@@ -1656,6 +1656,104 @@ impl Vm {
                 ),
             }));
         }
+        // `ceil` / `floor` / `round` / `truncate` on BigInt receiver:
+        // these are no-ops on Integer for 0-arg and positive-precision
+        // cases (Integer has no fractional digits to round past).
+        // Negative precision with BigInt receiver would round to a
+        // power-of-10 multiple — needs BigInt-aware modular
+        // arithmetic, deferred (same gap as the Int-recv path in
+        // numeric.rs, which uses i128 widening up to `|n| <= 38`
+        // but declines whenever the scaled result doesn't fit i64;
+        // see the spec's method-not-implemented trace for
+        // `10**70`-magnitude inputs).
+        // BigInt precision: by the canonical-BigInt invariant
+        // every Value::BigInt has |x| > i64::MAX, so any BigInt
+        // precision is way past any meaningful digit boundary
+        // (far beyond the 38-digit i128 limit) — round to a
+        // multiple of 10^huge, which is no-op-or-zero for Integer
+        // self. We accept positive-sign BigInt precision as a
+        // no-op (same as `n >= 0` for Int). Negative-sign BigInt
+        // precision rounds past every digit, with per-op/sign
+        // splits matching the |n| > 38 logic in numeric.rs:
+        //   - truncate, round: always 0 (|self| << half of 10^|n|)
+        //   - ceil with self <= 0: 0
+        //   - ceil with self > 0:  +10^|n| (needs BigInt)
+        //   - floor with self >= 0: 0
+        //   - floor with self < 0:  -10^|n| (needs BigInt)
+        // Currently deferred uniformly (returns None → NoMethodError)
+        // alongside the Int-recv negative-precision overflow path;
+        // a future refinement could mirror numeric.rs's zero-result
+        // shortcut and only defer the two genuine BigInt cases.
+        // Fires for both Int and BigInt receivers since the
+        // numeric.rs arm only matches Int precision.
+        if matches!(recv, Value::Int(_) | Value::BigInt(_))
+            && matches!(name, "ceil" | "floor" | "round" | "truncate")
+            && let [Value::BigInt(prec_id)] = args
+        {
+            use num_bigint::Sign;
+            let prec_sign = self.heap.bigint(*prec_id).sign();
+            if prec_sign != Sign::Minus {
+                // Positive (or zero — canonical invariant excludes
+                // BigInt(0)) precision: no-op for any Integer self.
+                return Ok(Some(recv.clone()));
+            }
+            // Negative huge precision: apply the same per-op/sign
+            // zero-result shortcut numeric.rs uses for |n| > 38
+            // (matches the math: |recv| is at most i64-sized or a
+            // canonical BigInt, but the precision magnitude is far
+            // huger, so |recv/10^|prec|| = 0 with remainder = recv).
+            //   - truncate, round: always 0
+            //   - ceil with recv <= 0: 0
+            //   - floor with recv >= 0: 0
+            // The two genuinely-BigInt cases (ceil with recv > 0,
+            // floor with recv < 0) still defer to NoMethodError.
+            let recv_sign = match recv {
+                Value::Int(n) => {
+                    if *n > 0 { Sign::Plus }
+                    else if *n < 0 { Sign::Minus }
+                    else { Sign::NoSign }
+                }
+                Value::BigInt(id) => self.heap.bigint(*id).sign(),
+                _ => unreachable!("recv guard above"),
+            };
+            let zero_result = match name {
+                "truncate" | "round" => true,
+                "ceil"  => !matches!(recv_sign, Sign::Plus),
+                "floor" => !matches!(recv_sign, Sign::Minus),
+                _ => unreachable!(),
+            };
+            if zero_result {
+                return Ok(Some(Value::Int(0)));
+            }
+            // Genuinely needs BigInt — defer.
+            return Ok(None);
+        }
+        // Existing arm: BigInt receiver with 0-arg or Int precision.
+        if matches!(recv, Value::BigInt(_))
+            && matches!(name, "ceil" | "floor" | "round" | "truncate")
+        {
+            match args {
+                [] => return Ok(Some(recv.clone())),
+                [Value::Int(n)] if *n >= 0 => return Ok(Some(recv.clone())),
+                [Value::Int(_)] => return Ok(None),  // negative precision: defer
+                [other] => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into Integer",
+                            crate::vm::numeric::type_name_for_coerce(other),
+                        ),
+                    }));
+                }
+                _ => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0..1)",
+                            args.len(),
+                        ),
+                    }));
+                }
+            }
+        }
         // Bitwise shifts `<<` / `>>`. Fires for any Integer recv +
         // any Integer arg, including the Int×Int overflow path
         // (`1 << 64`) that numeric.rs declined under bignum. Sits

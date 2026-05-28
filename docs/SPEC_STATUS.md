@@ -12,9 +12,9 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 113 |
-| Examples in corpus | 591 |
-| Skipped `it` traces | 145 |
+| Files | 117 |
+| Examples in corpus | 625 |
+| Skipped `it` traces | 151 |
 
 ### Skipped traces by category
 
@@ -22,8 +22,8 @@ count below is also the passing count.
 |---|---|
 | `divergent` | 1 |
 | `fixture` | 51 |
-| `method-not-implemented` | 75 |
-| `mock` | 18 |
+| `method-not-implemented` | 80 |
+| `mock` | 19 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
 `DROP_PATTERNS` (`fixture` / `mock` / `method-not-implemented` plus the
@@ -41,7 +41,7 @@ Find blocks unlocked by a future feature with e.g.
 | Array | 18 | 72 | 49 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 24 | 62 | 43 |
-| Integer | 29 | 254 | 22 |
+| Integer | 33 | 288 | 28 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
 | String | 20 | 94 | 30 |
@@ -105,6 +105,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_bit_or_spec.rb` | Integer#\| | `core/integer/bit_or_spec.rb` | 10 | 0 |
 | `integer_bit_xor_spec.rb` | Integer#^ | `core/integer/bit_xor_spec.rb` | 11 | 0 |
 | `integer_case_compare_spec.rb` | Integer#=== | `core/integer/case_compare_spec.rb + core/integer/shared/equal.rb` | 9 | 1 |
+| `integer_ceil_spec.rb` | Integer#ceil | `core/integer/ceil_spec.rb + shared/to_i.rb + shared/integer_rounding.rb + shared/integer_ceil_precision.rb` | 10 | 1 |
 | `integer_comparison_spec.rb` | Integer#<=> | `core/integer/comparison_spec.rb` | 23 | 2 |
 | `integer_complement_spec.rb` | Integer#~ | `core/integer/complement_spec.rb` | 2 | 0 |
 | `integer_digits_spec.rb` | Integer#digits | `core/integer/digits_spec.rb` | 7 | 0 |
@@ -114,6 +115,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_equal_value_spec.rb` | Integer#== | `core/integer/equal_value_spec.rb + core/integer/shared/equal.rb` | 10 | 1 |
 | `integer_even_spec.rb` | Integer#even? | `core/integer/even_spec.rb` | 5 | 1 |
 | `integer_fdiv_spec.rb` | Integer#fdiv | `core/integer/fdiv_spec.rb` | 10 | 1 |
+| `integer_floor_spec.rb` | Integer#floor | `core/integer/floor_spec.rb + shared/to_i.rb + shared/integer_rounding.rb + shared/integer_floor_precision.rb` | 9 | 1 |
 | `integer_gcd_spec.rb` | Integer#gcd | `core/integer/gcd_spec.rb` | 11 | 0 |
 | `integer_lcm_spec.rb` | Integer#lcm | `core/integer/lcm_spec.rb` | 11 | 0 |
 | `integer_left_shift_spec.rb` | Integer#<< | `core/integer/left_shift_spec.rb` | 26 | 0 |
@@ -121,9 +123,11 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_odd_spec.rb` | Integer#odd? | `core/integer/odd_spec.rb` | 5 | 1 |
 | `integer_pow_spec.rb` | Integer#pow | `core/integer/pow_spec.rb` | 7 | 0 |
 | `integer_right_shift_spec.rb` | Integer#>> | `core/integer/right_shift_spec.rb` | 26 | 0 |
+| `integer_round_spec.rb` | Integer#round | `core/integer/round_spec.rb + shared/to_i.rb + shared/integer_rounding.rb` | 9 | 4 |
 | `integer_succ_spec.rb` | Integer#succ / Integer#next | `core/integer/succ_spec.rb + core/integer/next_spec.rb + shared/next.rb` | 5 | 4 |
 | `integer_times_spec.rb` | Integer#times | `core/integer/times_spec.rb` | 7 | 1 |
 | `integer_to_s_spec.rb` | Integer#to_s | `core/integer/to_s_spec.rb` | 6 | 2 |
+| `integer_truncate_spec.rb` | Integer#truncate | `core/integer/truncate_spec.rb + shared/to_i.rb + shared/integer_rounding.rb` | 6 | 0 |
 | `integer_upto_spec.rb` | Integer#upto [stop] when self and stop are Integers | `core/integer/upto_spec.rb` | 5 | 1 |
 | `integer_zero_spec.rb` | Integer#zero? | `core/integer/zero_spec.rb` | 2 | 0 |
 | `method_arity_spec.rb` | Method#arity | `core/method/arity_spec.rb` | 6 | 0 |

@@ -355,6 +355,42 @@ pub(crate) fn numeric_call(
                 ),
             });
         }
+        // ceil/floor/round/truncate accept 0..1 args (precision).
+        // 2+ args raises ArgumentError matching CRuby.
+        (Value::Int(_), "ceil" | "floor" | "round" | "truncate", args_slice)
+            if args_slice.len() > 1 =>
+        {
+            return Err(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    args_slice.len(),
+                ),
+            });
+        }
+        // Non-Integer precision arg for ceil/floor/round/truncate:
+        // CRuby raises TypeError "no implicit conversion of X into Integer".
+        #[cfg(feature = "bignum")]
+        (Value::Int(_), "ceil" | "floor" | "round" | "truncate", [other])
+            if !matches!(other, Value::Int(_) | Value::BigInt(_)) =>
+        {
+            return Err(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Integer",
+                    type_name_for_coerce(other),
+                ),
+            });
+        }
+        #[cfg(not(feature = "bignum"))]
+        (Value::Int(_), "ceil" | "floor" | "round" | "truncate", [other])
+            if !matches!(other, Value::Int(_)) =>
+        {
+            return Err(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Integer",
+                    type_name_for_coerce(other),
+                ),
+            });
+        }
         // Bit-mask predicates — Int × Int happy path. CRuby
         // semantics (two's-complement masking, works for negatives):
         //   allbits?(m): (i & m) == m  — every set bit of m is set in i
@@ -415,6 +451,117 @@ pub(crate) fn numeric_call(
         // does — matching parity is more important than absolute
         // precision (BigInt path uses num_traits::ToPrimitive for
         // a similar approximation).
+        // `Integer#ceil` / `#floor` / `#round` / `#truncate` —
+        // CRuby's Integer-side counterparts to Float's. All four
+        // accept an optional precision arg:
+        //   - 0-arg: returns self (Integer has no fractional part)
+        //   - n > 0: returns self (no digits to keep past the
+        //     decimal point on an Integer)
+        //   - n < 0: rounds to a multiple of 10^|n| using the
+        //     selector's rounding mode (ceil → +∞, floor → -∞,
+        //     round → half-away-from-zero, truncate → toward 0).
+        //
+        // Under bignum the `10**|n|` computation overflows i128
+        // at |n| > 38 and the result can also overflow i64. Those
+        // cases decline here, which currently surfaces as
+        // NoMethodError (bigint_primitive's ceil/floor/round/truncate
+        // arms only handle 0-arg / positive-precision no-ops on
+        // BigInt receivers; the negative-precision branch with
+        // Int recv isn't wired through yet). Tracked as
+        // method-not-implemented in the associated specs for
+        // `10**70`-magnitude inputs.
+        (Value::Int(a), "ceil" | "floor" | "round" | "truncate", []) => {
+            Some(Value::Int(*a))
+        }
+        (Value::Int(a), "ceil" | "floor" | "round" | "truncate", [Value::Int(n)])
+            if *n >= 0 =>
+        {
+            Some(Value::Int(*a))
+        }
+        (Value::Int(a), op @ ("ceil" | "floor" | "round" | "truncate"), [Value::Int(n)])
+            if *n < 0 =>
+        {
+            // Negative precision: round to a multiple of 10^|n|.
+            // Use `unsigned_abs` to avoid the `-(i64::MIN)` panic
+            // that `(-*n) as u64` would hit in debug builds when
+            // someone passes i64::MIN as the precision.
+            let abs_n = n.unsigned_abs();
+            // For |n| > 38, 10^|n| overflows i128 too. But |a| fits
+            // i64 (so |a| < 10^19 < 10^38), which means |a/10^|n||
+            // = 0 with remainder a — so MOST op/sign combinations
+            // give exactly 0 without needing BigInt:
+            //   - truncate, round: always 0 (|a| is far less than
+            //     half of 10^|n|, so round-half doesn't fire)
+            //   - floor with a >= 0: 0 (truncate toward -∞ leaves 0)
+            //   - ceil with a <= 0: 0 (truncate toward +∞ leaves 0)
+            //   - floor with a < 0: -10^|n| (needs BigInt)
+            //   - ceil with a > 0: 10^|n| (needs BigInt)
+            //
+            // Return Some(0) for the zero-result cases. Defer the
+            // two BigInt-requiring cases under bignum (surfaces as
+            // NoMethodError until bigint_primitive grows a negative-
+            // precision path); under no-bignum fall back to 0 as
+            // an explicit choice — the wrap convention would
+            // compute `10^|n| mod 2^64` via wrapping_pow but the
+            // resulting i64 has no semantic meaning, so 0 is the
+            // documented exception to the wrap rule for this case.
+            if abs_n > 38 {
+                let zero_result = match op {
+                    "truncate" | "round" => true,
+                    "floor" => *a >= 0,
+                    "ceil"  => *a <= 0,
+                    _ => unreachable!(),
+                };
+                if zero_result {
+                    return Ok(Some(Value::Int(0)));
+                }
+                #[cfg(feature = "bignum")]
+                { return Ok(None); }
+                #[cfg(not(feature = "bignum"))]
+                { return Ok(Some(Value::Int(0))); }
+            }
+            // Widen to i128 so pow10 and the round-mode arithmetic
+            // can't overflow for |n| <= 38 (i128 holds 10^38 with
+            // room). Cast back to i64 at the end; under bignum we
+            // detect the truncation and decline (currently surfaces
+            // as NoMethodError since the negative-precision Int-recv
+            // BigInt promotion path isn't wired through
+            // bigint_primitive — tracked alongside the spec's
+            // method-not-implemented trace); under no-bignum we
+            // wrap per the existing wrapping-on-overflow convention
+            // (same one +/-/* use).
+            let pow10: i128 = 10i128.pow(abs_n as u32);
+            let a128 = *a as i128;
+            let trunc_q = a128 / pow10;
+            let trunc_r = a128 % pow10;
+            let half = pow10 / 2;
+            let q: i128 = match op {
+                "truncate" => trunc_q,
+                "floor" => if trunc_r < 0 { trunc_q - 1 } else { trunc_q },
+                "ceil"  => if trunc_r > 0 { trunc_q + 1 } else { trunc_q },
+                "round" => {
+                    // CRuby default: round half-away-from-zero
+                    // (`25.round(-1) == 30`, `-25.round(-1) == -30`).
+                    if trunc_r >= half        { trunc_q + 1 }
+                    else if trunc_r <= -half  { trunc_q - 1 }
+                    else                       { trunc_q }
+                }
+                _ => unreachable!(),
+            };
+            let result_i128 = q.wrapping_mul(pow10);
+            if result_i128 >= (i64::MIN as i128) && result_i128 <= (i64::MAX as i128) {
+                Some(Value::Int(result_i128 as i64))
+            } else {
+                #[cfg(feature = "bignum")]
+                { return Ok(None); }
+                // Under no-bignum, wrap the i128 result into i64
+                // per the existing wrapping-on-overflow convention
+                // (matches `+`/`-`/`*` overflow behavior; documented
+                // in Cargo.toml feature notes).
+                #[cfg(not(feature = "bignum"))]
+                { Some(Value::Int(result_i128 as i64)) }
+            }
+        }
         (Value::Int(a), "fdiv", [Value::Int(b)]) => {
             Some(Value::Float((*a as f64) / (*b as f64)))
         }
