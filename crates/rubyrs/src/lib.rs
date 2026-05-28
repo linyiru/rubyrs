@@ -1081,14 +1081,8 @@ impl Runtime {
         //     snapshot's keyset. Clone-and-replace is the only
         //     way to fully rewind.
         //
-        // Restore all four baseline HashMaps (`classes` /
-        // `constants` / `toplevel_methods` / `sources`) plus the
-        // per-class `RefCell` fields in one shot. The previous
-        // shape inlined three of them here and the fourth
-        // (`sources`) ~60 lines later, interleaved with
-        // unrelated volatile-state clears — see
-        // `PostPreambleSnapshot::restore_baseline_maps_into`
-        // for the bundled rationale.
+        // Restore baseline HashMaps + per-class RefCells in one
+        // shot — see `PostPreambleSnapshot::restore_baseline_maps_into`.
         snapshot.restore_baseline_maps_into(&mut self.vm);
         // --- Literal caches keyed by user-time SymIds: clear. ---
         // `regex_cache` and `bigint_lit_cache` map compile-time-
@@ -1129,10 +1123,6 @@ impl Runtime {
             self.vm.loaded_features.clear();
             self.vm.loaded_stdlib_stubs.clear();
         }
-        // (preamble filename→source-text map for `Method#source_location`
-        // and trap backtrace line lookup is now restored by
-        // `restore_baseline_maps_into` above alongside the other
-        // baseline HashMaps — see `PostPreambleSnapshot::sources`.)
         // Control-flow signals from a possibly-trapped prior eval.
         // Without these, a user script that broke out of a loop
         // (Op::Break) and then trapped would leave
