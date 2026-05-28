@@ -316,16 +316,28 @@ impl Vm {
         // MatchData" convention for the common case.
         #[cfg(feature = "regex")]
         if let (Value::Str(s), Value::Regex(re), 1) = (recv, args.first().unwrap_or(&Value::Nil), args.len())
-            && (name == "gsub" || name == "sub") {
+            && (name == "gsub" || name == "sub" || name == "gsub!" || name == "sub!") {
+                let is_bang = name == "sub!" || name == "gsub!";
+                // Bang siblings must reject a frozen receiver
+                // before iterating — even when the pattern would
+                // not have matched, CRuby raises FrozenError on
+                // `freeze.sub! { ... }` rather than returning nil.
+                if is_bang && s.frozen.get() {
+                    return Err(self.trap(crate::error::RubyError::FrozenError {
+                        msg: format!("can't modify frozen String: {:?}", s.content.borrow()),
+                    }));
+                }
                 let source = s.to_string_lossy();
-                let only_first = name == "sub";
+                let only_first = name == "sub" || name == "sub!";
                 let mut g = PinGuard::new(self);
                 g.pin(recv.clone());
                 g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
                 let mut out = String::with_capacity(source.len());
                 let mut last_end = 0usize;
+                let mut any_match = false;
                 for m in re.find_iter(&source) {
+                    any_match = true;
                     out.push_str(&source[last_end..m.start()]);
                     let r = match g.vm.step_block(block, vec![Value::new_str(m.as_str().to_string())], pre_frames)? {
                         // Non-local `return` from the block —
@@ -346,6 +358,20 @@ impl Vm {
                     if only_first { break; }
                 }
                 out.push_str(&source[last_end..]);
+                // Bang siblings return nil when the pattern never
+                // matched (block was never invoked); otherwise
+                // mutate self in place and return self. The
+                // equality check skips a buffer swap when the
+                // block produced bytes identical to the match
+                // (e.g. `"a".sub!(/a/) { |m| m }`).
+                if is_bang {
+                    if !any_match { return Ok(Some(Value::Nil)); }
+                    let new_bytes = out.into_bytes();
+                    if *s.borrow() != new_bytes {
+                        *s.borrow_mut() = new_bytes;
+                    }
+                    return Ok(Some(Value::Str(s.clone())));
+                }
                 return Ok(Some(Value::new_str(out)));
             }
         // `s.each_byte { |b| ... }` — yield each byte (Int 0..255)

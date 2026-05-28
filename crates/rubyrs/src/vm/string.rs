@@ -83,6 +83,56 @@ fn swapcase_ascii(s: &str) -> String {
         .collect()
 }
 
+/// `String#sub` core — first-match string replacement.
+/// Empty pattern prepends `repl` (CRuby quirk). Shared by
+/// `sub` / `sub!`. The destructive arm gates nil-vs-self on
+/// match presence (`pat.is_empty() || a.contains(pat)`) at
+/// the call site — this helper just produces the rewritten
+/// string and is oblivious to the destructive contract.
+fn sub_str_str_core(a: &str, pat: &str, repl: &str) -> String {
+    if pat.is_empty() {
+        let mut s = String::with_capacity(repl.len() + a.len());
+        s.push_str(repl);
+        s.push_str(a);
+        s
+    } else if let Some(idx) = a.find(pat) {
+        let mut s = String::with_capacity(a.len() + repl.len());
+        s.push_str(&a[..idx]);
+        s.push_str(repl);
+        s.push_str(&a[idx + pat.len()..]);
+        s
+    } else {
+        a.to_string()
+    }
+}
+
+/// `String#gsub` core — every-match string replacement.
+/// Empty pattern wraps `repl` around every char
+/// (`"abc".gsub("", "X") == "XaXbXcX"`). Shared by `gsub`
+/// and `gsub!`.
+fn gsub_str_str_core(a: &str, pat: &str, repl: &str) -> String {
+    if pat.is_empty() {
+        // Avoid `chars().count()` for an exact pre-allocation
+        // (a full extra O(n) pass over the receiver). A
+        // length-byte upper-bound is `repl.len() * (a.len() + 1)
+        // + a.len()`, but that over-allocates wildly when `a` is
+        // long and `repl` is small. Pick a cheap initial
+        // capacity equal to `a.len() + repl.len()` instead — the
+        // String will grow at most a handful of times on the
+        // common short-repl path. Trade O(n) precount for at
+        // most log₂(n) reallocs.
+        let mut s = String::with_capacity(a.len() + repl.len());
+        s.push_str(repl);
+        for c in a.chars() {
+            s.push(c);
+            s.push_str(repl);
+        }
+        s
+    } else {
+        a.replace(pat, repl)
+    }
+}
+
 /// Try the Str primitive arms. Returns `Ok(Some(v))` on a
 /// handled call, `Ok(None)` if the receiver/method shape
 /// doesn't match.
@@ -536,23 +586,11 @@ pub(crate) fn string_call(
         // that via `Rust`'s `str::replace` for non-empty patterns
         // and a hand-rolled walk for the empty-pattern case.
         (Value::Str(a), "sub", [Value::Str(pat), Value::Str(repl)]) => {
-            let a_ref = a.to_string_lossy();
-            let pat_ref = pat.to_string_lossy();
-            let repl_ref = repl.to_string_lossy();
-            let out = if pat_ref.is_empty() {
-                // CRuby: sub("", repl) inserts `repl` at index 0.
-                let mut s = repl_ref.clone();
-                s.push_str(&a_ref);
-                s
-            } else if let Some(idx) = a_ref.find(pat_ref.as_str()) {
-                let mut s = String::with_capacity(a_ref.len() + repl_ref.len());
-                s.push_str(&a_ref[..idx]);
-                s.push_str(&repl_ref);
-                s.push_str(&a_ref[idx + pat_ref.len()..]);
-                s
-            } else {
-                a_ref.clone()
-            };
+            let out = sub_str_str_core(
+                &a.to_string_lossy(),
+                &pat.to_string_lossy(),
+                &repl.to_string_lossy(),
+            );
             check(out.len())?;
             Some(Value::new_str(out))
         }
@@ -581,23 +619,114 @@ pub(crate) fn string_call(
             Some(Value::new_str(out))
         }
         (Value::Str(a), "gsub", [Value::Str(pat), Value::Str(repl)]) => {
-            let a_ref = a.to_string_lossy();
-            let pat_ref = pat.to_string_lossy();
-            let repl_ref = repl.to_string_lossy();
-            let out = if pat_ref.is_empty() {
-                // CRuby: gsub("", repl) wraps `repl` around every
-                // character — `"abc".gsub("", "X") == "XaXbXcX"`.
-                let mut s = repl_ref.clone();
-                for c in a_ref.chars() {
-                    s.push(c);
-                    s.push_str(&repl_ref);
-                }
-                s
-            } else {
-                a_ref.replace(pat_ref.as_str(), &repl_ref)
-            };
+            let out = gsub_str_str_core(
+                &a.to_string_lossy(),
+                &pat.to_string_lossy(),
+                &repl.to_string_lossy(),
+            );
             check(out.len())?;
             Some(Value::new_str(out))
+        }
+        // Destructive `!` siblings for sub / gsub — share the
+        // frozen-check pattern with the case-fold `!` arms
+        // above, but the nil-vs-self decision is gated on
+        // MATCH PRESENCE, not on byte equality: CRuby returns
+        // `self` whenever a match occurred (even when the
+        // replacement produced bytes identical to the input,
+        // e.g. `"a".sub!("a", "a")` → `"a"`); only no-match
+        // returns nil. An empty Str pattern always matches
+        // (sub prepends, gsub wraps every char) — both
+        // preserve that quirk for parity with the non-bang
+        // arms. The post-compute equality check is kept as a
+        // cheap guard to avoid an unnecessary buffer swap
+        // when the bytes happen to be identical.
+        (Value::Str(a), "sub!", [Value::Str(pat), Value::Str(repl)]) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let a_ref = a.to_string_lossy();
+            let pat_ref = pat.to_string_lossy();
+            let matched = pat_ref.is_empty() || a_ref.contains(pat_ref.as_str());
+            if !matched { return Ok(Some(Value::Nil)); }
+            let new_bytes = sub_str_str_core(
+                &a_ref, &pat_ref, &repl.to_string_lossy(),
+            ).into_bytes();
+            if *a.borrow() != new_bytes {
+                check(new_bytes.len())?;
+                *a.borrow_mut() = new_bytes;
+            }
+            Some(Value::Str(a.clone()))
+        }
+        (Value::Str(a), "gsub!", [Value::Str(pat), Value::Str(repl)]) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let a_ref = a.to_string_lossy();
+            let pat_ref = pat.to_string_lossy();
+            let matched = pat_ref.is_empty() || a_ref.contains(pat_ref.as_str());
+            if !matched { return Ok(Some(Value::Nil)); }
+            let new_bytes = gsub_str_str_core(
+                &a_ref, &pat_ref, &repl.to_string_lossy(),
+            ).into_bytes();
+            if *a.borrow() != new_bytes {
+                check(new_bytes.len())?;
+                *a.borrow_mut() = new_bytes;
+            }
+            Some(Value::Str(a.clone()))
+        }
+        #[cfg(feature = "regex")]
+        (Value::Str(a), "sub!", [Value::Regex(re), Value::Str(repl)]) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let a_ref = a.to_string_lossy();
+            let repl_ref = repl.to_string_lossy();
+            let repl_xlated = ruby_backref_to_dollar(&repl_ref);
+            // `regex::Regex::replace` returns `Cow::Borrowed`
+            // when there's no match — use that to detect the
+            // no-match case in a single scan instead of running
+            // a separate `is_match` first.
+            match re.replace(&a_ref, repl_xlated.as_str()) {
+                std::borrow::Cow::Borrowed(_) => Some(Value::Nil),
+                std::borrow::Cow::Owned(new_str) => {
+                    let new_bytes = new_str.into_bytes();
+                    if *a.borrow() != new_bytes {
+                        check(new_bytes.len())?;
+                        *a.borrow_mut() = new_bytes;
+                    }
+                    Some(Value::Str(a.clone()))
+                }
+            }
+        }
+        #[cfg(feature = "regex")]
+        (Value::Str(a), "gsub!", [Value::Regex(re), Value::Str(repl)]) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let a_ref = a.to_string_lossy();
+            let repl_ref = repl.to_string_lossy();
+            let repl_xlated = ruby_backref_to_dollar(&repl_ref);
+            // Same single-scan no-match detection via the Cow
+            // returned by `replace_all`.
+            match re.replace_all(&a_ref, repl_xlated.as_str()) {
+                std::borrow::Cow::Borrowed(_) => Some(Value::Nil),
+                std::borrow::Cow::Owned(new_str) => {
+                    let new_bytes = new_str.into_bytes();
+                    if *a.borrow() != new_bytes {
+                        check(new_bytes.len())?;
+                        *a.borrow_mut() = new_bytes;
+                    }
+                    Some(Value::Str(a.clone()))
+                }
+            }
         }
         // String#tr — character-by-character translation. Each
         // char in `from` maps to the same-index char in `to`; if

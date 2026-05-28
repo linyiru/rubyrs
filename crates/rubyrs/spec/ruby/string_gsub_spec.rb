@@ -81,3 +81,85 @@ describe "String#gsub with pattern and block" do
     assert_eq("aaa".gsub(/a/) { "!" }, "!!!")
   end
 end
+
+describe "String#gsub!" do
+  it "modifies self in place and returns self on a match" do
+    s = "hello"
+    r = s.gsub!("l", "L")
+    assert(r.equal?(s))
+    assert_eq(s, "heLLo")
+  end
+
+  it "returns nil if no substitutions were made" do
+    s = "hello"
+    assert_eq(s.gsub!("xyz", "Q"), nil)
+    assert_eq(s, "hello")
+  end
+
+  it "returns self when a match occurred even if the replacement bytes are identical" do
+    # CRuby gates nil-vs-self on match presence, not on byte
+    # equality — `s.gsub!("l", "l")` matches and returns
+    # self despite the result being byte-identical to the
+    # input.
+    s = "hello"
+    r = s.gsub!("l", "l")
+    assert(r.equal?(s))
+    assert_eq(s, "hello")
+  end
+
+  it "handles an empty pattern by wrapping the replacement around every char" do
+    s = "abc"
+    s.gsub!("", "X")
+    assert_eq(s, "XaXbXcX")
+  end
+
+  it "supports a Regexp pattern" do
+    s = "hello"
+    s.gsub!(/l/, "L")
+    assert_eq(s, "heLLo")
+    assert_eq("hello".gsub!(/z/, "Q"), nil)
+  end
+
+  it "honours Ruby-style numeric backrefs (\\0, \\1) in the replacement" do
+    # Guards the `ruby_backref_to_dollar` translation on the
+    # destructive Regexp arm — every match site should expand
+    # the captures, not just the first.
+    s = "hello"
+    s.gsub!(/(l)/, "<\\1>")
+    assert_eq(s, "he<l><l>o")
+    s = "abc"
+    s.gsub!(/[abc]/, "[\\0]")
+    assert_eq(s, "[a][b][c]")
+  end
+
+  it "raises a FrozenError on a frozen instance that is modified" do
+    s = "hi".freeze
+    assert_raises("FrozenError") { s.gsub!("h", "H") }
+  end
+
+  it "accepts a Regexp pattern and block, mutating every match site" do
+    s = "hello"
+    r = s.gsub!(/l/) { |m| m.upcase }
+    assert(r.equal?(s))
+    assert_eq(s, "heLLo")
+  end
+
+  it "returns nil when the block-form Regexp pattern doesn't match" do
+    assert_eq("hello".gsub!(/z/) { |m| m.upcase }, nil)
+  end
+
+  it "raises FrozenError on the block-form Regexp variant too" do
+    s = "hi".freeze
+    assert_raises("FrozenError") { s.gsub!(/h/) { |m| m.upcase } }
+  end
+
+  it "returns self on a Regexp match that produces byte-identical output" do
+    # Symmetric Cow::Borrowed-contract pin for the gsub!
+    # path. See string_sub_spec.rb's pin for the rationale.
+    s = "a"
+    r = s.gsub!(/a/, "a")
+    assert(r.equal?(s))
+    assert_eq(s, "a")
+  end
+end
+
