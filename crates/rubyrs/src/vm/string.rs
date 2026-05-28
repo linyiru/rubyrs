@@ -483,8 +483,11 @@ pub(crate) fn string_call(
         // `String#squeeze` — collapse consecutive runs of the same
         // character. With a char-set arg, only chars in the set
         // are squeezed. Char-set ranges (`"a-z"`) and ^-negation
-        // are NOT expanded here — same conservative semantics as
-        // `tr`. Documented in SUBSET.md.
+        // are NOT expanded here — the selector is treated as a
+        // literal char set. `tr` and `count` got the full
+        // `parse_tr_set` expansion in PR #255; squeeze still
+        // takes the conservative path and can migrate later.
+        // Documented in SUBSET.md.
         (Value::Str(a), "squeeze", rest) if rest.is_empty()
             || (rest.len() == 1 && matches!(rest[0], Value::Str(_))) => {
             let a_str = a.to_string_lossy();
