@@ -10,7 +10,11 @@
 #
 # rubyrs implementation: bind the anonymous `(&)` parameter to
 # the reserved local name `&` (invalid as a user identifier);
-# rewrite `inner(&)` to `inner(&)` reading that sentinel local.
+# at the call site, rewrite `inner(&)` to a CallWithBlockArg
+# whose block_arg expression is `LVarRead("&")` — i.e. read
+# that sentinel local and forward it as the block argument.
+# Reuses the existing named-`&blk` forwarding plumbing; no new
+# opcodes, no runtime changes.
 
 # --- (1) Basic forwarding ---
 def inner1(&blk)
