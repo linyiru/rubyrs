@@ -56,6 +56,15 @@ puts true.object_id == :length.object_id          # false (true → 20 was = fir
 puts 1.0.object_id == (-1.0).object_id            # false (sign-bit mask collapsed them)
 puts /a/.object_id != /b/.object_id               # true  (regex used constant id 11)
 
+# Int overflow injectivity (cycle-3 review): naive
+# `n.wrapping_mul(2).wrapping_add(1)` collapses i64::MAX to 0
+# (= false.object_id). Out-of-range ints fall to a bit-59 tag
+# scheme to stay injective.
+big1 = 1 << 62
+big2 = -big1
+puts big1.object_id != big2.object_id             # true
+puts big1.object_id != false.object_id            # true
+
 # respond_to? whitelist matches new universal arms
 puts Object.new.respond_to?(:object_id)           # true
 puts Object.new.respond_to?(:__id__)              # true

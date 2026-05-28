@@ -6892,7 +6892,9 @@ fn is_valid_ivar_name(s: &str) -> bool {
 /// beyond equality checks (`a.object_id == b.object_id`), so
 /// this encoding diverges from CRuby's exact tags but preserves
 /// the contract: same value → same id, distinct values →
-/// distinct ids.
+/// distinct ids (best-effort — Float encoding hashes 64 bits
+/// into 60 with collision-resistance ~2^30 distinct floats;
+/// distinct floats can in principle collide).
 ///
 /// Encoding contract:
 ///   - CRuby-exact for the special immediates user code is known
@@ -6906,7 +6908,7 @@ fn is_valid_ivar_name(s: &str) -> bool {
 ///       * Sym:   bit 61 set
 ///       * Float: bit 60 set
 ///       * Heap:  bit 62 set, with a 4-bit type subtag at
-///                bits 32..35 to distinguish Array vs Object
+///                bits 58..61 to distinguish Array vs Object
 ///                vs Hash etc.
 ///   - The discriminator bits are far above the range that user
 ///     code's integer literals reach (`|n| < 2^58` for any
@@ -6926,7 +6928,24 @@ pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
         (1i64 << 62) | ((type_subtag as i64) << 58) | (payload_masked as i64)
     }
     match v {
-        Value::Int(n) => n.wrapping_mul(2).wrapping_add(1),
+        // CRuby-exact Fixnum encoding `2n+1` (always odd) for
+        // ints in the safe range; falls back to a bit-59 tag
+        // for large magnitudes where `2n+1` would overflow and
+        // become non-injective (e.g. naive
+        // `i64::MAX.wrapping_mul(2).wrapping_add(1) == 0`
+        // collides with `false.object_id == 0`).
+        Value::Int(n) => match n.checked_mul(2).and_then(|m| m.checked_add(1)) {
+            Some(id) => id,
+            None => {
+                // Out-of-range int (|n| > 2^62 roughly): pack
+                // the raw bit pattern into the low 59 bits and
+                // set bit 59 as the type tag. Bit 59 is below
+                // Float(60)/Sym(61)/Heap(62) so no cross-type
+                // collision; it's above the safe Int range so
+                // no collision with regular `2n+1` ids.
+                (1i64 << 59) | ((*n as u64 & 0x07FF_FFFF_FFFF_FFFF) as i64)
+            }
+        },
         Value::Bool(true) => 20,
         Value::Bool(false) => 0,
         Value::Nil => 4,
