@@ -580,6 +580,12 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     // on its next iteration. The Nil return becomes a stack
     // placeholder that the next resume replaces with the
     // resume's arg (see resume_fiber's "subsequent" path).
+    //
+    // P1d.2 cext-re-entrancy guard: if `vm.cext_depth > 0`,
+    // we're inside a cext-style host fn that re-entered the
+    // Vm via rb_funcall. Yielding here would unwind through
+    // C code that doesn't expect Ruby control flow; raise
+    // FiberError instead.
     rt.register_fn("__rubyrs_fiber_yield", move |args| {
         let v = args.first().cloned().unwrap_or(Value::Nil);
         let ptr = crate::vm::current_vm_ptr();
@@ -593,6 +599,15 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         }
         // SAFETY: same ADR 0013 contract.
         let vm = unsafe { &mut *ptr };
+        // P1d.2 guard — see comment above.
+        if vm.cext_depth > 0 {
+            return Err(Trap {
+                err: RubyError::RuntimeError {
+                    msg: "FiberError: can't yield from cext".to_string(),
+                },
+                backtrace: vec![],
+            });
+        }
         vm.fiber_yield_pending = Some(v);
         Ok(Value::Nil)
     });
@@ -1181,6 +1196,86 @@ mod tests {
                 "\"deliberate\"/\"post:deliberate\""
             ),
             other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    // ===== P1d.2: cext_depth guard on Fiber.yield =====
+
+    /// P1d.2: `__rubyrs_fiber_yield` raises FiberError
+    /// when `vm.cext_depth > 0` — preventing yields out
+    /// of cext frames that don't expect Ruby control flow.
+    ///
+    /// Production cext-side incrementing of `cext_depth`
+    /// lands as a follow-up (vm/cext.rs integration). This
+    /// test exercises the guard via a custom host fn that
+    /// manually bumps the counter, runs a Ruby block that
+    /// calls Fiber.yield, and confirms the error fires.
+    /// Pattern: same shape as registering any V1 host fn
+    /// would do once cext rb_funcall is wired up.
+    #[test]
+    fn fiber_yield_traps_when_cext_depth_nonzero() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // Register a host fn that simulates a cext frame:
+        // bumps cext_depth, calls a Ruby block (via no-arg
+        // marker — the block runs as a Proc directly), then
+        // decrements. The fiber body inside the block will
+        // try to yield and should get FiberError.
+        rt.register_fn("__test_cext_frame", move |_args| {
+            let ptr = crate::vm::current_vm_ptr();
+            if ptr.is_null() {
+                return Err(crate::error::Trap {
+                    err: crate::error::RubyError::RuntimeError {
+                        msg: "CURRENT_VM_PTR null in __test_cext_frame".to_string(),
+                    },
+                    backtrace: vec![],
+                });
+            }
+            // SAFETY: standard host fn pattern.
+            let vm = unsafe { &mut *ptr };
+            vm.cext_depth += 1;
+            // Do NOT decrement on early return — let the
+            // host fn fall through normally. (Real cext
+            // bridges use RAII guards; here we test the
+            // contract from inside the increment scope.)
+            // We do nothing else; the caller's bytecode
+            // will eventually try Fiber.yield while
+            // cext_depth is still 1.
+            Ok(crate::value::Value::Nil)
+        });
+
+        let err = rt.eval(r##"
+            body = proc {
+              __test_cext_frame
+              __rubyrs_fiber_yield(:will_fail)  # should raise here
+            }
+            fib = __rubyrs_fiber_new(body)
+            __rubyrs_fiber_resume(fib, nil)
+        "##, "p1d2_cext_yield.rb").expect_err("expected FiberError");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("can't yield from cext"),
+            "expected cext-yield trap, got: {msg}",
+        );
+    }
+
+    /// P1d.2: `__rubyrs_fiber_yield` works normally when
+    /// `cext_depth == 0`. Regression guard against a
+    /// future change that accidentally trips the check on
+    /// the happy path.
+    #[test]
+    fn fiber_yield_works_when_cext_depth_zero() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // Plain yield + resume — no cext involvement.
+        let r = rt.eval(r##"
+            body = proc { __rubyrs_fiber_yield(:ok); :done }
+            fib = __rubyrs_fiber_new(body)
+            __rubyrs_fiber_resume(fib, nil).inspect
+        "##, "p1d2_happy.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => assert_eq!(s.to_string_lossy(), ":ok"),
+            other => panic!("expected Str(:ok), got {other:?}"),
         }
     }
 

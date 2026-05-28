@@ -600,6 +600,34 @@ pub(crate) struct Vm {
     /// cfg(_fiber)-gated.
     #[cfg(feature = "_fiber")]
     pub(crate) current_fiber_id: Option<ObjId>,
+    /// P1d.2 (ADR 0023 v2 §"Mechanics — cext re-entrancy guard"):
+    /// counter tracking depth of cext-style Vm re-entry. Each
+    /// increment marks "we're inside a C extension's host fn
+    /// that has re-entered the Vm via rb_funcall" (or the
+    /// equivalent embed-host bridge that calls back into
+    /// bytecode while a Vm borrow is mid-flight).
+    ///
+    /// `Fiber.yield` checks this counter and raises
+    /// `FiberError("can't yield from cext")` when nonzero —
+    /// without this trap, yielding mid-cext would unwind
+    /// through C code that doesn't expect Ruby control flow
+    /// (the suspended cext frame would be re-entered on the
+    /// next resume in a state CRuby/rubyrs C extensions
+    /// generally don't anticipate).
+    ///
+    /// Increment site: cext bridge's rb_funcall analog
+    /// (vm/cext.rs) — production-side wiring lands in a
+    /// follow-up cext+_fiber integration commit. P1d.2
+    /// adds the field + check + protocol; tests exercise
+    /// the guard by setting the counter manually.
+    ///
+    /// `resume_fiber` does NOT increment — it's the
+    /// designed re-entry path, and fiber.resume → bytecode
+    /// → Fiber.yield is the normal flow we WANT to work.
+    ///
+    /// cfg(_fiber)-gated.
+    #[cfg(feature = "_fiber")]
+    pub(crate) cext_depth: u32,
     /// Builtin reflection metadata for the synth Methods that
     /// `Kernel.instance_method(:foo)` returns. Looked up by the
     /// `instance_method` arm when the receiver is Kernel.
@@ -766,6 +794,8 @@ impl Vm {
             fiber_yield_pending: None,
             #[cfg(feature = "_fiber")]
             current_fiber_id: None,
+            #[cfg(feature = "_fiber")]
+            cext_depth: 0,
             kernel_builtin_metas: std::collections::HashMap::new(),
             kernel_class_sym: None,
             basic_object_builtin_metas: std::collections::HashMap::new(),
