@@ -2578,6 +2578,24 @@ impl Vm {
             (Value::Hash(id), "any?", []) => Some(self.iter_hash_filter(*id, IterMode::Any, block)?),
             (Value::Hash(id), "all?", []) => Some(self.iter_hash_filter(*id, IterMode::All, block)?),
             (Value::Hash(id), "none?", []) => Some(self.iter_hash_filter(*id, IterMode::NoneM, block)?),
+            // Hash#min / #max block-form (comparator) is out of
+            // subset — only the no-block form (hash.rs) is
+            // implemented. Without this guard arm the
+            // block-given call would fall through every Hash
+            // iter.rs arm and surface as
+            // `NoMethodError: undefined method min/max for Hash`
+            // even though `respond_to?(:min)` returns true
+            // (lookup.rs widens both names). Raise a clear
+            // ArgumentError naming the gap so users know to
+            // either drop the block or wait for the block-form.
+            (Value::Hash(_), "min" | "max", []) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: format!(
+                        "Hash#{name} block-form (comparator) is not supported in this subset; \
+                         use the no-block form or sort_by + first/last",
+                    ),
+                }));
+            }
             // `h.one? { |pair| ... }` / `{ |k, v| ... }` — true
             // iff exactly one entry yields truthy. CRuby yields
             // a single `[k, v]` Array per entry (matching

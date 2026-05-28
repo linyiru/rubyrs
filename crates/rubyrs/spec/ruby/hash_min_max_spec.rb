@@ -34,12 +34,24 @@ describe "Hash#min" do
     assert_eq(h.min, [1, :first])
   end
 
+  it "raises ArgumentError when called with a block (comparator form unsupported)" do
+    # Without this guard, the block-given call would fall
+    # through every iter.rs arm and surface as NoMethodError
+    # despite respond_to?(:min) returning true. The guard
+    # arm raises a clear ArgumentError instead.
+    assert_raises("ArgumentError") { {a: 1, b: 2}.min { |x, y| x[1] <=> y[1] } }
+  end
+
   # skipped (method-not-implemented): it "with a block uses block as the comparator" do
-  #   `h.min { |a, b| a[1] <=> b[1] }`. Block-form Enumerable
-  #   comparators not modelled on Hash.
 end
 
 describe "Hash#max" do
+  it "raises ArgumentError when called with a block (comparator form unsupported)" do
+    # Symmetric guard with Hash#min — see that spec's
+    # rationale.
+    assert_raises("ArgumentError") { {a: 1, b: 2}.max { |x, y| x[1] <=> y[1] } }
+  end
+
   it "returns the lexicographically largest [k, v] pair" do
     h = {b: 2, a: 1, c: 3}
     assert_eq(h.max, [:c, 3])
