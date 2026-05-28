@@ -140,6 +140,7 @@ _http_server = [
     "dep:bytes",
     "dep:http",
     "dep:socket2",
+    "dep:libc",
 ]
 
 [dependencies]
@@ -162,6 +163,11 @@ http = { version = "1", optional = true }
 # SO_REUSEADDR; the kernel-hash-LB SO_REUSEPORT path
 # requires raw setsockopt, which socket2 wraps portably.
 socket2 = { version = "0.5", features = ["all"], optional = true }
+# Stage 7d: libc::fork + waitpid for pre-fork supervisor.
+# Unix-only inside the host fn (cfg(target_family = "unix")).
+# libc is preferred over nix here — minimal API surface
+# (3 syscalls), no extra dep tree.
+libc = { version = "0.2", optional = true }
 # Brings `num_integer::Integer::div_rem` into scope so we can do
 # one division step (returning quotient + remainder) instead of
 # separate `/` and `%` divisions inside `Integer#digits`'s loop.

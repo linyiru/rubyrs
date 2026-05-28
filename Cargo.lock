@@ -1380,6 +1380,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "libloading",
  "num-bigint",
  "num-integer",

@@ -269,6 +269,11 @@ fn main() {
     let mut rt = Runtime::with_config(cfg);
     trace.at("runtime_ready");
     rt.set_stdout(Box::new(std::io::stdout()));
+    // Stage 7d: expose `_http_server` host fns to scripts
+    // when the feature is built in. Keeps the binary
+    // useful for prefork subprocess tests + examples.
+    #[cfg(feature = "_http_server")]
+    rubyrs::register_http_server_host_fns(&mut rt);
     let result = rt.eval_file(path);
     trace.at("eval_done");
     match result {

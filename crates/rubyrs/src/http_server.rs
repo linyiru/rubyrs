@@ -1326,13 +1326,16 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 backtrace: vec![],
             });
         }
+        // 7d: N>=2 path requires fork(2). Unix-only.
+        // Windows has no SO_REUSEPORT equivalent + no fork
+        // primitive at all, so we explicitly reject N>=2
+        // on non-unix rather than silently degrade to N=1
+        // (which would mask the user's scaling intent).
+        #[cfg(not(target_family = "unix"))]
         if n_workers > 1 {
-            // 7d will lift this gate. Until then, multi-
-            // worker requests fail explicitly rather than
-            // silently degrading to N=1.
             return Err(Trap {
-                err: RubyError::RuntimeError {
-                    msg: format!("n_workers > 1 not yet implemented (Stage 7d); got n_workers={n_workers}"),
+                err: RubyError::ArgumentError {
+                    msg: format!("n_workers > 1 unsupported on non-Unix targets (no fork(2) or SO_REUSEPORT); got n_workers={n_workers}"),
                 },
                 backtrace: vec![],
             });
@@ -1344,6 +1347,133 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             },
             backtrace: vec![],
         })?;
+
+        // Stage 7d: N >= 2 path forks N workers. Each
+        // child binds its own SO_REUSEPORT listener post-
+        // fork (kernel hash-distributes connections),
+        // calls on_worker_boot in its address space, then
+        // serves. Parent does NOT bind, NOT accept; it
+        // only waitpid-loops. The non-unix branch already
+        // rejected N>=2 above; the cfg here lets the
+        // libc::* calls compile.
+        #[cfg(target_family = "unix")]
+        if n_workers > 1 {
+            if addr.port() == 0 {
+                return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "n_workers > 1 requires an explicit non-zero port (port 0 binds different kernel ports per worker)".to_string(),
+                    },
+                    backtrace: vec![],
+                });
+            }
+
+            let mut child_pids: Vec<libc::pid_t> = Vec::with_capacity(n_workers as usize);
+            for worker_index in 0..n_workers {
+                // SAFETY: fork(2) is async-signal-safe but
+                // the post-fork Rust state must be handled
+                // carefully — see the child branch below.
+                let pid = unsafe { libc::fork() };
+                if pid < 0 {
+                    let errno_msg = std::io::Error::last_os_error();
+                    // Reap already-spawned children before
+                    // returning the error.
+                    for &cpid in &child_pids {
+                        unsafe { libc::kill(cpid, libc::SIGTERM); }
+                    }
+                    for &cpid in &child_pids {
+                        let mut status = 0;
+                        unsafe { libc::waitpid(cpid, &mut status, 0); }
+                    }
+                    return Err(Trap {
+                        err: RubyError::RuntimeError {
+                            msg: format!("fork(2) failed at worker {worker_index}: {errno_msg}"),
+                        },
+                        backtrace: vec![],
+                    });
+                } else if pid == 0 {
+                    // ===== Child process =====
+                    //
+                    // New address space (COW of parent).
+                    // Vm heap + class defs + host fn
+                    // closures came along. Tokio runtime
+                    // was NOT inherited — each child builds
+                    // its own inside on_listener.
+                    //
+                    // CRITICAL: must call libc::exit() at
+                    // the end rather than returning from
+                    // Rust. Returning would unwind + drop
+                    // the Vm + run destructors — most are
+                    // fork-safe but a few (Apple framework
+                    // cluster on macOS) aren't. exit()
+                    // short-circuits all of that.
+                    let child_result: Result<(), String> = (|| {
+                        let listener = bind_reuseport_v4(addr)
+                            .map_err(|e| format!("child {worker_index} bind: {e}"))?;
+                        if let Some(boot_id) = on_worker_boot_id {
+                            let ptr = crate::vm::current_vm_ptr();
+                            if ptr.is_null() {
+                                return Err(format!("child {worker_index}: CURRENT_VM_PTR null"));
+                            }
+                            // SAFETY: same Vm pointer as parent
+                            // pre-fork; COW means we now own
+                            // the child's copy of that memory.
+                            let vm = unsafe { &mut *ptr };
+                            let idx_val = Value::Int(worker_index);
+                            call_ruby_block_sync(vm, boot_id, vec![idx_val])
+                                .map_err(|trap| format!(
+                                    "child {worker_index} on_worker_boot raised: {}",
+                                    trap.err.message(),
+                                ))?;
+                        }
+                        let duration = Duration::from_secs(duration_secs as u64);
+                        run_blocking_for_duration_with_app_on_listener(
+                            listener, duration, block_id, None, None,
+                            DEFAULT_MAX_BODY_BYTES, None, None, None, false,
+                        ).map_err(|e| format!("child {worker_index} serve: {e}"))?;
+                        Ok(())
+                    })();
+                    let exit_code = match child_result {
+                        Ok(()) => 0,
+                        Err(msg) => {
+                            eprintln!("rubyrs prefork: {msg}");
+                            1
+                        }
+                    };
+                    // SAFETY: end of child's responsibility.
+                    // libc::exit skips Rust drop handlers —
+                    // exactly what we want for fork-safety.
+                    unsafe { libc::exit(exit_code) };
+                } else {
+                    child_pids.push(pid);
+                }
+            }
+
+            // ===== Parent: waitpid loop =====
+            //
+            // SIGINT/SIGTERM sent to the parent (e.g.,
+            // Ctrl+C or k8s termination) goes to the whole
+            // process group by default — children receive
+            // it too and exit. Parent's job here is just
+            // to reap zombies and return.
+            //
+            // No restart-on-crash supervision in 7d; lands
+            // as a follow-up. A failed child exits with
+            // code 1; parent observes via WEXITSTATUS but
+            // doesn't act on it.
+            for &cpid in &child_pids {
+                let mut status = 0;
+                unsafe { libc::waitpid(cpid, &mut status, 0); }
+            }
+
+            // Return the input addr as the "bound" — each
+            // child has its own listener on the SAME port,
+            // so the input string is the canonical endpoint.
+            return Ok(Value::Str(std::rc::Rc::new(
+                crate::value::RStr::new(addr.to_string()),
+            )));
+        }
+
+        // ===== N=1 path (no fork) — original 7c logic =====
 
         // Bind ONCE in the parent (for N=1 this IS the
         // worker). 7d will fork before this point and each
@@ -3206,21 +3336,44 @@ mod tests {
         );
     }
 
-    /// Stage 7c: n_workers >= 2 is gated off until 7d
-    /// lands. Explicit RuntimeError rather than silent
-    /// degrade to N=1.
+    /// Stage 7d: N>=2 with port 0 is an explicit
+    /// ArgumentError — each forked child would get a
+    /// different kernel-assigned port, leaving the user
+    /// with no canonical endpoint to connect to. Force
+    /// an explicit non-zero port for multi-worker mode.
+    #[cfg(target_family = "unix")]
     #[test]
-    fn prefork_rejects_n_gte_2_until_7d() {
+    fn prefork_rejects_n_gte_2_with_port_zero() {
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
         let err = rt.eval(r#"
             app = ->(env) { [200, {}, []] }
             __rubyrs_http_serve_prefork("127.0.0.1:0", 0, app, 4)
-        "#, "stage_7c_n_too_big.rb").expect_err("should reject N=4");
+        "#, "stage_7d_n_with_port_zero.rb").expect_err("should reject port 0");
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("n_workers > 1 not yet implemented"),
-            "expected gating error, got: {msg}",
+            msg.contains("requires an explicit non-zero port"),
+            "expected port-0 ArgumentError, got: {msg}",
+        );
+    }
+
+    /// Stage 7d: N>=2 on non-Unix targets is an
+    /// ArgumentError — no fork(2), no SO_REUSEPORT
+    /// equivalent. This test only runs on Windows-like
+    /// targets; on unix it's a no-op.
+    #[cfg(not(target_family = "unix"))]
+    #[test]
+    fn prefork_rejects_n_gte_2_on_non_unix() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let err = rt.eval(r#"
+            app = ->(env) { [200, {}, []] }
+            __rubyrs_http_serve_prefork("127.0.0.1:18150", 0, app, 4)
+        "#, "stage_7d_non_unix.rb").expect_err("should reject N>=2 on non-unix");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("unsupported on non-Unix"),
+            "expected non-unix ArgumentError, got: {msg}",
         );
     }
 
