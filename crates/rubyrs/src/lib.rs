@@ -496,18 +496,6 @@ struct ClassStateSnapshot {
     includes: Vec<std::rc::Rc<value::Class>>,
     prepends: Vec<std::rc::Rc<value::Class>>,
     singleton_prepends: Vec<std::rc::Rc<value::Class>>,
-    /// Lazy eigenclass shell built by `Class#singleton_class`.
-    /// Captured / restored so `Runtime::reset()` drops shells
-    /// created during the session (and any mutations on them);
-    /// the normal post-reset state is `None`. A preamble-time
-    /// `singleton_class` call would land in the snapshot as the
-    /// shell `Rc` so a subsequent reset restores the same
-    /// cached identity. (Code-review #253 round 4.)
-    singleton_view: Option<std::rc::Rc<value::Class>>,
-    /// Weak back-reference from a shell to the real class.
-    /// Snapshot only matters for shells (real classes always
-    /// have `None`); restoring this for a non-shell is a no-op.
-    singleton_target: Option<std::rc::Weak<value::Class>>,
     class_vars: std::collections::HashMap<intern::SymId, value::Value>,
 }
 
@@ -703,8 +691,15 @@ impl ClassStateSnapshot {
             includes: cls.includes.borrow().clone(),
             prepends: cls.prepends.borrow().clone(),
             singleton_prepends: cls.singleton_prepends.borrow().clone(),
-            singleton_view: cls.singleton_view.borrow().clone(),
-            singleton_target: cls.singleton_target.borrow().clone(),
+            // `singleton_view` / `singleton_target` are NOT
+            // snapshotted: even if a shell exists at preamble
+            // baseline, preserving its `Rc` would also preserve
+            // its internal RefCell state (methods, ivars, …)
+            // because restore reuses the same allocation.
+            // Instead, restore unconditionally drops the shell
+            // (see `restore_into` below) and lets it rebuild on
+            // the next `singleton_class` call. (Code-review #253
+            // round 7.)
             class_vars: cls.class_vars.borrow().clone(),
         }
     }
@@ -726,8 +721,21 @@ impl ClassStateSnapshot {
         cls.includes.borrow_mut().clone_from(&self.includes);
         cls.prepends.borrow_mut().clone_from(&self.prepends);
         cls.singleton_prepends.borrow_mut().clone_from(&self.singleton_prepends);
-        cls.singleton_view.borrow_mut().clone_from(&self.singleton_view);
-        cls.singleton_target.borrow_mut().clone_from(&self.singleton_target);
+        // For the eigenclass shell: ALWAYS reset to None on
+        // restore, regardless of what was captured. Preserving
+        // the same `Rc` would also preserve its own internal
+        // RefCell state (methods, singleton_methods, ivars,
+        // class_vars, includes/prepends) — those wouldn't get
+        // reset because they're shared via the cached Rc.
+        // Dropping the shell entirely is the only way to honor
+        // the "every mutable class field reverts" contract; the
+        // shell rebuilds lazily on the next `singleton_class`
+        // call. Identity invariant
+        // (`A.singleton_class.equal?(A.singleton_class)`) still
+        // holds within a single post-reset session.
+        // (Code-review #253 round 7.)
+        *cls.singleton_view.borrow_mut() = None;
+        *cls.singleton_target.borrow_mut() = None;
         cls.class_vars.borrow_mut().clone_from(&self.class_vars);
     }
 }
