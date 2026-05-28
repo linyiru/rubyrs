@@ -187,6 +187,24 @@ fn dunder_dir_returns_lexical_parent_under_sandbox() {
     assert!(matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"/abs/proj"));
 }
 
+#[test]
+fn dunder_dir_returns_dot_for_relative_source_under_sandbox() {
+    // Embed test setups often pass relative filenames to
+    // `rt.eval(source, "test.rb")`. `Path::new("test.rb").parent()`
+    // returns `Some("")` (empty PathBuf, NOT None), so a bare
+    // unwrap_or wouldn't fall back to ".". Guarded with a
+    // `.filter(|s| !s.is_empty())` so the empty-parent case
+    // collapses to "." — matches what a script doing
+    // `$LOAD_PATH.unshift __dir__` would expect.
+    let mut rt = Runtime::new();
+    let v = rt.eval(r#"__dir__"#, "test.rb").unwrap();
+    assert!(
+        matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"."),
+        "expected '.' for empty-parent case, got {:?}",
+        v,
+    );
+}
+
 // ---------- Opt-in (allow_filesystem_io: true) ----------
 
 #[test]

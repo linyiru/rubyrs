@@ -2700,19 +2700,28 @@ impl Vm {
                 // syscall — return the lexical parent directly,
                 // matching the fallback the existing `Err(_) =>`
                 // arm already takes when canonicalize fails.
+                // Empty-parent guard: `Path::new("test.rb").parent()`
+                // returns `Some("")` (not None), so a bare unwrap_or
+                // wouldn't collapse the empty case to ".". Filter the
+                // empty string out alongside None — both mean
+                // "no enclosing directory in the lexical path",
+                // which `__dir__` reports as ".".
+                let lexical_parent = |fname: &str| -> String {
+                    Path::new(fname).parent()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| ".".to_string())
+                };
                 let dir = if self.allow_filesystem_io {
                     match std::fs::canonicalize(&fname) {
                         Ok(real) => real.parent()
                             .map(|p| p.to_string_lossy().into_owned())
+                            .filter(|s| !s.is_empty())
                             .unwrap_or_else(|| ".".to_string()),
-                        Err(_) => Path::new(&fname).parent()
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| ".".to_string()),
+                        Err(_) => lexical_parent(&fname),
                     }
                 } else {
-                    Path::new(&fname).parent()
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| ".".to_string())
+                    lexical_parent(&fname)
                 };
                 self.stack.push(Value::new_str(dir));
                 return Ok(());
