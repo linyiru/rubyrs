@@ -2788,6 +2788,53 @@ impl Vm {
                     None => Value::Nil,
                 }))
             }
+            // `h.uniq { |pair| key }` — block-form uniq.
+            // Yields a single `[k, v]` pair Array per entry;
+            // the block return is the uniqueness key (compared
+            // via `ruby_eql`). First-seen entry wins on
+            // collision. Returns Array<[k, v]> in insertion
+            // order. The no-block form lives in hash.rs (every
+            // Hash entry is eql?-unique already).
+            (Value::Hash(id), "uniq", []) => {
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut seen: Vec<Value> = Vec::with_capacity(snapshot.len());
+                let mut early = None;
+                for (k, v) in snapshot {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    g.vm.pinned.push(Value::Array(pair_id));
+                    let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
+                    g.vm.pinned.pop();
+                    let key = match step? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    // First-seen wins: only push if no
+                    // previously-seen key is `ruby_eql` to this
+                    // one.
+                    let already_seen = seen.iter().any(|s| s.ruby_eql(&key, &g.vm.heap));
+                    if !already_seen {
+                        seen.push(key);
+                        g.vm.heap.array_mut(result_id).push(Value::Array(pair_id));
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(result_id)))
+            }
             // `h.count { |k, v| pred }` — count pairs whose block
             // result is truthy. Same shape as Array#count block,
             // but the per-iter pair is the `[k, v]` Array (yielded

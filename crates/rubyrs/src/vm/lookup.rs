@@ -607,6 +607,7 @@ impl Vm {
                 "flat_map" | "collect_concat" | "reduce" | "inject" | "sum" |
                 "first" | "min" | "max" | "one?" | "partition" |
                 "take" | "drop" | "take_while" | "drop_while" | "find_index" |
+                "tally" | "uniq" | "zip" |
                 "inspect"
             ),
             Value::Range(_) => matches!(name,
