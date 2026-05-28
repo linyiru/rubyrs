@@ -88,6 +88,8 @@ fn run_diff(name: &str) {
 #[test] fn ensure_basics() { run_diff("ensure_basics"); }
 #[test] fn control_flow() { run_diff("control_flow"); }
 #[test] fn range_basics() { run_diff("range_basics"); }
+#[test] fn range_to_s_inspect() { run_diff("range_to_s_inspect"); }
+#[test] fn range_hash() { run_diff("range_hash"); }
 #[test] fn enumerable_filter() { run_diff("enumerable_filter"); }
 #[test] fn enumerable_aggregate() { run_diff("enumerable_aggregate"); }
 #[test] fn int_string_basics() { run_diff("int_string_basics"); }
@@ -97,6 +99,7 @@ fn run_diff(name: &str) {
 #[test] fn root_hierarchy() { run_diff("root_hierarchy"); }
 #[test] fn kernel_builtin_reflection() { run_diff("kernel_builtin_reflection"); }
 #[test] fn basic_object_builtin_reflection() { run_diff("basic_object_builtin_reflection"); }
+#[test] fn universal_object_methods() { run_diff("universal_object_methods"); }
 #[test] fn class_compare() { run_diff("class_compare"); }
 #[test] fn sinatra_dsl_shape() { run_diff("sinatra_dsl_shape"); }
 #[test] fn anon_block_forward() { run_diff("anon_block_forward"); }

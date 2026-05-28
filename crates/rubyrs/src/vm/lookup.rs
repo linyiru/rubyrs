@@ -448,6 +448,12 @@ impl Vm {
         if matches!(name,
             "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?" | "eql?"
             | "send" | "__send__"
+            // Universal dispatch arms wired by the
+            // object_id/__id__/hash/frozen?/inspect PR. All
+            // succeed on every receiver type, so feature
+            // detection (`obj.respond_to?(:object_id)`) must
+            // agree.
+            | "object_id" | "__id__" | "hash" | "frozen?" | "inspect"
             // The ivar-introspection family (`instance_variables` /
             // `instance_variable_get` / `instance_variable_set`)
             // is implemented as universal dispatch arms in

@@ -4799,6 +4799,157 @@ impl Vm {
             self.stack.push(c);
             return Ok(());
         }
+        // `Object#object_id` / `BasicObject#__id__` — universal,
+        // no args. Delegates to `object_id_for` (defined at the
+        // bottom of this file). The encoding contract:
+        //   - CRuby-exact for nil/true/false/Int (4 / 20 / 0 /
+        //     `n*2+1`).
+        //   - High-bit type discriminators for everything else
+        //     (bit 62 = heap, 61 = Sym, 60 = Float). These bit
+        //     positions are unreachable by `n*2+1` for any
+        //     practical integer literal (`|n| < 2^58`), so
+        //     cross-type collisions are eliminated by
+        //     construction.
+        //   - 4-bit type subtag at bits 58..61 distinguishes
+        //     heap variants (Object vs Array vs Hash etc.),
+        //     leaving a 58-bit payload that fits both u32
+        //     ObjId and 48-bit virtual pointers natively.
+        if (&*name == "object_id" || &*name == "__id__") && args.is_empty() {
+            let id = object_id_for(&recv);
+            self.stack.push(Value::Int(id));
+            return Ok(());
+        }
+        // `Object#frozen?` — universal, no args.
+        // CRuby treats all immediates (Integer, Float, Symbol,
+        // true, false, nil) as always-frozen. Str/Array/Hash/Regex
+        // have their own primitive arms earlier in dispatch and
+        // never reach here. For plain user-class instances we
+        // return false (we don't model a freeze bit on
+        // Value::Object yet).
+        if &*name == "frozen?" && args.is_empty() {
+            let frozen = matches!(
+                &recv,
+                Value::Int(_)
+                    | Value::Float(_)
+                    | Value::Sym(_)
+                    | Value::Bool(_)
+                    | Value::Nil
+            );
+            self.stack.push(Value::Bool(frozen));
+            return Ok(());
+        }
+        // `Object#to_s` / `Object#inspect` — universal default.
+        // For plain Object instances, CRuby renders as
+        // `"#<ClassName:0xADDR>"`. We can't expose real addresses
+        // (sandbox), so use the object_id hex form. Primitive
+        // arms for Str/Int/Sym/Array/Hash run earlier in dispatch
+        // and shadow this, and `Value::Class` is handled by
+        // `primitive_call` (vm/primitive.rs). Any receiver type
+        // without a specialized `to_s`/`inspect` handler falls
+        // through here — that includes plain `Object` instances
+        // but also BoundMethod / UnboundMethod / CurriedProc /
+        // future heap variants we add without a custom default.
+        if (&*name == "to_s" || &*name == "inspect") && args.is_empty() {
+            // Range has no primitive to_s/inspect arm of its own.
+            // Without this short-circuit the universal
+            // `#<Range:0xHEX>` form below would silently win for
+            // Range and diverge from CRuby. `to_display` /
+            // `to_inspect` in heap.rs already render Range with
+            // the correct endpoint-quoting and endless/beginless
+            // handling — funnel through them so the Array#inspect
+            // path (which also calls `to_inspect`) stays
+            // consistent.
+            if matches!(&recv, Value::Range(_)) {
+                let rendered = if &*name == "inspect" {
+                    recv.to_inspect(&self.heap, &self.interner)
+                } else {
+                    recv.to_display(&self.heap, &self.interner)
+                };
+                self.stack.push(Value::new_str(rendered));
+                return Ok(());
+            }
+            let cls_name = match self.class_of(&recv) {
+                Value::Class(c) => c.name.clone(),
+                _ => "Object".to_string(),
+            };
+            let oid = object_id_for(&recv);
+            let s = format!("#<{}:0x{:016x}>", cls_name, oid);
+            self.stack.push(Value::new_str(s));
+            return Ok(());
+        }
+        // `Object#hash` — universal, no args. Returns an integer
+        // hash. For value types (Int/Str/Sym/Bool/Nil), hash by
+        // content so `{1 => :a}[1] == :a` works. For heap objects
+        // where equality is identity, hash by object_id.
+        if &*name == "hash" && args.is_empty() {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            // Salt each variant with a distinct type tag before
+            // hashing the value bits. Without the tag, the
+            // Rust-derived `Hash` impls collapse across types —
+            // e.g. `Nil` writing `0u8` produces the same byte
+            // sequence as `Bool(false)` (Rust's `bool::hash`
+            // delegates to `u8(0)`), so `nil.hash == false.hash`
+            // deterministically. Tagging keeps the value-type
+            // domains injective by construction.
+            match &recv {
+                Value::Int(n) => { 1u8.hash(&mut h); n.hash(&mut h); }
+                Value::Float(f) => { 2u8.hash(&mut h); f.to_bits().hash(&mut h); }
+                Value::Str(s) => {
+                    // Hash raw bytes (binary-safe) — `with_str_lossy`
+                    // would replace invalid UTF-8 with U+FFFD,
+                    // collapsing distinct binary strings to the
+                    // same hash and breaking Hash key semantics
+                    // for non-UTF-8 content.
+                    3u8.hash(&mut h);
+                    s.content.borrow().hash(&mut h);
+                }
+                Value::Sym(sid) => { 4u8.hash(&mut h); sid.0.hash(&mut h); }
+                Value::Bool(b) => { 5u8.hash(&mut h); b.hash(&mut h); }
+                Value::Nil => { 6u8.hash(&mut h); }
+                // Range hashes by content — CRuby's
+                // `(1..5).hash == (1..5).hash` is true. Without
+                // this arm we'd fall to the identity branch
+                // below, and two `(1..5)` allocations would
+                // produce different hashes (Set/Hash with Range
+                // keys would miss). Feed the recursive content
+                // hashes of begin/end (computed via `object_hash`
+                // — same salt scheme) plus the exclusive flag.
+                Value::Range(id) => {
+                    let (begin, end, excl) = {
+                        let r = self.heap.range(*id);
+                        (r.begin.clone(), r.end.clone(), r.exclusive)
+                    };
+                    8u8.hash(&mut h);
+                    object_hash(&begin, &self.heap).hash(&mut h);
+                    object_hash(&end, &self.heap).hash(&mut h);
+                    excl.hash(&mut h);
+                }
+                // Heap-managed / classes / blocks / methods —
+                // identity hash via object_id. CRuby Array/Hash
+                // override `hash` to recurse over contents; ours
+                // doesn't yet (documented gap — Array/Hash
+                // `#hash` is identity-based, not content-based,
+                // so equal-by-content arrays/hashes won't hash
+                // alike). Hash key lookup itself doesn't depend
+                // on `#hash` today — `vm/hash.rs` does a linear
+                // scan with `ruby_eql`, so `{[1] => :a}[[1]]`
+                // does find the entry; only `#hash`-using paths
+                // (e.g. `Set`, custom user code) see the gap.
+                _ => { 7u8.hash(&mut h); object_id_for(&recv).hash(&mut h); }
+            }
+            // Return the full 64-bit hash as i64 — Ruby permits
+            // negative hashes, and masking off the sign bit here
+            // would drop 1 bit of entropy without benefit. Other
+            // `#hash` impls in this crate likewise return the
+            // unmasked i64 cast (String uses DefaultHasher in
+            // `vm/string.rs`; Integer/Float use fnv1a_64 in
+            // `vm/numeric.rs` for cross-rustc stability — both
+            // still cast the full u64 to i64 without masking).
+            let v = h.finish() as i64;
+            self.stack.push(Value::Int(v));
+            return Ok(());
+        }
         // `Object#respond_to?(name)` — pure feature detection, no
         // invocation. Goes last so user classes that override
         // `respond_to?` (we don't support that yet, but conceptually)
@@ -7124,4 +7275,196 @@ fn is_valid_ivar_name(s: &str) -> bool {
     // Remaining: letter / digit / `_`. Rejects `@foo?`, `@foo=`,
     // `@foo!`, `@foo-bar`.
     bytes[2..].iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
+/// Compute a stable integer id for any `Value`. Backs both
+/// `Object#object_id` and `BasicObject#__id__`. Ids are
+/// stable for a value while that value is alive; CRuby also
+/// reuses heap `object_id` values after GC, and our heap
+/// encoding likewise can reuse ids after deallocation
+/// (`Heap::alloc` reissues entries from a freelist; Rc
+/// pointer identities can also reappear). So we promise
+/// "stable while alive", not session-wide uniqueness. CRuby
+/// exact values aren't observable beyond equality checks
+/// (`a.object_id == b.object_id`), so this encoding diverges
+/// from CRuby's exact tags but preserves the contract: same
+/// (live) value → same id, distinct (simultaneously live)
+/// values →
+/// distinct ids (best-effort — Float encoding hashes 64 bits
+/// into 60 with collision-resistance ~2^30 distinct floats;
+/// distinct floats can in principle collide).
+///
+/// Encoding contract:
+///   - CRuby-exact for the special immediates user code is known
+///     to depend on:
+///       * nil:   4   (CRuby 3.x — was 8 in 2.x)
+///       * true:  20
+///       * false: 0
+///       * Int n: `n * 2 + 1` (CRuby's Fixnum tag — always odd)
+///   - Distinct high-bit type discriminators for the rest, so
+///     cross-type collisions are impossible:
+///       * Sym:   bit 61 set
+///       * Float: bit 60 set
+///       * Heap:  bit 62 set, with a 4-bit type subtag at
+///                bits 58..61 to distinguish Array vs Object
+///                vs Hash etc.
+///   - The discriminator bits are far above the range that user
+///     code's integer literals reach (`|n| < 2^58` for any
+///     practical int produces an id below 2^59, well clear of
+///     the Sym/Float/Heap tag bits).
+pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
+    use crate::value::Value;
+    /// Heap-managed value id:
+    ///   - bit 62        = heap discriminator
+    ///   - bits 58..61   = type subtag (4 bits → 16 types)
+    ///   - bits 0..57    = payload (58 bits). ObjId-backed
+    ///                     variants pass a u32 freelist index
+    ///                     here, which always fits. Rc-backed
+    ///                     variants (Str/Regex/Class) hash the
+    ///                     pointer through `scramble_ptr` first
+    ///                     to avoid leaking host addresses, and
+    ///                     the resulting 64-bit scramble is
+    ///                     masked into 58 bits — so two
+    ///                     simultaneously-live Rc allocations
+    ///                     can in principle collide
+    ///                     (~2^29 distinct live allocations
+    ///                     before a collision is likely).
+    fn heap_id(payload: u64, type_subtag: u8) -> i64 {
+        debug_assert!(type_subtag < 16, "type subtag must fit in 4 bits");
+        let payload_masked = payload & 0x03FF_FFFF_FFFF_FFFF; // 58 bits
+        (1i64 << 62) | ((type_subtag as i64) << 58) | (payload_masked as i64)
+    }
+    match v {
+        // CRuby-exact Fixnum encoding `2n+1` for ints in the
+        // safe range; falls back to a bit-59 tag otherwise.
+        // Safe range:
+        //   * `n < 0` — id is negative (sign bit set), distinct
+        //     from every type-tagged id (Float/Sym/Heap all set
+        //     specific positive bits and clear the sign bit).
+        //     Only excluded by overflow of `2n+1` itself
+        //     (i.e. `n == i64::MIN`).
+        //   * `n >= 0` — id must clear bits 59..62 so it doesn't
+        //     collide with Float(bit 60) / Sym(bit 61) /
+        //     Heap(bit 62). That means `id < (1<<59)` i.e.
+        //     `n < (1<<58)`.
+        // Without this guard, e.g. `n = 1<<60` yields
+        // `2n+1 = 2^61+1` which collides with `Sym(SymId(1))`.
+        Value::Int(n) => match n.checked_mul(2).and_then(|m| m.checked_add(1)) {
+            Some(id) if *n < 0 || id < (1i64 << 59) => id,
+            _ => {
+                // Out-of-range int (|n| > 2^62 roughly): hash
+                // the full 64-bit pattern into 59 bits and set
+                // bit 59 as the type tag. A raw low-bit mask
+                // would collide on inputs with identical low 59
+                // bits (e.g. `2**62` and `-(2**62)` both have
+                // low-59 == 0). Bit 59 is below
+                // Float(60)/Sym(61)/Heap(62) so no cross-type
+                // collision; it's above the safe Int range so
+                // no collision with regular `2n+1` ids.
+                // Collision resistance ~2^30 distinct
+                // out-of-range ints — only reachable in builds
+                // without bignum promotion.
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                n.hash(&mut h);
+                (1i64 << 59) | ((h.finish() & 0x07FF_FFFF_FFFF_FFFF) as i64)
+            }
+        },
+        Value::Bool(true) => 20,
+        Value::Bool(false) => 0,
+        Value::Nil => 4,
+        // Sym: bit 61 set; bits 0..58 = SymId. Distinct from
+        // true(20)/false(0)/nil(4) because bit 61 is way above
+        // their bit positions; distinct from heap (bit 62) and
+        // Float (bit 60).
+        Value::Sym(sid) => (1i64 << 61) | (sid.0 as i64),
+        // Float: bit 60 set; low 60 bits = a hash of the f64
+        // bit pattern. The bit pattern occupies all 64 bits
+        // (sign + 11-bit exponent + 52-bit mantissa); a naive
+        // `& 0x0FFF...` would strip the sign bit and collapse
+        // `1.0` and `-1.0` to the same id. Hashing folds all 64
+        // bits into 60 with collision-resistance ~2^30 distinct
+        // floats — adequate for any practical workload.
+        Value::Float(f) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            f.to_bits().hash(&mut h);
+            (1i64 << 60) | ((h.finish() & 0x0FFF_FFFF_FFFF_FFFF) as i64)
+        }
+        // Rc-backed values (Str/Regex/Class): use the raw
+        // pointer as the *seed* for an opaque, per-process id,
+        // not as the id itself. A naive `Rc::as_ptr(s) as u64`
+        // would leak the host virtual address through
+        // `object_id` (and through the `to_s`/`inspect`
+        // fallback), weakening ASLR for embedders running
+        // untrusted Ruby code. Scrambling with a process-local
+        // RandomState keeps the identity contract (same Rc →
+        // same id while alive) but the resulting payload is
+        // not recoverable to the original address. ObjId-backed
+        // variants below already use opaque freelist indices,
+        // not addresses, so they don't need this treatment.
+        Value::Str(s) => heap_id(scramble_ptr(std::rc::Rc::as_ptr(s) as usize), 2),
+        Value::Object(id) => heap_id(id.0 as u64, 3),
+        Value::Array(id) => heap_id(id.0 as u64, 4),
+        Value::Hash(id) => heap_id(id.0 as u64, 5),
+        Value::Range(id) => heap_id(id.0 as u64, 6),
+        Value::Block(id) => heap_id(id.0 as u64, 7),
+        Value::BoundMethod(id) => heap_id(id.0 as u64, 8),
+        Value::UnboundMethod(id) => heap_id(id.0 as u64, 9),
+        Value::CurriedProc(id) => heap_id(id.0 as u64, 10),
+        #[cfg(feature = "regex")]
+        Value::Regex(re) => heap_id(scramble_ptr(std::rc::Rc::as_ptr(re) as usize), 11),
+        #[cfg(feature = "bignum")]
+        Value::BigInt(id) => heap_id(id.0 as u64, 12),
+        Value::Class(c) => heap_id(scramble_ptr(std::rc::Rc::as_ptr(c) as usize), 13),
+    }
+}
+
+/// Compute the universal `Object#hash` value for `v` without
+/// going through dispatch. Used by `Range#hash` and any future
+/// container-of-content hashing arm so they recurse over their
+/// children with the same salt scheme as the top-level
+/// `Object#hash` arm. Mirrors the per-variant tags 1..7 used
+/// inline above (Int=1, Float=2, Str=3, Sym=4, Bool=5, Nil=6,
+/// heap=7); kept in lock-step with that match.
+fn object_hash(v: &Value, heap: &crate::heap::Heap) -> i64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match v {
+        Value::Int(n) => { 1u8.hash(&mut h); n.hash(&mut h); }
+        Value::Float(f) => { 2u8.hash(&mut h); f.to_bits().hash(&mut h); }
+        Value::Str(s) => { 3u8.hash(&mut h); s.content.borrow().hash(&mut h); }
+        Value::Sym(sid) => { 4u8.hash(&mut h); sid.0.hash(&mut h); }
+        Value::Bool(b) => { 5u8.hash(&mut h); b.hash(&mut h); }
+        Value::Nil => { 6u8.hash(&mut h); }
+        Value::Range(id) => {
+            let (begin, end, excl) = {
+                let r = heap.range(*id);
+                (r.begin.clone(), r.end.clone(), r.exclusive)
+            };
+            8u8.hash(&mut h);
+            object_hash(&begin, heap).hash(&mut h);
+            object_hash(&end, heap).hash(&mut h);
+            excl.hash(&mut h);
+        }
+        _ => { 7u8.hash(&mut h); object_id_for(v).hash(&mut h); }
+    }
+    h.finish() as i64
+}
+
+/// Scramble a raw pointer into an opaque, process-local u64
+/// suitable for embedding in `object_id`. Same pointer → same
+/// scrambled value within a process (so identity holds while
+/// the value is alive), but the host virtual address isn't
+/// recoverable from the result. Uses the std `RandomState`'s
+/// process-startup entropy as the hash key.
+fn scramble_ptr(ptr: usize) -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hash, Hasher};
+    use std::sync::OnceLock;
+    static SEED: OnceLock<RandomState> = OnceLock::new();
+    let rs = SEED.get_or_init(RandomState::new);
+    let mut h = rs.build_hasher();
+    ptr.hash(&mut h);
+    h.finish()
 }
