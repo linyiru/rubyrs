@@ -66,3 +66,8 @@ puts "shape-bare=#{shape_of(proc { })}"
 puts "shape-single=#{shape_of(proc { |x| x })}"
 puts "shape-splat=#{shape_of(proc { |*args| args })}"
 puts "shape-other=#{shape_of(proc { |a, b| })}"
+
+## `Proc#arity` rejects any args — ArgumentError shape
+## matches CRuby (Copilot review #263 round 1).
+err = begin; proc { }.arity(1); "DID-NOT-RAISE"; rescue ArgumentError => e; e.message; end
+puts "arity-with-arg=#{err}"

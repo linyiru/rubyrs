@@ -578,6 +578,12 @@ impl Vm {
         // (sinatra/base.rb:1810) reads `block.arity` to size
         // the route block's positional bindings. (TRY_RUNS
         // layer #24.)
+        if let Value::Block(_) = &recv
+            && name == "arity" && !args.is_empty() {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+            }));
+        }
         if let Value::Block(bid) = &recv
             && name == "arity" && args.is_empty() {
             let (n_required, has_rest) = {
@@ -1246,10 +1252,14 @@ impl Vm {
                     }
                     Some(m) => {
                         let proto = &self.protos[m.proto_idx];
-                        // Lock-step with Proc#arity via the shared
-                        // `proto_arity` helper. The block-param
-                        // anonymity / required-kw bumping rules
-                        // live there.
+                        // Shared `proto_arity` helper carries the
+                        // CRuby formula (required-kw bumping,
+                        // block-param exclusion, etc.). NOTE:
+                        // `Proc#arity` does NOT share this helper
+                        // — blocks store rest info on
+                        // `BlockHandle`, not on the Proto, so the
+                        // block intrinsic arm above computes
+                        // arity from the handle directly.
                         let arity = self.proto_arity(m.proto_idx);
                         // Other counts still needed for the
                         // `parameters` build below.
@@ -1260,7 +1270,6 @@ impl Vm {
                         let block_count = proto.block_param.is_some() as usize;
                         let positional_total = proto.params.len()
                             .saturating_sub(rest_count + kw_count + kw_rest_count + block_count);
-                        let _ = (n_req_pos, kw_count); // silence unused if compiler reorders
                         let mut params: Vec<(&'static str, Option<String>)> = Vec::new();
                         for i in 0..n_req_pos {
                             params.push(("req", Some(proto.params[i].clone())));
@@ -6426,9 +6435,13 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
 impl Vm {
     /// CRuby-shape arity for a Proto: required positional count
     /// when the signature is fully fixed; `-(required + 1)`
-    /// otherwise. Used by `Method#arity`, `UnboundMethod#arity`,
-    /// and `Proc#arity` (block) so the three callable shapes
-    /// stay in lock-step.
+    /// otherwise. Used by `Method#arity` and
+    /// `UnboundMethod#arity`. Note: `Proc#arity` does NOT call
+    /// this helper — blocks store rest info on `BlockHandle`
+    /// (the Proto's `rest_param` field stays empty for them),
+    /// and the block arm in `try_dispatch_callable_intrinsics`
+    /// computes arity directly from the handle's `n_params` /
+    /// `rest_slot`.
     ///
     /// The Proto's parameter layout is
     /// `[required..., optional..., rest?, kw..., kw_rest?, block?]`.
