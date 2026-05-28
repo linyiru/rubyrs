@@ -250,11 +250,12 @@ for a runnable example.
 
 **Platform support** (per ADR 0022 v3 §"Multi-core scaling"):
 
-| Platform   | Single-process | Pre-fork N≥2                                |
-|------------|---------------|---------------------------------------------|
-| Linux      | ✅            | ✅ — kernel hash-balanced SO_REUSEPORT       |
-| macOS      | ✅            | ⚠️  dev-only (Apple frameworks fork-unsafe; SO_REUSEPORT distribution OS-dependent) |
-| Windows    | ✅            | ❌ no fork(2) or SO_REUSEPORT equivalent     |
+| Platform | Single-process | Pre-fork N≥2 | Notes |
+|----------|---------------|--------------|-------|
+| Linux 3.9+ | ✅ | ✅ — kernel hash-balanced SO_REUSEPORT | Production target |
+| macOS    | ✅ | ⚠️  dev-only | Workers fork + boot + serve, but Darwin has no `SO_REUSEPORT_LB` — kernel typically routes new connections to the most-recent listener, NOT hash-distributed. Apple's CoreFoundation/dispatch are officially fork-unsafe. |
+| FreeBSD  | ✅ | ⚠️  partial | `SO_REUSEPORT` only (permissive). Kernel-LB needs `SO_REUSEPORT_LB` set explicitly — not wired in this PoC (see `bind_reuseport_v4` doc TODO). |
+| Windows  | ✅ | ❌ | No `fork(2)`, no `SO_REUSEPORT` equivalent. N≥2 returns ArgumentError. |
 
 **Vm state across fork**: class defs, method tables, constants, and
 host fn closures inherit via copy-on-write. File descriptors opened

@@ -8,18 +8,19 @@
 #   curl 127.0.0.1:9292/
 #   wrk -t4 -c100 -d10s http://127.0.0.1:9292/
 #
-# Per ADR 0022 v3 §"Multi-core scaling":
-# - Linux: full support; kernel hash-balances connections across
-#   N SO_REUSEPORT sockets. Pin N_WORKERS = vCPU count for best
-#   throughput.
-# - macOS: dev-only. Children fork cleanly and serve, but Apple's
-#   BSD lineage doesn't have SO_REUSEPORT_LB — distribution can
-#   stick to one listener. Apple frameworks (CoreFoundation,
-#   dispatch) are officially fork-unsafe; production deploys
-#   should be Linux.
-# - Windows: unsupported (no fork(2) + no SO_REUSEPORT). Falls
-#   through to the single-process __rubyrs_http_serve_with_app
-#   path.
+# Per ADR 0022 v3 §"Multi-core scaling" + FU3:
+# - Linux 3.9+: production target. Kernel hash-distributes
+#   connections across N SO_REUSEPORT sockets via 4-tuple hash.
+#   Pin N_WORKERS = vCPU count.
+# - macOS: dev-only. Workers fork cleanly + boot + serve, but
+#   Darwin has NO SO_REUSEPORT_LB (verified against libc 0.2.169
+#   `unix/bsd/apple/mod.rs`). The kernel typically routes new
+#   connections to the most-recent listener — load distribution
+#   is OS-discretion. CoreFoundation/dispatch are officially
+#   fork-unsafe; production should be Linux.
+# - FreeBSD: SO_REUSEPORT_LB exists but isn't wired here yet
+#   (PoC TODO). Falls back to permissive SO_REUSEPORT.
+# - Windows: unsupported. N>=2 returns ArgumentError.
 #
 # Vm state across fork (per ADR 0022 v3 "Inherited state"):
 # - Class definitions, method tables, constants, host fn closures

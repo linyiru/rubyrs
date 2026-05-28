@@ -294,20 +294,34 @@ fn install_prefork_signal_handlers() {
 /// the listener in std form until each worker converts it
 /// inside its own runtime).
 ///
-/// `SO_REUSEPORT` (Linux 3.9+, BSDs incl. macOS) lets
-/// multiple processes bind the same `(addr, port)` —
-/// the kernel hash-distributes incoming connections across
-/// the bound sockets. This is the foundational primitive
-/// for Stage 7 pre-fork: each child opens its own listener
-/// on the same port, no cross-child socket sharing or
-/// accept-thundering-herd.
+/// `SO_REUSEPORT` semantics differ by platform:
+///
+/// - **Linux 3.9+**: kernel hash-distributes incoming
+///   connections across the bound sockets (4-tuple hash).
+///   This is the production-grade path for pre-fork.
+/// - **FreeBSD**: has `SO_REUSEPORT_LB` (constant 0x10000)
+///   for kernel-LB; plain `SO_REUSEPORT` is permissive only.
+///   We currently set only `SO_REUSEPORT` here — FreeBSD
+///   users running pre-fork should add the LB variant
+///   explicitly (TODO follow-up).
+/// - **macOS / Darwin**: NO `SO_REUSEPORT_LB` (verified
+///   against libc 0.2.169+ — only `SO_REUSEPORT=0x0200` is
+///   exposed in `unix/bsd/apple/mod.rs`). Multiple binds
+///   succeed but the kernel typically routes all new
+///   connections to the most-recently-bound listener
+///   instead of hashing. Pre-fork on macOS still WORKS in
+///   the sense that N children fork + boot + serve, but
+///   load distribution is OS-discretion. Production
+///   deployments should be Linux; macOS is dev-only.
+/// - **Windows**: no SO_REUSEPORT equivalent at all;
+///   stage 7 N>=2 returns ArgumentError there.
 ///
 /// `SO_REUSEADDR` is set alongside to allow rapid restarts
 /// (TIME_WAIT skip), matching Puma's listener defaults.
 ///
-/// On non-Unix targets returns `Unsupported` — Windows
-/// has no equivalent kernel-level load-balancing primitive
-/// and Stage 7 N>=2 is gated off there. See ADR 0022 v3.
+/// On non-Unix targets returns `Unsupported`. See ADR 0022
+/// v3 §"Multi-core scaling" + the README "HTTP server
+/// battery" platform matrix.
 #[cfg(unix)]
 #[allow(dead_code)] // wired up in 7b refactor + 7c/7d prefork host fn
 pub(crate) fn bind_reuseport_v4(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
