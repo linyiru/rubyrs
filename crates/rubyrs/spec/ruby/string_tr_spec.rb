@@ -25,9 +25,12 @@ describe "String#tr" do
     assert_eq("hello".tr("xyz", "abc"), "hello")
   end
 
-  # skipped (divergent): character-range shorthand (`tr("a-y", "b-z")`).
-  #   rubyrs treats `-` literally; CRuby expands the range.
-  # skipped (divergent): negation form (`tr("^aeiou", "*")`).
-  #   rubyrs treats `^` literally; CRuby negates the set.
-  # skipped (method-not-implemented): `String#tr!` (destructive variant).
+  # skipped (divergent): it "translates characters in the range" do
+  #   Character-range shorthand `tr("a-y", "b-z")`. rubyrs treats
+  #   `-` literally; CRuby expands the range.
+  # skipped (divergent): it "treats a leading ^ in from_str as negation" do
+  #   Negation form `tr("^aeiou", "*")`. rubyrs treats `^`
+  #   literally; CRuby negates the set.
+  # skipped (method-not-implemented): describe "String#tr!" do ... end
+  #   Destructive variant.
 end

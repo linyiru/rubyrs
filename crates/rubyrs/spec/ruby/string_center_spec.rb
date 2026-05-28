@@ -21,6 +21,8 @@ describe "String#center" do
     assert_raises("ArgumentError") { "hello".center(11, "") }
   end
 
-  # skipped (method-not-implemented): integer-coerce on width arg (`String#center(width.to_int)`).
-  # skipped (fixture): subclass-return-type variant.
+  # skipped (method-not-implemented): it "tries to convert width to an Integer using #to_int" do
+  #   Integer-coerce on the width arg via `#to_int`. Out of subset.
+  # skipped (fixture): it "returns subclass instances when called on a subclass" do
+  #   `MyString < String` fixture; subclass-return-type variant.
 end

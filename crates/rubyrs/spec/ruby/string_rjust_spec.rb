@@ -20,5 +20,6 @@ describe "String#rjust" do
     assert_eq("x".rjust(7, "ab"), "abababx")
   end
 
-  # skipped (fixture): subclass-return-type variant.
+  # skipped (fixture): it "returns subclass instances when called on a subclass" do
+  #   `MyString < String` fixture; subclass-return-type variant.
 end
