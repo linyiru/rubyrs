@@ -41,26 +41,42 @@ describe "Array#pop" do
   # skipped (fixture): it "raises a FrozenError on an empty frozen array" do
 
   describe "passed a number n as an argument" do
-    # skipped (method-not-implemented): it "removes and returns an array with the last n elements of the array" do
+    it "removes and returns an array with the last n elements of the array" do
+      arr = [1, 2, 3, 4, 5]
+      assert_eq(arr.pop(2), [4, 5])
+      assert_eq(arr, [1, 2, 3])
+    end
 
-    # skipped (method-not-implemented): it "returns an array with the last n elements even if shift was invoked" do
+    it "returns a new empty array if there are no more elements" do
+      assert_eq([].pop(2), [])
+    end
 
-    # skipped (method-not-implemented): it "returns a new empty array if there are no more elements" do
+    it "returns whole elements if n exceeds size of the array" do
+      arr = [1, 2, 3]
+      assert_eq(arr.pop(5), [1, 2, 3])
+      assert_eq(arr, [])
+    end
 
-    # skipped (method-not-implemented): it "returns whole elements if n exceeds size of the array" do
+    it "returns an empty array when n is 0" do
+      arr = [1, 2, 3]
+      assert_eq(arr.pop(0), [])
+      assert_eq(arr, [1, 2, 3])
+    end
 
-    # skipped (method-not-implemented): it "does not return self even when it returns whole elements" do
+    it "raises an ArgumentError if n is negative" do
+      assert_raises("ArgumentError") { [1, 2, 3].pop(-1) }
+    end
 
-    # skipped (method-not-implemented): it "raises an ArgumentError if n is negative" do
+    it "raises an ArgumentError if more arguments are passed" do
+      assert_raises("ArgumentError") { [1, 2, 3].pop(1, 2) }
+    end
 
     # skipped (mock): it "tries to convert n to an Integer using #to_int" do
-
+    #   `#to_int` coercion via mock — out of subset.
     # skipped (method-not-implemented): it "raises a TypeError when the passed n cannot be coerced to Integer" do
-
-    # skipped (method-not-implemented): it "raises an ArgumentError if more arguments are passed" do
-
+    #   Type-coerce path lands at the catch-all `(many)` arm with
+    #   wrong-arity message rather than CRuby's TypeError-on-Float.
     # skipped (fixture): it "does not return subclass instances with Array subclass" do
-
     # skipped (fixture): it "raises a FrozenError on a frozen array" do
   end
 end

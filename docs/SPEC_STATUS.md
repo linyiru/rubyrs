@@ -13,8 +13,8 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 113 |
-| Examples in corpus | 578 |
-| Skipped `it` traces | 159 |
+| Examples in corpus | 591 |
+| Skipped `it` traces | 145 |
 
 ### Skipped traces by category
 
@@ -22,7 +22,7 @@ count below is also the passing count.
 |---|---|
 | `divergent` | 1 |
 | `fixture` | 51 |
-| `method-not-implemented` | 89 |
+| `method-not-implemented` | 75 |
 | `mock` | 18 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -38,7 +38,7 @@ Find blocks unlocked by a future feature with e.g.
 
 | Class | Files | Examples | Skipped |
 |---|---|---|---|
-| Array | 18 | 59 | 63 |
+| Array | 18 | 72 | 49 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 24 | 62 | 43 |
 | Integer | 29 | 254 | 22 |
@@ -63,11 +63,11 @@ Find blocks unlocked by a future feature with e.g.
 | `array_length_spec.rb` | Array#length | `core/array/length_spec.rb + shared/length.rb` | 1 | 1 |
 | `array_map_spec.rb` | Array#map | `core/array/map_spec.rb + shared/collect.rb` | 3 | 3 |
 | `array_none_spec.rb` | Array#none? | `core/array/none_spec.rb` | 3 | 3 |
-| `array_pop_spec.rb` | Array#pop | `core/array/pop_spec.rb` | 2 | 14 |
+| `array_pop_spec.rb` | Array#pop | `core/array/pop_spec.rb` | 8 | 7 |
 | `array_reject_spec.rb` | Array#reject | `core/array/reject_spec.rb` | 2 | 4 |
 | `array_reverse_spec.rb` | Array#reverse | `core/array/reverse_spec.rb` | 2 | 4 |
 | `array_select_spec.rb` | Array#select | `core/array/select_spec.rb + shared/select.rb` | 1 | 4 |
-| `array_shift_spec.rb` | Array#shift | `core/array/shift_spec.rb` | 2 | 13 |
+| `array_shift_spec.rb` | Array#shift | `core/array/shift_spec.rb` | 9 | 6 |
 | `array_size_spec.rb` | Array#size | `core/array/size_spec.rb + shared/length.rb` | 1 | 1 |
 | `array_take_spec.rb` | Array#take | `core/array/take_spec.rb` | 5 | 0 |
 | `class_eval_spec.rb` | Module#class_eval | `core/module/class_eval_spec.rb` | 6 | 0 |
