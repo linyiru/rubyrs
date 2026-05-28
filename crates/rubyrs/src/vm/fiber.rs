@@ -25,6 +25,49 @@
 //! Fibers actually runnable from Ruby. The split keeps
 //! atomic-commit diffs reviewable.
 //!
+//! # Drop-Vm-free contract for downstream consumers (P1d.3)
+//!
+//! Downstream code holding a Fiber via `Value::Object(fiber_id)`
+//! — e.g., the `_http_server` battery's A3β `RubyrsResponseBody`
+//! that wraps a request-scoped Fiber for hyper's poll_frame
+//! (P2b) — **must keep its `Drop` impl Vm-free**.
+//!
+//! Specifically: Drop must NOT
+//! 1. Look up the Fiber in `vm.heap` (would require `&mut Vm`,
+//!    which Drop has no access to via the standard
+//!    `tokio::Task` model)
+//! 2. Mutate fiber state (e.g., set state = Returned)
+//! 3. Mutate any heap object (no `vm.heap.array_mut(...)` etc.)
+//! 4. Call into Vm bytecode (no `dispatch_until`, no
+//!    `invoke_block`)
+//!
+//! Why: hyper drops the response body on the tokio task
+//! between polls. At that moment there is no live `VmBorrow`
+//! proving `&mut Vm` is safe to access. A Drop that touched
+//! `&mut Vm` would either need to acquire one (impossible in
+//! Drop's `&mut self`) or panic (defeating cleanup).
+//!
+//! What IS safe:
+//!
+//! - Dropping the `Value` itself. `Value::Object(ObjId)` carries
+//!   only `ObjId(u32)` — `Copy`, no destructor. Dropping it is
+//!   a no-op at the Rust level. The heap slot becomes
+//!   unreachable through this Value but stays alive until the
+//!   next GC cycle (`Vm::gc_mark` won't visit it via this
+//!   path); the GC sweeps the FiberObject in its own time,
+//!   running its non-`&mut Vm`-requiring drop logic.
+//!
+//! - Releasing other `Copy` fields (ObjId, bool, u32, etc.).
+//!
+//! - Logging via `eprintln!` or panic-free APIs.
+//!
+//! This contract aligns with ADR 0023 v2 §"Correctness" bullet
+//! 3 (P2b reviewer concern) and §"Risks" #6 (drop-during-await
+//! safety). Pinned structurally by `Value::Object(ObjId)`'s
+//! trivial drop — no test needed, but downstream `Drop` impls
+//! that accidentally add Vm access break the contract. Future
+//! P1e Miri tests cover the broader drop-safety pattern.
+//!
 //! What's here:
 //!
 //! - [`FiberState`] — `Created | Running | Suspended | Returned`.
