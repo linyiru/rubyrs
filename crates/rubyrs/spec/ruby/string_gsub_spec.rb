@@ -96,6 +96,17 @@ describe "String#gsub!" do
     assert_eq(s, "hello")
   end
 
+  it "returns self when a match occurred even if the replacement bytes are identical" do
+    # CRuby gates nil-vs-self on match presence, not on byte
+    # equality — `s.gsub!("l", "l")` matches and returns
+    # self despite the result being byte-identical to the
+    # input.
+    s = "hello"
+    r = s.gsub!("l", "l")
+    assert(r.equal?(s))
+    assert_eq(s, "hello")
+  end
+
   it "handles an empty pattern by wrapping the replacement around every char" do
     s = "abc"
     s.gsub!("", "X")

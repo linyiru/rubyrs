@@ -94,6 +94,16 @@ describe "String#sub!" do
     assert_eq(s, "hello")
   end
 
+  it "returns self when a match occurred even if the replacement bytes are identical" do
+    # CRuby gates nil-vs-self on match presence, not on byte
+    # equality — `s.sub!("l", "l")` matches and returns self
+    # despite the result being byte-identical to the input.
+    s = "hello"
+    r = s.sub!("l", "l")
+    assert(r.equal?(s))
+    assert_eq(s, "hello")
+  end
+
   it "handles an empty pattern by prepending the replacement" do
     s = "hello"
     s.sub!("", "X")
