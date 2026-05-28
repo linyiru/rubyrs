@@ -2618,11 +2618,6 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Int(n)))
             }
-            // `h.each_with_object(memo) { |(k, v), memo| ... }`.
-            // Mirrors `Array#each_with_object` but yields a pair
-            // Array. Block return is ignored; `memo` is the
-            // observable result. Same up-front pin discipline as
-            // `Hash#count` above.
             // `h.flat_map { |pair| ... }` / `{ |k, v| ... }` —
             // like map then one-level flatten. CRuby yields a
             // single `[k, v]` Array per entry (matching
@@ -2825,6 +2820,11 @@ impl Vm {
                 }
                 Some(early.unwrap_or(acc))
             }
+            // `h.each_with_object(memo) { |(k, v), memo| ... }`.
+            // Mirrors `Array#each_with_object` but yields a pair
+            // Array. Block return is ignored; `memo` is the
+            // observable result. Same up-front pin discipline as
+            // `Hash#count` above.
             (Value::Hash(id), "each_with_object", [seed]) => {
                 let id = *id;
                 let seed = seed.clone();
