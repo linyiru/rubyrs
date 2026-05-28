@@ -2772,6 +2772,71 @@ fn integer_chr_basic() {
     }
 }
 
+#[test]
+fn float_domain_error_class_and_rescue_chain() {
+    // FloatDomainError sits at FloatDomainError < RangeError <
+    // StandardError < Exception. Verify (a) the class is exposed
+    // to Ruby code (preamble loaded), (b) the ancestor chain is
+    // correct, (c) `rescue FloatDomainError`, `rescue RangeError`,
+    // and a bare `rescue` all catch a NaN-divmod trap, (d)
+    // `Float::INFINITY.to_i` / `Float::NAN.to_i` raise it (and
+    // not the silent `as i64` clamp), (e) the embed host sees
+    // the `Uncaught { class_name: "FloatDomainError" }` shape.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts FloatDomainError.ancestors.inspect",
+        "fde_chain.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot().trim(),
+        "[FloatDomainError, RangeError, StandardError, Exception]",
+    );
+
+    for (script, rescue_class, expected) in [
+        ("begin; 13.divmod(0.0/0.0); rescue FloatDomainError => e; puts e.class; end",
+         "FloatDomainError", "FloatDomainError"),
+        ("begin; 13.divmod(0.0/0.0); rescue RangeError => e; puts e.class; end",
+         "RangeError", "FloatDomainError"),
+        ("begin; 13.divmod(0.0/0.0); rescue => e; puts e.class; end",
+         "bare", "FloatDomainError"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "fde_rescue.rb").expect("eval");
+        assert_eq!(
+            buf.snapshot().trim(),
+            expected,
+            "rescue {} should catch FloatDomainError",
+            rescue_class,
+        );
+    }
+
+    // Float#to_i / floor / ceil / round / truncate on NaN / ±Inf.
+    for (script, expected_msg) in [
+        ("(0.0/0.0).to_i",     "NaN"),
+        ("(1.0/0.0).to_i",     "Infinity"),
+        ("(-1.0/0.0).to_i",    "-Infinity"),
+        ("(0.0/0.0).floor",    "NaN"),
+        ("(1.0/0.0).ceil",     "Infinity"),
+        ("(-1.0/0.0).round",   "-Infinity"),
+        ("(0.0/0.0).truncate", "NaN"),
+    ] {
+        let err = rt.eval(script, "fde_to_i.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::FloatDomainError { ref msg } => {
+                assert_eq!(msg, expected_msg, "for {:?}", script);
+            }
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, "FloatDomainError", "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected FloatDomainError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_pow_bigint_exponent_traps() {

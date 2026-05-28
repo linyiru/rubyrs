@@ -6,12 +6,6 @@
 #   TypeError example — the plain non-Integer cases ("10" / :symbol)
 #   are kept as the non-mock subset.
 # - skipped (mock): the bignum context's `mock('10')` TypeError test.
-# - skipped (method-not-implemented): `FloatDomainError` rescue at
-#   the script level isn't wired through rubyrs's exception class
-#   hierarchy; the raise itself works (the implementation raises
-#   `Uncaught { class_name: "FloatDomainError" }`) but the
-#   micro-runner's `assert_raises` checks would need ancestor-aware
-#   matching. Tracked as a follow-up.
 
 describe "Integer#divmod" do
   it "fixnum: returns an Array containing quotient and modulus" do
@@ -77,15 +71,12 @@ describe "Integer#divmod" do
     assert_raises("TypeError") { bn.divmod(:symbol) }
   end
 
-  # skipped (method-not-implemented): `FloatDomainError` rescue at
-  # the script level isn't currently wired through rubyrs's
-  # exception class hierarchy. The implementation does raise the
-  # right error (`Uncaught { class_name: "FloatDomainError" }`)
-  # but the micro-runner's `assert_raises` matcher doesn't yet
-  # walk the ancestor chain for non-StandardError classes.
-  #
-  # bignum_it "bignum: raises a FloatDomainError if other is NaN" do
-  #   bn = 2**64
-  #   assert_raises("FloatDomainError") { bn.divmod(0.0/0.0) }
-  # end
+  it "fixnum: raises a FloatDomainError if other is NaN" do
+    assert_raises("FloatDomainError") { 13.divmod(0.0/0.0) }
+  end
+
+  bignum_it "bignum: raises a FloatDomainError if other is NaN" do
+    bn = 2**64
+    assert_raises("FloatDomainError") { bn.divmod(0.0/0.0) }
+  end
 end

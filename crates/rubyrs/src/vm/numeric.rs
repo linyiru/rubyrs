@@ -1129,6 +1129,26 @@ pub(crate) fn numeric_call(
             Some(Value::new_str(crate::heap::format_float(*a)))
         }
         (Value::Float(a), "to_f", []) => Some(Value::Float(*a)),
+        // Float → Integer conversions need to trap NaN / ±Infinity
+        // with CRuby's FloatDomainError shape — silently casting via
+        // `as i64` clamps to `i64::MIN`/`MAX`, which is the
+        // canonical "wrong answer" for this surface. Same guard
+        // applies to floor/ceil/round/truncate's no-arg form
+        // (each returns an Integer).
+        (Value::Float(a), "to_i" | "floor" | "ceil" | "round" | "truncate", [])
+            if a.is_nan() || a.is_infinite() =>
+        {
+            let label = if a.is_nan() {
+                "NaN"
+            } else if *a > 0.0 {
+                "Infinity"
+            } else {
+                "-Infinity"
+            };
+            return Err(RubyError::FloatDomainError {
+                msg: label.to_string(),
+            });
+        }
         (Value::Float(a), "to_i", []) => Some(Value::Int(*a as i64)),
         (Value::Float(a), "abs", []) => Some(Value::Float(a.abs())),
         (Value::Float(a), "-@", []) => Some(Value::Float(-*a)),
