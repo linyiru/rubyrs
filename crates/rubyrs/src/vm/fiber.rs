@@ -593,6 +593,10 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     };
 
     // __rubyrs_fiber_new(block_value) -> Value::Object(fiber_id)
+    //
+    // P1e.1: enforces `vm.max_live_fibers` (sourced from
+    // `Config::max_live_fibers`). At-cap allocation raises
+    // FiberError without leaking the would-be slot.
     rt.register_fn("__rubyrs_fiber_new", move |args| {
         let block_id = match args {
             [Value::Block(id)] => *id,
@@ -614,6 +618,19 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         // SAFETY: ADR 0013 — outer &mut Vm parked by
         // invoke_host_fn; time-disjoint re-borrow.
         let vm = unsafe { &mut *ptr };
+        // P1e.1 cap check.
+        if let Some(cap) = vm.max_live_fibers
+            && vm.heap.count_live_fibers() >= cap
+        {
+            return Err(Trap {
+                err: RubyError::RuntimeError {
+                    msg: format!(
+                        "FiberError: max_live_fibers cap reached (cap = {cap})",
+                    ),
+                },
+                backtrace: vec![],
+            });
+        }
         let fiber_id = vm.heap.alloc_fiber(block_id);
         Ok(Value::Object(fiber_id))
     });
@@ -1239,6 +1256,85 @@ mod tests {
                 "\"deliberate\"/\"post:deliberate\""
             ),
             other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    // ===== P1e.1: max_live_fibers cap =====
+
+    /// P1e.1: allocating past `Config::max_live_fibers`
+    /// raises FiberError. The cap is set via
+    /// `Runtime::apply_config`; subsequent
+    /// `__rubyrs_fiber_new` calls scan the heap and trap
+    /// when at the cap.
+    #[test]
+    fn max_live_fibers_cap_blocks_alloc() {
+        let mut cfg = crate::Config::default();
+        cfg.max_live_fibers = Some(2);
+        let mut rt = crate::Runtime::with_config(cfg);
+        super::register_host_fns(&mut rt);
+        let err = rt.eval(r##"
+            f1 = __rubyrs_fiber_new(proc {})
+            f2 = __rubyrs_fiber_new(proc {})
+            f3 = __rubyrs_fiber_new(proc {})   # third must trap
+        "##, "p1e1_cap.rb").expect_err("expected cap trap");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("max_live_fibers cap reached"),
+            "expected cap trap, got: {msg}",
+        );
+    }
+
+    /// P1e.1: dead fibers count against the cap until GC
+    /// reaps them. Verify that running GC frees the slot
+    /// so subsequent allocation succeeds. Exercises the
+    /// "heap scan counts only live slots" path.
+    #[test]
+    fn max_live_fibers_releases_after_gc() {
+        let mut cfg = crate::Config::default();
+        cfg.max_live_fibers = Some(1);
+        // Aggressive GC to make collection observable in
+        // a small test — stress_gc fires a collect at
+        // every allocation.
+        cfg.stress_gc = true;
+        let mut rt = crate::Runtime::with_config(cfg);
+        super::register_host_fns(&mut rt);
+        // Allocate first fiber, then immediately drop the
+        // local binding so it's unreachable, then alloc
+        // again. The second alloc would trip the cap if
+        // GC hadn't run between them — stress_gc ensures
+        // it does.
+        let r = rt.eval(r##"
+            # Without rebinding f, the new allocation has
+            # the prior fiber as a live root via the local.
+            # Drop reachability by replacing the binding
+            # with nil; stress_gc then sweeps.
+            f = __rubyrs_fiber_new(proc {})
+            f = nil
+            # Force a few extra allocs to push GC forward.
+            ("a" * 100).length
+            ("b" * 100).length
+            g = __rubyrs_fiber_new(proc {})
+            "ok"
+        "##, "p1e1_gc_release.rb").expect("second alloc should succeed");
+        match r {
+            Value::Str(s) => assert_eq!(s.to_string_lossy(), "ok"),
+            other => panic!("expected Str(ok), got {other:?}"),
+        }
+    }
+
+    /// P1e.1: cap = None (default) doesn't gate
+    /// allocation — happy path regression guard.
+    #[test]
+    fn no_max_live_fibers_means_unlimited() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            10.times { __rubyrs_fiber_new(proc {}) }
+            "ok"
+        "##, "p1e1_unlimited.rb").expect("default unlimited");
+        match r {
+            Value::Str(s) => assert_eq!(s.to_string_lossy(), "ok"),
+            other => panic!("expected Str(ok), got {other:?}"),
         }
     }
 

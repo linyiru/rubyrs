@@ -628,6 +628,14 @@ pub(crate) struct Vm {
     /// cfg(_fiber)-gated.
     #[cfg(feature = "_fiber")]
     pub(crate) cext_depth: u32,
+    /// P1e.1 (ADR 0023 v2 §"Risks" #2): cap on concurrently-live
+    /// Fibers. Set from `Config::max_live_fibers`.
+    /// `__rubyrs_fiber_new` checks this against a heap scan of
+    /// live `HeapObj::Fiber` slots; allocation past the cap
+    /// raises FiberError. `None` = unlimited (default).
+    /// cfg(_fiber)-gated.
+    #[cfg(feature = "_fiber")]
+    pub(crate) max_live_fibers: Option<usize>,
     /// Builtin reflection metadata for the synth Methods that
     /// `Kernel.instance_method(:foo)` returns. Looked up by the
     /// `instance_method` arm when the receiver is Kernel.
@@ -796,6 +804,8 @@ impl Vm {
             current_fiber_id: None,
             #[cfg(feature = "_fiber")]
             cext_depth: 0,
+            #[cfg(feature = "_fiber")]
+            max_live_fibers: None,
             kernel_builtin_metas: std::collections::HashMap::new(),
             kernel_class_sym: None,
             basic_object_builtin_metas: std::collections::HashMap::new(),

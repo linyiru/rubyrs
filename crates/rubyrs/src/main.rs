@@ -200,6 +200,8 @@ fn main() {
             .map(std::time::Duration::from_millis),
         max_symbols: parse_env_cap("RUBYRS_MAX_SYMBOLS", env_lookup("RUBYRS_MAX_SYMBOLS")),
         max_value_bytes: parse_env_cap("RUBYRS_MAX_VALUE_BYTES", env_lookup("RUBYRS_MAX_VALUE_BYTES")),
+        #[cfg(feature = "_fiber")]
+        max_live_fibers: parse_env_cap("RUBYRS_MAX_LIVE_FIBERS", env_lookup("RUBYRS_MAX_LIVE_FIBERS")),
         env: Some(host_env.iter().cloned().collect()),
         // `std::process::id()` panics on wasm32-wasip1 (wasi has no
         // process-ID concept). The runtime treats `pid: None` as

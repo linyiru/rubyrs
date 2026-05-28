@@ -147,6 +147,26 @@ pub struct Config {
     /// storms); this caps *individual* object size (good against
     /// `"a" * 10_000_000`, which is one heap object that grabs 10 MB).
     pub max_value_bytes: Option<usize>,
+    /// P1e.1 (ADR 0023 v2 §"Risks" #2): cap on the number of
+    /// concurrently-live Fibers. Each in-flight streaming
+    /// response carries a FiberSnapshot; for 1000 concurrent SSE
+    /// connections, that's 1000 snapshots pinned. Without this
+    /// cap a malicious script could `loop { Fiber.new { sleep } }`
+    /// itself into OOM under `max_live`'s heap-object cap (since
+    /// each Fiber is exactly one heap object).
+    ///
+    /// Checked at `__rubyrs_fiber_new` allocation time. Raises
+    /// `FiberError("max_live_fibers cap reached")` when at the
+    /// cap. Default `None` (unlimited).
+    ///
+    /// Embedders running A3β streaming should pin this to
+    /// `Some(max_concurrent_requests)` so Fiber count tracks
+    /// active connections; the `_http_server` battery's
+    /// `HttpServerConfig` will surface this as a knob in P2b.
+    ///
+    /// cfg(_fiber)-gated.
+    #[cfg(feature = "_fiber")]
+    pub max_live_fibers: Option<usize>,
     /// If `Some(d)`, an `eval` call that runs longer than `d`
     /// wall-clock time returns a `ResourceExhausted` trap. Checked
     /// every 1024 ops (cheap and precise enough for the host-side
@@ -330,6 +350,8 @@ impl Default for Config {
             max_frames: None,
             max_symbols: None,
             max_value_bytes: None,
+            #[cfg(feature = "_fiber")]
+            max_live_fibers: None,
             deadline: None,
             env: None,
             pid: None,
@@ -1048,6 +1070,10 @@ impl Runtime {
         self.vm.heap.max_live = cfg.max_heap_objects;
         self.vm.max_symbols = cfg.max_symbols;
         self.vm.max_value_bytes = cfg.max_value_bytes;
+        #[cfg(feature = "_fiber")]
+        {
+            self.vm.max_live_fibers = cfg.max_live_fibers;
+        }
         self.vm.env_override = cfg.env;
         self.vm.pid = cfg.pid.map(|n| n.get() as i64);
         self.vm.time_now = cfg.time_now;

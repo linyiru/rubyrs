@@ -383,6 +383,21 @@ impl Heap {
     pub(crate) fn alloc_fiber(&mut self, body_block: ObjId) -> ObjId {
         self.alloc(HeapObj::Fiber(crate::vm::fiber::FiberObject::new(body_block)))
     }
+
+    /// P1e.1: count currently-live `HeapObj::Fiber` slots.
+    /// O(heap_size) — fine for the once-per-fiber-alloc cap
+    /// check; the alternative would be a Vm-level counter
+    /// kept in sync with sweep (more bookkeeping than the
+    /// rate of fiber allocation justifies for typical
+    /// HTTP-server workloads).
+    #[cfg(feature = "_fiber")]
+    #[allow(dead_code)] // P1e.1 host fn consumes this
+    pub(crate) fn count_live_fibers(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| matches!(slot, Slot::Live(HeapObj::Fiber(_))))
+            .count()
+    }
     #[cfg(feature = "bignum")]
     pub(crate) fn bigint(&self, id: ObjId) -> &num_bigint::BigInt {
         if let HeapObj::BigInt(b) = self.get(id) { b } else { panic!("ICE: heap slot is not a BigInt") }
