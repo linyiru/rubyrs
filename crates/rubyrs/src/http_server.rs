@@ -729,7 +729,7 @@ pub(crate) fn parse_serve_options(
 }
 
 pub(crate) fn marshal_rack_response(
-    vm: &crate::vm::Vm,
+    vm: &mut crate::vm::Vm,
     app_result: crate::value::Value,
 ) -> Result<MarshaledResponse, String> {
     use crate::value::Value;
@@ -769,12 +769,55 @@ pub(crate) fn marshal_rack_response(
             other.type_name(),
         )),
     };
-    let body_arr_id = match &arr[2] {
+    // A3: accept Array directly OR any object that
+    // responds to `to_a` (Rack each-shape — Enumerable-y
+    // objects, Enumerator instances, custom classes).
+    // The Array path stays fast; the to_a path invokes
+    // the method synchronously + expects an Array back.
+    //
+    // True streaming (Ruby producing chunks overlapped
+    // with socket writes) needs Fiber + a !Send Vm
+    // bridge — deferred to a separate ADR. A3α scope
+    // is "API-shape compatibility" so Rack apps + Sinatra
+    // responses can flow through unmodified.
+    let body_val = arr[2].clone();
+    let body_arr_id = match &body_val {
         Value::Array(id) => *id,
-        other => return Err(format!(
-            "Rack body must be Array<String>; got {} (streaming bodies need Fiber, Phase H3)",
-            other.type_name(),
-        )),
+        other => {
+            let class_val = vm.class_of(&body_val);
+            let cls = match &class_val {
+                Value::Class(c) => c.clone(),
+                _ => return Err(format!(
+                    "Rack body must be Array or respond to to_a; got {} (no class to dispatch to)",
+                    other.type_name(),
+                )),
+            };
+            let to_a_sym = vm.interner.intern("to_a");
+            let method = vm.lookup_method_uncached(&cls, to_a_sym).ok_or_else(|| {
+                format!(
+                    "Rack body must be Array or respond to to_a; got {} — no `to_a` method found",
+                    other.type_name(),
+                )
+            })?;
+            let pre_frames = vm.frames.len();
+            vm.invoke_method(method, body_val.clone(), Vec::new())
+                .map_err(|trap| format!(
+                    "Rack body.to_a raised: {}",
+                    trap.err.message(),
+                ))?;
+            vm.dispatch_until(pre_frames).map_err(|trap| format!(
+                "Rack body.to_a raised during dispatch: {}",
+                trap.err.message(),
+            ))?;
+            let result = vm.stack.pop().unwrap_or(Value::Nil);
+            match result {
+                Value::Array(id) => id,
+                other => return Err(format!(
+                    "Rack body.to_a must return Array; got {}",
+                    other.type_name(),
+                )),
+            }
+        }
     };
 
     // Headers — Hash<String, String> only in PoC v1.
@@ -3331,6 +3374,105 @@ mod tests {
         assert!(
             response_text.contains("remote=127.0.0.1;"),
             "expected env REMOTE_ADDR=127.0.0.1 in body, got:\n{response_text}",
+        );
+    }
+
+    /// A3: Rack body can be ANY object that responds to
+    /// `to_a` (Enumerator, custom class with each + include
+    /// Enumerable, etc.) — not just a literal Array. The
+    /// marshal layer calls to_a + processes the resulting
+    /// Array. Streaming (true overlap of Ruby body
+    /// production with socket writes) deferred to A3β.
+    #[test]
+    fn rack_body_responding_to_to_a_serves_normally() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18111";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /a3 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // ChunkedBody defines to_a explicitly — rubyrs's
+        // Enumerable is an empty stub today, so we can't
+        // rely on the `include Enumerable` shortcut to get
+        // to_a for free. The marshal layer only requires
+        // `to_a` (no each iteration in A3α scope).
+        rt.eval(&format!(r#"
+            class ChunkedBody
+              def to_a
+                ["chunk-a", "chunk-b"]
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, ChunkedBody.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app)
+        "#), "a3_to_a_body.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("chunk-a") && response_text.contains("chunk-b"),
+            "expected both chunks in body, got:\n{response_text}",
+        );
+    }
+
+    /// A3: Rack body that doesn't respond to `to_a` AND
+    /// isn't an Array → 500 with a clear diagnostic.
+    /// Today an Integer is the cleanest "neither" — it
+    /// has Numeric methods but no `to_a`.
+    #[test]
+    fn rack_body_without_each_or_to_a_yields_500() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18112";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /a3 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // Integer body → no to_a → 500 + message.
+        rt.eval(&format!(r#"
+            app = ->(env) {{ [200, {{"Content-Type" => "text/plain"}}, 42] }}
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app)
+        "#), "a3_no_to_a.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 500"),
+            "expected 500 for non-iterable body, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("Array or respond to to_a"),
+            "expected diagnostic mentioning Array/to_a, got:\n{response_text}",
         );
     }
 
