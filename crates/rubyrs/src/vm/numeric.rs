@@ -1089,12 +1089,15 @@ pub(crate) fn floor_mod_f64(a: f64, b: f64) -> f64 {
 
 /// Greatest common divisor on i64, Euclidean algorithm. Result
 /// is always non-negative (CRuby parity — `(-12).gcd(6)` is 6).
-/// Caller must reject `i64::MIN` operands under bignum so the
-/// promotion path can return the BigInt 2^63 result (since
-/// |i64::MIN| is 2^63 which doesn't fit i64).
+/// Under bignum the caller declines `i64::MIN` inputs so the
+/// BigInt-promotion path returns the exact 2^63 result. Under
+/// no-bignum the helper saturates: if the magnitude would be
+/// `2^63` (only reachable when at least one operand is i64::MIN
+/// and the algorithm collapses to it), return `i64::MAX` so the
+/// result stays positive instead of wrapping to i64::MIN.
+/// Saturation costs 1 from the true magnitude — acceptable under
+/// the no-bignum wrapping-on-overflow convention.
 pub(crate) fn gcd_i64(a: i64, b: i64) -> i64 {
-    // Use unsigned magnitudes to keep gcd positive without
-    // overflow on i64::MIN.abs() (i64::MIN excluded by caller).
     let mut x = a.unsigned_abs();
     let mut y = b.unsigned_abs();
     while y != 0 {
@@ -1102,10 +1105,14 @@ pub(crate) fn gcd_i64(a: i64, b: i64) -> i64 {
         x = y;
         y = r;
     }
-    // x fits i64 because we excluded i64::MIN above; the
-    // largest possible result is i64::MAX (gcd of i64::MAX with
-    // itself).
-    x as i64
+    // Saturate to i64::MAX when the magnitude is 2^63 to keep
+    // the always-non-negative contract. Without this, the cast
+    // wraps to i64::MIN.
+    if x > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        x as i64
+    }
 }
 
 /// Least common multiple on i64. Returns `None` on overflow

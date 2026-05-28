@@ -3884,14 +3884,20 @@ impl Vm {
                 }
                 Value::Float(b) => {
                     if b.is_nan() {
-                        // CRuby: FloatDomainError. rubyrs doesn't
-                        // model that class natively; use Uncaught
-                        // with the matching class name so
-                        // `rescue FloatDomainError` works at the
-                        // script level.
-                        return Err(self.trap(RubyError::Uncaught {
-                            class_name: "FloatDomainError".to_string(),
-                            message: "NaN".to_string(),
+                        // CRuby raises FloatDomainError (which is a
+                        // RangeError subclass). rubyrs doesn't model
+                        // FloatDomainError as a distinct class, and
+                        // raising via Uncaught bypasses the rescue
+                        // dispatch entirely. Use RangeError so the
+                        // CRuby ancestor chain still routes the
+                        // exception to `rescue RangeError` /
+                        // `rescue StandardError` correctly — only
+                        // `rescue FloatDomainError` (the specific
+                        // class) misses, which is documented as a
+                        // follow-up alongside the exception-class
+                        // wiring for FloatDomainError specifically.
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "NaN".to_string(),
                         }));
                     }
                     if *b == 0.0 {
