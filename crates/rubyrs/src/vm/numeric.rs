@@ -379,7 +379,7 @@ pub(crate) fn numeric_call(
                         msg: "divided by 0".to_string(),
                     });
                 }
-                Some(Value::Int(a / b))
+                Some(Value::Int(floor_div_i64(*a, *b)))
             }
             "%" => {
                 if *b == 0 {
@@ -387,7 +387,7 @@ pub(crate) fn numeric_call(
                         msg: "divided by 0".to_string(),
                     });
                 }
-                Some(Value::Int(a % b))
+                Some(Value::Int(floor_mod_i64(*a, *b)))
             }
             "==" => Some(Value::Bool(a == b)),
             "!=" => Some(Value::Bool(a != b)),
@@ -740,7 +740,7 @@ pub(crate) fn numeric_call(
             // Float / 0.0 == ±Infinity (or NaN), not an exception —
             // matches IEEE 754 and CRuby.
             "/" => Some(Value::Float(a / b)),
-            "%" => Some(Value::Float(a % b)),
+            "%" => Some(Value::Float(floor_mod_f64(*a, *b))),
             "==" => Some(Value::Bool(a == b)),
             "!=" => Some(Value::Bool(a != b)),
             "<"  => Some(Value::Bool(a < b)),
@@ -808,7 +808,7 @@ pub(crate) fn numeric_call(
                 "-" => Some(Value::Float(a - b)),
                 "*" => Some(Value::Float(a * b)),
                 "/" => Some(Value::Float(a / b)),
-                "%" => Some(Value::Float(a % b)),
+                "%" => Some(Value::Float(floor_mod_f64(*a, b))),
                 "**" => Some(Value::Float(a.powf(b))),
                 _ => None,
             }
@@ -827,7 +827,7 @@ pub(crate) fn numeric_call(
                 "-" => Some(Value::Float(a - b)),
                 "*" => Some(Value::Float(a * b)),
                 "/" => Some(Value::Float(a / b)),
-                "%" => Some(Value::Float(a % b)),
+                "%" => Some(Value::Float(floor_mod_f64(a, *b))),
                 "**" => Some(Value::Float(a.powf(*b))),
                 _ => None,
             }
@@ -912,6 +912,55 @@ fn try_int_shl_lossless(a: i64, shift: i64) -> Option<i64> {
     // same amount doesn't reconstruct the input. `0 << anything ==
     // 0` round-trips trivially.
     if (result >> s) == a { Some(result) } else { None }
+}
+
+/// CRuby-style floor division on i64. CRuby's `Integer#/` is
+/// `floor(a/b)` (not truncating toward zero like Rust's `/`),
+/// so e.g. `(-13) / 4` is -4 (Rust: -3) and `13 / (-4)` is -4
+/// (Rust: -3). Uses `wrapping_div` to side-step the
+/// `i64::MIN / -1` overflow panic — that exact pair promotes to
+/// BigInt elsewhere; here it wraps quietly to i64::MIN, which
+/// the BigInt promotion path replaces before the user sees it.
+///
+/// Caller must ensure `b != 0` (ZeroDivisionError fires upstream).
+pub(crate) fn floor_div_i64(a: i64, b: i64) -> i64 {
+    let q = a.wrapping_div(b);
+    let r = a.wrapping_rem(b);
+    // r and b have opposite signs (and r != 0) → adjust toward
+    // negative infinity by one.
+    if (r != 0) && ((r < 0) != (b < 0)) {
+        q.wrapping_sub(1)
+    } else {
+        q
+    }
+}
+
+/// CRuby-style floor modulus on i64. `r = a - b * floor(a/b)`,
+/// so the sign of r matches the sign of b (positive divisor →
+/// `0 <= r < b`; negative divisor → `b < r <= 0`). Mirrors
+/// [`floor_div_i64`].
+pub(crate) fn floor_mod_i64(a: i64, b: i64) -> i64 {
+    let r = a.wrapping_rem(b);
+    if (r != 0) && ((r < 0) != (b < 0)) {
+        r.wrapping_add(b)
+    } else {
+        r
+    }
+}
+
+/// CRuby-style floor modulus on f64. CRuby's `Numeric#%` for
+/// Float matches `floor(a/b)` semantics too: sign of `r` follows
+/// sign of `b`. Rust's `f64::%` truncates toward zero, so
+/// `(-13.0) % 4.0` is `-1.0` in Rust but `3.0` in CRuby. Use
+/// `rem_euclid` for the magnitude then flip sign per `b`.
+pub(crate) fn floor_mod_f64(a: f64, b: f64) -> f64 {
+    // f64::rem_euclid already gives "non-negative remainder of
+    // a/|b|" for finite b; for negative b we then need to subtract
+    // |b| to land in (b, 0].
+    let r = a - (a / b).floor() * b;
+    // Above can produce -0.0 when a / b is integral; CRuby emits
+    // +0.0 in that case. Normalise.
+    if r == 0.0 { 0.0 } else { r }
 }
 
 /// CRuby-parity lossless three-way comparison between an Int

@@ -35,7 +35,7 @@ mod util;
 pub(crate) use bignum::bigint_equals_float_lossless;
 #[cfg(all(feature = "cext", not(target_os = "wasi")))]
 pub(crate) use cext::with_vm_ptr_set;
-pub(crate) use numeric::int_cmp_float_lossless;
+pub(crate) use numeric::{floor_div_i64, floor_mod_i64, int_cmp_float_lossless};
 pub(crate) use lookup::{class_is_a, flatten_ancestors, CallCache};
 pub use lookup::IcStats;
 pub(crate) use primitive::primitive_call;

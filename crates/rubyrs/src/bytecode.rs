@@ -472,8 +472,17 @@ impl BinOpKind {
             BinOpKind::Add => Value::Int(arith(a, b, add)?),
             BinOpKind::Sub => Value::Int(arith(a, b, sub)?),
             BinOpKind::Mul => Value::Int(arith(a, b, mul)?),
-            BinOpKind::Div => Value::Int(a.wrapping_div(b)),
-            BinOpKind::Mod => Value::Int(a.wrapping_rem(b)),
+            // CRuby uses floor division for Integer#/ and #%: the
+            // remainder's sign matches the divisor's sign, so
+            // `(-13) / 4 == -4` (Rust's wrapping_div gives -3) and
+            // `(-13) % 4 == 3` (Rust's wrapping_rem gives -1).
+            // Delegated to the helpers in `vm::numeric` so the
+            // method-call path (`5.send(:/, 2)`) and the BinOp
+            // fast path stay in lock-step. See
+            // `crate::vm::numeric::floor_div_i64` /
+            // `floor_mod_i64`.
+            BinOpKind::Div => Value::Int(crate::vm::floor_div_i64(a, b)),
+            BinOpKind::Mod => Value::Int(crate::vm::floor_mod_i64(a, b)),
             BinOpKind::Lt => Value::Bool(a < b),
             BinOpKind::Le => Value::Bool(a <= b),
             BinOpKind::Gt => Value::Bool(a > b),
