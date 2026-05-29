@@ -1072,10 +1072,16 @@ impl Runtime {
     ///
     /// Allocates the `$LOAD_PATH` Array on the heap if it hasn't
     /// been already (`Vm::ensure_load_path` is idempotent). Panics
-    /// only if heap-cap checks reject the allocation, which would
-    /// indicate a misconfigured Runtime (`max_heap_objects: 0`
-    /// during preamble would already have aborted by the time
-    /// we get here).
+    /// only if `ensure_load_path`'s `check_alloc` rejects the
+    /// allocation — typically a misconfigured Runtime that sets
+    /// `Config::max_heap_objects: 0` while also passing a non-
+    /// empty `load_paths` (the two are mutually inconsistent: a
+    /// zero-cap heap can't hold the seed). Because we run BEFORE
+    /// the preamble (the seed needs to land in the post-preamble
+    /// snapshot so `Runtime::reset` preserves it), this trap fires
+    /// from `seed_load_path` rather than later from preamble
+    /// allocation — but in both cases the panic indicates the
+    /// host's Config is self-contradicting.
     fn seed_load_path(&mut self, paths: Vec<std::path::PathBuf>) {
         if paths.is_empty() {
             return;
