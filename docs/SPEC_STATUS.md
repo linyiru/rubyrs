@@ -13,8 +13,8 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 138 |
-| Examples in corpus | 829 |
-| Skipped `it` traces | 155 |
+| Examples in corpus | 834 |
+| Skipped `it` traces | 154 |
 
 ### Skipped traces by category
 
@@ -22,7 +22,7 @@ count below is also the passing count.
 |---|---|
 | `divergent` | 2 |
 | `fixture` | 53 |
-| `method-not-implemented` | 81 |
+| `method-not-implemented` | 80 |
 | `mock` | 19 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -38,7 +38,7 @@ Find blocks unlocked by a future feature with e.g.
 
 | Class | Files | Examples | Skipped |
 |---|---|---|---|
-| Array | 19 | 80 | 50 |
+| Array | 19 | 85 | 49 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 39 | 169 | 51 |
 | Integer | 35 | 312 | 29 |
@@ -70,7 +70,7 @@ Find blocks unlocked by a future feature with e.g.
 | `array_shift_spec.rb` | Array#shift | `core/array/shift_spec.rb` | 9 | 6 |
 | `array_size_spec.rb` | Array#size | `core/array/size_spec.rb + shared/length.rb` | 1 | 1 |
 | `array_take_spec.rb` | Array#take | `core/array/take_spec.rb` | 5 | 0 |
-| `array_uniq_spec.rb` | Array#uniq | `core/array/uniq_spec.rb` | 8 | 1 |
+| `array_uniq_spec.rb` | Array#uniq | `core/array/uniq_spec.rb` | 13 | 0 |
 | `class_eval_spec.rb` | Module#class_eval | `core/module/class_eval_spec.rb` | 6 | 0 |
 | `define_method_spec.rb` | Module#define_method | `core/module/define_method_spec.rb` | 4 | 0 |
 | `hash_any_spec.rb` | Hash#any? | `core/hash/any_spec.rb` | 5 | 1 |

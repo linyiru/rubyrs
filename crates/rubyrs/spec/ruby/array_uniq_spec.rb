@@ -1,8 +1,6 @@
 # Adapted from ruby/spec core/array/uniq_spec.rb at upstream
-# commit 448cb340 (2026-05). Hand-translated — baseline
-# shapes for the no-block form only. The block form
-# (`[...].uniq { |x| key }`) is currently out of subset
-# (no iter.rs arm); skipped at the bottom of this file.
+# commit 448cb340 (2026-05). Hand-translated — covers
+# both the no-block and block forms.
 
 describe "Array#uniq" do
   it "returns a new Array with duplicates removed (first-seen wins)" do
@@ -45,11 +43,25 @@ describe "Array#uniq" do
     assert_eq(out[2], 2)
   end
 
-  # skipped (method-not-implemented): it "with a block uses block return as the uniqueness key" do
-  #   `[1, 2, 3].uniq { |x| x.odd? }` — block form is not
-  #   yet implemented in vm/iter.rs (only Hash#uniq has a
-  #   block-form arm). Tracked as a subset gap; add an
-  #   Array#uniq block arm in iter.rs to un-skip.
+  it "raises ArgumentError when called with positional args" do
+    assert_raises("ArgumentError") { [1].uniq(99) }
+  end
+
+  it "with a block uses the block return as the uniqueness key" do
+    # First-seen wins on collision. `|x| x.odd?` collapses
+    # all odd numbers onto the first odd seen, and all even
+    # onto the first even.
+    assert_eq([1, 2, 3, 4].uniq { |x| x.odd? }, [1, 2])
+  end
+
+  it "with a block returns [] for an empty receiver" do
+    assert_eq([].uniq { |x| x }, [])
+  end
+
+  it "with a block honours `break` with the break value" do
+    out = [1, 2].uniq { |x| break :early }
+    assert_eq(out, :early)
+  end
 end
 
 describe "Array#uniq!" do
@@ -73,6 +85,10 @@ describe "Array#uniq!" do
     a = [1, 1.0]
     assert_eq(a.uniq!, nil)
     assert_eq(a, [1, 1.0])
+  end
+
+  it "raises ArgumentError when called with positional args" do
+    assert_raises("ArgumentError") { [1].uniq!(99) }
   end
 end
 

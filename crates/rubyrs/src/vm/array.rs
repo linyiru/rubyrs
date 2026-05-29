@@ -970,6 +970,20 @@ impl Vm {
                         let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
                     }
+                    // Wrong-arity guard for uniq — CRuby's
+                    // no-block form takes no positional args.
+                    // Without this guard, `ary.uniq(1)` falls
+                    // through every primitive arm and surfaces
+                    // as NoMethodError despite
+                    // respond_to?(:uniq) returning true.
+                    ("uniq", many) => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 0)",
+                                many.len(),
+                            ),
+                        }));
+                    }
                     ("compact", []) => {
                         let out: Vec<Value> = self.heap.array(id).iter()
                             .filter(|v| !matches!(v, Value::Nil))
@@ -1023,6 +1037,15 @@ impl Vm {
                             *self.heap.array_mut(id) = out;
                             Some(Value::Array(id))
                         }
+                    }
+                    // Symmetric wrong-arity guard for uniq!.
+                    ("uniq!", many) => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 0)",
+                                many.len(),
+                            ),
+                        }));
                     }
                     ("compact!", []) => {
                         let src = self.heap.array(id).clone();
