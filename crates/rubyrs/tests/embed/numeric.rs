@@ -2948,10 +2948,20 @@ fn rational_phase_c1_construction_and_readers() {
         ("puts Rational(-3, -4).inspect",       "(3/4)"),
         ("puts Rational(5).inspect",            "(5/1)"),
         ("puts Rational(0, 7).inspect",         "(0/1)"),
-        // class chain — Rational < Numeric < Object.
+        // class chain — Rational < Numeric < Object. Integer
+        // and Float are also re-opened to chain through Numeric
+        // so the whole numeric tower matches CRuby:
+        // `5.is_a?(Numeric)` and `5.0.is_a?(Numeric)` both true,
+        // `5.class.ancestors` includes Numeric.
         ("puts Rational(1, 2).class",           "Rational"),
         ("puts Rational(1, 2).is_a?(Numeric)",  "true"),
         ("puts Rational(1, 2).is_a?(Object)",   "true"),
+        ("puts 5.is_a?(Numeric)",               "true"),
+        ("puts 5.0.is_a?(Numeric)",             "true"),
+        ("puts 5.class.ancestors.inspect",      "[Integer, Numeric, Object, Kernel, BasicObject]"),
+        ("puts 5.0.class.ancestors.inspect",    "[Float, Numeric, Object, Kernel, BasicObject]"),
+        ("puts Rational(1, 2).class.ancestors.inspect",
+         "[Rational, Numeric, Object, Kernel, BasicObject]"),
         // to_s drops the parens; inspect keeps them.
         ("puts Rational(3, 4).to_s",            "3/4"),
         // Readers.

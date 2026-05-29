@@ -88,7 +88,22 @@ end
 ## ensures `Rational.new(...)` resolves (we shim `Kernel#Rational`
 ## as the public constructor entry) AND `obj.is_a?(Numeric)` works
 ## across Integer / Float / Rational.
+##
+## Re-opening `class Integer < Numeric` / `class Float < Numeric`
+## here is intentional: Integer and Float already exist as
+## seeded shells whose initial superclass is Object. The
+## re-open form with an explicit superclass is rejected by
+## CRuby ONLY when the new superclass differs from the
+## existing one; declaring the superclass we WANT to apply on
+## first definition (Object → Numeric) is the canonical way to
+## promote them. The preamble runs once at boot, before any
+## user code observes `Integer.superclass`, so the promotion
+## is invisible to scripts that don't look.
 class Numeric < Object
+end
+class Integer < Numeric
+end
+class Float < Numeric
 end
 class Rational < Numeric
 end
