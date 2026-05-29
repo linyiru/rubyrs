@@ -21,11 +21,20 @@ describe "Hash#tally" do
     assert_eq({}.tally, {})
   end
 
-  it "raises ArgumentError when called with an arg (accumulating form unsupported)" do
+  it "raises ArgumentError when called with one arg (accumulating form unsupported)" do
     # CRuby's Ruby 2.7+ `h.tally(target_hash)` form is out
-    # of subset. Explicit guard avoids the silent
-    # NoMethodError from respond_to? widening.
+    # of subset. The error message names the unsupported
+    # form so callers know to drop the arg.
     assert_raises("ArgumentError") { {a: 1}.tally({}) }
+  end
+
+  it "raises ArgumentError with the standard wrong-arity shape on 2+ args" do
+    # 2+ args isn't an "accumulating form" in any Ruby
+    # version, so the diagnostic should match the standard
+    # `wrong number of arguments` shape rather than the
+    # accumulating-form note.
+    assert_raises("ArgumentError") { {a: 1}.tally({}, {}) }
+    assert_raises("ArgumentError") { {a: 1}.tally(1, 2, 3) }
   end
 
   # skipped (method-not-implemented): it "accepts a hash argument to fold into" do

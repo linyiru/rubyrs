@@ -608,13 +608,22 @@ impl Vm {
                     }
                     // `h.tally(target_hash)` — Ruby 2.7+
                     // accumulating form is out of subset.
-                    // Without this guard, the 1-arg call falls
-                    // through to NoMethodError despite
-                    // respond_to?(:tally) returning true.
-                    ("tally", _) => {
+                    // 1-arg form gets a specific "not
+                    // supported" message; 2+ args get the
+                    // standard wrong-arity shape so the
+                    // diagnostic actually matches the input.
+                    ("tally", many) => {
+                        let msg = if many.len() == 1 {
+                            "Hash#tally with an accumulating Hash argument is not \
+                             supported in this subset (Ruby 2.7+ form)".to_string()
+                        } else {
+                            format!(
+                                "wrong number of arguments (given {}, expected 0)",
+                                many.len(),
+                            )
+                        };
                         return Err(self.trap(crate::error::RubyError::ArgumentError {
-                            msg: "Hash#tally with an accumulating Hash argument is not \
-                                  supported in this subset (Ruby 2.7+ form)".to_string(),
+                            msg,
                         }));
                     }
                     // Wrong-arity arm for take / drop — CRuby
