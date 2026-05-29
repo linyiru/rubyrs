@@ -30,6 +30,8 @@ mod error_handling;
 mod filesystem_sandbox;
 #[path = "embed/gc.rs"]
 mod gc;
+#[path = "embed/load_paths.rs"]
+mod load_paths;
 #[path = "embed/misc.rs"]
 mod misc;
 #[path = "embed/numeric.rs"]
