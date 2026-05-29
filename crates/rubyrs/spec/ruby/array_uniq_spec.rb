@@ -1,7 +1,8 @@
 # Adapted from ruby/spec core/array/uniq_spec.rb at upstream
 # commit 448cb340 (2026-05). Hand-translated — baseline
-# shapes for the no-block form. Block form lives in
-# iter.rs (separate spec).
+# shapes for the no-block form only. The block form
+# (`[...].uniq { |x| key }`) is currently out of subset
+# (no iter.rs arm); skipped at the bottom of this file.
 
 describe "Array#uniq" do
   it "returns a new Array with duplicates removed (first-seen wins)" do
@@ -45,6 +46,33 @@ describe "Array#uniq" do
   end
 
   # skipped (method-not-implemented): it "with a block uses block return as the uniqueness key" do
-  #   `[1, 2, 3].uniq { |x| x.odd? }` — block form lives
-  #   in iter.rs and has separate spec coverage.
+  #   `[1, 2, 3].uniq { |x| x.odd? }` — block form is not
+  #   yet implemented in vm/iter.rs (only Hash#uniq has a
+  #   block-form arm). Tracked as a subset gap; add an
+  #   Array#uniq block arm in iter.rs to un-skip.
 end
+
+describe "Array#uniq!" do
+  it "mutates self in place and returns self when something was deduped" do
+    a = [1, 2, 1, 3]
+    r = a.uniq!
+    assert(r.equal?(a))
+    assert_eq(a, [1, 2, 3])
+  end
+
+  it "returns nil when nothing was deduped" do
+    a = [1, 2, 3]
+    assert_eq(a.uniq!, nil)
+    # Sanity: no mutation.
+    assert_eq(a, [1, 2, 3])
+  end
+
+  it "uses `eql?` (strict) — does NOT coerce Int and Float" do
+    # Mirror Array#uniq's parity fix; uniq! must use the
+    # same predicate.
+    a = [1, 1.0]
+    assert_eq(a.uniq!, nil)
+    assert_eq(a, [1, 1.0])
+  end
+end
+

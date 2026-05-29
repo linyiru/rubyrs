@@ -1005,10 +1005,14 @@ impl Vm {
                         Some(Value::Array(id))
                     }
                     ("uniq!", []) => {
+                        // Mirror Array#uniq: dedup via ruby_eql
+                        // (eql?, strict on numeric type) so the
+                        // bang variant doesn't diverge from the
+                        // non-bang form.
                         let src = self.heap.array(id).clone();
                         let mut out: Vec<Value> = Vec::with_capacity(src.len());
                         for v in &src {
-                            if !out.iter().any(|x| x.ruby_eq(v, &self.heap)) {
+                            if !out.iter().any(|x| x.ruby_eql(v, &self.heap)) {
                                 out.push(v.clone());
                             }
                         }

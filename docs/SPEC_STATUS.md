@@ -12,8 +12,8 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 137 |
-| Examples in corpus | 822 |
+| Files | 138 |
+| Examples in corpus | 829 |
 | Skipped `it` traces | 155 |
 
 ### Skipped traces by category
@@ -38,9 +38,9 @@ Find blocks unlocked by a future feature with e.g.
 
 | Class | Files | Examples | Skipped |
 |---|---|---|---|
-| Array | 19 | 77 | 50 |
+| Array | 19 | 80 | 50 |
 | BasicObject | 3 | 15 | 0 |
-| Hash | 38 | 165 | 51 |
+| Hash | 39 | 169 | 51 |
 | Integer | 35 | 312 | 29 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
@@ -70,7 +70,7 @@ Find blocks unlocked by a future feature with e.g.
 | `array_shift_spec.rb` | Array#shift | `core/array/shift_spec.rb` | 9 | 6 |
 | `array_size_spec.rb` | Array#size | `core/array/size_spec.rb + shared/length.rb` | 1 | 1 |
 | `array_take_spec.rb` | Array#take | `core/array/take_spec.rb` | 5 | 0 |
-| `array_uniq_spec.rb` | Array#uniq | `core/array/uniq_spec.rb` | 5 | 1 |
+| `array_uniq_spec.rb` | Array#uniq | `core/array/uniq_spec.rb` | 8 | 1 |
 | `class_eval_spec.rb` | Module#class_eval | `core/module/class_eval_spec.rb` | 6 | 0 |
 | `define_method_spec.rb` | Module#define_method | `core/module/define_method_spec.rb` | 4 | 0 |
 | `hash_any_spec.rb` | Hash#any? | `core/hash/any_spec.rb` | 5 | 1 |
@@ -95,6 +95,7 @@ Find blocks unlocked by a future feature with e.g.
 | `hash_merge_spec.rb` | Hash#merge | `core/hash/merge_spec.rb` | 1 | 6 |
 | `hash_min_by_spec.rb` | Hash#min_by | `core/enumerable/min_by_spec.rb` | 3 | 2 |
 | `hash_min_max_spec.rb` | Hash#min | `core/hash/{min,max}_spec.rb` | 7 | 2 |
+| `hash_nan_key_spec.rb` | Hash with Float::NAN keys |  | 4 | 0 |
 | `hash_one_spec.rb` | Hash#one? | `core/hash/one_spec.rb` | 6 | 0 |
 | `hash_partition_spec.rb` | Hash#partition | `core/hash/partition_spec.rb` | 6 | 0 |
 | `hash_select_spec.rb` | Hash#select | `core/hash/select_spec.rb + shared/select.rb` | 2 | 2 |
