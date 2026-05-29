@@ -73,3 +73,4 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0021 — OutputSink trait — no_std-compatible stdout abstraction](0021-output-sink-trait.md)
 - [0022 — `_http_server` battery — Rust HTTP front, Ruby app handler](0022-http-server-battery.md)
 - [0023 — True async streaming for `_http_server` — architecture analysis](0023-true-async-streaming.md)
+- [0024 — Bytecode-level iter drivers + block-break propagation through `Op::Yield`](0024-bytecode-iter-and-block-break.md)
