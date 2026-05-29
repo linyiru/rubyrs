@@ -64,8 +64,20 @@ rescue ArgumentError
   puts "clone-extra-arg"
 end
 
-# respond_to? must agree with dispatch
-puts 42.respond_to?(:dup)
-puts 42.respond_to?(:clone)
-puts nil.respond_to?(:dup)
-puts Object.new.respond_to?(:clone)
+# respond_to? must agree with dispatch — cycle-1 review of
+# this PR caught that the original universal whitelist
+# claimed true for every receiver (including Range/Block/
+# Method/Regex/BigInt/Class) but dispatch raised
+# NoMethodError. The whitelist is now per-type and only true
+# where dispatch actually succeeds.
+puts 42.respond_to?(:dup)             # true — Int dispatch returns self
+puts 42.respond_to?(:clone)           # true
+puts 1.5.respond_to?(:dup)            # true — Float
+puts :foo.respond_to?(:dup)           # true — Sym
+puts true.respond_to?(:dup)           # true — Bool
+puts nil.respond_to?(:dup)            # true — Nil
+puts "s".respond_to?(:dup)            # true — String primitive arm
+puts [].respond_to?(:dup)             # true — Array primitive arm
+puts({}.respond_to?(:dup))            # true — Hash primitive arm
+puts Object.new.respond_to?(:dup)     # true — Object universal arm
+puts Object.new.respond_to?(:clone)   # true
