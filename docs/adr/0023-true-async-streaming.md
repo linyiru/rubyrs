@@ -2,9 +2,9 @@
 
 ## Status
 
-**Accepted (2026-05-28, refined 2026-05-29). v5 — all v4
-"remaining Phase 2 polish" items landed; surfaced follow-
-ups generalized into successor ADRs 0024 + 0025.**
+**Accepted (2026-05-28, refined 2026-05-29). v6 — three
+parallel reviewer rounds surfaced honest gaps in the v5
+status doc, addressed inline below.**
 
 Phase 0, Phase 1, Phase 2 items #16–#20, and Phase 3 all
 landed (commits `18eb0e37` → `88d139f6`). Live behaviour
@@ -115,8 +115,29 @@ to permit conditional Vm access via the
 `current_vm_ptr().is_null()` guard. Companion test commit
 `c2669f1b` adds server-shutdown coverage AND surfaces the
 finding that the null-pointer guard branch is currently
-unreachable in the standard hyper + tokio current-thread
-+ V1 host fn setup — kept as futureproofing.
+unreachable on **happy and error paths**.
+
+**v6 correction**: v5 said the null branch is
+"currently unreachable", which is incomplete. Under **panic
+unwind through the host fn** the `with_vm_ptr_set` RAII
+guard clears `CURRENT_VM_PTR` *before* the panic propagates
+past the host fn boundary. Any `FiberResponseBody` that
+ends up dropped from a tokio task drop queue *during* the
+unwind hits the null branch — which is then the *only*
+reachable arm. The "kept as futureproofing" framing
+understated this: the null branch is load-bearing for
+panic safety, not just future refactors. Same code shape,
+clearer rationale.
+
+A further hazard the v5 doc didn't analyze: if
+`invoke_body_close` itself panics (a Ruby `close` raising
+during a pre-existing panic unwind → Rust abort), there's
+no `catch_unwind` around it. The risk surface is small
+(close handlers are typically defensive; a panic in `close`
+during a normal stream completion is also a current-day
+abort), but a SAFETY note would let a future implementer
+opt into `catch_unwind` if the abort becomes user-visible.
+Not changed in this revision; tracked as a follow-up.
 
 The remaining v1 of Risk #1 — `ensure` blocks attached to
 Ruby methods that were RUNNING when the Fiber dropped —
@@ -124,6 +145,30 @@ still doesn't fire (the Fiber is dropped without resume,
 suspended bytecode never re-enters). `Fiber#raise` to
 surface disconnect as a Ruby-level exception remains
 deferred (separate design effort; no ADR open yet).
+
+**v6 — cross-ADR interaction risk surfaced by review**:
+Mid-disconnect Drop currently invokes `body.close` via
+`invoke_body_close` → `dispatch_until`. ADR 0025 Phase 2
+adds an `interrupt_pending` check at the top of
+`dispatch_until`. If SIGINT arrives concurrently with a
+client disconnect, the Drop-initiated close path enters
+dispatch_until, immediately observes the flag, and raises
+`Interrupt` mid-close. The close body aborts halfway —
+which is exactly the `ensure`-leak shape Risk #1 was meant
+to fix.
+
+Two mitigation candidates for ADR 0025 to pick from:
+
+1. **Drain `interrupt_pending` before Drop-initiated close**
+   (cheapest; the dropping Drop loses the interrupt signal
+   but the close runs to completion).
+2. **No-interrupt window** around close paths (a Vm-scoped
+   `suppress_interrupt: bool` set on entry, cleared on
+   exit; the safe-point check honors it). More principled;
+   reusable for other "must-complete" cleanup paths.
+
+Tracked as a coordination point in ADR 0025 v2 §"Cross-ADR
+0023 interaction".
 
 **Documented limitations (carry forward — not regressions)**:
 
@@ -934,7 +979,22 @@ commit atomic with tests per the existing process.
 
 ## Revision log
 
-- **2026-05-29 — v5 (this revision).** All v4 "remaining
+- **2026-05-29 — v6 (this revision).** Three parallel
+  reviewer rounds (architecture, Rust safety, Ruby parity)
+  surfaced honest gaps in the v5 status doc, addressed
+  inline. Key corrections: (a) the Drop null-pointer guard
+  branch is reachable under PANIC UNWIND (the v5 "currently
+  unreachable" claim only held on happy + error paths;
+  `with_vm_ptr_set`'s RAII clears the pointer before panic
+  propagates); (b) `invoke_body_close` panicking during an
+  in-flight panic would abort — tracked as a SAFETY-comment
+  follow-up; (c) cross-ADR coordination risk: Drop-initiated
+  close → `dispatch_until` → ADR 0025's `interrupt_pending`
+  check could abort close mid-flight on SIGINT during
+  client-disconnect. Two mitigation candidates handed off
+  to ADR 0025 v2. No architectural change from v5; review-
+  driven doc precision.
+- **2026-05-29 — v5.** All v4 "remaining
   Phase 2 polish" items landed (P2 #21 Cat 1 decision recorded,
   Cat 2 backpressure shipped `a9a335a4`, Cat 4 remainder
   shipped `ba0a7859`). Surfaced follow-ups during the work
