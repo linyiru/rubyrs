@@ -4778,6 +4778,191 @@ mod tests {
         );
     }
 
+    /// P2 #20 (ADR 0023): perf-regression guard — Array-shape
+    /// bodies MUST NEVER allocate a Fiber, even when the
+    /// `_fiber` feature is on. Pins the user-facing
+    /// guarantee that the buffered fast path stays
+    /// allocation-free for the common `[String]` body.
+    ///
+    /// Two layered defenses protect this in
+    /// marshal_rack_response: (1) explicit
+    /// `!matches!(&arr[2], Value::Array(_))` early-exit in
+    /// the streaming branch (cheap micro-opt); (2) builtin
+    /// `Array#each` dispatches via the iter module, not the
+    /// user method table — `lookup_method_uncached` returns
+    /// None even if (1) were removed. This test verifies the
+    /// OUTCOME (no Fiber tick during Array serve),
+    /// independent of which defense fires. Paired with
+    /// `p2_20_control_each_body_ticks_fiber_count` which
+    /// proves the counter does fire for user-defined each.
+    ///
+    /// Detection: `heap.fiber_alloc_count` is monotonic —
+    /// a transient Fiber that GC reaps still shows up as a
+    /// tick.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2_20_array_body_allocates_zero_fibers() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18160";
+        let recorded_counts: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            for _ in 0..3 {
+                let mut client = TcpStream::connect(server_addr).expect("connect");
+                client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                client.write_all(b"GET /a HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .expect("write");
+                let mut response = Vec::new();
+                let _ = client.read_to_end(&mut response);
+                // Tiny gap so the server's accept loop has a
+                // chance to finish the previous connection
+                // and re-arm before the next syn lands.
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
+
+        let mut rt = crate::Runtime::new();
+        let recorded_for_fn = Arc::clone(&recorded_counts);
+        // SAFETY: V1 host fns run with CURRENT_VM_PTR set
+        // to the live &mut Vm (ADR 0013); single-threaded
+        // tokio current-thread means no concurrent &mut Vm
+        // exists. Read-only access here is sound.
+        //
+        // Reads `heap.fiber_alloc_count` — a monotonic
+        // counter bumped on EVERY alloc_fiber call. Unlike
+        // `count_live_fibers` (which drops to 0 after
+        // sweep), this catches transient allocations too:
+        // a leak that's GC'd before the next snapshot
+        // would still show up as a tick. That's the
+        // property we need to actually catch "Array
+        // slipped through the Fiber branch" regressions.
+        rt.register_fn("__rubyrs_test_fiber_count", move |_args| {
+            let ptr = crate::vm::current_vm_ptr();
+            let count: i64 = if ptr.is_null() {
+                -1
+            } else {
+                unsafe { (*ptr).heap.fiber_alloc_count as i64 }
+            };
+            recorded_for_fn.lock().unwrap().push(count);
+            Ok(crate::value::Value::Int(count))
+        });
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            app = ->(env) {{
+              __rubyrs_test_fiber_count
+              [200, {{"Content-Type" => "text/plain"}}, ["hi from array fast path"]]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 4, app)
+        "#), "p2_20_array_fast_path.rb").expect("server ran");
+
+        let _ = client_thread.join();
+        let counts = recorded_counts.lock().unwrap().clone();
+        assert!(
+            counts.len() >= 2,
+            "P2 #20: expected >=2 fiber-count snapshots from 3 requests; \
+             got {counts:?} — server may have rejected requests",
+        );
+        // The first snapshot is the baseline (set by
+        // whatever startup code allocated Fibers before
+        // any request). Subsequent snapshots must equal it
+        // — a tick means a per-request Fiber allocation
+        // sneaked in.
+        let baseline = counts[0];
+        assert!(
+            counts.iter().all(|&n| n == baseline),
+            "P2 #20 perf-regression: Array-shape body must NEVER allocate \
+             a Fiber, even with `_fiber` enabled. Cumulative \
+             fiber_alloc_count across {} requests: {counts:?} (baseline \
+             {baseline}). A non-flat sequence indicates the Array bypass \
+             guard in marshal_rack_response's streaming branch leaked.",
+            counts.len(),
+        );
+    }
+
+    /// P2 #20 control: the cumulative `fiber_alloc_count`
+    /// counter MUST tick when a streaming each-shape body
+    /// is served. Without this control, a future change
+    /// that accidentally stops bumping the counter would
+    /// silently break the Array perf-regression guard
+    /// (the guard would then pass for ANY body).
+    /// Together with `p2_20_array_body_allocates_zero_fibers`
+    /// these pin both directions: Array→flat, each→ticks.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2_20_control_each_body_ticks_fiber_count() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18161";
+        let recorded_counts: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            for _ in 0..2 {
+                let mut client = TcpStream::connect(server_addr).expect("connect");
+                client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                client.write_all(b"GET /e HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .expect("write");
+                let mut response = Vec::new();
+                let _ = client.read_to_end(&mut response);
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
+
+        let mut rt = crate::Runtime::new();
+        let recorded_for_fn = Arc::clone(&recorded_counts);
+        rt.register_fn("__rubyrs_test_fiber_count", move |_args| {
+            let ptr = crate::vm::current_vm_ptr();
+            let count: i64 = if ptr.is_null() {
+                -1
+            } else {
+                unsafe { (*ptr).heap.fiber_alloc_count as i64 }
+            };
+            recorded_for_fn.lock().unwrap().push(count);
+            Ok(crate::value::Value::Int(count))
+        });
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class EachBody
+              def each
+                yield "hi"
+              end
+            end
+            app = ->(env) {{
+              __rubyrs_test_fiber_count
+              [200, {{"Content-Type" => "text/plain"}}, EachBody.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 4, app)
+        "#), "p2_20_control_each.rb").expect("server ran");
+
+        let _ = client_thread.join();
+        let counts = recorded_counts.lock().unwrap().clone();
+        assert!(
+            counts.len() >= 2,
+            "P2 #20 control: expected >=2 snapshots; got {counts:?}",
+        );
+        // Each `each`-shape request allocates exactly one
+        // Fiber (the body driver). So between any two
+        // successive snapshots the counter must STRICTLY
+        // INCREASE by at least 1.
+        assert!(
+            counts.windows(2).all(|w| w[1] > w[0]),
+            "P2 #20 control: each-shape body must tick fiber_alloc_count \
+             between requests. Counts: {counts:?}. If this passes flat, the \
+             cumulative-counter mechanism that underpins the Array guard \
+             test has broken — Array test would then pass trivially.",
+        );
+    }
+
     /// A3: Rack body that doesn't respond to `to_a` AND
     /// isn't an Array → 500 with a clear diagnostic.
     /// Today an Integer is the cleanest "neither" — it

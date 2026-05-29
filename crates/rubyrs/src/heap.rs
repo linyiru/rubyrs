@@ -203,11 +203,28 @@ pub(crate) struct Heap {
     /// objects; the caller traps with `ResourceExhausted`. Hosts running
     /// untrusted scripts should set this; default (None) is unlimited.
     pub(crate) max_live: Option<usize>,
+    /// P2 #20 (ADR 0023): monotonic count of Fiber allocations
+    /// ever made on this heap. Unlike `count_live_fibers` (which
+    /// drops back to 0 after sweep), this counter only goes up —
+    /// so a test can detect a transient Fiber alloc even if GC
+    /// reaps it before the next observation point. Used by the
+    /// Array-fast-path perf-regression guard.
+    #[cfg(feature = "_fiber")]
+    pub(crate) fiber_alloc_count: u64,
 }
 
 impl Heap {
     pub(crate) fn new() -> Self {
-        Heap { slots: vec![], marks: vec![], free: vec![], live_count: 0, next_gc: 1024, max_live: None }
+        Heap {
+            slots: vec![],
+            marks: vec![],
+            free: vec![],
+            live_count: 0,
+            next_gc: 1024,
+            max_live: None,
+            #[cfg(feature = "_fiber")]
+            fiber_alloc_count: 0,
+        }
     }
     pub(crate) fn alloc(&mut self, obj: HeapObj) -> ObjId {
         self.live_count += 1;
@@ -397,6 +414,7 @@ impl Heap {
     #[cfg(feature = "_fiber")]
     #[allow(dead_code)] // P1c.2 consumes this
     pub(crate) fn alloc_fiber(&mut self, body_block: ObjId) -> ObjId {
+        self.fiber_alloc_count = self.fiber_alloc_count.saturating_add(1);
         self.alloc(HeapObj::Fiber(crate::vm::fiber::FiberObject::new(body_block)))
     }
 
