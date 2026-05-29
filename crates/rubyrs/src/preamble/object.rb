@@ -37,6 +37,46 @@ end
 module Kernel
 end
 
+# Subset gap: `Kernel#loop` is intentionally NOT installed.
+# Investigated on 2026-05-29 (discovered while writing the
+# client-disconnect close test for ADR 0023 Risk #1) and
+# deferred.
+#
+# Three implementation paths exist; none are quick wins:
+#
+# 1. Ruby-level `def loop; while true; yield; end; end` —
+#    works for `next` and natural fallthrough, but `break`
+#    inside the block sets `vm.break_signaled` without
+#    propagating: `Op::Yield` doesn't check the flag, so
+#    after the block returns the `while true` loops again
+#    and yields again. `loop { break }` hangs in an infinite
+#    Ruby loop. A clean NoMethodError beats a silent hang —
+#    so this option is rejected.
+#
+# 2. Rust builtin in `vm/kernel.rs` (mirrors Int#times) —
+#    correctly handles `break` via `BlockStep::Break` but
+#    inherits the silent-truncation guard added in
+#    `vm::iter::step_block` for Fiber-driven streaming
+#    (P2 #21 follow-up). `loop { yield_to_fiber }` would
+#    deliver one chunk and silently drop the rest — same
+#    UX as the documented `times`-inside-Fiber limitation.
+#    Also non-trivial: builtin_call has no block parameter,
+#    so the impl needs to route through the do_call_block
+#    dispatch path's no-recv arm, not via `builtin_call`.
+#
+# 3. Proper block-break propagation in `Op::Yield` — the
+#    "right" fix. Block-break in CRuby unwinds the
+#    YIELDING method (not lexically-defining method like
+#    `return` does). rubyrs has `method_return` for return-
+#    from-block; an analogous `block_break_return` flag
+#    consumed at `Op::Yield`'s return path would unblock
+#    user-level `def`s that wrap iteration. Significant
+#    bytecode semantics work, deserves its own ADR.
+#
+# Until one of those lands, scripts use `while true` instead
+# of `loop`. The SSE example (`crates/rubyrs/examples/sse_server.rb`)
+# and the streaming tests already use this idiom.
+
 class Object < BasicObject
   include Kernel
 end
