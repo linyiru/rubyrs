@@ -21,11 +21,21 @@ describe "Hash#any?" do
     assert_eq({ a: 1, b: 2 }.any? { |k, v| v > 5 }, false)
   end
 
-  it "yields two args (key, value) to the block" do
+  it "yields a single [k, v] Array per entry (Enumerable shape)" do
+    # Hash#any? inherits from Enumerable, so the block
+    # receives a single `[k, v]` pair Array. `|k, v|`
+    # blocks auto-splat from it; `|pair|` blocks bind to
+    # the whole Array. (Contrast with Hash#select /
+    # #reject which override Enumerable and yield two
+    # separate args — see hash_select_spec.)
     h = { a: 1, b: 2 }
     seen = []
-    h.any? { |k, v| seen << [k, v]; false }
+    h.any? { |pair| seen << pair; false }
     assert_eq(seen, [[:a, 1], [:b, 2]])
+    # Two-param block still works via auto-splat:
+    seen2 = []
+    h.any? { |k, v| seen2 << [k, v]; false }
+    assert_eq(seen2, [[:a, 1], [:b, 2]])
   end
 
   # skipped (method-not-implemented): pattern-arg form `h.any?(pat)`.
