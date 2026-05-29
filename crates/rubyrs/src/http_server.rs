@@ -789,6 +789,51 @@ impl hyper::body::Body for FiberResponseBody {
     }
 }
 
+/// Client-disconnect Drop (ADR 0023 v4 follow-up addressing
+/// Risk #1). When hyper drops the response body mid-stream
+/// — typically because the client TCP-closed the connection
+/// — we still want `body.close` to fire if the body responds
+/// to it (Rack 3 SPEC: close exactly once, regardless of
+/// whether iteration completed). Without this Drop, server-
+/// side `ensure` blocks attached to `close` (DB-transaction
+/// rollback, file-handle release, etc.) silently leak on
+/// every client disconnect.
+///
+/// Safety follows the refined Drop-Vm-free contract documented
+/// in `vm/fiber.rs`: `current_vm_ptr().is_null()` gates every
+/// Vm access, so the late-drop path (task cancel, runtime
+/// shutdown) skips silently while the mid-poll drop path
+/// (hyper detecting EOF inside its connection driver, with
+/// `with_vm_ptr_set` active for the host fn) safely invokes
+/// close.
+///
+/// Normal stream completion clears `body_for_close` via
+/// `.take()` in `poll_frame`'s Returned/Err branches, so this
+/// Drop becomes a no-op when the stream ended cleanly — no
+/// double-close risk.
+#[cfg(feature = "_fiber")]
+impl Drop for FiberResponseBody {
+    fn drop(&mut self) {
+        let Some(body) = self.body_for_close.take() else {
+            return; // Normal completion already invoked close.
+        };
+        let ptr = crate::vm::current_vm_ptr();
+        if ptr.is_null() {
+            // Late drop — no Vm access available. The body's
+            // close won't fire; documented limitation for
+            // post-runtime-shutdown paths (rare in practice).
+            return;
+        }
+        // SAFETY: mid-poll drop. Single-threaded current-thread
+        // tokio + the host fn set CURRENT_VM_PTR via
+        // with_vm_ptr_set — no other code holds &mut Vm. Same
+        // reborrow pattern as `poll_frame` uses on the live
+        // resume path.
+        let vm = unsafe { &mut *ptr };
+        invoke_body_close(vm, body);
+    }
+}
+
 /// Parsed `options` Hash from the FU4 Hash-arg form of
 /// the serve host fns. Each field is `None`/`false` unless
 /// the user supplied a key with that name; the host fn
@@ -4775,6 +4820,149 @@ mod tests {
         assert!(
             records.contains(&"close".to_string()),
             "P2c: body.close must fire even when body raises mid-stream; got {records:?}",
+        );
+    }
+
+    /// P2c follow-up (ADR 0023 Risk #1): when the client drops
+    /// the connection mid-stream, `body.close` must STILL fire
+    /// — Rack 3 SPEC requires close exactly once after the
+    /// server is done with the body, regardless of WHY it's
+    /// done. Before the FiberResponseBody Drop handler landed,
+    /// hyper would drop the body silently on client disconnect
+    /// and any `ensure` clauses attached to `close` (DB
+    /// rollback, file-handle release) would leak.
+    ///
+    /// Test setup: server yields a chunk, sleeps long enough
+    /// for the client to read it AND close the connection,
+    /// then yields another chunk. The Drop fires when hyper
+    /// notices the closed socket. We assert that `close` was
+    /// recorded.
+    ///
+    /// Setup of the client-side disconnect uses
+    /// `shutdown(Shutdown::Both)` after reading the first
+    /// chunk — sends FIN to the server. Hyper detects it on
+    /// the next poll and drops the body. The server-side
+    /// Fiber may be partway through the sleep — that's OK,
+    /// Drop on the body invokes close synchronously regardless
+    /// of Fiber state.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2c_streaming_close_fires_on_client_disconnect_mid_stream() {
+        use std::io::{Read, Write};
+        use std::net::{TcpStream, Shutdown};
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18180";
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            client.write_all(b"GET /d HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            // Read just enough to confirm headers + first
+            // chunk arrived. Then half-close the write side
+            // and drop the socket — hyper sees the FIN on
+            // its next poll and drops the body.
+            let mut buf = [0u8; 1024];
+            let mut total = 0usize;
+            // Read until we've seen the first chunk marker.
+            for _ in 0..20 {
+                match client.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        total += n;
+                        let s = String::from_utf8_lossy(&buf[..n]);
+                        if s.contains("first") { break; }
+                    }
+                    Err(_) => break,
+                }
+            }
+            // Hard-disconnect.
+            let _ = client.shutdown(Shutdown::Both);
+            drop(client);
+            total
+        });
+
+        let mut rt = crate::Runtime::new();
+        // Inject sleep so the body can pause long enough for
+        // the client to disconnect between chunks.
+        rt.register_fn("__rubyrs_test_sleep_ms", |args| {
+            use crate::error::{RubyError, Trap};
+            use crate::value::Value;
+            let ms = match args {
+                [Value::Int(n)] if *n >= 0 => *n as u64,
+                _ => return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__rubyrs_test_sleep_ms(ms: Integer)".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            std::thread::sleep(Duration::from_millis(ms));
+            Ok(crate::value::Value::Nil)
+        });
+        let log_for_fn = Arc::clone(&log);
+        rt.register_fn("__rubyrs_test_record", move |args| {
+            use crate::error::{RubyError, Trap};
+            use crate::value::Value;
+            let tag = match args {
+                [Value::Str(s)] => s.to_string_lossy(),
+                _ => return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__rubyrs_test_record(tag: String)".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            log_for_fn.lock().unwrap().push(tag);
+            Ok(crate::value::Value::Nil)
+        });
+        super::register_host_fns(&mut rt);
+        // Body uses `loop` (bytecode iter — sidesteps the
+        // P2 #21 Fiber+Rust-iter limitation). Critically the
+        // Fiber NEVER RETURNS naturally — only client
+        // disconnect (→ hyper drops the body → the
+        // FiberResponseBody Drop handler) can end the stream.
+        // So if `close` appears in the log, the Drop path is
+        // the ONLY way it could have fired.
+        rt.eval(&format!(r#"
+            class NeverReturningBody
+              def each
+                yield "first chunk\n"
+                while true
+                  __rubyrs_test_sleep_ms(50)
+                  yield "tick\n"
+                end
+              end
+              def close
+                __rubyrs_test_record("close")
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, NeverReturningBody.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 4, app)
+        "#), "p2c_disconnect_close.rb").expect("server ran");
+
+        let bytes_read = client_thread.join().expect("client thread");
+        assert!(
+            bytes_read > 0,
+            "client must receive at least the first chunk before disconnecting",
+        );
+        // Drop on FiberResponseBody fires close. Without
+        // the Drop handler this assertion would fail —
+        // hyper would silently drop the body without ever
+        // invoking close.
+        let records = log.lock().unwrap().clone();
+        assert!(
+            records.contains(&"close".to_string()),
+            "ADR Risk #1: body.close MUST fire when client disconnects \
+             mid-stream. Without the Drop handler this assertion fails — \
+             hyper drops the body silently. records: {records:?}",
         );
     }
 

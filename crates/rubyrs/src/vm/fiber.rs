@@ -25,29 +25,66 @@
 //! Fibers actually runnable from Ruby. The split keeps
 //! atomic-commit diffs reviewable.
 //!
-//! # Drop-Vm-free contract for downstream consumers (P1d.3)
+//! # Drop-Vm-free contract for downstream consumers (P1d.3,
+//! refined for client-disconnect close 2026-05-29)
 //!
 //! Downstream code holding a Fiber via `Value::Object(fiber_id)`
-//! — e.g., the `_http_server` battery's A3β `RubyrsResponseBody`
+//! — e.g., the `_http_server` battery's A3β `FiberResponseBody`
 //! that wraps a request-scoped Fiber for hyper's poll_frame
-//! (P2b) — **must keep its `Drop` impl Vm-free**.
+//! (P2b) — **must keep its `Drop` impl Vm-free UNLESS it gates
+//! every Vm access on a `current_vm_ptr().is_null()` check**.
 //!
-//! Specifically: Drop must NOT
-//! 1. Look up the Fiber in `vm.heap` (would require `&mut Vm`,
-//!    which Drop has no access to via the standard
-//!    `tokio::Task` model)
+//! The default policy: Drop SHOULD NOT
+//! 1. Unconditionally look up the Fiber in `vm.heap` (would
+//!    require `&mut Vm`, which Drop has no guaranteed access to
+//!    via the standard `tokio::Task` model)
 //! 2. Mutate fiber state (e.g., set state = Returned)
 //! 3. Mutate any heap object (no `vm.heap.array_mut(...)` etc.)
 //! 4. Call into Vm bytecode (no `dispatch_until`, no
 //!    `invoke_block`)
 //!
-//! Why: hyper drops the response body on the tokio task
-//! between polls. At that moment there is no live `VmBorrow`
-//! proving `&mut Vm` is safe to access. A Drop that touched
-//! `&mut Vm` would either need to acquire one (impossible in
-//! Drop's `&mut self`) or panic (defeating cleanup).
+//! Why default-deny: hyper drops the response body on the tokio
+//! task. There are TWO Drop call sites for our use case, with
+//! different Vm-access guarantees:
 //!
-//! What IS safe:
+//! (a) **Mid-poll drop** (client disconnect during a streaming
+//!     response). Hyper's H1 connection driver detects EOF on
+//!     the socket and drops the body INSIDE its `poll` call,
+//!     which is itself driven by the tokio runtime executing
+//!     INSIDE the host fn invocation. At this moment
+//!     `CURRENT_VM_PTR` is non-null and points at the live
+//!     `&mut Vm` — the host fn set it up via the standard
+//!     `with_vm_ptr_set` RAII guard (ADR 0013). A Drop here CAN
+//!     safely promote the pointer to `&mut Vm` and invoke Vm
+//!     bytecode (`body.close` etc.).
+//!
+//! (b) **Late drop** — task cancel, runtime shutdown, or any
+//!     other path that drops the body OUTSIDE a poll cycle.
+//!     `CURRENT_VM_PTR` is null. Drop must skip silently —
+//!     no Vm access is safe.
+//!
+//! The mandatory pattern for any Vm-touching Drop on a Fiber-
+//! holding type:
+//!
+//! ```ignore
+//! impl Drop for MyFiberHolder {
+//!     fn drop(&mut self) {
+//!         let ptr = crate::vm::current_vm_ptr();
+//!         if ptr.is_null() {
+//!             return; // (b) — late drop, can't touch Vm
+//!         }
+//!         // SAFETY: (a) mid-poll drop. Single-threaded
+//!         // current-thread tokio + the host fn set
+//!         // CURRENT_VM_PTR via with_vm_ptr_set — no other
+//!         // code holds &mut Vm. Reborrowing here is the
+//!         // same pattern as poll_frame uses.
+//!         let vm = unsafe { &mut *ptr };
+//!         // ... safely touch vm ...
+//!     }
+//! }
+//! ```
+//!
+//! What IS always safe (no Vm access needed):
 //!
 //! - Dropping the `Value` itself. `Value::Object(ObjId)` carries
 //!   only `ObjId(u32)` — `Copy`, no destructor. Dropping it is
@@ -62,11 +99,12 @@
 //! - Logging via `eprintln!` or panic-free APIs.
 //!
 //! This contract aligns with ADR 0023 v2 §"Correctness" bullet
-//! 3 (P2b reviewer concern) and §"Risks" #6 (drop-during-await
-//! safety). Pinned structurally by `Value::Object(ObjId)`'s
-//! trivial drop — no test needed, but downstream `Drop` impls
-//! that accidentally add Vm access break the contract. Future
-//! P1e Miri tests cover the broader drop-safety pattern.
+//! 3 (P2b reviewer concern) and §"Risks" #1 (`ensure` on client
+//! disconnect — the mid-poll-drop path is where `body.close`
+//! gets to fire). Pinned structurally by `Value::Object(ObjId)`'s
+//! trivial drop + the `current_vm_ptr().is_null()` guard for any
+//! refined Drop impl. The `FiberResponseBody` `Drop` in
+//! `http_server.rs` is the canonical example.
 //!
 //! What's here:
 //!
