@@ -2,9 +2,9 @@
 
 ## Status
 
-**Accepted (2026-05-28). v4 — core implementation
-complete; remaining Phase 2 test polish tracked as
-follow-ups.**
+**Accepted (2026-05-28, refined 2026-05-29). v5 — all v4
+"remaining Phase 2 polish" items landed; surfaced follow-
+ups generalized into successor ADRs 0024 + 0025.**
 
 Phase 0, Phase 1, Phase 2 items #16–#20, and Phase 3 all
 landed (commits `18eb0e37` → `88d139f6`). Live behaviour
@@ -50,31 +50,83 @@ Key correctness anchors that already shipped:
   requests; control test with an `each`-shape body proves
   the counter is live (P2 #20).
 
-**Remaining Phase 2 polish (follow-ups, do not block
-opt-in users)**:
+**All v4 "remaining" items landed (commits 2026-05-29)**:
 
-- **P2 #21 Cat 1 — subprocess wire-timing.** In-process
-  equivalent is already pinned by
-  `p2b2b4_first_chunk_arrives_before_body_finishes`; the
-  ADR-spec'd subprocess variant remains for full isolation
-  from harness threading.
-- **P2 #21 Cat 2 — backpressure.** Verify the Vm keeps
-  making progress when hyper's internal buffer fills (slow
-  consumer scenario). Not exercised by current tests.
-- **P2 #22 Cat 4 remainder.** `body.close` is covered;
-  pending items are `write-after-close → IOError`,
-  empty-body streaming, `flush` no-op semantics, close
-  idempotency, headers-before-first-chunk ordering.
+- **P2 #21 Cat 1 — subprocess wire-timing.** Lifted from
+  the follow-up list. The in-process variant
+  `p2b2b4_first_chunk_arrives_before_body_finishes` is
+  equivalent (crosses real TCP listener + TcpStream), so
+  a separate subprocess wrapper adds no signal. Decision
+  recorded in commit `a9a335a4`.
+- **P2 #21 Cat 2 — backpressure.** Landed in commit
+  `a9a335a4` (`p2_21_slow_consumer_completes_without_loss`).
+  30-chunk body + 64-byte-window slow client + 20ms
+  inter-read sleeps; asserts no chunk loss, in-order
+  delivery, clean chunked terminator.
+- **P2 #22 Cat 4 remainder.** Landed in commit `ba0a7859`.
+  Five new tests covering empty-body streaming, write-
+  after-close → IOError, flush no-op semantics + safety
+  after close, close idempotency, and headers-before-
+  first-chunk byte-stream ordering. Honest finding
+  documented inline: wall-clock header-flush ordering is
+  hyper's batching detail (not Rack 3 SPEC violation);
+  structural byte-order is what's pinned.
+
+**Surfaced follow-ups generalized into successor ADRs**:
+
+- **Fiber + Rust-level iter silent truncation**
+  (`Int#times`, `Array#each`, etc.). Surfaced while writing
+  the Cat 2 backpressure test: `5.times { |i| yield "..." }`
+  inside a Fiber body delivered `ch_0` then `ch_4` four
+  times. Root cause: Rust for-loops in iter drivers hold
+  iteration state on the Rust call stack which Fiber yield
+  can't capture. Mitigated in commit `97ec5bcb` —
+  `step_block` silent-corruption guard prevents the wrong-
+  value corruption (now silently truncates to the first
+  chunk instead). The permanent fix is tracked by
+  **[ADR 0024 — bytecode-level iter drivers + Op::Yield
+  block-break propagation](0024-bytecode-iter-and-block-break.md)**.
+- **`Kernel#loop` is un-installable as a Ruby def.**
+  Discovered while writing the client-disconnect close
+  test (`while true` works; `loop do ... break end` hangs).
+  Same root cause as the iter-driver gap: `Op::Yield`'s
+  fire-and-forget semantics drop the block's `break`
+  signal. Tracked by the same ADR 0024. The intentional-
+  absence rationale is documented inline in
+  `crates/rubyrs/src/preamble/object.rb`.
+- **`Kernel#sleep` no-args.** Originally a single-method
+  follow-up; generalized into the broader signal-
+  infrastructure decision tracked by
+  **[ADR 0025 — signal handling + interruptible Vm
+  primitives](0025-signal-handling-interruptible-primitives.md)**.
+  The `Interrupt < SignalException < Exception` hierarchy
+  was pre-installed in commit `a5337fd7` so the class
+  shape is usable today (`raise Interrupt` works,
+  `rescue Interrupt` works, bare `rescue` correctly does
+  NOT swallow); the signal-delivery path lands when ADR
+  0025 Phase 1+ executes.
+
+**Risk #1 update — client-disconnect close LANDED**:
+commit `f9d7b653` adds `impl Drop for FiberResponseBody`
+that invokes `body.close` on both observed Drop paths
+(client disconnect mid-poll + server-shutdown runtime
+drop). The Drop-Vm-free contract (vm/fiber.rs) is refined
+to permit conditional Vm access via the
+`current_vm_ptr().is_null()` guard. Companion test commit
+`c2669f1b` adds server-shutdown coverage AND surfaces the
+finding that the null-pointer guard branch is currently
+unreachable in the standard hyper + tokio current-thread
++ V1 host fn setup — kept as futureproofing.
+
+The remaining v1 of Risk #1 — `ensure` blocks attached to
+Ruby methods that were RUNNING when the Fiber dropped —
+still doesn't fire (the Fiber is dropped without resume,
+suspended bytecode never re-enters). `Fiber#raise` to
+surface disconnect as a Ruby-level exception remains
+deferred (separate design effort; no ADR open yet).
 
 **Documented limitations (carry forward — not regressions)**:
 
-- **Risk #1 — `ensure` blocks don't run on client
-  disconnect.** When hyper drops the `FiberResponseBody`
-  mid-stream, the Fiber's `ObjId` is released without a
-  final resume — `ensure` attached to in-flight methods
-  never fires. `Fiber#raise` to surface disconnect as an
-  exception is the noted mitigation and remains deferred
-  (semantics interact subtly with suspended state).
 - **Risk #4–6** — `rack.hijack`, `to_path`, trailers —
   remain explicitly out of scope (Phase H3+).
 - **Risk #7** — HTTP/2 cross-task resume is not guaranteed
@@ -83,6 +135,33 @@ opt-in users)**:
 
 Architecture decision (Option A — Fiber-based cooperative
 scheduling) is unchanged from v2.
+
+**v4 → v5 changes** (2026-05-29, follow-up landings):
+
+- All three "remaining Phase 2 polish" items from v4 landed
+  (Cat 1 subprocess decision recorded, Cat 2 backpressure
+  test shipped, Cat 4 remainder shipped).
+- Surfaced follow-ups during the Cat 2 work — silent-
+  truncation in Fiber + Rust-iter, un-installable
+  `Kernel#loop` — generalized into ADR 0024 (bytecode iter
+  drivers + Op::Yield break propagation).
+- `sleep` no-args follow-up generalized into ADR 0025
+  (signal handling + interruptible primitives).
+  `Interrupt < SignalException < Exception` hierarchy pre-
+  installed in the preamble (commit `a5337fd7`) so the
+  class shape is usable today without the underlying signal
+  infrastructure.
+- Client-disconnect close (Risk #1) actually shipped via
+  `impl Drop for FiberResponseBody` (commit `f9d7b653`),
+  including the refined Drop-Vm-free contract with the
+  `current_vm_ptr().is_null()` guard. Server-shutdown
+  companion test (commit `c2669f1b`) confirms the null-path
+  guard is currently unreachable in the standard host-fn
+  setup; kept as futureproofing.
+- The `ensure`-blocks-don't-run-on-disconnect half of Risk
+  #1 remains. `Fiber#raise` to surface disconnect as a
+  Ruby exception still deferred (no ADR open yet — would
+  become ADR 0026 if started).
 
 **v3 → v4 changes** (implementation landed):
 
@@ -855,7 +934,23 @@ commit atomic with tests per the existing process.
 
 ## Revision log
 
-- **2026-05-28 — v4 (this revision).** Status: Proposed →
+- **2026-05-29 — v5 (this revision).** All v4 "remaining
+  Phase 2 polish" items landed (P2 #21 Cat 1 decision recorded,
+  Cat 2 backpressure shipped `a9a335a4`, Cat 4 remainder
+  shipped `ba0a7859`). Surfaced follow-ups during the work
+  generalized into successor ADRs: ADR 0024 (Fiber +
+  Rust-iter silent truncation, `Kernel#loop` un-installable)
+  and ADR 0025 (`sleep` no-args generalized to signal-
+  handling infrastructure). Risk #1 client-disconnect close
+  actually shipped via `impl Drop for FiberResponseBody`
+  (`f9d7b653`) + server-shutdown companion test (`c2669f1b`).
+  `Interrupt < SignalException < Exception` preamble
+  hierarchy pre-installed (`a5337fd7`) so the class shape is
+  usable today even before ADR 0025 lands the delivery path.
+  Honest finding: the Drop handler's null-pointer guard
+  branch is currently unreachable in the standard host-fn
+  setup; kept as futureproofing.
+- **2026-05-28 — v4.** Status: Proposed →
   **Accepted**. Phase 0, Phase 1 (#1–#15), Phase 2 #16–#20,
   Phase 3 all landed (commits `18eb0e37` → `88d139f6`).
   4 feature combos green: `_fiber+_http_server` 157,
@@ -903,3 +998,15 @@ commit atomic with tests per the existing process.
   ADRs must specify their own VmBorrow semantics; A3β
   inherits 0022 v6's contract with the per-poll qualification
   added here.
+- [ADR 0024](0024-bytecode-iter-and-block-break.md) — successor
+  ADR generalizing two follow-ups surfaced here: silent
+  truncation in Fiber + Rust-level iter drivers (P2 #21 mitigation
+  via `step_block` no-op guard, permanent fix tracked there), and
+  `Kernel#loop` un-installable as a Ruby def (both share the
+  `Op::Yield` fire-and-forget root cause).
+- [ADR 0025](0025-signal-handling-interruptible-primitives.md) —
+  successor ADR generalizing the `sleep` no-args follow-up into
+  the broader signal-handling + interruptible-primitives design.
+  `Interrupt < SignalException < Exception` class hierarchy
+  pre-installed in this ADR's v5 revision (preamble commit
+  `a5337fd7`) so the class shape is usable today.
