@@ -3018,6 +3018,36 @@ fn rational_phase_c1_construction_and_readers() {
 }
 
 #[test]
+fn rational_survives_stress_gc() {
+    // Regression guard for the visit_value mark hole Copilot
+    // flagged on PR #297: without an arm for `Value::Rational`,
+    // any live Rational's backing HeapObj slot fails to mark
+    // during sweep and gets reused for the next allocation,
+    // corrupting subsequent reads via `heap.rational(*id)`.
+    //
+    // Stress GC trips a collect on every alloc, so the bug is
+    // reliably observable here when present. Bind a Rational to
+    // a local, allocate several other heap objects (each forces
+    // a sweep), then read the Rational back via #inspect /
+    // #numerator. Without the fix the backing slot's RationalRepr
+    // bytes are overwritten by whatever the intervening alloc
+    // stored there.
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "r = Rational(355, 113); \
+         100.times { _ = [1, 2, 3]; _ = {a: 1, b: 2}; _ = \"alloc\" }; \
+         puts r.inspect; puts r.numerator; puts r.denominator",
+        "rational_stress_gc.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot().trim(), "(355/113)\n355\n113");
+}
+
+#[test]
 fn numeric_coerce_basic() {
     // `Numeric#coerce(other)` — Tier-2 protocol entry point;
     // returns `[other_promoted, self_promoted]`. Spec coverage

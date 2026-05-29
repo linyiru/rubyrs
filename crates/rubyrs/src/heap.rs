@@ -781,6 +781,16 @@ impl Heap {
                 let i = id.0 as usize;
                 marks[i] = true;
             }
+            // Same leaf shape as BigInt — `HeapObj::Rational` is a
+            // `RationalRepr { num: i64, den: i64 }` with no nested
+            // Value. Without this arm a live `Value::Rational` would
+            // fall into the `_ => {}` catch-all and never mark its
+            // backing slot, getting swept under stress_gc and
+            // corrupting subsequent reads via `heap.rational(*id)`.
+            Value::Rational(id) => {
+                let i = id.0 as usize;
+                marks[i] = true;
+            }
             _ => {}
         }
     }
