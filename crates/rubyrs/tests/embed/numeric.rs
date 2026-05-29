@@ -3059,6 +3059,60 @@ fn numeric_coerce_pass_through_bigint_survives_stress_gc() {
     );
 }
 
+#[cfg(feature = "bignum")]
+#[test]
+fn integer_divmod_bigint_result_survives_stress_gc() {
+    // Sibling to numeric_coerce_pass_through_bigint_survives_stress_gc.
+    // Pre-existing GC root hole noted during PR #289's /code-review:
+    // for BigInt divmod, `q` and `r` are freshly-allocated BigInt
+    // ObjIds returned by `bigint_arith` — their only live root
+    // between the (q, r) tuple binding and the `Array(vec![q, r])`
+    // alloc is the Rust local. Without a PinGuard, the maybe_gc
+    // fired in that window sweeps both BigInts before the result
+    // Array is rooted, leaving the Array with dangling slots.
+    //
+    // Stress GC trips a collect on every allocation, so the bug
+    // is reliably observable under this config when present.
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // (a) BigInt recv × Int divisor — both q and r are BigInt
+        //     (q stays BigInt because 2**100 / 3 > i64::MAX; r
+        //     is a small Int after the modulo and demotes via
+        //     bigint_to_value, so only q is the GC-hazardous one).
+        // (b) BigInt recv × BigInt divisor — both q and r demote
+        //     to Int, no BigInt in result — safe but exercise the
+        //     code path.
+        // (c) BigInt recv × small Int with negative result — q is
+        //     a fresh BigInt (negative, magnitude > i64::MAX).
+        "puts (2**100).divmod(3).inspect; \
+         puts (2**100).divmod(2**99).inspect; \
+         puts (-(2**100)).divmod(3).inspect",
+        "divmod_stress_gc.rb",
+    ).expect("eval");
+    let snap = buf.snapshot();
+    let lines: Vec<&str> = snap.lines().collect();
+    assert_eq!(lines.len(), 3);
+    // q = floor(2**100 / 3), r = 2**100 mod 3.
+    assert_eq!(
+        lines[0],
+        "[422550200076076467165567735125, 1]",
+    );
+    // 2**100 / 2**99 == 2, r == 0.
+    assert_eq!(lines[1], "[2, 0]");
+    // CRuby floor: -(2**100) / 3 = -422550200076076467165567735126, r = 2
+    //   (floor towards -∞, so quotient is one less in magnitude than
+    //   truncated-toward-zero, and remainder is positive).
+    assert_eq!(
+        lines[2],
+        "[-422550200076076467165567735126, 2]",
+    );
+}
+
 #[test]
 fn float_domain_error_class_and_rescue_chain() {
     // FloatDomainError sits at FloatDomainError < RangeError <
