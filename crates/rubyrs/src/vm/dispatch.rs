@@ -4196,31 +4196,55 @@ impl Vm {
             self.stack.push(v);
             return Ok(());
         }
-        // `obj.methods` — Array of Symbols of every method the
-        // receiver can dispatch. For user instances walks the
-        // class chain (own + includes + superclass). For a Class
-        // receiver, walks the class-method chain — each level's
-        // `singleton_prepends` (recursing through each module's
-        // own prepends/includes) and `singleton_methods` — up
-        // the superclass chain. Other shapes return an empty
+        // `obj.methods` / `#public_methods` / `#private_methods` /
+        // `#protected_methods` — receiver-side method introspection.
+        // All four walk the same ancestor chain on Value::Object
+        // (own class via `class_of` so a singleton class is included
+        // if installed, then includes, then superclass) collecting
+        // (SymId, Visibility) pairs and keep the first occurrence
+        // of each name (matching method-lookup precedence). The
+        // dispatch arm then filters by visibility:
+        //   methods                   → Public | Protected
+        //   public_methods            → Public
+        //   private_methods           → Private
+        //   protected_methods         → Protected
+        // CRuby excludes private from the default `methods` list,
+        // so pre-cycle behaviour (returning private too) was a
+        // divergence — fixed here. Class receivers walk the
+        // class-method chain (singleton_prepends recursing through
+        // each module's prepends/includes, plus singleton_methods)
+        // up the superclass chain. Other shapes return an empty
         // Array (the subset doesn't expose Kernel-level methods
         // individually). De-dups by SymId, sorted by interner
         // string order for determinism.
-        if &*name == "methods" && args.is_empty() {
+        if matches!(&*name, "methods" | "public_methods" | "private_methods" | "protected_methods")
+            && args.is_empty()
+        {
+            use crate::value::Visibility;
+            let pred: fn(Visibility) -> bool = match &*name {
+                "methods" => |v| matches!(v, Visibility::Public | Visibility::Protected),
+                "public_methods" => |v| v == Visibility::Public,
+                "private_methods" => |v| v == Visibility::Private,
+                "protected_methods" => |v| v == Visibility::Protected,
+                _ => unreachable!(),
+            };
             let mut names: Vec<crate::intern::SymId> = Vec::new();
             if let Value::Object(id) = &recv {
                 let cls = self.heap.class_of(*id);
                 let mut visited: Vec<*const crate::value::Class> = Vec::new();
+                let mut pairs: Vec<(crate::intern::SymId, Visibility)> = Vec::new();
                 fn walk(
                     c: &std::rc::Rc<crate::value::Class>,
-                    out: &mut Vec<crate::intern::SymId>,
+                    out: &mut Vec<(crate::intern::SymId, Visibility)>,
                     visited: &mut Vec<*const crate::value::Class>,
                 ) {
                     let ptr = std::rc::Rc::as_ptr(c);
                     if visited.contains(&ptr) { return; }
                     visited.push(ptr);
-                    for k in c.methods.borrow().keys() {
-                        if !out.contains(k) { out.push(*k); }
+                    for (k, m) in c.methods.borrow().iter() {
+                        if !out.iter().any(|(s, _)| s == k) {
+                            out.push((*k, m.visibility.get()));
+                        }
                     }
                     for inc in c.includes.borrow().iter() {
                         walk(inc, out, visited);
@@ -4229,11 +4253,21 @@ impl Vm {
                         walk(&sup, out, visited);
                     }
                 }
-                walk(&cls, &mut names, &mut visited);
+                walk(&cls, &mut pairs, &mut visited);
+                for (sid, vis) in pairs {
+                    if pred(vis) { names.push(sid); }
+                }
                 names.sort_by(|a, b| {
                     self.interner.resolve(*a).cmp(self.interner.resolve(*b))
                 });
-            } else if let Value::Class(cls) = &recv {
+            } else if &*name == "methods" {
+                // Class receiver — class-method chain. Visibility
+                // filtering for the class-method tier doesn't have a
+                // user-facing surface today (singleton methods don't
+                // carry per-entry visibility in rubyrs's Class
+                // shape), so the variants other than `methods` skip
+                // this branch and report an empty Array for now.
+                if let Value::Class(cls) = &recv {
                 // Walk a prepended module's transitive includes /
                 // prepends — same shape as `walk_module` in
                 // lookup.rs, but collects method names rather
@@ -4278,7 +4312,44 @@ impl Vm {
                 names.sort_by(|a, b| {
                     self.interner.resolve(*a).cmp(self.interner.resolve(*b))
                 });
+                }
             }
+            let elems: Vec<Value> = names.into_iter().map(Value::Sym).collect();
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::Array(elems));
+            self.stack.push(Value::Array(id));
+            return Ok(());
+        }
+        // `obj.singleton_methods` — Array of Symbols of methods
+        // installed directly on this object's eigenclass via
+        // `def obj.foo` / `define_singleton_method`. Distinct
+        // from `methods` which walks the whole ancestor chain.
+        // Receivers without an eigenclass installed return an
+        // empty Array. Class receivers report their own
+        // singleton-method table (class methods).
+        if &*name == "singleton_methods" && args.is_empty() {
+            let mut names: Vec<crate::intern::SymId> = Vec::new();
+            match &recv {
+                Value::Object(id) => {
+                    if let crate::heap::HeapObj::Instance(inst) = self.heap.get(*id)
+                        && let Some(sc) = &inst.singleton_class
+                    {
+                        for k in sc.methods.borrow().keys() {
+                            if !names.contains(k) { names.push(*k); }
+                        }
+                    }
+                }
+                Value::Class(cls) => {
+                    for k in cls.singleton_methods.borrow().keys() {
+                        if !names.contains(k) { names.push(*k); }
+                    }
+                }
+                _ => {}
+            }
+            names.sort_by(|a, b| {
+                self.interner.resolve(*a).cmp(self.interner.resolve(*b))
+            });
             let elems: Vec<Value> = names.into_iter().map(Value::Sym).collect();
             self.maybe_gc();
             self.check_alloc()?;
