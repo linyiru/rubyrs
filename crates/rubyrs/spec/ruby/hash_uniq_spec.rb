@@ -47,17 +47,18 @@ describe "Hash#uniq" do
     assert_eq(h.uniq(&:last), [[:a, 1], [:c, 2]])
   end
 
-  it "does NOT dedupe Float::NAN keys (rubyrs ruby_eql divergence)" do
-    # Divergent from CRuby: Float#eql?(NaN, NaN) is true in
-    # CRuby (structural equality), so a Hash whose block
-    # returns NaN for every entry deduplicates to one. In
-    # rubyrs, ruby_eql for two Floats falls through to Rust
-    # `a == b`, which is false for NaN — so every NaN-keyed
-    # entry survives. Pinning the current behaviour; the
-    # broader ruby_eql Float-NaN gap is tracked as a
-    # separate follow-up.
+  it "dedupes Float::NAN block keys (same-NaN identity shortcut)" do
+    # CRuby's Float#eql?(NaN, NaN) is actually false (NaN
+    # never structurally equals NaN). But Array#uniq /
+    # Hash#uniq dedup uses an identity check FIRST (same
+    # Float object short-circuits to equal), and only falls
+    # back to eql? for distinct objects. rubyrs has
+    # value-based Floats with no identity, so we treat
+    # bit-identical NaN as eql? — which makes the common
+    # `{a: nan, b: nan}.uniq` shape dedup correctly (where
+    # both entries reference the same nan local).
     nan = 0.0 / 0.0
     r = {a: nan, b: nan}.uniq { |pair| pair.last }
-    assert_eq(r.size, 2)  # CRuby returns 1
+    assert_eq(r.size, 1)
   end
 end

@@ -940,10 +940,17 @@ impl Vm {
                         Some(Value::Array(nid))
                     }
                     ("uniq", []) => {
+                        // CRuby's Array#uniq dedupes via `eql?`
+                        // (strict — no Int↔Float coercion), not
+                        // `==`. Switched from ruby_eq to
+                        // ruby_eql so `[1, 1.0].uniq` correctly
+                        // returns [1, 1.0] (was [1]). Bit-
+                        // identical NaN now dedupes too via the
+                        // NaN identity shortcut in ruby_eql.
                         let src = self.heap.array(id).clone();
                         let mut out: Vec<Value> = Vec::with_capacity(src.len());
                         for v in &src {
-                            if !out.iter().any(|x| x.ruby_eq(v, &self.heap)) {
+                            if !out.iter().any(|x| x.ruby_eql(v, &self.heap)) {
                                 out.push(v.clone());
                             }
                         }
