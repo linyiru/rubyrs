@@ -8171,6 +8171,18 @@ fn object_hash_inner(
                 visited.remove(id);
             }
         }
+        // Phase C.1: structural Rational hash. Required to keep
+        // the `a.eql?(b) ⇒ a.hash == b.hash` invariant after the
+        // companion `ruby_eq` arm in heap.rs treats canonical
+        // (num, den) as equality. Without this `Rational(1, 2)`
+        // values would compare equal but hash to per-ObjId values,
+        // breaking Hash key lookup.
+        Value::Rational(id) => {
+            let r = *heap.rational(*id);
+            11u8.hash(&mut h);
+            r.num.hash(&mut h);
+            r.den.hash(&mut h);
+        }
         _ => { 7u8.hash(&mut h); object_id_for(v).hash(&mut h); }
     }
     h.finish() as i64

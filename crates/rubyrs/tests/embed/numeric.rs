@@ -2965,6 +2965,23 @@ fn rational_phase_c1_construction_and_readers() {
         ("puts Rational(3, 4).to_f",            "0.75"),
         ("puts Rational(-3, 4).to_f",           "-0.75"),
         ("puts Rational(3, 4).to_r.inspect",    "(3/4)"),
+        // Structural equality (Phase C.1 — independent of Phase
+        // C.2 arithmetic). gcd-normalize + sign-normalize at
+        // construction make canonical form an invariant, so
+        // `(num, den)` equality IS value equality. Without this
+        // Rationals couldn't be used as Hash keys / Set members /
+        // Array#include? args.
+        ("puts (Rational(1, 2) == Rational(1, 2))",         "true"),
+        ("puts (Rational(1, 2) == Rational(2, 4))",         "true"),
+        ("puts (Rational(1, 2) == Rational(3, 7))",         "false"),
+        ("puts (Rational(-3, 4) == Rational(3, -4))",       "true"),  // both normalize to (-3, 4)
+        // eql? mirrors == for same-typed Rational (numeric
+        // strictness doesn't apply since both sides are Rational).
+        ("puts Rational(1, 2).eql?(Rational(1, 2))",        "true"),
+        // hash invariant: a == b ⇒ a.hash == b.hash. Needed for
+        // Hash key lookup.
+        ("puts (Rational(1, 2).hash == Rational(2, 4).hash)", "true"),
+        ("puts ({Rational(1, 2) => :half}[Rational(2, 4)])",   "half"),
         // Builtin Rational wins over user `def Rational` — without
         // adding "Rational" to `is_builtin_name`, the toplevel fast
         // path would cache the user def and silently shadow the

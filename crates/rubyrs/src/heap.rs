@@ -1245,6 +1245,20 @@ impl Value {
             (Value::Float(a), Value::BigInt(b)) => {
                 crate::vm::bigint_equals_float_lossless(heap.bigint(*b), *a)
             }
+            // Phase C.1: structural equality for Rational. Safe to
+            // wire now (independent of arithmetic) because the
+            // gcd-normalize + sign-normalize at construction
+            // guarantee canonical form — two Rationals representing
+            // the same value always have identical (num, den) pairs.
+            // Same-ObjId fast path mirrors the Array / Hash / Range /
+            // BigInt arms above. Cross-type Rational == Integer /
+            // Float lands in Phase C.2.
+            (Value::Rational(a), Value::Rational(b)) => {
+                if a == b { return true; }
+                let x = heap.rational(*a);
+                let y = heap.rational(*b);
+                x.num == y.num && x.den == y.den
+            }
             _ => false,
         }
     }
