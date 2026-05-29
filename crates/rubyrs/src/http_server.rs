@@ -5366,6 +5366,208 @@ mod tests {
         let _ = body_delay_ms; // silence "unused" if assertions stop referencing it
     }
 
+    /// P2 #21 Cat 2 — backpressure under slow consumer.
+    /// A client that reads incrementally with small
+    /// pauses forces hyper's H1 encoder + TCP socket
+    /// buffer to fill, which in turn slows down how often
+    /// `poll_frame` is invoked on `FiberResponseBody`.
+    /// The Fiber must suspend cleanly between chunks
+    /// (not spin, not OOM the encoder, not deadlock),
+    /// and ALL chunks must eventually arrive intact + in
+    /// order.
+    ///
+    /// We can't easily inspect hyper's internal buffer
+    /// from Rust tests, so this is a black-box correctness
+    /// check: yield N chunks server-side, read slowly
+    /// client-side, assert every chunk arrives in order
+    /// AND the connection closes cleanly. A naïve impl
+    /// that buffers the whole stream in hyper's encoder
+    /// would still pass — but the wire-streaming
+    /// invariant from `p2b2b4_*` already proves we don't
+    /// buffer. Together: streaming + backpressure-safe.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2_21_slow_consumer_completes_without_loss() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18175";
+        // 30 literal yields. We'd prefer `30.times { |i|
+        // yield "ch_#{i}\n" }` but a Fiber + iter-block-
+        // parameter scoping bug surfaces with that form
+        // (see `p2_21_known_bug_times_loop_inside_fiber_yield`
+        // below — `#[ignore]`'d regression). Literal
+        // yields still exercise the backpressure invariant
+        // (slow consumer + many chunks + suspend/resume
+        // loop), which is what this test is for.
+        const N_CHUNKS: usize = 30;
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            client.write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            // Incremental, slowed reader. Small buffer +
+            // sleep between reads creates the effective
+            // backpressure (TCP receive window stays small,
+            // server-side send queue fills, hyper stops
+            // polling body until the consumer drains).
+            let mut response = Vec::with_capacity(8192);
+            let mut tmp = [0u8; 64];
+            loop {
+                match client.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        response.extend_from_slice(&tmp[..n]);
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // Generate 30 literal `yield "ch_N\n"` lines.
+        // Inline string-building avoids the times-loop
+        // bug noted above.
+        let mut yields = String::new();
+        for i in 0..N_CHUNKS {
+            yields.push_str(&format!("                yield \"ch_{i}\\n\"\n"));
+        }
+        rt.eval(&format!(r#"
+            class ManyChunks
+              def each
+{yields}              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, ManyChunks.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 8, app)
+        "#), "p2_21_backpressure.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200, got:\n{response_text}",
+        );
+        // Every chunk must appear in order + intact.
+        // A backpressure-induced loss would either drop
+        // a chunk or interleave them (impossible at this
+        // layer, but still verified).
+        let mut last_idx = 0;
+        for i in 0..N_CHUNKS {
+            let needle = format!("ch_{i}\n");
+            let pos = response_text[last_idx..].find(&needle).unwrap_or_else(|| {
+                panic!(
+                    "P2 #21 backpressure: chunk #{i} (`{needle}`) missing or \
+                     out-of-order in response after byte {last_idx}.\n\
+                     Full response ({} bytes):\n{response_text}",
+                    response_text.len(),
+                )
+            });
+            last_idx += pos + needle.len();
+        }
+        // Connection must close cleanly — chunked
+        // terminator `0\r\n` precedes EOF.
+        assert!(
+            response_text.contains("\r\n0\r\n"),
+            "P2 #21 backpressure: response must terminate with the chunked \
+             end marker (`0\\r\\n`). Truncation indicates the connection \
+             died mid-stream (deadlock / encoder overflow / panic). \
+             response:\n{response_text}",
+        );
+    }
+
+    /// KNOWN BUG (surfaced 2026-05-29 while writing
+    /// `p2_21_slow_consumer_completes_without_loss`).
+    /// `N.times { |i| yield "ch_#{i}\n" }` inside a Fiber
+    /// body — i.e., the natural Ruby idiom for "yield N
+    /// chunks" via Rack 3's each-shape streaming —
+    /// corrupts the block parameter `i` across the Fiber
+    /// suspend/resume boundary. Observed output for N=5:
+    ///
+    ///   `ch_0`, `ch_4`, `ch_4`, `ch_4`, `ch_4`
+    ///
+    /// First iteration yields correctly; subsequent
+    /// resumes pick up `i` at the LAST value of the
+    /// loop. Literal yields (`yield "ch_0\n"; yield
+    /// "ch_1\n"; …`) work fine — so the bug lives at the
+    /// intersection of (a) iter-protocol block-parameter
+    /// binding and (b) FiberSnapshot's frame/local
+    /// restoration. Likely root cause: the iter loop's
+    /// block parameter slot is shared across iterations
+    /// instead of fresh-per-invocation, and the FiberSnapshot
+    /// restore sees the final value.
+    ///
+    /// This test is `#[ignore]`'d so CI stays green but the
+    /// reproducer stays findable. To run:
+    ///   cargo test --features _http_server,_fiber -p rubyrs \
+    ///     --lib p2_21_known_bug_times_loop_inside_fiber_yield -- --ignored
+    ///
+    /// User-facing impact: the SSE example
+    /// (`examples/sse_server.rb`) currently uses a
+    /// `while`-loop counter rather than `times` to dodge
+    /// this — see the example's pacing note. Fixing this
+    /// would let the natural Ruby idiom work.
+    ///
+    /// When fixed: remove `#[ignore]`, the literal-yields
+    /// workaround in `p2_21_slow_consumer_completes_without_loss`,
+    /// and rewrite the SSE example's `each` to use `times`.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    #[ignore = "iter-block param + Fiber resume scoping bug — tracked"]
+    fn p2_21_known_bug_times_loop_inside_fiber_yield() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18176";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /t HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class TimesYield
+              def each
+                5.times {{ |i| yield "ch_#{{i}}\n" }}
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, TimesYield.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 3, app)
+        "#), "p2_21_known_bug.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        // Expectation when fixed: all five distinct chunks
+        // arrive in order.
+        for i in 0..5 {
+            let needle = format!("ch_{i}\n");
+            assert!(
+                response_text.contains(&needle),
+                "expected chunk #{i} `{needle}` — Fiber+times bug means \
+                 the natural iter form doesn't yield distinct values. \
+                 response:\n{response_text}",
+            );
+        }
+    }
+
     /// A3: Rack body that doesn't respond to `to_a` AND
     /// isn't an Array → 500 with a clear diagnostic.
     /// Today an Integer is the cleanest "neither" — it

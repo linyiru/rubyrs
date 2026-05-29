@@ -68,8 +68,18 @@ end
 # resumes — same wire effect as `each`, different API.
 class WriteStyleStream
   def call(stream)
-    5.times do |i|
+    # NOTE: this uses a `while` counter instead of
+    # `5.times { |i| ... }` to dodge a known Fiber +
+    # iter-block-parameter scoping bug — see the ignored
+    # regression test `p2_21_known_bug_times_loop_inside_fiber_yield`
+    # in crates/rubyrs/src/http_server.rs. With `times`,
+    # iterations 2..N pick up `i` at the loop's final
+    # value. Once the bug is fixed, this can revert to
+    # the natural Ruby idiom.
+    i = 0
+    while i < 5
       stream.write("data: write-style #{i}\n\n")
+      i += 1
     end
     stream.write("data: done\n\n")
     stream.close
