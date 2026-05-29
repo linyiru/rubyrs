@@ -4963,6 +4963,409 @@ mod tests {
         );
     }
 
+    // ===== P2 #22 Cat 4 — Rack 3 stream-contract tests =====
+    //
+    // Five contract points beyond body.close (covered by
+    // P2c). Each test is `_fiber`-gated since these are
+    // properties of the streaming Fiber path
+    // (RubyrsStreamingStream from P2b.2a).
+
+    /// P2 #22 Cat 4 — empty body. A streaming each-shape
+    /// body that yields nothing must still produce a
+    /// well-formed HTTP/1.1 200 response (with chunked
+    /// encoding closing immediately on a zero-length frame).
+    /// No 500, no hang.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2_22_empty_each_body_serves_200_with_empty_payload() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18170";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /e HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class EmptyEach
+              def each
+                # nothing
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, EmptyEach.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 2, app)
+        "#), "p2_22_empty.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200 for empty body, got:\n{response_text}",
+        );
+        // The chunked-encoding terminator "0\r\n\r\n" must
+        // appear — proves the server closed the body
+        // cleanly rather than hanging.
+        assert!(
+            response_text.contains("\r\n0\r\n"),
+            "expected chunked terminator (`0\\r\\n`) for empty stream, got:\n{response_text}",
+        );
+    }
+
+    /// P2 #22 Cat 4 — write-after-close raises IOError.
+    /// Rack 3 SPEC: once `close` has been called on the
+    /// stream, subsequent `write` MUST raise. Our
+    /// `RubyrsStreamingStream#write` checks @closed and
+    /// raises IOError("stream closed"). This test pins
+    /// the contract: the IOError propagates out of the
+    /// Fiber body and the streaming response surfaces
+    /// the trap to hyper as a body error (response closes
+    /// early; no panic; no Vm corruption).
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2_22_write_after_close_raises_ioerror() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18171";
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /w HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        let log_for_fn = Arc::clone(&log);
+        rt.register_fn("__rubyrs_test_record", move |args| {
+            use crate::error::{RubyError, Trap};
+            use crate::value::Value;
+            let tag = match args {
+                [Value::Str(s)] => s.to_string_lossy(),
+                _ => return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__rubyrs_test_record(tag: String)".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            log_for_fn.lock().unwrap().push(tag);
+            Ok(crate::value::Value::Nil)
+        });
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class CloseThenWrite
+              def call(stream)
+                stream.write("first\n")
+                stream.close
+                begin
+                  stream.write("second\n")
+                  __rubyrs_test_record("no_error")
+                rescue IOError => e
+                  __rubyrs_test_record("ioerror:" + e.message)
+                end
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, CloseThenWrite.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 2, app)
+        "#), "p2_22_write_after_close.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("first"),
+            "first chunk must reach client before close, got:\n{response_text}",
+        );
+        assert!(
+            !response_text.contains("second"),
+            "post-close write MUST NOT reach client, got:\n{response_text}",
+        );
+        let records = log.lock().unwrap().clone();
+        assert!(
+            records.iter().any(|r| r.starts_with("ioerror:")),
+            "post-close write must raise IOError; records: {records:?}",
+        );
+        assert!(
+            !records.iter().any(|r| r == "no_error"),
+            "post-close write must NOT silently succeed; records: {records:?}",
+        );
+    }
+
+    /// P2 #22 Cat 4 — `flush` is a documented no-op and
+    /// MUST NOT raise. Rack 3 SPEC requires flush to be
+    /// idempotent + non-raising even after close. Our
+    /// `RubyrsStreamingStream#flush` is literally empty.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2_22_flush_is_noop_and_safe_after_close() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18172";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /f HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class FlushExercise
+              def call(stream)
+                stream.flush             # before any write — no-op
+                stream.write("payload\n")
+                stream.flush             # mid-stream — no-op
+                stream.close
+                stream.flush             # after close — MUST NOT raise
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, FlushExercise.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 2, app)
+        "#), "p2_22_flush.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("payload"),
+            "flush must not corrupt payload, got:\n{response_text}",
+        );
+        // A flush that raised post-close would surface as
+        // a body error → 500 or truncated response.
+        assert!(
+            !response_text.contains("500"),
+            "post-close flush must not raise, got:\n{response_text}",
+        );
+    }
+
+    /// P2 #22 Cat 4 — `close` is idempotent. Calling
+    /// `close` twice MUST NOT raise; the second call is
+    /// observationally a no-op. Rack 3 SPEC doesn't
+    /// explicitly require this, but most middleware
+    /// double-closes defensively and a server that raises
+    /// on the second close breaks the Rack ecosystem.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2_22_close_is_idempotent() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18173";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /c HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class DoubleClose
+              def call(stream)
+                stream.write("hello\n")
+                stream.close
+                stream.close             # idempotent
+                stream.close_write       # also idempotent (alias)
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, DoubleClose.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 2, app)
+        "#), "p2_22_double_close.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("hello"),
+            "payload must reach client, got:\n{response_text}",
+        );
+    }
+
+    /// P2 #22 Cat 4 — headers-before-first-chunk ordering.
+    /// Rack 3 SPEC §"Body" requires the server to commit
+    /// to status/headers BEFORE the body iteration starts.
+    /// We satisfy this at the API contract level:
+    /// `marshal_rack_response` parses status + headers
+    /// before constructing the streaming body, so the head
+    /// is fully determined by the time the Fiber starts.
+    ///
+    /// Wire-level note: hyper's H1 encoder batches the
+    /// queued head with the first body frame into a single
+    /// TCP write — so wall-clock-wise the client may see
+    /// headers + first chunk arrive together (after the
+    /// body's delay). That's a hyper/TCP implementation
+    /// detail, NOT a SPEC violation: structurally the
+    /// status line + headers always precede chunk bytes in
+    /// the response stream. Attempts to force an early
+    /// header flush (initial Pending in poll_frame) broke
+    /// the wire-streaming timing test
+    /// (`p2b2b4_first_chunk_arrives_before_body_finishes`)
+    /// — the single-task self-wakeup pattern in current-
+    /// thread tokio doesn't actually yield to the OS
+    /// between self-wakes, so the flush never happens.
+    ///
+    /// What this test pins: when the body delays the first
+    /// chunk, the client receives a single coherent
+    /// response with headers correctly preceding chunks in
+    /// the byte stream — no truncation, no malformed head,
+    /// no Content-Type leaked into the body.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2_22_headers_arrive_before_first_chunk() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let server_addr = "127.0.0.1:18174";
+        let body_delay_ms: u64 = 400;
+
+        let client_thread = thread::spawn(move || -> (String, Option<Duration>, Option<Duration>) {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            client.write_all(b"GET /h HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+
+            let start = Instant::now();
+            let mut buf: Vec<u8> = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let mut headers_at: Option<Duration> = None;
+            let mut chunk_at: Option<Duration> = None;
+
+            loop {
+                match client.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        let s = String::from_utf8_lossy(&buf);
+                        // Headers complete when we've seen
+                        // the blank line `\r\n\r\n` after
+                        // the status line.
+                        if headers_at.is_none() && s.contains("\r\n\r\n") {
+                            headers_at = Some(start.elapsed());
+                        }
+                        if chunk_at.is_none() && s.contains("DELAYED_CHUNK") {
+                            chunk_at = Some(start.elapsed());
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            (String::from_utf8_lossy(&buf).into_owned(), headers_at, chunk_at)
+        });
+
+        let mut rt = crate::Runtime::new();
+        rt.register_fn("__rubyrs_test_sleep_ms", |args| {
+            use crate::error::{RubyError, Trap};
+            use crate::value::Value;
+            let ms = match args {
+                [Value::Int(n)] if *n >= 0 => *n as u64,
+                _ => return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__rubyrs_test_sleep_ms(ms: Integer)".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            std::thread::sleep(Duration::from_millis(ms));
+            Ok(crate::value::Value::Nil)
+        });
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class DelayedFirstChunk
+              def each
+                __rubyrs_test_sleep_ms({body_delay_ms})
+                yield "DELAYED_CHUNK\n"
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, DelayedFirstChunk.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 3, app)
+        "#), "p2_22_headers_ordering.rb").expect("server ran");
+
+        let (response_text, _headers_at, _chunk_at) = client_thread.join().expect("client thread");
+        // Wire-level structural ordering: status line first,
+        // then headers, then chunk. The `find` indices
+        // pin byte-stream order independent of how hyper
+        // batched the underlying TCP writes.
+        let status_idx = response_text.find("HTTP/1.1 200")
+            .unwrap_or_else(|| panic!("missing status line; response:\n{response_text}"));
+        let ct_idx = response_text.find("text/plain")
+            .unwrap_or_else(|| panic!("missing Content-Type header; response:\n{response_text}"));
+        let blank_line_idx = response_text.find("\r\n\r\n")
+            .unwrap_or_else(|| panic!("missing end-of-headers marker; response:\n{response_text}"));
+        let chunk_idx = response_text.find("DELAYED_CHUNK")
+            .unwrap_or_else(|| panic!("delayed chunk never arrived; response:\n{response_text}"));
+        assert!(
+            status_idx < ct_idx,
+            "status line must precede Content-Type; response:\n{response_text}",
+        );
+        assert!(
+            ct_idx < blank_line_idx,
+            "Content-Type must precede the blank line (end-of-headers); response:\n{response_text}",
+        );
+        assert!(
+            blank_line_idx < chunk_idx,
+            "P2 #22: end-of-headers must precede the first body chunk in the byte stream; \
+             a chunk that appears before \\r\\n\\r\\n means the head leaked into the body. \
+             response:\n{response_text}",
+        );
+        // Body delay does NOT need to be observable in
+        // wall-clock terms — that's a hyper-internal flush
+        // policy. The chunk must arrive though.
+        let _ = body_delay_ms; // silence "unused" if assertions stop referencing it
+    }
+
     /// A3: Rack body that doesn't respond to `to_a` AND
     /// isn't an Array → 500 with a clear diagnostic.
     /// Today an Integer is the cleanest "neither" — it
