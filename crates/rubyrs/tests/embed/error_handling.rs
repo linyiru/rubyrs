@@ -150,6 +150,63 @@ fn ruby_error_is_a_walks_builtin_hierarchy() {
 }
 
 #[test]
+fn signal_exception_hierarchy_pre_installed_for_adr_0025() {
+    // Pre-install for ADR 0025: scripts must be able to
+    // `raise Interrupt` / `rescue SignalException` today, even
+    // before the signal-delivery infrastructure lands. The
+    // hierarchy walk uses the same BUILTIN_EXCEPTION_PARENT
+    // table that the runtime consults for is_a checks, so a
+    // user-raised Interrupt must traverse the same chain as
+    // CRuby's would.
+    //
+    // Intentional placement (matches CRuby + ResourceExhausted):
+    //   Interrupt < SignalException < Exception
+    // NOT under StandardError — bare `rescue` clauses must NOT
+    // swallow Ctrl+C interrupts.
+    let mut rt = Runtime::new();
+    let e = rt.eval(r#"raise Interrupt, "ctrl+c""#, "t.rb").unwrap_err().err;
+    assert!(e.is_a("Interrupt"));
+    assert!(e.is_a("SignalException"), "Interrupt parent");
+    assert!(e.is_a("Exception"));
+    assert!(!e.is_a("StandardError"), "ADR 0025: must NOT be under StandardError");
+    assert!(!e.is_a("RuntimeError"));
+
+    // SignalException itself raisable.
+    let mut rt = Runtime::new();
+    let e = rt.eval(r#"raise SignalException, "abstract""#, "t.rb").unwrap_err().err;
+    assert!(e.is_a("SignalException"));
+    assert!(e.is_a("Exception"));
+    assert!(!e.is_a("Interrupt"), "parent isn't `is_a` child");
+    assert!(!e.is_a("StandardError"));
+}
+
+#[test]
+fn signal_exception_not_swallowed_by_bare_rescue() {
+    // Companion to `resource_exhausted_cannot_be_swallowed_by_bare_rescue`:
+    // a bare `rescue => e` (which filters on StandardError) must
+    // NOT catch SignalException or Interrupt. Otherwise a script's
+    // top-level `rescue` handler would silently swallow Ctrl+C —
+    // breaking the user's escape hatch.
+    let mut rt = Runtime::new();
+    let trap = rt.eval(
+        r#"
+        begin
+          raise Interrupt, "ctrl+c"
+        rescue => e
+          # If bare rescue catches Interrupt, control falls into
+          # this block and the test reads "swallowed". The escape-
+          # hatch contract requires the Interrupt to propagate
+          # past this rescue, so `e` should never be assigned.
+          puts "swallowed"
+        end
+        "#,
+        "t.rb",
+    );
+    let trap = trap.expect_err("Interrupt must propagate past bare rescue");
+    assert!(trap.err.is_a("Interrupt"));
+}
+
+#[test]
 fn format_trap_emits_cruby_style_line() {
     let mut rt = Runtime::new();
     let trap = rt.eval(r#"nil.foo"#, "snippet.rb").unwrap_err();

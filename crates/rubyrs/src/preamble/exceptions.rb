@@ -5,10 +5,9 @@
 #
 # Hierarchy mirrors CRuby's `Init_Exception` (error.c) for the
 # error classes the runtime actually raises. The "Tier 1" rubyrs
-# subset omits `LoadError`, `SyntaxError`, `EncodingError`,
-# `IOError`, `SystemCallError`, `SystemExit`, `Interrupt`,
-# `SignalException`, `SecurityError`, `Math::DomainError` etc.;
-# those are added as the runtime grows.
+# subset omits `SyntaxError`, `EncodingError`, `SystemCallError`,
+# `SystemExit`, `SecurityError`, `Math::DomainError` etc.; those
+# are added as the runtime grows.
 #
 # Re-opening any of these from user code works (`class
 # RuntimeError; def foo; end`), but adding methods that way
@@ -105,4 +104,23 @@ end
 ## CRuby uses the same pattern for `SystemExit` and `Interrupt`.
 ## See docs/adr/0008-resource-caps-for-untrusted-scripts.md.
 class ResourceExhausted < Exception
+end
+
+## CRuby's signal-driven exception hierarchy. Pre-installed here
+## (without the underlying signal infrastructure that's tracked by
+## ADR 0025) so embedders + scripts can `raise Interrupt`, write
+## `rescue Interrupt`, and reason about the class hierarchy today.
+## When ADR 0025 phases land, the signal-delivery path raises
+## these without any preamble change required.
+##
+## Intentionally `< Exception`, NOT `< StandardError`. A user's
+## bare `rescue` clause must NOT swallow a Ctrl+C interrupt — same
+## rationale as ResourceExhausted above. CRuby places SignalException
+## and SystemExit directly under Exception for this reason.
+class SignalException < Exception
+end
+## SIGINT-shaped signals (Ctrl+C in a CLI). CRuby instantiates this
+## from the default INT handler. rubyrs's signal-handling capability
+## (ADR 0025 Phase 1+) will do the same when the host opts in.
+class Interrupt < SignalException
 end

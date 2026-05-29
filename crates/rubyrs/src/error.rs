@@ -186,6 +186,15 @@ const BUILTIN_EXCEPTION_PARENT: &[(&str, &str)] = &[
     ("ResourceExhausted", "Exception"),
     ("IOError", "StandardError"),
     ("LoadError", "ScriptError"),
+    // Signal-driven exception hierarchy. Pre-installed for ADR
+    // 0025 — embedders can already `raise Interrupt` / write
+    // `rescue Interrupt` even before the signal-delivery
+    // infrastructure lands. Intentionally `< Exception`, NOT
+    // `< StandardError`: a bare `rescue` clause must not swallow
+    // Ctrl+C. Mirrors CRuby's placement of `SignalException` /
+    // `SystemExit` outside the StandardError subtree.
+    ("SignalException", "Exception"),
+    ("Interrupt", "SignalException"),
 ];
 
 impl RubyError {
