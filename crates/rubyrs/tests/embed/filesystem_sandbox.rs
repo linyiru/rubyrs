@@ -859,21 +859,27 @@ fn allowlist_dunder_dir_does_not_canonicalize_symlinks() {
 #[test]
 #[cfg(all(not(target_os = "wasi"), unix))]
 fn allowlist_require_walks_candidates_past_symlink_poisoned_one() {
-    // Defends require_ruby's candidate walk against the
-    // "first-canon-wins masks a legitimate later candidate"
-    // shape. Layout:
+    // Pins the `require` $LOAD_PATH walk under sandbox +
+    // allowed_paths when the caller's directory contains a
+    // SAME-NAMED symlink to an out-of-scope file. Layout:
     //   - caller is /allowed1/caller.rb
     //   - /allowed1/sib.rb is a SYMLINK pointing to /outside/sib.rb
     //     (canonicalize succeeds but the target is outside scope)
     //   - /load_dir/sib.rb is a REAL file inside scope
     //   - $LOAD_PATH includes /load_dir
     //
-    // Pre-fix, find_map(canonicalize.ok()) picked candidate[1]
-    // (the caller-dir hit) — canon resolved to /outside/sib.rb,
-    // scope check failed → require traps LoadError even though
-    // /load_dir/sib.rb is a legitimate match further down.
-    // Post-fix: walk skips out-of-scope canon hits and finds the
-    // /load_dir entry.
+    // Pre-pass-10-layer-#6 `ruby_source_candidates` included the
+    // caller's directory; `find_map(canonicalize.ok())` could
+    // pick that poisoned symlink candidate FIRST and trap
+    // LoadError even though /load_dir/sib.rb was a legitimate
+    // later match — the original bug this test defends against.
+    // Post-layer-#6 (PR #295) caller-relative candidates are
+    // removed entirely; the symlink decoy isn't even probed.
+    // The test still passes because the $LOAD_PATH entry
+    // resolves correctly; it now ALSO functions as a
+    // regression-prevention against re-introducing caller_dir
+    // lookup without also re-validating the symlink-poisoning
+    // case.
     use std::os::unix::fs::symlink;
     let (_guard_require_walk_caller, allowed1, _) = alloc_tempdir("require-walk-caller");
     let (_guard_require_walk_loadpath, load_dir, _) = alloc_tempdir("require-walk-loadpath");
