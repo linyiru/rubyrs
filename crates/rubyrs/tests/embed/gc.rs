@@ -735,3 +735,39 @@ fn hash_first_min_max_pin_receiver_under_stress_gc() {
         "first/min/max output corrupted under STRESS_GC: {out}"
     );
 }
+
+#[test]
+fn hash_uniq_pin_seen_keys_under_stress_gc() {
+    // Regression: Hash#uniq's `seen` set was a Rust-local
+    // Vec<Value> holding block return values across
+    // iterations. When the block returned a heap-backed
+    // Value (Array / Hash / String / BigInt), the next
+    // iter's maybe_gc swept the slot — and the subsequent
+    // ruby_eql scan read use-after-free heap slots,
+    // SILENTLY returning false on every comparison. No
+    // ICE; just wrong output (the uniq predicate failed
+    // to deduplicate anything).
+    //
+    // Caught by Copilot review on PR #292. Fixed by
+    // storing the seen-keys list in a heap-backed Array
+    // that's pinned via PinGuard — its contents become
+    // real GC roots through the heap walker.
+    let mut rt = Runtime::with_config(Config { stress_gc: true, ..Default::default() });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        # Block returns a freshly-allocated Array per iter
+        # (heap-backed). Without the fix, the seen-keys
+        # list dangles and the dedup silently fails.
+        h = {a: 1, b: 1, c: 2, d: 1, e: 2, f: 3, g: 1, h: 2}
+        r = h.uniq { |k, v| [v, "tag", v.to_s, [v, v, v]] }
+        puts r.inspect
+    "#, "uniq_stress.rb").expect("eval should not ICE");
+    let out = buf.snapshot();
+    // Correct dedup: 3 unique values (1, 2, 3); first-seen
+    // wins → [:a, 1] / [:c, 2] / [:f, 3].
+    assert!(
+        out.starts_with("[[:a, 1], [:c, 2], [:f, 3]]"),
+        "uniq block-form seen keys corrupted under STRESS_GC: {out}"
+    );
+}

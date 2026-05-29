@@ -2825,6 +2825,103 @@ impl Vm {
                     None => Value::Nil,
                 }))
             }
+            // Wrong-arity for block-form uniq — CRuby's uniq
+            // takes no positional args (just an optional
+            // block). Without this guard, `h.uniq(1) { ... }`
+            // falls through and surfaces as NoMethodError.
+            (Value::Hash(_), "uniq", many) if !many.is_empty() => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        many.len(),
+                    ),
+                }));
+            }
+            // `h.tally { ... }` (block-given) — CRuby silently
+            // discards the block and returns the same Hash as
+            // the no-block tally. Without this arm, dispatch
+            // routes block-given to iter.rs first, sees no
+            // `tally` arm, and lands at NoMethodError —
+            // contradicting respond_to?(:tally). Delegate to
+            // the no-block hash.rs arm by calling
+            // `hash_collection_call` directly with empty args.
+            (Value::Hash(id), "tally", []) => {
+                return self.hash_collection_call(*id, "tally", &[]);
+            }
+            // `h.zip(*args) { |tuple| ... }` block form is out
+            // of subset. Without this guard the block would be
+            // silently ignored: dispatch routes block-given to
+            // iter.rs first, sees no `zip` arm here, then falls
+            // through to hash.rs which DOES match the no-block
+            // arm and returns the result, discarding the block.
+            // Raise a clear "not supported" error instead.
+            (Value::Hash(_), "zip", _) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: "Hash#zip block form (yielding each tuple) is not supported \
+                          in this subset".to_string(),
+                }));
+            }
+            // `h.uniq { |pair| key }` — block-form uniq.
+            // Yields a single `[k, v]` pair Array per entry;
+            // the block return is the uniqueness key (compared
+            // via `ruby_eql`). First-seen entry wins on
+            // collision. Returns Array<[k, v]> in insertion
+            // order. The no-block form lives in hash.rs (every
+            // Hash entry is eql?-unique already).
+            (Value::Hash(id), "uniq", []) => {
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                let pre_frames = g.vm.frames.len();
+                // `seen_id` is a heap-backed Array of block
+                // return values — heap-ref keys (Array / Hash /
+                // String / BigInt / Object) MUST be rooted
+                // across iterations, otherwise the next iter's
+                // maybe_gc sweeps them and the subsequent
+                // `ruby_eql` scan reads use-after-free slots.
+                // Storing in a pinned Array gives them a real
+                // root via the GC walker.
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let seen_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
+                g.pin(Value::Array(seen_id));
+                let mut early = None;
+                for (k, v) in snapshot {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    g.vm.pinned.push(Value::Array(pair_id));
+                    let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
+                    g.vm.pinned.pop();
+                    let key = match step? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    // First-seen wins: only push if no
+                    // previously-seen key is `ruby_eql` to this
+                    // one. seen_id is heap-backed + pinned so
+                    // its contents stay rooted across the next
+                    // iter's maybe_gc.
+                    let already_seen = g.vm.heap.array(seen_id).iter()
+                        .any(|s| s.ruby_eql(&key, &g.vm.heap));
+                    if !already_seen {
+                        g.vm.heap.array_mut(seen_id).push(key);
+                        g.vm.heap.array_mut(result_id).push(Value::Array(pair_id));
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(result_id)))
+            }
             // `h.count { |k, v| pred }` — count pairs whose block
             // result is truthy. Same shape as Array#count block,
             // but the per-iter pair is the `[k, v]` Array (yielded

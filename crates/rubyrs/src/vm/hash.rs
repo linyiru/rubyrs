@@ -452,6 +452,180 @@ impl Vm {
                         }
                         Some(Value::Nil)
                     }
+                    // `h.tally` (no block, no args) — returns a
+                    // new Hash<[k, v], Int> counting each entry's
+                    // pair. On a Hash receiver every pair is
+                    // unique by definition (keys are eql?-unique),
+                    // so every count is 1 — the behaviour is
+                    // trivially Hash#each_with_index-shaped, but
+                    // we still materialise the result Hash for
+                    // CRuby parity (callers may chain
+                    // `tally.values.sum` etc.).
+                    ("tally", []) => {
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let result_id = g.vm.heap.alloc(HeapObj::Hash(
+                            crate::heap::HashObj::with_pairs(Vec::new())
+                        ));
+                        g.pin(Value::Hash(result_id));
+                        for (k, v) in pairs {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            // Each pair Array is unique per
+                            // iteration (Hash keys eql?-unique
+                            // by definition), so we always push
+                            // a fresh entry with count = 1
+                            // rather than re-scanning. After the
+                            // push the pair is reachable via the
+                            // pinned result Hash — no per-iter
+                            // pin needed (would grow pinned-set
+                            // O(n) for no benefit).
+                            g.vm.heap.hash_mut(result_id).push((Value::Array(pid), Value::Int(1)));
+                        }
+                        Some(Value::Hash(result_id))
+                    }
+                    // `h.uniq` (no block) — returns all entries
+                    // as Array<[k, v]>. Hash keys are already
+                    // eql?-unique, so the result is trivially the
+                    // pair list — but materialising the Array
+                    // matches CRuby's surface (callers may
+                    // chain `.size`, `.first`, etc.).
+                    ("uniq", []) => {
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        // Pre-alloc the result Array and pin it;
+                        // direct-push each pair into it rather
+                        // than accumulating in a Rust-local Vec
+                        // + per-iter pinning each pair Array.
+                        // Result Array roots all the pair Arrays
+                        // through the GC walker, so pinned-set
+                        // stays O(1) instead of O(n).
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let aid = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(pairs.len())));
+                        g.pin(Value::Array(aid));
+                        for (k, v) in pairs {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            g.vm.heap.array_mut(aid).push(Value::Array(pid));
+                        }
+                        Some(Value::Array(aid))
+                    }
+                    // `h.zip(*args)` — pairs each `[k, v]` entry
+                    // with the corresponding element from each
+                    // arg Array. Returns Array of `[pair,
+                    // arg1_i, arg2_i, ...]`. Args shorter than
+                    // the receiver fill with nil. With zero
+                    // args, returns Array of `[[k, v]]`
+                    // singletons. Only Array args are supported
+                    // (Enumerator / Range args are Tier-2).
+                    ("zip", args_slice) if args_slice.iter().all(|a| matches!(a, Value::Array(_))) => {
+                        let receiver_pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        // Snapshot every arg Array's contents
+                        // BEFORE the result-alloc loop so
+                        // intermediate maybe_gc can't sweep
+                        // them (each arg's ObjId is held only
+                        // in args_slice, which is a Rust slice
+                        // borrowed from caller).
+                        let arg_lists: Vec<Vec<Value>> = args_slice.iter().map(|a| {
+                            if let Value::Array(aid) = a {
+                                self.heap.array(*aid).clone()
+                            } else {
+                                Vec::new()
+                            }
+                        }).collect();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        for a in args_slice {
+                            g.pin(a.clone());
+                        }
+                        // Pre-alloc + pin the result Array;
+                        // direct-push each tuple. Once the
+                        // tuple is in the result Array it
+                        // transitively roots its pair_id child
+                        // too. Pinned-set stays O(1) instead of
+                        // O(n) per receiver entry.
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let aid = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(receiver_pairs.len())));
+                        g.pin(Value::Array(aid));
+                        for (i, (k, v)) in receiver_pairs.into_iter().enumerate() {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            // Build the per-entry tuple:
+                            // [[k, v], arg1[i] || nil, arg2[i] || nil, ...]
+                            let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            // pair_id needs a brief pin only
+                            // while we're allocating the
+                            // tuple Array (one more maybe_gc
+                            // window).
+                            g.vm.pinned.push(Value::Array(pair_id));
+                            let mut tuple: Vec<Value> = Vec::with_capacity(1 + arg_lists.len());
+                            tuple.push(Value::Array(pair_id));
+                            for list in &arg_lists {
+                                tuple.push(list.get(i).cloned().unwrap_or(Value::Nil));
+                            }
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let tid = g.vm.heap.alloc(HeapObj::Array(tuple));
+                            g.vm.pinned.pop();
+                            // tid is now reachable via aid; no
+                            // per-iter pin needed for either.
+                            g.vm.heap.array_mut(aid).push(Value::Array(tid));
+                        }
+                        Some(Value::Array(aid))
+                    }
+                    // Wrong-arity for uniq — CRuby's no-block
+                    // form takes no args; without this guard
+                    // `h.uniq(1)` falls through to NoMethodError
+                    // despite respond_to?(:uniq) returning true.
+                    ("uniq", many) => {
+                        return Err(self.trap(crate::error::RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 0)",
+                                many.len(),
+                            ),
+                        }));
+                    }
+                    // Fallback for `zip` with a non-Array arg —
+                    // matched after the typed `zip` arm above.
+                    // CRuby coerces via `to_ary` / `each` for
+                    // Enumerable args (Range / Enumerator);
+                    // we restrict to Array in Tier 1, so anything
+                    // else raises TypeError with a clear message
+                    // rather than falling through to NoMethodError.
+                    ("zip", _) => {
+                        return Err(self.trap(crate::error::RubyError::TypeError {
+                            msg: "Hash#zip in this subset only accepts Array arguments \
+                                  (Range / Enumerator args are Tier-2)".to_string(),
+                        }));
+                    }
+                    // `h.tally(target_hash)` — Ruby 2.7+
+                    // accumulating form is out of subset.
+                    // 1-arg form gets a specific "not
+                    // supported" message; 2+ args get the
+                    // standard wrong-arity shape so the
+                    // diagnostic actually matches the input.
+                    ("tally", many) => {
+                        let msg = if many.len() == 1 {
+                            "Hash#tally with an accumulating Hash argument is not \
+                             supported in this subset (Ruby 2.7+ form)".to_string()
+                        } else {
+                            format!(
+                                "wrong number of arguments (given {}, expected 0)",
+                                many.len(),
+                            )
+                        };
+                        return Err(self.trap(crate::error::RubyError::ArgumentError {
+                            msg,
+                        }));
+                    }
                     // Wrong-arity arm for take / drop — CRuby
                     // raises ArgumentError on the no-arg call
                     // (`h.take` / `h.drop` without an Int). The
