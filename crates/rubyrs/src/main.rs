@@ -224,6 +224,11 @@ fn main() {
         // default (Time.now raises) until they wire their own
         // `Config::time_now` (potentially a fixed-clock for
         // reproducible tests).
+        // Wall-clock sleep injection for `Kernel#sleep`.
+        // CLI binary opts in so `rubyrs script.rb` matches
+        // CRuby; embed users get the deterministic default
+        // (sleep raises) unless they wire their own.
+        sleep_for: Some(std::sync::Arc::new(std::thread::sleep)),
         time_now: Some(std::sync::Arc::new(|| {
             // `UNIX_EPOCH` is the documented zero anchor; the
             // SystemTime returned by `now()` may be before or

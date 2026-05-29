@@ -24,15 +24,13 @@
 #   between events and resume when hyper polls for the
 #   next frame. See ADR 0023 §"Streaming bodies via Fiber".
 #
-# Pacing note: rubyrs's stdlib doesn't yet ship a `sleep`
-# primitive, so this demo yields all events as fast as the
-# fiber + tokio executor can deliver them. To see
-# wall-clock-paced streaming, register a tiny `sleep_ms`
-# host fn in your embedder (the test suite has an example —
-# search for `__rubyrs_test_sleep_ms`). The wire-level
-# streaming proof is independent of pacing: each `yield`
-# is still its own chunked frame (see the timing test
-# `p2b2b4_first_chunk_arrives_before_body_finishes`).
+# Pacing: this demo uses `Kernel#sleep` to wait 1 second
+# between events, so `curl -N` shows one `data:` line per
+# second arriving in real time. `sleep` is gated on the
+# host's `Config::sleep_for` capability — the CLI binary
+# (`cargo run -- script.rb`) wires it to
+# `std::thread::sleep`; library embedders that want
+# script-visible sleep must opt in (ADR 0017 Rule 1).
 
 # A Rack 3 streaming body. Responds to `each`; each `yield`
 # becomes one wire-level chunked frame.
@@ -47,6 +45,11 @@ class SSEStream
       # SSE wire format: `data: <payload>\n\n`. The blank
       # line is the event terminator per the SSE spec.
       yield "data: tick #{i} at #{Time.now.to_i}\n\n"
+      # 1-second pause. Demonstrates that each chunk is
+      # flushed to the client BEFORE the sleep — without
+      # true streaming the client would see all events
+      # at once at the end of the loop.
+      sleep(1)
       i += 1
     end
     yield "data: done\n\n"

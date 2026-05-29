@@ -47,6 +47,7 @@ impl Vm {
                 | "sprintf"
                 | "format"
                 | "__time_now_raw"
+                | "sleep"
                 | "__method__"
                 | "__callee__"
                 | "block_given?"
@@ -179,7 +180,7 @@ impl Vm {
                     let is_builtin = matches!(
                         &*name,
                         "puts" | "p" | "pp" | "print" | "require" |
-                        "sprintf" | "format" | "__time_now_raw" |
+                        "sprintf" | "format" | "__time_now_raw" | "sleep" |
                         "Integer" | "Float" | "String" | "Array" |
                         "eval" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?"
@@ -520,6 +521,70 @@ impl Vm {
                 let arr = vec![Value::Int(sec), Value::Int(nsec as i64)];
                 let id = self.heap.alloc(HeapObj::Array(arr));
                 Some(Ok(Value::Array(id)))
+            }
+            // `Kernel#sleep(seconds)` — host-injected via
+            // `Config::sleep_for` (ADR 0017 Rule 1
+            // closure pattern, same shape as `time_now`).
+            // Library / embed default is `None` → trap, so
+            // sandbox hosts can keep deterministic timing
+            // without opt-in. CLI binary wires this to
+            // `std::thread::sleep` so `rubyrs script.rb`
+            // matches CRuby.
+            //
+            // Accepts `Integer` or `Float` seconds; both
+            // converted to `Duration` (Float → nanos via
+            // `from_secs_f64`). CRuby returns the integer
+            // seconds actually slept — we return the
+            // requested seconds (rounded down) as a
+            // conservative lower bound since
+            // `std::thread::sleep` doesn't undersleep.
+            //
+            // Negative durations: CRuby raises
+            // `ArgumentError("time interval must not be
+            // negative")`; we match.
+            "sleep" => {
+                let secs = match args {
+                    [] => {
+                        // CRuby: `sleep` with no args sleeps
+                        // forever (until a signal). We bail
+                        // — rubyrs has no signal-driven wake
+                        // model yet, so blocking forever
+                        // would deadlock the embedder.
+                        return Some(Err(self.trap(RubyError::ArgumentError {
+                            msg: "sleep with no arguments (sleep-forever-until-signal) \
+                                  is not supported; pass an explicit duration".into(),
+                        })));
+                    }
+                    [Value::Int(n)] => *n as f64,
+                    [Value::Float(f)] => *f,
+                    [other] => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "sleep duration must be Integer or Float, got {}",
+                            other.type_name(),
+                        ),
+                    }))),
+                    _ => return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0..1)",
+                            args.len(),
+                        ),
+                    }))),
+                };
+                if secs < 0.0 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "time interval must not be negative".into(),
+                    })));
+                }
+                let Some(src) = self.sleep_for.clone() else {
+                    return Some(Err(self.trap(RubyError::RuntimeError {
+                        msg: "Kernel#sleep requires `Config::sleep_for` injection — \
+                              the embedding host hasn't enabled the wall-clock \
+                              sleep capability (Tier 1 deterministic default)".into(),
+                    })));
+                };
+                let dur = std::time::Duration::from_secs_f64(secs);
+                src(dur);
+                Some(Ok(Value::Int(secs as i64)))
             }
             "sprintf" | "format" => {
                 if args.is_empty() {

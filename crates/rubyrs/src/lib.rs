@@ -254,6 +254,25 @@ pub struct Config {
     /// explicitly. Deterministic-test hosts inject a fixed
     /// `|| (1_700_000_000, 0)` closure for reproducible output.
     pub time_now: Option<std::sync::Arc<dyn Fn() -> (i64, u32) + Send + Sync>>,
+    /// Host-injected wall-clock sleep for `Kernel#sleep`.
+    /// `None` (the deterministic Tier 1 default) means
+    /// `sleep` raises `RuntimeError`; embedders that want
+    /// the host to actually pause must inject a closure
+    /// (typically `std::thread::sleep`).
+    ///
+    /// The CLI binary `rubyrs` injects `std::thread::sleep`
+    /// so `rubyrs script.rb` matches CRuby; library / embed
+    /// users that want host-thread pauses exposed must opt
+    /// in explicitly. Deterministic-test hosts inject a
+    /// no-op closure for reproducible output.
+    ///
+    /// Closure receives `Duration`; CRuby's `sleep` returns
+    /// the integer seconds actually slept. We pin the
+    /// requested duration as the canonical "slept" value —
+    /// real `std::thread::sleep` may oversleep on some
+    /// platforms but never undersleep, so the requested
+    /// value is a conservative lower bound.
+    pub sleep_for: Option<std::sync::Arc<dyn Fn(std::time::Duration) + Send + Sync>>,
     /// Filesystem-access capability gate. When `false` (the
     /// secure-by-default), every script-callable path that
     /// touches the filesystem traps with `IOError` /
@@ -375,6 +394,7 @@ impl Default for Config {
             env: None,
             pid: None,
             time_now: None,
+            sleep_for: None,
             // Secure-by-default: library embedders evaluating
             // untrusted Ruby get a sandbox where File.* / require
             // / __dir__ cannot reach the host filesystem. The CLI
@@ -1097,6 +1117,7 @@ impl Runtime {
         self.vm.env_override = cfg.env;
         self.vm.pid = cfg.pid.map(|n| n.get() as i64);
         self.vm.time_now = cfg.time_now;
+        self.vm.sleep_for = cfg.sleep_for;
         self.deadline = cfg.deadline;
         self.vm.allow_filesystem_io = cfg.allow_filesystem_io;
         // Canonicalize each allowed prefix once at apply_config

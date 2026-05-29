@@ -152,3 +152,95 @@ fn time_now_observes_capability_state_changes_per_call() {
     // exactly 3 times.
     assert_eq!(*counter.lock().unwrap(), 3);
 }
+
+#[test]
+fn sleep_default_raises_without_capability_injection() {
+    // ADR 0017 Rule 1: by default `Kernel#sleep` must NOT
+    // pause the host thread. With no `Config::sleep_for`
+    // injection, `sleep(0)` raises RuntimeError pointing at
+    // the missing capability — same shape as Time.now.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("sleep(0)", "sleep_no_capability.rb").unwrap_err();
+    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+        panic!("expected Uncaught RuntimeError, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "RuntimeError");
+    assert!(
+        message.contains("Kernel#sleep requires `Config::sleep_for` injection"),
+        "unexpected message: {message}",
+    );
+}
+
+#[test]
+fn sleep_invokes_injected_closure_with_requested_duration() {
+    // With a recording closure injected, `sleep(0.25)`
+    // calls it exactly once carrying Duration::from_secs_f64(0.25).
+    // No real wall-clock pause — closure is a Mutex push.
+    use std::sync::{Arc, Mutex};
+    let recorded: Arc<Mutex<Vec<std::time::Duration>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded_for_cfg = Arc::clone(&recorded);
+    let cfg = rubyrs::Config {
+        sleep_for: Some(std::sync::Arc::new(move |d| {
+            recorded_for_cfg.lock().unwrap().push(d);
+        })),
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.eval("sleep(0.25); sleep(1)", "sleep_inject.rb").expect("eval");
+    let durations = recorded.lock().unwrap().clone();
+    assert_eq!(durations.len(), 2, "sleep called twice: {durations:?}");
+    // Float arg: ~250ms (subsec_nanos rounds via from_secs_f64).
+    let want_first = std::time::Duration::from_secs_f64(0.25);
+    assert_eq!(durations[0], want_first, "first sleep duration: {durations:?}");
+    // Integer arg: exactly 1 second.
+    assert_eq!(durations[1], std::time::Duration::from_secs(1), "second: {durations:?}");
+}
+
+#[test]
+fn sleep_negative_duration_raises_argument_error() {
+    // CRuby raises ArgumentError("time interval must not
+    // be negative") for `sleep(-1)`. We match — embedders
+    // get the same exception class for the same input,
+    // closure is NOT invoked.
+    use std::sync::{Arc, Mutex};
+    let recorded: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    let recorded_for_cfg = Arc::clone(&recorded);
+    let cfg = rubyrs::Config {
+        sleep_for: Some(std::sync::Arc::new(move |_| {
+            *recorded_for_cfg.lock().unwrap() = true;
+        })),
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval("sleep(-1)", "sleep_neg.rb").unwrap_err();
+    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+        panic!("expected ArgumentError, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "ArgumentError");
+    assert!(
+        message.contains("time interval must not be negative"),
+        "unexpected message: {message}",
+    );
+    assert!(
+        !*recorded.lock().unwrap(),
+        "sleep_for closure must NOT be invoked on negative arg",
+    );
+}
+
+#[test]
+fn sleep_returns_integer_seconds_slept() {
+    // CRuby returns `Integer` seconds actually slept. We
+    // return requested seconds truncated to Integer — a
+    // conservative lower bound since std::thread::sleep
+    // never undersleeps.
+    let cfg = rubyrs::Config {
+        sleep_for: Some(std::sync::Arc::new(|_| ())),
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval("puts sleep(2); puts sleep(0.9)", "sleep_ret.rb").expect("eval");
+    // 2 → 2; 0.9 → 0 (truncated).
+    assert_eq!(buf.snapshot(), "2\n0\n");
+}
