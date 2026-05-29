@@ -1273,16 +1273,21 @@ impl Vm {
         let mut candidates: Vec<PathBuf> = Vec::with_capacity(4);
         candidates.push(rb_form.clone());
         if !rb_form.is_absolute() {
-            let caller_dir: Option<PathBuf> = self.frames.last().and_then(|f| {
-                let fname = self.protos[f.proto_idx].filename.to_string();
-                Path::new(&fname).parent().map(Path::to_path_buf)
-            });
-            if let Some(dir) = caller_dir {
-                candidates.push(dir.join(&rb_form));
-                if let Some(parent) = dir.parent() {
-                    candidates.push(parent.join(&rb_form));
-                }
-            }
+            // CRuby's `require` walks `$LOAD_PATH` ONLY — the
+            // caller's directory is `require_relative`'s job,
+            // not `require`'s. Pre-fix this candidate list
+            // also included the caller's directory (and its
+            // parent), which broke the stdlib-stub fallback
+            // for nested `require`s: e.g. `require "tilt/erb"`
+            // runs lib/tilt/erb.rb whose body does
+            // `require 'erb'`; the caller_dir resolution
+            // matched tilt/erb.rb itself (already in
+            // loaded_features) → returned Bool(false) without
+            // ever reaching `is_stdlib_stub_name`. Result: the
+            // ERB constant never got installed, and subsequent
+            // `::ERB` lookups raised NameError. (TRY_RUNS
+            // pass-10 layer #6.)
+            //
             // `$LOAD_PATH` walk. The Array is populated by the
             // script's own `$LOAD_PATH.unshift(dir)` calls; if
             // it was never touched (lazy `Vm.load_path` still
