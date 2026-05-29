@@ -16,6 +16,12 @@ pub(crate) enum HeapObj {
     /// `Value::BigInt`. ADR 0018 BigInt placement.
     #[cfg(feature = "bignum")]
     BigInt(num_bigint::BigInt),
+    /// Heap-side of `Value::Rational`. Always in lowest terms with
+    /// `den > 0` — invariants enforced by `Kernel#Rational(n, d)`'s
+    /// gcd-normalize + sign-normalize at construction. Contains no
+    /// nested `Value`, so GC walk is a no-op. Phase C.1 stores
+    /// `i64` num/den only; BigInt num/den is a Phase C.4 follow-up.
+    Rational(RationalRepr),
     /// A `proc { ... }` value. Lives in the heap (P2-13) so blocks
     /// participate in mark-sweep — earlier `Rc<BlockHandle>` form
     /// cycled whenever a block's `captured` held the block itself.
@@ -138,6 +144,19 @@ pub(crate) struct TypedDataObj {
     /// in `Option` because some types are statically allocated
     /// and don't need cleanup.
     pub(crate) dfree: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+}
+
+/// Heap representation of a Rational number (Phase C.1).
+/// Canonical form: `den > 0`, `gcd(|num|, den) == 1`. The
+/// invariants are enforced by `Kernel#Rational(n, d)` at the
+/// constructor boundary so every reader (numerator / denominator /
+/// to_s / inspect) can trust them without re-normalizing. i64 num
+/// and den are the Phase C.1 storage; widening to BigInt num/den
+/// is tracked as Phase C.4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RationalRepr {
+    pub(crate) num: i64,
+    pub(crate) den: i64,
 }
 
 /// A Ruby Range. For our subset, both endpoints must be `Value::Int`.
@@ -435,6 +454,9 @@ impl Heap {
     #[cfg(feature = "bignum")]
     pub(crate) fn bigint(&self, id: ObjId) -> &num_bigint::BigInt {
         if let HeapObj::BigInt(b) = self.get(id) { b } else { panic!("ICE: heap slot is not a BigInt") }
+    }
+    pub(crate) fn rational(&self, id: ObjId) -> &RationalRepr {
+        if let HeapObj::Rational(r) = self.get(id) { r } else { panic!("ICE: heap slot is not a Rational") }
     }
     pub(crate) fn block(&self, id: ObjId) -> &BlockHandle {
         if let HeapObj::Block(b) = self.get(id) { b } else { panic!("ICE: heap slot is not a Block") }
@@ -759,6 +781,16 @@ impl Heap {
                 let i = id.0 as usize;
                 marks[i] = true;
             }
+            // Same leaf shape as BigInt — `HeapObj::Rational` is a
+            // `RationalRepr { num: i64, den: i64 }` with no nested
+            // Value. Without this arm a live `Value::Rational` would
+            // fall into the `_ => {}` catch-all and never mark its
+            // backing slot, getting swept under stress_gc and
+            // corrupting subsequent reads via `heap.rational(*id)`.
+            Value::Rational(id) => {
+                let i = id.0 as usize;
+                marks[i] = true;
+            }
             _ => {}
         }
     }
@@ -854,6 +886,7 @@ impl Value {
             | Value::CurriedProc(_) => true,
             #[cfg(feature = "bignum")]
             Value::BigInt(_) => true,
+            Value::Rational(_) => true,
             // Explicitly enumerate the non-heap variants so that
             // adding a new `Value` case forces an explicit decision
             // here rather than silently defaulting to `false`.
@@ -889,6 +922,7 @@ impl Value {
             Value::BoundMethod(_) => "Method",
             Value::UnboundMethod(_) => "UnboundMethod",
             Value::CurriedProc(_) => "Proc",
+            Value::Rational(_) => "Rational",
         }
     }
     pub(crate) fn to_display(&self, heap: &Heap, interner: &Interner) -> String {
@@ -979,6 +1013,13 @@ impl Value {
             Value::BoundMethod(_) => "#<Method>".into(),
             Value::UnboundMethod(_) => "#<UnboundMethod>".into(),
             Value::CurriedProc(_) => "#<Proc (curried)>".into(),
+            // `Rational#to_s` — CRuby uses `"num/den"` (no parens);
+            // inspect wraps in `(num/den)`. den is always positive
+            // by the canonical-form invariant.
+            Value::Rational(id) => {
+                let r = heap.rational(*id);
+                format!("{}/{}", r.num, r.den)
+            }
         }
     }
     pub(crate) fn to_inspect(&self, heap: &Heap, interner: &Interner) -> String {
@@ -1016,6 +1057,13 @@ impl Value {
                     }
                 };
                 format!("{}{}{}", endpoint(&r.begin), sep, endpoint(&r.end))
+            }
+            // `Rational#inspect` wraps the `num/den` display form
+            // in parens to match CRuby (`Rational(1, 2).inspect ==
+            // "(1/2)"`); `to_s` keeps the bare form via to_display.
+            Value::Rational(id) => {
+                let r = heap.rational(*id);
+                format!("({}/{})", r.num, r.den)
             }
             _ => self.to_display(heap, interner),
         }
@@ -1196,6 +1244,20 @@ impl Value {
             #[cfg(feature = "bignum")]
             (Value::Float(a), Value::BigInt(b)) => {
                 crate::vm::bigint_equals_float_lossless(heap.bigint(*b), *a)
+            }
+            // Phase C.1: structural equality for Rational. Safe to
+            // wire now (independent of arithmetic) because the
+            // gcd-normalize + sign-normalize at construction
+            // guarantee canonical form — two Rationals representing
+            // the same value always have identical (num, den) pairs.
+            // Same-ObjId fast path mirrors the Array / Hash / Range /
+            // BigInt arms above. Cross-type Rational == Integer /
+            // Float lands in Phase C.2.
+            (Value::Rational(a), Value::Rational(b)) => {
+                if a == b { return true; }
+                let x = heap.rational(*a);
+                let y = heap.rational(*b);
+                x.num == y.num && x.den == y.den
             }
             _ => false,
         }

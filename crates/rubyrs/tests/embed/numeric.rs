@@ -2935,6 +2935,155 @@ fn integer_chr_basic() {
 }
 
 #[test]
+fn rational_phase_c1_construction_and_readers() {
+    // Phase C.1 surface — `Kernel#Rational(n, d)` constructor +
+    // .numerator / .denominator / .to_s / .inspect / .to_i / .to_f
+    // / .to_r. Arithmetic + comparison lands in Phase C.2.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        // Construction + normalization invariants.
+        ("puts Rational(3, 4).inspect",         "(3/4)"),
+        ("puts Rational(6, 4).inspect",         "(3/2)"),
+        ("puts Rational(3, -4).inspect",        "(-3/4)"),
+        ("puts Rational(-3, -4).inspect",       "(3/4)"),
+        ("puts Rational(5).inspect",            "(5/1)"),
+        ("puts Rational(0, 7).inspect",         "(0/1)"),
+        // class chain — Rational < Numeric < Object. Integer
+        // and Float are also re-opened to chain through Numeric
+        // so the whole numeric tower matches CRuby:
+        // `5.is_a?(Numeric)` and `5.0.is_a?(Numeric)` both true,
+        // `5.class.ancestors` includes Numeric.
+        ("puts Rational(1, 2).class",           "Rational"),
+        ("puts Rational(1, 2).is_a?(Numeric)",  "true"),
+        ("puts Rational(1, 2).is_a?(Object)",   "true"),
+        ("puts 5.is_a?(Numeric)",               "true"),
+        ("puts 5.0.is_a?(Numeric)",             "true"),
+        ("puts 5.class.ancestors.inspect",      "[Integer, Numeric, Object, Kernel, BasicObject]"),
+        ("puts 5.0.class.ancestors.inspect",    "[Float, Numeric, Object, Kernel, BasicObject]"),
+        ("puts Rational(1, 2).class.ancestors.inspect",
+         "[Rational, Numeric, Object, Kernel, BasicObject]"),
+        // to_s drops the parens; inspect keeps them.
+        ("puts Rational(3, 4).to_s",            "3/4"),
+        // Readers.
+        ("puts Rational(3, 4).numerator",       "3"),
+        ("puts Rational(3, 4).denominator",     "4"),
+        ("puts Rational(-3, 4).numerator",      "-3"),
+        ("puts Rational(-3, 4).denominator",    "4"),
+        // Conversions. to_i truncates toward zero (NOT floor).
+        ("puts Rational(7, 2).to_i",            "3"),
+        ("puts Rational(-7, 2).to_i",           "-3"),
+        ("puts Rational(3, 4).to_f",            "0.75"),
+        ("puts Rational(-3, 4).to_f",           "-0.75"),
+        ("puts Rational(3, 4).to_r.inspect",    "(3/4)"),
+        // Structural equality (Phase C.1 — independent of Phase
+        // C.2 arithmetic). gcd-normalize + sign-normalize at
+        // construction make canonical form an invariant, so
+        // `(num, den)` equality IS value equality. Without this
+        // Rationals couldn't be used as Hash keys / Set members /
+        // Array#include? args.
+        ("puts (Rational(1, 2) == Rational(1, 2))",         "true"),
+        ("puts (Rational(1, 2) == Rational(2, 4))",         "true"),
+        ("puts (Rational(1, 2) == Rational(3, 7))",         "false"),
+        ("puts (Rational(-3, 4) == Rational(3, -4))",       "true"),  // both normalize to (-3, 4)
+        // eql? mirrors == for same-typed Rational (numeric
+        // strictness doesn't apply since both sides are Rational).
+        ("puts Rational(1, 2).eql?(Rational(1, 2))",        "true"),
+        // hash invariant: a == b ⇒ a.hash == b.hash. Needed for
+        // Hash key lookup.
+        ("puts (Rational(1, 2).hash == Rational(2, 4).hash)", "true"),
+        ("puts ({Rational(1, 2) => :half}[Rational(2, 4)])",   "half"),
+        // Builtin Rational wins over user `def Rational` — without
+        // adding "Rational" to `is_builtin_name`, the toplevel fast
+        // path would cache the user def and silently shadow the
+        // builtin Kernel function. CRuby's "builtin always wins"
+        // dispatch order applies the same way for Integer/Float/etc.
+        (
+            "def Rational(n, d=1); 'user-shadow' end; puts Rational(1, 2).inspect",
+            "(1/2)",
+        ),
+        // respond_to?
+        ("puts Rational(1, 2).respond_to?(:numerator)",  "true"),
+        ("puts Rational(1, 2).respond_to?(:denominator)","true"),
+        ("puts Rational(1, 2).respond_to?(:to_r)",       "true"),
+        // Arithmetic / comparison are PHASE C.2 — currently NOT
+        // available, so respond_to? returns false. Pin that so
+        // accidental whitelist creep is caught.
+        ("puts Rational(1, 2).respond_to?(:+)",          "false"),
+        ("puts Rational(1, 2).respond_to?(:==)",         "true"),  // Object#==
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "rational_c1.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // Error shapes.
+    for (script, expected_class, expected_msg) in [
+        // Denominator zero → ZeroDivisionError.
+        ("Rational(1, 0)", "ZeroDivisionError", "divided by 0"),
+        // Non-Integer arg → TypeError.
+        ("Rational(\"x\")",    "TypeError",    "can't convert String into Rational"),
+        ("Rational(1, nil)",   "TypeError",    "can't convert NilClass into Rational"),
+        ("Rational(1.5)",      "TypeError",    "can't convert Float into Rational"),
+        // Arity.
+        ("Rational()",         "ArgumentError","wrong number of arguments (given 0, expected 1..2)"),
+        ("Rational(1, 2, 3)",  "ArgumentError","wrong number of arguments (given 3, expected 1..2)"),
+    ] {
+        let err = rt.eval(script, "rational_c1_err.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected Uncaught {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+    // Reader arity guard.
+    for script in [
+        "Rational(1, 2).numerator(99)",
+        "Rational(1, 2).denominator(99)",
+        "Rational(1, 2).to_i(99)",
+    ] {
+        let err = rt.eval(script, "rational_c1_arity.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, .. } => {
+                assert_eq!(class_name, "ArgumentError", "for {:?}", script);
+            }
+            ref other => panic!("expected ArgumentError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
+#[test]
+fn rational_survives_stress_gc() {
+    // Regression guard for the visit_value mark hole Copilot
+    // flagged on PR #297: without an arm for `Value::Rational`,
+    // any live Rational's backing HeapObj slot fails to mark
+    // during sweep and gets reused for the next allocation,
+    // corrupting subsequent reads via `heap.rational(*id)`.
+    //
+    // Stress GC trips a collect on every alloc, so the bug is
+    // reliably observable here when present. Bind a Rational to
+    // a local, allocate several other heap objects (each forces
+    // a sweep), then read the Rational back via #inspect /
+    // #numerator. Without the fix the backing slot's RationalRepr
+    // bytes are overwritten by whatever the intervening alloc
+    // stored there.
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "r = Rational(355, 113); \
+         100.times { _ = [1, 2, 3]; _ = {a: 1, b: 2}; _ = \"alloc\" }; \
+         puts r.inspect; puts r.numerator; puts r.denominator",
+        "rational_stress_gc.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot().trim(), "(355/113)\n355\n113");
+}
+
+#[test]
 fn numeric_coerce_basic() {
     // `Numeric#coerce(other)` — Tier-2 protocol entry point;
     // returns `[other_promoted, self_promoted]`. Spec coverage
@@ -2988,6 +3137,14 @@ fn numeric_coerce_basic() {
         ("1.5.coerce(\"x\")","String can't be coerced into Float"),
         #[cfg(feature = "bignum")]
         ("(2**64).coerce(:sym)", "Symbol can't be coerced into Integer"),
+        // Rational arg surfaces "Rational" (not the `Object`
+        // fallback) once `type_name_for_coerce` knows the variant.
+        // Pin both Float and Integer recv sides; Phase C.2 will
+        // turn these into successful coercions, at which point the
+        // expected behaviour flips from TypeError to a Rational
+        // result and these asserts move into the happy-path block.
+        ("1.5.coerce(Rational(1, 2))", "Rational can't be coerced into Float"),
+        ("5.coerce(Rational(1, 2))",   "Rational can't be coerced into Integer"),
     ] {
         let err = rt.eval(script, "coerce_err.rb").unwrap_err();
         match err.err {

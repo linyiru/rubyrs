@@ -119,6 +119,15 @@ pub enum Value {
     /// (CRuby's "Float wins on mix" rule). Equality across the
     /// numeric types coerces too — `5 == 5.0` is `true`.
     Float(f64),
+    /// Tier-2 rational number (Phase C.1). Heap-stored
+    /// `RationalRepr { num: i64, den: i64 }` always in lowest terms
+    /// with `den > 0`. Constructed via `Kernel#Rational(n, d)` which
+    /// gcd-normalizes + sign-normalizes at the constructor boundary,
+    /// so every live `Value::Rational` is canonical. Cross-type
+    /// equality (Rational == Integer / Float) flows through the
+    /// Numeric#coerce protocol; in-band arithmetic + comparison is
+    /// added in Phase C.2.
+    Rational(ObjId),
     /// Mutable, optionally-frozen string. `Rc<RStr>` shares one
     /// content + frozen-flag pair across every Value clone — so
     /// `s[i] = x` and `s.freeze` both have global-to-aliases
