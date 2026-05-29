@@ -467,6 +467,7 @@ impl Vm {
             // true for every value even if the result will be nil
             // (primitives) or raise FrozenError (set on primitives).
             | "instance_variables" | "instance_variable_get" | "instance_variable_set"
+            | "instance_variable_defined?"
             // `instance_exec` is a universal dispatch arm (block-form
             // self-swap, parity with `instance_eval`). Whitelisted
             // here so feature detection agrees with what dispatch

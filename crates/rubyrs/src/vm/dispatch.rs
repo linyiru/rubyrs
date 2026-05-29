@@ -4413,13 +4413,37 @@ impl Vm {
                 }
             }
         }
+        // `obj.instance_variable_defined?(name)` — true iff the
+        // named ivar has been set (even to nil). Mirrors the
+        // get/set storage shape: reads the same Instance.ivars
+        // map for Value::Object and Class.ivars for Value::Class.
+        // Other receivers carry no ivar table, so the answer is
+        // always false. The name argument goes through the same
+        // `resolve_ivar_name_arg` validator as get/set, so an
+        // invalid identifier (e.g. `:foo` without `@`) raises
+        // NameError before the lookup runs — matching CRuby.
+        if &*name == "instance_variable_defined?" && args.len() == 1 {
+            let ivar_id = self.resolve_ivar_name_arg(&args[0])?;
+            let defined = match &recv {
+                Value::Object(oid) => match self.heap.get(*oid) {
+                    crate::heap::HeapObj::Instance(inst) => {
+                        inst.ivars.contains_key(&ivar_id)
+                    }
+                    _ => false,
+                },
+                Value::Class(cls) => cls.ivars.borrow().contains_key(&ivar_id),
+                _ => false,
+            };
+            self.stack.push(Value::Bool(defined));
+            return Ok(());
+        }
         // Wrong-arity arms for the ivar-introspection family —
         // match CRuby's ArgumentError surface. Without these,
         // `obj.instance_variables(1)`, `obj.instance_variable_get()`,
         // or `obj.instance_variable_set(:@x)` would fall through to
         // NoMethodError, which is wrong (CRuby reports arity, not
         // unknown method). `instance_variables` takes zero args;
-        // `_get` takes one; `_set` takes two.
+        // `_get` / `_defined?` take one; `_set` takes two.
         if &*name == "instance_variables" {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
@@ -4433,6 +4457,11 @@ impl Vm {
         if &*name == "instance_variable_set" {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!("wrong number of arguments (given {}, expected 2)", args.len()),
+            }));
+        }
+        if &*name == "instance_variable_defined?" {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
             }));
         }
         // `Integer#digits([base])` for Int receivers — LSB-first
