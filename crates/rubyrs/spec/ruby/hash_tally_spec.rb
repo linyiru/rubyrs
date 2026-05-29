@@ -21,6 +21,16 @@ describe "Hash#tally" do
     assert_eq({}.tally, {})
   end
 
+  it "silently discards a block (CRuby parity)" do
+    # CRuby's Hash#tally inherits Enumerable's no-block-arg
+    # semantics — passing a block is allowed but discarded.
+    # Without this guard, the block-given form would surface
+    # as NoMethodError despite respond_to?(:tally) returning
+    # true (asymmetric with the explicit zip block guard).
+    h = {a: 1, b: 2}
+    assert_eq(h.tally { |pair| pair.first }, {[:a, 1] => 1, [:b, 2] => 1})
+  end
+
   it "raises ArgumentError when called with one arg (accumulating form unsupported)" do
     # CRuby's Ruby 2.7+ `h.tally(target_hash)` form is out
     # of subset. The error message names the unsupported

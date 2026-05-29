@@ -2800,6 +2800,17 @@ impl Vm {
                     ),
                 }));
             }
+            // `h.tally { ... }` (block-given) — CRuby silently
+            // discards the block and returns the same Hash as
+            // the no-block tally. Without this arm, dispatch
+            // routes block-given to iter.rs first, sees no
+            // `tally` arm, and lands at NoMethodError —
+            // contradicting respond_to?(:tally). Delegate to
+            // the no-block hash.rs arm by calling
+            // `hash_collection_call` directly with empty args.
+            (Value::Hash(id), "tally", []) => {
+                return self.hash_collection_call(*id, "tally", &[]);
+            }
             // `h.zip(*args) { |tuple| ... }` block form is out
             // of subset. Without this guard the block would be
             // silently ignored: dispatch routes block-given to
