@@ -55,6 +55,28 @@ fn chomp_default(bytes: &[u8]) -> Vec<u8> {
     }
 }
 
+/// `String#chomp(sep)` with an explicit String separator.
+/// Special-cases the `"\n"` argument: CRuby treats it as the
+/// "universal record separator" and atomically eats a trailing
+/// `"\r\n"` pair, then any bare `"\n"`. Other separators are
+/// matched as an exact suffix only. (Copilot review #298
+/// round 1 — pre-fix `chomp("\n")` left a stray `\r`.)
+fn chomp_with_sep(bytes: &[u8], sep: &[u8]) -> Vec<u8> {
+    if sep.is_empty() {
+        chomp_paragraph(bytes)
+    } else if sep == b"\n" {
+        // The `"\n"` separator behaves as the universal record
+        // separator: strip `\r\n`, bare `\n`, OR bare `\r`.
+        // Equivalent to the no-arg behavior. (Copilot review
+        // #298 round 1.)
+        chomp_default(bytes)
+    } else if bytes.ends_with(sep) {
+        bytes[..bytes.len() - sep.len()].to_vec()
+    } else {
+        bytes.to_vec()
+    }
+}
+
 /// `String#chomp("")` paragraph mode — strip ALL trailing
 /// `\n` / `\r\n` sequences. CRuby's `$/ = ""` (paragraph
 /// record separator) semantics applied on demand.
@@ -537,7 +559,7 @@ pub(crate) fn string_call(
         //     the receiver ends with it.
         //   - nil arg: returns the receiver unchanged.
         // tilt-2.7.0 `StringTemplate#prepare` embeds a literal
-        // ".chomp" call in the heredoc-wrapped source it eval's
+        // ".chomp" call in the heredoc-wrapped source it evals
         // at render time; the missing method blocked rendering.
         // (TRY_RUNS pass-10 layer #7.)
         (Value::Str(a), "chomp", args) => {
@@ -545,16 +567,10 @@ pub(crate) fn string_call(
             let trimmed: Vec<u8> = match args {
                 [] => chomp_default(&bytes),
                 [Value::Nil] => bytes.clone(),
-                [Value::Str(sep)] => {
-                    let sep_bytes = sep.borrow();
-                    if sep_bytes.is_empty() {
-                        chomp_paragraph(&bytes)
-                    } else if bytes.ends_with(&*sep_bytes) {
-                        bytes[..bytes.len() - sep_bytes.len()].to_vec()
-                    } else {
-                        bytes.clone()
-                    }
-                }
+                [Value::Str(sep)] => chomp_with_sep(&bytes, &sep.borrow()),
+                [other] => return Err(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into String", other.type_name()),
+                }),
                 _ => return Err(RubyError::ArgumentError {
                     msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
                 }),
@@ -567,24 +583,26 @@ pub(crate) fn string_call(
                     msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
                 });
             }
+            // Validate arg shape BEFORE consulting the receiver
+            // so a non-String/non-nil arg raises TypeError even
+            // when the receiver is empty and short-circuits would
+            // return early. (Copilot review #298 round 1.)
+            match args {
+                [] | [Value::Nil] | [Value::Str(_)] => {}
+                [other] => return Err(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into String", other.type_name()),
+                }),
+                _ => return Err(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
+                }),
+            }
             let new_bytes: Vec<u8> = {
                 let bytes = a.borrow();
                 match args {
                     [] => chomp_default(&bytes),
                     [Value::Nil] => return Ok(Some(Value::Nil)),
-                    [Value::Str(sep)] => {
-                        let sep_bytes = sep.borrow();
-                        if sep_bytes.is_empty() {
-                            chomp_paragraph(&bytes)
-                        } else if bytes.ends_with(&*sep_bytes) {
-                            bytes[..bytes.len() - sep_bytes.len()].to_vec()
-                        } else {
-                            return Ok(Some(Value::Nil));
-                        }
-                    }
-                    _ => return Err(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
-                    }),
+                    [Value::Str(sep)] => chomp_with_sep(&bytes, &sep.borrow()),
+                    _ => unreachable!(),
                 }
             };
             if *a.borrow() == new_bytes { Some(Value::Nil) }

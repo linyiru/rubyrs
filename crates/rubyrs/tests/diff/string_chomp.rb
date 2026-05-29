@@ -6,7 +6,7 @@
 ##
 ## Discovery context: tilt-2.7.0 `StringTemplate#prepare`
 ## embeds a literal `.chomp` call in the heredoc-wrapped
-## source it eval's at render time. Pre-fix `String#chomp`
+## source it evals at render time. Pre-fix `String#chomp`
 ## raised NoMethodError, blocking `tpl.render`.
 ## (TRY_RUNS pass-10 layer #7.)
 
@@ -29,6 +29,15 @@ puts "abcXX".chomp("X").inspect
 puts "abcXX".chomp("YY").inspect
 puts "abc".chomp("abc").inspect
 puts "abc".chomp("abcd").inspect
+
+## Shape 3b: `"\n"` separator is the universal record
+## separator — atomically eats trailing `\r\n`, then bare
+## `\n`. Pre-fix the implementation only stripped the
+## final `\n`, leaving a stray `\r`. (Copilot review
+## #298 round 1.)
+puts "abc\r\n".chomp("\n").inspect
+puts "abc\n".chomp("\n").inspect
+puts "abc\r".chomp("\n").inspect
 
 ## Shape 4: `""` (paragraph mode) — strip ALL trailing
 ## newlines.
@@ -54,6 +63,31 @@ puts "chomp!-suffix=#{s.inspect} ret=#{r.inspect}"
 s = "abcXX"
 r = s.chomp!("ZZ")
 puts "chomp!-miss=#{s.inspect} ret=#{r.inspect}"
+
+## Shape 6b: `chomp!("\n")` atomically eats trailing
+## `\r\n`. (Copilot review #298 round 1.)
+s = "abc\r\n"
+r = s.chomp!("\n")
+puts "chomp!-crlf=#{s.inspect} ret=#{r.inspect}"
+
+## Shape 6c: non-String/non-nil separator raises
+## TypeError (not ArgumentError). (Copilot review #298
+## round 1.)
+err = begin
+  "abc".chomp(1)
+  "no-raise"
+rescue TypeError => e
+  e.message.include?("Integer into String") ? "TypeError-Integer" : "TypeError-other-#{e.message}"
+end
+puts "non-str-arg=#{err}"
+
+err = begin
+  "abc".dup.chomp!(1)
+  "no-raise"
+rescue TypeError => e
+  e.message.include?("Integer into String") ? "TypeError-Integer" : "TypeError-other-#{e.message}"
+end
+puts "non-str-arg!=#{err}"
 
 ## Shape 7: `chomp!` on frozen — FrozenError. Per CRuby
 ## the frozen check fires BEFORE the no-change check, so
