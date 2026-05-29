@@ -2,17 +2,14 @@
 
 ## Status
 
-Proposed (2026-05-29). **v4** — Important-tier parity refinements
-from the round-2 review:
-- Phase 0.5 expanded with `SystemExit#status` + `#success?` attrs
-  matching CRuby + concrete preamble shape.
-- New Phase 0.5b: `Kernel#exit` / `exit!` / `abort` family
-  specified (was an omission; `exit!` requires new
-  `Config::process_exit` capability).
-- Signal.trap signal-name normalization specified (Symbol +
-  Integer + "SIG…" prefix variants accepted; concrete subset).
-v3 critical fixes preserved. No code change in this ADR.
-Phase 0 has SHIPPED (commit `a5337fd7`).
+Proposed (2026-05-29). **v5** — Nice-to-have parity refinement
+from the round-2 review: `sleep` interrupted wording reframed —
+v2/v3/v4 said "returned value from rescue reflects elapsed
+seconds," which is a parity drift (CRuby's sleep raises through
+the call; elapsed is recovered by the user measuring
+`Time.now` in the rescue). v4 + v3 critical fixes preserved.
+No code change in this ADR. Phase 0 has SHIPPED (commit
+`a5337fd7`).
 
 **v2 → v3 changes**:
 
@@ -391,27 +388,56 @@ with-args (~2 commits)**:
    integer seconds. The difference between Some(d) and None is
    only the upper bound on the polling loop, not whether the flag
    is checked.
-10. `Kernel#sleep` (no args): call the closure with `None`, then
-    raise Interrupt if the flag is set, otherwise return seconds
-    slept (in the no-args case, this is the elapsed time before
-    the interrupt fired — never the "forever" upper bound).
-10a. `Kernel#sleep(secs)`: call the closure with `Some(Duration)`,
-    then raise Interrupt if the flag fired before the upper bound,
-    otherwise return Integer seconds requested (CRuby returns
-    Integer seconds actually slept; rubyrs returns requested as
-    lower bound — same shape as the pre-Phase 3 behavior).
+10. `Kernel#sleep` (no args): call the closure with `None`. If
+    the flag was set during the polling loop, raise Interrupt
+    (the call never returns a value — the exception unwinds the
+    sleep). Without signal handling, the no-args form is the
+    documented ArgumentError per the existing `Kernel#sleep`
+    Tier 1 behavior — only `install_signal_handler: true` makes
+    sleep-forever meaningful.
+10a. `Kernel#sleep(secs)`: call the closure with `Some(Duration)`.
+    Two outcomes:
+    - Duration elapsed without interrupt: return Integer seconds
+      requested (CRuby returns Integer seconds actually slept;
+      rubyrs returns requested as conservative lower bound —
+      same shape as the pre-Phase 3 behavior).
+    - Flag set before duration elapsed: raise Interrupt (the
+      call does NOT return). User recovers elapsed time via
+      `Time.now` measurement around the rescue, matching CRuby.
 11. Tests:
     - `sleep_default_raises_without_capability_injection` covers
       the no-capability case. Unchanged.
     - With capability + signal handler: SIGINT during `sleep`
-      (no args) raises Interrupt within ~100ms; returned value
-      from the catching `rescue` reflects elapsed seconds.
+      (no args) raises Interrupt within ~100ms. **v5 reframed
+      (round 2 parity correction)**: `sleep` does NOT return a
+      value on interrupt — the Interrupt unwinds the call. The
+      catching `rescue` block sees the Interrupt exception, not
+      a return value. Test shape:
+
+      ```ruby
+      start = Time.now
+      begin
+        sleep        # interrupted by SIGINT
+      rescue Interrupt
+        elapsed = Time.now - start
+        # elapsed ≈ 0.1s; sleep itself didn't return.
+      end
+      ```
+
+      v2–v4 said "returned value from rescue reflects elapsed
+      seconds." That was a parity drift — CRuby raises through
+      sleep; elapsed is recovered by the user measuring
+      Time.now in the rescue.
     - With capability + signal handler: SIGINT during `sleep(60)`
-      raises Interrupt within ~100ms (not 60s); returned value
-      from the catching `rescue` reflects elapsed seconds.
+      raises Interrupt within ~100ms (not 60s). Same shape as
+      above — sleep raises, user measures elapsed in rescue.
     - Without signal handler installed: existing `sleep(0.25)`
       capability test still passes (closure signature backward-
       compatible — flag exists but never set).
+    - **Uninterrupted sleep return value (CRuby parity)**:
+      `sleep(2)` running to completion still returns Integer 2
+      (the current Phase 3 / pre-Phase 3 behavior — flag
+      machinery doesn't change the no-interrupt return path).
 
 **Phase 4 — `Signal.trap("INT") { ... }` user handlers (~4-5 commits,
 revised upward from v1's 3-4)**:
@@ -779,7 +805,18 @@ Phase 5:
 
 ## Revision log
 
-- **2026-05-29 — v4 (this revision).** Important-tier parity
+- **2026-05-29 — v5 (this revision).** Nice-to-have parity
+  refinement: Phase 3 step 10 + step 11 test descriptions
+  reframed for CRuby-faithful sleep-interrupt semantics. v2/v3/
+  v4 said "returned value from rescue reflects elapsed seconds";
+  CRuby actually raises through sleep and the catching rescue
+  sees the Interrupt exception — elapsed time is recovered by
+  the user measuring `Time.now` around the rescue, not by sleep
+  returning a value. Test shape rewritten with the canonical
+  `start = Time.now; begin; sleep; rescue Interrupt; Time.now -
+  start; end` pattern. Uninterrupted sleep return value (Integer
+  seconds) unchanged.
+- **2026-05-29 — v4.** Important-tier parity
   refinements from the round-2 review:
   - Phase 0.5 expanded with concrete preamble shape:
     `SystemExit#status` (Integer; constructor accepts

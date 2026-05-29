@@ -2,13 +2,12 @@
 
 ## Status
 
-Proposed (2026-05-29). **v4** — Important-tier parity refinements
-from the round-2 review:
-- `Kernel#loop` def uses `e.result` directly (CRuby behavior),
-  not the v3 `respond_to?(:result)` gate (which was a parity drift).
-- Phase A round 2 adversarial block-break test list enumerated (5
-  cases with CRuby expected behavior).
-v3 critical fixes preserved. No code change in this ADR.
+Proposed (2026-05-29). **v5** — Nice-to-have parity refinement
+from the round-2 review: Enumerable break-with-value semantics
+differ per method; Phase B "accumulator in a Vm local" shorthand
+expanded into a per-method table (map / select / reject / each /
+reduce / find / count / any?/all?/none?). v4 + v3 critical fixes
+preserved. No code change in this ADR.
 
 **v2 → v3 changes**:
 
@@ -221,10 +220,41 @@ The two changes are interlocking:
    in Vm frame locals, which FiberStashGuard already snapshots, so
    Fiber yield naturally resumes mid-iteration. `Hash#each` walks
    the HashObj's ordered entry vector (CRuby 1.9+ insertion-order
-   guarantee). `Enumerable#map`'s accumulator is a frame-local
-   Array; `break val` REPLACES the accumulator with `val` (matches
-   CRuby: `[1,2,3].map { |x| break "early" } # => "early"`, NOT
-   `[]`).
+   guarantee).
+
+   **v5 — Enumerable break-with-value per-method semantics (round
+   2 surfaced)**. Phase B's "accumulator in a Vm local" shorthand
+   needs nuance — break semantics differ per method, and each
+   needs its own Phase B test:
+
+   | Method | Default return | `break val` returns | Accumulator role |
+   |---|---|---|---|
+   | `map` | `[mapped...]` | `val` (REPLACES the array) | Local Array, discarded on break. |
+   | `select` / `filter` | `[passed...]` | `val` (REPLACES) | Local Array, discarded on break. |
+   | `reject` | `[failed...]` | `val` (REPLACES) | Local Array, discarded on break. |
+   | `each` | the receiver | `val` (yielded value REPLACED by val) | None — receiver is returned for chaining. |
+   | `reduce` / `inject` | final memo | `val` (REPLACES memo entirely) | Single Vm local; break short-circuits past the running memo. |
+   | `find` / `detect` | first match or nil | `val` (REPLACES the match) | None — first hit returns directly. |
+   | `count` | accumulated Int | `val` (REPLACES the Integer) | Single Vm-local Int counter; break short-circuits. |
+   | `any?` / `all?` / `none?` | Bool | `val` (REPLACES the Bool — typically nonsensical but CRuby allows) | Internal Bool short-circuits. |
+
+   Concrete CRuby examples (verified against 3.x):
+
+   ```ruby
+   [1,2,3].map { |x| break "early" }          # => "early"
+   [1,2,3].select { |x| break 99 }            # => 99
+   [1,2,3].inject(0) { |s,x| break "k" }      # => "k" (NOT 0, NOT 1)
+   [1,2,3].find { |x| break :missing }        # => :missing
+   [1,2,3].count { |x| break -1 }             # => -1
+   [1,2,3].each { |x| break "stop" }          # => "stop" (NOT the receiver)
+   ```
+
+   Phase B test commits (one per method or grouped by accumulator
+   shape) verify each row. Implementation uses the same bytecode
+   pattern — `break val` always discards the local accumulator and
+   returns val; what differs is what the LOCAL ACCUMULATOR was
+   computing before the break. Single break-handling code path,
+   per-method accumulator init.
 
 Phase A unblocks `Kernel#loop` (as a Ruby def) and is the smaller of
 the two. Phase B is the permanent Fiber+iter fix.
@@ -651,7 +681,16 @@ Phase B:
 
 ## Revision log
 
-- **2026-05-29 — v4 (this revision).** Important-tier parity
+- **2026-05-29 — v5 (this revision).** Nice-to-have parity
+  refinement: Enumerable break-with-value per-method table
+  added to §Decision. Phase B's v4 "accumulator in a Vm local"
+  shorthand was sound but lossy; v5 spells out 9 method-shape
+  rows (map / select / reject / each / reduce / find / count /
+  any? / all?) with CRuby 3.x return semantics for each. One
+  implementation code path (break val discards local
+  accumulator), per-method accumulator init. Phase B test
+  commits split by accumulator shape, not by ADR-level grouping.
+- **2026-05-29 — v4.** Important-tier parity
   refinements from the round-2 review:
   - `Kernel#loop` def: v3's `e.respond_to?(:result) ? e.result :
     nil` was a parity drift — CRuby's StopIteration always has
