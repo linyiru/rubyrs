@@ -459,6 +459,13 @@ impl Vm {
             // in `do_call` succeed on every receiver, so feature
             // detection has to agree.
             | "itself" | "tap" | "then" | "yield_self"
+            // `dup` / `clone` — universal shallow-copy arms in
+            // `Vm::do_call`. Primitive arms in vm/string.rs /
+            // vm/array.rs / vm/hash.rs intercept their own
+            // receivers, and the universal arms cover
+            // immediates (return self) + plain Object (shallow
+            // copy via new Instance). respond_to? agrees.
+            | "dup" | "clone"
             // The ivar-introspection family (`instance_variables` /
             // `instance_variable_get` / `instance_variable_set`)
             // is implemented as universal dispatch arms in

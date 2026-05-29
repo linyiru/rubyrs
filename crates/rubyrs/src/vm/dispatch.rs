@@ -5264,6 +5264,87 @@ impl Vm {
             self.stack.push(recv);
             return Ok(());
         }
+        // `Object#dup` / `Object#clone` — universal shallow
+        // copy. Primitive arms in vm/string.rs / vm/array.rs /
+        // vm/hash.rs intercept their own receivers earlier in
+        // dispatch; this arm catches everything else.
+        //
+        // Immediates (Int/Float/Sym/Bool/Nil) return self —
+        // CRuby's `5.dup`, `nil.dup`, `:foo.dup` all return the
+        // receiver unchanged since Ruby 2.4. Plain `Value::Object`
+        // gets a fresh Instance with the same class and a
+        // shallow-cloned ivar table; the singleton class is NOT
+        // copied (CRuby's `dup` discards singleton methods, and
+        // `clone` properly copies them — we don't model the
+        // copy yet so both arms drop singletons. Documented
+        // divergence — Tier-2 follow-up alongside the
+        // `clone(freeze:)` kwarg).
+        //
+        // Arity: zero positional args for `dup`; `clone`
+        // accepts a `freeze:` kwarg in CRuby that we don't
+        // route yet — extra args fall to the wrong-arity arm
+        // below.
+        if matches!(&*name, "dup" | "clone") && args.is_empty() {
+            let copied = match &recv {
+                Value::Int(_)
+                | Value::Float(_)
+                | Value::Sym(_)
+                | Value::Bool(_)
+                | Value::Nil => recv.clone(),
+                Value::Object(oid) => {
+                    let (cls, ivars) = match self.heap.get(*oid) {
+                        crate::heap::HeapObj::Instance(inst) => {
+                            (inst.class.clone(), inst.ivars.clone())
+                        }
+                        // TypedData (cext-allocated) carries no
+                        // ivar table on the rubyrs side; punt to
+                        // the fallback below until a caller
+                        // surfaces a need.
+                        _ => {
+                            return Err(self.trap(RubyError::NoMethodError {
+                                kind: crate::error::NoMethodErrorKind::Missing,
+                                method: format!("undefined method '{}' called", &*name),
+                                recv_type: std::borrow::Cow::Owned(
+                                    crate::vm::numeric::class_name_for_error(&recv).to_string(),
+                                ),
+                            }));
+                        }
+                    };
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let new_id = self.heap.alloc(HeapObj::Instance(crate::value::Instance {
+                        class: cls,
+                        ivars,
+                        singleton_class: None,
+                    }));
+                    Value::Object(new_id)
+                }
+                // Range/Block/Method/Regex/BigInt/etc.: no
+                // shallow-copy support yet. Surface a clear
+                // NoMethodError rather than silently returning
+                // self — a future commit can add per-variant
+                // copy logic as use cases land.
+                _ => {
+                    return Err(self.trap(RubyError::NoMethodError {
+                        kind: crate::error::NoMethodErrorKind::Missing,
+                        method: format!("undefined method '{}' called", &*name),
+                        recv_type: std::borrow::Cow::Owned(
+                            crate::vm::numeric::class_name_for_error(&recv).to_string(),
+                        ),
+                    }));
+                }
+            };
+            self.stack.push(copied);
+            return Ok(());
+        }
+        if matches!(&*name, "dup" | "clone") {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0)",
+                    args.len()
+                ),
+            }));
+        }
         // `Object#tap` / `#then` / `#yield_self` without a
         // block — the block-taking forms are handled by
         // `collection_call_block` (vm/iter.rs). Reaching this
