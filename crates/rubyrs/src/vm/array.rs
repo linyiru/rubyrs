@@ -947,6 +947,16 @@ impl Vm {
                         // returns [1, 1.0] (was [1]). Bit-
                         // identical NaN now dedupes too via the
                         // NaN identity shortcut in ruby_eql.
+                        //
+                        // GC discipline: pin the receiver Array
+                        // before the maybe_gc + alloc — heap-ref
+                        // elements collected into `out` (e.g.
+                        // `[[1, 2], [3, 4]].uniq`) are held only
+                        // in a Rust-local Vec and would dangle
+                        // under STRESS_GC=1 between the loop and
+                        // the result alloc. Pinning the receiver
+                        // transitively roots all elements via
+                        // the GC walker.
                         let src = self.heap.array(id).clone();
                         let mut out: Vec<Value> = Vec::with_capacity(src.len());
                         for v in &src {
@@ -954,8 +964,10 @@ impl Vm {
                                 out.push(v.clone());
                             }
                         }
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
                     }
                     ("compact", []) => {

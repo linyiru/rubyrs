@@ -771,3 +771,33 @@ fn hash_uniq_pin_seen_keys_under_stress_gc() {
         "uniq block-form seen keys corrupted under STRESS_GC: {out}"
     );
 }
+
+#[test]
+fn array_uniq_pin_receiver_under_stress_gc() {
+    // Regression: Array#uniq called `maybe_gc()` between
+    // the dedup loop and the result heap.alloc with only a
+    // Rust-local `out` Vec holding heap-ref elements. Under
+    // STRESS_GC=1, inner Arrays in `[[1, 2], [3, 4], ...]`
+    // were swept before the result Array was built,
+    // producing `ICE: use-after-free`.
+    //
+    // Caught by Copilot review on PR #299. Fixed by
+    // pinning the receiver across maybe_gc — receiver pin
+    // transitively roots all elements via the GC walker.
+    let mut rt = Runtime::with_config(Config { stress_gc: true, ..Default::default() });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        # Inline-literal receiver — only held in do_call's
+        # recv-pop Rust local. Inner Arrays are heap-ref
+        # children that must survive maybe_gc between the
+        # dedup loop and the result alloc.
+        r = [[1, 2], [3, 4], [1, 2]].uniq
+        puts r.inspect
+    "#, "array_uniq_stress.rb").expect("eval should not ICE under STRESS_GC");
+    let out = buf.snapshot();
+    assert!(
+        out.starts_with("[[1, 2], [3, 4]]"),
+        "Array#uniq receiver swept under STRESS_GC: {out}"
+    );
+}
