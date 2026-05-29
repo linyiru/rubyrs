@@ -1,7 +1,10 @@
 # Canonical gem-entry-point shape: opt into the
-# co-located source tree via $LOAD_PATH so both CRuby
-# (which only walks $LOAD_PATH) and rubyrs (which also
-# consults caller-relative paths) resolve the same files.
+# co-located source tree via $LOAD_PATH. Both CRuby and
+# rubyrs (since pass-10 layer #6 / PR #295) walk
+# `$LOAD_PATH` only — caller-relative resolution belongs
+# to `require_relative`. Without these unshift calls,
+# `require 'helpers'` / `require 'rack/...'` below would
+# LoadError on both runtimes.
 #
 # `__dir__` is the sinatra/ directory; `..` of that is the
 # package root containing sinatra/, rack/, common/.
