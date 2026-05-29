@@ -42,6 +42,36 @@ fn strip_ws_or_nul(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\x0B' | '\x0C' | '\r' | '\0')
 }
 
+/// `String#chomp` (no arg) — strip exactly one trailing record
+/// separator. CRuby tries `\r\n` first (so the EOL pair is
+/// removed atomically), then bare `\n`, then bare `\r`.
+fn chomp_default(bytes: &[u8]) -> Vec<u8> {
+    if bytes.ends_with(b"\r\n") {
+        bytes[..bytes.len() - 2].to_vec()
+    } else if bytes.ends_with(b"\n") || bytes.ends_with(b"\r") {
+        bytes[..bytes.len() - 1].to_vec()
+    } else {
+        bytes.to_vec()
+    }
+}
+
+/// `String#chomp("")` paragraph mode — strip ALL trailing
+/// `\n` / `\r\n` sequences. CRuby's `$/ = ""` (paragraph
+/// record separator) semantics applied on demand.
+fn chomp_paragraph(bytes: &[u8]) -> Vec<u8> {
+    let mut end = bytes.len();
+    loop {
+        if end >= 2 && &bytes[end - 2..end] == b"\r\n" {
+            end -= 2;
+        } else if end >= 1 && bytes[end - 1] == b'\n' {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    bytes[..end].to_vec()
+}
+
 /// `String#capitalize` core — ASCII-only case fold. First
 /// char uppercase, remaining chars lowercase. Non-letters at
 /// position 0 are left as-is (`"1hello".capitalize` → same).
@@ -489,6 +519,74 @@ pub(crate) fn string_call(
             let new_bytes = a.with_str_lossy(|s|
                 s.trim_start_matches(strip_ws_or_nul).as_bytes().to_vec()
             );
+            if *a.borrow() == new_bytes { Some(Value::Nil) }
+            else {
+                check(new_bytes.len())?;
+                *a.borrow_mut() = new_bytes;
+                Some(Value::Str(a.clone()))
+            }
+        }
+        // `String#chomp` — strip ONE trailing record separator.
+        // CRuby semantics:
+        //   - no arg: strip a single trailing "\r\n", "\n", or
+        //     "\r" (whichever matches; "\r\n" preferred over
+        //     "\n" so the EOL pair is removed atomically).
+        //   - "" arg: strip ALL trailing "\n" / "\r\n" sequences
+        //     ("paragraph mode" — CRuby `$/` set to "").
+        //   - String suffix arg: strip exactly that suffix iff
+        //     the receiver ends with it.
+        //   - nil arg: returns the receiver unchanged.
+        // tilt-2.7.0 `StringTemplate#prepare` embeds a literal
+        // ".chomp" call in the heredoc-wrapped source it eval's
+        // at render time; the missing method blocked rendering.
+        // (TRY_RUNS pass-10 layer #7.)
+        (Value::Str(a), "chomp", args) => {
+            let bytes = a.borrow();
+            let trimmed: Vec<u8> = match args {
+                [] => chomp_default(&bytes),
+                [Value::Nil] => bytes.clone(),
+                [Value::Str(sep)] => {
+                    let sep_bytes = sep.borrow();
+                    if sep_bytes.is_empty() {
+                        chomp_paragraph(&bytes)
+                    } else if bytes.ends_with(&*sep_bytes) {
+                        bytes[..bytes.len() - sep_bytes.len()].to_vec()
+                    } else {
+                        bytes.clone()
+                    }
+                }
+                _ => return Err(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
+                }),
+            };
+            Some(Value::new_str_bytes(trimmed))
+        }
+        (Value::Str(a), "chomp!", args) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let new_bytes: Vec<u8> = {
+                let bytes = a.borrow();
+                match args {
+                    [] => chomp_default(&bytes),
+                    [Value::Nil] => return Ok(Some(Value::Nil)),
+                    [Value::Str(sep)] => {
+                        let sep_bytes = sep.borrow();
+                        if sep_bytes.is_empty() {
+                            chomp_paragraph(&bytes)
+                        } else if bytes.ends_with(&*sep_bytes) {
+                            bytes[..bytes.len() - sep_bytes.len()].to_vec()
+                        } else {
+                            return Ok(Some(Value::Nil));
+                        }
+                    }
+                    _ => return Err(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
+                    }),
+                }
+            };
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
                 check(new_bytes.len())?;
