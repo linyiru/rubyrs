@@ -212,13 +212,25 @@ impl Vm {
     }
 
     /// Same shape as `iter_array_filter`, but the source is a Hash.
-    /// The block receives two args (key, value). `select`/`reject`
-    /// return a Hash; `find` returns a `[k, v]` two-element Array (or nil).
+    /// Yield convention:
+    ///   - `select` / `reject` yield `(k, v)` as TWO args
+    ///     (Hash overrides Enumerable here — CRuby parity).
+    ///   - `any?` / `all?` / `none?` / `find` yield a SINGLE
+    ///     `[k, v]` pair Array (Enumerable-inherited shape),
+    ///     so `|pair|` blocks and `&:sym` to_proc work.
+    /// `find` returns the same pair Array it yielded.
     pub(crate) fn iter_hash_filter(&mut self, id: ObjId, mode: IterMode, block: ObjId) -> Result<Value, Trap> {
         let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
         let mut g = PinGuard::new(self);
         g.pin(Value::Hash(id));
         g.pin(Value::Block(block));
+        // Pre-pin every heap-ref k/v from the snapshot so a
+        // block that mutates the receiver can't sweep entries
+        // held only via the Rust-local Vec.
+        for (k, v) in &snapshot {
+            if k.is_gc_heap_ref() { g.pin(k.clone()); }
+            if v.is_gc_heap_ref() { g.pin(v.clone()); }
+        }
         let acc_id = if matches!(mode, IterMode::Select | IterMode::Reject) {
             g.vm.maybe_gc();
             g.vm.check_alloc()?;
@@ -230,8 +242,24 @@ impl Vm {
         let mut early: Option<Value> = None;
         let mut find_val = Value::Nil;
         let mut bool_acc = mode.bool_init();
+        let is_pair_yield = !matches!(mode, IterMode::Select | IterMode::Reject);
         for (k, v) in snapshot {
-            let r = match g.vm.step_block(block, vec![k.clone(), v.clone()], pre_frames)? {
+            // Build the block arg list. select/reject keep the
+            // two-arg shape (Hash#select / #reject override
+            // Enumerable in CRuby); everything else yields a
+            // single pair Array (Enumerable shape).
+            let (block_args, pair_id) = if is_pair_yield {
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                g.vm.pinned.push(Value::Array(pid));
+                (vec![Value::Array(pid)], Some(pid))
+            } else {
+                (vec![k.clone(), v.clone()], None)
+            };
+            let step = g.vm.step_block(block, block_args, pre_frames);
+            if pair_id.is_some() { g.vm.pinned.pop(); }
+            let r = match step? {
                 BlockStep::MethodReturn => break,
                 BlockStep::Break(r) => { early = Some(r); break; }
                 BlockStep::Value(r) => r,
@@ -241,10 +269,9 @@ impl Vm {
                 IterMode::Select => if truthy { g.vm.heap.hash_mut(acc_id.unwrap()).push((k, v)); }
                 IterMode::Reject => if !truthy { g.vm.heap.hash_mut(acc_id.unwrap()).push((k, v)); }
                 IterMode::Find => if truthy {
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let pair = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
-                    find_val = Value::Array(pair);
+                    // Reuse the per-iter pair_id rather than
+                    // allocating a second pair Array.
+                    find_val = Value::Array(pair_id.unwrap());
                     break;
                 }
                 IterMode::Any => if truthy { bool_acc = true; break; }
