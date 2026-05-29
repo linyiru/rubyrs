@@ -2,10 +2,50 @@
 
 ## Status
 
-Proposed (2026-05-29). **v2** — three parallel reviewer rounds on
-v1 surfaced six load-bearing corrections, addressed inline below.
-Phase 0 has SHIPPED (commit `a5337fd7`); the rest of the design
-lands in follow-up phases after acceptance.
+Proposed (2026-05-29). **v3** — second-round review on v2 surfaced
+four remaining issues (RAII for `suppress_interrupt`, OnceLock
+scope, suppress_interrupt placement choice, counter interaction
+matrix). All closed inline below. Phase 0 has SHIPPED (commit
+`a5337fd7`); the rest of the design lands in follow-up phases
+after acceptance.
+
+**v2 → v3 changes**:
+
+- **RAII guard for `suppress_interrupt`** (Rust-safety H2). v2
+  added the counter but left bare increment/decrement. A panic
+  in `invoke_body_close` would skip the decrement → suppress
+  state stuck > 0 → interrupts permanently disabled for the
+  Vm's remaining lifetime. v3 adds `SuppressInterruptGuard<'a>`
+  with Drop-decrement (same shape as `YieldDepthGuard` in 0024
+  v3).
+- **`suppress_interrupt` placement choice locked**. Round 2
+  asked: stash in FiberSnapshot (so Fiber-suspend-mid-close
+  resumes with correct suppress) or trap Fiber.yield from close
+  paths (mirror cext_depth's Fiber.yield guard)? v3 picks the
+  TRAP approach: when `suppress_interrupt > 0` AND
+  `Fiber.yield` is called, trap with FiberError. Simpler than
+  stashing; matches existing cext_depth pattern; explicit
+  contract that close paths don't yield. Documented in Risk #9
+  + the suppress-window mechanism section.
+- **OnceLock scope clarified**. v2 said
+  `OnceLock<Arc<AtomicBool>>` for Windows install. Round 2
+  asked: what if two Runtimes in the same process? v3 specifies
+  `install_signal_handler: true` is a ONE-TIME PER-PROCESS op;
+  second Runtime construction with the flag set returns
+  `Err(AlreadyInstalled)` from `Runtime::with_config` (new
+  error variant). Documented as a deliberate constraint, not a
+  hidden cost.
+- **Counter interaction matrix** (`cext_depth`,
+  `yield_recursion_depth`, `suppress_interrupt`). v3 specifies
+  the safe-point check ordering + per-counter semantics. All
+  three counters are RAII-guarded (existing `cext_depth` audited
+  + confirmed; the two new ones documented in v3).
+- **Merge-order specification corrected** (mirror of 0024 v3's
+  same correction). v2 said "0025 Phase 2 must precede 0024
+  Phase A" — shorthand; Phase 2 can't literally land first
+  without Phase 1 + flag/handler install. v3 specifies
+  achievable order: Phase 0 (done) → Phase 0.5 → Phase 1 →
+  Phase 2 → THEN 0024 Phase A.
 
 **v1 → v2 changes**:
 
@@ -391,9 +431,22 @@ commits).
    this on POSIX (the static registration owns its Arc clone).
    Windows needs an explicit static `OnceLock<Arc<AtomicBool>>`
    or a deliberately leaked Arc so the handler thread can read
-   without a dangling pointer after `Runtime` drop. Document
-   that `install_signal_handler: true` implies a one-time per-
-   process initialization that survives Runtime drops.
+   without a dangling pointer after `Runtime` drop.
+
+   **v3 — two-Runtime case (round 2 surfaced)**. If a host
+   embeds two `Runtime`s in the same process with
+   `install_signal_handler: true`, the second's `OnceLock::set`
+   would conflict. v3 design choice: `install_signal_handler:
+   true` is a ONE-TIME PER-PROCESS operation. Second Runtime
+   construction with the flag set returns a new
+   `RuntimeBuildError::SignalHandlerAlreadyInstalled` from
+   `Runtime::with_config`. Hosts wanting two Runtimes share the
+   handler installation explicitly: install once via a
+   first-time `Runtime` (or a dedicated init call), then
+   construct subsequent Runtimes with `install_signal_handler:
+   false` (they still consume the shared flag via Arc clone
+   inside the OnceLock). Document in the embedding guide; not a
+   silently-shared cross-Runtime contract.
 
    The "single-threaded language semantics" claim (ADR 0015) is
    preserved at the *Ruby* level — the user can't observe the
@@ -455,32 +508,115 @@ commits).
    flag inside the close path → raise Interrupt mid-close →
    repeat the ensure-leak shape of ADR 0023 Risk #1.
 
-   **v2 mitigation picked**: add `Vm::suppress_interrupt: u32`
-   (counter, mirroring `cext_depth`). `FiberResponseBody::drop`
-   increments before invoking close, decrements after. The
-   safe-point check honors the flag: if `suppress_interrupt > 0`,
-   leave `interrupt_pending` set but don't act on it. Once the
-   close finishes and `suppress_interrupt` returns to 0, the next
-   safe point delivers the deferred interrupt.
+   **v2 mitigation picked + v3 RAII guard**: add
+   `Vm::suppress_interrupt: u32` (counter, mirroring `cext_depth`).
+   Wrap mutation in `SuppressInterruptGuard<'a>` whose `Drop`
+   decrements, so a panic in `invoke_body_close` does NOT leak the
+   counter and permanently disable interrupts:
+
+   ```rust
+   struct SuppressInterruptGuard<'a> { vm: &'a mut Vm }
+   impl<'a> SuppressInterruptGuard<'a> {
+       fn enter(vm: &'a mut Vm) -> Self {
+           vm.suppress_interrupt += 1;
+           Self { vm }
+       }
+   }
+   impl Drop for SuppressInterruptGuard<'_> {
+       fn drop(&mut self) { self.vm.suppress_interrupt -= 1; }
+   }
+   ```
+
+   `FiberResponseBody::drop` enters the guard before invoking
+   close; the guard's Drop fires on close return (normal or
+   panic), restoring the counter cleanly. The safe-point check
+   honors the flag: if `suppress_interrupt > 0`, leave
+   `interrupt_pending` set but don't act on it. Once close
+   finishes and the guard's Drop decrements to 0, the next safe
+   point delivers the deferred interrupt.
 
    Why a counter not a bool: nested suppress windows. A close
    handler that itself runs through another close (rare but
    possible) needs counted suppression to avoid clearing the
    outer's window on the inner's exit.
 
+   **v3 — `suppress_interrupt` placement decision (round 2
+   surfaced)**: should `suppress_interrupt` stash in FiberSnapshot
+   (so Fiber-suspend-mid-close restores it on resume) or should
+   close paths trap on `Fiber.yield` (mirror the `cext_depth`
+   Fiber.yield guard from ADR 0023)?
+
+   v3 picks the **trap-on-yield** approach. Rationale:
+   - Mirrors the existing `cext_depth` pattern — close paths and
+     C-ext frames both run cleanup code that fundamentally
+     shouldn't suspend mid-flight.
+   - Simpler than stashing: no FiberSnapshot table edit, no
+     resume-time restoration ambiguity.
+   - User-visible contract: "a Rack body's `close` method MUST
+     NOT call `Fiber.yield`." Existing Rack 3 close handlers
+     don't yield (they're cleanup, not iteration).
+   - Trap shape: when `suppress_interrupt > 0` AND `Fiber.yield`
+     is called, raise `FiberError("can't yield from close
+     handler")`. Existing cext guard already uses
+     `FiberError("can't yield from cext")`; symmetric.
+
+   Therefore `suppress_interrupt` is **Vm-wide**, **NOT stashed
+   in FiberSnapshot** — same as `cext_depth`. Confirmed
+   explicitly in ADR 0023 v7's stash table.
+
    Reusable: any other "must-complete" cleanup path (future
    `at_exit` runner, ensure-block executor) uses the same
-   counter. Documented as the canonical mechanism.
+   counter AND inherits the no-Fiber-yield contract. Documented
+   as the canonical mechanism.
 
-10. **Coordination with ADR 0024 — `dispatch_until` hot path (v2
-    ADD)**. Both ADRs modify the top-of-loop. Phase 2's
-    interrupt check + 0024's pending_yield handling share the
-    same hot path. Specified merge order: 0025 Phase 2 lands
-    FIRST (or 0024's Phase A first commit includes 0025's
-    interaction). Interaction test (`def f; yield; end; f {
-    sleep(60) }` + SIGINT → Interrupt propagates correctly) is
-    OWNED BY 0024 Phase A but referenced here so the dependency
-    is visible from both sides.
+   **Counter interaction matrix** (round 2 raised this).
+   rubyrs's safe-point check now consults THREE Vm-wide counters:
+
+   | Counter | Source ADR | Suppresses what |
+   |---|---|---|
+   | `cext_depth` | 0023 | `Fiber.yield` |
+   | `yield_recursion_depth` | 0024 | `Op::Yield` (caps recursion, traps ResourceExhausted on overflow) |
+   | `suppress_interrupt` | 0025 | `interrupt_pending` delivery + `Fiber.yield` from close paths |
+
+   All three are Vm-wide, NOT stashed in FiberSnapshot, and
+   RAII-guarded via Drop-decrement helpers. Safe-point check
+   ordering (in `dispatch_until` top-of-loop):
+
+   1. `method_return.is_some()` — already exists. Returns early.
+   2. `fiber_yield_pending.is_some()` — already exists. Returns
+      early.
+   3. NEW: `interrupt_pending.load(Relaxed)` && `suppress_interrupt == 0`
+      → clear flag, trap Interrupt. (When `suppress_interrupt > 0`,
+      flag stays set; checked again at the next safe point.)
+   4. Existing fuel decrement.
+
+   `cext_depth` and `yield_recursion_depth` aren't part of the
+   safe-point ordering — they're consulted at their respective
+   trap sites (Fiber.yield call, Op::Yield entry).
+
+10. **Coordination with ADR 0024 — `dispatch_until` hot path.**
+    Both ADRs modify the top-of-loop. Phase 2's interrupt check
+    + 0024's pending_yield handling share the same hot path.
+
+    **v3 corrected merge order** (v2 said "Phase 2 lands first" —
+    shorthand; Phase 2 can't literally land first without Phase 1
+    + flag/handler install). The actual achievable order:
+
+    1. Phase 0 — Interrupt class hierarchy. **SHIPPED** (commit
+       `a5337fd7`).
+    2. Phase 0.5 — SystemExit class. Independent; can land any
+       time before Phase 4.
+    3. Phase 1 — `interrupt_pending` flag + Config capability +
+       signal-hook handler.
+    4. Phase 2 — safe-point check in `dispatch_until` (the actual
+       hot-path edit).
+    5. THEN ADR 0024 Phase A — synchronous Op::Yield +
+       break-unwind + the cross-ADR interaction handling.
+
+    Interaction test (`def f; yield; end; f { sleep(60) }` +
+    SIGINT → Interrupt propagates correctly) is OWNED BY 0024
+    Phase A but referenced here so the dependency is visible from
+    both sides.
 
 ## Test strategy
 
@@ -529,7 +665,29 @@ Phase 5:
 
 ## Revision log
 
-- **2026-05-29 — v2 (this revision).** Three parallel reviewer
+- **2026-05-29 — v3 (this revision).** Second-round review on v2
+  surfaced four remaining issues, all closed inline:
+  - `suppress_interrupt` counter now wrapped in
+    `SuppressInterruptGuard<'a>` with Drop-decrement (panic-safe).
+    Mirrors `YieldDepthGuard` in 0024 v3 and ADR 0013's
+    `VmPtrGuard`.
+  - `suppress_interrupt` placement question (FiberSnapshot stash
+    vs no-yield trap) resolved: pick TRAP. Close paths trap on
+    `Fiber.yield` via the same `FiberError` shape `cext_depth`
+    already uses. Counter stays Vm-wide; no FiberSnapshot edit.
+    Documented as a user-facing contract.
+  - OnceLock two-Runtime case: `install_signal_handler: true` is
+    one-time per process; second Runtime returns
+    `RuntimeBuildError::SignalHandlerAlreadyInstalled`. Document
+    + provide explicit shared-Arc pattern for embed users.
+  - Counter interaction matrix specified: three Vm-wide counters
+    (`cext_depth`, `yield_recursion_depth`, `suppress_interrupt`),
+    all RAII-guarded, safe-point check order documented.
+  - Merge-order corrected (symmetric with 0024 v3's mirror):
+    Phase 0 (done) → 0.5 → 1 → 2 → THEN 0024 Phase A.
+  No estimate change from v2 (still 12-16 commits / 3.5-4.5 weeks)
+  — the v3 changes refine specifications without adding new phases.
+- **2026-05-29 — v2.** Three parallel reviewer
   rounds (architecture / Rust safety / Ruby parity) on v1 surfaced
   six load-bearing corrections:
   - Phase 0 marked SHIPPED (commit `a5337fd7`).

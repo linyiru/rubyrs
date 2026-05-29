@@ -2,11 +2,35 @@
 
 ## Status
 
-Proposed (2026-05-29). **v2** — three parallel reviewer rounds
-(architecture / Rust safety / Ruby parity) on v1 surfaced four
-load-bearing corrections, addressed inline below. No code change
-in this ADR — implementation lands in a follow-up after the design
-is accepted.
+Proposed (2026-05-29). **v3** — second-round review on v2 surfaced
+three remaining issues (RAII guard for `yield_recursion_depth`,
+merge-order specification was a shorthand not actual order, FiberSnapshot
+stash table update dependency on ADR 0023 not visible). All addressed
+in v3 inline. No code change in this ADR — implementation lands in a
+follow-up after the design is accepted.
+
+**v2 → v3 changes**:
+
+- **RAII guard for `yield_recursion_depth`** (Rust-safety H1). v2
+  added the counter but left increment/decrement bare. A panic
+  through the synchronous Op::Yield wrapper would skip the
+  decrement and leak counter monotonically — eventually false-
+  tripping `Config::max_yield_recursion`. v3 specifies
+  `YieldDepthGuard<'a>` with `Drop` decrementing, same shape as
+  ADR 0013's `VmPtrGuard` and ADR 0023 v2's `FiberStashGuard`.
+- **FiberSnapshot stash dependency on ADR 0023 explicit**. v2
+  said the new `Frame::pending_yield` "MUST be added to the v2
+  FiberSnapshot table" — but didn't note this is a cross-ADR
+  edit that ADR 0023 v7 has to make. v3 explicitly states the
+  dependency + lists `pending_yield` as a v3 entry for ADR 0023's
+  stash table.
+- **Merge-order specification corrected**. v2 said "0025 Phase 2
+  must precede 0024 Phase A's first commit." That's shorthand —
+  Phase 2 can't literally land first without Phase 1 (flag +
+  capability + signal handler install) preceding it. v3 specifies
+  the achievable order: 0025 Phase 0 (shipped) → Phase 0.5
+  (SystemExit) → Phase 1 → Phase 2 → THEN 0024 Phase A. Stated
+  symmetrically with 0025 v3's mirror update.
 
 **v1 → v2 changes**:
 
@@ -254,9 +278,14 @@ Risk #2 resolutions added a per-Frame field + per-Vm counter)**:
 
 1. Add `Frame::pending_yield: bool` (Risk #2) +
    `Vm::yield_recursion_depth: u32` + `Config::max_yield_recursion:
-   Option<u32>` (Risk #1). Wire into Frame construction +
-   FiberSnapshot stash table (ADR 0023 §"Fiber-scoped Vm state"
-   needs the new pending_yield entry).
+   Option<u32>` (Risk #1) + `YieldDepthGuard<'a>` (Risk #1 RAII).
+   Wire into Frame construction. **Cross-ADR edit**: this commit
+   ALSO updates ADR 0023 §"Fiber-scoped Vm state" — adds
+   `pending_yield` to the "must stash" rows; adds
+   `yield_recursion_depth` to the "DO NOT stash" rows (Vm-wide,
+   not Fiber-scoped — same as `cext_depth`). ADR 0023 v7 already
+   carries placeholder rows for these; this commit fills them in
+   when the code lands.
 2. `Op::Yield` synchronous variant: SET pending_yield, invoke
    block, dispatch_until to block-frame depth, check method_return
    + break_signaled, CLEAR pending_yield, advance IP. Behavior-
@@ -339,10 +368,41 @@ Risk #2 resolutions added a per-Frame field + per-Vm counter)**:
 
    **v2 mitigation**: add `Vm::yield_recursion_depth: u32` +
    `Config::max_yield_recursion: Option<u32>` (default Some(256),
-   mirroring existing resource-cap conservatism). Incremented at
-   the top of Op::Yield's synchronous block, decremented before
-   return. Cap exhaustion traps `ResourceExhausted`. Same shape as
-   `cext_depth` from ADR 0023.
+   mirroring existing resource-cap conservatism). Cap exhaustion
+   traps `ResourceExhausted`.
+
+   **v3 RAII guard (was the round-2 reviewer finding)**: bare
+   increment/decrement leaks the counter on panic. Wrap the
+   counter mutation in a `YieldDepthGuard<'a>` whose `Drop`
+   decrements, same shape as ADR 0013's `VmPtrGuard` and ADR
+   0023 v2's `FiberStashGuard`.
+
+   ```rust
+   struct YieldDepthGuard<'a> { vm: &'a mut Vm }
+   impl<'a> YieldDepthGuard<'a> {
+       fn enter(vm: &'a mut Vm) -> Result<Self, Trap> {
+           vm.yield_recursion_depth += 1;
+           if let Some(cap) = vm.max_yield_recursion
+               && vm.yield_recursion_depth > cap {
+               vm.yield_recursion_depth -= 1;
+               return Err(vm.trap(RubyError::ResourceExhausted {
+                   msg: format!(
+                       "yield recursion depth exceeded ({} > {})",
+                       vm.yield_recursion_depth, cap,
+                   ),
+               }));
+           }
+           Ok(Self { vm })
+       }
+   }
+   impl Drop for YieldDepthGuard<'_> {
+       fn drop(&mut self) { self.vm.yield_recursion_depth -= 1; }
+   }
+   ```
+
+   Same shape as `cext_depth` from ADR 0023 — which itself was
+   audited as part of this review and confirmed to use a Drop-
+   based guard already.
 
 2. **Op::Yield + Fiber yield interaction (resolved in v2).**
    v1 left the IP-advancement question open ("two approaches",
@@ -382,16 +442,36 @@ Risk #2 resolutions added a per-Frame field + per-Vm counter)**:
    ADRs modify `dispatch_until`'s top-of-loop. 0024 Phase A adds
    the synchronous Op::Yield wrapper + break-unwind. 0025 Phase 2
    adds `interrupt_pending` check alongside `method_return` /
-   `fiber_yield_pending`. **Merge order**: 0025 Phase 2 must
-   precede 0024 Phase A's first commit OR 0024 Phase A's first
-   commit must include the 0025 interaction handling. The
-   interaction case: SIGINT arrives during a synchronous Op::Yield's
-   nested dispatch_until. Behavior: interrupt_pending observed at
-   the inner dispatch_until's top-of-loop, raises Interrupt as a
-   Trap, propagates up through the break-unwind helper's stack-walk
-   logic (the helper handles non-local exits cleanly because it
-   uses the same rescues stack as method_return). Test:
-   `def f; yield; end; f { sleep(60) }` + SIGINT → Interrupt
+   `fiber_yield_pending`.
+
+   **v3 corrected merge order** (v2 said "0025 Phase 2 must precede
+   0024 Phase A" — that was shorthand; Phase 2 can't literally land
+   first without Phase 1 + flag/handler install in place). The
+   actual achievable order:
+
+   1. ADR 0025 Phase 0 — Interrupt class hierarchy. **SHIPPED**
+      (commit `a5337fd7`).
+   2. ADR 0025 Phase 0.5 — SystemExit class. Independent; can
+      land any time before Phase 4.
+   3. ADR 0025 Phase 1 — `interrupt_pending` flag + Config
+      capability + signal-hook handler.
+   4. ADR 0025 Phase 2 — safe-point check in `dispatch_until`
+      (the actual hot-path edit).
+   5. THEN ADR 0024 Phase A — synchronous Op::Yield + break-unwind
+      + the cross-ADR interaction handling.
+
+   Alternative: 0024 Phase A's first commit ships before 0025
+   Phase 2 AND includes the 0025 Phase 2 work as part of that
+   commit. Discouraged: bundles two ADRs' first commits, harder
+   to review.
+
+   Interaction case + test: SIGINT arrives during a synchronous
+   Op::Yield's nested dispatch_until. Behavior: interrupt_pending
+   observed at the inner dispatch_until's top-of-loop, raises
+   Interrupt as a Trap, propagates up through the break-unwind
+   helper's stack-walk logic (the helper handles non-local exits
+   cleanly because it uses the same rescues stack as method_return).
+   Test: `def f; yield; end; f { sleep(60) }` + SIGINT → Interrupt
    propagates out of `f`'s frame correctly.
 
 4. **Rust-iter perf regression.** Bytecode iter on a `1_000_000.times`
@@ -496,7 +576,21 @@ Phase B:
 
 ## Revision log
 
-- **2026-05-29 — v2 (this revision).** Three parallel reviewer
+- **2026-05-29 — v3 (this revision).** Second-round review on v2
+  surfaced three remaining issues, all closed inline:
+  - `yield_recursion_depth` counter now wrapped in
+    `YieldDepthGuard<'a>` with Drop-decrement (panic-safe).
+    Mirrors ADR 0013's `VmPtrGuard` + ADR 0023's `FiberStashGuard`.
+  - Merge-order specification corrected: v2's "0025 Phase 2 must
+    precede 0024 Phase A" was shorthand. v3 spells out the actual
+    achievable order (0025 Phase 0 done → 0.5 → 1 → 2 → THEN 0024
+    Phase A) symmetric with 0025 v3.
+  - Phase A step 1 now explicitly notes the ADR 0023
+    §"Fiber-scoped Vm state" cross-edit (add `pending_yield`,
+    add `yield_recursion_depth` to DO-NOT-stash). ADR 0023 v7
+    placeholder rows make the dependency visible from both
+    sides.
+- **2026-05-29 — v2.** Three parallel reviewer
   rounds (architecture / Rust safety / Ruby parity) on v1 surfaced
   four load-bearing corrections:
   - Risk #1 (Rust-stack bound argument) was WRONG — `max_fiber_frame_depth`

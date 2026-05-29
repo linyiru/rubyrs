@@ -2,9 +2,26 @@
 
 ## Status
 
-**Accepted (2026-05-28, refined 2026-05-29). v6 — three
-parallel reviewer rounds surfaced honest gaps in the v5
-status doc, addressed inline below.**
+**Accepted (2026-05-28, refined 2026-05-29). v7 — second-round
+review on 0024 v2 + 0025 v2 surfaced a cross-ADR edit that
+required updating ADR 0023's Fiber-scoped Vm state table.**
+
+v6 → v7 changes (this revision):
+
+- §"Fiber-scoped Vm state" stash table updated with three new
+  rows agreed across ADR 0024 v3 + 0025 v3:
+  * `frames[*].pending_yield: bool` (must stash; transitively
+    via `frames`). Source: ADR 0024 v3 Phase A — synchronous
+    Op::Yield's IP-advancement flag.
+  * `yield_recursion_depth` (DO NOT stash). Source: ADR 0024
+    v3 Risk #1 RAII counter.
+  * `interrupt_pending`, `suppress_interrupt` (DO NOT stash).
+    Source: ADR 0025 v3 Phase 1 + Risk #9.
+- All three new rows mirror the existing `cext_depth` precedent
+  (Vm-wide counter, RAII-guarded via Drop helper, suppresses a
+  control-flow operation when nonzero).
+- No architectural change from v6; doc precision to keep the
+  table authoritative for downstream implementers of 0024 + 0025.
 
 Phase 0, Phase 1, Phase 2 items #16–#20, and Phase 3 all
 landed (commits `18eb0e37` → `88d139f6`). Live behaviour
@@ -628,11 +645,11 @@ the following Vm fields on `Fiber.yield` and restores on
 `fiber.resume`. This table mirrors ADR 0022 v6's
 `reset_between_requests` discipline.
 
-**Must stash + restore (12 fields)**:
+**Must stash + restore (13 fields — `pending_yield` added in v7)**:
 
 | Vm field | Why |
 |----------|-----|
-| `frames: Vec<Frame>` | The active call stack. Each Frame carries locals, IP, return target. |
+| `frames: Vec<Frame>` | The active call stack. Each Frame carries locals, IP, return target, AND (v7) `pending_yield: bool`. |
 | `stack: Vec<Value>` | Operand stack. The current expression's partial values. |
 | `pinned: Vec<Value>` | GC pins. Fiber-scoped pins must follow the Fiber. |
 | `class_stack` | Open class context. Yielding inside `class Foo; ...; end` must leave the resumer's class context unchanged. |
@@ -644,6 +661,7 @@ the following Vm fields on `Fiber.yield` and restores on
 | `bypass_visibility_once: bool` | `send` private-dispatch flag. |
 | `last_match: Option<...>` (regex feature) | `$~` is Fiber-local per CRuby. |
 | `last_read_line: Option<Value>` | `$_` is Fiber-local per CRuby. |
+| `frames[*].pending_yield: bool` (v7 / ADR 0024 Phase A) | Per-Frame "synchronous Op::Yield is in progress" flag. Fiber suspended mid-yield must resume with the flag intact so the resume path SKIPS re-invoking the block (block frame is already on the stack). Per-Frame, captured transitively by stashing `frames`. |
 
 **Must stash (pending exception)**:
 
@@ -651,7 +669,7 @@ the following Vm fields on `Fiber.yield` and restores on
 |-------|-------|
 | In-progress unwind exception | If yield happens inside `rescue`, the in-progress exception object must be Fiber-local. The active rescue frame is part of `frames`; the exception itself needs a separate stash slot. |
 
-**DO NOT stash (process-wide)**:
+**DO NOT stash (process-wide / Vm-wide-by-design)**:
 
 | Vm field | Why |
 |----------|-----|
@@ -661,6 +679,9 @@ the following Vm fields on `Fiber.yield` and restores on
 | `globals` | `$foo` is global per CRuby (only `$~` and `$_` are Fiber-local). |
 | `host_fns`, `cext_*` | Registration is process-wide. |
 | `cext_depth` | Counter is the Vm's "am I in cext?" view; if a Fiber resumes inside cext, that fact about the resumer remains true. |
+| `yield_recursion_depth` (v7 / ADR 0024 Phase A) | Vm-wide cap on synchronous `Op::Yield` recursion. Bounds Rust-stack growth, not yield-flow per Fiber. Same shape as `cext_depth`. RAII-managed via `YieldDepthGuard`. |
+| `interrupt_pending: Arc<AtomicBool>` (v7 / ADR 0025 Phase 1) | Vm-wide signal flag. Stashing would let a suspended Fiber miss signals on resume. Lives on Arc so signal handler can store cross-thread. |
+| `suppress_interrupt: u32` (v7 / ADR 0025 Phase 2) | Vm-wide "must-complete cleanup window" counter. Mirrors `cext_depth` shape. Close paths trap on `Fiber.yield` (FiberError) — no Fiber suspend possible mid-suppress, so no stash needed. RAII-managed via `SuppressInterruptGuard`. |
 
 **Phase 1 acceptance criterion**: a unit test for each
 field in the "Must stash" list that proves the resumer's
@@ -979,7 +1000,16 @@ commit atomic with tests per the existing process.
 
 ## Revision log
 
-- **2026-05-29 — v6 (this revision).** Three parallel
+- **2026-05-29 — v7 (this revision).** Second-round review on
+  0024 v2 + 0025 v2 surfaced a cross-ADR edit: their new fields
+  (`pending_yield`, `yield_recursion_depth`, `interrupt_pending`,
+  `suppress_interrupt`) need to appear in ADR 0023's
+  §"Fiber-scoped Vm state" stash table so future implementers
+  see one authoritative list. Added: `pending_yield` (must stash,
+  per-Frame) and three Vm-wide counters/flags (DO NOT stash, all
+  mirroring `cext_depth`'s pattern, all RAII-guarded). No
+  architectural change from v6.
+- **2026-05-29 — v6.** Three parallel
   reviewer rounds (architecture, Rust safety, Ruby parity)
   surfaced honest gaps in the v5 status doc, addressed
   inline. Key corrections: (a) the Drop null-pointer guard
