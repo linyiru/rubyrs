@@ -1233,29 +1233,26 @@ impl Vm {
     }
 
     /// Search-path candidates for `require <path_str>`. First
-    /// existing one wins. CRuby's canonical model walks
-    /// `$LOAD_PATH` (gem install paths + stdlib + the running
-    /// script's dir); rubyrs approximates the "co-located source
-    /// tree" subset of that for the embeddable / single-tree
-    /// DSL host case. Absolute paths shortcut the search.
+    /// existing one wins. Matches CRuby's `require`: walks
+    /// `$LOAD_PATH` only — the caller source file's directory
+    /// is `require_relative`'s job, not `require`'s.
+    /// (Co-located trees / cross-package hops opt in by
+    /// `$LOAD_PATH.unshift(dir)` at boot; require_xpkg
+    /// fixture is the in-tree example.) Absolute paths
+    /// shortcut the search.
     ///
     /// Order:
     ///   1. as-given (handles absolute paths + cwd-relative).
-    ///   2. caller source file's directory + name.rb
-    ///      (sibling: `require 'helpers'` from `lib/x.rb`
-    ///      finds `lib/helpers.rb`).
-    ///   3. caller source file's PARENT directory + name.rb
-    ///      (cross-package "lib" hop: `require
-    ///      'rack/show_exceptions'` from
-    ///      `<root>/sinatra/show_exceptions.rb` finds
-    ///      `<root>/rack/show_exceptions.rb`).
-    ///   4. each `$LOAD_PATH` entry + name.rb (in order;
+    ///   2. each `$LOAD_PATH` entry + name.rb (in order;
     ///      scripts opt into this by `$LOAD_PATH.unshift(dir)`
-    ///      at boot). Approximates CRuby's `$LOAD_PATH` walk
-    ///      for hand-managed source trees + gem-vendor
-    ///      layouts.
-    ///   5. raw input as last-resort defensive fallback when
+    ///      at boot).
+    ///   3. raw input as last-resort defensive fallback when
     ///      auto-`.rb` extension was applied but didn't match.
+    ///
+    /// (Pass-10 layer #6 removed the caller_dir + caller_dir
+    /// parent candidates — they shadowed the stdlib-stub
+    /// fallback when a `require` inside an already-loaded
+    /// file resolved back to that same file. See PR #295.)
     ///
     /// Shared by `require_ruby` (for the actual load) and the
     /// `require` dispatch arm (for the .rb-vs-cext routing
