@@ -2898,6 +2898,49 @@ impl Vm {
                           in this subset".to_string(),
                 }));
             }
+            // `arr.uniq { |x| key }` — block-form Array#uniq.
+            // Block return is the uniqueness key (compared via
+            // `ruby_eql`). First-seen wins on collision.
+            // Mirrors the Hash#uniq block-arm pattern below:
+            // seen-keys stored in a pinned heap-backed Array so
+            // heap-ref keys survive across maybe_gc.
+            (Value::Array(id), "uniq", []) => {
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(id).clone();
+                for v in &snapshot {
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                // Heap-backed seen-keys list (same pattern as
+                // Hash#uniq block-form to prevent UAF on
+                // swept block-return values).
+                let seen_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
+                g.pin(Value::Array(seen_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for v in snapshot {
+                    let key = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    let already_seen = g.vm.heap.array(seen_id).iter()
+                        .any(|s| s.ruby_eql(&key, &g.vm.heap));
+                    if !already_seen {
+                        g.vm.heap.array_mut(seen_id).push(key);
+                        g.vm.heap.array_mut(result_id).push(v);
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(result_id)))
+            }
             // `h.uniq { |pair| key }` — block-form uniq.
             // Yields a single `[k, v]` pair Array per entry;
             // the block return is the uniqueness key (compared

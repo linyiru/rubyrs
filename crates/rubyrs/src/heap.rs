@@ -1037,6 +1037,38 @@ impl Value {
     /// fixture; this method is the surface that retires it.
     pub(crate) fn ruby_eql(&self, other: &Value, heap: &Heap) -> bool {
         match (self, other) {
+            // Float-vs-Float — `eql?` strictness PLUS a NaN
+            // identity shortcut. CRuby's `Float#eql?(NaN, NaN)`
+            // returns false (NaN != NaN even structurally),
+            // but Array#uniq / Hash#uniq dedup AND Hash key
+            // lookup (Hash#[], Hash#[]=, Hash#include?, key
+            // collision check on insert) use an identity check
+            // FIRST (same Float object short-circuits to
+            // equal), and only fall back to `eql?` for
+            // distinct objects. rubyrs's Float is a value type
+            // with no identity, so distinct-but-bit-identical
+            // NaN values are indistinguishable from "the same
+            // NaN object" in CRuby. Treat them as eql? —
+            // otherwise:
+            //   - Hash#uniq / Array#uniq silently fail to
+            //     dedupe the common `{a: nan, b: nan}.uniq`
+            //     shape.
+            //   - `h = {nan => 1}; h[nan]` returns nil (key
+            //     lookup fails) instead of 1.
+            //   - Set-like operations don't recognise NaN as
+            //     a stored key.
+            // Trade-off: distinct CRuby Float objects with
+            // matching NaN bits would diverge here (we dedup,
+            // CRuby doesn't), but rubyrs has no way to model
+            // that distinction. For non-NaN floats, plain
+            // `==` is identical to CRuby (handles ±0.0 etc.).
+            (Value::Float(a), Value::Float(b)) => {
+                if a.is_nan() && b.is_nan() {
+                    a.to_bits() == b.to_bits()
+                } else {
+                    a == b
+                }
+            }
             // Numeric strictness: no Int↔Float or Int↔BigInt
             // coercion. Two values of DIFFERENT numeric type can
             // never be eql?, even when their `==` would be true.

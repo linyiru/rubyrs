@@ -940,16 +940,49 @@ impl Vm {
                         Some(Value::Array(nid))
                     }
                     ("uniq", []) => {
+                        // CRuby's Array#uniq dedupes via `eql?`
+                        // (strict — no Int↔Float coercion), not
+                        // `==`. Switched from ruby_eq to
+                        // ruby_eql so `[1, 1.0].uniq` correctly
+                        // returns [1, 1.0] (was [1]). Bit-
+                        // identical NaN now dedupes too via the
+                        // NaN identity shortcut in ruby_eql.
+                        //
+                        // GC discipline: pin the receiver Array
+                        // before the maybe_gc + alloc — heap-ref
+                        // elements collected into `out` (e.g.
+                        // `[[1, 2], [3, 4]].uniq`) are held only
+                        // in a Rust-local Vec and would dangle
+                        // under STRESS_GC=1 between the loop and
+                        // the result alloc. Pinning the receiver
+                        // transitively roots all elements via
+                        // the GC walker.
                         let src = self.heap.array(id).clone();
                         let mut out: Vec<Value> = Vec::with_capacity(src.len());
                         for v in &src {
-                            if !out.iter().any(|x| x.ruby_eq(v, &self.heap)) {
+                            if !out.iter().any(|x| x.ruby_eql(v, &self.heap)) {
                                 out.push(v.clone());
                             }
                         }
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
+                    }
+                    // Wrong-arity guard for uniq — CRuby's
+                    // no-block form takes no positional args.
+                    // Without this guard, `ary.uniq(1)` falls
+                    // through every primitive arm and surfaces
+                    // as NoMethodError despite
+                    // respond_to?(:uniq) returning true.
+                    ("uniq", many) => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 0)",
+                                many.len(),
+                            ),
+                        }));
                     }
                     ("compact", []) => {
                         let out: Vec<Value> = self.heap.array(id).iter()
@@ -986,10 +1019,14 @@ impl Vm {
                         Some(Value::Array(id))
                     }
                     ("uniq!", []) => {
+                        // Mirror Array#uniq: dedup via ruby_eql
+                        // (eql?, strict on numeric type) so the
+                        // bang variant doesn't diverge from the
+                        // non-bang form.
                         let src = self.heap.array(id).clone();
                         let mut out: Vec<Value> = Vec::with_capacity(src.len());
                         for v in &src {
-                            if !out.iter().any(|x| x.ruby_eq(v, &self.heap)) {
+                            if !out.iter().any(|x| x.ruby_eql(v, &self.heap)) {
                                 out.push(v.clone());
                             }
                         }
@@ -1000,6 +1037,15 @@ impl Vm {
                             *self.heap.array_mut(id) = out;
                             Some(Value::Array(id))
                         }
+                    }
+                    // Symmetric wrong-arity guard for uniq!.
+                    ("uniq!", many) => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 0)",
+                                many.len(),
+                            ),
+                        }));
                     }
                     ("compact!", []) => {
                         let src = self.heap.array(id).clone();
