@@ -42,6 +42,71 @@ fn strip_ws_or_nul(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\x0B' | '\x0C' | '\r' | '\0')
 }
 
+/// `String#chomp` (no arg) — strip exactly one trailing record
+/// separator. CRuby tries `\r\n` first (so the EOL pair is
+/// removed atomically), then bare `\n`, then bare `\r`.
+fn chomp_default(bytes: &[u8]) -> Vec<u8> {
+    bytes[..chomp_default_keep_len(bytes)].to_vec()
+}
+
+/// Allocation-free sibling of `chomp_default`: returns the
+/// number of leading bytes to keep. Used by `chomp!` to avoid
+/// allocating a fresh `Vec<u8>` for the common no-change case.
+/// (Copilot review #298 round 2.)
+fn chomp_default_keep_len(bytes: &[u8]) -> usize {
+    if bytes.ends_with(b"\r\n") {
+        bytes.len() - 2
+    } else if bytes.ends_with(b"\n") || bytes.ends_with(b"\r") {
+        bytes.len() - 1
+    } else {
+        bytes.len()
+    }
+}
+
+/// `String#chomp(sep)` with an explicit String separator.
+/// Special-cases the `"\n"` argument: CRuby treats it as the
+/// "universal record separator" and atomically eats a trailing
+/// `"\r\n"` pair, then any bare `"\n"` / `"\r"`. Other separators
+/// are matched as an exact suffix only.
+fn chomp_with_sep(bytes: &[u8], sep: &[u8]) -> Vec<u8> {
+    bytes[..chomp_with_sep_keep_len(bytes, sep)].to_vec()
+}
+
+/// Allocation-free sibling of `chomp_with_sep`: returns the
+/// number of leading bytes to keep. (Copilot review #298
+/// round 2.)
+fn chomp_with_sep_keep_len(bytes: &[u8], sep: &[u8]) -> usize {
+    if sep.is_empty() {
+        chomp_paragraph_keep_len(bytes)
+    } else if sep == b"\n" {
+        chomp_default_keep_len(bytes)
+    } else if bytes.ends_with(sep) {
+        bytes.len() - sep.len()
+    } else {
+        bytes.len()
+    }
+}
+
+/// `String#chomp("")` paragraph mode — strip ALL trailing
+/// `\n` / `\r\n` sequences. CRuby's `$/ = ""` (paragraph
+/// record separator) semantics applied on demand.
+/// Returns the number of leading bytes to keep so callers
+/// can decide whether to allocate. (Copilot review #298
+/// round 2.)
+fn chomp_paragraph_keep_len(bytes: &[u8]) -> usize {
+    let mut end = bytes.len();
+    loop {
+        if end >= 2 && &bytes[end - 2..end] == b"\r\n" {
+            end -= 2;
+        } else if end >= 1 && bytes[end - 1] == b'\n' {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    end
+}
+
 /// `String#capitalize` core — ASCII-only case fold. First
 /// char uppercase, remaining chars lowercase. Non-letters at
 /// position 0 are left as-is (`"1hello".capitalize` → same).
@@ -493,6 +558,75 @@ pub(crate) fn string_call(
             else {
                 check(new_bytes.len())?;
                 *a.borrow_mut() = new_bytes;
+                Some(Value::Str(a.clone()))
+            }
+        }
+        // `String#chomp` — strip ONE trailing record separator.
+        // CRuby semantics:
+        //   - no arg: strip a single trailing "\r\n", "\n", or
+        //     "\r" (whichever matches; "\r\n" preferred over
+        //     "\n" so the EOL pair is removed atomically).
+        //   - "" arg: strip ALL trailing "\n" / "\r\n" sequences
+        //     ("paragraph mode" — CRuby `$/` set to "").
+        //   - String suffix arg: strip exactly that suffix iff
+        //     the receiver ends with it.
+        //   - nil arg: returns the receiver unchanged.
+        // tilt-2.7.0 `StringTemplate#prepare` embeds a literal
+        // ".chomp" call in the heredoc-wrapped source it evals
+        // at render time; the missing method blocked rendering.
+        // (TRY_RUNS pass-10 layer #7.)
+        (Value::Str(a), "chomp", args) => {
+            let bytes = a.borrow();
+            let trimmed: Vec<u8> = match args {
+                [] => chomp_default(&bytes),
+                [Value::Nil] => bytes.clone(),
+                [Value::Str(sep)] => chomp_with_sep(&bytes, &sep.borrow()),
+                [other] => return Err(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into String", other.type_name()),
+                }),
+                _ => return Err(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
+                }),
+            };
+            Some(Value::new_str_bytes(trimmed))
+        }
+        (Value::Str(a), "chomp!", args) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            // Validate arg shape BEFORE consulting the receiver
+            // so a non-String/non-nil arg raises TypeError even
+            // when the receiver is empty and short-circuits would
+            // return early. (Copilot review #298 round 1.)
+            match args {
+                [] | [Value::Nil] | [Value::Str(_)] => {}
+                [other] => return Err(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into String", other.type_name()),
+                }),
+                _ => return Err(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
+                }),
+            }
+            // Cheap no-change detection: read the keep-length
+            // without allocating. Returns nil on no-op (the
+            // common case), only truncates in place when there's
+            // actually a separator to strip. (Copilot review
+            // #298 round 2.)
+            let keep_len = {
+                let bytes = a.borrow();
+                match args {
+                    [] => chomp_default_keep_len(&bytes),
+                    [Value::Nil] => return Ok(Some(Value::Nil)),
+                    [Value::Str(sep)] => chomp_with_sep_keep_len(&bytes, &sep.borrow()),
+                    _ => unreachable!(),
+                }
+            };
+            if keep_len == a.borrow().len() {
+                Some(Value::Nil)
+            } else {
+                a.borrow_mut().truncate(keep_len);
                 Some(Value::Str(a.clone()))
             }
         }

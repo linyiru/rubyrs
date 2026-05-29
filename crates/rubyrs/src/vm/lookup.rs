@@ -551,6 +551,7 @@ impl Vm {
                 "capitalize!" | "swapcase!" |
                 "strip" | "lstrip" | "rstrip" |
                 "strip!" | "lstrip!" | "rstrip!" |
+                "chomp" | "chomp!" |
                 "tr!" | "squeeze!" |
                 "center" | "ljust" | "rjust" |
                 "include?" | "start_with?" | "end_with?" |
