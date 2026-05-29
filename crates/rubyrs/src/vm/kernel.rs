@@ -44,6 +44,7 @@ impl Vm {
                 | "Float"
                 | "String"
                 | "Array"
+                | "Rational"
                 | "sprintf"
                 | "format"
                 | "__time_now_raw"
@@ -181,7 +182,7 @@ impl Vm {
                         &*name,
                         "puts" | "p" | "pp" | "print" | "require" |
                         "sprintf" | "format" | "__time_now_raw" | "sleep" |
-                        "Integer" | "Float" | "String" | "Array" |
+                        "Integer" | "Float" | "String" | "Array" | "Rational" |
                         "eval" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?"
                     );

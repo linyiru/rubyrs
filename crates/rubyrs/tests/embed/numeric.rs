@@ -2965,6 +2965,15 @@ fn rational_phase_c1_construction_and_readers() {
         ("puts Rational(3, 4).to_f",            "0.75"),
         ("puts Rational(-3, 4).to_f",           "-0.75"),
         ("puts Rational(3, 4).to_r.inspect",    "(3/4)"),
+        // Builtin Rational wins over user `def Rational` — without
+        // adding "Rational" to `is_builtin_name`, the toplevel fast
+        // path would cache the user def and silently shadow the
+        // builtin Kernel function. CRuby's "builtin always wins"
+        // dispatch order applies the same way for Integer/Float/etc.
+        (
+            "def Rational(n, d=1); 'user-shadow' end; puts Rational(1, 2).inspect",
+            "(1/2)",
+        ),
         // respond_to?
         ("puts Rational(1, 2).respond_to?(:numerator)",  "true"),
         ("puts Rational(1, 2).respond_to?(:denominator)","true"),
