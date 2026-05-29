@@ -3101,6 +3101,14 @@ fn numeric_coerce_basic() {
         ("1.5.coerce(\"x\")","String can't be coerced into Float"),
         #[cfg(feature = "bignum")]
         ("(2**64).coerce(:sym)", "Symbol can't be coerced into Integer"),
+        // Rational arg surfaces "Rational" (not the `Object`
+        // fallback) once `type_name_for_coerce` knows the variant.
+        // Pin both Float and Integer recv sides; Phase C.2 will
+        // turn these into successful coercions, at which point the
+        // expected behaviour flips from TypeError to a Rational
+        // result and these asserts move into the happy-path block.
+        ("1.5.coerce(Rational(1, 2))", "Rational can't be coerced into Float"),
+        ("5.coerce(Rational(1, 2))",   "Rational can't be coerced into Integer"),
     ] {
         let err = rt.eval(script, "coerce_err.rb").unwrap_err();
         match err.err {

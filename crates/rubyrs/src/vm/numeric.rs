@@ -1618,6 +1618,7 @@ pub(crate) fn type_name_for_coerce(v: &Value) -> &'static str {
         Value::Array(_) => "Array",
         Value::Hash(_) => "Hash",
         Value::Range(_) => "Range",
+        Value::Rational(_) => "Rational",
         _ => "Object",
     }
 }
