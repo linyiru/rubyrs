@@ -789,23 +789,43 @@ impl hyper::body::Body for FiberResponseBody {
     }
 }
 
-/// Client-disconnect Drop (ADR 0023 v4 follow-up addressing
-/// Risk #1). When hyper drops the response body mid-stream
-/// — typically because the client TCP-closed the connection
-/// — we still want `body.close` to fire if the body responds
-/// to it (Rack 3 SPEC: close exactly once, regardless of
-/// whether iteration completed). Without this Drop, server-
-/// side `ensure` blocks attached to `close` (DB-transaction
-/// rollback, file-handle release, etc.) silently leak on
-/// every client disconnect.
+/// Client-disconnect + server-shutdown Drop (ADR 0023 v4
+/// follow-up addressing Risk #1). When hyper drops the
+/// response body — typically because (a) the client
+/// TCP-closed the connection mid-stream, or (b) the host
+/// fn's tokio Runtime drops at end of scope and cancels
+/// in-flight tasks — we still want `body.close` to fire if
+/// the body responds to it (Rack 3 SPEC: close exactly once,
+/// regardless of whether iteration completed). Without this
+/// Drop, server-side `ensure` blocks attached to `close`
+/// (DB-transaction rollback, file-handle release, etc.)
+/// silently leak.
 ///
 /// Safety follows the refined Drop-Vm-free contract documented
 /// in `vm/fiber.rs`: `current_vm_ptr().is_null()` gates every
-/// Vm access, so the late-drop path (task cancel, runtime
-/// shutdown) skips silently while the mid-poll drop path
-/// (hyper detecting EOF inside its connection driver, with
-/// `with_vm_ptr_set` active for the host fn) safely invokes
-/// close.
+/// Vm access. The two ACTUAL Drop call sites are:
+///
+/// (a) Mid-poll drop — hyper's H1 connection driver detects
+///     EOF inside its `poll`. `CURRENT_VM_PTR` is non-null
+///     (we're inside the V1 host fn's `with_vm_ptr_set`).
+///     Pinned by `p2c_streaming_close_fires_on_client_disconnect_mid_stream`.
+///
+/// (b) Server-shutdown drop — the host fn's tokio Runtime +
+///     LocalSet go out of scope at the end of the host fn's
+///     function body. Every in-flight task is cancelled,
+///     bodies dropped. `CURRENT_VM_PTR` is STILL non-null
+///     because the V1 host fn's `with_vm_ptr_set` guard
+///     doesn't drop until the host fn closure RETURNS.
+///     Pinned by `p2c_streaming_close_fires_on_server_shutdown_with_live_stream`.
+///
+/// The `if ptr.is_null()` branch is therefore CURRENTLY
+/// UNREACHABLE in the standard hyper + tokio current-thread
+/// + V1 host fn setup. It stays as future-proofing against
+/// refactors that might let a body outlive its host fn (e.g.,
+/// V2 host fns + a different Vm-lifetime model, or a future
+/// scheme that hands bodies off to a worker pool). Removing
+/// it would turn such a future regression into a use-after-
+/// free instead of a silent close-skip.
 ///
 /// Normal stream completion clears `body_for_close` via
 /// `.take()` in `poll_frame`'s Returned/Err branches, so this
@@ -819,9 +839,14 @@ impl Drop for FiberResponseBody {
         };
         let ptr = crate::vm::current_vm_ptr();
         if ptr.is_null() {
-            // Late drop — no Vm access available. The body's
-            // close won't fire; documented limitation for
-            // post-runtime-shutdown paths (rare in practice).
+            // Late drop — no Vm access available. The
+            // null path is currently UNREACHABLE: both
+            // observed Drop call sites (client disconnect
+            // mid-poll, runtime drop at host-fn end) fire
+            // INSIDE the V1 host fn's `with_vm_ptr_set`
+            // scope, so the pointer is always live. See the
+            // outer doc comment for the futureproofing
+            // rationale.
             return;
         }
         // SAFETY: mid-poll drop. Single-threaded current-thread
@@ -4963,6 +4988,139 @@ mod tests {
             "ADR Risk #1: body.close MUST fire when client disconnects \
              mid-stream. Without the Drop handler this assertion fails — \
              hyper drops the body silently. records: {records:?}",
+        );
+    }
+
+    /// Companion to `p2c_streaming_close_fires_on_client_disconnect_mid_stream`:
+    /// the OTHER major Drop path is "server shutdown while a stream is
+    /// in flight". When the host fn's `serve_until_shutdown` exits
+    /// (duration elapsed), the tokio Runtime + LocalSet go out of
+    /// scope at the end of the host fn's function body, which
+    /// cancels every in-flight task. The connection's response body
+    /// gets dropped while still on the tokio task. The Drop handler
+    /// must invoke close exactly once — and (this is the subtle
+    /// part) `CURRENT_VM_PTR` must still be live at this moment.
+    ///
+    /// Why CURRENT_VM_PTR is still live: the host fn is mid-execution
+    /// inside the V1 dispatch frame that called `with_vm_ptr_set`.
+    /// The guard's Drop only runs when the host fn closure RETURNS.
+    /// Until then, every code path inside the host fn — including the
+    /// tokio Runtime drop that triggers task cancellation and body
+    /// drops — sees a non-null `CURRENT_VM_PTR`.
+    ///
+    /// This test pins both:
+    /// 1. Server-shutdown Drop fires close (the second of two Drop
+    ///    call sites).
+    /// 2. `CURRENT_VM_PTR` is non-null during this Drop, so the
+    ///    handler's `if ptr.is_null()` guard branch is currently
+    ///    UNREACHABLE in our setup. The defensive null check stays
+    ///    as future-proofing against refactors that might let a body
+    ///    outlive its host fn.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2c_streaming_close_fires_on_server_shutdown_with_live_stream() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18190";
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Client stays connected the WHOLE TIME — never
+        // disconnects. The only way close can fire is when
+        // the server's duration elapses and the tokio
+        // runtime cancels the body's task.
+        let client_thread = thread::spawn(move || -> Vec<u8> {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(4))).unwrap();
+            client.write_all(b"GET /s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            // Read what we can until EOF — server shutdown
+            // will close the socket cleanly OR break it,
+            // either is fine for this test.
+            let mut buf = Vec::new();
+            let _ = client.read_to_end(&mut buf);
+            buf
+        });
+
+        let mut rt = crate::Runtime::new();
+        rt.register_fn("__rubyrs_test_sleep_ms", |args| {
+            use crate::error::{RubyError, Trap};
+            use crate::value::Value;
+            let ms = match args {
+                [Value::Int(n)] if *n >= 0 => *n as u64,
+                _ => return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__rubyrs_test_sleep_ms(ms: Integer)".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            std::thread::sleep(Duration::from_millis(ms));
+            Ok(crate::value::Value::Nil)
+        });
+        let log_for_fn = Arc::clone(&log);
+        rt.register_fn("__rubyrs_test_record", move |args| {
+            use crate::error::{RubyError, Trap};
+            use crate::value::Value;
+            let tag = match args {
+                [Value::Str(s)] => s.to_string_lossy(),
+                _ => return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__rubyrs_test_record(tag: String)".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            log_for_fn.lock().unwrap().push(tag);
+            Ok(crate::value::Value::Nil)
+        });
+        super::register_host_fns(&mut rt);
+        // Body NEVER returns; only server shutdown can end
+        // the stream. Server duration: 2s — short enough
+        // to keep the test fast, long enough for the
+        // client to read the first chunk.
+        rt.eval(&format!(r#"
+            class ShutdownTarget
+              def each
+                yield "tick before shutdown\n"
+                while true
+                  __rubyrs_test_sleep_ms(50)
+                  yield "tick\n"
+                end
+              end
+              def close
+                __rubyrs_test_record("close")
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, ShutdownTarget.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 2, app)
+        "#), "p2c_shutdown_close.rb").expect("server ran");
+
+        let bytes = client_thread.join().expect("client thread");
+        assert!(
+            !bytes.is_empty(),
+            "client must receive SOMETHING before server shutdown",
+        );
+        // After server shutdown returned, the host fn's
+        // function body completes — the tokio Runtime drop
+        // cancelled all tasks, dropping the body, firing
+        // the Drop close handler. CURRENT_VM_PTR was still
+        // set at this moment because we're inside the V1
+        // dispatch's with_vm_ptr_set scope.
+        let records = log.lock().unwrap().clone();
+        assert!(
+            records.contains(&"close".to_string()),
+            "body.close MUST fire when the server shuts down with a live \
+             stream. If this assertion fails, either the Drop handler is \
+             skipping (its null-pointer guard fired unexpectedly) OR \
+             CURRENT_VM_PTR is being cleared before the runtime drop. \
+             records: {records:?}",
         );
     }
 
