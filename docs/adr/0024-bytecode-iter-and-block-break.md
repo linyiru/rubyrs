@@ -2,12 +2,13 @@
 
 ## Status
 
-Proposed (2026-05-29). **v3** — second-round review on v2 surfaced
-three remaining issues (RAII guard for `yield_recursion_depth`,
-merge-order specification was a shorthand not actual order, FiberSnapshot
-stash table update dependency on ADR 0023 not visible). All addressed
-in v3 inline. No code change in this ADR — implementation lands in a
-follow-up after the design is accepted.
+Proposed (2026-05-29). **v4** — Important-tier parity refinements
+from the round-2 review:
+- `Kernel#loop` def uses `e.result` directly (CRuby behavior),
+  not the v3 `respond_to?(:result)` gate (which was a parity drift).
+- Phase A round 2 adversarial block-break test list enumerated (5
+  cases with CRuby expected behavior).
+v3 critical fixes preserved. No code change in this ADR.
 
 **v2 → v3 changes**:
 
@@ -504,9 +505,68 @@ Risk #2 resolutions added a per-Frame field + per-Vm counter)**:
    passed to other blocks). Phase A's "nearest non-block" rule is
    CRuby-correct for the common case + the named extension; the
    adversarial-nesting parity work is **deferred to Phase A round
-   2** with an explicit test list to be added once the basic
-   mechanism ships. Tracked here so Phase A reviewers don't expect
-   100% CRuby parity at first land.
+   2**. Tracked here so Phase A reviewers don't expect 100% CRuby
+   parity at first land.
+
+   **v4 — Phase A round 2 test list (round 2 reviewer enumerated)**:
+
+   - **(a) `&block` re-yield through `.each`.**
+     ```ruby
+     def outer(&blk); [1,2].each(&blk); end
+     outer { break "x" }  # CRuby returns "x" from `outer`.
+     ```
+     "Nearest non-block" pops the `each` block frame and the
+     `each` Rust driver — the YIELDING method is `outer`. Today's
+     rule gives `each`; CRuby gives `outer`. **Diverges.**
+
+   - **(b) Proc.new from a block, called from another method.**
+     ```ruby
+     def make
+       Proc.new { break "x" }
+     end
+     def runner(p); p.call; end
+     p = make; runner(p)  # CRuby: LocalJumpError — `make` has
+                          # already returned; no yielding method
+                          # alive to break out of.
+     ```
+     Phase A's bare "nearest non-block" would pop `runner` — wrong.
+     CRuby raises LocalJumpError. Requires tracking the Proc's
+     lexically-defining method + checking it's still on the stack.
+
+   - **(c) `define_method` body with `break`.**
+     ```ruby
+     define_method(:f) { break "x" }
+     f  # CRuby: LocalJumpError — define_method body acts as block;
+        # bare `break` has no yielding method.
+     ```
+     Same shape as (b). Requires the LocalJumpError check.
+
+   - **(d) lambda body `break`.**
+     ```ruby
+     f = lambda { break "x" }
+     f.call  # CRuby: returns "x" from the lambda (NOT LocalJumpError).
+     ```
+     Lambdas are first-class — `break` from a lambda body is
+     equivalent to `return val`. Different from non-lambda Procs.
+     Requires distinguishing lambda from Proc at runtime
+     (currently rubyrs unifies them; tracked as a SUBSET gap).
+
+   - **(e) Block passed to another block (double-nesting).**
+     ```ruby
+     def outer; yield; end
+     def inner; yield; end
+     def f(&blk); inner(&blk); end
+     outer { f { break "x" } }  # CRuby: break unwinds `f` (the
+                                # yielder of the breaking block).
+     ```
+     Subtle: the breaking block was YIELDED to by `f` (which
+     re-yielded its own &blk), so the target is `f`. Today's rule
+     gives `f` too — likely **converges**. Pin with a test to
+     confirm.
+
+   All five tests land as Phase A round 2 to-do; each commit cycle
+   should pick one + the CRuby-divergence fix, not a bulk
+   landing.
 
 6. **`break val` value semantics.** CRuby's `break val` from a
    block returns val from the yielding method. rubyrs Phase A pins
@@ -528,19 +588,34 @@ Risk #2 resolutions added a per-Frame field + per-Vm counter)**:
 
 8. **`StopIteration` and `Kernel#loop`.** CRuby `loop` explicitly
    rescues StopIteration and returns the exception's `result`
-   attr if present. v1 hand-waved "minimal StopIteration, moot".
-   v2 commits: Phase A's `def loop` includes the
-   `rescue StopIteration` clause matching CRuby exactly. The
-   broader Enumerator / Lazy work (StopIteration-driven external
-   iterators) remains out of scope and is gated separately.
-   Phase A `def loop` becomes:
+   attr. v1 hand-waved "minimal StopIteration, moot".
+   v2 committed to an explicit `rescue StopIteration` clause.
+
+   **v4 correction (round 2 parity finding)**: v2's gate
+   `e.respond_to?(:result) ? e.result : nil` was a parity
+   drift — CRuby 2.0+'s `StopIteration#result` always exists
+   (returns nil if unset). The `respond_to?` gate ONLY
+   matched CRuby behavior by accident (always-nil path).
+   v4 simplifies + names the implementation prerequisite:
+
    ```ruby
    def loop
      while true; yield; end
    rescue StopIteration => e
-     e.respond_to?(:result) ? e.result : nil
+     e.result
    end
    ```
+
+   Phase A dependency: `StopIteration#result` attr must exist
+   on the preamble's StopIteration class. If StopIteration
+   itself isn't installed yet, install it (`StopIteration <
+   IndexError`) with a no-arg constructor + `result` accessor
+   (default nil). One-commit prerequisite, decoupled like
+   Phase 0 was. Track separately if it grows scope.
+
+   The broader Enumerator / Lazy work (StopIteration-driven
+   external iterators) remains out of scope and gated
+   separately.
 
 ## Test strategy
 
@@ -576,7 +651,23 @@ Phase B:
 
 ## Revision log
 
-- **2026-05-29 — v3 (this revision).** Second-round review on v2
+- **2026-05-29 — v4 (this revision).** Important-tier parity
+  refinements from the round-2 review:
+  - `Kernel#loop` def: v3's `e.respond_to?(:result) ? e.result :
+    nil` was a parity drift — CRuby's StopIteration always has
+    `#result` (returns nil if unset). v4 simplifies to `e.result`
+    and lists `StopIteration#result` accessor as a Phase A
+    one-commit prerequisite.
+  - Risk #5: Phase A round 2 adversarial block-break test list
+    enumerated. Five concrete cases with CRuby expected behavior:
+    (a) `&block` re-yield through `.each` — diverges, fix needed;
+    (b) Proc.new from a block called from another method —
+    LocalJumpError; (c) `define_method` body break —
+    LocalJumpError (same shape as (b)); (d) lambda body break —
+    returns from lambda (requires lambda/Proc distinction,
+    SUBSET gap); (e) block-passed-to-block double-nesting —
+    likely converges, pin with test.
+- **2026-05-29 — v3.** Second-round review on v2
   surfaced three remaining issues, all closed inline:
   - `yield_recursion_depth` counter now wrapped in
     `YieldDepthGuard<'a>` with Drop-decrement (panic-safe).

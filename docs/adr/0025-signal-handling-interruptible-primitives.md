@@ -2,12 +2,17 @@
 
 ## Status
 
-Proposed (2026-05-29). **v3** — second-round review on v2 surfaced
-four remaining issues (RAII for `suppress_interrupt`, OnceLock
-scope, suppress_interrupt placement choice, counter interaction
-matrix). All closed inline below. Phase 0 has SHIPPED (commit
-`a5337fd7`); the rest of the design lands in follow-up phases
-after acceptance.
+Proposed (2026-05-29). **v4** — Important-tier parity refinements
+from the round-2 review:
+- Phase 0.5 expanded with `SystemExit#status` + `#success?` attrs
+  matching CRuby + concrete preamble shape.
+- New Phase 0.5b: `Kernel#exit` / `exit!` / `abort` family
+  specified (was an omission; `exit!` requires new
+  `Config::process_exit` capability).
+- Signal.trap signal-name normalization specified (Symbol +
+  Integer + "SIG…" prefix variants accepted; concrete subset).
+v3 critical fixes preserved. No code change in this ADR.
+Phase 0 has SHIPPED (commit `a5337fd7`).
 
 **v2 → v3 changes**:
 
@@ -249,18 +254,77 @@ scripts. Rejected — orthogonal to the design.
    entries in `error.rs` + two embed tests verifying hierarchy
    walk and bare-rescue-doesn't-swallow.
 
-**Phase 0.5 — `SystemExit` exception class (~1 commit, ADD in v2)**:
+**Phase 0.5 — `SystemExit` exception class + `Kernel#exit` family
+(~2 commits, expanded in v4 from v2's 1-commit footprint)**:
 
-0.5. Install `SystemExit < Exception` in `preamble/exceptions.rb`
-   + BUILTIN_EXCEPTION_PARENT entry. Required dependency for
-   Phase 4 step 17 (`trap("INT") { exit }` → SystemExit → at_exit
-   handlers). Decoupled from the rest like Phase 0.
+0.5a. Install `SystemExit < Exception` in `preamble/exceptions.rb`
+   + BUILTIN_EXCEPTION_PARENT entry. Includes the CRuby attrs:
+   - `status: Integer` — the exit status. Constructor accepts
+     `Integer | true | false | nil`: true → 0, false → 1, nil → 0,
+     Integer → as-is.
+   - `success? -> Bool` — `status == 0`.
+
+   Concrete preamble shape (matches CRuby 3.x):
+   ```ruby
+   class SystemExit < Exception
+     def initialize(*args)
+       case args.length
+       when 0 then @status = 0; super("SystemExit")
+       when 1
+         case args[0]
+         when Integer then @status = args[0]; super("exit")
+         when true    then @status = 0; super("exit")
+         when false   then @status = 1; super("exit")
+         when nil     then @status = 0; super("exit")
+         else              @status = 0; super(args[0].to_s)
+         end
+       when 2
+         # (Integer, msg)
+         @status = args[0]; super(args[1])
+       end
+     end
+     attr_reader :status
+     def success?; @status == 0; end
+   end
+   ```
 
    Placement note: SystemExit is `< Exception`, NOT under
    SignalException despite the "exit-on-signal" use case — CRuby
    draws the line because `Kernel#exit` (the normal source) is
    programmatic, not signal-driven. SignalException is reserved
    for SIG{TERM,HUP,...} shapes.
+
+0.5b. **`Kernel#exit` / `Kernel#exit!` / `Kernel#abort` family
+   (v4 ADD)**. Round 2 surfaced these as omissions; v4 specifies:
+
+   - **`Kernel#exit(status = true)`**: raises `SystemExit.new(status)`.
+     Normal exception unwind, so `ensure` blocks and `at_exit`
+     handlers fire. Builtin in `vm/kernel.rs`'s `builtin_call`
+     match — symmetric with `sleep`/`puts`.
+
+   - **`Kernel#exit!(status = false)`**: immediate process exit
+     via `std::process::exit(status as i32)`. SKIPS `ensure` and
+     `at_exit`. Same Tier 1 capability gate as `sleep_for` —
+     embed users opt in via a new `Config::process_exit:
+     Option<Arc<dyn Fn(i32) + Send + Sync>>`. CLI binary wires
+     `std::process::exit`; library default is `None`, in which
+     case `exit!` raises RuntimeError ("Kernel#exit! requires
+     Config::process_exit injection"). Avoid std::process::exit
+     hardcoded so embedders can intercept (test hosts, language
+     bindings).
+
+   - **`Kernel#abort(msg = nil)`**: print `msg` (or `$!.message`
+     if currently in an `at_exit`) to stderr, then `exit(1)`.
+     Pure builtin in terms of `exit` + stderr write. No new
+     capability — stderr write already supported via OutputSink
+     (ADR 0021).
+
+   `at_exit { ... }` handler stack lives separately on the Vm
+   (`Vm::at_exit_handlers: Vec<ObjId>` block IDs). Phase 4 step
+   14's SystemExit unwind path drains the stack LIFO, invoking
+   each block. Decoupled from signal handling — `at_exit` is
+   useful without `Signal.trap` (registered with `Kernel#at_exit
+   { block }`).
 
 **Phase 1 — Flag + capability + handler (~2 commits)**:
 
@@ -352,12 +416,64 @@ with-args (~2 commits)**:
 **Phase 4 — `Signal.trap("INT") { ... }` user handlers (~4-5 commits,
 revised upward from v1's 3-4)**:
 
-12. `Vm::signal_traps: HashMap<&'static str, SignalHandlerState>`
-    where `SignalHandlerState` is `Default | Ignore | Block(ObjId)`.
-    `Signal.trap(name, handler) → previous_handler` matches CRuby:
-    - Input: `"DEFAULT"` / `"IGNORE"` / a `Proc` / an attached block
-    - Returns: the PREVIOUSLY-installed handler in the same shape
-      (`"DEFAULT"` / `"IGNORE"` / a Proc / nil if never set)
+12. `Vm::signal_traps: HashMap<i32, SignalHandlerState>` keyed by
+    Unix signal number (SIGINT=2, SIGTERM=15, etc.) where
+    `SignalHandlerState` is `Default | Ignore | Block(ObjId)`.
+    `Signal.trap(name, handler) → previous_handler` matches CRuby.
+
+    **v4 — signal-name normalization (round 2 surfaced)**.
+    CRuby accepts:
+    - `"INT"` (bare short name)
+    - `"SIGINT"` (with prefix)
+    - `:INT` / `:SIGINT` (Symbol form, either with/without prefix)
+    - `2` (Integer signal number)
+
+    v4 normalizes via a `parse_signal_name` helper:
+    ```rust
+    fn parse_signal_name(v: &Value) -> Option<i32> {
+        match v {
+            Value::Int(n) if (1..=64).contains(n) => Some(*n as i32),
+            Value::Sym(id) => parse_str(interner.resolve(*id)),
+            Value::Str(s) => parse_str(&s.to_string_lossy()),
+            _ => None,
+        }
+    }
+    fn parse_str(s: &str) -> Option<i32> {
+        let trimmed = s.strip_prefix("SIG").unwrap_or(s);
+        match trimmed {
+            "HUP" => Some(1), "INT" => Some(2), "QUIT" => Some(3),
+            "ILL" => Some(4), "TRAP" => Some(5), "ABRT" => Some(6),
+            "FPE" => Some(8), "KILL" => Some(9), "USR1" => Some(10),
+            "SEGV" => Some(11), "USR2" => Some(12), "PIPE" => Some(13),
+            "ALRM" => Some(14), "TERM" => Some(15), "CHLD" => Some(17),
+            "CONT" => Some(18), "STOP" => Some(19), "TSTP" => Some(20),
+            "TTIN" => Some(21), "TTOU" => Some(22), "URG" => Some(23),
+            "WINCH" => Some(28),
+            // Subset; expand as Phase 4 lands more handlers.
+            _ => None,
+        }
+    }
+    ```
+    Unknown signal name → ArgumentError (matches CRuby:
+    `"unsupported signal SIG…"`).
+
+    Handler input shape:
+    - `"DEFAULT"` / `:DEFAULT` → `SignalHandlerState::Default`
+    - `"IGNORE"` / `:IGNORE` / `"SIG_IGN"` → `SignalHandlerState::Ignore`
+    - A `Proc` (`Value::Block`) → `SignalHandlerState::Block(obj_id)`
+    - An attached block via `&block` → same as Proc
+    - Nil → ArgumentError (matches CRuby).
+
+    Return shape: PREVIOUSLY-installed handler — same shape:
+    - `SignalHandlerState::Default` → `"DEFAULT"` string
+    - `SignalHandlerState::Ignore` → `"IGNORE"` string
+    - `SignalHandlerState::Block(id)` → `Value::Block(id)`
+    - No previous entry (first install) → `"DEFAULT"` string
+      (CRuby returns the default behavior name).
+
+    **Subset scope (v4)**: Phase 4 implements `parse_str` for the
+    Tier-1 portable signal set listed above. Real-time signals
+    (SIGRTMIN+, etc.) and platform-specific names deferred.
 13. Safe-point check: if `interrupt_pending` is set, look up
     the trap for SIGINT.
     - `Block(b)`: invoke b at the safe point (re-entrant dispatch).
@@ -397,12 +513,10 @@ revised upward from v1's 3-4)**:
     `signal::ctrl_c()` that ALSO sets the same flag, so Ctrl+C
     during server idle wakes the accept loop too.
 
-**Total**: ~12-16 commits over 3.5-4.5 weeks (revised upward from
-v1's 10-13 / 3-4 weeks). Phase 0 already landed (`a5337fd7`).
-Phase 0.5 added (~1 commit); Phase 3 expanded to cover sleep(secs)
-interruptibility (~1 → 2 commits); Phase 4 expanded for the
-correct Signal.trap return + at_exit/SystemExit path (~3-4 → 4-5
-commits).
+**Total**: ~14-18 commits over 4-5 weeks (revised upward from v3's
+12-16 / 3.5-4.5 weeks). Phase 0 already landed (`a5337fd7`).
+Phase 0.5 expanded 1 → 2 commits (SystemExit class + exit/exit!/
+abort family). Phase 3 stays 2 commits. Phase 4 stays 4-5 commits.
 
 ## Risks + open questions
 
@@ -665,7 +779,26 @@ Phase 5:
 
 ## Revision log
 
-- **2026-05-29 — v3 (this revision).** Second-round review on v2
+- **2026-05-29 — v4 (this revision).** Important-tier parity
+  refinements from the round-2 review:
+  - Phase 0.5 expanded with concrete preamble shape:
+    `SystemExit#status` (Integer; constructor accepts
+    Integer|true|false|nil), `#success?` (Bool from
+    `status == 0`). Matches CRuby 3.x exactly.
+  - New Phase 0.5b: `Kernel#exit` (raises SystemExit) /
+    `Kernel#exit!` (immediate, skips at_exit + ensure; requires
+    new `Config::process_exit` capability) / `Kernel#abort`
+    (stderr write + exit(1)). Phase 0.5 footprint 1 → 2 commits.
+  - `Vm::at_exit_handlers: Vec<ObjId>` stack named — decoupled
+    from signal handling, used by SystemExit unwind path.
+  - Signal.trap signal-name normalization: keyed by Unix signal
+    number (`i32`), `parse_signal_name` helper accepts String /
+    Symbol / Integer / `"SIG…"` prefix variants. Tier-1 portable
+    signal subset enumerated; real-time signals deferred.
+  - Handler input/return shapes nailed down to the exact CRuby
+    string ("DEFAULT" / "IGNORE") + Proc + nil contract.
+  Total estimate 12-16 → 14-18 commits / 3.5-4.5 → 4-5 weeks.
+- **2026-05-29 — v3.** Second-round review on v2
   surfaced four remaining issues, all closed inline:
   - `suppress_interrupt` counter now wrapped in
     `SuppressInterruptGuard<'a>` with Drop-decrement (panic-safe).
