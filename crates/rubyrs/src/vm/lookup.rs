@@ -633,6 +633,14 @@ impl Vm {
                 "group_by" | "sort_by" | "sort"
             ),
             Value::Bool(_) | Value::Nil => matches!(name, "to_s" | "inspect" | "dup" | "clone"),
+            // Phase C.1 Rational surface — reader methods + class /
+            // type queries only. Arithmetic / comparison whitelist
+            // expansion lands with Phase C.2.
+            Value::Rational(_) => matches!(name,
+                "numerator" | "denominator" |
+                "to_s" | "inspect" | "to_r" |
+                "to_i" | "to_f"
+            ),
             Value::Class(cls) => {
                 // Built-in class-level methods (`.new`, `.name`,
                 // `.ancestors`, ...) are hardcoded; user-defined
@@ -773,6 +781,7 @@ impl Vm {
             Value::BoundMethod(_) => "Method",
             Value::UnboundMethod(_) => "UnboundMethod",
             Value::CurriedProc(_) => "Proc",
+            Value::Rational(_) => "Rational",
             // `Object#class` script call: CRuby reports the
             // user-declared class, not the eigenclass. Use
             // `real_class_of` so a `def obj.foo` installation

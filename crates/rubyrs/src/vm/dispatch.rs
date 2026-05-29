@@ -5408,7 +5408,12 @@ impl Vm {
             // handling — funnel through them so the Array#inspect
             // path (which also calls `to_inspect`) stays
             // consistent.
-            if matches!(&recv, Value::Range(_)) {
+            if matches!(&recv, Value::Range(_) | Value::Rational(_)) {
+                // Range and Rational both render via
+                // `to_display`/`to_inspect` — Rational#to_s is
+                // `"num/den"`, #inspect is `"(num/den)"`. Without
+                // this short-circuit the universal `#<Class:0xHEX>`
+                // fallback wins and rendering diverges from CRuby.
                 let rendered = if &*name == "inspect" {
                     recv.to_inspect(&self.heap, &self.interner)
                 } else {
@@ -5527,6 +5532,49 @@ impl Vm {
             let s = format!("#<{}:0x{:016x}>", cls_name, oid);
             self.stack.push(Value::new_str(s));
             return Ok(());
+        }
+        // Phase C.1 Rational readers / conversions. Lives here in
+        // dispatch.rs (not primitive_call) because the stateless
+        // primitive layer can't read the heap-stored RationalRepr.
+        // Arithmetic + comparison whitelist expansion lands in
+        // Phase C.2.
+        if let Value::Rational(id) = &recv {
+            let r = *self.heap.rational(*id);
+            match (&*name, args.len()) {
+                ("numerator", 0) => {
+                    self.stack.push(Value::Int(r.num));
+                    return Ok(());
+                }
+                ("denominator", 0) => {
+                    self.stack.push(Value::Int(r.den));
+                    return Ok(());
+                }
+                ("to_r", 0) => {
+                    self.stack.push(recv.clone());
+                    return Ok(());
+                }
+                ("to_i", 0) => {
+                    // CRuby `to_i` / `to_int` for Rational truncates
+                    // toward zero (NOT floor). `(7/2r).to_i == 3`,
+                    // `(-7/2r).to_i == -3`.
+                    self.stack.push(Value::Int(r.num / r.den));
+                    return Ok(());
+                }
+                ("to_f", 0) => {
+                    self.stack.push(Value::Float(r.num as f64 / r.den as f64));
+                    return Ok(());
+                }
+                // Arity guards for the readers — they take no args.
+                ("numerator" | "denominator" | "to_r" | "to_i" | "to_f", _) => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0)",
+                            args.len(),
+                        ),
+                    }));
+                }
+                _ => {}
+            }
         }
         // `Object#hash` — universal, no args. Returns an integer
         // hash. For value types (Int/Str/Sym/Bool/Nil), hash by
@@ -7804,6 +7852,10 @@ fn method_recv_identity(a: &Value, b: &Value) -> bool {
         // same heap slot.
         #[cfg(feature = "bignum")]
         (Value::BigInt(x), Value::BigInt(y)) => x == y,
+        // Same ObjId-identity rule as BigInt (see comment above):
+        // method receivers collapse only when they point at the
+        // literal same heap slot, not canonical-value equality.
+        (Value::Rational(x), Value::Rational(y)) => x == y,
         (Value::Class(x), Value::Class(y)) => Rc::ptr_eq(x, y),
         (Value::Str(x), Value::Str(y)) => Rc::ptr_eq(x, y),
         (Value::Int(x), Value::Int(y)) => x == y,
@@ -7822,7 +7874,7 @@ fn method_recv_hash(v: &Value) -> i64 {
     match v {
         Value::Object(id) | Value::Array(id) | Value::Hash(id) | Value::Range(id)
         | Value::Block(id) | Value::BoundMethod(id) | Value::UnboundMethod(id)
-        | Value::CurriedProc(id) => id.0 as i64,
+        | Value::CurriedProc(id) | Value::Rational(id) => id.0 as i64,
         // Two BigInts that hash-equal must collide via ObjId since
         // the heap-side bigint value identity is the ObjId (we
         // never share an ObjId across different BigInt values).
@@ -8013,6 +8065,7 @@ pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
         #[cfg(feature = "bignum")]
         Value::BigInt(id) => heap_id(id.0 as u64, 12),
         Value::Class(c) => heap_id(scramble_ptr(std::rc::Rc::as_ptr(c) as usize), 13),
+        Value::Rational(id) => heap_id(id.0 as u64, 14),
     }
 }
 

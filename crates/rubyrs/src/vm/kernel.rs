@@ -392,6 +392,80 @@ impl Vm {
                 let s = args[0].to_display(&self.heap, &self.interner);
                 Some(Ok(Value::new_str(s)))
             }
+            // `Rational(num, den)` / `Rational(num)` — Phase C.1
+            // public constructor. Accepts Integer num + Integer den
+            // (den defaults to 1). gcd-normalizes and sign-normalizes
+            // at construction so every live `Value::Rational` is
+            // canonical (`den > 0`, `gcd(|num|, den) == 1`).
+            "Rational" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1..2)",
+                            args.len(),
+                        ),
+                    })));
+                }
+                // Coerce both args to i64. Phase C.4 will widen to
+                // BigInt num/den; today only the i64 fast path lands.
+                let to_i64 = |v: &Value| -> Result<i64, RubyError> {
+                    match v {
+                        Value::Int(n) => Ok(*n),
+                        Value::Rational(id) => {
+                            // Existing Rational: only accept when it
+                            // happens to be an Integer (den == 1).
+                            // Otherwise this is the lossy
+                            // `Rational(Rational(1, 2))` shape, which
+                            // CRuby allows but is Phase C.2+ territory.
+                            let r = self.heap.rational(*id);
+                            if r.den == 1 { Ok(r.num) }
+                            else { Err(RubyError::TypeError {
+                                msg: format!("can't convert {} into Rational", v.type_name()),
+                            }) }
+                        }
+                        // Float / String coercion comes in Phase C.3
+                        // (Float#to_r needs the continued-fraction
+                        // algorithm; deferred).
+                        _ => Err(RubyError::TypeError {
+                            msg: format!("can't convert {} into Rational", v.type_name()),
+                        }),
+                    }
+                };
+                let num_raw = match to_i64(&args[0]) {
+                    Ok(n) => n,
+                    Err(e) => return Some(Err(self.trap(e))),
+                };
+                let den_raw: i64 = if args.len() == 2 {
+                    match to_i64(&args[1]) {
+                        Ok(n) => n,
+                        Err(e) => return Some(Err(self.trap(e))),
+                    }
+                } else { 1 };
+                if den_raw == 0 {
+                    return Some(Err(self.trap(RubyError::ZeroDivisionError {
+                        msg: "divided by 0".to_string(),
+                    })));
+                }
+                // Normalize: den must be positive; gcd(|num|, den) == 1.
+                // `i64::MIN` magnitude needs care — `(-i64::MIN)`
+                // panics in debug. Defer the bignum-promote case to
+                // Phase C.4 by trapping on i64::MIN num or den.
+                if num_raw == i64::MIN || den_raw == i64::MIN {
+                    return Some(Err(self.trap(RubyError::RangeError {
+                        msg: "Rational components must fit in i64 (Phase C.1)".to_string(),
+                    })));
+                }
+                let (mut num, mut den) = (num_raw, den_raw);
+                if den < 0 { num = -num; den = -den; }
+                let g = crate::vm::numeric::gcd_i64(num.abs(), den);
+                if g > 1 { num /= g; den /= g; }
+                self.maybe_gc();
+                if let Err(t) = self.check_alloc() { return Some(Err(t)); }
+                let id = self.heap.alloc(HeapObj::Rational(
+                    crate::heap::RationalRepr { num, den },
+                ));
+                Some(Ok(Value::Rational(id)))
+            }
             // `Array(x)` — coerce to Array. CRuby rules:
             //   - `nil` → `[]`
             //   - Array → unchanged

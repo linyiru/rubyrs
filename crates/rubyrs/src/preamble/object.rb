@@ -80,3 +80,15 @@ end
 class Object < BasicObject
   include Kernel
 end
+
+## Phase C.1 Numeric / Rational class shells. CRuby's chain is
+## `Rational < Numeric < Object`; the actual arithmetic is wired
+## via primitive dispatch arms in the VM (numeric.rs / dispatch.rs),
+## not via instance methods on these shells. Declaring them here
+## ensures `Rational.new(...)` resolves (we shim `Kernel#Rational`
+## as the public constructor entry) AND `obj.is_a?(Numeric)` works
+## across Integer / Float / Rational.
+class Numeric < Object
+end
+class Rational < Numeric
+end
