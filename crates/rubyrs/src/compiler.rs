@@ -480,6 +480,10 @@ fn compile_multiwrite_arm(
                 let id = interner.intern(name);
                 b.emit(Op::StoreIvar(id));
             }
+            MWT::Global(name) => {
+                let id = interner.intern(name);
+                b.emit(Op::StoreGlobal(id));
+            }
             MWT::SplatLocal(Some(name)) => {
                 let slot = b.local_slot(name);
                 b.emit(Op::StoreLocal(slot));

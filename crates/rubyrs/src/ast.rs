@@ -469,6 +469,11 @@ pub(crate) enum BlockParam {
 pub(crate) enum MultiWriteTarget {
     Local(String),
     Ivar(String),
+    /// `$foo` on the LHS of a multi-write. Threaded through to
+    /// `Op::StoreGlobal` so e.g. `verbose, $VERBOSE = $VERBOSE,
+    /// nil` (rackup.rb:13 — the "silence Ruby 3.4 deprecation
+    /// warning" idiom) compiles. (TRY_RUNS pass-10 layer #8.)
+    Global(String),
     /// `*rest` — receives a fresh Array of the middle slice.
     /// `None` is the anonymous form `*` which discards the slice
     /// but still anchors the post-splat counting.
@@ -1268,6 +1273,8 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 targets.push(MultiWriteTarget::Local(cid_to_string(lvt.name())));
             } else if let Some(ivt) = tgt.as_instance_variable_target_node() {
                 targets.push(MultiWriteTarget::Ivar(cid_to_string(ivt.name())));
+            } else if let Some(gvt) = tgt.as_global_variable_target_node() {
+                targets.push(MultiWriteTarget::Global(cid_to_string(gvt.name())));
             } else {
                 ctx.errors.push(
                     format!("unsupported multi-write target: {:?}", tgt)
