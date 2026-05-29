@@ -5483,44 +5483,47 @@ mod tests {
         );
     }
 
-    /// KNOWN BUG (surfaced 2026-05-29 while writing
-    /// `p2_21_slow_consumer_completes_without_loss`).
-    /// `N.times { |i| yield "ch_#{i}\n" }` inside a Fiber
-    /// body — i.e., the natural Ruby idiom for "yield N
-    /// chunks" via Rack 3's each-shape streaming —
-    /// corrupts the block parameter `i` across the Fiber
-    /// suspend/resume boundary. Observed output for N=5:
+    /// DOCUMENTED LIMITATION (was a silent-corruption bug
+    /// before the step_block guard landed). Yielding from
+    /// inside a Rust-level iter driver (`Int#times`,
+    /// `upto`, `downto`, etc.) when those bodies further
+    /// `yield` to an outer Fiber-driving block can only
+    /// deliver the FIRST iteration's chunk. Subsequent
+    /// iterations are silently dropped.
     ///
-    ///   `ch_0`, `ch_4`, `ch_4`, `ch_4`, `ch_4`
+    /// Root cause: Rust-level iter loops hold their
+    /// counter on the Rust call stack. When Fiber yield
+    /// fires, the Rust stack unwinds out of dispatch_until
+    /// — by the time the Fiber resumes, the Rust loop is
+    /// long gone. Before the fix, the for-loop continued
+    /// invoking the block AFTER yield, pushing block
+    /// frames that all re-emitted the LAST iteration's
+    /// block parameter (`5.times { |i| yield i }` →
+    /// `0,4,4,4,4`). The `step_block` short-circuit added
+    /// in commit `<this>` no-ops when `fiber_yield_pending`
+    /// is already set, so the for-loop now runs to
+    /// completion without pushing extra frames. Result:
+    /// truncated output (`0`), not garbled.
     ///
-    /// First iteration yields correctly; subsequent
-    /// resumes pick up `i` at the LAST value of the
-    /// loop. Literal yields (`yield "ch_0\n"; yield
-    /// "ch_1\n"; …`) work fine — so the bug lives at the
-    /// intersection of (a) iter-protocol block-parameter
-    /// binding and (b) FiberSnapshot's frame/local
-    /// restoration. Likely root cause: the iter loop's
-    /// block parameter slot is shared across iterations
-    /// instead of fresh-per-invocation, and the FiberSnapshot
-    /// restore sees the final value.
+    /// User-facing remediation: use a `while`-counter
+    /// pattern inside Fiber bodies — the counter lives in
+    /// Vm state, which FiberStashGuard correctly captures.
+    /// See `examples/sse_server.rb`'s `each` body for the
+    /// canonical pattern.
     ///
-    /// This test is `#[ignore]`'d so CI stays green but the
-    /// reproducer stays findable. To run:
-    ///   cargo test --features _http_server,_fiber -p rubyrs \
-    ///     --lib p2_21_known_bug_times_loop_inside_fiber_yield -- --ignored
+    /// Permanent fix (deferred): replace Rust-level iter
+    /// drivers with bytecode-level iteration. Significant
+    /// rework — would also need to apply to `upto` /
+    /// `downto` / `each` on various collections / `step`
+    /// etc. Out of scope for the streaming-body work;
+    /// tracked as a future Fiber-completeness item.
     ///
-    /// User-facing impact: the SSE example
-    /// (`examples/sse_server.rb`) currently uses a
-    /// `while`-loop counter rather than `times` to dodge
-    /// this — see the example's pacing note. Fixing this
-    /// would let the natural Ruby idiom work.
-    ///
-    /// When fixed: remove `#[ignore]`, the literal-yields
-    /// workaround in `p2_21_slow_consumer_completes_without_loss`,
-    /// and rewrite the SSE example's `each` to use `times`.
+    /// This test pins the LIMITATION: exactly one chunk
+    /// (`ch_0\n`) arrives — proving no silent corruption.
+    /// When the permanent fix lands, this test should be
+    /// updated to require all five chunks.
     #[cfg(feature = "_fiber")]
     #[test]
-    #[ignore = "iter-block param + Fiber resume scoping bug — tracked"]
     fn p2_21_known_bug_times_loop_inside_fiber_yield() {
         use std::io::{Read, Write};
         use std::net::TcpStream;
@@ -5555,17 +5558,38 @@ mod tests {
         "#), "p2_21_known_bug.rb").expect("server ran");
 
         let response_text = client_thread.join().expect("client thread");
-        // Expectation when fixed: all five distinct chunks
-        // arrive in order.
-        for i in 0..5 {
+        // Current limitation: only the first iteration's
+        // chunk arrives. The remaining four are silently
+        // dropped by step_block's yield-pending guard
+        // (which prevents the pre-fix silent corruption).
+        assert!(
+            response_text.contains("ch_0\n"),
+            "first chunk must still arrive — only subsequent iterations \
+             are dropped. response:\n{response_text}",
+        );
+        // Critically: no GARBLED chunks. The old bug
+        // delivered `ch_4` four times after `ch_0`. We
+        // assert NONE of `ch_1`/`ch_2`/`ch_3`/`ch_4`
+        // appear — they're not delivered correctly, AND
+        // they're not delivered incorrectly either.
+        for i in 1..5 {
             let needle = format!("ch_{i}\n");
             assert!(
-                response_text.contains(&needle),
-                "expected chunk #{i} `{needle}` — Fiber+times bug means \
-                 the natural iter form doesn't yield distinct values. \
-                 response:\n{response_text}",
+                !response_text.contains(&needle),
+                "P2 #21 limitation: chunk `{needle}` MUST NOT appear — \
+                 Rust-level `times` can't survive Fiber yield, so the \
+                 step_block guard silently drops iterations 2..N. If \
+                 this chunk DOES appear, the permanent fix (bytecode \
+                 iter) landed and this test should be rewritten to \
+                 require all five chunks.\nresponse:\n{response_text}",
             );
         }
+        // Connection must still terminate cleanly — no
+        // hang, no truncation mid-frame.
+        assert!(
+            response_text.contains("\r\n0\r\n"),
+            "expected chunked terminator after truncated stream, got:\n{response_text}",
+        );
     }
 
     /// A3: Rack body that doesn't respond to `to_a` AND

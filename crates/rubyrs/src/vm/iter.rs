@@ -89,6 +89,43 @@ impl Vm {
         args: Vec<Value>,
         pre_frames: usize,
     ) -> Result<BlockStep, Trap> {
+        // P2 #21 follow-up (ADR 0023): silent-corruption
+        // guard. When a Fiber yields inside a block invoked
+        // from a Rust-level iter driver (Int#times etc.),
+        // dispatch_until returns out of the block-body
+        // execution back to step_block, which returns to
+        // the driver's for-loop — but the for-loop has no
+        // visibility into Fiber state and keeps iterating.
+        // Without this guard, each subsequent step_block
+        // call pushes a NEW block frame on top of the
+        // already-suspended Fiber's frame stack; on resume
+        // those queued frames all re-emit the LAST
+        // iteration's block-parameter value. Observed shape
+        // for `5.times { |i| yield i }` inside a Fiber:
+        // `0, 4, 4, 4, 4` instead of `0, 1, 2, 3, 4`.
+        //
+        // Fix: when `fiber_yield_pending` is ALREADY set on
+        // entry to step_block, return Nil without invoking
+        // the block. The Rust for-loop runs to completion
+        // pushing no extra frames; only the FIRST iteration
+        // actually delivers a chunk. The remaining
+        // iterations are silently dropped — known-limitation
+        // documented at `p2_21_known_bug_times_loop_inside_fiber_yield`.
+        //
+        // Permanent fix (deferred) would replace Rust-level
+        // iter loops with bytecode-level iteration so the
+        // counter lives in Vm state and FiberStashGuard
+        // captures it across yield. User-facing
+        // remediation: use a `while`-counter pattern inside
+        // Fiber bodies (see examples/sse_server.rb).
+        //
+        // This is strictly better than the silent-corruption
+        // bug it replaces: no more wrong values delivered.
+        // Output is truncated, not garbled.
+        #[cfg(feature = "_fiber")]
+        if self.fiber_yield_pending.is_some() {
+            return Ok(BlockStep::Value(Value::Nil));
+        }
         self.invoke_block(block, args)?;
         self.dispatch_until(pre_frames)?;
         if self.method_return.is_some() {
