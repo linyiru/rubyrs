@@ -38,4 +38,26 @@ describe "Hash#uniq" do
   it "raises ArgumentError when called with positional args + block" do
     assert_raises("ArgumentError") { {a: 1}.uniq(1) { |p| p } }
   end
+
+  it "accepts a Symbol#to_proc block" do
+    # &:last on a pair Array `[k, v]` returns v — common
+    # idiom for uniqueness-by-value. Locks in Symbol#to_proc
+    # compatibility with the block-form arm.
+    h = {a: 1, b: 1, c: 2}
+    assert_eq(h.uniq(&:last), [[:a, 1], [:c, 2]])
+  end
+
+  it "does NOT dedupe Float::NAN keys (rubyrs ruby_eql divergence)" do
+    # Divergent from CRuby: Float#eql?(NaN, NaN) is true in
+    # CRuby (structural equality), so a Hash whose block
+    # returns NaN for every entry deduplicates to one. In
+    # rubyrs, ruby_eql for two Floats falls through to Rust
+    # `a == b`, which is false for NaN — so every NaN-keyed
+    # entry survives. Pinning the current behaviour; the
+    # broader ruby_eql Float-NaN gap is tracked as a
+    # separate follow-up.
+    nan = 0.0 / 0.0
+    r = {a: nan, b: nan}.uniq { |pair| pair.last }
+    assert_eq(r.size, 2)  # CRuby returns 1
+  end
 end

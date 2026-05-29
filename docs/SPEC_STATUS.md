@@ -13,7 +13,7 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 136 |
-| Examples in corpus | 814 |
+| Examples in corpus | 817 |
 | Skipped `it` traces | 154 |
 
 ### Skipped traces by category
@@ -40,7 +40,7 @@ Find blocks unlocked by a future feature with e.g.
 |---|---|---|---|
 | Array | 18 | 72 | 49 |
 | BasicObject | 3 | 15 | 0 |
-| Hash | 38 | 162 | 51 |
+| Hash | 38 | 165 | 51 |
 | Integer | 35 | 312 | 29 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
@@ -103,11 +103,11 @@ Find blocks unlocked by a future feature with e.g.
 | `hash_sum_spec.rb` | Hash#sum | `core/hash/sum_spec.rb` | 6 | 1 |
 | `hash_take_spec.rb` | Hash#take | `core/hash/take_spec.rb` | 8 | 0 |
 | `hash_take_while_spec.rb` | Hash#take_while | `core/hash/take_while_spec.rb` | 11 | 0 |
-| `hash_tally_spec.rb` | Hash#tally | `core/hash/tally_spec.rb` | 5 | 1 |
+| `hash_tally_spec.rb` | Hash#tally | `core/hash/tally_spec.rb` | 6 | 1 |
 | `hash_to_a_spec.rb` | Hash#to_a | `core/hash/to_a_spec.rb` | 1 | 1 |
 | `hash_transform_keys_spec.rb` | Hash#transform_keys | `core/hash/transform_keys_spec.rb` | 3 | 5 |
 | `hash_transform_values_spec.rb` | Hash#transform_values | `core/hash/transform_values_spec.rb` | 2 | 4 |
-| `hash_uniq_spec.rb` | Hash#uniq | `core/hash/uniq_spec.rb` | 7 | 0 |
+| `hash_uniq_spec.rb` | Hash#uniq | `core/hash/uniq_spec.rb` | 9 | 0 |
 | `hash_values_spec.rb` | Hash#values | `core/hash/values_spec.rb` | 1 | 0 |
 | `hash_zip_spec.rb` | Hash#zip | `core/hash/zip_spec.rb` | 8 | 2 |
 | `instance_eval_spec.rb` | BasicObject#instance_eval | `core/basicobject/instance_eval_spec.rb` | 4 | 0 |
