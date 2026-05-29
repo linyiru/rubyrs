@@ -211,9 +211,14 @@ fn apply_config_does_not_reseed_load_paths() {
 
 #[test]
 fn empty_load_paths_seed_is_noop() {
-    // Edge case: `Some(vec![])` — explicitly empty seed. Should
-    // behave like `None` (no entries in $LOAD_PATH), not panic
-    // or trigger Array allocation. Documents the boundary.
+    // Edge case: `Some(vec![])` — explicitly empty seed. The
+    // `seed_load_path` helper short-circuits on `paths.is_empty()`
+    // so the seeding step itself is a true no-op (doesn't even
+    // call `ensure_load_path`, doesn't materialise the Array).
+    // The Array does still get allocated LATER when the test
+    // below evaluates `$LOAD_PATH` for the first time — that's
+    // the existing lazy-init path, unrelated to seeding. What
+    // the test locks in: no seed → no panic, no entries.
     let mut rt = Runtime::with_config(Config {
         load_paths: Some(vec![]),
         ..Default::default()

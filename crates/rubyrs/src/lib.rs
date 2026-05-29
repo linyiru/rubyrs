@@ -299,8 +299,9 @@ pub struct Config {
     /// the SAME order — `paths[0]` lands at `$LOAD_PATH[0]`,
     /// `paths[1]` at `[1]`, and so on. (Naively writing
     /// `$LOAD_PATH.unshift(p)` for each `p` in order would
-    /// REVERSE the input — see `seed_load_path` for the actual
-    /// reverse-insert implementation that preserves intent.)
+    /// REVERSE the input — `seed_load_path` instead splices the
+    /// converted seeds in at index 0 in a single operation, which
+    /// preserves input order and is O(N) overall.)
     ///
     /// This gives embedders a typed configuration surface
     /// instead of injecting a synthetic `$LOAD_PATH.unshift(...)`
@@ -1056,17 +1057,18 @@ impl Runtime {
     /// whatever was there before. Used by `with_config` to
     /// implement `Config::load_paths`.
     ///
-    /// Implementation: iterate `paths` in reverse and `insert(0)`
-    /// each entry. Currently the Array is always empty when this
+    /// Implementation: convert `paths` into a `Vec<Value::Str>` in
+    /// one pass, then `splice(0..0, seeds)` to insert all of them
+    /// at the front of the `$LOAD_PATH` Array as a single O(N)
+    /// operation. Currently the Array is always empty when this
     /// runs (`with_config` calls us before the preamble, and
-    /// `ensure_load_path` allocates an empty Vec), so behaviour is
-    /// observably identical to `push` in forward order — but if a
-    /// future preamble change pre-populates `$LOAD_PATH` before
-    /// our call, the reverse-insert form keeps the seed at the
-    /// front and preserves the documented `paths[0] = index 0`
-    /// contract. Robustness against that change is essentially
-    /// free (a few `Vec::insert(0)` calls on a single-digit-length
-    /// Vec).
+    /// `ensure_load_path` allocates an empty Vec), so behaviour
+    /// is observably identical to `extend` — but if a future
+    /// preamble change pre-populates `$LOAD_PATH` before our
+    /// call, splice-at-zero keeps the seed at the front and
+    /// preserves the documented `paths[0] = index 0` contract.
+    /// (The earlier reverse-iterate + `insert(0)` shape was
+    /// O(N²); splice keeps the same semantics with linear cost.)
     ///
     /// Allocates the `$LOAD_PATH` Array on the heap if it hasn't
     /// been already (`Vm::ensure_load_path` is idempotent). Panics
