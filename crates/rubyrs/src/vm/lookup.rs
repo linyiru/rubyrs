@@ -494,7 +494,8 @@ impl Vm {
                 "gcd" | "lcm" | "fdiv" | "divmod" |
                 "ceil" | "floor" | "round" | "truncate" |
                 "chr" | "coerce" |
-                "eql?" | "hash"
+                "eql?" | "hash" |
+                "dup" | "clone"
             ),
             // Phase A BigInt subset + Phase B.1 `**` + Phase B.2
             // unary (`-@`/`+@`/`abs`) + Phase B.3 bit ops (`~`,
@@ -528,7 +529,8 @@ impl Vm {
                 "times" | "upto" | "downto" |
                 "succ" | "next" | "pred" |
                 "chr" | "coerce" |
-                "eql?" | "hash"
+                "eql?" | "hash" |
+                "dup" | "clone"
             ),
             Value::Float(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" | "**" |
@@ -540,7 +542,8 @@ impl Vm {
                 "eql?" | "hash" |
                 "floor" | "ceil" | "round" | "truncate" |
                 "-@" | "+@" |
-                "coerce"
+                "coerce" |
+                "dup" | "clone"
             ),
             Value::Str(_) => matches!(name,
                 "+" | "*" | "%" | "<" | "<=" | ">" | ">=" |
@@ -567,7 +570,7 @@ impl Vm {
                 "freeze" | "frozen?" | "dup" | "+@" | "-@" | "dump" | "count" |
                 "hash"
             ),
-            Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect" | "name" | "succ" | "next"),
+            Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect" | "name" | "succ" | "next" | "dup" | "clone"),
             Value::Array(_) => matches!(name,
                 "freeze" | "frozen?" |
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
@@ -629,7 +632,7 @@ impl Vm {
                 "partition" | "min_by" | "max_by" |
                 "group_by" | "sort_by" | "sort"
             ),
-            Value::Bool(_) | Value::Nil => matches!(name, "to_s" | "inspect"),
+            Value::Bool(_) | Value::Nil => matches!(name, "to_s" | "inspect" | "dup" | "clone"),
             Value::Class(cls) => {
                 // Built-in class-level methods (`.new`, `.name`,
                 // `.ancestors`, ...) are hardcoded; user-defined
@@ -713,6 +716,13 @@ impl Vm {
                 self.lookup_class_singleton_method(cls, name_id).is_some()
             },
             Value::Object(id) => {
+                // The universal `dup`/`clone` arm in
+                // `Vm::do_call` handles plain Value::Object via
+                // a shallow Instance copy, so report true even
+                // when no user method exists.
+                if matches!(name, "dup" | "clone") {
+                    return true;
+                }
                 let cls = self.heap.class_of(*id);
                 self.lookup_method_uncached(&cls, name_id).is_some()
             }

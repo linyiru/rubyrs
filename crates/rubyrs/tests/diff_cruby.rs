@@ -96,6 +96,7 @@ fn run_diff(name: &str) {
 #[test] fn array_hash_content_hash() { run_diff("array_hash_content_hash"); }
 #[test] fn object_itself_tap_then() { run_diff("object_itself_tap_then"); }
 #[test] fn instance_variable_defined() { run_diff("instance_variable_defined"); }
+#[test] fn object_dup_clone() { run_diff("object_dup_clone"); }
 #[test] fn enumerable_filter() { run_diff("enumerable_filter"); }
 #[test] fn enumerable_aggregate() { run_diff("enumerable_aggregate"); }
 #[test] fn int_string_basics() { run_diff("int_string_basics"); }
