@@ -5291,6 +5291,15 @@ impl Vm {
                 | Value::Sym(_)
                 | Value::Bool(_)
                 | Value::Nil => recv.clone(),
+                // CRuby treats Integer as immediate-like for
+                // dup/clone regardless of Fixnum/Bignum
+                // representation — `(10**100).dup.equal?(...)`
+                // returns true. We don't have to allocate a
+                // fresh heap slot for Bignum; returning the
+                // same Value is identity-preserving and matches
+                // user expectations.
+                #[cfg(feature = "bignum")]
+                Value::BigInt(_) => recv.clone(),
                 Value::Object(oid) => {
                     let (cls, ivars) = match self.heap.get(*oid) {
                         crate::heap::HeapObj::Instance(inst) => {

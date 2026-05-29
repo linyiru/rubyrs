@@ -21,6 +21,15 @@ puts 42.dup.equal?(42)
 puts :foo.clone.equal?(:foo)
 puts nil.clone.equal?(nil)
 
+# Bignum: CRuby treats Integer as immediate for dup/clone
+# regardless of Fixnum/Bignum representation. rubyrs followed
+# suit in cycle-2 review of PR #296 (the whitelist had
+# promised Bignum supported these but dispatch raised
+# NoMethodError — fixed by returning self).
+big = 10**100
+puts big.dup.equal?(big)
+puts big.clone.equal?(big)
+
 # Plain Object — fresh Instance, shallow-cloned ivars
 class C
   def initialize
