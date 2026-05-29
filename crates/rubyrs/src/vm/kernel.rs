@@ -590,16 +590,22 @@ impl Vm {
                     #[cfg(not(target_os = "wasi"))]
                     {
                         let path_str = path.to_string_lossy();
-                        // Probe for a `.rb` sibling first, regardless
+                        // Probe for a `.rb` candidate first, regardless
                         // of cfg!("cext"). Walks the same candidate
-                        // list `require_ruby` consults — cwd-relative,
-                        // caller-source-dir, caller-source-parent
-                        // (the cross-package "lib"-style hop). Lets
-                        // `require 'rack/show_exceptions'` from
-                        // `<root>/sinatra/show_exceptions.rb`
-                        // resolve to `<root>/rack/show_exceptions.rb`
-                        // without forcing the script to spell out
-                        // `require_relative` paths.
+                        // list `require_ruby` consults — as-given +
+                        // each `$LOAD_PATH` entry + `name.rb` + raw-
+                        // input fallback. Pre-pass-10-layer-#6 this
+                        // also included the caller source file's
+                        // directory and its parent (the cross-package
+                        // "lib" hop), but those shadowed the stdlib-
+                        // stub fallback when a `require` inside an
+                        // already-loaded file resolved back to that
+                        // same file. Co-located trees opt in by
+                        // `$LOAD_PATH.unshift(__dir__)` (see the
+                        // require_xpkg fixture's loader.rb). The
+                        // routing here only DECIDES .rb vs cext —
+                        // `find_ruby_source_candidate` runs the
+                        // same probe `require_ruby` will run.
                         //
                         // Under the FS sandbox (`Config::allow_filesystem_io:
                         // false`), skip the probe — it'd touch the host FS
