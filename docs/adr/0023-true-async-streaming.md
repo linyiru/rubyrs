@@ -2,11 +2,102 @@
 
 ## Status
 
-Proposed (2026-05-28). **v2**, follow-up to
-[ADR 0022 v6](0022-http-server-battery.md) which deferred
-"A3β true async streaming" to this ADR. No code change in
-this ADR — implementation lands in a follow-up after the
-architecture decision is accepted.
+**Accepted (2026-05-28). v4 — core implementation
+complete; remaining Phase 2 test polish tracked as
+follow-ups.**
+
+Phase 0, Phase 1, Phase 2 items #16–#20, and Phase 3 all
+landed (commits `18eb0e37` → `88d139f6`). Live behaviour
+verified across four feature combos:
+
+- `_fiber + _http_server`: 157 lib tests pass.
+- `_http_server` only: 114 lib tests pass (buffered fallback).
+- `_fiber` only: 96 lib tests pass (Fiber primitive in isolation).
+- default: 63 lib tests pass (neither feature touches default builds).
+
+Key correctness anchors that already shipped:
+
+- **Frame-stack swap** under Miri Stacked Borrows + Tree
+  Borrows (`vm::cext::miri_tests` extension — Phase 1 #12).
+- **GC walk** of suspended-Fiber snapshots, including
+  `body_block`, `frames.{locals,self_val,swap_return,block_arg}`,
+  `stack`, `pinned`, `method_return`, `last_value`.
+- **`cext_depth` guard** — `Fiber.yield` traps with
+  `FiberError` when invoked under any C-ext frame
+  (`p1d2_fiber_yield_in_cext_traps`).
+- **Resource caps** — `Config::max_live_fibers` +
+  `Config::max_fiber_frame_depth`, with `RUBYRS_MAX_*` env
+  parsing on the CLI binary.
+- **Drop-`Vm`-free contract** documented in
+  `crates/rubyrs/src/vm/fiber.rs` for downstream consumers
+  (Value::Object is Copy / no destructor → safe to drop
+  `FiberResponseBody` outside the host-fn scope).
+- **Wire-level streaming**: each `yield` becomes one HTTP/1.1
+  chunked frame, flushed to the socket before the next
+  chunk produces (P2b.2b.4 timing test —
+  `(arrival_SECOND − arrival_FIRST) ≥ 250 ms` for a Ruby
+  body that sleeps 500 ms between yields). The fix uncovered
+  a real hyper-driver bug: synchronous `Poll::Ready` returns
+  batched frames into a single TCP write, broken by the
+  `yield_next_poll` flag that forces one executor tick per
+  frame.
+- **`body.close` invocation** per Rack 3 SPEC: fires once
+  on buffered + streaming paths, even when the body raises
+  mid-stream (P2c).
+- **Array fast-path perf guard**: monotonic
+  `Heap::fiber_alloc_count` counter pinned by a paired
+  test — Array body keeps the counter flat across N
+  requests; control test with an `each`-shape body proves
+  the counter is live (P2 #20).
+
+**Remaining Phase 2 polish (follow-ups, do not block
+opt-in users)**:
+
+- **P2 #21 Cat 1 — subprocess wire-timing.** In-process
+  equivalent is already pinned by
+  `p2b2b4_first_chunk_arrives_before_body_finishes`; the
+  ADR-spec'd subprocess variant remains for full isolation
+  from harness threading.
+- **P2 #21 Cat 2 — backpressure.** Verify the Vm keeps
+  making progress when hyper's internal buffer fills (slow
+  consumer scenario). Not exercised by current tests.
+- **P2 #22 Cat 4 remainder.** `body.close` is covered;
+  pending items are `write-after-close → IOError`,
+  empty-body streaming, `flush` no-op semantics, close
+  idempotency, headers-before-first-chunk ordering.
+
+**Documented limitations (carry forward — not regressions)**:
+
+- **Risk #1 — `ensure` blocks don't run on client
+  disconnect.** When hyper drops the `FiberResponseBody`
+  mid-stream, the Fiber's `ObjId` is released without a
+  final resume — `ensure` attached to in-flight methods
+  never fires. `Fiber#raise` to surface disconnect as an
+  exception is the noted mitigation and remains deferred
+  (semantics interact subtly with suspended state).
+- **Risk #4–6** — `rack.hijack`, `to_path`, trailers —
+  remain explicitly out of scope (Phase H3+).
+- **Risk #7** — HTTP/2 cross-task resume is not guaranteed
+  to transfer; needs a separate design pass when
+  `_http_server_h2` lands.
+
+Architecture decision (Option A — Fiber-based cooperative
+scheduling) is unchanged from v2.
+
+**v3 → v4 changes** (implementation landed):
+
+- Status: Proposed → **Accepted**. Implementation matrix
+  added (commits, test counts per feature combo, the
+  follow-ups list).
+- No architectural changes. v3 → v4 is a status promotion
+  driven by completion of Phase 0/1/3 + Phase 2 #16–#20.
+- Real-bug finding added inline: synchronous `poll_frame`
+  Ready returns batched frames into one TCP write; fixed
+  by `yield_next_poll` flag (P2b.2b.4 commit `82dee3d0`).
+- Honest finding on Array fast-path: two layered defenses
+  (explicit `matches!` guard + builtin `Array#each` not
+  being in the user method table); test verifies outcome,
+  not specific defense.
 
 **v1 → v2 changes** (three parallel reviewer rounds —
 architecture / Rust safety / Ruby+Rack — surfaced 22
@@ -764,7 +855,26 @@ commit atomic with tests per the existing process.
 
 ## Revision log
 
-- **2026-05-28 — v2 (this revision).** Tightening pass
+- **2026-05-28 — v4 (this revision).** Status: Proposed →
+  **Accepted**. Phase 0, Phase 1 (#1–#15), Phase 2 #16–#20,
+  Phase 3 all landed (commits `18eb0e37` → `88d139f6`).
+  4 feature combos green: `_fiber+_http_server` 157,
+  `_http_server` 114, `_fiber` 96, default 63. Real-bug
+  finding documented: synchronous `poll_frame` Ready returns
+  batched frames into one TCP write — fixed via
+  `yield_next_poll` flag (`82dee3d0`). Honest finding on
+  Array fast-path: two layered defenses (explicit
+  `matches!(Value::Array, _)` early-exit + builtin
+  `Array#each` not in user method table), test verifies
+  outcome. Remaining follow-ups: P2 #21 subprocess timing /
+  backpressure + P2 #22 remaining Cat 4 contract tests.
+- **2026-05-28 — v3.** Implementation snapshot of v2.
+  Phase 0 prerequisite (each/yield composability) landed
+  as `18eb0e37`; Phase 1 (Fiber primitive + GC + caps +
+  Miri) landed as `311`–`315`. Phase 2 detection-order
+  rewrite landed as `535c2e32`. No architectural change
+  from v2 — v3 marker for tracking against commits.
+- **2026-05-28 — v2.** Tightening pass
   after three parallel reviewer rounds (architecture /
   Rust safety / Ruby+Rack). 22 actionable items
   surfaced; deduplicated into 7 groups. See "v1 → v2
