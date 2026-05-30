@@ -32,7 +32,7 @@
 
 use std::cell::RefCell;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use rubyrs::{Config, RubyError, Runtime, Value};
@@ -113,14 +113,12 @@ s.add_dependency "puma", "~> 6.0"
 "#,
     )
     .expect("write gemspec");
-    // Also create an out-of-scope file the demo will try (and
-    // fail) to read. Put it outside the gem root so the allowlist
-    // rejects it.
-    let outside = base.join(format!("rubyrs-gemspec-secret-{}.txt", std::process::id()));
-    fs::write(&outside, "host secret — not for guests").ok();
-    // The outside file is intentionally NOT registered with the
-    // guard; we leave it as a leak so the demo's "out of scope"
-    // assertion has something real to attempt.
+    // Phase 2's out-of-scope read uses `/etc/passwd` — universally
+    // present on the platforms this example targets, no fixture
+    // needed. (An earlier draft planted a per-process file outside
+    // the gem root, but its cleanup wasn't covered by GemRoot's
+    // RAII guard and the file was never actually read by the
+    // sandbox check — flagged in PR #302 review.)
     GemRoot { path: root }
 }
 
@@ -313,21 +311,6 @@ fn main() {
     println!("\n================================================================");
     println!("  All four embed-API hardening contracts validated end-to-end.");
     println!("================================================================");
-
-    // Clean up the planted out-of-scope file (the GemRoot's Drop
-    // handles the gem dir itself).
-    let secret = std::env::temp_dir().join(format!(
-        "rubyrs-gemspec-secret-{}.txt",
-        std::process::id()
-    ));
-    let _ = fs::remove_file(&secret);
-    // Tempdir under CARGO_TARGET_TMPDIR/option_env path lives one
-    // dir below; iterate to also clean that one if it exists.
-    if let Some(tmpdir) = option_env!("CARGO_TARGET_TMPDIR") {
-        let secret2 = Path::new(tmpdir).join(format!(
-            "rubyrs-gemspec-secret-{}.txt",
-            std::process::id()
-        ));
-        let _ = fs::remove_file(&secret2);
-    }
+    // GemRoot's Drop runs at scope exit (and on panic), cleaning
+    // up the tempdir. No manual cleanup needed.
 }
