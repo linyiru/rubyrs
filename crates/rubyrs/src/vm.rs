@@ -258,6 +258,25 @@ pub(crate) enum HostFnSlot {
     V2(Rc<HostFnV2>),
 }
 
+/// ADR 0025 Phase 4a: per-signal handler state.
+/// `Default` — raise Interrupt (or whatever the signal's
+///             default behavior is) at the next safe point.
+/// `Ignore`  — clear the flag and resume.
+/// `Block`   — invoke the stored block at the next safe
+///             point (Phase 4b: re-entrant dispatch).
+///
+/// Stored in `Vm::signal_traps` keyed by Unix signal number.
+/// `Signal.trap(name, handler)` parses inputs into one of
+/// these variants and replaces the current entry (returning
+/// the previous one in the same shape — `"DEFAULT"` /
+/// `"IGNORE"` / a `Proc` / nil).
+#[derive(Clone, Debug)]
+pub(crate) enum SignalHandlerState {
+    Default,
+    Ignore,
+    Block(crate::value::ObjId),
+}
+
 impl Clone for HostFnSlot {
     fn clone(&self) -> Self {
         match self {
@@ -487,6 +506,15 @@ pub(crate) struct Vm {
     /// existing guard) so no Fiber-suspend can happen inside
     /// a suppress window.
     pub(crate) suppress_interrupt: u32,
+    /// ADR 0025 Phase 4: user-installed signal handlers
+    /// keyed by Unix signal number. Default state for an
+    /// un-installed signal is `SignalHandlerState::Default`
+    /// (translates to a Ruby `Interrupt` raise at safe
+    /// point). Populated via `Signal.trap("INT") { ... }`;
+    /// consumed by the safe-point check (Phase 4b) which
+    /// switches between raise / no-op / re-entrant block
+    /// invocation based on the state.
+    pub(crate) signal_traps: std::collections::HashMap<i32, SignalHandlerState>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) heap: Heap,
@@ -811,6 +839,7 @@ impl Vm {
             // handling.
             interrupt_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             suppress_interrupt: 0,
+            signal_traps: std::collections::HashMap::new(),
             stack: Vec::with_capacity(1024),
             frames: vec![],
             heap: Heap::new(),

@@ -52,6 +52,7 @@ impl Vm {
                 | "exit"
                 | "exit!"
                 | "abort"
+                | "__rubyrs_signal_trap"
                 | "__method__"
                 | "__callee__"
                 | "block_given?"
@@ -185,7 +186,7 @@ impl Vm {
                         &*name,
                         "puts" | "p" | "pp" | "print" | "require" |
                         "sprintf" | "format" | "__time_now_raw" | "sleep" |
-                        "exit" | "exit!" | "abort" |
+                        "exit" | "exit!" | "abort" | "__rubyrs_signal_trap" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
                         "eval" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?"
@@ -792,6 +793,89 @@ impl Vm {
                 // no Ruby-level return value.
                 src(status);
                 Some(Ok(Value::Nil))
+            }
+            // ADR 0025 Phase 4a: `Signal.trap(sig, handler)` →
+            // previous handler. The `Signal` Ruby module
+            // (preamble) calls this host fn after normalizing
+            // its block argument. Three-arg shape:
+            //   `__rubyrs_signal_trap(sig, handler, block)`
+            // where exactly one of `handler` or `block` is
+            // non-nil (the Signal module enforces this; if both
+            // are nil, the host fn returns the current handler
+            // unchanged — useful for "what's set?" queries).
+            //
+            // Accepted handler inputs (CRuby parity):
+            //   "DEFAULT" / :DEFAULT          → Default state
+            //   "IGNORE"  / :IGNORE / "SIG_IGN" → Ignore state
+            //   Proc / block                  → Block(ObjId)
+            //
+            // Returns previous handler in the same shape:
+            //   Default → "DEFAULT" String
+            //   Ignore  → "IGNORE"  String
+            //   Block(id) → Value::Block(id)
+            "__rubyrs_signal_trap" => {
+                if args.len() != 3 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "__rubyrs_signal_trap(sig, handler, block) — expected 3 args, got {}",
+                            args.len(),
+                        ),
+                    })));
+                }
+                let sig = match crate::signals::parse_signal_name(&args[0], &self.interner) {
+                    Some(n) => n,
+                    None => return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "unsupported signal {:?}", args[0].to_display(&self.heap, &self.interner),
+                        ),
+                    }))),
+                };
+                // Pick the effective handler: explicit `handler`
+                // arg wins; else `block`. Nil-nil → no-op query.
+                let handler = if !matches!(&args[1], Value::Nil) { &args[1] } else { &args[2] };
+                // Parse the new state. Nil-Nil means "no change".
+                let new_state: Option<crate::vm::SignalHandlerState> = match handler {
+                    Value::Nil => None, // query mode
+                    Value::Str(s) => {
+                        let raw = s.to_string_lossy();
+                        let normalized = raw.strip_prefix("SIG_").unwrap_or(&raw);
+                        match normalized {
+                            "DEFAULT" => Some(crate::vm::SignalHandlerState::Default),
+                            "IGNORE" | "IGN" => Some(crate::vm::SignalHandlerState::Ignore),
+                            _ => return Some(Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("unrecognized command \"{raw}\" for Signal.trap"),
+                            }))),
+                        }
+                    }
+                    Value::Sym(id) => {
+                        let raw = self.interner.resolve(*id).clone();
+                        let normalized = raw.strip_prefix("SIG_").unwrap_or(&raw);
+                        match normalized {
+                            "DEFAULT" => Some(crate::vm::SignalHandlerState::Default),
+                            "IGNORE" | "IGN" => Some(crate::vm::SignalHandlerState::Ignore),
+                            _ => return Some(Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("unrecognized command :{raw} for Signal.trap"),
+                            }))),
+                        }
+                    }
+                    Value::Block(id) => Some(crate::vm::SignalHandlerState::Block(*id)),
+                    other => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "trap handler must be \"DEFAULT\" / \"IGNORE\" / Proc / block, got {}",
+                            other.type_name(),
+                        ),
+                    }))),
+                };
+                // Read previous (default to Default if none).
+                let previous = self.signal_traps.get(&sig)
+                    .cloned()
+                    .unwrap_or(crate::vm::SignalHandlerState::Default);
+                if let Some(new) = new_state {
+                    self.signal_traps.insert(sig, new);
+                }
+                // Convert previous state back to Ruby value.
+                let ret = signal_handler_state_to_value(self, previous);
+                Some(Ok(ret))
             }
             "sprintf" | "format" => {
                 if args.is_empty() {
@@ -2425,4 +2509,31 @@ fn raise_system_exit(vm: &mut Vm, status: i32, message: &str) -> Option<Result<V
     // Unwind found a rescue. Don't push a Nil over it.
     vm.suppress_call_result_push = true;
     Some(Ok(Value::Nil))
+}
+
+/// ADR 0025 Phase 4a: convert a `SignalHandlerState` back to
+/// a Ruby Value for `Signal.trap`'s previous-handler return.
+/// Default → "DEFAULT" String; Ignore → "IGNORE" String;
+/// Block(id) → Value::Block(id).
+fn signal_handler_state_to_value(
+    vm: &mut Vm,
+    state: crate::vm::SignalHandlerState,
+) -> Value {
+    use crate::value::RStr;
+    match state {
+        crate::vm::SignalHandlerState::Default => {
+            Value::Str(std::rc::Rc::new(RStr::new("DEFAULT".to_string())))
+        }
+        crate::vm::SignalHandlerState::Ignore => {
+            Value::Str(std::rc::Rc::new(RStr::new("IGNORE".to_string())))
+        }
+        crate::vm::SignalHandlerState::Block(id) => {
+            // Return the block as-is. Future Phase 4b will
+            // re-invoke this block; for the return value we
+            // hand the user back a reference they can pass
+            // to a subsequent Signal.trap to restore.
+            let _ = vm; // suppress unused-var when no allocation needed
+            Value::Block(id)
+        }
+    }
 }

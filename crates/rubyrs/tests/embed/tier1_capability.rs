@@ -416,6 +416,117 @@ fn phase_3_sleep_no_args_without_signal_handler_raises_argument_error() {
 }
 
 #[test]
+fn phase_4a_signal_trap_returns_default_on_first_install() {
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        prev = Signal.trap("INT") { puts "got" }
+        puts "previous=#{prev}"
+        "##,
+        "sigtrap_first.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "previous=DEFAULT\n");
+}
+
+#[test]
+fn phase_4a_signal_trap_accepts_all_name_forms() {
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        Signal.trap("INT") { puts "A" }
+        prev = Signal.trap("SIGINT") { puts "B" }
+        puts "after SIGINT: prev=#{prev.class}"
+
+        prev = Signal.trap(:INT) { puts "C" }
+        puts "after :INT: prev=#{prev.class}"
+
+        prev = Signal.trap(:SIGINT) { puts "D" }
+        puts "after :SIGINT: prev=#{prev.class}"
+
+        prev = Signal.trap(2, "DEFAULT")
+        puts "after Integer 2: prev=#{prev.class}"
+
+        prev = Signal.trap("INT")
+        puts "query: prev=#{prev}"
+        "##,
+        "sigtrap_name_forms.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "after SIGINT: prev=Proc\n\
+         after :INT: prev=Proc\n\
+         after :SIGINT: prev=Proc\n\
+         after Integer 2: prev=Proc\n\
+         query: prev=DEFAULT\n",
+    );
+}
+
+#[test]
+fn phase_4a_signal_trap_string_handlers_round_trip() {
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        prev = Signal.trap("INT", "IGNORE")
+        puts "first prev=#{prev}"
+        prev = Signal.trap("INT", "DEFAULT")
+        puts "after DEFAULT: prev=#{prev}"
+        prev = Signal.trap("INT", "SIG_IGN")
+        puts "after SIG_IGN: prev=#{prev}"
+        prev = Signal.trap("INT", :DEFAULT)
+        puts "after :DEFAULT: prev=#{prev}"
+        "##,
+        "sigtrap_string_handlers.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "first prev=DEFAULT\n\
+         after DEFAULT: prev=IGNORE\n\
+         after SIG_IGN: prev=DEFAULT\n\
+         after :DEFAULT: prev=IGNORE\n",
+    );
+}
+
+#[test]
+fn phase_4a_signal_trap_unknown_name_raises_argument_error() {
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        r##"Signal.trap("BOGUS") { puts "x" }"##,
+        "sigtrap_bad_name.rb",
+    ).unwrap_err();
+    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+        panic!("expected ArgumentError, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "ArgumentError");
+    assert!(
+        message.contains("unsupported signal"),
+        "unexpected: {message}",
+    );
+}
+
+#[test]
+fn phase_4a_signal_trap_unknown_handler_string_raises() {
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        r##"Signal.trap("INT", "MAYBE")"##,
+        "sigtrap_bad_handler.rb",
+    ).unwrap_err();
+    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+        panic!("expected ArgumentError, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "ArgumentError");
+    assert!(
+        message.contains("unrecognized command"),
+        "unexpected: {message}",
+    );
+}
+
+#[test]
 fn exit_raises_system_exit_caught_with_status() {
     // ADR 0025 Phase 0.5b: `Kernel#exit(N)` raises SystemExit
     // with status=N. The user-script `rescue SystemExit => e`

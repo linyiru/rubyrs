@@ -2246,6 +2246,14 @@ RUBY_ENGINE = "ruby".freeze
             "<rubyrs:preamble:time>",
         )
             .expect("ICE: failed to load Time preamble");
+        // ADR 0025 Phase 4a: Signal module — wraps the
+        // `__rubyrs_signal_trap` Kernel builtin so user
+        // scripts can write the canonical `Signal.trap` form.
+        self.eval_inner(
+            include_str!("preamble/signal.rb"),
+            "<rubyrs:preamble:signal>",
+        )
+            .expect("ICE: failed to load Signal preamble");
     }
 
     /// Replace the runtime's stdout sink.

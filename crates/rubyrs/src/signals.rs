@@ -120,6 +120,60 @@ pub(crate) fn is_shared_flag(flag: &Arc<AtomicBool>) -> bool {
     }
 }
 
+/// ADR 0025 Phase 4a: normalize a Ruby-side signal-name
+/// argument to a Unix signal number. Accepted shapes:
+/// - `Integer` (1..=64, the legal POSIX signal range).
+/// - `Symbol` or `String`: bare short name (`"INT"`, `:INT`)
+///   or `SIG`-prefixed (`"SIGINT"`, `:SIGINT`). Both
+///   case-insensitive isn't needed — CRuby is also case-
+///   sensitive here; we match.
+/// - Anything else → `None` (caller raises ArgumentError).
+///
+/// The Tier-1 portable signal subset is enumerated below.
+/// Real-time signals (SIGRTMIN+) and platform-specific names
+/// are deferred — match CRuby's documented portable set.
+pub(crate) fn parse_signal_name(
+    v: &crate::value::Value,
+    interner: &crate::intern::Interner,
+) -> Option<i32> {
+    use crate::value::Value;
+    match v {
+        Value::Int(n) if (1..=64).contains(n) => Some(*n as i32),
+        Value::Sym(id) => parse_str(interner.resolve(*id)),
+        Value::Str(s) => parse_str(&s.to_string_lossy()),
+        _ => None,
+    }
+}
+
+fn parse_str(s: &str) -> Option<i32> {
+    let trimmed = s.strip_prefix("SIG").unwrap_or(s);
+    match trimmed {
+        "HUP" => Some(1),
+        "INT" => Some(2),
+        "QUIT" => Some(3),
+        "ILL" => Some(4),
+        "TRAP" => Some(5),
+        "ABRT" => Some(6),
+        "FPE" => Some(8),
+        "KILL" => Some(9),
+        "USR1" => Some(10),
+        "SEGV" => Some(11),
+        "USR2" => Some(12),
+        "PIPE" => Some(13),
+        "ALRM" => Some(14),
+        "TERM" => Some(15),
+        "CHLD" => Some(17),
+        "CONT" => Some(18),
+        "STOP" => Some(19),
+        "TSTP" => Some(20),
+        "TTIN" => Some(21),
+        "TTOU" => Some(22),
+        "URG" => Some(23),
+        "WINCH" => Some(28),
+        _ => None,
+    }
+}
+
 // ---- Non-Unix fallback (Windows, WASI, etc.) ----
 
 #[cfg(not(unix))]
