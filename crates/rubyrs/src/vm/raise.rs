@@ -184,6 +184,24 @@ impl Vm {
                 // stacks in lock-step.
                 f.loop_rescue_depths.truncate(h.loop_depth_at_push);
                 f.loop_stack_depths.truncate(h.loop_depth_at_push);
+                // Same shape as loop_rescue_depths truncation but
+                // for the begin/rescue baseline stack: any inner
+                // `EnterBegin` entries the exception is escaping
+                // OUT of had their `ExitBegin` skipped (we jumped
+                // straight to a handler). A later `retry` in this
+                // (now-outer) rescue body reads `last()` of the
+                // baseline stack; without this truncate it would
+                // read the orphan inner baseline and shrink
+                // `rescues` to the wrong depth, leaving outer
+                // rescue handlers stranded or wiping siblings.
+                // (Code-review #306 round 2.)
+                // Truncate the begin-baseline stack length (each
+                // entry now carries a triple — `rescues_len`,
+                // `loop_rescue_depths_len`, `loop_stack_depths_len`
+                // — captured at its `EnterBegin`; truncating by
+                // count is enough since outer entries are still
+                // valid).
+                f.begin_rescue_depths.truncate(h.begin_depth_at_push);
                 if h.is_ensure {
                     // ensure handler: push the exception onto the operand
                     // stack; the handler's compiled code ends in `Op::Raise`

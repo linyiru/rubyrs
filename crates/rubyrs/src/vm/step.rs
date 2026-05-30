@@ -2378,7 +2378,7 @@ impl Vm {
                     locals: Rc::new(RefCell::new(vec_nil(n_locals))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false,
+                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
                 });
             }
             Op::NewArray(n) => {
@@ -2430,6 +2430,7 @@ impl Vm {
                 let f = self.frames.last().expect("ICE: PushRescue no frame");
                 let ip = f.ip;
                 let loop_depth = f.loop_rescue_depths.len();
+                let begin_depth = f.begin_rescue_depths.len();
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
                 let bind_slot = if bind != 0 { Some(slot) } else { None };
@@ -2452,21 +2453,56 @@ impl Vm {
                 self.frames.last_mut().expect("ICE: PushRescue no frame").rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
                     filter_class: filter, loop_depth_at_push: loop_depth,
+                    begin_depth_at_push: begin_depth,
                 });
             }
             Op::PopRescue => {
                 self.frames.last_mut().expect("ICE: PopRescue no frame").rescues.pop();
             }
+            Op::EnterBegin => {
+                let f = self.frames.last_mut().expect("ICE: EnterBegin no frame");
+                let baseline = crate::vm::BeginBaseline {
+                    rescues_len: f.rescues.len(),
+                    loop_rescue_depths_len: f.loop_rescue_depths.len(),
+                    loop_stack_depths_len: f.loop_stack_depths.len(),
+                };
+                f.begin_rescue_depths.push(baseline);
+            }
+            Op::ExitBegin => {
+                self.frames
+                    .last_mut()
+                    .expect("ICE: ExitBegin no frame")
+                    .begin_rescue_depths
+                    .pop()
+                    .expect("ICE: ExitBegin without matching EnterBegin");
+            }
+            Op::TruncateRescuesToBeginBaseline => {
+                let f = self.frames.last_mut().expect("ICE: TruncateRescues no frame");
+                let baseline = *f
+                    .begin_rescue_depths
+                    .last()
+                    .expect("ICE: retry without matching EnterBegin baseline");
+                // Three-stack cleanup so retry stays balanced
+                // whether it fires from a multi-class rescue
+                // (rescues truncation) or from inside a `while`
+                // loop in the rescue body (loop depths
+                // truncation). (Code-review #306 round 3.)
+                f.rescues.truncate(baseline.rescues_len);
+                f.loop_rescue_depths.truncate(baseline.loop_rescue_depths_len);
+                f.loop_stack_depths.truncate(baseline.loop_stack_depths_len);
+            }
             Op::PushEnsure(off) => {
                 let f = self.frames.last().expect("ICE: PushEnsure no frame");
                 let ip = f.ip;
                 let loop_depth = f.loop_rescue_depths.len();
+                let begin_depth = f.begin_rescue_depths.len();
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
                 self.frames.last_mut().expect("ICE: PushEnsure no frame").rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot: None, is_ensure: true,
                     filter_class: None, // ensure is unconditional
                     loop_depth_at_push: loop_depth,
+                    begin_depth_at_push: begin_depth,
                 });
             }
             Op::PopEnsure => {

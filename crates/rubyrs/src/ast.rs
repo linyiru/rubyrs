@@ -417,6 +417,16 @@ pub(crate) enum Expr {
     /// iteration in the calling driver (e.g. `arr.each`), making the
     /// driver's return value `val`.
     Break(Option<Box<SExpr>>),
+    /// `retry` — re-executes the surrounding `begin` block from
+    /// the start, re-evaluating the rescue clauses. Only legal
+    /// inside a `rescue` clause body. CRuby raises SyntaxError
+    /// at parse time when used outside; rubyrs catches the
+    /// out-of-context case at compile time and emits a runtime
+    /// raise (RuntimeError) instead — a Tier-1 divergence on the
+    /// error class for an error-only path. (TRY_RUNS pass-10
+    /// layer #9 — rackup-2.2.1/lib/rackup/server.rb:439 uses
+    /// the canonical retry-on-EADDRINUSE pattern.)
+    Retry,
     /// `super` (forwarding all of the enclosing method's args)
     /// or `super(arg1, arg2)` (explicit args). `super()` with
     /// empty parens passes no args and is `Some(vec![])`;
@@ -1644,6 +1654,13 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_break_node() {
         let val = collect_multi_return_value(ctx, n.arguments(), node);
         return sp(node, Expr::Break(val));
+    }
+    if node.as_retry_node().is_some() {
+        // `retry` carries no value/args; legality (must be inside a
+        // rescue clause body) is enforced at compile time via the
+        // ProtoBuilder's `retry_targets` stack. (TRY_RUNS pass-10
+        // layer #9.)
+        return sp(node, Expr::Retry);
     }
     // `defined?(expr)` — returns a string describing the kind
     // of `expr`, or nil if it's not defined. Resolved at AST

@@ -539,6 +539,47 @@ end
   surfaces an error.
 - Test: `anon_block_forward` in `crates/rubyrs/tests/diff/`.
 
+### `retry` from inside a `begin/ensure` inside a rescue body skips the ensure
+
+```ruby
+$ensure_count = 0
+counter = 0
+begin
+  counter += 1
+  raise "boom" if counter < 2
+rescue
+  begin
+    retry if counter < 2      # jumps backwards BEFORE the ensure body runs
+  ensure
+    $ensure_count += 1
+  end
+end
+puts $ensure_count            # CRuby: 1   rubyrs: 0
+```
+
+- CRuby's `retry` is a non-local control transfer (RUBY_TAG_RETRY)
+  that walks back through any active `ensure` scopes on its way
+  to the begin-block start, running each `ensure` body in order
+  before re-executing the begin body.
+- rubyrs's `retry` compiles to `Op::TruncateRescuesToBeginBaseline`
+  + `Op::Jump(begin_top)` — a direct backward jump that bypasses
+  any `PushEnsure` handlers active in the rescue body. The
+  truncation cleans up the `frame.rescues` Vec so the bypassed
+  ensure handler doesn't leak to catch later exceptions, but the
+  ensure body itself never executes for that aborted iteration.
+- Why: a proper TAG_RETRY-style transfer needs to share the
+  existing `pending_loop_transfer` walker (`break`/`next` already
+  go through it for the same reason) AND a new
+  `EnsureTransferKind::Retry` variant. The fixture surface that
+  motivated `retry` support (rackup-2.2.1/lib/rackup/server.rb:439's
+  EADDRINUSE loop) puts `retry` at the top of a flat rescue body
+  with no nested ensure, so this gap doesn't gate sinatra-4
+  loading. Deferred to a follow-up if a real consumer needs it.
+- Test: not pinned in `diff_cruby` — pinning the CRuby behavior
+  would lock the harness to expect rubyrs's divergent output,
+  blocking a future fix from landing cleanly. The bypass
+  shape is reproducible via the snippet above.
+
 ### `rescue` with an unresolved class name
 
 ```ruby

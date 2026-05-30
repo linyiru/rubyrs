@@ -149,6 +149,18 @@ pub(crate) struct Frame {
     /// yields each track their own pending state.
     #[allow(dead_code)] // wired in Phase A.1
     pub(crate) pending_yield: bool,
+    /// Stack of `rescues.len()` snapshots taken at the start
+    /// of each enclosing `begin / rescue` block, used by
+    /// `retry`'s rescue-stack truncation. `Op::EnterBegin`
+    /// pushes the current depth; `Op::ExitBegin` pops it. On
+    /// retry, `Op::TruncateRescuesToBeginBaseline` reads the
+    /// top and shrinks `rescues` back to that depth so a
+    /// partial-unwind stale handler (multi-class /
+    /// multi-clause cases where the unwinder consumed only
+    /// some entries) doesn't survive the retry to catch a
+    /// later exception outside the begin block.
+    /// (Code-review #306 round 1.)
+    pub(crate) begin_rescue_depths: Vec<BeginBaseline>,
 }
 
 /// In-flight structured `break`/`next` walking through an
@@ -255,6 +267,21 @@ impl Drop for PinGuard<'_> {
     }
 }
 
+/// Triple of frame-stack snapshots taken at `Op::EnterBegin`
+/// time: `rescues.len()`, `loop_rescue_depths.len()`, and
+/// `loop_stack_depths.len()`. On `Op::TruncateRescuesToBeginBaseline`
+/// (retry) all three are truncated to these values so a `retry`
+/// inside a `while` loop in a rescue body doesn't leave the
+/// loop's `EnterLoop` entries leaked into the next iteration of
+/// the begin body. (Code-review #306 round 2 — closes the
+/// nested-loop-in-rescue gap.)
+#[derive(Clone, Copy)]
+pub(crate) struct BeginBaseline {
+    pub(crate) rescues_len: usize,
+    pub(crate) loop_rescue_depths_len: usize,
+    pub(crate) loop_stack_depths_len: usize,
+}
+
 pub(crate) struct RescueHandler {
     pub(crate) handler_ip: usize,
     pub(crate) stack_depth: usize,
@@ -272,6 +299,17 @@ pub(crate) struct RescueHandler {
     /// pop the wrong number of rescue handlers / jump from the
     /// wrong join point.
     pub(crate) loop_depth_at_push: usize,
+    /// `begin_rescue_depths.len()` snapshot at the moment this
+    /// handler was pushed. When an exception fires and this
+    /// handler catches, the unwinder truncates
+    /// `begin_rescue_depths` back to this value so that
+    /// `Op::EnterBegin` baselines pushed by inner begin/rescue
+    /// blocks the exception is escaping out of don't leak.
+    /// Without this, a later `retry` in an outer rescue body
+    /// would read the stale inner baseline and truncate
+    /// `rescues` to the wrong depth, leaving outer rescue
+    /// handlers stranded. (Code-review #306 round 2.)
+    pub(crate) begin_depth_at_push: usize,
     /// Class filter for `rescue`. `None` means catch-all (used for
     /// `ensure` and as a future hook for internal/host-only handlers).
     /// `Some(cls)` means the handler only fires when the raised

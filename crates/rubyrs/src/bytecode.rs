@@ -351,6 +351,32 @@ pub(crate) enum Op {
     /// handler match nothing — see `unwind_with_exception`.
     PushRescue(i32, u16, u8, SymId),
     PopRescue,
+    /// Begin/rescue baseline marker. Pushes the current
+    /// `frame.rescues.len()` onto `frame.begin_rescue_depths`
+    /// at the start of a `begin / rescue` block — captured
+    /// BEFORE the `PushRescue` ops, so retry's truncation
+    /// restores the depth to "no rescue handlers from this
+    /// begin block". Paired with `Op::ExitBegin` at the end
+    /// of the begin/rescue arm. (Code-review #306 round 1
+    /// — closes the stale-handler accumulation bug surfaced
+    /// by multi-class rescue + retry shapes.)
+    EnterBegin,
+    /// Begin/rescue baseline marker pop — drops the top of
+    /// `frame.begin_rescue_depths`. Emitted at the end of the
+    /// normal-success path AND at the end of each rescue
+    /// clause body (before its jump-to-end), so a sibling
+    /// or outer begin block doesn't accidentally see this
+    /// block's baseline. (Code-review #306 round 1.)
+    ExitBegin,
+    /// Retry path: truncate `frame.rescues` back to the depth
+    /// recorded at the top of `frame.begin_rescue_depths` so
+    /// any partially-unwound handlers from a multi-class
+    /// rescue clause (where one filter matched but its
+    /// siblings remained on the stack) get cleaned up before
+    /// the retry's `PushRescue` ops re-register fresh
+    /// entries. Followed by an `Op::Jump` back to begin_top.
+    /// (Code-review #306 round 1.)
+    TruncateRescuesToBeginBaseline,
     /// Like PushRescue but for `ensure` clauses. When an exception is
     /// unwinding and hits a PushEnsure handler, the exception value is
     /// pushed onto the operand stack and control jumps to the handler;
