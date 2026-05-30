@@ -448,6 +448,26 @@ pub(crate) struct Vm {
     /// CLI binary fills with `std::process::exit`. See
     /// `Config::process_exit` for rationale.
     pub(crate) process_exit: Option<std::sync::Arc<dyn Fn(i32) + Send + Sync>>,
+    /// ADR 0025 Phase 1: process-wide SIGINT-arrived flag,
+    /// shared between every Runtime opting in via
+    /// `Config::install_signal_handler`. The signal handler's
+    /// only action is `AtomicBool::store(true, SeqCst)` —
+    /// async-signal-safe by construction (single relaxed-or-
+    /// stronger atomic instruction, no allocation, no
+    /// locking).
+    ///
+    /// Phase 2 will add the `dispatch_until` top-of-loop
+    /// consumer that translates a set flag into a Ruby-level
+    /// `Interrupt` trap.
+    ///
+    /// Embedders with `install_signal_handler: false` still
+    /// hold an Arc to AN AtomicBool — either the shared
+    /// process-wide one (if another Runtime opted in) or a
+    /// dedicated local one (nothing ever writes to it). The
+    /// safe-point read is the same atomic load either way; the
+    /// install gate is purely about whether the handler is
+    /// registered.
+    pub(crate) interrupt_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) heap: Heap,
@@ -766,6 +786,11 @@ impl Vm {
             time_now: None,
             sleep_for: None,
             process_exit: None,
+            // Default to a fresh dedicated flag. Runtime
+            // construction may replace this with the shared
+            // process-wide Arc if any Runtime opted into signal
+            // handling.
+            interrupt_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             stack: Vec::with_capacity(1024),
             frames: vec![],
             heap: Heap::new(),

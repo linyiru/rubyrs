@@ -213,5 +213,25 @@ rubyrs-cext = { path = "../rubyrs-cext", version = "0.1.0", optional = true }
 [target.'cfg(not(target_os = "wasi"))'.dependencies]
 libloading = { workspace = true, optional = true }
 
+# ADR 0025 Phase 1 — POSIX signal handling for `Config::install_signal_handler`.
+# `signal-hook::flag::register` is documented async-signal-safe (atomic store
+# only); it's the minimal-surface choice over hand-rolling `sigaction`.
+# Unix-only — Windows uses `SetConsoleCtrlHandler` (deferred per ADR 0025
+# v3 Risk #2). Unconditional within the unix target so the default-feature
+# build picks it up; the install path itself is still capability-gated via
+# `Config::install_signal_handler: bool` (default false), so a library
+# embedder that never opts in pays nothing at runtime.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
+
 [build-dependencies]
 cc.workspace = true
+
+# ADR 0025 Phase 1: dev-only libc for the SIGINT smoke test.
+# `libc::kill(getpid(), SIGINT)` is the standard way for a
+# unit test to drive its own signal infrastructure without
+# spawning a subprocess. Production builds don't need libc
+# outside the `_http_server` feature; this dev dep keeps the
+# Tier 1 binary lean.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

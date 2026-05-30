@@ -236,6 +236,13 @@ fn main() {
         process_exit: Some(std::sync::Arc::new(|status: i32| {
             std::process::exit(status);
         })),
+        // ADR 0025 Phase 1: SIGINT capture for Ctrl+C against
+        // `rubyrs script.rb`. CLI binary opts in so the
+        // interrupt_pending flag flips on Ctrl+C; Phase 2 will
+        // translate the flag into a Ruby `Interrupt` raise.
+        // Until then the flag is set but unobserved — the script
+        // continues until natural completion, same as before.
+        install_signal_handler: true,
         time_now: Some(std::sync::Arc::new(|| {
             // `UNIX_EPOCH` is the documented zero anchor; the
             // SystemTime returned by `now()` may be before or

@@ -38,6 +38,7 @@ mod heap;
 mod http_server;
 mod intern;
 mod output;
+mod signals;
 #[cfg(feature = "stdlib")]
 mod stdlib_vendor;
 mod value;
@@ -290,6 +291,32 @@ pub struct Config {
     /// users get `None` by default — `exit!` raises a
     /// RuntimeError pointing at this slot.
     pub process_exit: Option<std::sync::Arc<dyn Fn(i32) + Send + Sync>>,
+    /// ADR 0025 Phase 1: opt into POSIX SIGINT capture. When
+    /// `true`, the FIRST `Runtime` constructed in this process
+    /// with the flag set registers a `signal-hook`-based handler
+    /// (only action: `AtomicBool::store(true, SeqCst)`) and
+    /// publishes the flag at static lifetime so subsequent
+    /// Runtimes share it. Every Runtime after that — opt-in or
+    /// not — sees the same flag (a `false` value if no SIGINT
+    /// has arrived since `Vm::interrupt_pending` was last cleared).
+    ///
+    /// `false` (the Tier 1 default) means no handler is
+    /// registered FROM THIS Runtime. The flag still exists on
+    /// the Vm (so safe-point reads need no cfg branch), but
+    /// nothing ever writes to it unless ANOTHER Runtime in the
+    /// process registers the handler.
+    ///
+    /// Windows: SetConsoleCtrlHandler runs on a separate thread.
+    /// `signal-hook` is Unix-only; the Windows path is deferred
+    /// to a follow-up (ADR 0025 v3 Risk #2). On Windows builds,
+    /// `install_signal_handler: true` is a documented no-op.
+    ///
+    /// The CLI binary `rubyrs` defaults this to `true` so
+    /// `Ctrl+C` against a `rubyrs script.rb` behaves like CRuby
+    /// (Phase 2 will translate the flag into a Ruby-level
+    /// `Interrupt` raise). Library / embed users opt in
+    /// explicitly.
+    pub install_signal_handler: bool,
     /// Filesystem-access capability gate. When `false` (the
     /// secure-by-default), every script-callable path that
     /// touches the filesystem traps with `IOError` /
@@ -464,6 +491,7 @@ impl Default for Config {
             time_now: None,
             sleep_for: None,
             process_exit: None,
+            install_signal_handler: false,
             // Secure-by-default: library embedders evaluating
             // untrusted Ruby get a sandbox where File.* / require
             // / __dir__ cannot reach the host filesystem. The CLI
@@ -1085,6 +1113,28 @@ impl Runtime {
         Self::with_config(Config::default())
     }
 
+    /// ADR 0025 Phase 1 — test-only reader for the
+    /// `interrupt_pending` AtomicBool. `#[doc(hidden)]` so it
+    /// isn't part of the embedding surface. Used by the Phase 1
+    /// embed tests to verify SIGINT capture works end-to-end
+    /// before the Phase 2 safe-point consumer lands.
+    ///
+    /// Returns `(loaded_value, also_clears_to_false)`. When
+    /// `clear` is true and the load was true, the atomic is
+    /// reset to false — convenient for tests that want to
+    /// avoid leaking state into subsequent tests in the same
+    /// binary (the flag is process-wide once
+    /// `install_signal_handler: true` has fired in any Runtime).
+    #[doc(hidden)]
+    pub fn _test_interrupt_pending_load_and_clear(&self, clear: bool) -> bool {
+        use std::sync::atomic::Ordering;
+        let v = self.vm.interrupt_pending.load(Ordering::Relaxed);
+        if clear && v {
+            self.vm.interrupt_pending.store(false, Ordering::Relaxed);
+        }
+        v
+    }
+
     pub fn with_config(cfg: Config) -> Self {
         // Apply Config BEFORE the preamble so host-visible
         // settings (`env`, `pid`, `time_now`) the preamble might
@@ -1270,6 +1320,13 @@ impl Runtime {
         self.vm.time_now = cfg.time_now;
         self.vm.sleep_for = cfg.sleep_for;
         self.vm.process_exit = cfg.process_exit;
+        // ADR 0025 Phase 1: SIGINT capture. install_signals
+        // returns the shared process-wide Arc<AtomicBool> if any
+        // Runtime has opted in (this or a previous one); otherwise
+        // a fresh dedicated Arc that this Vm owns. The Vm's
+        // safe-point check (Phase 2) reads this address; Phase 1
+        // just publishes it.
+        self.vm.interrupt_pending = signals::install_signals(cfg.install_signal_handler);
         self.deadline = cfg.deadline;
         self.vm.allow_filesystem_io = cfg.allow_filesystem_io;
         // Canonicalize each allowed prefix once at apply_config

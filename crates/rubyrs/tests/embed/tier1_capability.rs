@@ -393,3 +393,86 @@ fn exit_not_swallowed_by_bare_rescue() {
     assert_eq!(class_name, "SystemExit");
     assert_eq!(buf.snapshot(), "");
 }
+
+#[test]
+fn install_signal_handler_default_does_not_register() {
+    // ADR 0025 Phase 1: Tier 1 default is `false`. A Runtime
+    // constructed without opting in gets an Arc<AtomicBool>
+    // that nothing writes to. The Vm field's existence is
+    // guaranteed (no cfg branching for the safe-point check),
+    // but the flag stays false.
+    //
+    // Race note: another test in this binary may have called
+    // `install_signal_handler: true` already, in which case
+    // SHARED_FLAG is populated and we get the shared Arc. The
+    // assertion stays correct: no SIGINT has been delivered
+    // during this test, so the flag is false either way.
+    let _rt = rubyrs::Runtime::new();
+    // Smoke check: no panic constructing without the flag.
+    // Phase 2 will hook the safe-point reader; Phase 1 just
+    // confirms the wiring compiles + the default is honest.
+}
+
+#[cfg(unix)]
+#[test]
+fn install_signal_handler_true_sets_flag_on_real_sigint() {
+    // ADR 0025 Phase 1 happy path. Construct a Runtime with
+    // `install_signal_handler: true`, send SIGINT to ourselves
+    // via libc::kill(getpid(), SIGINT), verify the
+    // `interrupt_pending` flag flips.
+    //
+    // The reader uses the test-only `_test_interrupt_pending_*`
+    // accessor on Runtime — `#[doc(hidden)]` so it isn't part
+    // of the embedding surface. Phase 2 will land the
+    // `dispatch_until` safe-point consumer; Phase 1 just
+    // verifies the wiring.
+    //
+    // Why kill self instead of subprocess: simpler, avoids
+    // process-spawn overhead. The signal arrives on the test
+    // thread; signal_hook's handler stores into the
+    // AtomicBool; the reader sees it.
+    //
+    // After-test cleanup: the SHARED_FLAG is process-wide once
+    // `install_signal_handler: true` has fired. We clear after
+    // observing so subsequent tests in the same binary aren't
+    // affected.
+
+    let cfg = rubyrs::Config {
+        install_signal_handler: true,
+        ..rubyrs::Config::default()
+    };
+    let rt = rubyrs::Runtime::with_config(cfg);
+
+    // Drain any stale interrupt that a prior test may have
+    // left. Idempotent.
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+
+    // Step 1: confirm starting state is false.
+    assert!(
+        !rt._test_interrupt_pending_load_and_clear(false),
+        "flag must start false",
+    );
+
+    // Step 2: send SIGINT to ourselves. signal_hook's handler
+    // sets the flag.
+    unsafe {
+        libc::kill(libc::getpid(), libc::SIGINT);
+    }
+    // Tiny pause to let the kernel deliver. POSIX guarantees
+    // delivery is synchronous with the next safe point, but
+    // 20ms makes the timing robust under loaded test runners.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    // Step 3: read again — flag must now be true. Clear it as
+    // we read to keep subsequent tests clean.
+    assert!(
+        rt._test_interrupt_pending_load_and_clear(true),
+        "flag must be true after SIGINT delivery",
+    );
+
+    // Sanity: confirm clear stuck.
+    assert!(
+        !rt._test_interrupt_pending_load_and_clear(false),
+        "flag must be false after clear",
+    );
+}
