@@ -3081,6 +3081,13 @@ fn rational_phase_c2_arithmetic_and_comparison() {
         // Rational × Float (Float dominates).
         ("puts (Rational(1, 2) + 0.5).inspect", "1.0"),
         ("puts (0.5 + Rational(1, 4)).inspect", "0.75"),
+        // Float div by 0.0 follows IEEE-754 / CRuby — `(r/0.0)`
+        // is `±Infinity`, NOT ZeroDivisionError. Matches the
+        // existing `1.0 / 0.0 == Infinity` semantics so all
+        // Float-dominant ops stay consistent.
+        ("puts (Rational(1, 2) / 0.0).inspect",   "Infinity"),
+        ("puts (Rational(-1, 2) / 0.0).inspect",  "-Infinity"),
+        ("puts (0.0 / Rational(1, 2)).inspect",   "0.0"),
         // Comparison operators (Rational × Rational and cross-type).
         ("puts (Rational(1, 2) < Rational(2, 3))", "true"),
         ("puts (Rational(2, 3) > Rational(1, 2))", "true"),

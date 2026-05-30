@@ -165,14 +165,13 @@ impl Vm {
                 K::Add => Value::Float(x + y),
                 K::Sub => Value::Float(x - y),
                 K::Mul => Value::Float(x * y),
-                K::Div => {
-                    if y == 0.0 {
-                        return Err(self.trap(RubyError::ZeroDivisionError {
-                            msg: "divided by 0".to_string(),
-                        }));
-                    }
-                    Value::Float(x / y)
-                }
+                // IEEE-754 / CRuby Float div by 0.0 yields ±Infinity
+                // (or NaN for 0.0 / 0.0); no exception. Matches the
+                // existing Float×Float `BinOpKind::Div` arm in
+                // numeric.rs which uses bare `a / b`. Pre-fix this
+                // arm raised ZeroDivisionError for `Rational(1, 2)
+                // / 0.0`, divergent from `1.0 / 0.0`.
+                K::Div => Value::Float(x / y),
                 K::Mod => Value::Float(crate::vm::numeric::floor_mod_f64(x, y)),
                 K::Lt => Value::Bool(x < y),
                 K::Le => Value::Bool(x <= y),
