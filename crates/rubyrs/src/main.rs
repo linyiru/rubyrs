@@ -228,7 +228,38 @@ fn main() {
         // CLI binary opts in so `rubyrs script.rb` matches
         // CRuby; embed users get the deterministic default
         // (sleep raises) unless they wire their own.
-        sleep_for: Some(std::sync::Arc::new(std::thread::sleep)),
+        // ADR 0025 Phase 3: polling sleep. Sleep up to the
+        // requested duration (or forever if None) in 50ms
+        // chunks, checking the interrupt flag between chunks.
+        // Returns the actually-elapsed Duration. 50ms bounds
+        // the worst-case SIGINT response latency to ~one
+        // chunk; production code that wants tighter bounds
+        // can inject its own polling resolution.
+        sleep_for: Some(std::sync::Arc::new(|requested, flag| {
+            use std::time::{Duration, Instant};
+            use std::sync::atomic::Ordering;
+            let start = Instant::now();
+            let chunk = Duration::from_millis(50);
+            loop {
+                if flag.load(Ordering::Relaxed) {
+                    return start.elapsed();
+                }
+                match requested {
+                    None => {
+                        // Sleep forever until the flag flips.
+                        std::thread::sleep(chunk);
+                    }
+                    Some(d) => {
+                        let elapsed = start.elapsed();
+                        if elapsed >= d {
+                            return d;
+                        }
+                        let remaining = d - elapsed;
+                        std::thread::sleep(remaining.min(chunk));
+                    }
+                }
+            }
+        })),
         // Immediate-exit injection for `Kernel#exit!`. CLI binary
         // wires `std::process::exit` so `rubyrs script.rb` matches
         // CRuby; embed users get the deterministic default (exit!

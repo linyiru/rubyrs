@@ -442,7 +442,10 @@ pub(crate) struct Vm {
     /// default); CLI binary fills this with
     /// `std::thread::sleep`. See `Config::sleep_for` for
     /// rationale + ADR 0017 Rule 1 closure pattern.
-    pub(crate) sleep_for: Option<std::sync::Arc<dyn Fn(std::time::Duration) + Send + Sync>>,
+    pub(crate) sleep_for: Option<std::sync::Arc<
+        dyn Fn(Option<std::time::Duration>, &std::sync::atomic::AtomicBool) -> std::time::Duration
+            + Send + Sync,
+    >>,
     /// Host-injected immediate-exit closure for `Kernel#exit!`.
     /// `None` means `exit!` raises (Tier 1 deterministic default).
     /// CLI binary fills with `std::process::exit`. See

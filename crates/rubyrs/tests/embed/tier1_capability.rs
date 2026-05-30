@@ -195,8 +195,15 @@ fn sleep_invokes_injected_closure_with_requested_duration() {
     let recorded: Arc<Mutex<Vec<std::time::Duration>>> = Arc::new(Mutex::new(Vec::new()));
     let recorded_for_cfg = Arc::clone(&recorded);
     let cfg = rubyrs::Config {
-        sleep_for: Some(std::sync::Arc::new(move |d| {
-            recorded_for_cfg.lock().unwrap().push(d);
+        sleep_for: Some(std::sync::Arc::new(move |d_opt, _flag| {
+            // Phase 3 signature: record the requested
+            // Duration (Some(d) for sleep(secs); None for
+            // sleep no-args — not exercised by this test).
+            // Return zero elapsed so the test runs fast.
+            if let Some(d) = d_opt {
+                recorded_for_cfg.lock().unwrap().push(d);
+            }
+            std::time::Duration::ZERO
         })),
         ..rubyrs::Config::default()
     };
@@ -221,8 +228,9 @@ fn sleep_negative_duration_raises_argument_error() {
     let recorded: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     let recorded_for_cfg = Arc::clone(&recorded);
     let cfg = rubyrs::Config {
-        sleep_for: Some(std::sync::Arc::new(move |_| {
+        sleep_for: Some(std::sync::Arc::new(move |_d_opt, _flag| {
             *recorded_for_cfg.lock().unwrap() = true;
+            std::time::Duration::ZERO
         })),
         ..rubyrs::Config::default()
     };
@@ -249,7 +257,7 @@ fn sleep_returns_integer_seconds_slept() {
     // conservative lower bound since std::thread::sleep
     // never undersleeps.
     let cfg = rubyrs::Config {
-        sleep_for: Some(std::sync::Arc::new(|_| ())),
+        sleep_for: Some(std::sync::Arc::new(|_d_opt, _flag| std::time::Duration::ZERO)),
         ..rubyrs::Config::default()
     };
     let mut rt = rubyrs::Runtime::with_config(cfg);
@@ -258,6 +266,153 @@ fn sleep_returns_integer_seconds_slept() {
     rt.eval("puts sleep(2); puts sleep(0.9)", "sleep_ret.rb").expect("eval");
     // 2 → 2; 0.9 → 0 (truncated).
     assert_eq!(buf.snapshot(), "2\n0\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn phase_3_sleep_with_args_raises_interrupt_when_flag_set_mid_call() {
+    // ADR 0025 Phase 3: `sleep(n)` polls the interrupt flag.
+    // When the flag flips mid-call, sleep raises Interrupt
+    // (does NOT return) — CRuby-faithful semantics. User
+    // recovers elapsed time via Time.now in the rescue.
+    let _lock = signal_test_lock();
+    use std::sync::atomic::Ordering;
+    let cfg = rubyrs::Config {
+        install_signal_handler: true,
+        // Production-shape polling closure: 50ms chunks +
+        // flag check. Identical structure to the CLI binary's
+        // closure (mirrors main.rs).
+        sleep_for: Some(std::sync::Arc::new(|requested, flag| {
+            use std::time::{Duration, Instant};
+            let start = Instant::now();
+            let chunk = Duration::from_millis(20);
+            loop {
+                if flag.load(Ordering::Relaxed) {
+                    return start.elapsed();
+                }
+                match requested {
+                    None => std::thread::sleep(chunk),
+                    Some(d) => {
+                        let elapsed = start.elapsed();
+                        if elapsed >= d { return d; }
+                        std::thread::sleep((d - elapsed).min(chunk));
+                    }
+                }
+            }
+        })),
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+
+    // Background thread flips the flag mid-sleep.
+    let flag = rt._test_interrupt_pending_arc();
+    let flag_for_thread = std::sync::Arc::clone(&flag);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        flag_for_thread.store(true, Ordering::SeqCst);
+    });
+
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        start = 0
+        elapsed_marker = "init"
+        begin
+          sleep(10)
+          puts "completed (should not happen)"
+        rescue Interrupt
+          puts "caught Interrupt"
+        end
+        "##,
+        "phase3_sleep_secs_interrupted.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "caught Interrupt\n");
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+}
+
+#[cfg(unix)]
+#[test]
+fn phase_3_sleep_no_args_raises_interrupt_when_flag_flips() {
+    // ADR 0025 Phase 3: `sleep` with no args sleeps until
+    // interrupt. Without `install_signal_handler: true` the
+    // call refuses (ArgumentError) — would deadlock otherwise.
+    // With install_signal_handler: true + flag flip → Interrupt.
+    let _lock = signal_test_lock();
+    use std::sync::atomic::Ordering;
+    let cfg = rubyrs::Config {
+        install_signal_handler: true,
+        sleep_for: Some(std::sync::Arc::new(|requested, flag| {
+            use std::time::{Duration, Instant};
+            let start = Instant::now();
+            let chunk = Duration::from_millis(20);
+            loop {
+                if flag.load(Ordering::Relaxed) {
+                    return start.elapsed();
+                }
+                match requested {
+                    None => std::thread::sleep(chunk),
+                    Some(d) => {
+                        let elapsed = start.elapsed();
+                        if elapsed >= d { return d; }
+                        std::thread::sleep((d - elapsed).min(chunk));
+                    }
+                }
+            }
+        })),
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+
+    let flag = rt._test_interrupt_pending_arc();
+    let flag_for_thread = std::sync::Arc::clone(&flag);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        flag_for_thread.store(true, Ordering::SeqCst);
+    });
+
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        begin
+          sleep
+          puts "completed (should not happen)"
+        rescue Interrupt
+          puts "caught Interrupt from no-args sleep"
+        end
+        "##,
+        "phase3_sleep_noargs_interrupted.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "caught Interrupt from no-args sleep\n");
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+}
+
+#[test]
+fn phase_3_sleep_no_args_without_signal_handler_raises_argument_error() {
+    // Without install_signal_handler: true, no-args sleep is
+    // un-wake-able — match CRuby's "no signals means it would
+    // deadlock" by refusing the call. ArgumentError keeps the
+    // failure mode close to CRuby's behavior (CRuby raises
+    // various exceptions depending on signal context; rubyrs
+    // picks the most-defensive shape).
+    let cfg = rubyrs::Config {
+        install_signal_handler: false,
+        sleep_for: Some(std::sync::Arc::new(|_d_opt, _flag| std::time::Duration::ZERO)),
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval("sleep", "phase3_no_signal_noargs.rb").unwrap_err();
+    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+        panic!("expected ArgumentError, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "ArgumentError");
+    assert!(
+        message.contains("requires `Config::install_signal_handler: true`"),
+        "unexpected message: {message}",
+    );
 }
 
 #[test]

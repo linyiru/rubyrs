@@ -622,20 +622,19 @@ impl Vm {
             // `ArgumentError("time interval must not be
             // negative")`; we match.
             "sleep" => {
-                let secs = match args {
-                    [] => {
-                        // CRuby: `sleep` with no args sleeps
-                        // forever (until a signal). We bail
-                        // — rubyrs has no signal-driven wake
-                        // model yet, so blocking forever
-                        // would deadlock the embedder.
-                        return Some(Err(self.trap(RubyError::ArgumentError {
-                            msg: "sleep with no arguments (sleep-forever-until-signal) \
-                                  is not supported; pass an explicit duration".into(),
-                        })));
-                    }
-                    [Value::Int(n)] => *n as f64,
-                    [Value::Float(f)] => *f,
+                // ADR 0025 Phase 3 (CRuby-faithful semantics):
+                //   - no args + signal handler installed →
+                //     sleep until SIGINT; raise Interrupt.
+                //   - no args + NO signal handler →
+                //     ArgumentError (would deadlock — no wake).
+                //   - Integer/Float secs → sleep up to secs;
+                //     interrupted by SIGINT raises Interrupt
+                //     mid-call; otherwise returns Integer
+                //     seconds requested.
+                let secs_opt = match args {
+                    [] => None,
+                    [Value::Int(n)] => Some(*n as f64),
+                    [Value::Float(f)] => Some(*f),
                     [other] => return Some(Err(self.trap(RubyError::TypeError {
                         msg: format!(
                             "sleep duration must be Integer or Float, got {}",
@@ -649,10 +648,12 @@ impl Vm {
                         ),
                     }))),
                 };
-                if secs < 0.0 {
-                    return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: "time interval must not be negative".into(),
-                    })));
+                if let Some(s) = secs_opt {
+                    if s < 0.0 {
+                        return Some(Err(self.trap(RubyError::ArgumentError {
+                            msg: "time interval must not be negative".into(),
+                        })));
+                    }
                 }
                 let Some(src) = self.sleep_for.clone() else {
                     return Some(Err(self.trap(RubyError::RuntimeError {
@@ -661,9 +662,63 @@ impl Vm {
                               sleep capability (Tier 1 deterministic default)".into(),
                     })));
                 };
-                let dur = std::time::Duration::from_secs_f64(secs);
-                src(dur);
-                Some(Ok(Value::Int(secs as i64)))
+                let dur_opt = secs_opt.map(std::time::Duration::from_secs_f64);
+                // Sleep-forever (no args) requires the signal
+                // handler to wake us; check that it's wired before
+                // we commit to the blocking call. Without
+                // `install_signal_handler: true`, the flag never
+                // flips and `sleep_forever` would deadlock.
+                #[cfg(unix)]
+                if dur_opt.is_none() {
+                    // Heuristic: if SHARED_FLAG hasn't been
+                    // populated, no Runtime has opted in. (A
+                    // separate Runtime in this process opting in
+                    // counts — its handler will store into
+                    // SHARED_FLAG; but THIS Vm has a dedicated
+                    // flag that doesn't share, so it would still
+                    // deadlock. Match against that case by
+                    // checking Arc identity.) Practical net:
+                    // require the same Runtime that's calling
+                    // sleep to have opted in.
+                    if !crate::signals::is_shared_flag(&self.interrupt_pending) {
+                        return Some(Err(self.trap(RubyError::ArgumentError {
+                            msg: "sleep with no arguments requires \
+                                  `Config::install_signal_handler: true` (otherwise the \
+                                  call would deadlock — nothing can wake it)".into(),
+                        })));
+                    }
+                }
+                let elapsed = src(dur_opt, &self.interrupt_pending);
+                // If the closure returned early because the flag
+                // flipped, raise Interrupt directly from the
+                // builtin — matches CRuby (sleep does NOT return
+                // on interrupt). The Phase 2 safe-point check
+                // would catch it on the next op too, but
+                // raising here keeps the trap site at the
+                // canonical CRuby location.
+                #[cfg(unix)]
+                if self.interrupt_pending.load(std::sync::atomic::Ordering::Relaxed) {
+                    self.interrupt_pending.store(false, std::sync::atomic::Ordering::Relaxed);
+                    let exc = match crate::vm::raise::build_interrupt_exception(self) {
+                        Some(v) => v,
+                        None => return Some(Err(self.trap(RubyError::Interrupt {
+                            msg: "interrupt".to_string(),
+                        }))),
+                    };
+                    if let Err(trap) = self.unwind_with_exception(exc) {
+                        return Some(Err(trap));
+                    }
+                    self.suppress_call_result_push = true;
+                    return Some(Ok(Value::Nil));
+                }
+                // Normal completion. Return Integer seconds —
+                // for no-args case (only reachable when the flag
+                // was set, but we just cleared+raised above) we
+                // fall through to here with elapsed; clamp to
+                // 0 to be defensive.
+                let returned = secs_opt.map(|s| s as i64)
+                    .unwrap_or_else(|| elapsed.as_secs() as i64);
+                Some(Ok(Value::Int(returned)))
             }
             // ADR 0025 Phase 0.5b: `Kernel#exit` / `exit!` /
             // `abort`. Three shapes:

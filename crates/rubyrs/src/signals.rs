@@ -104,7 +104,28 @@ fn install_signals_impl(install: bool) -> Arc<AtomicBool> {
     }
 }
 
+/// ADR 0025 Phase 3 helper: check whether the given Arc is
+/// the process-wide SHARED_FLAG installed by an `install: true`
+/// Runtime. Used by `Kernel#sleep` (no-args) to refuse the
+/// sleep-forever call when no signal handler can wake it.
+///
+/// Returns false on non-Unix (no signal infrastructure
+/// available; the equivalent guard there is "never permit
+/// sleep-forever").
+#[cfg(unix)]
+pub(crate) fn is_shared_flag(flag: &Arc<AtomicBool>) -> bool {
+    match SHARED_FLAG.get() {
+        Some(shared) => Arc::ptr_eq(shared, flag),
+        None => false,
+    }
+}
+
 // ---- Non-Unix fallback (Windows, WASI, etc.) ----
+
+#[cfg(not(unix))]
+pub(crate) fn is_shared_flag(_flag: &Arc<AtomicBool>) -> bool {
+    false
+}
 
 #[cfg(not(unix))]
 fn install_signals_impl(_install: bool) -> Arc<AtomicBool> {

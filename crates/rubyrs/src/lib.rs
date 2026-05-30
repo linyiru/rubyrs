@@ -273,7 +273,22 @@ pub struct Config {
     /// real `std::thread::sleep` may oversleep on some
     /// platforms but never undersleep, so the requested
     /// value is a conservative lower bound.
-    pub sleep_for: Option<std::sync::Arc<dyn Fn(std::time::Duration) + Send + Sync>>,
+    /// **Phase 3 signature**: `(Option<Duration>, &AtomicBool) -> Duration`.
+    /// `None` Duration means sleep-forever-until-interrupt;
+    /// `Some(d)` sleeps up to `d` polling the flag. The
+    /// closure MUST return the actually-elapsed `Duration`
+    /// (≤ requested), and MUST exit early when the
+    /// `AtomicBool` becomes true.
+    ///
+    /// CLI binary's closure does a polling loop with 50ms
+    /// chunks (bounds the SIGINT response latency). Embed
+    /// users that want deterministic timing in tests can
+    /// inject a no-op closure that returns `Duration::ZERO`
+    /// without sleeping.
+    pub sleep_for: Option<std::sync::Arc<
+        dyn Fn(Option<std::time::Duration>, &std::sync::atomic::AtomicBool) -> std::time::Duration
+            + Send + Sync,
+    >>,
     /// Host-injected process-exit capability for `Kernel#exit!`
     /// (ADR 0025 Phase 0.5b). `None` (the deterministic Tier 1
     /// default) means `exit!` raises `RuntimeError`; embedders
