@@ -443,6 +443,11 @@ pub(crate) struct Vm {
     /// `std::thread::sleep`. See `Config::sleep_for` for
     /// rationale + ADR 0017 Rule 1 closure pattern.
     pub(crate) sleep_for: Option<std::sync::Arc<dyn Fn(std::time::Duration) + Send + Sync>>,
+    /// Host-injected immediate-exit closure for `Kernel#exit!`.
+    /// `None` means `exit!` raises (Tier 1 deterministic default).
+    /// CLI binary fills with `std::process::exit`. See
+    /// `Config::process_exit` for rationale.
+    pub(crate) process_exit: Option<std::sync::Arc<dyn Fn(i32) + Send + Sync>>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) heap: Heap,
@@ -760,6 +765,7 @@ impl Vm {
             pid: None,
             time_now: None,
             sleep_for: None,
+            process_exit: None,
             stack: Vec::with_capacity(1024),
             frames: vec![],
             heap: Heap::new(),

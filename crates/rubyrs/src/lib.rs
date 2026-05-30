@@ -273,6 +273,23 @@ pub struct Config {
     /// platforms but never undersleep, so the requested
     /// value is a conservative lower bound.
     pub sleep_for: Option<std::sync::Arc<dyn Fn(std::time::Duration) + Send + Sync>>,
+    /// Host-injected process-exit capability for `Kernel#exit!`
+    /// (ADR 0025 Phase 0.5b). `None` (the deterministic Tier 1
+    /// default) means `exit!` raises `RuntimeError`; embedders
+    /// that want the host to actually exit must inject a closure
+    /// (typically `std::process::exit`).
+    ///
+    /// Unlike `Kernel#exit` (which raises `SystemExit` and lets
+    /// the existing rescue/ensure machinery run), `exit!` is the
+    /// IMMEDIATE-exit path — it SKIPS ensure + at_exit handlers.
+    /// The capability split lets embed users intercept (test
+    /// harnesses, language bindings, REPL hosts) without patching
+    /// the runtime.
+    ///
+    /// CLI binary wires `std::process::exit`. Library / embed
+    /// users get `None` by default — `exit!` raises a
+    /// RuntimeError pointing at this slot.
+    pub process_exit: Option<std::sync::Arc<dyn Fn(i32) + Send + Sync>>,
     /// Filesystem-access capability gate. When `false` (the
     /// secure-by-default), every script-callable path that
     /// touches the filesystem traps with `IOError` /
@@ -446,6 +463,7 @@ impl Default for Config {
             pid: None,
             time_now: None,
             sleep_for: None,
+            process_exit: None,
             // Secure-by-default: library embedders evaluating
             // untrusted Ruby get a sandbox where File.* / require
             // / __dir__ cannot reach the host filesystem. The CLI
@@ -1251,6 +1269,7 @@ impl Runtime {
         self.vm.pid = cfg.pid.map(|n| n.get() as i64);
         self.vm.time_now = cfg.time_now;
         self.vm.sleep_for = cfg.sleep_for;
+        self.vm.process_exit = cfg.process_exit;
         self.deadline = cfg.deadline;
         self.vm.allow_filesystem_io = cfg.allow_filesystem_io;
         // Canonicalize each allowed prefix once at apply_config

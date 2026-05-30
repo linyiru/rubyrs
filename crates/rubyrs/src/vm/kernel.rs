@@ -49,6 +49,9 @@ impl Vm {
                 | "format"
                 | "__time_now_raw"
                 | "sleep"
+                | "exit"
+                | "exit!"
+                | "abort"
                 | "__method__"
                 | "__callee__"
                 | "block_given?"
@@ -182,6 +185,7 @@ impl Vm {
                         &*name,
                         "puts" | "p" | "pp" | "print" | "require" |
                         "sprintf" | "format" | "__time_now_raw" | "sleep" |
+                        "exit" | "exit!" | "abort" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
                         "eval" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?"
@@ -660,6 +664,79 @@ impl Vm {
                 let dur = std::time::Duration::from_secs_f64(secs);
                 src(dur);
                 Some(Ok(Value::Int(secs as i64)))
+            }
+            // ADR 0025 Phase 0.5b: `Kernel#exit` / `exit!` /
+            // `abort`. Three shapes:
+            //   `exit(status = true)` — raises SystemExit; ensure
+            //     blocks fire, at_exit handlers run (Phase 4),
+            //     embedder reads status.
+            //   `exit!(status = false)` — IMMEDIATE process exit
+            //     via the host-injected `process_exit` closure.
+            //     SKIPS ensure + at_exit. Requires Tier 1
+            //     capability (Config::process_exit) per ADR 0017
+            //     Rule 1.
+            //   `abort(msg = nil)` — write msg to stderr (if
+            //     given), then `exit(1)`.
+            //
+            // `exit` shares the "construct SystemExit + unwind"
+            // path with `abort` since both end in a SystemExit
+            // raise; the helper is inlined to avoid an additional
+            // module-level fn.
+            "exit" => {
+                let status = match parse_exit_status(args) {
+                    Ok(s) => s,
+                    Err(early) => return early,
+                };
+                raise_system_exit(self, status, "exit")
+            }
+            "abort" => {
+                // Optional message argument prints to stderr; in
+                // either case, exit(1) follows.
+                if args.len() > 1 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0..1)",
+                            args.len(),
+                        ),
+                    })));
+                }
+                let msg = match args.first() {
+                    Some(Value::Str(s)) => Some(s.to_string_lossy()),
+                    Some(other) => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            other.type_name(),
+                        ),
+                    }))),
+                    None => None,
+                };
+                if let Some(m) = msg.as_ref() {
+                    if m.ends_with('\n') {
+                        let _ = write!(self.stdout, "{m}");
+                    } else {
+                        let _ = writeln!(self.stdout, "{m}");
+                    }
+                }
+                raise_system_exit(self, 1, msg.as_deref().unwrap_or("exit"))
+            }
+            "exit!" => {
+                let status = match parse_exit_status(args) {
+                    Ok(s) => s,
+                    Err(early) => return early,
+                };
+                let Some(src) = self.process_exit.clone() else {
+                    return Some(Err(self.trap(RubyError::RuntimeError {
+                        msg: "Kernel#exit! requires `Config::process_exit` injection — \
+                              the embedding host hasn't enabled immediate process \
+                              termination (Tier 1 deterministic default)".into(),
+                    })));
+                };
+                // The closure typically calls std::process::exit
+                // and never returns. If it DOES return (test host
+                // intercepts), fall through with Nil — exit! has
+                // no Ruby-level return value.
+                src(status);
+                Some(Ok(Value::Nil))
             }
             "sprintf" | "format" => {
                 if args.is_empty() {
@@ -2206,4 +2283,91 @@ fn strict_parse_integer(raw: &str, radix: i64) -> Option<i64> {
         }
     }
     Some(sign.wrapping_mul(n))
+}
+
+/// ADR 0025 Phase 0.5b: shared exit-status parser used by
+/// `exit` and `exit!`. Accepts the CRuby shapes:
+/// - no args   → 0
+/// - true      → 0
+/// - false     → 1
+/// - nil       → 0
+/// - Integer   → as-is (truncated to i32)
+/// - anything else → TypeError
+///
+/// Returns `Result<i32, Option<Result<Value, Trap>>>` — the outer
+/// `Option<Result<Value, Trap>>` matches `builtin_call`'s return
+/// type so the caller can early-return via `?`.
+fn parse_exit_status(args: &[Value]) -> Result<i32, Option<Result<Value, Trap>>> {
+    match args {
+        [] => Ok(0),
+        [Value::Bool(true)] => Ok(0),
+        [Value::Bool(false)] => Ok(1),
+        [Value::Nil] => Ok(0),
+        [Value::Int(n)] => Ok(*n as i32),
+        [other] => Err(Some(Err(Trap {
+            err: RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Integer",
+                    other.type_name(),
+                ),
+            },
+            backtrace: vec![],
+        }))),
+        _ => Err(Some(Err(Trap {
+            err: RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    args.len(),
+                ),
+            },
+            backtrace: vec![],
+        }))),
+    }
+}
+
+/// ADR 0025 Phase 0.5b: construct a SystemExit instance with the
+/// given status + message and route through the existing
+/// `unwind_with_exception` machinery. Shared by `Kernel#exit` and
+/// `Kernel#abort`.
+///
+/// Returns the `builtin_call`-shaped tuple. If unwind finds a
+/// rescue handler, `suppress_call_result_push` is set so the
+/// dispatch loop doesn't push a spurious Nil over the rescue
+/// binding. If no handler, the trap propagates to the embedder
+/// as `RubyError::Uncaught { class_name: "SystemExit", .. }`.
+fn raise_system_exit(vm: &mut Vm, status: i32, message: &str) -> Option<Result<Value, Trap>> {
+    // Look up SystemExit class. If the preamble hasn't loaded
+    // (Phase 0.5a not yet in this build), surface a clear error
+    // rather than panicking.
+    let cls_id = vm.interner.intern("SystemExit");
+    let cls = match vm.classes.get(&cls_id).cloned() {
+        Some(c) => c,
+        None => return Some(Err(vm.trap(RubyError::RuntimeError {
+            msg: "SystemExit class missing — preamble Phase 0.5a not loaded".into(),
+        }))),
+    };
+    vm.maybe_gc();
+    if let Err(e) = vm.check_alloc() {
+        return Some(Err(e));
+    }
+    // Allocate the instance, set @status + @message directly
+    // (bypassing the Ruby-level `initialize` — equivalent end
+    // state, no need to round-trip through invoke_method).
+    let id = vm.heap.alloc(HeapObj::Instance(crate::value::Instance {
+        class: cls,
+        ivars: std::collections::HashMap::new(),
+        singleton_class: None,
+    }));
+    let status_sym = vm.interner.intern("@status");
+    let message_sym = vm.interner.intern("@message");
+    let msg_val = Value::Str(std::rc::Rc::new(crate::value::RStr::new(message.to_string())));
+    vm.heap.instance_mut(id).ivars.insert(status_sym, Value::Int(status as i64));
+    vm.heap.instance_mut(id).ivars.insert(message_sym, msg_val);
+    // Route through the same unwind path Op::Raise uses.
+    if let Err(trap) = vm.unwind_with_exception(Value::Object(id)) {
+        return Some(Err(trap));
+    }
+    // Unwind found a rescue. Don't push a Nil over it.
+    vm.suppress_call_result_push = true;
+    Some(Ok(Value::Nil))
 }

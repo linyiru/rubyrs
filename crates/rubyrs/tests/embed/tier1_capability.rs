@@ -244,3 +244,152 @@ fn sleep_returns_integer_seconds_slept() {
     // 2 → 2; 0.9 → 0 (truncated).
     assert_eq!(buf.snapshot(), "2\n0\n");
 }
+
+#[test]
+fn exit_raises_system_exit_caught_with_status() {
+    // ADR 0025 Phase 0.5b: `Kernel#exit(N)` raises SystemExit
+    // with status=N. The user-script `rescue SystemExit => e`
+    // catches; `e.status == N`, `e.success? == (N == 0)`.
+    // Decoupled from `at_exit` machinery (Phase 4) — bare exit
+    // + rescue still works today.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        # exit(true) → 0, exit(false) → 1, exit(nil) → 0,
+        # exit(N) → N. All shapes verified together.
+        [true, false, nil, 7].each do |x|
+          begin
+            exit x
+          rescue SystemExit => e
+            puts "#{x.inspect} -> status=#{e.status} success?=#{e.success?}"
+          end
+        end
+        "##,
+        "exit_basic.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "true -> status=0 success?=true\n\
+         false -> status=1 success?=false\n\
+         nil -> status=0 success?=true\n\
+         7 -> status=7 success?=false\n",
+    );
+}
+
+#[test]
+fn exit_bang_default_raises_without_capability_injection() {
+    // ADR 0017 Rule 1: by default `Kernel#exit!` must NOT
+    // terminate the host process. With no
+    // `Config::process_exit` injection, `exit!(N)` raises
+    // RuntimeError pointing at the missing capability — same
+    // shape as Time.now / sleep / load.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("exit! 1", "exit_bang_no_cap.rb").unwrap_err();
+    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+        panic!("expected Uncaught RuntimeError, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "RuntimeError");
+    assert!(
+        message.contains("Kernel#exit! requires `Config::process_exit` injection"),
+        "unexpected message: {message}",
+    );
+}
+
+#[test]
+fn exit_bang_invokes_injected_closure_with_status() {
+    // With a recording closure injected, `exit! 5` calls it
+    // exactly once carrying 5. No SystemExit raised — the
+    // exit! path is immediate process exit. (Test host
+    // intercepts the closure so std::process::exit isn't
+    // actually invoked.)
+    use std::sync::{Arc, Mutex};
+    let recorded: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded_for_cfg = Arc::clone(&recorded);
+    let cfg = rubyrs::Config {
+        process_exit: Some(std::sync::Arc::new(move |status: i32| {
+            recorded_for_cfg.lock().unwrap().push(status);
+            // NOTE: do NOT call std::process::exit here —
+            // we're inside cargo test. Returning from the
+            // closure simulates the closure being intercepted
+            // by a test host.
+        })),
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.eval("exit! 5; exit! 0", "exit_bang_inject.rb").expect("eval");
+    let statuses = recorded.lock().unwrap().clone();
+    assert_eq!(statuses, vec![5i32, 0i32]);
+}
+
+#[test]
+fn abort_prints_message_then_raises_system_exit_with_status_1() {
+    // ADR 0025 Phase 0.5b: `Kernel#abort(msg)` writes msg
+    // (with trailing newline) and then raises
+    // SystemExit.new(1). Documented divergence: CRuby writes
+    // to stderr; rubyrs writes to the standard Vm sink (no
+    // separate stderr in the current OutputSink abstraction —
+    // ADR 0021 follow-up). Subject to revision when stderr
+    // sink lands.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        begin
+          abort "boom"
+        rescue SystemExit => e
+          puts "caught: status=#{e.status}"
+        end
+        "##,
+        "abort_with_msg.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "boom\ncaught: status=1\n");
+}
+
+#[test]
+fn abort_no_message_raises_system_exit_with_status_1() {
+    // `abort` with no args: just raise SystemExit.new(1).
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        begin
+          abort
+        rescue SystemExit => e
+          puts "caught: status=#{e.status}"
+        end
+        "##,
+        "abort_no_msg.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "caught: status=1\n");
+}
+
+#[test]
+fn exit_not_swallowed_by_bare_rescue() {
+    // Companion to `system_exit_not_swallowed_by_bare_rescue`
+    // (error_handling.rs) but exercising the Kernel#exit path
+    // rather than `raise SystemExit`. A bare `rescue` must NOT
+    // catch SystemExit — otherwise a top-level catch-all would
+    // silently turn `exit` into a no-op.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    let err = rt.eval(
+        r#"
+        begin
+          exit 42
+        rescue => e
+          puts "swallowed"
+        end
+        "#,
+        "exit_bare_rescue.rb",
+    ).expect_err("exit must propagate past bare rescue");
+    let rubyrs::RubyError::Uncaught { class_name, .. } = &err.err else {
+        panic!("expected SystemExit Uncaught, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "SystemExit");
+    assert_eq!(buf.snapshot(), "");
+}

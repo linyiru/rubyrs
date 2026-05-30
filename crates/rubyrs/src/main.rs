@@ -229,6 +229,13 @@ fn main() {
         // CRuby; embed users get the deterministic default
         // (sleep raises) unless they wire their own.
         sleep_for: Some(std::sync::Arc::new(std::thread::sleep)),
+        // Immediate-exit injection for `Kernel#exit!`. CLI binary
+        // wires `std::process::exit` so `rubyrs script.rb` matches
+        // CRuby; embed users get the deterministic default (exit!
+        // raises) unless they wire their own.
+        process_exit: Some(std::sync::Arc::new(|status: i32| {
+            std::process::exit(status);
+        })),
         time_now: Some(std::sync::Arc::new(|| {
             // `UNIX_EPOCH` is the documented zero anchor; the
             // SystemTime returned by `now()` may be before or
