@@ -729,7 +729,7 @@ impl Vm {
                 // `Vm::do_call` handles plain Value::Object via
                 // a shallow Instance copy, so report true even
                 // when no user method exists.
-                if matches!(name, "dup" | "clone") {
+                if matches!(name, "dup" | "clone" | "extend") {
                     return true;
                 }
                 let cls = self.heap.class_of(*id);
