@@ -4130,6 +4130,56 @@ impl Vm {
             self.stack.push(recv);
             return Ok(());
         }
+        // `obj.extend(Mod, ...)` for plain Value::Object — install
+        // each Module into the receiver's eigenclass so M's
+        // instance methods become callable on `obj` directly.
+        // Materializes the singleton class via `ensure_singleton_class`
+        // (idempotent — subsequent calls reuse the same Rc) and
+        // pushes Mod onto its `includes` table, matching how the
+        // Class-receiver `extend` arm below (and the class-body
+        // arm above) treat their targets. Module-lookup precedence
+        // comes from `class_of(obj_id)` returning the eigenclass:
+        // the existing `methods_for_obj` walk hits eigenclass.includes
+        // before the real class. CRuby last-extended-wins is
+        // honoured by inserting at the head of the chain.
+        // Zero-arg `obj.extend` raises ArgumentError in CRuby
+        // ("wrong number of arguments (given 0, expected 1+)"),
+        // not NoMethodError. Surface that explicitly before the
+        // arity-checked main arm below so a missing arg can't
+        // fall through to the dispatch-not-found path.
+        if let Value::Object(_) = &recv
+            && &*name == "extend" && args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "wrong number of arguments (given 0, expected 1+)".to_string(),
+                }));
+            }
+        if let Value::Object(id) = &recv
+            && &*name == "extend" && !args.is_empty() {
+                let mut modules: Vec<std::rc::Rc<crate::value::Class>> = Vec::with_capacity(args.len());
+                for a in &args {
+                    match a {
+                        Value::Class(c) if c.is_module => modules.push(c.clone()),
+                        Value::Class(_) => return Err(self.trap(RubyError::TypeError {
+                            msg: "wrong argument type Class (expected Module)".to_string(),
+                        })),
+                        _ => return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "wrong argument type {} (expected Module)",
+                                a.type_name(),
+                            ),
+                        })),
+                    }
+                }
+                let sc = self.heap.ensure_singleton_class(*id);
+                for src in modules {
+                    if !super::class_is_a(&sc, &src) {
+                        sc.includes.borrow_mut().insert(0, src);
+                    }
+                }
+                self.method_gen = self.method_gen.wrapping_add(1);
+                self.stack.push(recv.clone());
+                return Ok(());
+            }
         if let Value::Class(target) = &recv
             && matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty() {
                 // Explicit-receiver form: `MyClass.include(Mod)` /
@@ -4335,9 +4385,38 @@ impl Vm {
                     if let crate::heap::HeapObj::Instance(inst) = self.heap.get(*id)
                         && let Some(sc) = &inst.singleton_class
                     {
+                        // Methods installed via `def obj.foo` /
+                        // define_singleton_method land here directly.
                         for k in sc.methods.borrow().keys() {
                             if !names.contains(k) { names.push(*k); }
                         }
+                        // Modules brought in via `obj.extend(M)` live
+                        // on the eigenclass's `includes` chain; CRuby
+                        // reports each module's instance methods as
+                        // singleton methods of `obj`. Walk transitive
+                        // includes AND prepends so chains like
+                        // `module Q; prepend P; end; obj.extend(Q)`
+                        // surface P's methods too (CRuby's
+                        // `Module#ancestors` includes both).
+                        fn walk_chain(
+                            c: &std::rc::Rc<crate::value::Class>,
+                            out: &mut Vec<crate::intern::SymId>,
+                            visited: &mut Vec<*const crate::value::Class>,
+                        ) {
+                            for chain in [c.includes.borrow(), c.prepends.borrow()] {
+                                for m in chain.iter() {
+                                    let ptr = std::rc::Rc::as_ptr(m);
+                                    if visited.contains(&ptr) { continue; }
+                                    visited.push(ptr);
+                                    for k in m.methods.borrow().keys() {
+                                        if !out.contains(k) { out.push(*k); }
+                                    }
+                                    walk_chain(m, out, visited);
+                                }
+                            }
+                        }
+                        let mut visited: Vec<*const crate::value::Class> = Vec::new();
+                        walk_chain(sc, &mut names, &mut visited);
                     }
                 }
                 Value::Class(cls) => {
