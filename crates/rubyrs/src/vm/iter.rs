@@ -2958,7 +2958,14 @@ impl Vm {
                     g.vm.pinned.pop();
                     for _ in 0..chunk.len() { g.vm.pinned.pop(); }
                     match step? {
-                        BlockStep::MethodReturn => break 'outer,
+                        // Non-local `return` from inside the block:
+                        // bubble out immediately as Nil so the outer
+                        // dispatch loop reads `vm.method_return` and
+                        // unwinds. Matching the chunk_while
+                        // convention; `break 'outer` here would
+                        // swallow the return signal and push the
+                        // receiver onto the stack mid-unwind.
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break 'outer; }
                         BlockStep::Value(_) => {}
                     }
@@ -3006,7 +3013,10 @@ impl Vm {
                         let step = g.vm.step_block(block, vec![Value::Array(wid)], pre_frames);
                         g.vm.pinned.pop();
                         match step? {
-                            BlockStep::MethodReturn => break 'outer,
+                            // See each_slice arm above — non-local
+                            // `return` must bubble out as Nil so
+                            // outer dispatch reads `method_return`.
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                             BlockStep::Break(r) => { early = Some(r); break 'outer; }
                             BlockStep::Value(_) => {}
                         }

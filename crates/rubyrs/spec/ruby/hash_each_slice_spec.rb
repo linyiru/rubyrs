@@ -42,8 +42,19 @@ describe "Hash#each_slice" do
     assert_eq(r, :early)
   end
 
-  # Skipped (method-not-implemented): no-block-form returns an
-  # Enumerator in CRuby; rubyrs returns the materialised Array
+  it "propagates non-local return from inside the block" do
+    # The iterator must bubble out as Nil so dispatch reads
+    # vm.method_return and unwinds — otherwise the receiver
+    # gets pushed onto the stack mid-unwind.
+    def self.each_slice_with_return
+      {a: 1, b: 2, c: 3}.each_slice(2) { |_| return :returned }
+      :unreached
+    end
+    assert_eq(each_slice_with_return, :returned)
+  end
+
+  # Note: the no-block form is not vendored — CRuby returns an
+  # Enumerator there; rubyrs returns the materialised Array
   # directly. `.to_a` on the result is a no-op so the canonical
   # `h.each_slice(2).to_a` idiom still works.
 end
@@ -74,6 +85,14 @@ describe "Hash#each_cons" do
   it "honours break inside the block" do
     r = {a: 1, b: 2, c: 3}.each_cons(2) { |_| break :early }
     assert_eq(r, :early)
+  end
+
+  it "propagates non-local return from inside the block" do
+    def self.each_cons_with_return
+      {a: 1, b: 2, c: 3}.each_cons(2) { |_| return :returned }
+      :unreached
+    end
+    assert_eq(each_cons_with_return, :returned)
   end
 end
 
