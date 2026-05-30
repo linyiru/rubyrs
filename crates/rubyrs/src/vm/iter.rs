@@ -2941,22 +2941,29 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 'outer: for chunk in snapshot.chunks(n_usz) {
+                    // Per-iter pins go through PinGuard (`g.pin`)
+                    // rather than direct `vm.pinned.push` because
+                    // the slice's `check_alloc()?` below sits
+                    // between the per-pair pushes and the slice
+                    // push — a trap there would skip the matching
+                    // pops and leak GC roots. PinGuard's Drop pops
+                    // them unconditionally on every exit path.
+                    // Pin growth across iterations is bounded by
+                    // `snapshot.len()` (which we already cloned)
+                    // and released when the function returns.
                     let mut pair_ids: Vec<Value> = Vec::with_capacity(chunk.len());
                     for (k, v) in chunk {
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
                         let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
-                        g.vm.pinned.push(Value::Array(pid));
+                        g.pin(Value::Array(pid));
                         pair_ids.push(Value::Array(pid));
                     }
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
                     let slice_id = g.vm.heap.alloc(HeapObj::Array(pair_ids));
-                    g.vm.pinned.push(Value::Array(slice_id));
+                    g.pin(Value::Array(slice_id));
                     let step = g.vm.step_block(block, vec![Value::Array(slice_id)], pre_frames);
-                    // Pop the slice + each pair we pushed.
-                    g.vm.pinned.pop();
-                    for _ in 0..chunk.len() { g.vm.pinned.pop(); }
                     match step? {
                         // Non-local `return` from inside the block:
                         // bubble out immediately as Nil so the outer
