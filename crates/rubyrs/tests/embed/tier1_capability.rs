@@ -1065,6 +1065,34 @@ fn adr_0024_phase_a_block_normal_return_value_is_yield_expression() {
 }
 
 #[test]
+fn adr_0024_phase_a2_stop_iteration_has_result_accessor() {
+    // ADR 0024 Phase A.2: `StopIteration#result` reader +
+    // writer (`attr_accessor`). Default nil. Required for
+    // Phase A.3's `def loop` to match CRuby's
+    // "rescue StopIteration => e; e.result; end" shape.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        e1 = StopIteration.new
+        puts "default: msg=#{e1.message} result=#{e1.result.inspect}"
+        e2 = StopIteration.new("custom msg")
+        e2.result = 42
+        puts "set: msg=#{e2.message} result=#{e2.result}"
+        puts "hierarchy: is_a IndexError? #{e1.is_a?(IndexError)}"
+        "##,
+        "adr_0024_a2_stopiteration.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "default: msg=iteration reached an end result=nil\n\
+         set: msg=custom msg result=42\n\
+         hierarchy: is_a IndexError? true\n",
+    );
+}
+
+#[test]
 fn adr_0024_phase_a_max_yield_recursion_cap_trips_resource_exhausted() {
     // Recursive yield chains hit the cap. Setting
     // max_yield_recursion: Some(N) makes a recursion depth

@@ -211,6 +211,9 @@ const BUILTIN_EXCEPTION_PARENT: &[(&str, &str)] = &[
     ("NotImplementedError", "ScriptError"),
     ("IndexError", "StandardError"),
     ("KeyError", "IndexError"),
+    // ADR 0024 Phase A.2: StopIteration < IndexError. CRuby
+    // shape. Pre-installed for `Kernel#loop`'s rescue clause.
+    ("StopIteration", "IndexError"),
     ("ZeroDivisionError", "StandardError"),
     ("RangeError", "StandardError"),
     ("FloatDomainError", "RangeError"),

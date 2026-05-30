@@ -66,6 +66,23 @@ class IndexError < StandardError
 end
 class KeyError < IndexError
 end
+## ADR 0024 Phase A.2: `StopIteration < IndexError`. Raised by
+## Ruby iterators when an external `Enumerator#next` reaches
+## the end. CRuby's `loop` catches it and returns the
+## exception's `#result` attr (nil if unset). Pre-installed
+## here so the Phase A.3 `def loop` in object.rb can `rescue
+## StopIteration => e; e.result; end` matching CRuby exactly.
+##
+## The `#result` accessor is the bit Phase A.3 cares about;
+## rubyrs's broader Enumerator surface (Lazy chains etc.)
+## remains out-of-subset.
+class StopIteration < IndexError
+  def initialize(msg = nil)
+    @result = nil
+    super(msg.nil? ? "iteration reached an end" : msg)
+  end
+  attr_accessor :result
+end
 class ZeroDivisionError < StandardError
 end
 ## CRuby's RangeError — value out of an expected range. Raised
