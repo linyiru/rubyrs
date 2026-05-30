@@ -2,7 +2,8 @@
 
 ## Status
 
-**Accepted (2026-05-30). v6 — All phases (0–5) implemented.**
+**Accepted (2026-05-30). v7 — All phases (0–5) implemented +
+round-3 review findings closed.**
 
 Phase 0 (Interrupt class) shipped 2026-05-29 in `a5337fd7`.
 Phases 0.5–5 implemented over 8 commits 2026-05-30:
@@ -14,9 +15,26 @@ Phases 0.5–5 implemented over 8 commits 2026-05-30:
 - 4a  Signal.trap installation — `1cbaa246`
 - 4b  Safe-point dispatches to trap block — `512fe16e`
 - 4c  Kernel#at_exit + SystemExit unwind — `86674b20`
-- 5   deadline-stays-uncatchable + bool-flag broadening — (this commit)
+- 5   deadline-stays-uncatchable + bool-flag broadening — `a4c8e7aa`
 
-13 commits, well within the 14-18 estimate.
+13 phase commits, well within the 14-18 estimate.
+
+**Round-3 review (2026-05-30) — 3 follow-up commits**:
+- 5b Critical safety: SuppressInterruptGuard RAII type +
+  panic-safe at_exit drain + memory-order tripwire comment —
+  `75fb3dc8`. **Closed: 4 round-3 safety findings minus
+  cext_depth ungate (deferred).**
+- 5c Important parity: Signal.trap rejects SIGKILL/SIGSTOP +
+  nil-handler = IGNORE + sentinel-based query mode —
+  `a7eeadc9`. **Closed: 3 round-3 CRuby parity findings.**
+- 5d Nice parity: sleep accepts Rational + SystemExit no-args
+  message "exit" + SignalException 2-arg + dispatch order
+  alignment — `aa3a3490`. **Closed: 4 of 5 round-3
+  Nice-to-have findings.**
+
+16 commits total. All four ADR-prescribed feature combos
+green; 335 embed + 65 default + 169 _fiber+_http_server lib
+tests.
 
 CLI end-to-end behaviour now matches CRuby for the canonical
 trap-flow pattern:
@@ -28,8 +46,31 @@ trap-flow pattern:
   # Ctrl+C → trap fires → exit raises SystemExit
   #   → at_exit drain → process exits 0
 
-All five reviewer-round corrections from v1→v5 preserved.
-Test count delta this session: +24 lib + embed + signals tests.
+**Deferred follow-up work items** (round-3 surfaced; not
+implemented):
+
+- **`Vm::cext_depth` ungate from `_fiber`** + production cext
+  bridge entry/exit increments. Currently a SIGINT during a
+  real cext call is delivered mid-cext; not UB at the Rust
+  level (cext crossings already go through `catch_unwind` +
+  `vm_ptr` machinery) but can leak C-side state (held
+  malloc/locks). Ungating the field is trivial; wiring the
+  cext bridge sites needs a sweep touching both
+  `crates/rubyrs/src/vm/cext.rs` and the `rubyrs-cext` crate.
+- **`Kernel#abort` no-args reads `$!`**. CRuby's bare `abort`
+  consults the current exception via `$!` and writes its
+  message to stderr. rubyrs's `$!` exposure to host fns is
+  not yet wired; rubyrs's `abort` no-args currently writes
+  nothing and just raises SystemExit(1). Tracked separately.
+- **`parse_signal_name` integer range tightening**. Accepts
+  Int 1..=64 unconditionally; CRuby uses platform `NSIG`
+  (~32 Linux). Bogus numbers produce signal-hook install-time
+  errors rather than silent acceptance. Low priority.
+
+All five reviewer-round corrections from v1→v5 preserved +
+the 11 round-3 findings closed (8 fixed across 3 commits,
+3 deferred above). Test count delta this session: +30 lib +
+embed + signals tests.
 
 ---
 
@@ -872,7 +913,27 @@ Phase 5:
 
 ## Revision log
 
-- **2026-05-30 — v6 (this revision).** Status: Proposed → Accepted.
+- **2026-05-30 — v7 (this revision).** Round-3 review (architecture
+  / Rust safety / CRuby parity reviewers) post-acceptance
+  surfaced 11 findings. 8 fixed across 3 follow-up commits;
+  3 deferred as work items documented in §Status. Critical
+  safety: `SuppressInterruptGuard` RAII type ACTUALLY
+  implemented (was only documented in v3+; v6 had hand-written
+  inc/dec vulnerable to panic-leak); `drain_at_exit_handlers`
+  wrapped in `catch_unwind` per handler (panic in one handler
+  no longer aborts LIFO drain); memory-ordering tripwire
+  comment expanded with the 3-site upgrade checklist for
+  when paired state gets added. Important parity: Signal.trap
+  rejects SIGKILL/SIGSTOP, explicit nil handler = IGNORE
+  (CRuby 3.x parity), query mode via sentinel Symbol so the
+  block-form 1-arg `Signal.trap(sig) { ... }` doesn't
+  misroute. Nice parity: sleep accepts Rational, SystemExit
+  no-args message = "exit", SignalException 2-arg form +
+  #signo attr, dispatch's safe-point order aligned with
+  dispatch_until's. Deferred: cext_depth ungate + cext
+  bridge wiring, Kernel#abort \$! consultation, NSIG range
+  tightening.
+- **2026-05-30 — v6.** Status: Proposed → Accepted.
   Phases 0.5–5 implemented over a single session in 8 commits
   (Phase 0 already shipped earlier as `a5337fd7`):
   - Phase 0.5a + 0.5b: SystemExit class + Kernel#exit family
