@@ -689,6 +689,12 @@ impl Vm {
                     //     Copilot round 2 #1), so the bridge
                     //     whitelist stays in lockstep with this one.
                     | "define_method"
+                    // `define_singleton_method` parallels
+                    // `define_method` but installs into the
+                    // class's own `singleton_methods` table
+                    // (class methods), so `C.respond_to?` must
+                    // agree.
+                    | "define_singleton_method"
                 ) {
                     return true;
                 }
@@ -729,7 +735,7 @@ impl Vm {
                 // `Vm::do_call` handles plain Value::Object via
                 // a shallow Instance copy, so report true even
                 // when no user method exists.
-                if matches!(name, "dup" | "clone" | "extend") {
+                if matches!(name, "dup" | "clone" | "extend" | "define_singleton_method") {
                     return true;
                 }
                 let cls = self.heap.class_of(*id);
