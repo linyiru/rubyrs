@@ -378,34 +378,23 @@ impl Vm {
                     None => None,
                 };
                 if let Some(owner_idx) = target_idx {
-                    // Walk down to and including the owner frame.
-                    while self.frames.len() > owner_idx {
-                        let is_owner = self.frames.len() == owner_idx + 1;
-                        let f = self.frames.pop().unwrap();
-                        self.stack.truncate(f.base_sp);
-                        // `class_eval { ... }` frames are both
-                        // `is_block: true` AND `is_class_body:
-                        // true`. The class-body cleanup the
-                        // Op::Return arm does inline (pop
-                        // class_stack + class_visibility_stack)
-                        // has to happen here too — otherwise a
-                        // non-local return through a class_eval
-                        // block would leak class-stack entries.
-                        if f.is_class_body {
-                            let cls = self.class_stack.pop()
-                                .expect("ICE: class_stack empty unwinding through class_eval");
-                            self.class_visibility_stack.pop();
-                            if is_owner {
-                                self.stack.push(Value::Class(cls));
-                            }
-                        } else if is_owner {
-                            if let Some(replacement) = f.swap_return {
-                                self.stack.push(replacement);
-                            } else {
-                                self.stack.push(val.clone());
-                            }
-                        }
-                    }
+                    // ADR 0024 Phase A.6: route method_return
+                    // through the same Phase A.4/A.5 ensure-walk
+                    // machinery as block-break. `begin_method_break`
+                    // walks the in-flight frame stack from current
+                    // top down to + including the owner; for each
+                    // frame it pops the `is_ensure` rescue
+                    // handlers and runs their bodies before
+                    // dropping the frame, then pushes `val` (or
+                    // the class for an `is_class_body` owner) onto
+                    // the caller's operand stack.
+                    //
+                    // Pre-A.6 the unwind was a raw-pop loop that
+                    // skipped intermediate ensures — `def f;
+                    // begin; (1..3).each { |x| return x if x==2
+                    // }; ensure; cleanup; end; end` left
+                    // `cleanup` un-run.
+                    self.begin_method_break(val.clone(), owner_idx)?;
                     if self.frames.is_empty() { return Ok(()); }
                 } else {
                     // Legacy fallback: walk block frames, then

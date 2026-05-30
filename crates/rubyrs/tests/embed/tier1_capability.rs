@@ -1270,6 +1270,60 @@ fn adr_0024_phase_a5_case_b_nested_ensures_run_inner_first() {
 }
 
 #[test]
+fn adr_0024_phase_a6_method_return_runs_intermediate_ensure() {
+    // ADR 0024 Phase A.6: `return` from inside a block must
+    // walk intervening ensure handlers before the method's
+    // frame returns. Pre-A.6 `dispatch()`'s method_return
+    // arm raw-popped frames without walking rescues —
+    // ensures in the enclosing def silently dropped.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def f
+          begin
+            [1,2,3].each { |x| return "ret-#{x}" if x == 2 }
+            puts "after-unreachable"
+          ensure
+            puts "f ensure ran"
+          end
+        end
+        puts f
+        "##,
+        "adr_0024_a6_method_return_ensure.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "f ensure ran\nret-2\n");
+}
+
+#[test]
+fn adr_0024_phase_a6_nested_ensures_run_inner_first() {
+    // Phase A.6: nested begin/ensure inside the def runs
+    // inner ensure first, outer second.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def f
+          begin
+            begin
+              [1,2,3].each { |x| return "ret-#{x}" if x == 2 }
+            ensure
+              puts "inner"
+            end
+          ensure
+            puts "outer"
+          end
+        end
+        puts f
+        "##,
+        "adr_0024_a6_method_return_nested.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "inner\nouter\nret-2\n");
+}
+
+#[test]
 fn adr_0024_phase_a3_kernel_loop_works_with_break() {
     // ADR 0024 Phase A.3: top-level `def loop` installed in
     // preamble. The canonical CRuby idiom should work:

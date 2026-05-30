@@ -401,15 +401,31 @@ impl Vm {
             }
             // Current frame's rescues exhausted.
             if top_idx == target {
-                // We're at the yielding method itself. Final
-                // landing: pop the frame, push the break value
+                // We're at the target frame itself. Final
+                // landing: pop the frame, push the unwind value
                 // into the caller's stack.
+                //
+                // Class-body case: if the target frame is the
+                // class body for a `class Foo; ... end` (which
+                // can happen for `return` from a block defined
+                // inside a class body — A.6 path), the value
+                // pushed onto the caller's stack is the class
+                // itself, not the unwind value. Matches the
+                // pre-A.6 method_return arm in `dispatch()` and
+                // CRuby's class-body semantics ("class Foo; X;
+                // end" evaluates to X's class).
                 let mb = self.pending_method_break.take()
                     .expect("ICE: pending_method_break vanished mid-continue");
                 let popped = self.frames.pop()
                     .expect("ICE: continue_method_break landing with empty frames");
                 self.stack.truncate(popped.base_sp);
-                if let Some(replacement) = popped.swap_return {
+                if popped.is_class_body {
+                    let cls = self.class_stack.pop()
+                        .expect("ICE: class_stack empty unwinding class-body target");
+                    self.class_visibility_stack.pop();
+                    self.stack.push(crate::value::Value::Class(cls));
+                    let _ = mb; // unwind value dropped; class body returns the class
+                } else if let Some(replacement) = popped.swap_return {
                     self.stack.push(replacement);
                 } else {
                     self.stack.push(mb.value);
