@@ -157,6 +157,34 @@ pub enum RubyError {
     /// the host couldn't recover from. See
     /// [docs/SECURITY.md § known attack surface](../docs/SECURITY.md).
     Uncaught { class_name: String, message: String },
+    /// Synthetic "unwind has already happened" signal.
+    ///
+    /// Raised by [`Vm::dispatch_until`] when a block invoked via
+    /// [`Vm::step_block`] raises an exception that is caught by a
+    /// rescue handler in a frame AT OR ABOVE the dispatch boundary
+    /// (`until_depth`). At that point [`Vm::unwind_with_exception`]
+    /// has already redirected the caller's IP to the handler, so
+    /// the next bytecode tick will run the handler naturally. The
+    /// only remaining problem is the native iterator driver
+    /// (`Array#each`, `Hash#any?`, etc.) — it would keep looping,
+    /// push spurious results onto the operand stack, and possibly
+    /// re-raise on the next iteration, corrupting the rescue's
+    /// stack snapshot.
+    ///
+    /// `AlreadyCaught` short-circuits the iter driver's loop via
+    /// the usual `?` propagation: `step_block` returns Err, every
+    /// iter driver propagates, [`Vm::primitive_call`] returns Err,
+    /// `step` returns Err, and an enclosing `dispatch_until`
+    /// **re-emits** the variant (returns Err, not `continue`) so
+    /// the signal bubbles all the way out. The OUTERMOST
+    /// [`Vm::dispatch`] (script frame, no `_until` suffix) is the
+    /// one that actually CONSUMES the variant and resumes its
+    /// loop; the next op fetch lands on the `rescue` body whose
+    /// IP was set by [`Vm::unwind_with_exception`].
+    ///
+    /// Never reaches user code or `Runtime::eval`'s host-facing
+    /// `Result` — outer `dispatch_until` always consumes it.
+    AlreadyCaught,
 }
 
 /// Built-in exception hierarchy parent table — `(child, parent)`.
@@ -316,6 +344,9 @@ impl RubyError {
             // Hosts that want the Ruby-level class name should pattern-
             // match on `Uncaught { class_name, .. }` directly.
             RubyError::Uncaught { .. } => "Uncaught",
+            // Synthetic — should never escape dispatch_until.
+            // If a host ever sees this, it's an internal bug.
+            RubyError::AlreadyCaught => "AlreadyCaught",
         }
     }
     pub(crate) fn message(&self) -> String {
@@ -337,6 +368,7 @@ impl RubyError {
             | RubyError::LoadError { msg }
             | RubyError::Interrupt { msg } => msg.clone(),
             RubyError::Uncaught { message, .. } => message.clone(),
+            RubyError::AlreadyCaught => String::new(),
             RubyError::NoMethodError { kind, method, recv_type } => {
                 // CRuby uses three shapes for NoMethodError:
                 // - Missing: "undefined method `X' for <recv>"

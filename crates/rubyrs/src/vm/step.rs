@@ -447,6 +447,13 @@ impl Vm {
                 Ok(true) => {}
                 Ok(false) => return Ok(()),
                 Err(trap) => {
+                    // Synthetic signal from a nested `dispatch_until`
+                    // that already redirected IP to a rescue handler
+                    // in this frame. The next op fetch will land on
+                    // the handler — just resume.
+                    if matches!(trap.err, RubyError::AlreadyCaught) {
+                        continue;
+                    }
                     // Try routing the trap through the Ruby
                     // rescue machinery so scripts can `rescue`
                     // primitive errors (NoMethodError, KeyError,
@@ -485,6 +492,35 @@ impl Vm {
 
     /// Run dispatch loop until the frame stack returns to `until_depth`.
     pub(crate) fn dispatch_until(&mut self, until_depth: usize) -> Result<(), Trap> {
+        // Track our boundary so Op::Raise / Op::EndEnsure can
+        // detect when their direct `unwind_with_exception` call
+        // crosses out into a caller's frame, and signal the
+        // native iter driver above us to bail.
+        self.dispatch_until_depths.push(until_depth);
+        let len_before = self.dispatch_until_depths.len();
+        let r = self.dispatch_until_inner(until_depth);
+        // Debug-only nesting check: every push must pair with a
+        // pop at the same depth. A mismatch here would leave the
+        // boundary stack out of sync with the actual nesting,
+        // making subsequent AlreadyCaught checks consult the
+        // wrong boundary. The `popped` value is asserted to
+        // equal `until_depth` so a future refactor that
+        // accidentally pushes inside `dispatch_until_inner`
+        // without a matching pop fails loudly in tests/CI.
+        let popped = self.dispatch_until_depths.pop();
+        debug_assert_eq!(
+            self.dispatch_until_depths.len() + 1,
+            len_before,
+            "dispatch_until_depths nesting mismatch",
+        );
+        debug_assert_eq!(
+            popped, Some(until_depth),
+            "dispatch_until_depths top mismatch on pop",
+        );
+        r
+    }
+
+    fn dispatch_until_inner(&mut self, until_depth: usize) -> Result<(), Trap> {
         while self.frames.len() > until_depth {
             // A non-local return signal means we're about to
             // unwind past `until_depth` anyway. Exit early and
@@ -557,6 +593,16 @@ impl Vm {
                 Ok(true) => {}
                 Ok(false) => return Ok(()),
                 Err(trap) => {
+                    // `AlreadyCaught` is the bubble-out signal that
+                    // the iter driver above us must abort. Don't
+                    // try to resume locally — re-emit so step_block
+                    // and the iter driver see it. The OUTERMOST
+                    // `dispatch` (script frame) is the one that
+                    // consumes AlreadyCaught and resumes at the
+                    // redirected handler IP.
+                    if matches!(trap.err, RubyError::AlreadyCaught) {
+                        return Err(trap);
+                    }
                     // Same convert-to-rescue dance as `dispatch`.
                     // Without this, a primitive error inside a
                     // block (`arr.each { nil.foo }`) would
@@ -567,7 +613,27 @@ impl Vm {
                         let original_class = trap.err.class_name().to_string();
                         let original_msg = trap.err.message();
                         match self.unwind_with_exception(exc) {
-                            Ok(()) => continue,
+                            Ok(()) => {
+                                // Unwind found a handler. If that
+                                // handler lives at or above our
+                                // `until_depth`, then the native
+                                // iter driver above us (Array#each,
+                                // Hash#any?, …) must stop looping
+                                // immediately — otherwise it will
+                                // push spurious results / re-raise
+                                // and corrupt the rescue's stack
+                                // snapshot. Bubble out via
+                                // AlreadyCaught so step_block and
+                                // every `?` along the way returns
+                                // Err; the OUTER dispatch_until
+                                // catches it on the line above and
+                                // resumes at the redirected handler
+                                // IP without double-unwinding.
+                                if self.frames.len() <= until_depth {
+                                    return Err(self.trap(RubyError::AlreadyCaught));
+                                }
+                                continue;
+                            }
                             Err(_) => return Err(Trap {
                                 err: RubyError::Uncaught {
                                     class_name: original_class,
@@ -2141,6 +2207,18 @@ impl Vm {
                 let v = self.stack.pop().unwrap_or(Value::Nil);
                 let exc = self.normalize_exception(v);
                 self.unwind_with_exception(exc)?;
+                // If unwind redirected IP to a handler in a
+                // frame at or above the current dispatch_until
+                // boundary, signal the native iter driver to
+                // stop looping. Otherwise it would keep
+                // iterating, push spurious results, and possibly
+                // re-raise on the next iter — corrupting the
+                // rescue's stack snapshot.
+                if let Some(&d) = self.dispatch_until_depths.last() {
+                    if self.frames.len() <= d {
+                        return Err(self.trap(RubyError::AlreadyCaught));
+                    }
+                }
             }
             Op::Break => {
                 // Mark the surrounding native-driven loop to terminate.
@@ -2213,6 +2291,14 @@ impl Vm {
                         .expect("ICE: EndEnsure with empty stack on exception path");
                     let exc = self.normalize_exception(v);
                     self.unwind_with_exception(exc)?;
+                    // Same boundary check as Op::Raise — if
+                    // unwind crossed out of our dispatch_until's
+                    // scope, signal the iter driver above us.
+                    if let Some(&d) = self.dispatch_until_depths.last() {
+                        if self.frames.len() <= d {
+                            return Err(self.trap(RubyError::AlreadyCaught));
+                        }
+                    }
                 }
             }
             Op::BinOpInt(kind, rhs) => {
