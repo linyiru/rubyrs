@@ -33,6 +33,13 @@ describe "Array#clear" do
     assert_raises("ArgumentError") { [1].clear(0) }
   end
 
+  it "silently discards a block (CRuby parity)" do
+    a = [1, 2, 3]
+    r = a.clear { 99 }
+    assert(r.equal?(a))
+    assert_eq(a, [])
+  end
+
   # Skipped (fixture-not-vendored): the upstream spec's
   # frozen-array case (`ArraySpecs.frozen_array.clear`) raises
   # FrozenError. rubyrs supports `freeze` on Arrays but the

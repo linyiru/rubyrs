@@ -651,6 +651,14 @@ impl Vm {
             (Value::Array(id), "delete", _) => {
                 return self.array_collection_call(*id, name, args);
             }
+            // `arr.clear { ... }` — CRuby silently discards the
+            // block. Without this delegation the block-given
+            // routing fails over to NoMethodError because
+            // dispatch consults this table first and won't fall
+            // through to array.rs.
+            (Value::Array(id), "clear", _) => {
+                return self.array_collection_call(*id, name, args);
+            }
             // Same shape for `Range#first / #last` (and arity-1
             // forms). PR #146 added the arity-1 arms only to the
             // non-block dispatcher (`range_collection_call`),
