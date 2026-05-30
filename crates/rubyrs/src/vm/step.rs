@@ -1439,13 +1439,20 @@ impl Vm {
                 // continue depending on caller shape).
                 //
                 // The synchronous flow:
-                //   1. Locate yielding method's frame index
-                //      ("nearest non-block frame"). Note: for
-                //      adversarial nesting (`outer { f { break } }`
-                //      where `f` was passed a `&block` and
-                //      re-yielded), this rule diverges from
-                //      CRuby's strict "yielding method" target;
-                //      tracked as ADR 0024 Phase A round 2 work.
+                //   1. Locate yielding method's frame index by
+                //      LEXICAL scope (ADR 0024 Phase A.7). Blocks
+                //      share their captured `locals` Rc with the
+                //      defining scope (transitively through
+                //      nested blocks); the topmost !is_block
+                //      frame whose `locals` Rc-pointer matches
+                //      the current top frame's `locals` IS the
+                //      lexical owner. Pre-A.7 used "nearest non-
+                //      block frame" — incorrect for shapes like
+                //      `def f; g { yield }; end; def g; yield;
+                //      end; f { ... }` where the inner yield
+                //      bound to g (dynamic neighbour) instead of
+                //      f (lexical owner) and recursively
+                //      re-invoked g's block_arg.
                 //   2. Mark the yielding-method frame's
                 //      `pending_yield = true` (so a Fiber yield
                 //      mid-block can resume correctly).
@@ -1465,10 +1472,18 @@ impl Vm {
                 //   8. On `method_return` / `fiber_yield_pending`:
                 //      leave the signal set, let the outer
                 //      dispatch loop / Fiber driver handle.
-                let yielding_idx = self.frames.iter().rev()
-                    .position(|f| !f.is_block);
+                // Phase A.7: lexical lookup via locals Rc-pointer
+                // identity. The top frame's `locals` is the
+                // captured Rc that the block (or method) is
+                // executing in — find the topmost !is_block
+                // frame sharing the same Rc.
+                let target_locals = self.frames.last()
+                    .expect("ICE: Op::Yield with empty frames").locals.clone();
+                let yielding_idx = self.frames.iter().rposition(|f| {
+                    !f.is_block && std::rc::Rc::ptr_eq(&f.locals, &target_locals)
+                });
                 let yielding_idx = match yielding_idx {
-                    Some(rel) => self.frames.len() - 1 - rel,
+                    Some(idx) => idx,
                     None => return Err(self.trap(RubyError::RuntimeError {
                         msg: "no block given (yield)".to_string(),
                     })),

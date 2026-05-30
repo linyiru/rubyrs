@@ -1324,6 +1324,75 @@ fn adr_0024_phase_a6_nested_ensures_run_inner_first() {
 }
 
 #[test]
+fn adr_0024_phase_a7_yield_resolves_lexically_through_forwarded_block() {
+    // ADR 0024 Phase A.7: `yield` in a block forwarded to
+    // another method must resolve to the LEXICAL enclosing
+    // method's block_arg, not the dynamically-nearest
+    // method frame. Pre-A.7 the inner `yield` bound to `g`
+    // (the dynamic neighbour) and recursively re-invoked
+    // g's block_arg, stack-overflowing.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def f
+          g { yield }
+        end
+        def g
+          yield
+        end
+        puts(f { "v" })
+        "##,
+        "adr_0024_a7_forwarded_yield.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "v\n");
+}
+
+#[test]
+fn adr_0024_phase_a7_break_through_forwarded_block_targets_lexical_owner() {
+    // Phase A.7: `break` from a block whose lexical owner
+    // is `f` (block passed to f, f forwarded to g) targets
+    // f, not g.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def f
+          g { yield }
+        end
+        def g
+          yield
+        end
+        result = f { break "broken" }
+        puts "result=#{result}"
+        "##,
+        "adr_0024_a7_forwarded_break.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "result=broken\n");
+}
+
+#[test]
+fn adr_0024_phase_a7_doubly_forwarded_yield_resolves_lexically() {
+    // Phase A.7: three-deep forwarding still resolves
+    // correctly.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def aa; bb { yield }; end
+        def bb; cc { yield }; end
+        def cc; yield; end
+        puts(aa { "deep" })
+        "##,
+        "adr_0024_a7_doubly_forwarded.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "deep\n");
+}
+
+#[test]
 fn adr_0024_phase_a3_kernel_loop_works_with_break() {
     // ADR 0024 Phase A.3: top-level `def loop` installed in
     // preamble. The canonical CRuby idiom should work:
