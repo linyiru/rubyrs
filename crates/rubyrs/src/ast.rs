@@ -469,12 +469,22 @@ pub(crate) enum BlockParam {
 pub(crate) enum MultiWriteTarget {
     Local(String),
     Ivar(String),
+    /// `$foo` on the LHS of a multi-write. Threaded through to
+    /// `Op::StoreGlobal` so e.g. `verbose, $VERBOSE = $VERBOSE,
+    /// nil` (rackup.rb:13 — the "silence Ruby 3.4 deprecation
+    /// warning" idiom) compiles. (TRY_RUNS pass-10 layer #8.)
+    Global(String),
     /// `*rest` — receives a fresh Array of the middle slice.
     /// `None` is the anonymous form `*` which discards the slice
     /// but still anchors the post-splat counting.
     SplatLocal(Option<String>),
     /// `*@rest` — splat into an ivar. Same slicing as SplatLocal.
     SplatIvar(String),
+    /// `*$rest` — splat into a global. Same slicing as
+    /// SplatLocal. Added in code-review #301 for symmetry with
+    /// the positional `Global` variant; pre-fix `*$g = …` still
+    /// hit the legacy "unsupported splat target" error path.
+    SplatGlobal(String),
 }
 
 #[derive(Debug, Clone)]
@@ -1268,6 +1278,8 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 targets.push(MultiWriteTarget::Local(cid_to_string(lvt.name())));
             } else if let Some(ivt) = tgt.as_instance_variable_target_node() {
                 targets.push(MultiWriteTarget::Ivar(cid_to_string(ivt.name())));
+            } else if let Some(gvt) = tgt.as_global_variable_target_node() {
+                targets.push(MultiWriteTarget::Global(cid_to_string(gvt.name())));
             } else {
                 ctx.errors.push(
                     format!("unsupported multi-write target: {:?}", tgt)
@@ -1289,6 +1301,16 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         } else if let Some(ivt) = expr.as_instance_variable_target_node() {
                             targets.push(MultiWriteTarget::SplatIvar(
                                 cid_to_string(ivt.name()),
+                            ));
+                        } else if let Some(gvt) = expr.as_global_variable_target_node() {
+                            // Symmetric with the positional `Global`
+                            // arm at line 1274 — CRuby accepts
+                            // `a, *$g = …` (sets `a=arr[0]; $g=arr[1..]`)
+                            // and pre-fix this still raised
+                            // "unsupported splat target". (Code-review
+                            // #301.)
+                            targets.push(MultiWriteTarget::SplatGlobal(
+                                cid_to_string(gvt.name()),
                             ));
                         } else {
                             ctx.errors.push(
