@@ -322,6 +322,19 @@ impl Vm {
 
     pub(crate) fn dispatch(&mut self) -> Result<(), Trap> {
         while !self.frames.is_empty() {
+            // ADR 0024 Phase A.5: block-break in flight. Op::Yield
+            // case (b) parked the break and the Rust iter driver
+            // above propagated the value via step_block;
+            // continue_method_break now walks intermediate
+            // frames + ensures until landing on the yielding
+            // method. If the walk drains the frame stack, exit.
+            if let Some(mb) = self.pending_method_break.as_ref() {
+                if !mb.suspended && self.frames.len() - 1 == mb.target_frame_idx {
+                    self.continue_method_break()?;
+                    if self.frames.is_empty() { return Ok(()); }
+                    continue;
+                }
+            }
             // Non-local return unwind. `Op::ReturnMethod` sets
             // `method_return`; here we honour it by popping any
             // block frames between us and the enclosing method,
@@ -531,6 +544,23 @@ impl Vm {
             // signal to its own caller. Running more ops here
             // would burn fuel inside a frame about to be discarded.
             if self.method_return.is_some() { return Ok(()); }
+            // ADR 0024 Phase A.5: block-break in flight from an
+            // Op::Yield case (b). Only fire continue_method_break
+            // when the top frame IS the yielding method — at any
+            // other depth we'd pop frames out from under a Rust
+            // iter driver (step_block etc.) whose for-loop hasn't
+            // yet returned to its caller. The intervening block
+            // frames pop naturally via their own Op::Return; the
+            // break value rides through step_block's
+            // BlockStep::Break path until the outer iter driver
+            // returns to the bytecode level that owns the target.
+            if let Some(mb) = self.pending_method_break.as_ref() {
+                if !mb.suspended && self.frames.len() - 1 == mb.target_frame_idx {
+                    self.continue_method_break()?;
+                    if self.frames.len() <= until_depth { return Ok(()); }
+                    continue;
+                }
+            }
             // P1c.2 (ADR 0023): Fiber.yield(v) sets this slot
             // and we exit so `resume_fiber` can observe the
             // suspension. Same shape as method_return — the
@@ -1588,20 +1618,42 @@ impl Vm {
                         // recursion counter decrements before we
                         // bail.
                         let was_toplevel = yielding_idx == 0;
-                        yguard.vm.begin_method_break(block_return_value)?;
+                        yguard.vm.begin_method_break(block_return_value, yielding_idx)?;
                         drop(yguard);
                         if was_toplevel && self.frames.is_empty() {
                             return Ok(false);
                         }
                         return Ok(true);
                     }
-                    // Case (b): let the Rust iter driver above
-                    // observe break_signaled. Push the break
-                    // value back onto the stack — when the
-                    // intermediate block returns naturally,
-                    // step_block pops the top-of-stack as the
-                    // break value and returns it via
-                    // BlockStep::Break.
+                    // Case (b) — ADR 0024 Phase A.5: yielding
+                    // method is deeper than current frame's
+                    // direct parent. A Rust iter driver (e.g.
+                    // `Int#times`'s `step_block` loop) sits
+                    // between us and the yielding method.
+                    //
+                    // Park the break in `pending_method_break`
+                    // with `target_frame_idx = yielding_idx` so
+                    // the dispatch loop top-of-iteration check
+                    // picks it up after the Rust driver returns
+                    // and control re-enters bytecode in a frame
+                    // above the target. continue_method_break
+                    // then pops intermediate method frames
+                    // (running their ensures on the way) until
+                    // it reaches the yielding method, walks
+                    // its ensures, and lands the break value.
+                    //
+                    // Also push the break value + leave
+                    // break_signaled set so the EXISTING Rust
+                    // iter driver protocol (step_block → BlockStep
+                    // ::Break → driver returns the value) keeps
+                    // working end-to-end. Without this, drivers
+                    // would treat the block return as a normal
+                    // value and keep iterating.
+                    yguard.vm.pending_method_break = Some(crate::vm::MethodBreak {
+                        value: block_return_value.clone(),
+                        target_frame_idx: yielding_idx,
+                        suspended: false,
+                    });
                     yguard.vm.stack.push(block_return_value);
                     drop(yguard);
                     return Ok(true);

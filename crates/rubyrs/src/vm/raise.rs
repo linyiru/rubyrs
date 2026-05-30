@@ -349,52 +349,90 @@ impl Vm {
     /// Returns Ok(()) on success. Caller must already have
     /// truncated the block frame off `self.frames` and ensured
     /// `self.frames.last()` IS the yielding method.
-    pub(crate) fn begin_method_break(&mut self, value: Value) -> Result<(), Trap> {
-        self.pending_method_break = Some(crate::vm::MethodBreak { value });
+    pub(crate) fn begin_method_break(&mut self, value: Value, target_frame_idx: usize) -> Result<(), Trap> {
+        self.pending_method_break = Some(crate::vm::MethodBreak { value, target_frame_idx, suspended: false });
         self.continue_method_break()
     }
 
-    /// Resume the in-flight Phase A.4 block-break walk. Called by
-    /// `Op::EndEnsure` when `pending_method_break.is_some()`, and
-    /// directly by `begin_method_break` to do the first hop.
+    /// Resume the in-flight Phase A.4/A.5 block-break walk. Called by
+    /// `Op::EndEnsure` when `pending_method_break.is_some()`, by
+    /// `begin_method_break` to do the first hop, and by the
+    /// dispatch loops at their top-of-iteration check after a
+    /// Rust iter driver returns control to bytecode in a frame
+    /// above the target (Phase A.5 multi-frame propagation).
     pub(crate) fn continue_method_break(&mut self) -> Result<(), Trap> {
-        // Walk current frame's rescues; first ensure suspends the
-        // walk into its handler body.
+        // Clear any previous suspension marker — we're either
+        // about to suspend again (set below) or land (cleared
+        // when we `.take()` the slot).
+        if let Some(mb) = self.pending_method_break.as_mut() {
+            mb.suspended = false;
+        }
         loop {
+            let top_idx = self.frames.len() - 1;
+            let target = self.pending_method_break.as_ref()
+                .expect("ICE: continue_method_break with no pending break")
+                .target_frame_idx;
+            debug_assert!(top_idx >= target,
+                "ICE: continue_method_break: top frame {} below target {}", top_idx, target);
+            // Walk this frame's rescues; first is_ensure suspends.
             let f = self.frames.last_mut()
-                .expect("ICE: continue_method_break with empty frames");
-            match f.rescues.pop() {
-                Some(h) if h.is_ensure => {
-                    // Suspend the walk inside this ensure's body.
-                    // Restore the operand stack to PushEnsure depth
-                    // (matching the exception-path entry shape) but
-                    // do NOT push anything — ensure body runs with
-                    // pre-PushEnsure operand stack. EndEnsure at
-                    // the tail resumes the walk.
-                    self.stack.truncate(h.stack_depth);
-                    f.ip = h.handler_ip;
-                    return Ok(());
+                .expect("ICE: continue_method_break: empty frames");
+            let mut found_ensure = None;
+            while let Some(h) = f.rescues.pop() {
+                if h.is_ensure {
+                    found_ensure = Some(h);
+                    break;
                 }
-                Some(_) => {
-                    // Plain rescue handler — silently discard.
-                    // Block-break doesn't trigger a rescue clause.
+                // Plain rescue handler — block-break doesn't
+                // trigger rescue clauses, silently discard.
+            }
+            if let Some(h) = found_ensure {
+                // Suspend walk inside ensure body. EndEnsure
+                // resumes via `continue_method_break`. Mark the
+                // suspension so the dispatch loops' top-of-loop
+                // check knows to leave us alone while the body
+                // runs.
+                self.stack.truncate(h.stack_depth);
+                f.ip = h.handler_ip;
+                self.pending_method_break.as_mut()
+                    .expect("ICE: pending_method_break vanished mid-walk")
+                    .suspended = true;
+                return Ok(());
+            }
+            // Current frame's rescues exhausted.
+            if top_idx == target {
+                // We're at the yielding method itself. Final
+                // landing: pop the frame, push the break value
+                // into the caller's stack.
+                let mb = self.pending_method_break.take()
+                    .expect("ICE: pending_method_break vanished mid-continue");
+                let popped = self.frames.pop()
+                    .expect("ICE: continue_method_break landing with empty frames");
+                self.stack.truncate(popped.base_sp);
+                if let Some(replacement) = popped.swap_return {
+                    self.stack.push(replacement);
+                } else {
+                    self.stack.push(mb.value);
                 }
-                None => break, // No more rescues in this frame.
+                return Ok(());
+            }
+            // Phase A.5: above the target. Pop this intermediate
+            // frame (its ensures are done; its return value would
+            // normally land in caller's stack but we're unwinding
+            // past it). Truncate stack; do NOT push value. Loop
+            // to walk the next frame's ensures.
+            let popped = self.frames.pop()
+                .expect("ICE: continue_method_break intermediate pop with empty frames");
+            self.stack.truncate(popped.base_sp);
+            if popped.is_class_body {
+                // Class-body frames carry class_stack /
+                // class_visibility_stack entries; mirror what
+                // method_return / Op::Return cleanup does on a
+                // class-eval-inside-block pop.
+                self.class_stack.pop();
+                self.class_visibility_stack.pop();
             }
         }
-        // No more ensures. Pop the yielding method frame, push
-        // the break value into the caller's stack.
-        let mb = self.pending_method_break.take()
-            .expect("ICE: pending_method_break vanished mid-continue");
-        let f = self.frames.pop()
-            .expect("ICE: continue_method_break landing with empty frames");
-        self.stack.truncate(f.base_sp);
-        if let Some(replacement) = f.swap_return {
-            self.stack.push(replacement);
-        } else {
-            self.stack.push(mb.value);
-        }
-        Ok(())
     }
 }
 

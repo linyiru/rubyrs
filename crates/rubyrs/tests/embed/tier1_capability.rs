@@ -1187,6 +1187,89 @@ fn adr_0024_phase_a4_raise_in_ensure_supersedes_break() {
 }
 
 #[test]
+fn adr_0024_phase_a5_case_b_skips_remaining_method_body() {
+    // ADR 0024 Phase A.5: when `def each; 3.times { yield };
+    // puts "after"; end` is broken from the user's block,
+    // CRuby skips the "after" puts and returns the break
+    // value as each's result. Pre-A.5, rubyrs left
+    // break_signaled set so Int#times returned the value
+    // but each's body continued executing "after" and the
+    // break value was discarded.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def each
+          3.times { |i| yield i }
+          puts "after-unreachable"
+        end
+        result = each { |v| break "br-#{v}" if v == 1 }
+        puts "result=#{result}"
+        "##,
+        "adr_0024_a5_case_b_skip.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "result=br-1\n");
+}
+
+#[test]
+fn adr_0024_phase_a5_case_b_runs_yielding_method_ensure() {
+    // Phase A.5: ensure on the yielding method must run
+    // even when break crosses a Rust iter driver
+    // (`Int#times`'s step_block loop sits between yield
+    // and each).
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def each
+          begin
+            3.times { |i| yield i }
+            puts "unreachable"
+          ensure
+            puts "each ensure ran"
+          end
+        end
+        result = each { |v| break "br-#{v}" if v == 1 }
+        puts "result=#{result}"
+        "##,
+        "adr_0024_a5_case_b_ensure.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "each ensure ran\nresult=br-1\n",
+    );
+}
+
+#[test]
+fn adr_0024_phase_a5_case_b_nested_ensures_run_inner_first() {
+    // Phase A.5: nested begin/ensure inside the yielding
+    // method runs inner ensure first, then outer.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def f
+          begin
+            begin
+              3.times { yield }
+            ensure
+              puts "inner"
+            end
+          ensure
+            puts "outer"
+          end
+        end
+        puts f { break "v" }
+        "##,
+        "adr_0024_a5_case_b_nested.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "inner\nouter\nv\n");
+}
+
+#[test]
 fn adr_0024_phase_a3_kernel_loop_works_with_break() {
     // ADR 0024 Phase A.3: top-level `def loop` installed in
     // preamble. The canonical CRuby idiom should work:

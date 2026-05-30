@@ -196,13 +196,26 @@ pub(crate) enum LoopTransferKind {
 /// have run, lands by popping the yielding method's frame and
 /// pushing `value` as its return.
 ///
-/// Phase A.4 limits the target to the topmost frame (the yielding
-/// method itself; case (a)). Multi-frame walks (case b — break
-/// across a Rust iter driver where each-method body has code AND
-/// ensure after the iter call) are Phase A.5 work and will extend
-/// this struct with a `target_frame_idx`.
+/// Phase A.5 extends this to multi-frame walks (yielding method
+/// is deeper than the immediate top frame; e.g.
+/// `def each; 3.times { yield }; rest...; end` where times's
+/// step_block-driven Rust loop sits between yield and each, so
+/// after times returns we need to skip "rest..." and run each's
+/// ensures before landing). `target_frame_idx` is the absolute
+/// frame index the break should land on (the yielding method's
+/// frame). Frames above it get popped + have their own ensures
+/// run on the way down.
 pub(crate) struct MethodBreak {
     pub(crate) value: Value,
+    pub(crate) target_frame_idx: usize,
+    /// True while control is parked inside an `is_ensure` body
+    /// because `continue_method_break` jumped to its handler IP.
+    /// The dispatch loops' top-of-iteration check honours this:
+    /// they skip firing `continue_method_break` while suspended
+    /// so the ensure body runs to completion. `Op::EndEnsure`
+    /// clears the flag before re-entering
+    /// `continue_method_break`, resuming the walk.
+    pub(crate) suspended: bool,
 }
 
 /// RAII guard for `Vm.pinned`. Native-side code that needs heap
