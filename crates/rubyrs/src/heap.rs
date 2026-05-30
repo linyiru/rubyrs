@@ -1125,6 +1125,18 @@ impl Value {
             (Value::Int(_), Value::BigInt(_)) | (Value::BigInt(_), Value::Int(_)) => false,
             #[cfg(feature = "bignum")]
             (Value::Float(_), Value::BigInt(_)) | (Value::BigInt(_), Value::Float(_)) => false,
+            // Phase C.2 — Rational cross-type strictness. The new
+            // ruby_eq arms (heap.rs:~1268) make `Rational(1, 1) ==
+            // 1` true via canonical i128 cross-multiply, but `eql?`
+            // must remain type-strict per CRuby. Without these
+            // explicit-false arms, ruby_eql falls through to
+            // ruby_eq and `Rational(1, 1).eql?(1)` returns true —
+            // breaking Hash#uniq / Array#uniq / Set semantics for
+            // mixed numeric collections.
+            (Value::Int(_), Value::Rational(_)) | (Value::Rational(_), Value::Int(_)) => false,
+            (Value::Float(_), Value::Rational(_)) | (Value::Rational(_), Value::Float(_)) => false,
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(_), Value::Rational(_)) | (Value::Rational(_), Value::BigInt(_)) => false,
             // Composites recurse via ruby_eql so the strictness
             // propagates: `[1] eql? [1.0]` is false.
             (Value::Array(a), Value::Array(b)) => {

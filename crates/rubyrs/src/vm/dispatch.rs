@@ -5106,13 +5106,20 @@ impl Vm {
         //    immediates.
         // Universal `respond_to?(:eql?)` already returns true via
         // the universal whitelist.
-        if &*name == "eql?" {
+        if &*name == "eql?" && !matches!(&recv, Value::Rational(_)) {
             // Arity guard fires regardless of receiver — CRuby
             // raises ArgumentError before doing any per-type
             // dispatch. Primitive_call's per-type arms above only
             // match exact 1-arg shape, so we know arity must
             // mismatch if control reaches this `eql?` block with
             // != 1 arg.
+            //
+            // Rational recv is gated out — Phase C.2 added a
+            // type-strict `eql?` arm in the Rational dispatch
+            // block further below. The universal `ruby_eq` here
+            // would otherwise treat `Rational(1, 1).eql?(1)` as
+            // true (since ruby_eq has cross-type Rational arms),
+            // breaking CRuby's numeric strictness for eql?.
             if args.len() != 1 {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!(
@@ -5823,6 +5830,36 @@ impl Vm {
                         msg: format!(
                             "{} can't be coerced into Rational",
                             crate::vm::numeric::type_name_for_coerce(&args[0]),
+                        ),
+                    }));
+                }
+                // `Rational#eql?(other)` — CRuby's numeric
+                // strictness: only true when `other` is also a
+                // Rational AND structurally equal. The universal
+                // `Object#eql?` arm further up calls `ruby_eq`,
+                // which after Phase C.2 treats `Rational == Int|Float`
+                // as true — so without this arm, `Rational(1, 1)
+                // .eql?(1)` returned true, breaking Hash#uniq /
+                // Array#uniq / Set semantics. Mirrors the existing
+                // `(Int, "eql?")` / `(Float, "eql?")` strict arms
+                // in numeric.rs. Same-Rational case routes through
+                // ruby_eq's canonical (num, den) compare.
+                ("eql?", 1) => {
+                    let same = matches!(&args[0], Value::Rational(_))
+                        && recv.ruby_eq(&args[0], &self.heap);
+                    self.stack.push(Value::Bool(same));
+                    return Ok(());
+                }
+                ("eql?", _) => {
+                    // Arity guard. The universal Object#eql? arm
+                    // is gated out for Rational receivers (see
+                    // dispatch.rs:5109), so without this arm a
+                    // wrong-arity call would surface NoMethodError
+                    // instead of CRuby's ArgumentError.
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1)",
+                            args.len(),
                         ),
                     }));
                 }

@@ -3125,6 +3125,19 @@ fn rational_phase_c2_arithmetic_and_comparison() {
         // keys still resolve when looked up by their canonical
         // equivalent.
         ("puts ({Rational(1, 2) => :half}[Rational(2, 4)])", "half"),
+        // CRuby numeric strictness for `eql?`: even though
+        // `Rational(1, 1) == 1` is true (Phase C.2 cross-type
+        // arithmetic), `eql?` requires identical Ruby class.
+        // Mirrors `1.eql?(1.0) == false`. Hash#uniq / Array#uniq
+        // depend on this strictness to distinguish mixed numeric
+        // collections.
+        ("puts Rational(1, 1).eql?(1)",                    "false"),
+        ("puts Rational(1, 2).eql?(0.5)",                  "false"),
+        ("puts 1.eql?(Rational(1, 1))",                    "false"),
+        ("puts 0.5.eql?(Rational(1, 2))",                  "false"),
+        ("puts Rational(1, 2).eql?(Rational(2, 4))",       "true"),
+        #[cfg(feature = "bignum")]
+        ("puts Rational(1, 1).eql?(2**64)",                "false"),
     ] {
         let buf = SharedBuf::new();
         rt.set_stdout(Box::new(buf.clone()));
@@ -3137,6 +3150,11 @@ fn rational_phase_c2_arithmetic_and_comparison() {
         ("Rational(1, 2) / 0",              "ZeroDivisionError", "divided by 0"),
         ("Rational(1, 2) + \"x\"",          "TypeError",         "String can't be coerced into Rational"),
         ("Rational(1, 2) - nil",            "TypeError",         "nil can't be coerced into Rational"),
+        // eql? arity guard (universal Object#eql? is gated out
+        // for Rational receivers, so the Rational-specific arm
+        // must surface the ArgumentError itself).
+        ("Rational(1, 1).eql?",             "ArgumentError",     "wrong number of arguments (given 0, expected 1)"),
+        ("Rational(1, 1).eql?(1, 2)",       "ArgumentError",     "wrong number of arguments (given 2, expected 1)"),
     ] {
         let err = rt.eval(script, "rational_c2_err.rb").unwrap_err();
         match err.err {
