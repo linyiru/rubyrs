@@ -207,6 +207,100 @@ fn signal_exception_not_swallowed_by_bare_rescue() {
 }
 
 #[test]
+fn system_exit_hierarchy_pre_installed_for_adr_0025_phase_0_5() {
+    // ADR 0025 Phase 0.5a: `Kernel#exit` (Phase 0.5b) raises
+    // SystemExit which must NOT be under StandardError — a
+    // bare `rescue => e` clause must NOT swallow a user's
+    // exit() call. Same security-posture as Interrupt +
+    // ResourceExhausted.
+    //
+    // Placement: SystemExit < Exception (NOT under
+    // SignalException despite the name overlap — CRuby matches
+    // this because exit is programmatic, not signal-driven).
+    let mut rt = Runtime::new();
+    let e = rt.eval(r#"raise SystemExit, 0"#, "t.rb").unwrap_err().err;
+    assert!(e.is_a("SystemExit"));
+    assert!(e.is_a("Exception"));
+    assert!(!e.is_a("StandardError"), "ADR 0025: must NOT be under StandardError");
+    assert!(!e.is_a("SignalException"), "SystemExit is NOT under SignalException");
+    assert!(!e.is_a("RuntimeError"));
+}
+
+#[test]
+fn system_exit_not_swallowed_by_bare_rescue() {
+    // Companion to interrupt + resource-exhausted analogues:
+    // bare `rescue => e` filters on StandardError; SystemExit
+    // must propagate past it. Otherwise a top-level catch-all
+    // handler silently turns `exit` into a no-op.
+    let mut rt = Runtime::new();
+    let trap = rt.eval(
+        r#"
+        begin
+          raise SystemExit, 0
+        rescue => e
+          puts "swallowed"
+        end
+        "#,
+        "t.rb",
+    );
+    let trap = trap.expect_err("SystemExit must propagate past bare rescue");
+    assert!(trap.err.is_a("SystemExit"));
+}
+
+#[test]
+fn system_exit_constructor_shapes_match_cruby() {
+    // ADR 0025 Phase 0.5a: SystemExit.new accepts the same
+    // shapes CRuby 3.x does:
+    //   - no args   → status=0
+    //   - Integer   → status=int
+    //   - true      → status=0
+    //   - false     → status=1
+    //   - nil       → status=0
+    //   - String    → status=0, message=str
+    //   - (int, msg)→ status=int, message=msg
+    // `#success?` returns (status == 0).
+    let mut rt = Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r#"
+        e0 = SystemExit.new
+        puts "no-args:  status=#{e0.status} success?=#{e0.success?}"
+
+        ei = SystemExit.new(42)
+        puts "Int(42):  status=#{ei.status} success?=#{ei.success?}"
+
+        et = SystemExit.new(true)
+        puts "true:     status=#{et.status} success?=#{et.success?}"
+
+        ef = SystemExit.new(false)
+        puts "false:    status=#{ef.status} success?=#{ef.success?}"
+
+        en = SystemExit.new(nil)
+        puts "nil:      status=#{en.status} success?=#{en.success?}"
+
+        es = SystemExit.new("custom message")
+        puts "Str:      status=#{es.status} success?=#{es.success?} msg=#{es.message}"
+
+        e2 = SystemExit.new(7, "with msg")
+        puts "(int,msg):status=#{e2.status} msg=#{e2.message}"
+        "#,
+        "system_exit_ctor.rb",
+    ).expect("eval");
+    let got = buf.snapshot();
+    let want = "\
+no-args:  status=0 success?=true\n\
+Int(42):  status=42 success?=false\n\
+true:     status=0 success?=true\n\
+false:    status=1 success?=false\n\
+nil:      status=0 success?=true\n\
+Str:      status=0 success?=true msg=custom message\n\
+(int,msg):status=7 msg=with msg\n\
+";
+    assert_eq!(got, want);
+}
+
+#[test]
 fn format_trap_emits_cruby_style_line() {
     let mut rt = Runtime::new();
     let trap = rt.eval(r#"nil.foo"#, "snippet.rb").unwrap_err();

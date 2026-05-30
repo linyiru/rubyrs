@@ -124,3 +124,66 @@ end
 ## (ADR 0025 Phase 1+) will do the same when the host opts in.
 class Interrupt < SignalException
 end
+
+## `SystemExit` is the exception raised by `Kernel#exit(status)` to
+## trigger a clean shutdown — `ensure` blocks fire, `at_exit`
+## handlers run, the unwind reaches the script's outer frame and
+## the embedder reads the status. Pre-installed for ADR 0025
+## Phase 0.5a; the matching `Kernel#exit` / `exit!` / `abort`
+## builtins land in Phase 0.5b.
+##
+## Intentionally `< Exception`, NOT `< SignalException` despite the
+## name overlap. CRuby draws the line because `Kernel#exit` (the
+## normal source) is programmatic, not signal-driven —
+## `SignalException` is reserved for SIG{TERM,HUP,...} shapes that
+## reach the process via an actual OS signal. A bare `rescue`
+## clause filters on StandardError, so attaching `SystemExit`
+## outside that subtree keeps user code from accidentally
+## swallowing its own `exit` call — same security-posture
+## rationale as `ResourceExhausted` (ADR 0008).
+##
+## Constructor accepts the same shapes as CRuby 3.x's `SystemExit.new`:
+##   - no args        → status=0, message="SystemExit"
+##   - Integer        → status=int, message="exit"
+##   - true           → status=0, message="exit"
+##   - false          → status=1, message="exit"
+##   - nil            → status=0, message="exit"
+##   - String         → status=0, message=str
+##   - (Integer, msg) → status=int, message=msg
+class SystemExit < Exception
+  def initialize(*args)
+    if args.length == 0
+      @status = 0
+      super("SystemExit")
+    elsif args.length == 1
+      arg = args[0]
+      if arg.is_a?(Integer)
+        @status = arg
+        super("exit")
+      elsif arg == true
+        @status = 0
+        super("exit")
+      elsif arg == false
+        @status = 1
+        super("exit")
+      elsif arg.nil?
+        @status = 0
+        super("exit")
+      else
+        @status = 0
+        super(arg.to_s)
+      end
+    elsif args.length == 2
+      @status = args[0]
+      super(args[1])
+    else
+      raise ArgumentError, "wrong number of arguments (given #{args.length}, expected 0..2)"
+    end
+  end
+
+  attr_reader :status
+
+  def success?
+    @status == 0
+  end
+end

@@ -195,6 +195,12 @@ const BUILTIN_EXCEPTION_PARENT: &[(&str, &str)] = &[
     // `SystemExit` outside the StandardError subtree.
     ("SignalException", "Exception"),
     ("Interrupt", "SignalException"),
+    // SystemExit < Exception (NOT under SignalException despite
+    // the name overlap). ADR 0025 Phase 0.5a — raised by
+    // Kernel#exit and friends. Same security-posture rationale
+    // as ResourceExhausted: bare `rescue` must not swallow
+    // a user's `exit` call.
+    ("SystemExit", "Exception"),
 ];
 
 impl RubyError {
