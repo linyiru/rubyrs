@@ -987,6 +987,118 @@ fn v7_at_exit_handler_raise_continues_lifo_drain() {
 }
 
 #[test]
+fn adr_0024_phase_a_break_from_yielded_block_unwinds_to_yielding_method() {
+    // ADR 0024 Phase A.1: `def f; while true; yield; end; end` +
+    // `f { break }` exits cleanly. The previous fire-and-forget
+    // Op::Yield set break_signaled but the yielding method's
+    // `while true` kept looping (because Op::Yield's wrapper
+    // didn't observe break_signaled at all). v8 Phase A.1 makes
+    // Op::Yield synchronous + observes break.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def my_loop
+          while true
+            yield
+          end
+        end
+        i = 0
+        my_loop do
+          i += 1
+          break if i >= 3
+          puts "iter #{i}"
+        end
+        puts "after, i=#{i}"
+        "##,
+        "adr_0024_break_unwinds.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "iter 1\niter 2\nafter, i=3\n",
+    );
+}
+
+#[test]
+fn adr_0024_phase_a_break_with_value_returns_from_yielding_method() {
+    // `break val` propagates val as the yielding method's
+    // return value (CRuby `[1,2,3].map { break "x" } # => "x"`).
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def my_loop
+          while true
+            yield
+          end
+        end
+        result = my_loop { break "early-exit-val" }
+        puts "result=#{result}"
+        "##,
+        "adr_0024_break_value.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "result=early-exit-val\n");
+}
+
+#[test]
+fn adr_0024_phase_a_block_normal_return_value_is_yield_expression() {
+    // Without break, the block's normal return value is the
+    // value of the yield expression in the yielding method.
+    // This is the existing CRuby behavior that v6 already
+    // matched; v8 must not regress it.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def f
+          v = yield 10
+          puts "block returned #{v}"
+        end
+        f { |x| x * 2 }
+        "##,
+        "adr_0024_block_return.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "block returned 20\n");
+}
+
+#[test]
+fn adr_0024_phase_a_max_yield_recursion_cap_trips_resource_exhausted() {
+    // Recursive yield chains hit the cap. Setting
+    // max_yield_recursion: Some(N) makes a recursion depth
+    // of N+1 trap ResourceExhausted.
+    let cfg = rubyrs::Config {
+        max_yield_recursion: Some(10),
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        r##"
+        def f
+          yield
+        end
+        # Build a deep yield chain via mutually-recursive yields.
+        # 20 levels exceeds the cap of 10.
+        def recurse(n)
+          return if n <= 0
+          f { recurse(n - 1) }
+        end
+        recurse(20)
+        "##,
+        "adr_0024_max_yield_recursion.rb",
+    ).unwrap_err();
+    let rubyrs::RubyError::ResourceExhausted { msg } = &err.err else {
+        panic!("expected ResourceExhausted, got {:?}", err.err);
+    };
+    assert!(
+        msg.contains("yield recursion depth exceeded"),
+        "unexpected message: {msg}",
+    );
+}
+
+#[test]
 fn exit_raises_system_exit_caught_with_status() {
     // ADR 0025 Phase 0.5b: `Kernel#exit(N)` raises SystemExit
     // with status=N. The user-script `rescue SystemExit => e`

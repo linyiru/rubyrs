@@ -1405,12 +1405,56 @@ impl Vm {
                 // CRuby implements the same lookup via the cfp
                 // chain (vm_get_yield_method_cfp). Without the
                 // walk, every block-wrapped yield raises
-                // "no block given (yield)" — broke ERB's scanner
-                // (lib/erb/compiler.rb:166-169 nests `yield(token)`
-                // inside `line.scan { |tokens| tokens.each { ... } }`).
-                let block = self.frames.iter().rev()
-                    .find(|f| !f.is_block)
-                    .and_then(|f| f.block_arg);
+                // "no block given (yield)" — broke ERB's scanner.
+                //
+                // **ADR 0024 Phase A.1**: Op::Yield now drives
+                // the block SYNCHRONOUSLY (recursive
+                // `dispatch_until`) so the block's `break val`
+                // unwinds back to the yielding method and
+                // returns val from it — matching CRuby
+                // semantics. v6's fire-and-forget pattern set
+                // `break_signaled` but only Rust-level iter
+                // drivers (`step_block`) observed it; a Ruby
+                // `def f; yield; end; f { break }` was
+                // historically broken (infinite loop / silent
+                // continue depending on caller shape).
+                //
+                // The synchronous flow:
+                //   1. Locate yielding method's frame index
+                //      ("nearest non-block frame"). Note: for
+                //      adversarial nesting (`outer { f { break } }`
+                //      where `f` was passed a `&block` and
+                //      re-yielded), this rule diverges from
+                //      CRuby's strict "yielding method" target;
+                //      tracked as ADR 0024 Phase A round 2 work.
+                //   2. Mark the yielding-method frame's
+                //      `pending_yield = true` (so a Fiber yield
+                //      mid-block can resume correctly).
+                //   3. Enter `YieldDepthGuard` (bounded recursion
+                //      via `Config::max_yield_recursion`; Drop
+                //      decrements panic-safely).
+                //   4. `invoke_block` pushes block frame.
+                //   5. Inner `dispatch_until(pre_frames)` drives
+                //      the block to completion.
+                //   6. On normal return: block value is on
+                //      stack, IP past Op::Yield; clear
+                //      pending_yield; continue.
+                //   7. On `break_signaled`: pop value, walk
+                //      frames down to + including yielding
+                //      method, push value as method's return,
+                //      clear break_signaled.
+                //   8. On `method_return` / `fiber_yield_pending`:
+                //      leave the signal set, let the outer
+                //      dispatch loop / Fiber driver handle.
+                let yielding_idx = self.frames.iter().rev()
+                    .position(|f| !f.is_block);
+                let yielding_idx = match yielding_idx {
+                    Some(rel) => self.frames.len() - 1 - rel,
+                    None => return Err(self.trap(RubyError::RuntimeError {
+                        msg: "no block given (yield)".to_string(),
+                    })),
+                };
+                let block = self.frames[yielding_idx].block_arg;
                 let block = match block {
                     Some(b) => b,
                     None => return Err(self.trap(RubyError::RuntimeError {
@@ -1420,7 +1464,121 @@ impl Vm {
                 let argc = argc as usize;
                 let split = self.stack.len() - argc;
                 let args: Vec<Value> = self.stack.drain(split..).collect();
-                self.invoke_block(block, args)?;
+
+                let pre_frames = self.frames.len();
+
+                // Bounded recursion guard FIRST so we never
+                // mark pending_yield without a matching guard
+                // (if enter fails, no cleanup needed).
+                let yguard = crate::vm::YieldDepthGuard::enter(self)?;
+                yguard.vm.frames[yielding_idx].pending_yield = true;
+
+                // Push block frame + drive to completion.
+                if let Err(trap) = yguard.vm.invoke_block(block, args) {
+                    yguard.vm.frames[yielding_idx].pending_yield = false;
+                    return Err(trap);
+                }
+                if let Err(trap) = yguard.vm.dispatch_until(pre_frames) {
+                    // Block raised; clear pending_yield and
+                    // propagate so rescue can catch.
+                    if yielding_idx < yguard.vm.frames.len() {
+                        yguard.vm.frames[yielding_idx].pending_yield = false;
+                    }
+                    return Err(trap);
+                }
+
+                // dispatch_until returned. Determine why:
+                if yguard.vm.method_return.is_some() {
+                    // return-from-block: leave method_return
+                    // set; outer dispatch loop handles unwind.
+                    if yielding_idx < yguard.vm.frames.len() {
+                        yguard.vm.frames[yielding_idx].pending_yield = false;
+                    }
+                    // Guard drops on return → decrements counter.
+                    return Ok(true);
+                }
+                #[cfg(feature = "_fiber")]
+                if yguard.vm.fiber_yield_pending.is_some() {
+                    // Fiber.yield mid-block. DO NOT clear
+                    // pending_yield — it stays set so the
+                    // Fiber's stashed FiberSnapshot captures
+                    // the in-progress state. On resume the
+                    // block continues; eventually it returns
+                    // normally OR breaks. We can't see that
+                    // far ahead here — let the outer Fiber
+                    // driver propagate up; on resume the
+                    // dispatch loop re-enters this same
+                    // dispatch_until at a level that observes
+                    // the post-block state.
+                    //
+                    // Actually subtle: this `dispatch_until`
+                    // call returned. The outer caller is the
+                    // dispatch_until that's driving the Fiber.
+                    // It also sees fiber_yield_pending and
+                    // returns. resume_fiber stashes; later
+                    // re-enters dispatch_until. The dispatch
+                    // loop will pick up at the block's IP
+                    // (top of stack). Block completes,
+                    // Op::Return pops it, control resumes at
+                    // the yielding-method's IP past Op::Yield —
+                    // which is the NEXT op, NOT this same Op::Yield.
+                    //
+                    // Wait — the IP for `self.frames[yielding_idx].ip`
+                    // was advanced BEFORE we entered the match
+                    // arm (top of the dispatch loop). So past-yield
+                    // is already the IP. On resume, dispatch fetches
+                    // that next op, not Op::Yield. The synchronous
+                    // wrapper's break-check is therefore SKIPPED on
+                    // the resume path. **Limitation**: a block-break
+                    // delivered AFTER a Fiber-yield resume can't be
+                    // observed by this Op::Yield's wrapper (we're
+                    // long gone from this Rust frame). Phase A
+                    // round 2 follow-up to design that.
+                    return Ok(true);
+                }
+
+                // Normal block return or block-break.
+                let block_return_value = yguard.vm.stack.pop().unwrap_or(Value::Nil);
+                yguard.vm.frames[yielding_idx].pending_yield = false;
+
+                if yguard.vm.break_signaled {
+                    yguard.vm.break_signaled = false;
+                    // Unwind: walk current frame down to + including
+                    // yielding method. Truncate each frame's stack
+                    // residue. Push break value as the popped
+                    // method's return value.
+                    //
+                    // For now we use a simple pop-all loop —
+                    // doesn't run ensure handlers on intermediate
+                    // method frames. Tracked as Phase A round 2.
+                    while yguard.vm.frames.len() > yielding_idx {
+                        let f = yguard.vm.frames.pop().unwrap();
+                        yguard.vm.stack.truncate(f.base_sp);
+                        if !f.is_block {
+                            // This is the yielding method. Push
+                            // its return value (break val unless
+                            // swap_return overrides).
+                            if let Some(rep) = f.swap_return {
+                                yguard.vm.stack.push(rep);
+                            } else {
+                                yguard.vm.stack.push(block_return_value.clone());
+                            }
+                            break;
+                        }
+                    }
+                    if yguard.vm.frames.is_empty() {
+                        // We unwound off the bottom (yielding
+                        // method was at toplevel).
+                        drop(yguard);
+                        return Ok(false);
+                    }
+                    drop(yguard);
+                    return Ok(true);
+                }
+                // Normal block return — push the block's value
+                // as the yield expression's value.
+                yguard.vm.stack.push(block_return_value);
+                // Guard drops on fall-through → decrements counter.
             }
             Op::DefMethod(name_id, p_idx) => {
                 let proto = &self.protos[p_idx as usize];
