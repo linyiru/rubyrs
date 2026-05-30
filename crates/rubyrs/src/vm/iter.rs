@@ -2941,30 +2941,37 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 'outer: for chunk in snapshot.chunks(n_usz) {
-                    // Per-iter pins go through PinGuard (`g.pin`)
-                    // rather than direct `vm.pinned.push` because
-                    // the slice's `check_alloc()?` below sits
-                    // between the per-pair pushes and the slice
-                    // push — a trap there would skip the matching
-                    // pops and leak GC roots. PinGuard's Drop pops
-                    // them unconditionally on every exit path.
-                    // Pin growth across iterations is bounded by
-                    // `snapshot.len()` (which we already cloned)
-                    // and released when the function returns.
-                    let mut pair_ids: Vec<Value> = Vec::with_capacity(chunk.len());
-                    for (k, v) in chunk {
+                    // Per-iter scope: snapshot pinned-len at iter
+                    // start, push transient pair/slice pins
+                    // directly, then truncate back unconditionally
+                    // after the closure returns (Ok OR Err).
+                    // Wrapping the body in a closure routes any
+                    // `?` early-return through the post-closure
+                    // truncate, so per-iter pins are released
+                    // at end of each chunk on every path — no
+                    // accumulation across iterations, no leak on
+                    // check_alloc trap. `g.pin()` isn't used here
+                    // because PinGuard's Drop only fires at
+                    // function exit (would keep all iters'
+                    // pins alive — O(snapshot.len()) growth).
+                    let iter_baseline = g.vm.pinned.len();
+                    let step_result: Result<BlockStep, Trap> = (|| {
+                        let mut pair_ids: Vec<Value> = Vec::with_capacity(chunk.len());
+                        for (k, v) in chunk {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                            g.vm.pinned.push(Value::Array(pid));
+                            pair_ids.push(Value::Array(pid));
+                        }
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
-                        g.pin(Value::Array(pid));
-                        pair_ids.push(Value::Array(pid));
-                    }
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let slice_id = g.vm.heap.alloc(HeapObj::Array(pair_ids));
-                    g.pin(Value::Array(slice_id));
-                    let step = g.vm.step_block(block, vec![Value::Array(slice_id)], pre_frames);
-                    match step? {
+                        let slice_id = g.vm.heap.alloc(HeapObj::Array(pair_ids));
+                        g.vm.pinned.push(Value::Array(slice_id));
+                        g.vm.step_block(block, vec![Value::Array(slice_id)], pre_frames)
+                    })();
+                    g.vm.pinned.truncate(iter_baseline);
+                    match step_result? {
                         // Non-local `return` from inside the block:
                         // bubble out immediately as Nil so the outer
                         // dispatch loop reads `vm.method_return` and
@@ -3013,21 +3020,24 @@ impl Vm {
                 let mut early = None;
                 if pair_vals.len() >= n_usz {
                     'outer: for win in pair_vals.windows(n_usz) {
-                        g.vm.maybe_gc();
-                        g.vm.check_alloc()?;
-                        let wid = g.vm.heap.alloc(HeapObj::Array(win.to_vec()));
-                        // Per-window pin via PinGuard so Drop pops
-                        // on every exit path — converges this arm
-                        // on the same RAII pattern as each_slice
-                        // after the cycle-2 fix. The current
-                        // manual push/pop is provably safe (pop
-                        // sits between step_block and `?`), but
-                        // PinGuard makes the safety syntactically
-                        // obvious and survives future edits that
-                        // sneak `?`-trapping ops into the gap.
-                        g.pin(Value::Array(wid));
-                        let step = g.vm.step_block(block, vec![Value::Array(wid)], pre_frames);
-                        match step? {
+                        // Per-iter scope: see each_slice arm
+                        // above for the closure+truncate
+                        // rationale. The window pin is released
+                        // at end of each iteration on every
+                        // path, keeping `vm.pinned` size bounded
+                        // by `pair_vals.len()` (already pre-
+                        // pinned) instead of growing
+                        // O(number_of_windows).
+                        let iter_baseline = g.vm.pinned.len();
+                        let step_result: Result<BlockStep, Trap> = (|| {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let wid = g.vm.heap.alloc(HeapObj::Array(win.to_vec()));
+                            g.vm.pinned.push(Value::Array(wid));
+                            g.vm.step_block(block, vec![Value::Array(wid)], pre_frames)
+                        })();
+                        g.vm.pinned.truncate(iter_baseline);
+                        match step_result? {
                             // See each_slice arm above — non-local
                             // `return` must bubble out as Nil so
                             // outer dispatch reads `method_return`.
