@@ -3005,10 +3005,12 @@ fn rational_phase_c1_construction_and_readers() {
         ("puts Rational(1, 2).respond_to?(:numerator)",  "true"),
         ("puts Rational(1, 2).respond_to?(:denominator)","true"),
         ("puts Rational(1, 2).respond_to?(:to_r)",       "true"),
-        // Arithmetic / comparison are PHASE C.2 — currently NOT
-        // available, so respond_to? returns false. Pin that so
-        // accidental whitelist creep is caught.
-        ("puts Rational(1, 2).respond_to?(:+)",          "false"),
+        // Arithmetic / comparison whitelist (Phase C.2 — the
+        // operator method-call arms in dispatch.rs's Rational
+        // block plus `try_rational_binop` at the Op::BinOp site).
+        ("puts Rational(1, 2).respond_to?(:+)",          "true"),
+        ("puts Rational(1, 2).respond_to?(:<=>)",        "true"),
+        ("puts Rational(1, 2).respond_to?(:coerce)",     "true"),
         ("puts Rational(1, 2).respond_to?(:==)",         "true"),  // Object#==
     ] {
         let buf = SharedBuf::new();
@@ -3049,6 +3051,78 @@ fn rational_phase_c1_construction_and_readers() {
                 assert_eq!(class_name, "ArgumentError", "for {:?}", script);
             }
             ref other => panic!("expected ArgumentError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
+#[test]
+fn rational_phase_c2_arithmetic_and_comparison() {
+    // Phase C.2 surface — `+ - * / <=>` + comparisons on Rational
+    // operands, plus cross-type promotion (Int and Float) routed
+    // through `try_rational_binop` at the Op::BinOp site and the
+    // method-call arms in dispatch.rs's Rational block.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        // Rational × Rational.
+        ("puts (Rational(1, 2) + Rational(1, 3)).inspect", "(5/6)"),
+        ("puts (Rational(3, 4) - Rational(1, 2)).inspect", "(1/4)"),
+        ("puts (Rational(2, 3) * Rational(3, 4)).inspect", "(1/2)"),
+        ("puts (Rational(1, 2) / Rational(1, 3)).inspect", "(3/2)"),
+        // Rational result that reduces back to an integer-valued
+        // Rational stays a Rational (CRuby parity).
+        ("puts (Rational(1, 2) + Rational(1, 2)).inspect", "(1/1)"),
+        // Rational × Int (and reverse) via Op::BinOp's
+        // try_rational_binop.
+        ("puts (Rational(1, 2) + 1).inspect",  "(3/2)"),
+        ("puts (1 + Rational(1, 2)).inspect",  "(3/2)"),
+        ("puts (2 * Rational(1, 4)).inspect",  "(1/2)"),
+        ("puts (Rational(1, 2) - 1).inspect",  "(-1/2)"),
+        ("puts (Rational(1, 2) / 2).inspect",  "(1/4)"),
+        // Rational × Float (Float dominates).
+        ("puts (Rational(1, 2) + 0.5).inspect", "1.0"),
+        ("puts (0.5 + Rational(1, 4)).inspect", "0.75"),
+        // Comparison operators (Rational × Rational and cross-type).
+        ("puts (Rational(1, 2) < Rational(2, 3))", "true"),
+        ("puts (Rational(2, 3) > Rational(1, 2))", "true"),
+        ("puts (Rational(1, 2) <= Rational(1, 2))", "true"),
+        ("puts (Rational(1, 2) == Rational(2, 4))", "true"),
+        ("puts (Rational(1, 2) != Rational(1, 3))", "true"),
+        // <=> across Rational / Int / Float.
+        ("puts (Rational(1, 2) <=> Rational(2, 3))", "-1"),
+        ("puts (Rational(1, 2) <=> Rational(1, 2))", "0"),
+        ("puts (Rational(2, 3) <=> Rational(1, 2))", "1"),
+        ("puts (Rational(1, 2) <=> 1)",              "-1"),
+        ("puts (1 <=> Rational(1, 2))",              "1"),
+        ("puts (Rational(1, 2) <=> 0.5)",            "0"),
+        ("puts (0.5 <=> Rational(2, 3))",            "-1"),
+        // Cross-type equality (`Int == Rational` / `Float ==
+        // Rational`) flows through the same path.
+        ("puts (1 == Rational(1, 1))",   "true"),
+        ("puts (Rational(1, 1) == 1)",   "true"),
+        ("puts (0.5 == Rational(1, 2))", "true"),
+        ("puts (Rational(1, 2) == 0.5)", "true"),
+        // Non-numeric arg returns nil from <=>.
+        ("puts (Rational(1, 2) <=> \"x\").inspect", "nil"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "rational_c2.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // Error shapes.
+    for (script, expected_class, expected_msg) in [
+        ("Rational(1, 2) / Rational(0, 1)", "ZeroDivisionError", "divided by 0"),
+        ("Rational(1, 2) / 0",              "ZeroDivisionError", "divided by 0"),
+        ("Rational(1, 2) + \"x\"",          "TypeError",         "String can't be coerced into Rational"),
+        ("Rational(1, 2) - nil",            "TypeError",         "nil can't be coerced into Rational"),
+    ] {
+        let err = rt.eval(script, "rational_c2_err.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected Uncaught {} for {:?}, got {:?}", expected_class, script, other),
         }
     }
 }

@@ -2070,6 +2070,9 @@ impl Vm {
                     if let Some(v) = self.try_bigint_binop(kind, &a, &b_val)? {
                         // BigInt LHS + Int RHS — promoted arithmetic.
                         self.stack.push(v);
+                    } else if let Some(v) = self.try_rational_binop(kind, &a, &b_val)? {
+                        // Rational LHS + Int RHS — Phase C.2.
+                        self.stack.push(v);
                     } else if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b_val), self.max_value_bytes).map_err(|e| self.trap(e))? {
                         self.stack.push(v);
                     } else if let Some(v) = self.sym_primitive(&a, kind.name(), std::slice::from_ref(&b_val))? {
@@ -2107,6 +2110,10 @@ impl Vm {
                 } else if let Some(v) = self.try_bigint_binop(kind, &a, &b)? {
                     // BigInt × {Int,BigInt} or Int × BigInt — promoted
                     // arithmetic in arbitrary precision.
+                    self.stack.push(v);
+                } else if let Some(v) = self.try_rational_binop(kind, &a, &b)? {
+                    // Rational × {Int,Rational,Float} (or reverse) —
+                    // Phase C.2.
                     self.stack.push(v);
                 } else if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b), self.max_value_bytes).map_err(|e| self.trap(e))? {
                     self.stack.push(v);
