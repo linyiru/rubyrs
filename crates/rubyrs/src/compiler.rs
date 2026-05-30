@@ -644,10 +644,16 @@ fn compile_begin_arm(
             b.retry_targets.push(begin_top);
             compile_body(b, &rc.body, protos, interner, cc);
             b.retry_targets.pop();
-            // The rescue body ran to completion without
-            // hitting `retry` — drop the begin-baseline
-            // before jumping past the rescue chain.
-            // (Code-review #306 round 1.)
+            // Rescue body completed without `retry`. The
+            // unwinder may have left sibling-class entries
+            // from a multi-class clause on the rescue stack
+            // below the matched handler — truncate to the
+            // begin baseline so they don't survive past this
+            // begin block and catch unrelated later
+            // exceptions. (Code-review #306 round 3.)
+            b.emit(Op::TruncateRescuesToBeginBaseline);
+            // Drop the begin-baseline before jumping past
+            // the rescue chain. (Code-review #306 round 1.)
             b.emit(Op::ExitBegin);
             jump_to_end.push(b.emit(Op::Jump(0)));
         }

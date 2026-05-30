@@ -2401,8 +2401,12 @@ impl Vm {
             }
             Op::EnterBegin => {
                 let f = self.frames.last_mut().expect("ICE: EnterBegin no frame");
-                let depth = f.rescues.len();
-                f.begin_rescue_depths.push(depth);
+                let baseline = crate::vm::BeginBaseline {
+                    rescues_len: f.rescues.len(),
+                    loop_rescue_depths_len: f.loop_rescue_depths.len(),
+                    loop_stack_depths_len: f.loop_stack_depths.len(),
+                };
+                f.begin_rescue_depths.push(baseline);
             }
             Op::ExitBegin => {
                 self.frames
@@ -2418,7 +2422,14 @@ impl Vm {
                     .begin_rescue_depths
                     .last()
                     .expect("ICE: retry without matching EnterBegin baseline");
-                f.rescues.truncate(baseline);
+                // Three-stack cleanup so retry stays balanced
+                // whether it fires from a multi-class rescue
+                // (rescues truncation) or from inside a `while`
+                // loop in the rescue body (loop depths
+                // truncation). (Code-review #306 round 3.)
+                f.rescues.truncate(baseline.rescues_len);
+                f.loop_rescue_depths.truncate(baseline.loop_rescue_depths_len);
+                f.loop_stack_depths.truncate(baseline.loop_stack_depths_len);
             }
             Op::PushEnsure(off) => {
                 let f = self.frames.last().expect("ICE: PushEnsure no frame");

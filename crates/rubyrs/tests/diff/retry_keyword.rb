@@ -151,3 +151,47 @@ rescue TypeError => e
   "caught:#{e.message}"
 end
 puts "trailing=#{trailing}"
+
+## Shape 8: rescue body that DOESN'T retry but the
+## multi-class clause matched one filter — the unwound stack
+## might still have the sibling-class entry. The rescue body
+## completing without retry must truncate to the begin
+## baseline before exiting so a later trailing raise outside
+## the begin block isn't caught by the orphan.
+## (Code-review #306 round 3.)
+n = 0
+result_no_retry = begin
+  n += 1
+  raise ArgumentError, "stop-now"
+rescue ArgumentError, TypeError
+  "stopped-at-#{n}"
+end
+puts "no-retry-result=#{result_no_retry}"
+post_raise = begin
+  raise TypeError, "trailing-no-retry"
+rescue TypeError => e
+  "caught-here:#{e.message}"
+end
+puts "post-raise=#{post_raise}"
+
+## Shape 9: while loop inside rescue body, with retry. The
+## loop's EnterLoop pushes loop_rescue_depths /
+## loop_stack_depths; retry must restore those to the values
+## recorded at begin_top time, else a subsequent EnterLoop /
+## BreakLoop would read stale entries. (Code-review #306
+## round 3.)
+c = 0
+$visited = []
+begin
+  c += 1
+  raise "x" if c < 3
+  $visited << "main-end"
+rescue
+  3.times do |i|
+    $visited << "inner-#{c}-#{i}"
+    break if i == 1
+  end
+  retry if c < 3
+end
+puts "loop-retry-c=#{c}"
+puts "visited=#{$visited.inspect}"

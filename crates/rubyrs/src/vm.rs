@@ -160,7 +160,7 @@ pub(crate) struct Frame {
     /// some entries) doesn't survive the retry to catch a
     /// later exception outside the begin block.
     /// (Code-review #306 round 1.)
-    pub(crate) begin_rescue_depths: Vec<usize>,
+    pub(crate) begin_rescue_depths: Vec<BeginBaseline>,
 }
 
 /// In-flight structured `break`/`next` walking through an
@@ -230,6 +230,21 @@ impl Drop for PinGuard<'_> {
     fn drop(&mut self) {
         for _ in 0..self.count { self.vm.pinned.pop(); }
     }
+}
+
+/// Triple of frame-stack snapshots taken at `Op::EnterBegin`
+/// time: `rescues.len()`, `loop_rescue_depths.len()`, and
+/// `loop_stack_depths.len()`. On `Op::TruncateRescuesToBeginBaseline`
+/// (retry) all three are truncated to these values so a `retry`
+/// inside a `while` loop in a rescue body doesn't leave the
+/// loop's `EnterLoop` entries leaked into the next iteration of
+/// the begin body. (Code-review #306 round 2 — closes the
+/// nested-loop-in-rescue gap.)
+#[derive(Clone, Copy)]
+pub(crate) struct BeginBaseline {
+    pub(crate) rescues_len: usize,
+    pub(crate) loop_rescue_depths_len: usize,
+    pub(crate) loop_stack_depths_len: usize,
 }
 
 pub(crate) struct RescueHandler {

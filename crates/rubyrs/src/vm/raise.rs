@@ -190,6 +190,12 @@ impl Vm {
                 // `rescues` to the wrong depth, leaving outer
                 // rescue handlers stranded or wiping siblings.
                 // (Code-review #306 round 2.)
+                // Truncate the begin-baseline stack length (each
+                // entry now carries a triple — `rescues_len`,
+                // `loop_rescue_depths_len`, `loop_stack_depths_len`
+                // — captured at its `EnterBegin`; truncating by
+                // count is enough since outer entries are still
+                // valid).
                 f.begin_rescue_depths.truncate(h.begin_depth_at_push);
                 if h.is_ensure {
                     // ensure handler: push the exception onto the operand
