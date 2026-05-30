@@ -183,6 +183,28 @@ pub(crate) enum LoopTransferKind {
     Next,
 }
 
+/// ADR 0024 Phase A.4: in-flight block-break unwinding the yielding
+/// method through its `ensure` chain. Distinct from `LoopTransfer`
+/// because the target is a frame pop + return-value push (single
+/// method frame), not a loop join in the same frame.
+///
+/// Set by `Op::Yield`'s case (a) when the block did
+/// `break val` and the yielding method's frame still has pending
+/// `is_ensure: true` rescue handlers. Walks them top-down running
+/// each ensure body; `Op::EndEnsure` observes this slot (alongside
+/// `pending_loop_transfer`) and resumes the walk. Once all ensures
+/// have run, lands by popping the yielding method's frame and
+/// pushing `value` as its return.
+///
+/// Phase A.4 limits the target to the topmost frame (the yielding
+/// method itself; case (a)). Multi-frame walks (case b — break
+/// across a Rust iter driver where each-method body has code AND
+/// ensure after the iter call) are Phase A.5 work and will extend
+/// this struct with a `target_frame_idx`.
+pub(crate) struct MethodBreak {
+    pub(crate) value: Value,
+}
+
 /// RAII guard for `Vm.pinned`. Native-side code that needs heap
 /// values to survive an intervening `maybe_gc` / `?` early-return
 /// constructs one of these, calls `.pin(v)` for every value it
@@ -763,6 +785,13 @@ pub(crate) struct Vm {
     /// CRuby semantics where a `raise` inside an ensure body
     /// silently drops a pending break/next.
     pub(crate) pending_loop_transfer: Option<LoopTransfer>,
+    /// ADR 0024 Phase A.4: in-flight block-break walking the
+    /// yielding method's ensure chain before that frame returns.
+    /// `Op::EndEnsure` checks this slot (after
+    /// `pending_loop_transfer`) and calls `continue_method_break`
+    /// to resume. Cleared once the yielding-method frame is
+    /// popped and the break value lands on the caller's stack.
+    pub(crate) pending_method_break: Option<MethodBreak>,
     /// One-shot flag set by a builtin that detected its caller was
     /// unwound past its own call-site (e.g. `require_relative` saw
     /// `unwind_with_exception` route control to an outer
@@ -1036,6 +1065,7 @@ impl Vm {
             dispatch_until_depths: Vec::new(),
             method_return_locals: None,
             pending_loop_transfer: None,
+            pending_method_break: None,
             suppress_call_result_push: false,
             bypass_visibility_once: false,
             #[cfg(feature = "_fiber")]
@@ -1093,6 +1123,11 @@ impl Vm {
         let v = self.method_return.take();
         if v.is_some() {
             self.pending_loop_transfer = None;
+            // Same invariant for the Phase A.4 block-break walk:
+            // a return-from-block that fires mid-ensure-walk
+            // supersedes the in-flight break (CRuby semantics —
+            // `return` wins, the break value is dropped).
+            self.pending_method_break = None;
         }
         // Always clear `method_return_locals` — the field-pair
         // invariant says it lives and dies with `method_return`,
@@ -1194,6 +1229,7 @@ impl Vm {
         // invariant. (code-review #285 round 2 #3.)
         self.method_return_locals = None;
         self.pending_loop_transfer = None;
+        self.pending_method_break = None;
         self.suppress_call_result_push = false;
         self.bypass_visibility_once = false;
         // Boundary stack for AlreadyCaught propagation through

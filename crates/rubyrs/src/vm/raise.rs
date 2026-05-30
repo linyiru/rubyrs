@@ -123,6 +123,11 @@ impl Vm {
         // dropped). Clear the slot before walking handlers so a later
         // EndEnsure doesn't try to resume a now-cancelled transfer.
         self.pending_loop_transfer = None;
+        // Same invariant for Phase A.4's block-break-through-ensure
+        // walk: a `raise` from inside the yielding method's ensure
+        // body cancels the in-flight break — the exception takes
+        // over the unwind, and the break value is dropped.
+        self.pending_method_break = None;
         // Resolve the raised value's class once up front; the unwind loop
         // may probe many handlers before finding (or not finding) a match.
         let exc_class: Option<Rc<Class>> = match &exc {
@@ -319,6 +324,75 @@ impl Vm {
             // push; iter_check evaluates the cond from a clean
             // stack.
             self.stack.push(value);
+        }
+        Ok(())
+    }
+}
+
+impl Vm {
+    /// ADR 0024 Phase A.4: kick off a block-break unwinding the
+    /// yielding method's frame through any pending `is_ensure`
+    /// handlers. Mirrors `begin_loop_transfer` but the target is
+    /// a frame pop + return-value push, not an intra-frame jump.
+    ///
+    /// Walks the current frame's rescues top-down; the first
+    /// `is_ensure` entry suspends the walk by jumping into its
+    /// handler body and parking `pending_method_break`. The
+    /// `Op::EndEnsure` at the body's tail calls
+    /// `continue_method_break` to either find the next ensure
+    /// or land the break.
+    ///
+    /// When no `is_ensure` handlers remain, lands inline: pops
+    /// the yielding-method frame, truncates stack, pushes the
+    /// break value into the caller's operand stack.
+    ///
+    /// Returns Ok(()) on success. Caller must already have
+    /// truncated the block frame off `self.frames` and ensured
+    /// `self.frames.last()` IS the yielding method.
+    pub(crate) fn begin_method_break(&mut self, value: Value) -> Result<(), Trap> {
+        self.pending_method_break = Some(crate::vm::MethodBreak { value });
+        self.continue_method_break()
+    }
+
+    /// Resume the in-flight Phase A.4 block-break walk. Called by
+    /// `Op::EndEnsure` when `pending_method_break.is_some()`, and
+    /// directly by `begin_method_break` to do the first hop.
+    pub(crate) fn continue_method_break(&mut self) -> Result<(), Trap> {
+        // Walk current frame's rescues; first ensure suspends the
+        // walk into its handler body.
+        loop {
+            let f = self.frames.last_mut()
+                .expect("ICE: continue_method_break with empty frames");
+            match f.rescues.pop() {
+                Some(h) if h.is_ensure => {
+                    // Suspend the walk inside this ensure's body.
+                    // Restore the operand stack to PushEnsure depth
+                    // (matching the exception-path entry shape) but
+                    // do NOT push anything — ensure body runs with
+                    // pre-PushEnsure operand stack. EndEnsure at
+                    // the tail resumes the walk.
+                    self.stack.truncate(h.stack_depth);
+                    f.ip = h.handler_ip;
+                    return Ok(());
+                }
+                Some(_) => {
+                    // Plain rescue handler — silently discard.
+                    // Block-break doesn't trigger a rescue clause.
+                }
+                None => break, // No more rescues in this frame.
+            }
+        }
+        // No more ensures. Pop the yielding method frame, push
+        // the break value into the caller's stack.
+        let mb = self.pending_method_break.take()
+            .expect("ICE: pending_method_break vanished mid-continue");
+        let f = self.frames.pop()
+            .expect("ICE: continue_method_break landing with empty frames");
+        self.stack.truncate(f.base_sp);
+        if let Some(replacement) = f.swap_return {
+            self.stack.push(replacement);
+        } else {
+            self.stack.push(mb.value);
         }
         Ok(())
     }

@@ -1568,27 +1568,31 @@ impl Vm {
                     //     would strand the Rust driver mid-loop.
                     if yielding_idx == pre_frames - 1 {
                         yguard.vm.break_signaled = false;
-                        // Pop frames down to + including yielding
-                        // method. Simple pop-all loop — doesn't
-                        // run ensure handlers on intermediate
-                        // method frames. Tracked as Phase A round 2.
-                        while yguard.vm.frames.len() > yielding_idx {
-                            let f = yguard.vm.frames.pop().unwrap();
-                            yguard.vm.stack.truncate(f.base_sp);
-                            if !f.is_block {
-                                if let Some(rep) = f.swap_return {
-                                    yguard.vm.stack.push(rep);
-                                } else {
-                                    yguard.vm.stack.push(block_return_value.clone());
-                                }
-                                break;
-                            }
-                        }
-                        if yguard.vm.frames.is_empty() {
-                            drop(yguard);
+                        // ADR 0024 Phase A.4: walk the yielding
+                        // method's `is_ensure` rescue handlers
+                        // before the frame returns. After
+                        // dispatch_until returned, frames.len() ==
+                        // pre_frames and the topmost frame IS the
+                        // yielding method (case a), so
+                        // begin_method_break drives the ensure
+                        // walk on that frame directly. When no
+                        // ensures remain, it pops the frame and
+                        // pushes the break value as the method's
+                        // return.
+                        //
+                        // Toplevel case: if the yielding method
+                        // is the bottom frame, the walk pops it
+                        // and pushes the value as the script's
+                        // result. dispatch loop terminates on
+                        // empty frames — drop guard FIRST so the
+                        // recursion counter decrements before we
+                        // bail.
+                        let was_toplevel = yielding_idx == 0;
+                        yguard.vm.begin_method_break(block_return_value)?;
+                        drop(yguard);
+                        if was_toplevel && self.frames.is_empty() {
                             return Ok(false);
                         }
-                        drop(yguard);
                         return Ok(true);
                     }
                     // Case (b): let the Rust iter driver above
@@ -2477,16 +2481,23 @@ impl Vm {
                 self.begin_loop_transfer(LoopTransferKind::Next, target_ip, target_depth)?;
             }
             Op::EndEnsure => {
-                // Tail of an ensure handler body. Two paths:
+                // Tail of an ensure handler body. Three paths:
                 //   - Loop-transfer in flight: `pending_loop_transfer`
                 //     is Some because BreakLoop/NextLoop kicked off a
                 //     walk through this ensure. Resume the walk.
+                //   - Method-break in flight (ADR 0024 Phase A.4):
+                //     `pending_method_break` is Some because Op::Yield's
+                //     case (a) kicked off a block-break that has to
+                //     walk the yielding method's ensures before the
+                //     frame returns. Resume the walk.
                 //   - Normal exception unwind: the ensure was entered
                 //     by `unwind_with_exception` which pushed the
                 //     exception onto the operand stack. Pop and
                 //     re-raise so unwind continues.
                 if self.pending_loop_transfer.is_some() {
                     self.continue_loop_transfer()?;
+                } else if self.pending_method_break.is_some() {
+                    self.continue_method_break()?;
                 } else {
                     // Stack invariant on the exception path: the
                     // unwinder pushed exactly one exception value

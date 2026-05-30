@@ -1093,6 +1093,100 @@ fn adr_0024_phase_a2_stop_iteration_has_result_accessor() {
 }
 
 #[test]
+fn adr_0024_phase_a4_block_break_runs_yielding_method_ensure() {
+    // ADR 0024 Phase A.4: `break` from inside a block must
+    // walk the yielding method's `is_ensure` rescue handlers
+    // before the method frame returns the break value.
+    // Pre-A.4: the unwind raw-popped the frame and the ensure
+    // body never executed.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def f
+          begin
+            yield
+            puts "after-yield-unreachable"
+          ensure
+            puts "f ensure ran"
+          end
+        end
+        result = f { break "broken" }
+        puts "result=#{result}"
+        "##,
+        "adr_0024_a4_ensure_break.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "f ensure ran\nresult=broken\n",
+    );
+}
+
+#[test]
+fn adr_0024_phase_a4_nested_ensures_run_inner_first() {
+    // Phase A.4: nested begin/ensure blocks run inner ensure
+    // first, then outer — matching CRuby's stack-unwind
+    // order. Break value flows through both ensures
+    // unchanged.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def f
+          begin
+            begin
+              yield
+            ensure
+              puts "inner ensure"
+            end
+          ensure
+            puts "outer ensure"
+          end
+        end
+        puts f { break "v" }
+        "##,
+        "adr_0024_a4_nested_ensures.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "inner ensure\nouter ensure\nv\n",
+    );
+}
+
+#[test]
+fn adr_0024_phase_a4_raise_in_ensure_supersedes_break() {
+    // Phase A.4: when a block-break is mid-walk and the
+    // yielding method's ensure body raises, the exception
+    // takes over — the in-flight break value is dropped
+    // (matches CRuby; mirrors the existing
+    // pending_loop_transfer behavior).
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def g
+          begin
+            yield
+          ensure
+            raise "from-ensure"
+          end
+        end
+        begin
+          result = g { break "ignored" }
+          puts "unexpected: #{result}"
+        rescue => e
+          puts "rescued: #{e.message}"
+        end
+        "##,
+        "adr_0024_a4_ensure_raise.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "rescued: from-ensure\n");
+}
+
+#[test]
 fn adr_0024_phase_a3_kernel_loop_works_with_break() {
     // ADR 0024 Phase A.3: top-level `def loop` installed in
     // preamble. The canonical CRuby idiom should work:
