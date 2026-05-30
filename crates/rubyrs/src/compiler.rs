@@ -58,6 +58,18 @@ pub(crate) struct ProtoBuilder {
     /// an empty stack so `next` in a block reaches the iteration
     /// driver, not an enclosing `while` in the parent proto.
     pub(crate) loop_next_jumps: Vec<Vec<usize>>,
+    /// Stack of in-progress `begin / rescue` blocks' "begin top"
+    /// positions, pushed while compiling a rescue clause's body
+    /// so that `Expr::Retry` inside the body jumps backwards to
+    /// re-run the begin block (re-registering rescue handlers
+    /// via the PushRescue ops on each retry). Each entry is the
+    /// bytecode offset AFTER PushEnsure but BEFORE the first
+    /// PushRescue — re-entering at that point re-pushes the
+    /// rescue handlers without double-pushing the ensure layer.
+    /// Empty outside any rescue clause body; `Expr::Retry` with
+    /// an empty stack emits a runtime raise instead. (TRY_RUNS
+    /// pass-10 layer #9.)
+    pub(crate) retry_targets: Vec<usize>,
     /// Per-proto pool for binary string literals (`"\xNN..."`
     /// inputs where the unescaped bytes aren't valid UTF-8).
     /// Flushed into `Proto.byte_literals` on emit. See
@@ -564,6 +576,12 @@ fn compile_begin_arm(
     if rescue.is_empty() {
         compile_body(b, body, protos, interner, cc);
     } else {
+        // Capture the begin-top — AFTER PushEnsure (so retry
+        // doesn't double-push ensure) and BEFORE the first
+        // PushRescue (so retry re-registers rescue handlers).
+        // Pushed onto `retry_targets` while compiling each
+        // rescue clause body below. (TRY_RUNS pass-10 layer #9.)
+        let begin_top = b.pos();
         let stderr_sym = interner.intern("StandardError");
         // Per-clause groups of PushRescue placeholders. Same
         // outer iteration order as `rescue.iter().rev()` (i.e.
@@ -600,7 +618,16 @@ fn compile_begin_arm(
                     *o = off;
                 }
             }
+            // Make begin_top reachable from inside this rescue
+            // body so any `Expr::Retry` can jump back to re-run
+            // the begin block. Popped right after the body
+            // compiles so a later sibling rescue clause sees a
+            // clean stack (still has its OWN frame on retry —
+            // pushed again next iteration). (TRY_RUNS pass-10
+            // layer #9.)
+            b.retry_targets.push(begin_top);
             compile_body(b, &rc.body, protos, interner, cc);
+            b.retry_targets.pop();
             jump_to_end.push(b.emit(Op::Jump(0)));
         }
         let end = b.pos();
@@ -740,6 +767,7 @@ impl ProtoBuilder {
             is_method_body: false,
             loop_break_jumps: vec![],
             loop_next_jumps: vec![],
+            retry_targets: vec![],
             class_path: vec![],
             byte_literals: vec![],
             const_chains: vec![],
@@ -1446,6 +1474,33 @@ pub(crate) fn compile_expr(
             for a in args { compile_expr(b, a, protos, interner, cc); }
             b.emit(Op::Yield(args.len() as u8));
         }
+        Expr::Retry => {
+            // `retry` re-executes the surrounding begin block. The
+            // target is the inner-most `retry_targets` entry, set
+            // by `compile_begin_arm` while compiling a rescue
+            // clause body. CRuby raises SyntaxError at parse time
+            // when `retry` appears outside a rescue; rubyrs catches
+            // the out-of-context case here and emits a RuntimeError
+            // raise instead — a Tier-1 divergence on the error
+            // class for an error-only path. (TRY_RUNS pass-10
+            // layer #9.)
+            match b.retry_targets.last().copied() {
+                Some(target) => {
+                    let here = b.pos();
+                    let off = target as i32 - here as i32 - 1;
+                    b.emit(Op::Jump(off));
+                    // Sentinel for stack-balance of any unreachable
+                    // code following — mirrors Op::Return / Break.
+                    b.emit(Op::LoadNil);
+                }
+                None => {
+                    let msg_sym = interner.intern("Invalid retry");
+                    b.emit(Op::LoadConstStr(msg_sym));
+                    b.emit(Op::Raise);
+                    b.emit(Op::LoadNil);
+                }
+            }
+        }
         Expr::Apply { receiver, name, splat } => {
             // `foo(*arr)` — compile receiver (if any) then the
             // splat expression. The VM op `ApplyCall(NoRecv)`
@@ -1612,6 +1667,12 @@ pub(crate) fn compile_block(
         // driver (`Op::Return` from the block frame), not an
         // enclosing `while` in the parent.
         loop_next_jumps: vec![],
+        // Fresh `retry` target stack — blocks don't inherit
+        // begin/rescue context from the parent proto. (CRuby's
+        // `retry` always rescues within the textually-enclosing
+        // begin block, but blocks introduce a fresh frame for
+        // their own begin/rescue layers.)
+        retry_targets: vec![],
         // Blocks inherit the enclosing proto's class_path so a
         // bare `class Bar` inside a block running in a class body
         // still aliases under the right `Foo::Bar` key. Real
