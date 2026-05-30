@@ -106,7 +106,7 @@ impl Vm {
         }
         if num == i64::MIN || den == i64::MIN {
             return Err(self.trap(RubyError::RangeError {
-                msg: "Rational components must fit in i64 (Phase C.1)".to_string(),
+                msg: "Rational components must fit in i64".to_string(),
             }));
         }
         let (mut num, mut den) = (num, den);
@@ -5393,10 +5393,10 @@ impl Vm {
             && !matches!(&recv, Value::Rational(_))
         {
             // Phase C.2 — `Int <=> Rational` and `Float <=> Rational`
-            // route through the Rational comparison (recv-side is
-            // synthesised as `recv/1` for Int, demoted to f64 for
-            // Float) and the result is the SIGN we'd get from
-            // `Rational <=> recv` NEGATED. Lives here (not in
+            // are computed DIRECTLY here (no inversion): for Int
+            // recv we cross-multiply as `n*den <=> num`; for Float
+            // recv we demote the Rational to f64 and use
+            // `f.partial_cmp(&o_f)`. Lives in dispatch (not
             // primitive_call) because the Rational cross-multiply
             // needs heap access. The primitive_call arms are now
             // gated to fall through when rhs is Rational.
@@ -5797,7 +5797,9 @@ impl Vm {
                         ),
                     }));
                 }
-                // Phase C.2 — method-call form for operators +/-/*/<<=>>=. The
+                // Phase C.2 — method-call form for the binary
+                // operators `+ - * /` and the comparisons
+                // `< <= > >=` (plus `==` / `!=`; see arm note). The
                 // `Op::BinOp` path already wires `try_rational_binop`; this
                 // arm catches `r.send(:+, x)` / `r.+ x` (parsed by Prism
                 // as a method call rather than Op::BinOp when send is

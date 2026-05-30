@@ -453,7 +453,7 @@ impl Vm {
                 // Phase C.4 by trapping on i64::MIN num or den.
                 if num_raw == i64::MIN || den_raw == i64::MIN {
                     return Some(Err(self.trap(RubyError::RangeError {
-                        msg: "Rational components must fit in i64 (Phase C.1)".to_string(),
+                        msg: "Rational components must fit in i64".to_string(),
                     })));
                 }
                 let (mut num, mut den) = (num_raw, den_raw);
