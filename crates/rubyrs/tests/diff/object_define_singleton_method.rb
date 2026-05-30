@@ -70,13 +70,18 @@ CC.define_singleton_method(:literal_cls_hi) { "L" }
 puts CC.literal_cls_hi
 puts CC.singleton_methods.include?(:literal_cls_hi)
 
-# (11) Cycle-1: defining_class anchor set on the runtime
-# install — static `def obj.foo; super; end` already worked;
-# the runtime arm needed the same anchor or `super` raised
-# "outside of method". (The block-from-method `super` case
-# is a separate pre-existing limitation orthogonal to this
-# fix.)
-class P; def speak; "Parent"; end; end
-inst = P.new
-def inst.speak; super + ".singleton"; end
-puts inst.speak
+# (11) Cycle-2: dropped the regression guard for the cycle-1
+# defining_class anchor. The original guard
+# (`def inst.speak; super; end`) routed through the static
+# `Op::DefObjectSingletonMethod` opcode, not the new runtime
+# arm — so it wouldn't catch a regression in the changed
+# dispatch path. Rewriting it as
+# `inst.__send__(:define_singleton_method, :speak) { super() }`
+# would correctly exercise the runtime arm but the
+# block-from-method `super` resolution is broken at a
+# separate, pre-existing layer (rubyrs's block→method super
+# walk doesn't honour the block's enclosing method anchor
+# even when `defining_class` is set). Until that orthogonal
+# gap is fixed, no easy fixture-level assertion pins the
+# runtime install's `defining_class` field through
+# observable behaviour — recorded as Tier-2.
