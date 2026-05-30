@@ -2318,7 +2318,7 @@ impl Vm {
                     locals: Rc::new(RefCell::new(vec_nil(n_locals))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false,
+                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
                 });
             }
             Op::NewArray(n) => {
@@ -2396,6 +2396,27 @@ impl Vm {
             }
             Op::PopRescue => {
                 self.frames.last_mut().expect("ICE: PopRescue no frame").rescues.pop();
+            }
+            Op::EnterBegin => {
+                let f = self.frames.last_mut().expect("ICE: EnterBegin no frame");
+                let depth = f.rescues.len();
+                f.begin_rescue_depths.push(depth);
+            }
+            Op::ExitBegin => {
+                self.frames
+                    .last_mut()
+                    .expect("ICE: ExitBegin no frame")
+                    .begin_rescue_depths
+                    .pop()
+                    .expect("ICE: ExitBegin without matching EnterBegin");
+            }
+            Op::TruncateRescuesToBeginBaseline => {
+                let f = self.frames.last_mut().expect("ICE: TruncateRescues no frame");
+                let baseline = *f
+                    .begin_rescue_depths
+                    .last()
+                    .expect("ICE: retry without matching EnterBegin baseline");
+                f.rescues.truncate(baseline);
             }
             Op::PushEnsure(off) => {
                 let f = self.frames.last().expect("ICE: PushEnsure no frame");

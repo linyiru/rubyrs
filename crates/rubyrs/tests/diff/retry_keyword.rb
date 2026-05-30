@@ -91,3 +91,31 @@ rescue StandardError => e
 end
 puts "seen=#{seen_classes.inspect}"
 puts "final-counter=#{counter}"
+
+## Shape 6: multi-class rescue clause `rescue A, B` with
+## retry — sibling-class PushRescue entries from the failed
+## iteration must NOT accumulate on the rescue stack across
+## retries. Pre-fix the unwinder consumed only the matched
+## handler (one class), and each retry pushed a fresh pair
+## on top of the orphaned sibling, so after the begin block
+## completed an outer raise of the OTHER class would be
+## (incorrectly) caught by the stale handler — re-entering
+## the inner rescue body's IP and re-running the trailing
+## code on EACH stale entry. (Code-review #306 round 1.)
+acc_counter = 0
+begin
+  acc_counter += 1
+  raise ArgumentError, "boom" if acc_counter < 3
+rescue ArgumentError, TypeError
+  retry if acc_counter < 3
+end
+$once_after_begin = 0
+$once_after_begin += 1
+err = begin
+  raise TypeError, "must-propagate"
+  "no-raise"
+rescue TypeError => e
+  "caught-here:#{e.message}"
+end
+puts "after-begin-count=#{$once_after_begin}"
+puts "trailing-rescue=#{err}"

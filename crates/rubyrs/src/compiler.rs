@@ -576,11 +576,23 @@ fn compile_begin_arm(
     if rescue.is_empty() {
         compile_body(b, body, protos, interner, cc);
     } else {
-        // Capture the begin-top — AFTER PushEnsure (so retry
-        // doesn't double-push ensure) and BEFORE the first
-        // PushRescue (so retry re-registers rescue handlers).
-        // Pushed onto `retry_targets` while compiling each
-        // rescue clause body below. (TRY_RUNS pass-10 layer #9.)
+        // Establish the rescue-stack baseline before any
+        // PushRescue ops fire. On retry,
+        // `TruncateRescuesToBeginBaseline` shrinks
+        // `frame.rescues` back to this depth so stale
+        // multi-class siblings from a previous iteration's
+        // partial unwind don't survive into the new
+        // iteration. EnterBegin is emitted ONCE per begin
+        // block; retry's backward jump targets `begin_top`,
+        // which is AFTER EnterBegin so the baseline isn't
+        // double-pushed. (Code-review #306 round 1.)
+        b.emit(Op::EnterBegin);
+        // Capture the begin-top — AFTER EnterBegin / PushEnsure
+        // (so retry doesn't double-push them) and BEFORE the
+        // first PushRescue (so retry re-registers rescue
+        // handlers). Pushed onto `retry_targets` while
+        // compiling each rescue clause body below.
+        // (TRY_RUNS pass-10 layer #9.)
         let begin_top = b.pos();
         let stderr_sym = interner.intern("StandardError");
         // Per-clause groups of PushRescue placeholders. Same
@@ -607,6 +619,10 @@ fn compile_begin_arm(
         compile_body(b, body, protos, interner, cc);
         let total: usize = groups.iter().map(|g| g.len()).sum();
         for _ in 0..total { b.emit(Op::PopRescue); }
+        // End of the normal (no-exception) path — drop the
+        // begin-baseline before falling through. (Code-review
+        // #306 round 1.)
+        b.emit(Op::ExitBegin);
         let mut jump_to_end: Vec<usize> = Vec::with_capacity(rescue.len() + 1);
         jump_to_end.push(b.emit(Op::Jump(0)));
         for (i, rc) in rescue.iter().rev().enumerate() {
@@ -628,6 +644,11 @@ fn compile_begin_arm(
             b.retry_targets.push(begin_top);
             compile_body(b, &rc.body, protos, interner, cc);
             b.retry_targets.pop();
+            // The rescue body ran to completion without
+            // hitting `retry` — drop the begin-baseline
+            // before jumping past the rescue chain.
+            // (Code-review #306 round 1.)
+            b.emit(Op::ExitBegin);
             jump_to_end.push(b.emit(Op::Jump(0)));
         }
         let end = b.pos();
@@ -1486,6 +1507,16 @@ pub(crate) fn compile_expr(
             // layer #9.)
             match b.retry_targets.last().copied() {
                 Some(target) => {
+                    // Truncate stale rescue handlers from the
+                    // failed iteration before jumping back to
+                    // begin_top. Without this, a multi-class
+                    // clause whose unwinder consumed only the
+                    // matched filter leaves its siblings on the
+                    // rescue stack, where they accumulate across
+                    // retries and can catch unrelated exceptions
+                    // raised AFTER the begin block completes.
+                    // (Code-review #306 round 1.)
+                    b.emit(Op::TruncateRescuesToBeginBaseline);
                     let here = b.pos();
                     let off = target as i32 - here as i32 - 1;
                     b.emit(Op::Jump(off));

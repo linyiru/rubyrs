@@ -149,6 +149,18 @@ pub(crate) struct Frame {
     /// yields each track their own pending state.
     #[allow(dead_code)] // wired in Phase A.1
     pub(crate) pending_yield: bool,
+    /// Stack of `rescues.len()` snapshots taken at the start
+    /// of each enclosing `begin / rescue` block, used by
+    /// `retry`'s rescue-stack truncation. `Op::EnterBegin`
+    /// pushes the current depth; `Op::ExitBegin` pops it. On
+    /// retry, `Op::TruncateRescuesToBeginBaseline` reads the
+    /// top and shrinks `rescues` back to that depth so a
+    /// partial-unwind stale handler (multi-class /
+    /// multi-clause cases where the unwinder consumed only
+    /// some entries) doesn't survive the retry to catch a
+    /// later exception outside the begin block.
+    /// (Code-review #306 round 1.)
+    pub(crate) begin_rescue_depths: Vec<usize>,
 }
 
 /// In-flight structured `break`/`next` walking through an
