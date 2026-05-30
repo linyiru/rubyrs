@@ -504,6 +504,7 @@ impl Vm {
                 "gcd" | "lcm" | "fdiv" | "divmod" |
                 "ceil" | "floor" | "round" | "truncate" |
                 "chr" | "coerce" |
+                "to_r" | "rationalize" |
                 "eql?" | "hash" |
                 "dup" | "clone"
             ),
@@ -539,6 +540,7 @@ impl Vm {
                 "times" | "upto" | "downto" |
                 "succ" | "next" | "pred" |
                 "chr" | "coerce" |
+                "to_r" | "rationalize" |
                 "eql?" | "hash" |
                 "dup" | "clone"
             ),

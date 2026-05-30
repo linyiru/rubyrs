@@ -3056,6 +3056,50 @@ fn rational_phase_c1_construction_and_readers() {
 }
 
 #[test]
+fn integer_to_r_and_rationalize() {
+    // Phase C.3 — `Integer#to_r` and `Integer#rationalize`. Both
+    // return `Rational(self, 1)`. rationalize accepts (and
+    // ignores) an optional epsilon arg per CRuby; the eps is
+    // only meaningful for Float#rationalize (Phase C.4).
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        ("puts 5.to_r.inspect",             "(5/1)"),
+        ("puts (-3).to_r.inspect",          "(-3/1)"),
+        ("puts 0.to_r.inspect",             "(0/1)"),
+        ("puts 5.to_r.numerator",           "5"),
+        ("puts 5.to_r.denominator",         "1"),
+        ("puts 5.rationalize.inspect",      "(5/1)"),
+        ("puts (-3).rationalize.inspect",   "(-3/1)"),
+        // rationalize tolerates an ignored argument.
+        ("puts 5.rationalize(0.001).inspect", "(5/1)"),
+        ("puts 5.rationalize(nil).inspect",   "(5/1)"),
+        ("puts 5.respond_to?(:to_r)",       "true"),
+        ("puts 5.respond_to?(:rationalize)","true"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "integer_to_r.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // Errors.
+    for (script, expected_class) in [
+        ("5.to_r(99)",            "ArgumentError"),
+        ("5.rationalize(1, 2)",   "ArgumentError"),
+        // BigInt recv: Phase C.4 widens; today RangeError.
+        #[cfg(feature = "bignum")]
+        ("(2**64).to_r",          "RangeError"),
+    ] {
+        let err = rt.eval(script, "integer_to_r_err.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, .. } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+            }
+            ref other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+}
+
+#[test]
 fn rational_phase_c2_arithmetic_and_comparison() {
     // Phase C.2 surface — `+ - * / <=>` + comparisons on Rational
     // operands, plus cross-type promotion (Int and Float) routed

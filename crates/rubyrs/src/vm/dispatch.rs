@@ -5166,6 +5166,41 @@ impl Vm {
             self.stack.push(Value::Array(arr_id));
             return Ok(());
         }
+        // Phase C.3 — `Integer#to_r` and `Integer#rationalize` are
+        // pure constructors (no fractional part) so they trivially
+        // build `Rational(self, 1)`. Lives here in dispatch.rs (not
+        // primitive_call) because heap.alloc is needed.
+        //
+        // `Integer#rationalize(eps=nil)` accepts an optional
+        // tolerance arg per CRuby but ignores it — eps is only
+        // meaningful for Float#rationalize (Phase C.4). Any value
+        // is accepted to match CRuby's `5.rationalize(0.1)` shape.
+        // 2+ args raise CRuby's ArgumentError.
+        if recv_is_integer && (&*name == "to_r" || &*name == "rationalize") {
+            let max_arity: usize = if &*name == "rationalize" { 1 } else { 0 };
+            if args.len() > max_arity {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0..{})",
+                        args.len(), max_arity,
+                    ),
+                }));
+            }
+            // Coerce receiver to i64 — BigInt num/den is Phase C.4.
+            let num = match &recv {
+                Value::Int(n) => *n,
+                #[cfg(feature = "bignum")]
+                Value::BigInt(_) => {
+                    return Err(self.trap(RubyError::RangeError {
+                        msg: "Rational components must fit in i64".to_string(),
+                    }));
+                }
+                _ => unreachable!("guarded by recv_is_integer"),
+            };
+            let v = self.make_rational(num, 1)?;
+            self.stack.push(v);
+            return Ok(());
+        }
         if let Value::Int(_) = &recv && &*name == "digits" && args.len() > 1 {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!(
