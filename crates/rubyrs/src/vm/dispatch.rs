@@ -5417,10 +5417,16 @@ impl Vm {
         // `obj.define_singleton_method(...)` without a block —
         // mirror the block-form arm's arity / type validation
         // so the user sees an ArgumentError / TypeError instead
-        // of NoMethodError. The actual install requires a block
-        // (or the 2-arg Proc form, deferred), so any well-typed
-        // call here ends with the no-block ArgumentError.
-        if &*name == "define_singleton_method" {
+        // of NoMethodError. Gated on the same receiver shapes
+        // the block-form arm actually supports (Value::Object
+        // and Value::Class); other receivers fall through to
+        // the normal NoMethodError path (matching what CRuby
+        // does at the TypeError "can't define singleton"
+        // surface — close enough for primitives that don't
+        // accept the install at all).
+        if &*name == "define_singleton_method"
+            && matches!(&recv, Value::Object(_) | Value::Class(_))
+        {
             match args.len() {
                 0 => return Err(self.trap(RubyError::ArgumentError {
                     msg: "wrong number of arguments (given 0, expected 1..2)".into(),
@@ -6946,6 +6952,15 @@ impl Vm {
         // (CRuby reports "can't define singleton" TypeError, but
         // routing the dispatch arm to do that requires plumbing
         // we don't have here — Tier-2 polish).
+        //
+        // Known limitation: this short-circuit fires before
+        // user-method lookup, so a user `def self.define_singleton_method`
+        // override on a Class is shadowed. Mirrors the pre-existing
+        // Object-extras precedence gap documented at iter.rs's
+        // tap/itself comment (bb4df50c, PR #290 cycle-3).
+        // The proper fix is a user-override probe (see the
+        // `send` arm in dispatch.rs:513) applied to the whole
+        // built-in install family — tracked as Tier-2 follow-up.
         if &*name == "define_singleton_method" {
             let target_recv = recv.clone().or_else(|| {
                 self.frames.last().map(|f| f.self_val.clone())
@@ -6987,21 +7002,40 @@ impl Vm {
             };
             let proto = &self.protos[proto_idx];
             let params = proto.params.clone();
-            let m = std::rc::Rc::new(crate::value::Method {
-                params,
-                proto_idx,
-                fixed_arity: None,
-                defining_class: None,
-                visibility: std::cell::Cell::new(crate::value::Visibility::Public),
-                closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
-                builtin: None,
-            });
+            // `defining_class` anchors `super` lookups inside
+            // the installed method. For Object receivers the
+            // anchor is the eigenclass (super walks its
+            // superclass chain into the original class);
+            // for Class receivers the anchor is the class whose
+            // `singleton_methods` table we're writing into, so
+            // `super` inside a class method walks the metaclass
+            // chain. Without an anchor, `super` raises
+            // "outside of method" — mirrors the static
+            // singleton install at step.rs:1273.
             match target_recv {
                 Some(Value::Object(id)) => {
                     let sc = self.heap.ensure_singleton_class(id);
+                    let m = std::rc::Rc::new(crate::value::Method {
+                        params,
+                        proto_idx,
+                        fixed_arity: None,
+                        defining_class: Some(std::rc::Rc::downgrade(&sc)),
+                        visibility: std::cell::Cell::new(crate::value::Visibility::Public),
+                        closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                        builtin: None,
+                    });
                     sc.methods.borrow_mut().insert(name_sym, m);
                 }
                 Some(Value::Class(c)) => {
+                    let m = std::rc::Rc::new(crate::value::Method {
+                        params,
+                        proto_idx,
+                        fixed_arity: None,
+                        defining_class: Some(std::rc::Rc::downgrade(&c)),
+                        visibility: std::cell::Cell::new(crate::value::Visibility::Public),
+                        closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                        builtin: None,
+                    });
                     c.singleton_methods.borrow_mut().insert(name_sym, m);
                 }
                 Some(other) => return Err(self.trap(RubyError::NoMethodError {

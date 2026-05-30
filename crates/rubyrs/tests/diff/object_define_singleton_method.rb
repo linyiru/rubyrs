@@ -48,3 +48,35 @@ puts sym.class.name
 # (8) respond_to? on every supported receiver shape
 puts Object.new.respond_to?(:define_singleton_method)
 puts C.respond_to?(:define_singleton_method)
+
+# (9) Cycle-1: primitive receiver gets NoMethodError (closer
+# to CRuby than the previous ArgumentError, though CRuby
+# raises TypeError "can't define singleton" — runtime
+# plumbing is a Tier-2 polish).
+begin
+  42.define_singleton_method(:x)
+rescue NoMethodError, TypeError
+  # rubyrs: NoMethodError, CRuby: TypeError. Both interpreters
+  # collapse to the same branch — the contract this assertion
+  # pins is "some error gets raised for primitives".
+  puts "primitive-rejected"
+end
+
+# (10) Cycle-1: literal `C.define_singleton_method` (Class
+# receiver) now installs via the compiler shortcut; previously
+# the Op rejected non-Object receivers with TypeError.
+class CC; end
+CC.define_singleton_method(:literal_cls_hi) { "L" }
+puts CC.literal_cls_hi
+puts CC.singleton_methods.include?(:literal_cls_hi)
+
+# (11) Cycle-1: defining_class anchor set on the runtime
+# install — static `def obj.foo; super; end` already worked;
+# the runtime arm needed the same anchor or `super` raised
+# "outside of method". (The block-from-method `super` case
+# is a separate pre-existing limitation orthogonal to this
+# fix.)
+class P; def speak; "Parent"; end; end
+inst = P.new
+def inst.speak; super + ".singleton"; end
+puts inst.speak

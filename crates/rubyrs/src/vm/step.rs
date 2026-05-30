@@ -1710,40 +1710,56 @@ impl Vm {
                 };
                 let recv = self.stack.pop()
                     .expect("ICE: DefObjectSingletonMethodBlock no receiver on stack");
-                let obj_id = match recv {
-                    Value::Object(id) => id,
-                    other => {
-                        return Err(self.trap(RubyError::TypeError {
-                            msg: format!(
-                                "can't define singleton method on {} (only user-class instances are supported)",
-                                other.type_name(),
-                            ),
-                        }));
-                    }
-                };
                 let (proto_idx, captured, param_start, n_params) = {
                     let bh = self.heap.block(block_id);
                     (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
-                let sc = self.heap.ensure_singleton_class(obj_id);
-                // `defining_class` points at the eigenclass so
-                // `super` from inside walks the eigenclass's
-                // superclass chain (which falls through to the
-                // original class), matching `Op::DefSingletonMethod`'s
-                // chain semantics.
-                let m = Rc::new(Method {
-                    params,
-                    proto_idx,
-                    fixed_arity: None,
-                    // Weak — same cycle break as DefSingletonMethod.
-                    defining_class: Some(Rc::downgrade(&sc)),
-                    visibility: std::cell::Cell::new(Visibility::Public),
-                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
-                builtin: None,
-                });
-                sc.methods.borrow_mut().insert(name_id, m);
+                // Class receivers install into the class's own
+                // `singleton_methods` table (= class method),
+                // matching the runtime arm in dispatch.rs. Object
+                // receivers install into the eigenclass. Other
+                // receivers (primitives) raise TypeError.
+                // PR #309 cycle-1: the literal form
+                // `C.define_singleton_method(:foo) { ... }`
+                // previously rejected Class; aligning both paths
+                // now.
+                match recv {
+                    Value::Object(obj_id) => {
+                        let sc = self.heap.ensure_singleton_class(obj_id);
+                        let m = Rc::new(Method {
+                            params,
+                            proto_idx,
+                            fixed_arity: None,
+                            defining_class: Some(Rc::downgrade(&sc)),
+                            visibility: std::cell::Cell::new(Visibility::Public),
+                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                            builtin: None,
+                        });
+                        sc.methods.borrow_mut().insert(name_id, m);
+                    }
+                    Value::Class(cls) => {
+                        let m = Rc::new(Method {
+                            params,
+                            proto_idx,
+                            fixed_arity: None,
+                            defining_class: Some(Rc::downgrade(&cls)),
+                            visibility: std::cell::Cell::new(Visibility::Public),
+                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                            builtin: None,
+                        });
+                        cls.singleton_methods.borrow_mut().insert(name_id, m);
+                    }
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "can't define singleton method on {} (only user-class instances and classes are supported)",
+                                other.type_name(),
+                            ),
+                        }));
+                    }
+                }
                 self.method_gen = self.method_gen.wrapping_add(1);
                 // CRuby: `define_singleton_method(:foo) { … }`
                 // evaluates to `:foo`. Mirrors the same alignment
