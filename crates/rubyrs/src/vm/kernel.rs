@@ -448,30 +448,14 @@ impl Vm {
                         Err(e) => return Some(Err(self.trap(e))),
                     }
                 } else { 1 };
-                if den_raw == 0 {
-                    return Some(Err(self.trap(RubyError::ZeroDivisionError {
-                        msg: "divided by 0".to_string(),
-                    })));
-                }
-                // Normalize: den must be positive; gcd(|num|, den) == 1.
-                // `i64::MIN` magnitude needs care — `(-i64::MIN)`
-                // panics in debug. Defer the bignum-promote case to
-                // Phase C.4 by trapping on i64::MIN num or den.
-                if num_raw == i64::MIN || den_raw == i64::MIN {
-                    return Some(Err(self.trap(RubyError::RangeError {
-                        msg: "Rational components must fit in i64 (Phase C.1)".to_string(),
-                    })));
-                }
-                let (mut num, mut den) = (num_raw, den_raw);
-                if den < 0 { num = -num; den = -den; }
-                let g = crate::vm::numeric::gcd_i64(num.abs(), den);
-                if g > 1 { num /= g; den /= g; }
-                self.maybe_gc();
-                if let Err(t) = self.check_alloc() { return Some(Err(t)); }
-                let id = self.heap.alloc(HeapObj::Rational(
-                    crate::heap::RationalRepr { num, den },
-                ));
-                Some(Ok(Value::Rational(id)))
+                // Delegate to the shared canonical-form builder
+                // (`Vm::make_rational`) so the normalize / alloc /
+                // ZeroDivisionError / RangeError logic lives in
+                // ONE place. Prior to this refactor `Kernel#Rational`
+                // hand-rolled the same dance, risking drift when
+                // make_rational's invariants tightened (per Phase C.2
+                // /code-review note).
+                Some(self.make_rational(num_raw, den_raw))
             }
             // `Array(x)` — coerce to Array. CRuby rules:
             //   - `nil` → `[]`

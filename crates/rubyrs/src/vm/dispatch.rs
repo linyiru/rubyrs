@@ -88,6 +88,184 @@ enum ClassOutcome {
 }
 
 impl Vm {
+    /// Allocate a canonical-form `Value::Rational` from raw i64
+    /// (num, den). gcd-normalizes and sign-normalizes (`den > 0`)
+    /// at the boundary so every `HeapObj::Rational` slot satisfies
+    /// the canonical invariants every reader assumes.
+    /// `den == 0` → ZeroDivisionError. i64::MIN num or den →
+    /// RangeError ("Rational components must fit in i64") since
+    /// `.abs()` would panic in debug; Phase C.4 widens to BigInt.
+    /// Numeric values that produce small results (e.g. 4/2 = 2/1
+    /// equivalent to Integer 2) STAY as a Value::Rational — CRuby
+    /// also keeps the type tag distinct from Integer.
+    pub(crate) fn make_rational(&mut self, num: i64, den: i64) -> Result<Value, Trap> {
+        if den == 0 {
+            return Err(self.trap(RubyError::ZeroDivisionError {
+                msg: "divided by 0".to_string(),
+            }));
+        }
+        if num == i64::MIN || den == i64::MIN {
+            return Err(self.trap(RubyError::RangeError {
+                msg: "Rational components must fit in i64".to_string(),
+            }));
+        }
+        let (mut num, mut den) = (num, den);
+        if den < 0 { num = -num; den = -den; }
+        let g = crate::vm::numeric::gcd_i64(num.abs(), den);
+        if g > 1 { num /= g; den /= g; }
+        self.maybe_gc();
+        self.check_alloc()?;
+        let id = self.heap.alloc(HeapObj::Rational(
+            crate::heap::RationalRepr { num, den },
+        ));
+        Ok(Value::Rational(id))
+    }
+
+    /// `try_rational_binop` — the `Op::BinOp` arm for Rational
+    /// operands. Called between `try_bigint_binop` and
+    /// `primitive_call`, so by the time we get here neither side
+    /// can be (Int × Int) without one side being Rational.
+    ///
+    /// Returns `Ok(Some(v))` on a handled pair, `Ok(None)` if
+    /// neither side is a Rational (caller falls through). Errors
+    /// propagate (ZeroDivisionError on `r / 0`, RangeError on i64
+    /// overflow).
+    ///
+    /// Coverage:
+    ///   - Rational × Rational    → Rational
+    ///   - Rational × Integer     → Rational
+    ///   - Integer × Rational     → Rational
+    ///   - Rational × Float       → Float (Float dominates)
+    ///   - Float × Rational       → Float
+    /// Phase C.4 widens Integer-side to BigInt num/den.
+    pub(crate) fn try_rational_binop(
+        &mut self,
+        kind: crate::bytecode::BinOpKind,
+        a: &Value,
+        b: &Value,
+    ) -> Result<Option<Value>, Trap> {
+        use crate::bytecode::BinOpKind as K;
+        // Float arms first — Float dominates Numeric, and both
+        // operands are demoted to f64 before the op runs.
+        let (a_f, b_f, has_float) = match (a, b) {
+            (Value::Float(x), Value::Rational(id)) => {
+                let r = self.heap.rational(*id);
+                (Some(*x), Some(r.num as f64 / r.den as f64), true)
+            }
+            (Value::Rational(id), Value::Float(y)) => {
+                let r = self.heap.rational(*id);
+                (Some(r.num as f64 / r.den as f64), Some(*y), true)
+            }
+            _ => (None, None, false),
+        };
+        if has_float {
+            let x = a_f.unwrap();
+            let y = b_f.unwrap();
+            let result = match kind {
+                K::Add => Value::Float(x + y),
+                K::Sub => Value::Float(x - y),
+                K::Mul => Value::Float(x * y),
+                // IEEE-754 / CRuby Float div by 0.0 yields ±Infinity
+                // (or NaN for 0.0 / 0.0); no exception. Matches the
+                // existing Float×Float `BinOpKind::Div` arm in
+                // numeric.rs which uses bare `a / b`. Pre-fix this
+                // arm raised ZeroDivisionError for `Rational(1, 2)
+                // / 0.0`, divergent from `1.0 / 0.0`.
+                K::Div => Value::Float(x / y),
+                K::Mod => Value::Float(crate::vm::numeric::floor_mod_f64(x, y)),
+                K::Lt => Value::Bool(x < y),
+                K::Le => Value::Bool(x <= y),
+                K::Gt => Value::Bool(x > y),
+                K::Ge => Value::Bool(x >= y),
+                K::Eq => Value::Bool(x == y),
+                K::Ne => Value::Bool(x != y),
+            };
+            return Ok(Some(result));
+        }
+        // Resolve both sides to (num, den) pairs. Integer side
+        // synthesises (n, 1). Anything else → fall through.
+        let to_pair = |v: &Value, heap: &crate::heap::Heap| -> Option<(i64, i64)> {
+            match v {
+                Value::Int(n) => Some((*n, 1)),
+                Value::Rational(id) => {
+                    let r = heap.rational(*id);
+                    Some((r.num, r.den))
+                }
+                _ => None,
+            }
+        };
+        let (an, ad) = match to_pair(a, &self.heap) { Some(p) => p, None => return Ok(None) };
+        let (bn, bd) = match to_pair(b, &self.heap) { Some(p) => p, None => return Ok(None) };
+        // At least one side must be Rational (the Int × Int path
+        // is already covered by apply_int upstream).
+        if !matches!(a, Value::Rational(_)) && !matches!(b, Value::Rational(_)) {
+            return Ok(None);
+        }
+        // Checked arithmetic on i64 — overflow → RangeError
+        // (Phase C.4 promotes to BigInt num/den).
+        let overflow = || -> Trap {
+            Trap::new(RubyError::RangeError {
+                msg: "Rational result overflows i64 (Phase C.4)".to_string(),
+            })
+        };
+        match kind {
+            K::Add => {
+                // (an*bd + bn*ad) / (ad*bd)
+                let p1 = an.checked_mul(bd).ok_or_else(|| overflow())?;
+                let p2 = bn.checked_mul(ad).ok_or_else(|| overflow())?;
+                let num = p1.checked_add(p2).ok_or_else(|| overflow())?;
+                let den = ad.checked_mul(bd).ok_or_else(|| overflow())?;
+                Ok(Some(self.make_rational(num, den)?))
+            }
+            K::Sub => {
+                let p1 = an.checked_mul(bd).ok_or_else(|| overflow())?;
+                let p2 = bn.checked_mul(ad).ok_or_else(|| overflow())?;
+                let num = p1.checked_sub(p2).ok_or_else(|| overflow())?;
+                let den = ad.checked_mul(bd).ok_or_else(|| overflow())?;
+                Ok(Some(self.make_rational(num, den)?))
+            }
+            K::Mul => {
+                let num = an.checked_mul(bn).ok_or_else(|| overflow())?;
+                let den = ad.checked_mul(bd).ok_or_else(|| overflow())?;
+                Ok(Some(self.make_rational(num, den)?))
+            }
+            K::Div => {
+                if bn == 0 {
+                    return Err(self.trap(RubyError::ZeroDivisionError {
+                        msg: "divided by 0".to_string(),
+                    }));
+                }
+                // r / s = (an*bd) / (ad*bn)
+                let num = an.checked_mul(bd).ok_or_else(|| overflow())?;
+                let den = ad.checked_mul(bn).ok_or_else(|| overflow())?;
+                Ok(Some(self.make_rational(num, den)?))
+            }
+            K::Mod => {
+                // r % s = r - s * (r / s).floor — Phase C.2
+                // defers Rational#%; let it fall through to
+                // NoMethodError until Phase C.4 (or just call it
+                // here via the formula). For now, return None.
+                let _ = (an, ad, bn, bd);
+                Ok(None)
+            }
+            // Comparison. Cross-multiply with sign-aware compare
+            // (both dens are positive in canonical form).
+            K::Lt | K::Le | K::Gt | K::Ge | K::Eq | K::Ne => {
+                let lhs = (an as i128) * (bd as i128);
+                let rhs = (bn as i128) * (ad as i128);
+                Ok(Some(Value::Bool(match kind {
+                    K::Lt => lhs < rhs,
+                    K::Le => lhs <= rhs,
+                    K::Gt => lhs > rhs,
+                    K::Ge => lhs >= rhs,
+                    K::Eq => lhs == rhs,
+                    K::Ne => lhs != rhs,
+                    _ => unreachable!(),
+                })))
+            }
+        }
+    }
+
     /// `String#encoding` intercept — pushes the preamble's
     /// `Encoding::UTF_8` instance and returns true if the call
     /// matches the shape; returns false otherwise so the caller
@@ -5069,13 +5247,20 @@ impl Vm {
         //    immediates.
         // Universal `respond_to?(:eql?)` already returns true via
         // the universal whitelist.
-        if &*name == "eql?" {
+        if &*name == "eql?" && !matches!(&recv, Value::Rational(_)) {
             // Arity guard fires regardless of receiver — CRuby
             // raises ArgumentError before doing any per-type
             // dispatch. Primitive_call's per-type arms above only
             // match exact 1-arg shape, so we know arity must
             // mismatch if control reaches this `eql?` block with
             // != 1 arg.
+            //
+            // Rational recv is gated out — Phase C.2 added a
+            // type-strict `eql?` arm in the Rational dispatch
+            // block further below. The universal `ruby_eq` here
+            // would otherwise treat `Rational(1, 1).eql?(1)` as
+            // true (since ruby_eq has cross-type Rational arms),
+            // breaking CRuby's numeric strictness for eql?.
             if args.len() != 1 {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!(
@@ -5352,7 +5537,44 @@ impl Vm {
         // model: same `ObjId`) and `nil` otherwise. User-defined
         // `<=>` on a class already fired via class-method-lookup
         // earlier, so we don't shadow.
-        if &*name == "<=>" && args.len() == 1 {
+        if &*name == "<=>" && args.len() == 1
+            && !matches!(&recv, Value::Rational(_))
+        {
+            // Phase C.2 — `Int <=> Rational` and `Float <=> Rational`
+            // are computed DIRECTLY here (no inversion): for Int
+            // recv we cross-multiply as `n*den <=> num`; for Float
+            // recv we demote the Rational to f64 and use
+            // `f.partial_cmp(&o_f)`. Lives in dispatch (not
+            // primitive_call) because the Rational cross-multiply
+            // needs heap access. The primitive_call arms are now
+            // gated to fall through when rhs is Rational.
+            if let Value::Rational(oid) = &args[0] {
+                let o = *self.heap.rational(*oid);
+                let result = match &recv {
+                    Value::Int(n) => {
+                        // n <=> o.num/o.den ⇔ n*o.den <=> o.num
+                        let lhs = (*n as i128) * (o.den as i128);
+                        let rhs = o.num as i128;
+                        Some(lhs.cmp(&rhs))
+                    }
+                    Value::Float(f) => {
+                        let o_f = o.num as f64 / o.den as f64;
+                        f.partial_cmp(&o_f)
+                    }
+                    _ => None,
+                };
+                let v = match result {
+                    Some(std::cmp::Ordering::Less) => Value::Int(-1),
+                    Some(std::cmp::Ordering::Equal) => Value::Int(0),
+                    Some(std::cmp::Ordering::Greater) => Value::Int(1),
+                    None => Value::Nil,
+                };
+                self.stack.push(v);
+                return Ok(());
+            }
+            // Rational has its own `<=>` arm (cross-multiply against
+            // Int / Float / Rational) further below; the universal
+            // Object#<=> would otherwise shadow it with Nil.
             let result = match (&recv, &args[0]) {
                 (Value::Object(a), Value::Object(b)) if a == b => Value::Int(0),
                 _ => Value::Nil,
@@ -5719,6 +5941,108 @@ impl Vm {
                     return Err(self.trap(RubyError::ArgumentError {
                         msg: format!(
                             "wrong number of arguments (given {}, expected 0)",
+                            args.len(),
+                        ),
+                    }));
+                }
+                // Phase C.2 — method-call form for the binary
+                // operators `+ - * /` and the comparisons
+                // `< <= > >=` (plus `==` / `!=`; see arm note). The
+                // `Op::BinOp` path already wires `try_rational_binop`; this
+                // arm catches `r.send(:+, x)` / `r.+ x` (parsed by Prism
+                // as a method call rather than Op::BinOp when send is
+                // used or when the receiver is a complex expression).
+                // `==` / `!=` are NOT listed here — the universal
+                // `Object#==` / `Object#!=` arms further up call
+                // `Value::ruby_eq`, which carries the canonical
+                // Rational cross-type equality (see heap.rs).
+                // Routing `r.send(:==, x)` through this arm would
+                // be dead code because it's shadowed by the
+                // universal dispatch.
+                ("+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=", 1) => {
+                    let kind = crate::bytecode::BinOpKind::from_op_name(&name)
+                        .expect("name matched above");
+                    if let Some(v) = self.try_rational_binop(kind, &recv, &args[0])? {
+                        self.stack.push(v);
+                        return Ok(());
+                    }
+                    // Non-numeric arg → TypeError matching CRuby.
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "{} can't be coerced into Rational",
+                            crate::vm::numeric::type_name_for_coerce(&args[0]),
+                        ),
+                    }));
+                }
+                // `Rational#eql?(other)` — CRuby's numeric
+                // strictness: only true when `other` is also a
+                // Rational AND structurally equal. The universal
+                // `Object#eql?` arm further up calls `ruby_eq`,
+                // which after Phase C.2 treats `Rational == Int|Float`
+                // as true — so without this arm, `Rational(1, 1)
+                // .eql?(1)` returned true, breaking Hash#uniq /
+                // Array#uniq / Set semantics. Mirrors the existing
+                // `(Int, "eql?")` / `(Float, "eql?")` strict arms
+                // in numeric.rs. Same-Rational case routes through
+                // ruby_eq's canonical (num, den) compare.
+                ("eql?", 1) => {
+                    let same = matches!(&args[0], Value::Rational(_))
+                        && recv.ruby_eq(&args[0], &self.heap);
+                    self.stack.push(Value::Bool(same));
+                    return Ok(());
+                }
+                ("eql?", _) => {
+                    // Arity guard. The universal Object#eql? arm
+                    // is gated out for Rational receivers (see
+                    // dispatch.rs:5109), so without this arm a
+                    // wrong-arity call would surface NoMethodError
+                    // instead of CRuby's ArgumentError.
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1)",
+                            args.len(),
+                        ),
+                    }));
+                }
+                // `Rational#<=>(other)` — there is no BinOpKind for
+                // <=>, so it always reaches this method-call arm.
+                // Cross-multiply with Int/Float/Rational; returns
+                // -1/0/1 (Int) or nil for non-numeric.
+                ("<=>", 1) => {
+                    let other = &args[0];
+                    let result = match other {
+                        Value::Rational(oid) => {
+                            let o = self.heap.rational(*oid);
+                            let lhs = (r.num as i128) * (o.den as i128);
+                            let rhs = (o.num as i128) * (r.den as i128);
+                            Some(lhs.cmp(&rhs))
+                        }
+                        Value::Int(n) => {
+                            // r <=> n: compare (r.num) vs (n * r.den).
+                            let lhs = r.num as i128;
+                            let rhs = (*n as i128) * (r.den as i128);
+                            Some(lhs.cmp(&rhs))
+                        }
+                        Value::Float(f) => {
+                            let r_f = r.num as f64 / r.den as f64;
+                            r_f.partial_cmp(f)
+                        }
+                        _ => None,
+                    };
+                    let v = match result {
+                        Some(std::cmp::Ordering::Less) => Value::Int(-1),
+                        Some(std::cmp::Ordering::Equal) => Value::Int(0),
+                        Some(std::cmp::Ordering::Greater) => Value::Int(1),
+                        None => Value::Nil,
+                    };
+                    self.stack.push(v);
+                    return Ok(());
+                }
+                // Arity guard for the binary operators.
+                ("+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" | "<=>", _) => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1)",
                             args.len(),
                         ),
                     }));

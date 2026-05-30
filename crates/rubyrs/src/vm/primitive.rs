@@ -90,6 +90,11 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         // for `<=>` both want to compare numerically).
         #[cfg(feature = "bignum")]
         (Value::Int(_), "<=>", [Value::BigInt(_)]) => None,
+        // Skip the Int catch-all when rhs is Rational — Phase C.2
+        // wires the reverse cross-multiply in the Rational dispatch
+        // block in dispatch.rs. Matching here would shadow it with
+        // a wrong `nil`.
+        (Value::Int(_), "<=>", [Value::Rational(_)]) => None,
         (Value::Int(_), "<=>", [_]) => Some(Value::Nil),
         // Skip the Float catch-all when rhs is BigInt — bigint_primitive's
         // `<=>` arm (via bigint_cmp_float_lossless) handles the
@@ -98,6 +103,10 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         // should compare losslessly).
         #[cfg(feature = "bignum")]
         (Value::Float(_), "<=>", [Value::BigInt(_)]) => None,
+        // Same as the Int arm above — Phase C.2 handles Float ×
+        // Rational in dispatch.rs's Rational block (after promoting
+        // both sides to f64).
+        (Value::Float(_), "<=>", [Value::Rational(_)]) => None,
         (Value::Float(_), "<=>", [_]) => Some(Value::Nil),
         (Value::Str(_), "<=>", [_]) => Some(Value::Nil),
         (Value::Bool(_), "<=>", [_]) => Some(Value::Nil),

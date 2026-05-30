@@ -643,13 +643,19 @@ impl Vm {
                 "group_by" | "sort_by" | "sort"
             ),
             Value::Bool(_) | Value::Nil => matches!(name, "to_s" | "inspect" | "dup" | "clone"),
-            // Phase C.1 Rational surface — reader methods + class /
-            // type queries only. Arithmetic / comparison whitelist
-            // expansion lands with Phase C.2.
+            // Phase C.1 readers + Phase C.2 arithmetic / comparison.
+            // `coerce` is included so cross-type promotion (Rational
+            // arg with Int/Float receiver) routes through the
+            // standard protocol — `1 + Rational(1, 2)` goes through
+            // `try_rational_binop` directly, but `1.send(:+, r)` via
+            // method-call dispatch consults respond_to.
             Value::Rational(_) => matches!(name,
                 "numerator" | "denominator" |
                 "to_s" | "inspect" | "to_r" |
-                "to_i" | "to_f"
+                "to_i" | "to_f" |
+                "+" | "-" | "*" | "/" |
+                "<" | "<=" | ">" | ">=" | "<=>" |
+                "coerce"
             ),
             Value::Class(cls) => {
                 // Built-in class-level methods (`.new`, `.name`,
