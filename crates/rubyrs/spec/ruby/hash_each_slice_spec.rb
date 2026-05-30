@@ -1,10 +1,10 @@
 # Adapted from ruby/spec core/hash/each_slice_spec.rb /
 # each_cons_spec.rb / chunk_while_spec.rb (Enumerable-inherited
 # behaviour) at upstream commit 448cb340 (2026-05).
-# Hand-translated — the no-block/no-arg Enumerator form is
-# folded into a single "returns the same shape as .to_a" test
-# (rubyrs returns the materialised Array directly; see comment
-# at hash.rs:432).
+# Hand-translated — each_slice / each_cons always take an `n`
+# argument; the no-block (Enumerator) form is covered by the
+# trailing `.to_a` example per group (rubyrs returns the
+# materialised Array directly; see comment at hash.rs:432).
 
 describe "Hash#each_slice" do
   it "yields each consecutive group of n [k,v] pair Arrays as one Array" do

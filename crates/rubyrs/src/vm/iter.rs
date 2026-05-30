@@ -3016,9 +3016,17 @@ impl Vm {
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
                         let wid = g.vm.heap.alloc(HeapObj::Array(win.to_vec()));
-                        g.vm.pinned.push(Value::Array(wid));
+                        // Per-window pin via PinGuard so Drop pops
+                        // on every exit path — converges this arm
+                        // on the same RAII pattern as each_slice
+                        // after the cycle-2 fix. The current
+                        // manual push/pop is provably safe (pop
+                        // sits between step_block and `?`), but
+                        // PinGuard makes the safety syntactically
+                        // obvious and survives future edits that
+                        // sneak `?`-trapping ops into the gap.
+                        g.pin(Value::Array(wid));
                         let step = g.vm.step_block(block, vec![Value::Array(wid)], pre_frames);
-                        g.vm.pinned.pop();
                         match step? {
                             // See each_slice arm above — non-local
                             // `return` must bubble out as Nil so
