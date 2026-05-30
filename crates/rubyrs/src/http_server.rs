@@ -916,14 +916,20 @@ fn expect_non_neg_int(key: &str, value: &crate::value::Value) -> Result<i64, cra
 }
 
 fn expect_bool_flag(key: &str, value: &crate::value::Value) -> Result<bool, crate::error::Trap> {
+    // ADR 0025 Phase 5 broadened: accept the Ruby-idiomatic
+    // Bool form (`true`/`false`) alongside the original
+    // C-int form (`1`/`0`). Avoids surprising
+    // `ArgumentError: option ... must be 0 or 1, got Bool(true)`
+    // when users write the natural Ruby Hash literal.
     match value {
+        crate::value::Value::Bool(b) => Ok(*b),
         crate::value::Value::Int(0) => Ok(false),
         crate::value::Value::Int(1) => Ok(true),
         crate::value::Value::Int(n) => Err(arg_err(format!(
-            "option '{key}' must be 0 or 1, got {n}"
+            "option '{key}' must be true / false / 0 / 1, got {n}"
         ))),
         _ => Err(arg_err(format!(
-            "option '{key}' must be 0 or 1, got {value:?}"
+            "option '{key}' must be true / false / 0 / 1, got {value:?}"
         ))),
     }
 }
@@ -2828,6 +2834,22 @@ mod tests {
         assert_eq!(DEFAULT_MAX_BODY_BYTES, 16 * 1024 * 1024);
     }
 
+    /// ADR 0025 Phase 5: `expect_bool_flag` accepts both the
+    /// C-int form (`1`/`0`) and the Ruby-idiomatic Bool form
+    /// (`true`/`false`). Broadened in Phase 5 after a CLI
+    /// smoke test surfaced the surprising
+    /// "must be 0 or 1, got Bool(true)" error.
+    #[test]
+    fn expect_bool_flag_accepts_bool_and_int() {
+        use crate::value::Value;
+        assert_eq!(expect_bool_flag("k", &Value::Bool(true)).unwrap(), true);
+        assert_eq!(expect_bool_flag("k", &Value::Bool(false)).unwrap(), false);
+        assert_eq!(expect_bool_flag("k", &Value::Int(1)).unwrap(), true);
+        assert_eq!(expect_bool_flag("k", &Value::Int(0)).unwrap(), false);
+        assert!(expect_bool_flag("k", &Value::Int(2)).is_err());
+        assert!(expect_bool_flag("k", &Value::Nil).is_err());
+    }
+
     /// Smoke test: spawn the PoC server in a background
     /// thread, hit it with a raw TCP client, verify the
     /// hardcoded response shape.
@@ -3249,7 +3271,7 @@ mod tests {
         "#, "stage_6d_signal_flag_bad.rb").expect_err("should reject sig=2");
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("'install_signal_handler' must be 0 or 1"),
+            msg.contains("'install_signal_handler' must be"),
             "expected ArgumentError mentioning install_signal_handler, got: {msg}",
         );
     }

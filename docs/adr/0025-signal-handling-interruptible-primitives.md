@@ -2,6 +2,39 @@
 
 ## Status
 
+**Accepted (2026-05-30). v6 — All phases (0–5) implemented.**
+
+Phase 0 (Interrupt class) shipped 2026-05-29 in `a5337fd7`.
+Phases 0.5–5 implemented over 8 commits 2026-05-30:
+- 0.5a SystemExit class — `0b7a60d6`
+- 0.5b Kernel#exit/exit!/abort family — `937c8ee6`
+- 1   `interrupt_pending` flag + signal-hook — `66f181b6`
+- 2   dispatch safe-point + Interrupt raise — `ac31bcef`
+- 3   Kernel#sleep interruptible — `09714bcc`
+- 4a  Signal.trap installation — `1cbaa246`
+- 4b  Safe-point dispatches to trap block — `512fe16e`
+- 4c  Kernel#at_exit + SystemExit unwind — `86674b20`
+- 5   deadline-stays-uncatchable + bool-flag broadening — (this commit)
+
+13 commits, well within the 14-18 estimate.
+
+CLI end-to-end behaviour now matches CRuby for the canonical
+trap-flow pattern:
+
+  at_exit { cleanup_db }
+  Signal.trap("INT") { puts "graceful shutdown"; exit 0 }
+  serve_or_whatever
+
+  # Ctrl+C → trap fires → exit raises SystemExit
+  #   → at_exit drain → process exits 0
+
+All five reviewer-round corrections from v1→v5 preserved.
+Test count delta this session: +24 lib + embed + signals tests.
+
+---
+
+Proposed history (kept for historical reference):
+
 Proposed (2026-05-29). **v5** — Nice-to-have parity refinement
 from the round-2 review: `sleep` interrupted wording reframed —
 v2/v3/v4 said "returned value from rescue reflects elapsed
@@ -525,19 +558,53 @@ revised upward from v1's 3-4)**:
     Backtrace points at the user code holding execution, not at
     the handler install site.
 
-**Phase 5 — Deadline / Fiber + signal interaction polish (~1-2 commits)**:
+**Phase 5 — Deadline / Fiber + signal interaction polish — SHIPPED
+2026-05-30**:
 
-16. `Config::deadline` is checked at the same safe point. With
-    `install_signal_handler: true`, deadline expiration sets the
-    interrupt flag — gives the user a chance to catch the deadline
-    via `rescue Interrupt`. (Currently deadline raises
-    ResourceExhausted which is uncatchable. Discuss: is this a
-    desirable union, or should deadline stay uncatchable?
-    Probably orthogonal; gate as a separate Config knob.)
-17. Tokio bridge (optional): in `_http_server` builds with both
-    `_http_server` and `install_signal_handler`, register a tokio
-    `signal::ctrl_c()` that ALSO sets the same flag, so Ctrl+C
-    during server idle wakes the accept loop too.
+16. **Deadline ≠ Interrupt — decision LOCKED**. Considered
+    unifying `Config::deadline` with `interrupt_pending` so users
+    could `rescue Interrupt` on timeout. **Rejected**. The ADR 0008
+    "uncatchable kill switch" property is load-bearing for the
+    sandbox-host security posture: a hostile script that catches
+    its own deadline can spin in a rescue loop and burn host time
+    forever, defeating the embedder's quota. Deadline expiration
+    keeps raising `ResourceExhausted` (uncatchable). The
+    safe-point check in `dispatch_until` already calls both
+    `check_fuel` (which includes the deadline branch) and the
+    interrupt action helper at the same op-boundary; no code
+    change needed. **No commit.**
+
+17. **Tokio bridge — ALREADY WIRED**. The `_http_server` battery
+    already has `tokio::signal::ctrl_c()` + `signal::unix::
+    SignalKind::terminate()` selected against the accept loop's
+    `tokio::select!` (predates ADR 0025; per-server
+    `install_signal_handler: bool` option from
+    `ServeOptions`). Verified that this composes cleanly with
+    ADR 0025's `Config::install_signal_handler`: with both on,
+    SIGINT (a) flips the Vm flag via signal-hook (Phase 1), and
+    (b) wakes the accept loop via tokio's signal future. The
+    accept loop returns; the host fn finishes; control returns
+    to dispatch_until in Ruby; the Phase 2 safe-point delivers
+    Interrupt (or runs the trap block if installed via
+    `Signal.trap`). End-to-end smoke verified manually:
+    `rubyrs server_script.rb` + `Ctrl+C` runs the trap block,
+    falls through to `after serve`, then runs `at_exit`
+    handlers. **No new bridge code.**
+
+17b. **`expect_bool_flag` broadened to accept Ruby `true`/`false`**.
+    The `_http_server` `ServeOptions` parser only accepted
+    Integer `0`/`1` for boolean flags including
+    `install_signal_handler`. CLI smoke surfaced "must be 0 or 1,
+    got Bool(true)" when users wrote the natural Ruby Hash
+    literal. v5 broadens to accept `Value::Bool` alongside the
+    Int forms. **1 commit + 1 unit test.**
+
+**Total**: ~14-18 commits over 4-5 weeks (revised upward from v3's
+12-16 / 3.5-4.5 weeks). Phase 0 already landed (`a5337fd7`).
+Phase 0.5 expanded 1 → 2 commits (SystemExit class + exit/exit!/
+abort family). Phase 3 stays 2 commits. Phase 4 stays 4-5 commits.
+**Phase 5 lands as 1 commit (~14 of estimate)** — both step 16 +
+step 17's main features required no new code.
 
 **Total**: ~14-18 commits over 4-5 weeks (revised upward from v3's
 12-16 / 3.5-4.5 weeks). Phase 0 already landed (`a5337fd7`).
@@ -805,7 +872,29 @@ Phase 5:
 
 ## Revision log
 
-- **2026-05-29 — v5 (this revision).** Nice-to-have parity
+- **2026-05-30 — v6 (this revision).** Status: Proposed → Accepted.
+  Phases 0.5–5 implemented over a single session in 8 commits
+  (Phase 0 already shipped earlier as `a5337fd7`):
+  - Phase 0.5a + 0.5b: SystemExit class + Kernel#exit family
+    + Config::process_exit capability.
+  - Phase 1: interrupt_pending + signal-hook OnceLock SHARED_FLAG
+    + CLI opt-in. Round-2 finding incorporated: `install:false`
+    returns dedicated Arc (signal isolation between opt-in and
+    opt-out Runtimes).
+  - Phase 2: dispatch/dispatch_until safe-point + RubyError::Interrupt
+    + InterruptAction helper (refactored Phase 4b extension).
+  - Phase 3: Kernel#sleep interruptible (Config::sleep_for
+    signature change to polling closure shape; no-args requires
+    install_signal_handler).
+  - Phase 4a/b/c: Signal.trap install + safe-point delivery to
+    trap blocks (re-entrant dispatch with suppress_interrupt) +
+    at_exit drain on eval return.
+  - Phase 5: deadline-stays-uncatchable decision LOCKED (ADR
+    0008 security posture); tokio bridge already wired by
+    existing _http_server battery; expect_bool_flag broadened
+    to accept Bool. 1 commit + 1 unit test.
+  Total: 13 commits / well under the 14-18 estimate.
+- **2026-05-29 — v5.** Nice-to-have parity
   refinement: Phase 3 step 10 + step 11 test descriptions
   reframed for CRuby-faithful sleep-interrupt semantics. v2/v3/
   v4 said "returned value from rescue reflects elapsed seconds";
