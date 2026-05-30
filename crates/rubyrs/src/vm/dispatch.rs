@@ -203,30 +203,30 @@ impl Vm {
         }
         // Checked arithmetic on i64 — overflow → RangeError
         // (Phase C.4 promotes to BigInt num/den).
-        let overflow = |this: &Self| -> Trap {
-            this.trap_owned(RubyError::RangeError {
+        let overflow = || -> Trap {
+            Trap::new(RubyError::RangeError {
                 msg: "Rational result overflows i64 (Phase C.4)".to_string(),
             })
         };
         match kind {
             K::Add => {
                 // (an*bd + bn*ad) / (ad*bd)
-                let p1 = an.checked_mul(bd).ok_or_else(|| overflow(self))?;
-                let p2 = bn.checked_mul(ad).ok_or_else(|| overflow(self))?;
-                let num = p1.checked_add(p2).ok_or_else(|| overflow(self))?;
-                let den = ad.checked_mul(bd).ok_or_else(|| overflow(self))?;
+                let p1 = an.checked_mul(bd).ok_or_else(|| overflow())?;
+                let p2 = bn.checked_mul(ad).ok_or_else(|| overflow())?;
+                let num = p1.checked_add(p2).ok_or_else(|| overflow())?;
+                let den = ad.checked_mul(bd).ok_or_else(|| overflow())?;
                 Ok(Some(self.make_rational(num, den)?))
             }
             K::Sub => {
-                let p1 = an.checked_mul(bd).ok_or_else(|| overflow(self))?;
-                let p2 = bn.checked_mul(ad).ok_or_else(|| overflow(self))?;
-                let num = p1.checked_sub(p2).ok_or_else(|| overflow(self))?;
-                let den = ad.checked_mul(bd).ok_or_else(|| overflow(self))?;
+                let p1 = an.checked_mul(bd).ok_or_else(|| overflow())?;
+                let p2 = bn.checked_mul(ad).ok_or_else(|| overflow())?;
+                let num = p1.checked_sub(p2).ok_or_else(|| overflow())?;
+                let den = ad.checked_mul(bd).ok_or_else(|| overflow())?;
                 Ok(Some(self.make_rational(num, den)?))
             }
             K::Mul => {
-                let num = an.checked_mul(bn).ok_or_else(|| overflow(self))?;
-                let den = ad.checked_mul(bd).ok_or_else(|| overflow(self))?;
+                let num = an.checked_mul(bn).ok_or_else(|| overflow())?;
+                let den = ad.checked_mul(bd).ok_or_else(|| overflow())?;
                 Ok(Some(self.make_rational(num, den)?))
             }
             K::Div => {
@@ -236,8 +236,8 @@ impl Vm {
                     }));
                 }
                 // r / s = (an*bd) / (ad*bn)
-                let num = an.checked_mul(bd).ok_or_else(|| overflow(self))?;
-                let den = ad.checked_mul(bn).ok_or_else(|| overflow(self))?;
+                let num = an.checked_mul(bd).ok_or_else(|| overflow())?;
+                let den = ad.checked_mul(bn).ok_or_else(|| overflow())?;
                 Ok(Some(self.make_rational(num, den)?))
             }
             K::Mod => {
@@ -264,15 +264,6 @@ impl Vm {
                 })))
             }
         }
-    }
-
-    /// Internal: build a `Trap` from a RubyError without holding
-    /// `&mut self` — used in closure contexts where the trap
-    /// itself can't borrow self mutably. Same shape as
-    /// `Vm::trap` (which is `&mut self`) but as a free fn so the
-    /// outer code can keep operating on `&self`.
-    fn trap_owned(&self, err: RubyError) -> Trap {
-        Trap { err, backtrace: vec![] }
     }
 
     /// `String#encoding` intercept — pushes the preamble's
