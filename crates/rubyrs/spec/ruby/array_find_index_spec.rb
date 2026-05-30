@@ -50,8 +50,21 @@ describe "Array#find_index" do
     assert_raises("ArgumentError") { [1].find_index(1, 2) }
   end
 
-  # Skipped (method-not-implemented): the no-arg-no-block form
-  # `[1,2,3].find_index` returns an Enumerator in CRuby.
+  it "raises (not NoMethodError) when called with no arg and no block" do
+    # CRuby returns an Enumerator. rubyrs raises a RuntimeError
+    # with an explicit "not yet implemented" message instead of
+    # falling through to NoMethodError (which would contradict
+    # `respond_to?(:find_index) == true`). The exact error
+    # class is the rubyrs fallback per dispatch.rs:4548; bare
+    # rescue catches it.
+    caught = nil
+    begin
+      [1, 2, 3].find_index
+    rescue => e
+      caught = e.class.to_s
+    end
+    assert_eq(caught, "RuntimeError")
+  end
 end
 
 describe "Array#index" do

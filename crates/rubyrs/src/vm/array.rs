@@ -346,6 +346,24 @@ impl Vm {
                             None => Value::Nil,
                         })
                     }
+                    // `arr.find_index` (no arg, no block) returns
+                    // an Enumerator in CRuby. Without this arm
+                    // the dispatcher fell through to
+                    // NoMethodError, contradicting
+                    // `respond_to?(:find_index) == true`. Raise
+                    // RuntimeError with an explicit feature-gate
+                    // message instead — same fallback shape as
+                    // dispatch.rs:4548 (rubyrs doesn't model
+                    // `NotImplementedError` as a RubyError
+                    // variant yet, so RuntimeError is the
+                    // closest catchable fit).
+                    ("find_index" | "index", []) => {
+                        return Err(self.trap(RubyError::RuntimeError {
+                            msg: format!(
+                                "Array#{name} without a block or arg returns an Enumerator, which is not yet implemented in rubyrs"
+                            ),
+                        }));
+                    }
                     ("find_index" | "index", many) if many.len() > 1 => {
                         // CRuby surface says `expected 0..1`
                         // because no-arg returns an Enumerator
