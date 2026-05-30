@@ -641,6 +641,16 @@ fn compile_begin_arm(
             // clean stack (still has its OWN frame on retry —
             // pushed again next iteration). (TRY_RUNS pass-10
             // layer #9.)
+            // BEFORE running this rescue body, drop any
+            // sibling-class entries from a multi-class clause
+            // (`rescue A, B`) that the unwinder left below the
+            // matched handler. Without this, a raise of the
+            // sibling class FROM INSIDE this rescue body
+            // (e.g. `rescue A, B; raise B; end` after A matched)
+            // would re-enter this clause's body instead of
+            // propagating outside the begin block. (Code-review
+            // #306 round 4.)
+            b.emit(Op::TruncateRescuesToBeginBaseline);
             b.retry_targets.push(begin_top);
             compile_body(b, &rc.body, protos, interner, cc);
             b.retry_targets.pop();

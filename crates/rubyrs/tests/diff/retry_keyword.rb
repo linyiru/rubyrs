@@ -195,3 +195,23 @@ rescue
 end
 puts "loop-retry-c=#{c}"
 puts "visited=#{$visited.inspect}"
+
+## Shape 10: rescue body itself raises the SIBLING class of a
+## multi-class clause (`rescue A, B; raise B`). The unwinder
+## matched A and left B's handler on the stack below.
+## Pre-fix the body's raise of B was re-caught by the stale
+## sibling, re-entering the same clause. Round 4 emits
+## TruncateRescuesToBeginBaseline BEFORE the rescue body
+## runs, so the raise propagates outside the begin block as
+## CRuby expects. (Code-review #306 round 4.)
+inside_result = begin
+  begin
+    raise ArgumentError, "from-body"
+  rescue ArgumentError, TypeError
+    raise TypeError, "raised-inside-rescue"
+  end
+  "no-raise"
+rescue TypeError => e
+  "outer-caught:#{e.message}"
+end
+puts "inside-raise=#{inside_result}"
