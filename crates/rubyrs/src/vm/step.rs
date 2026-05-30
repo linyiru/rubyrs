@@ -1542,36 +1542,63 @@ impl Vm {
                 yguard.vm.frames[yielding_idx].pending_yield = false;
 
                 if yguard.vm.break_signaled {
-                    yguard.vm.break_signaled = false;
-                    // Unwind: walk current frame down to + including
-                    // yielding method. Truncate each frame's stack
-                    // residue. Push break value as the popped
-                    // method's return value.
+                    // Two cases:
                     //
-                    // For now we use a simple pop-all loop —
-                    // doesn't run ensure handlers on intermediate
-                    // method frames. Tracked as Phase A round 2.
-                    while yguard.vm.frames.len() > yielding_idx {
-                        let f = yguard.vm.frames.pop().unwrap();
-                        yguard.vm.stack.truncate(f.base_sp);
-                        if !f.is_block {
-                            // This is the yielding method. Push
-                            // its return value (break val unless
-                            // swap_return overrides).
-                            if let Some(rep) = f.swap_return {
-                                yguard.vm.stack.push(rep);
-                            } else {
-                                yguard.vm.stack.push(block_return_value.clone());
+                    // (a) Current frame IS the yielding method
+                    //     (yielding_idx == pre_frames - 1).
+                    //     Example: `def f; yield; end; f { break }`.
+                    //     No Rust iter driver sits between us and
+                    //     `f`, so this wrapper is solely responsible
+                    //     for unwinding. Pop the yielding method,
+                    //     push the break value as its return — the
+                    //     new behavior Phase A.1 adds.
+                    //
+                    // (b) Yielding method is deeper
+                    //     (yielding_idx < pre_frames - 1).
+                    //     Example: `def each; 10.times { yield };
+                    //     end; obj.each { break }`. A Rust iter
+                    //     driver (`Int#times`'s `step_block` loop)
+                    //     sits between yield and each. The legacy
+                    //     pre-A.1 path already handles this: leave
+                    //     `break_signaled` set so the enclosing
+                    //     `step_block` returns `BlockStep::Break`
+                    //     and `Int#times` aborts naturally,
+                    //     propagating the break through `each` as
+                    //     its return value. Eating the signal here
+                    //     would strand the Rust driver mid-loop.
+                    if yielding_idx == pre_frames - 1 {
+                        yguard.vm.break_signaled = false;
+                        // Pop frames down to + including yielding
+                        // method. Simple pop-all loop — doesn't
+                        // run ensure handlers on intermediate
+                        // method frames. Tracked as Phase A round 2.
+                        while yguard.vm.frames.len() > yielding_idx {
+                            let f = yguard.vm.frames.pop().unwrap();
+                            yguard.vm.stack.truncate(f.base_sp);
+                            if !f.is_block {
+                                if let Some(rep) = f.swap_return {
+                                    yguard.vm.stack.push(rep);
+                                } else {
+                                    yguard.vm.stack.push(block_return_value.clone());
+                                }
+                                break;
                             }
-                            break;
                         }
-                    }
-                    if yguard.vm.frames.is_empty() {
-                        // We unwound off the bottom (yielding
-                        // method was at toplevel).
+                        if yguard.vm.frames.is_empty() {
+                            drop(yguard);
+                            return Ok(false);
+                        }
                         drop(yguard);
-                        return Ok(false);
+                        return Ok(true);
                     }
+                    // Case (b): let the Rust iter driver above
+                    // observe break_signaled. Push the break
+                    // value back onto the stack — when the
+                    // intermediate block returns naturally,
+                    // step_block pops the top-of-stack as the
+                    // break value and returns it via
+                    // BlockStep::Break.
+                    yguard.vm.stack.push(block_return_value);
                     drop(yguard);
                     return Ok(true);
                 }
