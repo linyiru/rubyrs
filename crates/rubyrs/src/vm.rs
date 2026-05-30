@@ -523,6 +523,17 @@ pub(crate) struct Vm {
     /// semantics: `return` inside a `do…end` exits the enclosing
     /// method, not just the block.
     pub(crate) method_return: Option<Value>,
+    /// Stack of active `dispatch_until` boundaries. Each entry
+    /// is the `until_depth` of an in-flight dispatch_until call.
+    /// `Op::Raise` / `Op::EndEnsure` consult the top of this
+    /// stack: when their direct call to `unwind_with_exception`
+    /// redirects IP to a handler in a frame at or above that
+    /// boundary, they bubble out via `RubyError::AlreadyCaught`
+    /// so the native iter driver above (`Array#each`,
+    /// `Hash#any?`, …) stops looping instead of pushing
+    /// spurious results / re-raising on the next iteration.
+    /// See [`RubyError::AlreadyCaught`] for the full protocol.
+    pub(crate) dispatch_until_depths: Vec<usize>,
     /// Identity of the lexical-owner frame for an in-flight
     /// non-local return. CRuby's `return` inside a block exits
     /// the method that **lexically defined** the block, not
@@ -807,6 +818,7 @@ impl Vm {
             method_compose_forwarder_proto: None,
             sources: HashMap::new(),
             method_return: None,
+            dispatch_until_depths: Vec::new(),
             method_return_locals: None,
             pending_loop_transfer: None,
             suppress_call_result_push: false,
