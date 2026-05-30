@@ -2917,6 +2917,166 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Array(result_id)))
             }
+            // `h.each_slice(n) { |slice| ... }` — yield each
+            // consecutive group of n `[k, v]` pair Arrays as a
+            // single Array argument; return the receiver Hash
+            // (CRuby parity — block-form returns the receiver,
+            // not nil). Last slice may be shorter than n.
+            (Value::Hash(id), "each_slice", [Value::Int(n)]) => {
+                if *n <= 0 {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: format!("invalid slice size: {}", n),
+                    }));
+                }
+                let id = *id;
+                let n_usz = *n as usize;
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                'outer: for chunk in snapshot.chunks(n_usz) {
+                    let mut pair_ids: Vec<Value> = Vec::with_capacity(chunk.len());
+                    for (k, v) in chunk {
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                        g.vm.pinned.push(Value::Array(pid));
+                        pair_ids.push(Value::Array(pid));
+                    }
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let slice_id = g.vm.heap.alloc(HeapObj::Array(pair_ids));
+                    g.vm.pinned.push(Value::Array(slice_id));
+                    let step = g.vm.step_block(block, vec![Value::Array(slice_id)], pre_frames);
+                    // Pop the slice + each pair we pushed.
+                    g.vm.pinned.pop();
+                    for _ in 0..chunk.len() { g.vm.pinned.pop(); }
+                    match step? {
+                        BlockStep::MethodReturn => break 'outer,
+                        BlockStep::Break(r) => { early = Some(r); break 'outer; }
+                        BlockStep::Value(_) => {}
+                    }
+                }
+                Some(early.unwrap_or(Value::Hash(id)))
+            }
+            // `h.each_cons(n) { |window| ... }` — sliding window
+            // of n consecutive `[k, v]` pair Arrays. No yields
+            // when receiver has fewer than n pairs. Returns
+            // receiver Hash (CRuby parity).
+            (Value::Hash(id), "each_cons", [Value::Int(n)]) => {
+                if *n <= 0 {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: format!("invalid size: {}", n),
+                    }));
+                }
+                let id = *id;
+                let n_usz = *n as usize;
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                // Pre-materialise pair Arrays once; CRuby shares
+                // pair identity across overlapping windows.
+                let mut pair_vals: Vec<Value> = Vec::with_capacity(snapshot.len());
+                for (k, v) in &snapshot {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    g.pin(Value::Array(pid));
+                    pair_vals.push(Value::Array(pid));
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                if pair_vals.len() >= n_usz {
+                    'outer: for win in pair_vals.windows(n_usz) {
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let wid = g.vm.heap.alloc(HeapObj::Array(win.to_vec()));
+                        g.vm.pinned.push(Value::Array(wid));
+                        let step = g.vm.step_block(block, vec![Value::Array(wid)], pre_frames);
+                        g.vm.pinned.pop();
+                        match step? {
+                            BlockStep::MethodReturn => break 'outer,
+                            BlockStep::Break(r) => { early = Some(r); break 'outer; }
+                            BlockStep::Value(_) => {}
+                        }
+                    }
+                }
+                Some(early.unwrap_or(Value::Hash(id)))
+            }
+            // `h.chunk_while { |a, b| pred(a, b) }` — partition
+            // entries into runs where the block (called with two
+            // adjacent `[k, v]` pair Arrays) returns truthy.
+            // Falsy starts a new chunk. Result is an Array of
+            // chunk Arrays, each chunk containing pair Arrays.
+            // Empty hash → `[]`; single-pair hash → `[[[k,v]]]`.
+            (Value::Hash(id), "chunk_while", []) => {
+                let id = *id;
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                // Pre-materialise pair Arrays so adjacent
+                // chunks see the same identity (CRuby parity
+                // with Array#chunk_while where adjacent
+                // elements are the same Value).
+                let mut pair_vals: Vec<Value> = Vec::with_capacity(snapshot.len());
+                for (k, v) in &snapshot {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    g.pin(Value::Array(pid));
+                    pair_vals.push(Value::Array(pid));
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                if pair_vals.is_empty() {
+                    return Ok(Some(Value::Array(result_id)));
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut current_chunk: Vec<Value> = vec![pair_vals[0].clone()];
+                let mut early: Option<Value> = None;
+                for pair in pair_vals.windows(2) {
+                    let r = match g.vm.step_block(block, vec![pair[0].clone(), pair[1].clone()], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    if r.is_truthy() {
+                        current_chunk.push(pair[1].clone());
+                    } else {
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let chunk_id = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current_chunk)));
+                        g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
+                        current_chunk.push(pair[1].clone());
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                if !current_chunk.is_empty() {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let chunk_id = g.vm.heap.alloc(HeapObj::Array(current_chunk));
+                    g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
+                }
+                Some(Value::Array(result_id))
+            }
             // `h.find_index { |pair| ... }` — returns the Int
             // index of the first entry whose block result is
             // truthy, or nil. Same yield shape as one? /
