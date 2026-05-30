@@ -324,6 +324,37 @@ impl Vm {
     }
 }
 
+/// ADR 0025 Phase 2: build an Interrupt instance for the
+/// safe-point check to feed into `unwind_with_exception`. The
+/// shape matches what `raise Interrupt, "msg"` would produce
+/// from script-level Ruby: a Value::Object whose class is the
+/// preamble's Interrupt class, with `@message = "interrupt"`.
+///
+/// Returns None when the Interrupt class is missing (preamble
+/// not loaded or a host disabled Phase 0). The caller falls back
+/// to a host-level `RubyError::Interrupt` Trap in that case.
+pub(crate) fn build_interrupt_exception(vm: &mut crate::vm::Vm) -> Option<crate::value::Value> {
+    use crate::heap::HeapObj;
+    use crate::value::{Instance, RStr, Value};
+    let cls_id = vm.interner.intern("Interrupt");
+    let cls = vm.classes.get(&cls_id).cloned()?;
+    vm.maybe_gc();
+    // Allocation failure here would also break the safe-point
+    // delivery — fall back to None and let the caller decide.
+    if vm.check_alloc().is_err() {
+        return None;
+    }
+    let id = vm.heap.alloc(HeapObj::Instance(Instance {
+        class: cls,
+        ivars: std::collections::HashMap::new(),
+        singleton_class: None,
+    }));
+    let message_sym = vm.interner.intern("@message");
+    let msg_val = Value::Str(std::rc::Rc::new(RStr::new("interrupt".to_string())));
+    vm.heap.instance_mut(id).ivars.insert(message_sym, msg_val);
+    Some(Value::Object(id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

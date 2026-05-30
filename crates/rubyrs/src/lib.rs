@@ -295,16 +295,17 @@ pub struct Config {
     /// `true`, the FIRST `Runtime` constructed in this process
     /// with the flag set registers a `signal-hook`-based handler
     /// (only action: `AtomicBool::store(true, SeqCst)`) and
-    /// publishes the flag at static lifetime so subsequent
-    /// Runtimes share it. Every Runtime after that — opt-in or
-    /// not — sees the same flag (a `false` value if no SIGINT
-    /// has arrived since `Vm::interrupt_pending` was last cleared).
+    /// publishes the flag at static lifetime so SUBSEQUENT
+    /// `install: true` Runtimes share the same Arc. SIGINTs
+    /// reach every opted-in Runtime's safe-point check.
     ///
-    /// `false` (the Tier 1 default) means no handler is
-    /// registered FROM THIS Runtime. The flag still exists on
-    /// the Vm (so safe-point reads need no cfg branch), but
-    /// nothing ever writes to it unless ANOTHER Runtime in the
-    /// process registers the handler.
+    /// `false` (the Tier 1 default) gives the Vm a DEDICATED
+    /// fresh Arc<AtomicBool> — no shared state with opted-in
+    /// Runtimes, no handler-store visibility. Cost is one Arc
+    /// + AtomicBool per non-opt-in Runtime (negligible) in
+    /// exchange for crisp signal isolation: an embed host can
+    /// run an opt-in CLI Runtime and an opt-out sandbox
+    /// Runtime side-by-side without surprise cross-talk.
     ///
     /// Windows: SetConsoleCtrlHandler runs on a separate thread.
     /// `signal-hook` is Unix-only; the Windows path is deferred
@@ -1133,6 +1134,24 @@ impl Runtime {
             self.vm.interrupt_pending.store(false, Ordering::Relaxed);
         }
         v
+    }
+
+    /// ADR 0025 Phase 2 test-only Arc-clone for the
+    /// `interrupt_pending` flag. Used by Phase 2 integration tests
+    /// to set the flag from a background thread (mimicking the
+    /// signal handler's atomic store) deterministically.
+    #[doc(hidden)]
+    pub fn _test_interrupt_pending_arc(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.vm.interrupt_pending)
+    }
+
+    /// ADR 0025 Phase 2 test-only setter for `suppress_interrupt`.
+    /// Production code uses `SuppressInterruptGuard` (Phase 4 / Risk
+    /// #9); tests poke the counter directly to exercise the
+    /// safe-point branch.
+    #[doc(hidden)]
+    pub fn _test_set_suppress_interrupt(&mut self, value: u32) {
+        self.vm.suppress_interrupt = value;
     }
 
     pub fn with_config(cfg: Config) -> Self {

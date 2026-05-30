@@ -159,6 +159,23 @@ fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
     )
 }
 
+/// ADR 0025 Phase 2 cext-deferral helper. With `_fiber` on,
+/// `cext_depth` exists and is honored; without `_fiber`, the
+/// counter doesn't exist (no Fiber to integrate with), so the
+/// safe-point treats `cext_depth == 0` as the constant `true`.
+/// Production cext entry/exit paths will gate this counter
+/// when the cext bridge integration lands (separate work item).
+#[cfg(feature = "_fiber")]
+#[inline]
+fn cext_depth_zero(vm: &crate::vm::Vm) -> bool {
+    vm.cext_depth == 0
+}
+#[cfg(not(feature = "_fiber"))]
+#[inline]
+fn cext_depth_zero(_vm: &crate::vm::Vm) -> bool {
+    true
+}
+
 impl Vm {
     /// Lazily allocate the `$LOAD_PATH` Array on first access.
     /// Idempotent — subsequent calls return the same ObjId so
@@ -198,6 +215,34 @@ impl Vm {
 
     pub(crate) fn dispatch(&mut self) -> Result<(), Trap> {
         while !self.frames.is_empty() {
+            // ADR 0025 Phase 2: SIGINT safe-point check —
+            // mirror of the dispatch_until top-of-loop check.
+            // `dispatch()` drives the top-level frame stack
+            // (e.g. `Runtime::eval`'s script body); the
+            // signal must be observable here too, not only in
+            // dispatch_until's iterator-driver path. See
+            // dispatch_until below for the full safety
+            // rationale + counter interaction matrix.
+            #[cfg(unix)]
+            if self.interrupt_pending.load(std::sync::atomic::Ordering::Relaxed)
+                && self.suppress_interrupt == 0
+                && cext_depth_zero(self)
+            {
+                self.interrupt_pending.store(false, std::sync::atomic::Ordering::Relaxed);
+                let exc = match crate::vm::raise::build_interrupt_exception(self) {
+                    Some(v) => v,
+                    None => {
+                        return Err(self.trap(RubyError::Interrupt {
+                            msg: "interrupt".to_string(),
+                        }));
+                    }
+                };
+                self.unwind_with_exception(exc)?;
+                // Continue dispatch loop — IP now at rescue
+                // handler (or the unwind raised an Uncaught
+                // Trap if no handler, returning Err above).
+                continue;
+            }
             // Non-local return unwind. `Op::ReturnMethod` sets
             // `method_return`; here we honour it by popping any
             // block frames between us and the enclosing method,
@@ -371,6 +416,58 @@ impl Vm {
             // suspension.
             #[cfg(feature = "_fiber")]
             if self.fiber_yield_pending.is_some() { return Ok(()); }
+            // ADR 0025 Phase 2: SIGINT safe-point check. The
+            // POSIX handler (signal-hook, registered in Phase 1)
+            // sets `interrupt_pending`; the safe point reads it
+            // here and translates to a Ruby-level `Interrupt`
+            // raise. Honored only when:
+            //
+            // - `suppress_interrupt == 0`: must-complete cleanup
+            //   windows (close paths, future `at_exit` runner,
+            //   future ensure executor) defer delivery. Wired
+            //   via `SuppressInterruptGuard` at the entry points
+            //   that need it; ADR 0025 v3 Risk #9.
+            // - `cext_depth == 0` (when `_fiber` is on): deferred
+            //   during C-ext frames; mirrors the existing
+            //   `Fiber.yield`-in-cext guard from ADR 0023.
+            //
+            // **TODO (Phase 2 follow-up)**: production cext entry
+            // / exit paths don't yet increment `cext_depth`
+            // (only the Fiber test scaffolding does). Until those
+            // land, interrupt-during-cext can still fire mid-cext;
+            // documented as a known gap until the cext bridge
+            // wires the counter.
+            //
+            // Memory ordering: Relaxed load is sufficient for a
+            // single flag with no paired data — handler uses
+            // SeqCst store; reader uses Relaxed. If a future
+            // change pairs additional state with the flag
+            // (signal-name discriminant, trap handler ObjId),
+            // upgrade load → Acquire + handler store → Release.
+            // ADR 0025 v3 Phase 2 step 5 locks this contract.
+            #[cfg(unix)]
+            if self.interrupt_pending.load(std::sync::atomic::Ordering::Relaxed)
+                && self.suppress_interrupt == 0
+                && cext_depth_zero(self)
+            {
+                self.interrupt_pending.store(false, std::sync::atomic::Ordering::Relaxed);
+                let exc = match crate::vm::raise::build_interrupt_exception(self) {
+                    Some(v) => v,
+                    None => {
+                        // Interrupt class missing (preamble not
+                        // loaded?) — fall back to a host trap.
+                        // Embedders see Uncaught { class_name:
+                        // "Interrupt", message: "interrupt" }.
+                        return Err(self.trap(RubyError::Interrupt {
+                            msg: "interrupt".to_string(),
+                        }));
+                    }
+                };
+                self.unwind_with_exception(exc)?;
+                // Unwind found a rescue — dispatch continues at
+                // the new IP. Loop back to the top.
+                continue;
+            }
             let (proto_idx, ip) = {
                 let f = self.frames.last().expect("ICE: dispatch_until no frame");
                 (f.proto_idx, f.ip)

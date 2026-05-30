@@ -468,6 +468,22 @@ pub(crate) struct Vm {
     /// install gate is purely about whether the handler is
     /// registered.
     pub(crate) interrupt_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// ADR 0025 Phase 2 + Risk #9 — "must-complete cleanup
+    /// window" counter. While > 0, the dispatch_until
+    /// safe-point check leaves `interrupt_pending` set but
+    /// doesn't deliver. Used by close paths (FiberResponseBody
+    /// Drop runs `body.close` through dispatch_until; without
+    /// this guard a concurrent SIGINT would abort close
+    /// mid-flight — exactly ADR 0023 Risk #1's ensure-leak
+    /// shape). Counter, not bool, so nested suppress windows
+    /// work. RAII-managed via `SuppressInterruptGuard` (Phase
+    /// 4 wires the wrap on FiberResponseBody::drop).
+    ///
+    /// Vm-wide; NOT stashed in FiberSnapshot. Close paths trap
+    /// on `Fiber.yield` (FiberError, mirroring `cext_depth`'s
+    /// existing guard) so no Fiber-suspend can happen inside
+    /// a suppress window.
+    pub(crate) suppress_interrupt: u32,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) heap: Heap,
@@ -791,6 +807,7 @@ impl Vm {
             // process-wide Arc if any Runtime opted into signal
             // handling.
             interrupt_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            suppress_interrupt: 0,
             stack: Vec::with_capacity(1024),
             frames: vec![],
             heap: Heap::new(),

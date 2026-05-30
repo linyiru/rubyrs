@@ -88,15 +88,18 @@ fn install_signals_impl(install: bool) -> Arc<AtomicBool> {
             flag
         });
         Arc::clone(arc)
-    } else if let Some(existing) = SHARED_FLAG.get() {
-        // Another Runtime already opted in. Share the same
-        // flag — incoming SIGINTs reach this Vm too. Documented
-        // behavior in the Config doc comment.
-        Arc::clone(existing)
     } else {
-        // No Runtime has opted in. Dedicated fresh Arc with no
-        // signal handler. The Phase 2 safe-point check reads
-        // this flag's always-false value; nothing ever sets it.
+        // `install: false`: always return a dedicated fresh
+        // Arc, NEVER the shared one. Rationale: a Runtime that
+        // didn't opt in has no signal handler registered FOR
+        // ITSELF; sharing the SHARED_FLAG would let SIGINTs
+        // delivered to (and stored by) the handler that the
+        // opt-in Runtime registered appear in this opt-out
+        // Runtime's safe-point checks. That's a surprise
+        // factor for embed users who construct multiple
+        // Runtimes and expect signal isolation. Pay the
+        // cost of one Arc + AtomicBool per non-opt-in Runtime
+        // (negligible) to keep the contract crisp.
         Arc::new(AtomicBool::new(false))
     }
 }
@@ -138,14 +141,20 @@ mod tests {
     #[test]
     fn install_true_publishes_shared_flag() {
         // After install_signals(true), SHARED_FLAG must be Some
-        // and subsequent calls (install:true OR install:false)
-        // must return the same Arc.
+        // and subsequent install:true calls must return the
+        // same Arc. install:false ALWAYS returns a fresh
+        // dedicated Arc (signal isolation between opted-in and
+        // not-opted-in Runtimes).
         let a = install_signals(true);
         let b = install_signals(true);
         let c = install_signals(false);
-        // Identity check: all three Arcs point at the same
-        // AtomicBool.
-        assert!(Arc::ptr_eq(&a, &b));
-        assert!(Arc::ptr_eq(&a, &c));
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "install:true calls share the shared Arc",
+        );
+        assert!(
+            !Arc::ptr_eq(&a, &c),
+            "install:false returns a dedicated Arc, not the shared one",
+        );
     }
 }

@@ -16,6 +16,21 @@
 
 use super::SharedBuf;
 
+/// ADR 0025 Phase 1+2: SIGINT capture is a process-wide
+/// resource. cargo test's default multi-threaded runner would let
+/// signal-using tests race over the shared `interrupt_pending`
+/// Arc — one test sets the flag, another test's `dispatch_until`
+/// reads + clears it. Serialize all signal-touching tests behind
+/// this mutex; poisoning is recoverable here (the lock guards
+/// scheduling, not invariants).
+#[cfg(unix)]
+static SIGNAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(unix)]
+fn signal_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    SIGNAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[test]
 fn random_new_no_arg_raises_in_tier1_deterministic_mode() {
     // Documented divergence from CRuby: per ADR 0017 row 131
@@ -415,7 +430,169 @@ fn install_signal_handler_default_does_not_register() {
 
 #[cfg(unix)]
 #[test]
+fn phase_2_safe_point_translates_pending_flag_to_interrupt_raise() {
+    let _lock = signal_test_lock();
+    // ADR 0025 Phase 2 happy path. With install_signal_handler:true,
+    // setting `interrupt_pending` via direct atomic store (mimicking
+    // the signal handler) MUST cause the next dispatch_until /
+    // dispatch top-of-loop check to raise `Interrupt` — script-side
+    // rescue catches it.
+    //
+    // Direct flag-set rather than libc::kill: deterministic timing
+    // and removes the kernel-delivery latency. The Phase 1 SIGINT
+    // test verifies the signal-to-flag pipe; this test verifies the
+    // flag-to-Interrupt pipe.
+    use std::sync::Arc as StdArc;
+    use std::sync::atomic::Ordering;
+
+    let cfg = rubyrs::Config {
+        install_signal_handler: true,
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+
+    // Drain any stale flag from a prior test in the same binary.
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+
+    // Set the flag from a background thread so the eval can
+    // observe it on entry. Atomic store mirrors the signal handler.
+    let flag = rt._test_interrupt_pending_arc();
+    let flag_for_thread = StdArc::clone(&flag);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        flag_for_thread.store(true, Ordering::SeqCst);
+    });
+
+    // Busy loop in Ruby — the dispatch_until check fires on each op.
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r#"
+        i = 0
+        begin
+          while true
+            i += 1
+          end
+        rescue Interrupt => e
+          puts "caught after #{i} iters"
+        end
+        "#,
+        "phase2_interrupt.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    assert!(
+        out.starts_with("caught after "),
+        "expected interrupt-caught output, got {out:?}",
+    );
+    // Clean up the flag for the next test in this binary.
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+}
+
+#[cfg(unix)]
+#[test]
+fn phase_2_interrupt_uncaught_propagates_to_embedder() {
+    let _lock = signal_test_lock();
+    // When no rescue handler is on the stack, the Phase 2 safe-point
+    // raise becomes an Uncaught Trap with class_name "Interrupt".
+    // Embedders see a recoverable error, not a process kill.
+    use std::sync::Arc as StdArc;
+    use std::sync::atomic::Ordering;
+
+    let cfg = rubyrs::Config {
+        install_signal_handler: true,
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+
+    let flag = rt._test_interrupt_pending_arc();
+    let flag_for_thread = StdArc::clone(&flag);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        flag_for_thread.store(true, Ordering::SeqCst);
+    });
+
+    let err = rt.eval(
+        r#"
+        i = 0
+        while true
+          i += 1
+        end
+        "#,
+        "phase2_uncaught.rb",
+    ).expect_err("expected interrupt to propagate as Trap");
+    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+        panic!("expected Uncaught Interrupt, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "Interrupt");
+    assert_eq!(message, "interrupt");
+
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+}
+
+#[cfg(unix)]
+#[test]
+fn phase_2_suppress_interrupt_defers_delivery() {
+    let _lock = signal_test_lock();
+    // ADR 0025 Risk #9 — when `suppress_interrupt > 0`, the
+    // safe-point check leaves the flag set but DOESN'T raise.
+    // Once the counter drops back to 0, the next safe point
+    // delivers normally.
+    //
+    // Drives the counter directly via a test helper (the
+    // SuppressInterruptGuard wrapper that close paths will use
+    // lands in Phase 4 / Risk #9 wiring).
+    use std::sync::atomic::Ordering;
+
+    let cfg = rubyrs::Config {
+        install_signal_handler: true,
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+
+    // Pre-set both: suppress_interrupt > 0 AND flag pending.
+    rt._test_set_suppress_interrupt(1);
+    let flag = rt._test_interrupt_pending_arc();
+    flag.store(true, Ordering::SeqCst);
+
+    // Run a short loop. The check sees the flag but suppress is
+    // nonzero, so it doesn't raise. Loop completes normally.
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r#"
+        i = 0
+        while i < 100
+          i += 1
+        end
+        puts "completed: #{i}"
+        "#,
+        "phase2_suppress.rb",
+    ).expect("eval should complete normally when suppressed");
+    assert_eq!(buf.snapshot(), "completed: 100\n");
+
+    // Flag is STILL set (suppression deferred but didn't clear).
+    assert!(
+        flag.load(Ordering::Relaxed),
+        "suppress must not clear the flag",
+    );
+
+    // Drop suppression. Next eval delivers.
+    rt._test_set_suppress_interrupt(0);
+    let err = rt.eval(
+        "while true; end",
+        "phase2_after_suppress.rb",
+    ).expect_err("expected interrupt now that suppress is 0");
+    assert!(err.err.is_a("Interrupt"));
+
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+}
+
+#[cfg(unix)]
+#[test]
 fn install_signal_handler_true_sets_flag_on_real_sigint() {
+    let _lock = signal_test_lock();
     // ADR 0025 Phase 1 happy path. Construct a Runtime with
     // `install_signal_handler: true`, send SIGINT to ourselves
     // via libc::kill(getpid(), SIGINT), verify the

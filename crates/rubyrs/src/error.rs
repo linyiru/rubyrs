@@ -141,6 +141,14 @@ pub enum RubyError {
     /// catching every File.* failure. Raised by
     /// `Vm::check_load_allowed`.
     LoadError { msg: String },
+    /// SIGINT (or `Thread#raise(Interrupt)` if/when threads land)
+    /// delivered to the Vm via the Phase 2 safe-point check in
+    /// `dispatch_until`. Rescuable via `rescue Interrupt` (or
+    /// `rescue SignalException`), per CRuby. Intentionally outside
+    /// the StandardError subtree so a bare `rescue` clause can't
+    /// swallow Ctrl+C — same security posture as ResourceExhausted
+    /// (ADR 0008) + SystemExit (ADR 0025 Phase 0.5).
+    Interrupt { msg: String },
     /// A Ruby-level `raise` whose exception class wasn't caught by any
     /// `rescue` clause on the call stack. Carries the script's class
     /// name and message so the host can log/format whatever it likes,
@@ -302,6 +310,7 @@ impl RubyError {
             RubyError::ResourceExhausted { .. } => "ResourceExhausted",
             RubyError::IOError { .. } => "IOError",
             RubyError::LoadError { .. } => "LoadError",
+            RubyError::Interrupt { .. } => "Interrupt",
             // Uncaught carries the actual class name from the script's
             // exception object; static-class machinery doesn't apply.
             // Hosts that want the Ruby-level class name should pattern-
@@ -325,7 +334,8 @@ impl RubyError {
             | RubyError::FloatDomainError { msg }
             | RubyError::ResourceExhausted { msg }
             | RubyError::IOError { msg }
-            | RubyError::LoadError { msg } => msg.clone(),
+            | RubyError::LoadError { msg }
+            | RubyError::Interrupt { msg } => msg.clone(),
             RubyError::Uncaught { message, .. } => message.clone(),
             RubyError::NoMethodError { kind, method, recv_type } => {
                 // CRuby uses three shapes for NoMethodError:
