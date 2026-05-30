@@ -826,10 +826,10 @@ impl Vm {
                 })))
             }
             "__rubyrs_signal_trap" => {
-                if args.len() != 3 {
+                if args.len() != 2 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
                         msg: format!(
-                            "__rubyrs_signal_trap(sig, handler, block) — expected 3 args, got {}",
+                            "__rubyrs_signal_trap(sig, handler) — expected 2 args, got {}",
                             args.len(),
                         ),
                     })));
@@ -842,12 +842,36 @@ impl Vm {
                         ),
                     }))),
                 };
-                // Pick the effective handler: explicit `handler`
-                // arg wins; else `block`. Nil-nil → no-op query.
-                let handler = if !matches!(&args[1], Value::Nil) { &args[1] } else { &args[2] };
-                // Parse the new state. Nil-Nil means "no change".
-                let new_state: Option<crate::vm::SignalHandlerState> = match handler {
-                    Value::Nil => None, // query mode
+                // v7 round-3: reject SIGKILL (9) and SIGSTOP (19).
+                // CRuby raises ArgumentError for these because the
+                // kernel forbids userspace trapping of them. The
+                // numbers are POSIX-standard; signal-hook would
+                // also reject them at install time, but raising
+                // here gives a clear ArgumentError before the
+                // ServeOptions/trap flow gets confusing.
+                if sig == 9 || sig == 19 {
+                    let name = if sig == 9 { "KILL" } else { "STOP" };
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("can't trap reserved signal: SIG{name}"),
+                    })));
+                }
+                // v7 round-3: the preamble's 1-arg-no-block form
+                // sends a sentinel Symbol so the host fn can
+                // distinguish QUERY mode from explicit
+                // `Signal.trap(sig, nil)` (the latter is CRuby's
+                // IGNORE shorthand).
+                let query_sentinel = self.interner.intern("__rubyrs_query_mode__");
+                let is_query = matches!(&args[1], Value::Sym(s) if *s == query_sentinel);
+                let handler = &args[1];
+                // Parse the new state. Query sentinel → no install;
+                // explicit nil → IGNORE (CRuby parity).
+                let new_state: Option<crate::vm::SignalHandlerState> = if is_query {
+                    None
+                } else if matches!(handler, Value::Nil) {
+                    // Explicit nil = IGNORE per CRuby 3.x.
+                    Some(crate::vm::SignalHandlerState::Ignore)
+                } else { match handler {
+                    Value::Nil => unreachable!(),
                     Value::Str(s) => {
                         let raw = s.to_string_lossy();
                         let normalized = raw.strip_prefix("SIG_").unwrap_or(&raw);
@@ -877,7 +901,7 @@ impl Vm {
                             other.type_name(),
                         ),
                     }))),
-                };
+                } };
                 // Read previous (default to Default if none).
                 let previous = self.signal_traps.get(&sig)
                     .cloned()

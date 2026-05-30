@@ -807,6 +807,79 @@ fn phase_4c_at_exit_without_block_raises_local_jump_error() {
 }
 
 #[test]
+fn v7_signal_trap_rejects_sigkill_and_sigstop() {
+    // CRuby raises ArgumentError("can't trap reserved signal:
+    // SIGKILL") and SIGSTOP. Round-3 review parity gap.
+    let mut rt = rubyrs::Runtime::new();
+    for (sig, expected) in [
+        (r##"Signal.trap("KILL") { }"##, "SIGKILL"),
+        (r##"Signal.trap(:SIGKILL) { }"##, "SIGKILL"),
+        (r##"Signal.trap(9, "IGNORE")"##, "SIGKILL"),
+        (r##"Signal.trap("STOP") { }"##, "SIGSTOP"),
+        (r##"Signal.trap(:SIGSTOP) { }"##, "SIGSTOP"),
+        (r##"Signal.trap(19, "DEFAULT")"##, "SIGSTOP"),
+    ] {
+        let err = rt.eval(sig, "v7_sigkill.rb").unwrap_err();
+        let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+            panic!("expected ArgumentError, got {:?}", err.err);
+        };
+        assert_eq!(class_name, "ArgumentError", "sig={sig}");
+        assert!(
+            message.contains(expected),
+            "sig={sig}: unexpected: {message}",
+        );
+    }
+}
+
+#[test]
+fn v7_signal_trap_explicit_nil_handler_means_ignore() {
+    // CRuby 3.x: `Signal.trap("INT", nil)` installs IGNORE.
+    // Round-3 review surfaced that rubyrs was treating it as
+    // QUERY (returning current handler). v7 fixes by routing
+    // explicit nil through the IGNORE path; QUERY mode now
+    // requires the 1-arg-no-block form (sentinel Symbol).
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        # First install a block so we can verify nil REPLACES it.
+        Signal.trap("INT") { puts "installed block" }
+        prev = Signal.trap("INT", nil)
+        puts "after nil: prev=#{prev.class}"
+        prev = Signal.trap("INT")  # query
+        puts "now installed: prev=#{prev}"
+        "##,
+        "v7_sigtrap_nil.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "after nil: prev=Proc\n\
+         now installed: prev=IGNORE\n",
+    );
+}
+
+#[test]
+fn v7_signal_trap_one_arg_with_block_installs_block() {
+    // Regression: the v7 preamble splat-based form must NOT
+    // misroute `Signal.trap("INT") { ... }` (block-form) as
+    // query mode. Verify by querying again afterward — should
+    // return a Proc, not "DEFAULT".
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        Signal.trap("INT") { puts "trap" }
+        prev = Signal.trap("INT")  # query
+        puts "prev=#{prev.class}"
+        "##,
+        "v7_sigtrap_1arg_block.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "prev=Proc\n");
+}
+
+#[test]
 fn v7_at_exit_handler_raise_continues_lifo_drain() {
     // Round-3 review safety finding: a raising at_exit handler
     // must NOT stop the LIFO drain. Verify with three handlers
