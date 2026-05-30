@@ -3110,6 +3110,21 @@ fn rational_phase_c2_arithmetic_and_comparison() {
         ("puts (Rational(1, 2) == 0.5)", "true"),
         // Non-numeric arg returns nil from <=>.
         ("puts (Rational(1, 2) <=> \"x\").inspect", "nil"),
+        // send(:==, ...) consistency — the BinOp == fast path and
+        // the method-call (Object#== via ruby_eq) path must agree
+        // on cross-type Rational × Int / Float. Pre-fix
+        // `1.send(:==, Rational(1, 1))` returned false because
+        // ruby_eq had no cross-type arms.
+        ("puts Rational(1, 1).send(:==, 1)",          "true"),
+        ("puts 1.send(:==, Rational(1, 1))",          "true"),
+        ("puts Rational(1, 2).send(:==, 0.5)",        "true"),
+        ("puts 0.5.send(:==, Rational(1, 2))",        "true"),
+        ("puts Rational(1, 2).send(:==, Rational(2, 4))", "true"),
+        // Hash key lookup goes through ruby_eql which falls
+        // through to ruby_eq for cross-types — pin that Rational
+        // keys still resolve when looked up by their canonical
+        // equivalent.
+        ("puts ({Rational(1, 2) => :half}[Rational(2, 4)])", "half"),
     ] {
         let buf = SharedBuf::new();
         rt.set_stdout(Box::new(buf.clone()));

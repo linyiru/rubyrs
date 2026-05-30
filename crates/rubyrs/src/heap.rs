@@ -1251,13 +1251,41 @@ impl Value {
             // guarantee canonical form — two Rationals representing
             // the same value always have identical (num, den) pairs.
             // Same-ObjId fast path mirrors the Array / Hash / Range /
-            // BigInt arms above. Cross-type Rational == Integer /
-            // Float lands in Phase C.2.
+            // BigInt arms above.
             (Value::Rational(a), Value::Rational(b)) => {
                 if a == b { return true; }
                 let x = heap.rational(*a);
                 let y = heap.rational(*b);
                 x.num == y.num && x.den == y.den
+            }
+            // Phase C.2: cross-type Rational × Integer / Float
+            // equality. The BinOp `==` path goes through
+            // `try_rational_binop` (canonical i128 cross-multiply
+            // for Int, lossy f64 demote for Float), but
+            // `send(:==, ...)` and the universal `Object#==`
+            // fallback go through `ruby_eq` — without these arms
+            // `1.send(:==, Rational(1, 1))` returned false despite
+            // `1 == Rational(1, 1)` returning true. Mirrors the
+            // BigInt × Float / BigInt × Int pattern above.
+            // Canonical form means r.den > 0, so no sign-fixup is
+            // needed on the cross-multiply.
+            (Value::Rational(rid), Value::Int(n)) => {
+                let r = heap.rational(*rid);
+                (*n as i128) * (r.den as i128) == r.num as i128
+            }
+            (Value::Int(n), Value::Rational(rid)) => {
+                let r = heap.rational(*rid);
+                (*n as i128) * (r.den as i128) == r.num as i128
+            }
+            (Value::Rational(rid), Value::Float(f)) => {
+                if !f.is_finite() { return false; }
+                let r = heap.rational(*rid);
+                (r.num as f64 / r.den as f64) == *f
+            }
+            (Value::Float(f), Value::Rational(rid)) => {
+                if !f.is_finite() { return false; }
+                let r = heap.rational(*rid);
+                *f == (r.num as f64 / r.den as f64)
             }
             _ => false,
         }

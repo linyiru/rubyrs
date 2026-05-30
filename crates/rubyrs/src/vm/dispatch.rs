@@ -5804,7 +5804,14 @@ impl Vm {
                 // arm catches `r.send(:+, x)` / `r.+ x` (parsed by Prism
                 // as a method call rather than Op::BinOp when send is
                 // used or when the receiver is a complex expression).
-                ("+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" | "==" | "!=", 1) => {
+                // `==` / `!=` are NOT listed here — the universal
+                // `Object#==` / `Object#!=` arms further up call
+                // `Value::ruby_eq`, which carries the canonical
+                // Rational cross-type equality (see heap.rs).
+                // Routing `r.send(:==, x)` through this arm would
+                // be dead code because it's shadowed by the
+                // universal dispatch.
+                ("+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=", 1) => {
                     let kind = crate::bytecode::BinOpKind::from_op_name(&name)
                         .expect("name matched above");
                     if let Some(v) = self.try_rational_binop(kind, &recv, &args[0])? {
@@ -5854,7 +5861,7 @@ impl Vm {
                     return Ok(());
                 }
                 // Arity guard for the binary operators.
-                ("+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" | "==" | "!=" | "<=>", _) => {
+                ("+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" | "<=>", _) => {
                     return Err(self.trap(RubyError::ArgumentError {
                         msg: format!(
                             "wrong number of arguments (given {}, expected 1)",
