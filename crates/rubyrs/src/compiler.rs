@@ -467,7 +467,7 @@ fn compile_multiwrite_arm(
     let splat_id = interner.intern("__mw_splat");
 
     let splat_pos = targets.iter().position(|t| matches!(
-        t, MWT::SplatLocal(_) | MWT::SplatIvar(_)
+        t, MWT::SplatLocal(_) | MWT::SplatIvar(_) | MWT::SplatGlobal(_)
     ));
 
     let emit_store = |b: &mut ProtoBuilder, interner: &mut Interner, t: &MWT| {
@@ -494,6 +494,10 @@ fn compile_multiwrite_arm(
             MWT::SplatIvar(name) => {
                 let id = interner.intern(name);
                 b.emit(Op::StoreIvar(id));
+            }
+            MWT::SplatGlobal(name) => {
+                let id = interner.intern(name);
+                b.emit(Op::StoreGlobal(id));
             }
         }
     };

@@ -56,3 +56,20 @@ a, *m, $TAIL = 1, 2, 3, 4
 puts "head=#{a.inspect}"
 puts "mid=#{m.inspect}"
 puts "tail-glob=#{$TAIL.inspect}"
+
+## Shape 6: GLOBAL as the splat target itself (`*$rest`).
+## Symmetric with the local/ivar splat forms. Pre-fix
+## raised "unsupported splat target: GlobalVariableTargetNode"
+## even after Shape 1's positional-global path landed.
+## (Code-review #301.)
+$REST = nil
+head, *$REST, last = 1, 2, 3, 4, 5
+puts "head=#{head.inspect}"
+puts "rest-glob=#{$REST.inspect}"
+puts "last=#{last.inspect}"
+
+## Shape 6b: degenerate — only enough values for head+last,
+## so the global splat captures an empty array.
+$REST = nil
+head, *$REST, last = 1, 2
+puts "empty-rest=#{$REST.inspect}"
