@@ -41,7 +41,7 @@ impl Vm {
             locals: Rc::new(RefCell::new(vec_nil(n_locals))),
             self_val: Value::Nil,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![],
+            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false,
         });
         self.dispatch()?;
         Ok(self.stack.pop().unwrap_or(Value::Nil))

@@ -137,6 +137,18 @@ pub(crate) struct Frame {
     /// (EnterLoop), pop site (ExitLoop), and truncate site
     /// (rescue/ensure match in `unwind_with_exception`).
     pub(crate) loop_stack_depths: Vec<usize>,
+    /// ADR 0024 Phase A: `Op::Yield` synchronous-wrapper
+    /// "yield in progress" flag. Set by `Op::Yield`'s match
+    /// arm BEFORE `invoke_block`, cleared after the nested
+    /// `dispatch_until` returns normally. On Fiber yield
+    /// mid-block, the flag stays set and is stashed in
+    /// FiberSnapshot (ADR 0023 v7 §"Fiber-scoped Vm state");
+    /// resume reads it and SKIPS the invoke_block step
+    /// (block frame already on the stack), going straight to
+    /// the post-block branch. Per-Frame so nested concurrent
+    /// yields each track their own pending state.
+    #[allow(dead_code)] // wired in Phase A.1
+    pub(crate) pending_yield: bool,
 }
 
 /// In-flight structured `break`/`next` walking through an
@@ -331,6 +343,45 @@ impl Drop for SuppressInterruptGuard<'_> {
         // `saturating_add` in `enter` keeps the counter
         // bounded in the other direction.
         self.vm.suppress_interrupt = self.vm.suppress_interrupt.saturating_sub(1);
+    }
+}
+
+/// ADR 0024 Phase A: RAII guard for `Vm::yield_recursion_depth`.
+/// `enter` increments + range-checks against `max_yield_recursion`
+/// (returns `ResourceExhausted` Trap if exceeded); `Drop`
+/// decrements unconditionally — panic-safe.
+///
+/// Mirrors `SuppressInterruptGuard`'s shape (round-3 v7
+/// review pattern) so a panic in the synchronous `Op::Yield`
+/// wrapper's nested `dispatch_until` can't permanently bump
+/// the counter and falsely trip the cap on subsequent yields.
+#[allow(dead_code)] // wired in Phase A.1
+pub(crate) struct YieldDepthGuard<'a> {
+    pub(crate) vm: &'a mut Vm,
+}
+
+impl<'a> YieldDepthGuard<'a> {
+    #[allow(dead_code)] // wired in Phase A.1
+    pub(crate) fn enter(vm: &'a mut Vm) -> Result<Self, Trap> {
+        let new = vm.yield_recursion_depth.saturating_add(1);
+        if let Some(cap) = vm.max_yield_recursion
+            && new > cap {
+            return Err(vm.trap(crate::error::RubyError::ResourceExhausted {
+                msg: format!(
+                    "yield recursion depth exceeded ({new} > {cap})"
+                ),
+            }));
+        }
+        vm.yield_recursion_depth = new;
+        Ok(Self { vm })
+    }
+}
+
+impl Drop for YieldDepthGuard<'_> {
+    fn drop(&mut self) {
+        // `saturating_sub` for symmetry with SuppressInterruptGuard
+        // (defensive against double-drop bugs).
+        self.vm.yield_recursion_depth = self.vm.yield_recursion_depth.saturating_sub(1);
     }
 }
 
@@ -563,6 +614,24 @@ pub(crate) struct Vm {
     /// switches between raise / no-op / re-entrant block
     /// invocation based on the state.
     pub(crate) signal_traps: std::collections::HashMap<i32, SignalHandlerState>,
+    /// ADR 0024 Phase A Risk #1: bounds Rust-stack growth
+    /// from recursive `Op::Yield` (synchronous wrapper
+    /// re-enters `dispatch_until` per yield-site chain).
+    /// Incremented by `YieldDepthGuard::enter`, decremented
+    /// by its `Drop` — panic-safe. Cap (`Config::max_yield_recursion`)
+    /// trips `ResourceExhausted` to keep adversarial scripts
+    /// from blowing the Rust stack via deep yield nesting.
+    /// Vm-wide; NOT stashed in FiberSnapshot — same as
+    /// `cext_depth`.
+    #[allow(dead_code)] // wired in Phase A.1
+    pub(crate) yield_recursion_depth: u32,
+    /// Cap on `yield_recursion_depth`. `None` = unlimited
+    /// (default). Mirrors `Config::max_live_fibers` shape.
+    /// Default value when `Config::max_yield_recursion: None`:
+    /// 256 (defensive — well above typical recursive-yield
+    /// depths, below where the Rust stack runs out under
+    /// default 8MB).
+    pub(crate) max_yield_recursion: Option<u32>,
     /// ADR 0025 Phase 4c: `Kernel#at_exit { ... }` handlers
     /// registered for end-of-eval execution. Drained LIFO by
     /// the public `Runtime::eval` wrapper after `eval_inner`
@@ -912,6 +981,10 @@ impl Vm {
             interrupt_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             suppress_interrupt: 0,
             signal_traps: std::collections::HashMap::new(),
+            yield_recursion_depth: 0,
+            // None until Config::apply lays in a value. The
+            // safe-point check treats None as "unlimited".
+            max_yield_recursion: None,
             at_exit_handlers: Vec::new(),
             stack: Vec::with_capacity(1024),
             frames: vec![],

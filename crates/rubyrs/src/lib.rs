@@ -185,6 +185,17 @@ pub struct Config {
     /// cfg(_fiber)-gated.
     #[cfg(feature = "_fiber")]
     pub max_fiber_frame_depth: Option<usize>,
+    /// ADR 0024 Phase A Risk #1: cap on `Op::Yield` recursion
+    /// depth. The synchronous Op::Yield wrapper re-enters
+    /// `dispatch_until` per yield-site nesting level, so each
+    /// nested yield adds ~2-3 Rust call-stack frames. Without
+    /// this cap, a script with deep `def f; yield; end; f { f
+    /// { f { ... } } }` chains would blow the Rust stack.
+    /// `None` = unlimited (Tier 1 default). Defensive setting:
+    /// `Some(256)` is well above typical recursive-yield
+    /// depths and well below where the default 8 MB Rust stack
+    /// runs out.
+    pub max_yield_recursion: Option<u32>,
     /// If `Some(d)`, an `eval` call that runs longer than `d`
     /// wall-clock time returns a `ResourceExhausted` trap. Checked
     /// every 1024 ops (cheap and precise enough for the host-side
@@ -501,6 +512,7 @@ impl Default for Config {
             max_live_fibers: None,
             #[cfg(feature = "_fiber")]
             max_fiber_frame_depth: None,
+            max_yield_recursion: None,
             deadline: None,
             env: None,
             pid: None,
@@ -1349,6 +1361,11 @@ impl Runtime {
             self.vm.max_live_fibers = cfg.max_live_fibers;
             self.vm.max_fiber_frame_depth = cfg.max_fiber_frame_depth;
         }
+        // ADR 0024 Phase A: yield-recursion cap. Always wired
+        // (no `_fiber` gate) — Op::Yield's synchronous wrapper
+        // exists in default builds too, so the bound is
+        // meaningful regardless of Fiber availability.
+        self.vm.max_yield_recursion = cfg.max_yield_recursion;
         self.vm.env_override = cfg.env;
         self.vm.pid = cfg.pid.map(|n| n.get() as i64);
         self.vm.time_now = cfg.time_now;

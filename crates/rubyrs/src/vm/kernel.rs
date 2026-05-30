@@ -1836,7 +1836,7 @@ impl Vm {
             is_block: false,
             n_given_positional: 0,
             rescues: vec![],
-            loop_rescue_depths: vec![], loop_stack_depths: vec![],
+            loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false,
         });
         // Dispatch loop. We can't just call `dispatch_until` and
         // bail on the first method_return: a non-local `return`
@@ -2121,7 +2121,7 @@ impl Vm {
             is_block: false,
             n_given_positional: 0,
             rescues: vec![],
-            loop_rescue_depths: vec![], loop_stack_depths: vec![],
+            loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false,
         });
         // Same dispatch-loop shape as compile_and_run_source;
         // a non-local `return` defined INSIDE the eval'd string

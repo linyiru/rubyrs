@@ -274,6 +274,10 @@ fn main() {
         // Until then the flag is set but unobserved — the script
         // continues until natural completion, same as before.
         install_signal_handler: true,
+        // ADR 0024 Phase A: CLI gets the defensive default
+        // (None = unlimited). CLI scripts trust their own code;
+        // sandbox embedders should set a finite cap.
+        max_yield_recursion: None,
         time_now: Some(std::sync::Arc::new(|| {
             // `UNIX_EPOCH` is the documented zero anchor; the
             // SystemTime returned by `now()` may be before or
