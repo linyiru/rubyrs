@@ -2498,6 +2498,62 @@ impl Vm {
             (Value::Array(id), "any?", []) => Some(self.iter_array_filter(*id, IterMode::Any, block)?),
             (Value::Array(id), "all?", []) => Some(self.iter_array_filter(*id, IterMode::All, block)?),
             (Value::Array(id), "none?", []) => Some(self.iter_array_filter(*id, IterMode::NoneM, block)?),
+            // `a.find_index { |x| ... }` / `a.index { |x| ... }`
+            // — Int index of the first element whose block result
+            // is truthy, or nil. Positional-arg form lives in
+            // array.rs; passing both a positional arg AND a block
+            // routes there too (CRuby silently discards the block
+            // when an arg is given — but emits a warning; we
+            // skip the warning).
+            // Positional-arg form with a block-given — CRuby
+            // honours the arg and silently discards the block
+            // (with a `given block not used` warning). Without
+            // this arm dispatch would fall through to a
+            // NoMethodError because array.rs's positional arm
+            // only runs in the no-block path. We skip the
+            // warning emission.
+            (Value::Array(id), "find_index", [target]) | (Value::Array(id), "index", [target]) => {
+                let id = *id;
+                let target = target.clone();
+                let len = self.heap.array(id).len();
+                let mut found: Option<i64> = None;
+                for i in 0..len {
+                    let el = self.heap.array(id)[i].clone();
+                    if el.ruby_eq(&target, &self.heap) {
+                        found = Some(i as i64);
+                        break;
+                    }
+                }
+                Some(match found {
+                    Some(i) => Value::Int(i),
+                    None => Value::Nil,
+                })
+            }
+            (Value::Array(id), "find_index", []) | (Value::Array(id), "index", []) => {
+                let id = *id;
+                let snapshot: Vec<Value> = self.heap.array(id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(id));
+                g.pin(Value::Block(block));
+                for v in &snapshot {
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut found: Option<i64> = None;
+                let mut early = None;
+                for (i, v) in snapshot.into_iter().enumerate() {
+                    let r = match g.vm.step_block(block, vec![v], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    if r.is_truthy() { found = Some(i as i64); break; }
+                }
+                Some(early.unwrap_or_else(|| match found {
+                    Some(idx) => Value::Int(idx),
+                    None => Value::Nil,
+                }))
+            }
 
             // Hash#min_by / #max_by — yield (k, v) to the block,
             // pick the pair whose block-returned key is the
