@@ -3002,12 +3002,12 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                for (k, v) in &snapshot {
-                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
-                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
-                }
                 // Pre-materialise pair Arrays once; CRuby shares
-                // pair identity across overlapping windows.
+                // pair identity across overlapping windows. Each
+                // pinned pair Array transitively pins its `k` /
+                // `v` contents, so no per-entry snapshot pin is
+                // needed (would just inflate vm.pinned for large
+                // hashes — GC root-walk cost).
                 let mut pair_vals: Vec<Value> = Vec::with_capacity(snapshot.len());
                 for (k, v) in &snapshot {
                     g.vm.maybe_gc();
@@ -3061,14 +3061,13 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                for (k, v) in &snapshot {
-                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
-                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
-                }
                 // Pre-materialise pair Arrays so adjacent
                 // chunks see the same identity (CRuby parity
                 // with Array#chunk_while where adjacent
-                // elements are the same Value).
+                // elements are the same Value). Each pinned
+                // pair transitively pins its `k` / `v`
+                // contents, so no per-entry snapshot pin
+                // is needed.
                 let mut pair_vals: Vec<Value> = Vec::with_capacity(snapshot.len());
                 for (k, v) in &snapshot {
                     g.vm.maybe_gc();
