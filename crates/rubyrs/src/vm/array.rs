@@ -307,6 +307,76 @@ impl Vm {
                             ),
                         }));
                     }
+                    // `Array#clear` — drop all elements in place,
+                    // return the (now-empty) receiver. CRuby is
+                    // O(1) modulo refcount drops; rubyrs is O(n)
+                    // because the GC owns element liveness, but
+                    // the observable shape (`a.equal?(a.clear)`)
+                    // is the same.
+                    ("clear", []) => {
+                        self.heap.array_mut(id).clear();
+                        Some(Value::Array(id))
+                    }
+                    ("clear", many) => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 0)",
+                                many.len()
+                            ),
+                        }));
+                    }
+                    // `Array#find_index(target)` / `Array#index(target)`
+                    // — Int index of the first element `==` the
+                    // target, or nil. The block form lives in
+                    // iter.rs; the no-arg-no-block form returns
+                    // an Enumerator in CRuby (not implemented).
+                    ("find_index", [target]) | ("index", [target]) => {
+                        let target = target.clone();
+                        let len = self.heap.array(id).len();
+                        let mut found: Option<i64> = None;
+                        for i in 0..len {
+                            let el = self.heap.array(id)[i].clone();
+                            if el.ruby_eq(&target, &self.heap) {
+                                found = Some(i as i64);
+                                break;
+                            }
+                        }
+                        Some(match found {
+                            Some(i) => Value::Int(i),
+                            None => Value::Nil,
+                        })
+                    }
+                    // `arr.find_index` (no arg, no block) returns
+                    // an Enumerator in CRuby. Without this arm
+                    // the dispatcher fell through to
+                    // NoMethodError, contradicting
+                    // `respond_to?(:find_index) == true`. Raise
+                    // RuntimeError with an explicit feature-gate
+                    // message instead — same fallback shape as
+                    // dispatch.rs:4548 (rubyrs doesn't model
+                    // `NotImplementedError` as a RubyError
+                    // variant yet, so RuntimeError is the
+                    // closest catchable fit).
+                    ("find_index" | "index", []) => {
+                        return Err(self.trap(RubyError::RuntimeError {
+                            msg: format!(
+                                "Array#{name} without a block or arg returns an Enumerator, which is not yet implemented in rubyrs"
+                            ),
+                        }));
+                    }
+                    ("find_index" | "index", many) if many.len() > 1 => {
+                        // CRuby surface says `expected 0..1`
+                        // because no-arg returns an Enumerator
+                        // (not implemented here). We mirror the
+                        // wording so rescue-by-message callers
+                        // don't diverge.
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 0..1)",
+                                many.len()
+                            ),
+                        }));
+                    }
                     // `Array#unshift(v)` / `prepend(v)` — insert at
                     // front, return receiver. Variadic in CRuby
                     // (`unshift(a, b, c)` inserts all at once in

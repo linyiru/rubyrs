@@ -592,7 +592,8 @@ impl Vm {
                 "inject" | "reduce" |
                 "to_a" | "reverse" | "uniq" | "compact" |
                 "flatten" | "join" |
-                "+" | "-" | "concat" | "replace" | "take" | "drop" |
+                "+" | "-" | "concat" | "replace" | "clear" | "take" | "drop" |
+                "find_index" | "index" |
                 "each" | "map" | "select" | "filter" |
                 "reject" | "find" | "detect" |
                 "any?" | "all?" | "none?" |
