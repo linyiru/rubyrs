@@ -629,6 +629,7 @@ impl Vm {
                 "first" | "min" | "max" | "one?" | "partition" |
                 "take" | "drop" | "take_while" | "drop_while" | "find_index" |
                 "tally" | "uniq" | "zip" |
+                "each_slice" | "each_cons" | "chunk_while" |
                 "inspect"
             ),
             Value::Range(_) => matches!(name,

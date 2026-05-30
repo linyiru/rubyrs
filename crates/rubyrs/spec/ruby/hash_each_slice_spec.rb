@@ -1,0 +1,174 @@
+# Adapted from ruby/spec core/hash/each_slice_spec.rb /
+# each_cons_spec.rb / chunk_while_spec.rb (Enumerable-inherited
+# behaviour) at upstream commit 448cb340 (2026-05).
+# Hand-translated — each_slice / each_cons always take an `n`
+# argument; the no-block (Enumerator) form is covered by the
+# trailing `.to_a` example per group (rubyrs returns the
+# materialised Array directly; see comment at hash.rs:432).
+
+describe "Hash#each_slice" do
+  it "yields each consecutive group of n [k,v] pair Arrays as one Array" do
+    seen = []
+    {a: 1, b: 2, c: 3, d: 4, e: 5}.each_slice(2) { |s| seen << s }
+    assert_eq(seen, [[[:a, 1], [:b, 2]], [[:c, 3], [:d, 4]], [[:e, 5]]])
+  end
+
+  it "returns the receiver Hash (block form)" do
+    h = {a: 1, b: 2}
+    assert(h.each_slice(1) { |_| }.equal?(h))
+  end
+
+  it "yields a single-element slice for a single-pair receiver" do
+    seen = []
+    {a: 1}.each_slice(3) { |s| seen << s }
+    assert_eq(seen, [[[:a, 1]]])
+  end
+
+  it "is a no-op on an empty Hash" do
+    h = {}
+    seen = []
+    r = h.each_slice(2) { |s| seen << s }
+    assert_eq(seen, [])
+    assert(r.equal?(h))
+  end
+
+  it "raises ArgumentError when n <= 0" do
+    assert_raises("ArgumentError") { {a: 1}.each_slice(0) { } }
+    assert_raises("ArgumentError") { {a: 1}.each_slice(-1) { } }
+  end
+
+  it "honours break inside the block" do
+    r = {a: 1, b: 2, c: 3}.each_slice(2) { |_| break :early }
+    assert_eq(r, :early)
+  end
+
+  it "propagates non-local return from inside the block" do
+    # The iterator must bubble out as Nil so dispatch reads
+    # vm.method_return and unwinds — otherwise the receiver
+    # gets pushed onto the stack mid-unwind.
+    def self.each_slice_with_return
+      {a: 1, b: 2, c: 3}.each_slice(2) { |_| return :returned }
+      :unreached
+    end
+    assert_eq(each_slice_with_return, :returned)
+  end
+
+  it "no-block form: .to_a yields the same shape as the block form" do
+    # CRuby returns an Enumerator; rubyrs returns the
+    # materialised Array directly (see hash.rs Enumerator
+    # stub). `.to_a` on either is a no-op vs a forced
+    # materialisation respectively — both produce the same
+    # nested-Array shape, so the canonical
+    # `h.each_slice(2).to_a` idiom stays portable.
+    h = {a: 1, b: 2, c: 3, d: 4, e: 5}
+    assert_eq(
+      h.each_slice(2).to_a,
+      [[[:a, 1], [:b, 2]], [[:c, 3], [:d, 4]], [[:e, 5]]]
+    )
+  end
+end
+
+describe "Hash#each_cons" do
+  it "yields each sliding window of n [k,v] pair Arrays" do
+    seen = []
+    {a: 1, b: 2, c: 3}.each_cons(2) { |w| seen << w }
+    assert_eq(seen, [[[:a, 1], [:b, 2]], [[:b, 2], [:c, 3]]])
+  end
+
+  it "returns the receiver Hash (block form)" do
+    h = {a: 1, b: 2, c: 3}
+    assert(h.each_cons(2) { |_| }.equal?(h))
+  end
+
+  it "yields nothing when receiver has fewer than n pairs" do
+    seen = []
+    {a: 1}.each_cons(2) { |w| seen << w }
+    assert_eq(seen, [])
+  end
+
+  it "raises ArgumentError when n <= 0" do
+    assert_raises("ArgumentError") { {a: 1}.each_cons(0) { } }
+    assert_raises("ArgumentError") { {a: 1}.each_cons(-1) { } }
+  end
+
+  it "honours break inside the block" do
+    r = {a: 1, b: 2, c: 3}.each_cons(2) { |_| break :early }
+    assert_eq(r, :early)
+  end
+
+  it "propagates non-local return from inside the block" do
+    def self.each_cons_with_return
+      {a: 1, b: 2, c: 3}.each_cons(2) { |_| return :returned }
+      :unreached
+    end
+    assert_eq(each_cons_with_return, :returned)
+  end
+
+  it "no-block form: .to_a yields the same shape as the block form" do
+    # Mirrors the each_slice no-block test — CRuby returns
+    # an Enumerator; rubyrs returns the materialised
+    # windows Array. `.to_a` is portable across both.
+    h = {a: 1, b: 2, c: 3, d: 4}
+    assert_eq(
+      h.each_cons(2).to_a,
+      [[[:a, 1], [:b, 2]], [[:b, 2], [:c, 3]], [[:c, 3], [:d, 4]]]
+    )
+  end
+
+  it "shares pair-Array identity across overlapping windows (CRuby parity)" do
+    # The implementation pre-materialises pair Arrays so the
+    # shared middle pair across consecutive windows is the
+    # SAME Array, not a fresh clone. Pin this with `.equal?`
+    # so a future refactor that re-allocates per window
+    # surfaces here instead of as a silent identity drift.
+    windows = []
+    {a: 1, b: 2, c: 3}.each_cons(2) { |w| windows << w }
+    # windows[0] = [[:a,1], [:b,2]]   ;   windows[1] = [[:b,2], [:c,3]]
+    assert(windows[0][1].equal?(windows[1][0]))
+  end
+end
+
+describe "Hash#chunk_while" do
+  it "partitions into runs where the block (called with adjacent pair Arrays) is truthy" do
+    h = {a: 1, b: 2, c: 5, d: 6}
+    r = h.chunk_while { |prev, cur| cur[1] - prev[1] == 1 }
+    assert_eq(r, [[[:a, 1], [:b, 2]], [[:c, 5], [:d, 6]]])
+  end
+
+  it "yields prev=pair[i] and cur=pair[i+1] as two separate args" do
+    seen = []
+    {a: 1, b: 2, c: 3}.chunk_while { |a, b| seen << [a, b]; true }
+    assert_eq(seen, [[[:a, 1], [:b, 2]], [[:b, 2], [:c, 3]]])
+  end
+
+  it "returns a single chunk when the block is always truthy" do
+    h = {a: 1, b: 2, c: 3}
+    assert_eq(h.chunk_while { true }, [[[:a, 1], [:b, 2], [:c, 3]]])
+  end
+
+  it "returns a chunk per pair when the block is always falsy" do
+    h = {a: 1, b: 2, c: 3}
+    assert_eq(h.chunk_while { false }, [[[:a, 1]], [[:b, 2]], [[:c, 3]]])
+  end
+
+  it "returns [] on empty Hash" do
+    assert_eq({}.chunk_while { true }, [])
+  end
+
+  it "returns [[[k,v]]] on single-pair Hash (block never invoked)" do
+    assert_eq({a: 1}.chunk_while { false }, [[[:a, 1]]])
+  end
+
+  it "honours break inside the block" do
+    r = {a: 1, b: 2, c: 3}.chunk_while { |_a, _b| break :early }
+    assert_eq(r, :early)
+  end
+
+  it "propagates non-local return from inside the block" do
+    def self.chunk_while_with_return
+      {a: 1, b: 2, c: 3}.chunk_while { |_a, _b| return :returned }
+      :unreached
+    end
+    assert_eq(chunk_while_with_return, :returned)
+  end
+end

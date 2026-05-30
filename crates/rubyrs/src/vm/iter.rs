@@ -2917,6 +2917,200 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Array(result_id)))
             }
+            // `h.each_slice(n) { |slice| ... }` — yield each
+            // consecutive group of n `[k, v]` pair Arrays as a
+            // single Array argument; return the receiver Hash
+            // (CRuby parity — block-form returns the receiver,
+            // not nil). Last slice may be shorter than n.
+            (Value::Hash(id), "each_slice", [Value::Int(n)]) => {
+                if *n <= 0 {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: format!("invalid slice size: {}", n),
+                    }));
+                }
+                let id = *id;
+                let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                'outer: for chunk in snapshot.chunks(n_usz) {
+                    // Per-iter scope: snapshot pinned-len at iter
+                    // start, push transient pair/slice pins
+                    // directly, then truncate back unconditionally
+                    // after the closure returns (Ok OR Err).
+                    // Wrapping the body in a closure routes any
+                    // `?` early-return through the post-closure
+                    // truncate, so per-iter pins are released
+                    // at end of each chunk on every path — no
+                    // accumulation across iterations, no leak on
+                    // check_alloc trap. `g.pin()` isn't used here
+                    // because PinGuard's Drop only fires at
+                    // function exit (would keep all iters'
+                    // pins alive — O(snapshot.len()) growth).
+                    let iter_baseline = g.vm.pinned.len();
+                    let step_result: Result<BlockStep, Trap> = (|| {
+                        let mut pair_ids: Vec<Value> = Vec::with_capacity(chunk.len());
+                        for (k, v) in chunk {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                            g.vm.pinned.push(Value::Array(pid));
+                            pair_ids.push(Value::Array(pid));
+                        }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let slice_id = g.vm.heap.alloc(HeapObj::Array(pair_ids));
+                        g.vm.pinned.push(Value::Array(slice_id));
+                        g.vm.step_block(block, vec![Value::Array(slice_id)], pre_frames)
+                    })();
+                    g.vm.pinned.truncate(iter_baseline);
+                    match step_result? {
+                        // Non-local `return` from inside the block:
+                        // bubble out immediately as Nil so the outer
+                        // dispatch loop reads `vm.method_return` and
+                        // unwinds. Matching the chunk_while
+                        // convention; `break 'outer` here would
+                        // swallow the return signal and push the
+                        // receiver onto the stack mid-unwind.
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break 'outer; }
+                        BlockStep::Value(_) => {}
+                    }
+                }
+                Some(early.unwrap_or(Value::Hash(id)))
+            }
+            // `h.each_cons(n) { |window| ... }` — sliding window
+            // of n consecutive `[k, v]` pair Arrays. No yields
+            // when receiver has fewer than n pairs. Returns
+            // receiver Hash (CRuby parity).
+            (Value::Hash(id), "each_cons", [Value::Int(n)]) => {
+                if *n <= 0 {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: format!("invalid size: {}", n),
+                    }));
+                }
+                let id = *id;
+                let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                // Pre-materialise pair Arrays once; CRuby shares
+                // pair identity across overlapping windows. Each
+                // pinned pair Array transitively pins its `k` /
+                // `v` contents, so no per-entry snapshot pin is
+                // needed (would just inflate vm.pinned for large
+                // hashes — GC root-walk cost).
+                let mut pair_vals: Vec<Value> = Vec::with_capacity(snapshot.len());
+                for (k, v) in &snapshot {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    g.pin(Value::Array(pid));
+                    pair_vals.push(Value::Array(pid));
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                if pair_vals.len() >= n_usz {
+                    'outer: for win in pair_vals.windows(n_usz) {
+                        // Per-iter scope: see each_slice arm
+                        // above for the closure+truncate
+                        // rationale. The window pin is released
+                        // at end of each iteration on every
+                        // path, keeping `vm.pinned` size bounded
+                        // by `pair_vals.len()` (already pre-
+                        // pinned) instead of growing
+                        // O(number_of_windows).
+                        let iter_baseline = g.vm.pinned.len();
+                        let step_result: Result<BlockStep, Trap> = (|| {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let wid = g.vm.heap.alloc(HeapObj::Array(win.to_vec()));
+                            g.vm.pinned.push(Value::Array(wid));
+                            g.vm.step_block(block, vec![Value::Array(wid)], pre_frames)
+                        })();
+                        g.vm.pinned.truncate(iter_baseline);
+                        match step_result? {
+                            // See each_slice arm above — non-local
+                            // `return` must bubble out as Nil so
+                            // outer dispatch reads `method_return`.
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                            BlockStep::Break(r) => { early = Some(r); break 'outer; }
+                            BlockStep::Value(_) => {}
+                        }
+                    }
+                }
+                Some(early.unwrap_or(Value::Hash(id)))
+            }
+            // `h.chunk_while { |a, b| pred(a, b) }` — partition
+            // entries into runs where the block (called with two
+            // adjacent `[k, v]` pair Arrays) returns truthy.
+            // Falsy starts a new chunk. Result is an Array of
+            // chunk Arrays, each chunk containing pair Arrays.
+            // Empty hash → `[]`; single-pair hash → `[[[k,v]]]`.
+            (Value::Hash(id), "chunk_while", []) => {
+                let id = *id;
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                // Pre-materialise pair Arrays so adjacent
+                // chunks see the same identity (CRuby parity
+                // with Array#chunk_while where adjacent
+                // elements are the same Value). Each pinned
+                // pair transitively pins its `k` / `v`
+                // contents, so no per-entry snapshot pin
+                // is needed.
+                let mut pair_vals: Vec<Value> = Vec::with_capacity(snapshot.len());
+                for (k, v) in &snapshot {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    g.pin(Value::Array(pid));
+                    pair_vals.push(Value::Array(pid));
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                if pair_vals.is_empty() {
+                    return Ok(Some(Value::Array(result_id)));
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut current_chunk: Vec<Value> = vec![pair_vals[0].clone()];
+                let mut early: Option<Value> = None;
+                for pair in pair_vals.windows(2) {
+                    let r = match g.vm.step_block(block, vec![pair[0].clone(), pair[1].clone()], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    if r.is_truthy() {
+                        current_chunk.push(pair[1].clone());
+                    } else {
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let chunk_id = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current_chunk)));
+                        g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
+                        current_chunk.push(pair[1].clone());
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                if !current_chunk.is_empty() {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let chunk_id = g.vm.heap.alloc(HeapObj::Array(current_chunk));
+                    g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
+                }
+                Some(Value::Array(result_id))
+            }
             // `h.find_index { |pair| ... }` — returns the Int
             // index of the first entry whose block result is
             // truthy, or nil. Same yield shape as one? /
