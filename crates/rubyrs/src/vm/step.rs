@@ -2370,6 +2370,7 @@ impl Vm {
                 let f = self.frames.last().expect("ICE: PushRescue no frame");
                 let ip = f.ip;
                 let loop_depth = f.loop_rescue_depths.len();
+                let begin_depth = f.begin_rescue_depths.len();
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
                 let bind_slot = if bind != 0 { Some(slot) } else { None };
@@ -2392,6 +2393,7 @@ impl Vm {
                 self.frames.last_mut().expect("ICE: PushRescue no frame").rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
                     filter_class: filter, loop_depth_at_push: loop_depth,
+                    begin_depth_at_push: begin_depth,
                 });
             }
             Op::PopRescue => {
@@ -2422,12 +2424,14 @@ impl Vm {
                 let f = self.frames.last().expect("ICE: PushEnsure no frame");
                 let ip = f.ip;
                 let loop_depth = f.loop_rescue_depths.len();
+                let begin_depth = f.begin_rescue_depths.len();
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
                 self.frames.last_mut().expect("ICE: PushEnsure no frame").rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot: None, is_ensure: true,
                     filter_class: None, // ensure is unconditional
                     loop_depth_at_push: loop_depth,
+                    begin_depth_at_push: begin_depth,
                 });
             }
             Op::PopEnsure => {

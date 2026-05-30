@@ -249,6 +249,17 @@ pub(crate) struct RescueHandler {
     /// pop the wrong number of rescue handlers / jump from the
     /// wrong join point.
     pub(crate) loop_depth_at_push: usize,
+    /// `begin_rescue_depths.len()` snapshot at the moment this
+    /// handler was pushed. When an exception fires and this
+    /// handler catches, the unwinder truncates
+    /// `begin_rescue_depths` back to this value so that
+    /// `Op::EnterBegin` baselines pushed by inner begin/rescue
+    /// blocks the exception is escaping out of don't leak.
+    /// Without this, a later `retry` in an outer rescue body
+    /// would read the stale inner baseline and truncate
+    /// `rescues` to the wrong depth, leaving outer rescue
+    /// handlers stranded. (Code-review #306 round 2.)
+    pub(crate) begin_depth_at_push: usize,
     /// Class filter for `rescue`. `None` means catch-all (used for
     /// `ensure` and as a future hook for internal/host-only handlers).
     /// `Some(cls)` means the handler only fires when the raised

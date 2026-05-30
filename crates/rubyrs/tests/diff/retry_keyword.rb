@@ -119,3 +119,35 @@ rescue TypeError => e
 end
 puts "after-begin-count=#{$once_after_begin}"
 puts "trailing-rescue=#{err}"
+
+## Shape 7: nested begin where the inner one's `EnterBegin`
+## baseline gets bypassed because the inner rescue's filter
+## doesn't match — the exception propagates through to the
+## outer rescue, which retries. The unwind needs to truncate
+## `begin_rescue_depths` to the depth recorded when the outer
+## handler was pushed; without it, the inner orphan baseline
+## stays at the top and outer-retry's
+## TruncateRescuesToBeginBaseline shrinks `rescues` to the
+## wrong depth. (Code-review #306 round 2.)
+outer_c = 0
+nested_result = begin
+  outer_c += 1
+  begin
+    raise ArgumentError, "inner" if outer_c < 3
+    "inner-ok-#{outer_c}"
+  rescue TypeError
+    "wont-match"
+  end
+rescue ArgumentError
+  retry if outer_c < 3
+  "outer-fail"
+end
+puts "nested-result=#{nested_result.inspect}"
+puts "nested-outer-c=#{outer_c}"
+# Trailing raise — stale baselines shouldn't catch.
+trailing = begin
+  raise TypeError, "trailing"
+rescue TypeError => e
+  "caught:#{e.message}"
+end
+puts "trailing=#{trailing}"
