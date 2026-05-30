@@ -286,6 +286,54 @@ impl Clone for HostFnSlot {
     }
 }
 
+/// ADR 0025 Phase 5b: RAII guard for `Vm::suppress_interrupt`.
+/// Increments on `enter`, decrements on `Drop` — panic-safe.
+///
+/// Round-3 review surfaced that the hand-written
+/// `vm.suppress_interrupt += 1 ... vm.suppress_interrupt -= 1`
+/// pattern in `InterruptAction::deliver`'s InvokeBlock branch
+/// was vulnerable to panic-induced counter leakage: if
+/// `invoke_block` or the nested `dispatch_until` panics (rather
+/// than returns Err), the decrement is skipped, the counter
+/// stays positive forever, and SIGINT delivery is permanently
+/// disabled for the Vm. This guard removes that hazard.
+///
+/// Used by:
+/// 1. `vm/step.rs::InterruptAction::deliver` around the trap
+///    block's re-entrant dispatch.
+/// 2. `http_server.rs::FiberResponseBody::drop` around
+///    `invoke_body_close` — ADR 0023 Risk #1 mitigation.
+/// 3. Future: `at_exit` drain (ADR 0025 Phase 5b extension),
+///    `ensure` block executor, any other "must-complete
+///    cleanup" path.
+pub(crate) struct SuppressInterruptGuard<'a> {
+    pub(crate) vm: &'a mut Vm,
+}
+
+impl<'a> SuppressInterruptGuard<'a> {
+    /// Increment `suppress_interrupt`, returning a guard whose
+    /// Drop decrements. The dispatch-loop safe-point check
+    /// reads `suppress_interrupt == 0` and skips delivery
+    /// when nonzero — so deliveries land at the next safe
+    /// point AFTER this guard drops.
+    pub(crate) fn enter(vm: &'a mut Vm) -> Self {
+        vm.suppress_interrupt = vm.suppress_interrupt.saturating_add(1);
+        Self { vm }
+    }
+}
+
+impl Drop for SuppressInterruptGuard<'_> {
+    fn drop(&mut self) {
+        // `saturating_sub` so a logic bug somewhere that
+        // double-decrements doesn't underflow into u32::MAX
+        // (which would also disable SIGINT delivery forever
+        // — but more silently than a panic). The matched
+        // `saturating_add` in `enter` keeps the counter
+        // bounded in the other direction.
+        self.vm.suppress_interrupt = self.vm.suppress_interrupt.saturating_sub(1);
+    }
+}
+
 /// Side-channel record of the most recent successful regex match.
 /// Holds owned strings so the GC need not walk it; the cost is
 /// one `.to_string()` per capture group on each successful match.

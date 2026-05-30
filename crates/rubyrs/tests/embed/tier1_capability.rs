@@ -807,6 +807,42 @@ fn phase_4c_at_exit_without_block_raises_local_jump_error() {
 }
 
 #[test]
+fn v7_at_exit_handler_raise_continues_lifo_drain() {
+    // Round-3 review safety finding: a raising at_exit handler
+    // must NOT stop the LIFO drain. Verify with three handlers
+    // where the MIDDLE one raises; the other two still fire
+    // (LIFO order: 3 → 2-raises → 1) and the final eval result
+    // is the last error.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    let err = rt.eval(
+        r##"
+        at_exit { puts "handler 1 (registered 1st, fires last)" }
+        at_exit { puts "handler 2 (raises)"; raise "boom from at_exit" }
+        at_exit { puts "handler 3 (registered last, fires first)" }
+        puts "main"
+        "##,
+        "v7_at_exit_raise.rb",
+    ).unwrap_err();
+    assert_eq!(
+        buf.snapshot(),
+        "main\n\
+         handler 3 (registered last, fires first)\n\
+         handler 2 (raises)\n\
+         handler 1 (registered 1st, fires last)\n",
+    );
+    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+        panic!("expected RuntimeError, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "RuntimeError");
+    assert!(
+        message.contains("boom from at_exit"),
+        "unexpected: {message}",
+    );
+}
+
+#[test]
 fn exit_raises_system_exit_caught_with_status() {
     // ADR 0025 Phase 0.5b: `Kernel#exit(N)` raises SystemExit
     // with status=N. The user-script `rescue SystemExit => e`

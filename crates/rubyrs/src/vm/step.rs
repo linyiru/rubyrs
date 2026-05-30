@@ -226,24 +226,23 @@ impl InterruptAction {
             Self::Clear => Ok(()),
             Self::InvokeBlock(block_id) => {
                 // Re-entrant dispatch of the user's trap block.
-                // suppress_interrupt++ ensures a concurrent
-                // signal landing mid-block doesn't recursively
-                // re-enter; decrement on exit so subsequent
-                // safe-points re-arm normally.
-                vm.suppress_interrupt += 1;
-                let pre_frames = vm.frames.len();
-                let r = (|| -> Result<(), Trap> {
-                    vm.invoke_block(block_id, vec![])?;
-                    vm.dispatch_until(pre_frames)?;
-                    // Block returned. Pop its return value; trap
-                    // handlers in CRuby return values are ignored
-                    // (the canonical use is side-effects only,
-                    // e.g. `exit` or logging).
-                    vm.stack.pop();
-                    Ok(())
-                })();
-                vm.suppress_interrupt -= 1;
-                r
+                // The `SuppressInterruptGuard` increments
+                // `suppress_interrupt` on entry and decrements
+                // on Drop — so a panic in `invoke_block` or the
+                // nested `dispatch_until` CANNOT leak the
+                // counter (which would permanently disable
+                // SIGINT delivery for the Vm's remaining life).
+                // Round-3 review safety finding.
+                let _guard = crate::vm::SuppressInterruptGuard::enter(vm);
+                let pre_frames = _guard.vm.frames.len();
+                _guard.vm.invoke_block(block_id, vec![])?;
+                _guard.vm.dispatch_until(pre_frames)?;
+                // Block returned. Pop its return value; trap
+                // handlers in CRuby return values are ignored
+                // (the canonical use is side-effects only,
+                // e.g. `exit` or logging).
+                _guard.vm.stack.pop();
+                Ok(())
             }
         }
     }
@@ -571,11 +570,32 @@ impl Vm {
             //
             // Memory ordering: Relaxed load is sufficient for
             // a single flag with no paired data — handler uses
-            // SeqCst store; reader uses Relaxed. If a future
-            // change pairs additional state with the flag,
-            // upgrade load → Acquire + handler store →
-            // Release. ADR 0025 v3 Phase 2 step 5 locks this
-            // contract.
+            // SeqCst store; reader uses Relaxed. Round-3 review
+            // confirmed: composition is sound today *only*
+            // because the AtomicBool carries no paired data.
+            //
+            // **Tripwire**: if a future change adds Vm state
+            // that the handler / signal context MUST observe
+            // alongside the flag (e.g. a `signal_traps[SIGINT]`
+            // ObjId discriminant published from a separate
+            // thread), update BOTH sides at once:
+            //
+            //   1. Upgrade THIS load → Acquire.
+            //   2. Upgrade the handler-side store → Release
+            //      (replace `signal_hook::flag::register`,
+            //      which uses Relaxed, with `register_usize`
+            //      or hand-rolled `sigaction` that pairs the
+            //      store with a Release fence on the paired
+            //      state).
+            //   3. Mirror the upgrade at the `kernel.rs` sleep
+            //      poller's `flag.load(Relaxed)` site —
+            //      otherwise sleep observes the stale paired
+            //      state mid-call.
+            //
+            // The contract is unchanged from Phase 2; this
+            // round-3 expansion just makes the upgrade
+            // checklist explicit so a future implementer
+            // doesn't miss site #3.
             #[cfg(unix)]
             if let Some(action) = self.safe_point_interrupt_action() {
                 action.deliver(self)?;

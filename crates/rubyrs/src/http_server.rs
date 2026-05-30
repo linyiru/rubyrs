@@ -855,7 +855,20 @@ impl Drop for FiberResponseBody {
         // reborrow pattern as `poll_frame` uses on the live
         // resume path.
         let vm = unsafe { &mut *ptr };
-        invoke_body_close(vm, body);
+        // ADR 0025 Phase 5b: wrap `invoke_body_close` in
+        // `SuppressInterruptGuard` so a concurrent SIGINT
+        // (`interrupt_pending` already true when Drop fires)
+        // does NOT abort the close mid-flight. The close path
+        // enters dispatch_until, which would normally fire
+        // the Phase 2 safe-point check and raise Interrupt —
+        // exactly the ensure-leak shape ADR 0023 Risk #1 was
+        // meant to fix. The guard defers delivery until close
+        // completes (or panics — Drop unwinds; the guard's
+        // own Drop decrements the counter, so a subsequent
+        // signal can still fire on the next safe point).
+        let guard = crate::vm::SuppressInterruptGuard::enter(vm);
+        invoke_body_close(guard.vm, body);
+        drop(guard);
     }
 }
 

@@ -2384,35 +2384,79 @@ RUBY_ENGINE = "ruby".freeze
     /// Drains the queue (each handler runs exactly once per
     /// eval call). Empty queue → returns `original` unchanged.
     fn drain_at_exit_handlers(&mut self, original: Result<Value, Trap>) -> Result<Value, Trap> {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
         if self.vm.at_exit_handlers.is_empty() {
             return original;
         }
+        // Round-3 safety finding: if the original eval ended OK,
+        // `vm.frames` / `stack` / `pinned` are NOT cleaned up by
+        // `eval_inner`'s per-eval epilogue (which only runs the
+        // counter/deadline reset). A handler invoked on top of
+        // residual state can corrupt subsequent handlers' view.
+        // Pre-drain cleanup: if the original was Ok, the
+        // eval_inner postlude ran but didn't wipe frames; the
+        // top frame is gone (Op::Return popped) but pinned /
+        // control-flow signals may carry over. Defensive
+        // sweep here so each handler starts from a clean slate.
+        // On Err the eval wrapper at line 2454 already clears
+        // them on the Err path, so this is redundant but cheap.
+        self.vm.clear_control_flow_signals();
+
         let mut current = original;
         // Drain in reverse — CRuby runs at_exit handlers LIFO
         // (last-registered first).
         let handlers: Vec<crate::value::ObjId> = self.vm.at_exit_handlers.drain(..).rev().collect();
         for block_id in handlers {
             let pre_frames = self.vm.frames.len();
-            // invoke_block + dispatch_until — the same shape
-            // step_block uses for Rust-driven iter callers.
-            let handler_result = (|| -> Result<(), Trap> {
-                self.vm.invoke_block(block_id, vec![])?;
-                self.vm.dispatch_until(pre_frames)?;
-                // Pop the return value — at_exit blocks have no
-                // meaningful return semantics.
-                self.vm.stack.pop();
-                Ok(())
-            })();
+            // Round-3 safety finding: a panic in `invoke_block`
+            // or the nested `dispatch_until` bypasses the Result
+            // path — `catch_unwind` ensures the LIFO drain
+            // continues regardless. `AssertUnwindSafe` is sound
+            // here because we explicitly wipe Vm transient
+            // state after each handler (panic or not), so no
+            // half-completed invariant carries into the next
+            // handler's dispatch.
+            let handler_result: Result<Result<(), Trap>, _> =
+                catch_unwind(AssertUnwindSafe(|| -> Result<(), Trap> {
+                    self.vm.invoke_block(block_id, vec![])?;
+                    self.vm.dispatch_until(pre_frames)?;
+                    // Pop the return value — at_exit blocks have no
+                    // meaningful return semantics.
+                    self.vm.stack.pop();
+                    Ok(())
+                }));
             // Per-handler cleanup: the dispatch may have left
             // method_return / break_signaled / other transient
             // signals stale if the block did an early `next` /
-            // `return`. Clear them before the next handler so
-            // they don't bleed into subsequent invocations.
+            // `return`. Also clear frames left behind by a
+            // panicking handler so the next handler starts clean.
+            // Truncate frames back to the count before THIS
+            // handler ran.
+            if self.vm.frames.len() > pre_frames {
+                self.vm.frames.truncate(pre_frames);
+            }
             self.vm.clear_control_flow_signals();
-            // Per ADR 0025: an at_exit handler raising
-            // OVERRIDES the original eval result. Match CRuby.
-            if let Err(trap) = handler_result {
-                current = Err(trap);
+            match handler_result {
+                Ok(Ok(())) => {} // handler completed; original `current` stays
+                Ok(Err(trap)) => {
+                    // Per ADR 0025: an at_exit handler raising
+                    // OVERRIDES the original eval result. Match
+                    // CRuby's "last error wins" semantic.
+                    current = Err(trap);
+                }
+                Err(panic_payload) => {
+                    // Panic mid-handler. Convert to a Trap so the
+                    // embedder sees a recoverable error rather
+                    // than process abort. Subsequent handlers
+                    // continue (LIFO drain not aborted) — matches
+                    // the documented "errors don't stop drain"
+                    // contract just generalized to panics.
+                    let msg = format!(
+                        "host-side panic inside at_exit handler: {}",
+                        panic_payload_message(panic_payload.as_ref()),
+                    );
+                    current = Err(self.vm.trap(crate::error::RubyError::RuntimeError { msg }));
+                }
             }
         }
         current
