@@ -88,6 +88,36 @@ end
 # respond_to? agrees with dispatch
 puts Object.new.respond_to?(:extend)
 
+# Zero-arg extend raises ArgumentError, NOT NoMethodError
+# (cycle-1 review of this PR — was falling through to dispatch
+# lookup and surfacing as NoMethodError).
+begin
+  Object.new.extend
+rescue ArgumentError
+  puts "argerr-zero-args"
+end
+
+# Transitive prepends — `Q prepends P; obj.extend(Q)` exposes
+# P's methods in singleton_methods. Pre-cycle-1 walk only
+# followed `includes`, missing prepended chains even though
+# dispatch could call P's methods (cycle-1 fix follows
+# Module#ancestors which spans both chains).
+module Pp
+  def pp_hi
+    "Pp"
+  end
+end
+module Qq
+  prepend Pp
+  def qq_hi
+    "Qq"
+  end
+end
+op = Object.new
+op.extend(Qq)
+puts op.pp_hi
+puts op.singleton_methods.sort.inspect
+
 # Methods inherited from extended modules participate in
 # dispatch's normal precedence: own def > singleton > extended.
 class C; def m_hi; "C-version"; end; end

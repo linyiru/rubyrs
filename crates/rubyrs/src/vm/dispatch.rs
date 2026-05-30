@@ -4142,6 +4142,17 @@ impl Vm {
         // the existing `methods_for_obj` walk hits eigenclass.includes
         // before the real class. CRuby last-extended-wins is
         // honoured by inserting at the head of the chain.
+        // Zero-arg `obj.extend` raises ArgumentError in CRuby
+        // ("wrong number of arguments (given 0, expected 1+)"),
+        // not NoMethodError. Surface that explicitly before the
+        // arity-checked main arm below so a missing arg can't
+        // fall through to the dispatch-not-found path.
+        if let Value::Object(_) = &recv
+            && &*name == "extend" && args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "wrong number of arguments (given 0, expected 1+)".to_string(),
+                }));
+            }
         if let Value::Object(id) = &recv
             && &*name == "extend" && !args.is_empty() {
                 let mut modules: Vec<std::rc::Rc<crate::value::Class>> = Vec::with_capacity(args.len());
@@ -4383,25 +4394,29 @@ impl Vm {
                         // on the eigenclass's `includes` chain; CRuby
                         // reports each module's instance methods as
                         // singleton methods of `obj`. Walk transitive
-                        // includes so `M includes N` surfaces N's
-                        // methods too.
-                        fn walk_includes(
+                        // includes AND prepends so chains like
+                        // `module Q; prepend P; end; obj.extend(Q)`
+                        // surface P's methods too (CRuby's
+                        // `Module#ancestors` includes both).
+                        fn walk_chain(
                             c: &std::rc::Rc<crate::value::Class>,
                             out: &mut Vec<crate::intern::SymId>,
                             visited: &mut Vec<*const crate::value::Class>,
                         ) {
-                            for inc in c.includes.borrow().iter() {
-                                let ptr = std::rc::Rc::as_ptr(inc);
-                                if visited.contains(&ptr) { continue; }
-                                visited.push(ptr);
-                                for k in inc.methods.borrow().keys() {
-                                    if !out.contains(k) { out.push(*k); }
+                            for chain in [c.includes.borrow(), c.prepends.borrow()] {
+                                for m in chain.iter() {
+                                    let ptr = std::rc::Rc::as_ptr(m);
+                                    if visited.contains(&ptr) { continue; }
+                                    visited.push(ptr);
+                                    for k in m.methods.borrow().keys() {
+                                        if !out.contains(k) { out.push(*k); }
+                                    }
+                                    walk_chain(m, out, visited);
                                 }
-                                walk_includes(inc, out, visited);
                             }
                         }
                         let mut visited: Vec<*const crate::value::Class> = Vec::new();
-                        walk_includes(sc, &mut names, &mut visited);
+                        walk_chain(sc, &mut names, &mut visited);
                     }
                 }
                 Value::Class(cls) => {
