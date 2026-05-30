@@ -114,6 +114,18 @@ describe "Hash#each_cons" do
       [[[:a, 1], [:b, 2]], [[:b, 2], [:c, 3]], [[:c, 3], [:d, 4]]]
     )
   end
+
+  it "shares pair-Array identity across overlapping windows (CRuby parity)" do
+    # The implementation pre-materialises pair Arrays so the
+    # shared middle pair across consecutive windows is the
+    # SAME Array, not a fresh clone. Pin this with `.equal?`
+    # so a future refactor that re-allocates per window
+    # surfaces here instead of as a silent identity drift.
+    windows = []
+    {a: 1, b: 2, c: 3}.each_cons(2) { |w| windows << w }
+    # windows[0] = [[:a,1], [:b,2]]   ;   windows[1] = [[:b,2], [:c,3]]
+    assert(windows[0][1].equal?(windows[1][0]))
+  end
 end
 
 describe "Hash#chunk_while" do
@@ -145,5 +157,18 @@ describe "Hash#chunk_while" do
 
   it "returns [[[k,v]]] on single-pair Hash (block never invoked)" do
     assert_eq({a: 1}.chunk_while { false }, [[[:a, 1]]])
+  end
+
+  it "honours break inside the block" do
+    r = {a: 1, b: 2, c: 3}.chunk_while { |_a, _b| break :early }
+    assert_eq(r, :early)
+  end
+
+  it "propagates non-local return from inside the block" do
+    def self.chunk_while_with_return
+      {a: 1, b: 2, c: 3}.chunk_while { |_a, _b| return :returned }
+      :unreached
+    end
+    assert_eq(chunk_while_with_return, :returned)
   end
 end
