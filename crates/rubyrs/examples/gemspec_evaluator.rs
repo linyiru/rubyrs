@@ -28,7 +28,9 @@
 //! Run with: `cargo run --release --example gemspec_evaluator`
 //!
 //! No external setup needed — the example materializes a fake
-//! gem in `target/tmp/` and tears it down on exit.
+//! gem under `CARGO_TARGET_TMPDIR` (when run via `cargo test`) or
+//! `std::env::temp_dir()` (the normal `cargo run` case) and
+//! tears it down on exit via the `GemRoot` RAII guard.
 
 use std::cell::RefCell;
 use std::fs;
@@ -158,7 +160,7 @@ fn main() {
             // which is a load-class FS op.
             allow_filesystem_io: true,
             // Scope: only the gem root tree. Any read outside
-            // (the planted /tmp/secret.txt below) traps with
+            // (Phase 2 below tries `/etc/passwd`) traps with
             // IOError before the syscall.
             allowed_paths: Some(vec![gem_root.path.clone()]),
             // Seed $LOAD_PATH with the gem's lib/ so
@@ -210,8 +212,8 @@ fn main() {
                 println!("     deps    = {:?}", cap.deps);
                 assert_eq!(cap.name.as_deref(), Some("fakegem"));
                 // The interpolated VERSION constant came from
-                // `lib/version.rb` — load_paths-driven resolution
-                // worked.
+                // `lib/fakegem/version.rb` — load_paths-driven
+                // resolution worked.
                 assert_eq!(cap.version.as_deref(), Some("1.2.3"));
                 assert_eq!(cap.deps.len(), 2);
             }
