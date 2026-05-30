@@ -365,8 +365,26 @@ impl Vm {
         // crosses out into a caller's frame, and signal the
         // native iter driver above us to bail.
         self.dispatch_until_depths.push(until_depth);
+        let len_before = self.dispatch_until_depths.len();
         let r = self.dispatch_until_inner(until_depth);
-        self.dispatch_until_depths.pop();
+        // Debug-only nesting check: every push must pair with a
+        // pop at the same depth. A mismatch here would leave the
+        // boundary stack out of sync with the actual nesting,
+        // making subsequent AlreadyCaught checks consult the
+        // wrong boundary. The `popped` value is asserted to
+        // equal `until_depth` so a future refactor that
+        // accidentally pushes inside `dispatch_until_inner`
+        // without a matching pop fails loudly in tests/CI.
+        let popped = self.dispatch_until_depths.pop();
+        debug_assert_eq!(
+            self.dispatch_until_depths.len() + 1,
+            len_before,
+            "dispatch_until_depths nesting mismatch",
+        );
+        debug_assert_eq!(
+            popped, Some(until_depth),
+            "dispatch_until_depths top mismatch on pop",
+        );
         r
     }
 

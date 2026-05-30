@@ -166,10 +166,13 @@ pub enum RubyError {
     /// `AlreadyCaught` short-circuits the iter driver's loop via
     /// the usual `?` propagation: `step_block` returns Err, every
     /// iter driver propagates, [`Vm::primitive_call`] returns Err,
-    /// `step` returns Err, and the OUTER `dispatch_until` catches
-    /// this variant and resumes its loop without double-unwinding.
-    /// The handler IP is already set; the next op fetch lands on
-    /// the `rescue` body.
+    /// `step` returns Err, and an enclosing `dispatch_until`
+    /// **re-emits** the variant (returns Err, not `continue`) so
+    /// the signal bubbles all the way out. The OUTERMOST
+    /// [`Vm::dispatch`] (script frame, no `_until` suffix) is the
+    /// one that actually CONSUMES the variant and resumes its
+    /// loop; the next op fetch lands on the `rescue` body whose
+    /// IP was set by [`Vm::unwind_with_exception`].
     ///
     /// Never reaches user code or `Runtime::eval`'s host-facing
     /// `Result` — outer `dispatch_until` always consumes it.

@@ -981,6 +981,12 @@ impl Vm {
         self.pending_loop_transfer = None;
         self.suppress_call_result_push = false;
         self.bypass_visibility_once = false;
+        // Boundary stack for AlreadyCaught propagation through
+        // native iter drivers. Cleared here so a panic-aborted
+        // dispatch_until (caught by Runtime::eval) doesn't leave
+        // a stale entry that triggers spurious AlreadyCaught on
+        // the next eval. See [`RubyError::AlreadyCaught`] doc.
+        self.dispatch_until_depths.clear();
     }
 
     /// Vm-level inner half of `Runtime::reset_between_requests`.
