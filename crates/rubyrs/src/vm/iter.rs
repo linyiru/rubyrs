@@ -2929,7 +2929,7 @@ impl Vm {
                     }));
                 }
                 let id = *id;
-                let n_usz = *n as usize;
+                let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
                 let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
@@ -2990,7 +2990,7 @@ impl Vm {
                     }));
                 }
                 let id = *id;
-                let n_usz = *n as usize;
+                let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
                 let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));

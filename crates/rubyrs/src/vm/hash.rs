@@ -442,7 +442,7 @@ impl Vm {
                                 msg: format!("invalid slice size: {}", n),
                             }));
                         }
-                        let n = *n as usize;
+                        let n = usize::try_from(*n).unwrap_or(usize::MAX);
                         let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
@@ -473,7 +473,7 @@ impl Vm {
                                 msg: format!("invalid size: {}", n),
                             }));
                         }
-                        let n = *n as usize;
+                        let n = usize::try_from(*n).unwrap_or(usize::MAX);
                         let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
