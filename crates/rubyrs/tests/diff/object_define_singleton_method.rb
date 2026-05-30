@@ -24,10 +24,13 @@ puts C.__send__(:define_singleton_method, :cls_hi) { "C.cls_hi" }
 puts C.cls_hi
 puts C.singleton_methods.include?(:cls_hi)
 
-# (4) Closure captures outer local
+# (4) Closure captures outer local — routed through __send__
+# so the runtime arm's MethodClosure capture path is what's
+# under test (the literal form takes the compiler shortcut at
+# Op::DefObjectSingletonMethodBlock instead).
 counter = 0
 o3 = Object.new
-o3.define_singleton_method(:bump) { counter += 1 }
+o3.__send__(:define_singleton_method, :bump) { counter += 1 }
 o3.bump; o3.bump; o3.bump
 puts counter
 
