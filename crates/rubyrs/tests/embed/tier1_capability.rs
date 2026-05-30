@@ -1093,6 +1093,71 @@ fn adr_0024_phase_a2_stop_iteration_has_result_accessor() {
 }
 
 #[test]
+fn adr_0024_phase_a3_kernel_loop_works_with_break() {
+    // ADR 0024 Phase A.3: top-level `def loop` installed in
+    // preamble. The canonical CRuby idiom should work:
+    //   i = 0; loop { i += 1; break if i >= 3 }
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        i = 0
+        loop do
+          i += 1
+          break if i >= 3
+          puts "iter #{i}"
+        end
+        puts "after, i=#{i}"
+        "##,
+        "adr_0024_a3_loop_break.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "iter 1\niter 2\nafter, i=3\n",
+    );
+}
+
+#[test]
+fn adr_0024_phase_a3_kernel_loop_break_value() {
+    // `result = loop { break "x" }` returns "x".
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        result = loop { break "early-out" }
+        puts "result=#{result}"
+        "##,
+        "adr_0024_a3_loop_value.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "result=early-out\n");
+}
+
+#[test]
+fn adr_0024_phase_a3_kernel_loop_catches_stop_iteration() {
+    // CRuby's `loop` rescues StopIteration and returns the
+    // exception's `#result`. The preamble def uses this
+    // shape directly.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def producer
+          e = StopIteration.new
+          e.result = "iter-end-val"
+          raise e
+        end
+        result = loop { producer }
+        puts "result=#{result}"
+        "##,
+        "adr_0024_a3_loop_stopiteration.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "result=iter-end-val\n");
+}
+
+#[test]
 fn adr_0024_phase_a_max_yield_recursion_cap_trips_resource_exhausted() {
     // Recursive yield chains hit the cap. Setting
     // max_yield_recursion: Some(N) makes a recursion depth
