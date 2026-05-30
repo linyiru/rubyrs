@@ -6,10 +6,198 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Release highlights
+
+Two big arcs landed since 0.1.0: **true async streaming for the
+`_http_server` battery** (ADR 0023, completed pre-0.1.0 + Risk #1
+shipped post-tag via Phase 5b) and **full signal-handling
+infrastructure** (ADR 0025, Phase 0–5 + round-3 follow-ups). The
+combination unlocks the canonical CRuby trap-flow chain in
+`rubyrs script.rb`:
+
+  at_exit { cleanup }
+  Signal.trap("INT") { puts "graceful shutdown"; exit 0 }
+  __rubyrs_http_serve_with_app("127.0.0.1:9292", 60, app,
+                              { install_signal_handler: true })
+
+Ctrl+C → trap fires → exit raises SystemExit → at_exit drain →
+embedder sees Trap with the cleanup already done. Streaming
+responses honor `body.close` exactly-once on client disconnect
++ server shutdown (Drop-Vm-free contract + `SuppressInterruptGuard`
+holding off concurrent SIGINT during close).
+
 ### Added
+
+- **`Signal.trap(name, handler = nil)` + block form**
+  (ADR 0025 Phase 4a/b). Accepts String / Symbol / Integer
+  signal names with optional "SIG" prefix; handlers can be
+  "DEFAULT" / "IGNORE" / `SIG_IGN` / Proc / attached block /
+  explicit `nil` (CRuby 3.x maps `nil` to IGNORE). Returns the
+  previously-installed handler in matching shape. SIGKILL +
+  SIGSTOP rejected per CRuby. Trap blocks run at the
+  `dispatch_until` safe-point — same thread, same Vm,
+  re-entrant under `SuppressInterruptGuard`.
+
+- **`Kernel#sleep(secs)` and bare `Kernel#sleep`** become
+  interruptible (ADR 0025 Phase 3). `Config::sleep_for` signature
+  changed to `Fn(Option<Duration>, &AtomicBool) -> Duration` so
+  the closure polls the flag in chunks (CLI binary uses 50ms
+  — bounds SIGINT response latency). On flag-flip the call
+  raises Interrupt instead of returning. Bare `sleep` requires
+  `Config::install_signal_handler: true` (otherwise it would
+  deadlock — refuses with ArgumentError).
+
+- **`Kernel#exit` / `Kernel#exit!` / `Kernel#abort`**
+  (ADR 0025 Phase 0.5b). `exit(status = true)` raises
+  SystemExit; ensure + at_exit fire. `exit!(status = false)`
+  is the immediate-exit path — needs new `Config::process_exit:
+  Option<Arc<dyn Fn(i32) + Send + Sync>>` capability; CLI wires
+  `std::process::exit`. `abort(msg = nil)` writes msg then
+  exit(1). Status shapes match CRuby:
+  `Integer | true | false | nil`.
+
+- **`Kernel#at_exit { ... }`** (ADR 0025 Phase 4c). LIFO stack
+  drained at end of each `Runtime::eval()` (the embed-model
+  adaptation of CRuby's "process end"). Errors override the
+  eval result ("last-error-wins"). Round-3 follow-up made the
+  drain panic-safe (`catch_unwind` per handler) so one panicking
+  handler doesn't abort the rest of the queue.
+
+- **`Interrupt < SignalException < Exception`** + **`SystemExit
+  < Exception`** preamble class hierarchy (ADR 0025 Phase 0 +
+  0.5a). All three sit outside `StandardError` so a bare
+  `rescue` clause can't swallow Ctrl+C or `exit`. `SystemExit`
+  carries `#status` (Integer) + `#success?`; `SignalException`
+  v7 added 2-arg constructor + `#signo`.
+
+- **`Signal` module preamble** wrapping `__rubyrs_signal_trap`
+  Kernel builtin. Lives in `crates/rubyrs/src/preamble/signal.rb`.
+
+- **CLI opt-ins** (`crates/rubyrs/src/main.rs`):
+  - `Config::sleep_for: Some(std::thread::sleep)` (Phase 3)
+  - `Config::process_exit: Some(std::process::exit)` (Phase 0.5b)
+  - `Config::install_signal_handler: true` (Phase 1)
+
+- **`_http_server` streaming bodies** (ADR 0023, completed
+  earlier; v7 `FiberResponseBody::drop` now wraps
+  `invoke_body_close` in `SuppressInterruptGuard` so a
+  concurrent SIGINT during client-disconnect close doesn't
+  abort the close mid-flight — ADR 0023 Risk #1 actually wired
+  in `75fb3dc8`).
+
+- **`Kernel#sleep` accepts `Rational`** (v7 round-3 parity).
+
 ### Changed
+
+- `Config::sleep_for` signature `Fn(Duration)` →
+  `Fn(Option<Duration>, &AtomicBool) -> Duration`. Breaking for
+  embed users with custom sleep closures — existing four embed
+  tests updated.
+
+- `Config::default()` adds two new None slots
+  (`process_exit`, `sleep_for` already existed) +
+  `install_signal_handler: false`. Tier 1 defaults preserved:
+  no host-side process termination, no signal capture, sleep
+  raises without injection.
+
+- `ServeOptions::install_signal_handler` parser now accepts
+  Ruby `true` / `false` alongside `0` / `1` (v7 cleanup of a
+  surprising "must be 0 or 1, got Bool(true)" error from a
+  natural Hash literal).
+
+- `expect_bool_flag`'s rejection message updated to list all
+  four accepted shapes.
+
 ### Fixed
+
+- **ADR 0023 Risk #1 — `body.close` on client disconnect** now
+  actually fires. v6 documented the `FiberResponseBody::drop`
+  intent; v7 (Phase 5b) wires `SuppressInterruptGuard` around
+  `invoke_body_close` so a concurrent SIGINT during the
+  Drop-initiated close doesn't trip the Phase 2 safe-point and
+  abort the close — exactly the ensure-leak shape Risk #1 was
+  written to fix.
+
+- **`drain_at_exit_handlers` panic-safety** (v7). A panicking
+  at_exit handler no longer abandons remaining handlers in
+  the LIFO queue. `catch_unwind` per handler; converted to a
+  RuntimeError Trap that flows through "last-error-wins".
+  Pre-drain Vm state cleanup + per-handler frame truncation
+  so panic in one handler doesn't bleed into the next.
+
+- **`SuppressInterruptGuard` RAII type** actually implemented
+  (was only documented + sketched in ADR 0025 v3+; v6's
+  `InterruptAction::deliver` used hand-written inc/dec around
+  a `Result`-catching closure that did NOT catch panics → a
+  panic in a trap block permanently disabled SIGINT delivery
+  for the Vm's remaining life). v7 ships the real
+  Drop-decrementing guard.
+
+- **`Signal.trap("INT", nil)` now installs IGNORE** (v7 round-3
+  CRuby parity). Pre-v7 treated as query mode. The 1-arg
+  query form now uses a sentinel Symbol so block-form
+  `Signal.trap("INT") { ... }` doesn't misroute.
+
+- **`SystemExit.new` no-args message** changed from
+  "SystemExit" to "exit" (v7 round-3 CRuby parity).
+
 ### Internal
+
+- `Vm::interrupt_pending: Arc<AtomicBool>` — process-wide
+  signal flag. Opted-in Runtimes share the static `SHARED_FLAG`
+  via `OnceLock`; opted-out Runtimes get a dedicated fresh Arc
+  (round-2 signal isolation finding — non-opt-in Runtimes
+  don't leak each other's SIGINT writes).
+
+- `Vm::signal_traps: HashMap<i32, SignalHandlerState>` —
+  trap-block storage keyed by Unix signal number (`i32`, not
+  String — `parse_signal_name` normalizes inputs).
+
+- `Vm::suppress_interrupt: u32` + `SuppressInterruptGuard<'a>` —
+  must-complete cleanup window. RAII Drop decrements; safe
+  through panic unwind.
+
+- `Vm::at_exit_handlers: Vec<ObjId>` — block-id stack drained
+  by `Runtime::eval` after `eval_inner` returns.
+
+- `vm/step.rs::InterruptAction` enum + Vm method
+  `safe_point_interrupt_action() -> Option<InterruptAction>`.
+  Both `dispatch` and `dispatch_until` consult it at op-boundary
+  for SIGINT delivery. The three actions (RaiseInterrupt /
+  Clear / InvokeBlock) cover Default / Ignore / Block trap
+  states. Counter interaction matrix locked: `suppress_interrupt
+  == 0 && cext_depth_zero` gates delivery.
+
+- `crates/rubyrs/src/signals.rs` (new module). `signal-hook`-
+  backed `install_signals(install) -> Arc<AtomicBool>` with
+  static `OnceLock<Arc<AtomicBool>>` + `parse_signal_name`
+  Tier-1 portable signal subset. Unix-only — Windows fallback
+  is no-op stub (deferred per ADR 0025 v3 Risk #2).
+
+- `signal-hook = "0.3"` added as unix-target dep; `libc =
+  "0.2"` added as unix-target dev-dep for the SIGINT smoke
+  test.
+
+- Memory-ordering contract locked down in
+  `vm/step.rs::dispatch_until`: Relaxed-load + SeqCst-store is
+  sufficient for the single flag. v7 added an explicit 3-site
+  upgrade checklist for the day someone adds paired state.
+
+- `Runtime::_test_interrupt_pending_load_and_clear`,
+  `_test_interrupt_pending_arc`, `_test_set_suppress_interrupt` —
+  `#[doc(hidden)]` accessors for the Phase 1/2/4 integration
+  tests (signal-test mutex serializes them).
+
+### Deferred (tracked in ADR 0025 v7)
+
+- `Vm::cext_depth` ungate from `_fiber` + production cext bridge
+  entry/exit increments. Currently SIGINT during a real cext
+  call IS delivered mid-cext.
+- `Kernel#abort` no-args reads `$!`. Needs $! exposure to host
+  fns.
+- `parse_signal_name` integer range tightening via libc
+  `NSIG`. Currently accepts 1..=64 unconditionally; bogus
+  numbers fail at signal-hook install rather than parse.
 
 ## [0.1.0] - 2026-05-28
 
