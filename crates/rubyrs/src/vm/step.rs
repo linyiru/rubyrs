@@ -322,13 +322,6 @@ impl Vm {
 
     pub(crate) fn dispatch(&mut self) -> Result<(), Trap> {
         while !self.frames.is_empty() {
-            // ADR 0025 Phase 2 + Phase 4b: SIGINT safe-point check.
-            // See `dispatch_until` below for the full rationale.
-            #[cfg(unix)]
-            if let Some(action) = self.safe_point_interrupt_action() {
-                action.deliver(self)?;
-                continue;
-            }
             // Non-local return unwind. `Op::ReturnMethod` sets
             // `method_return`; here we honour it by popping any
             // block frames between us and the enclosing method,
@@ -434,6 +427,17 @@ impl Vm {
                         return Ok(());
                     }
                 }
+                continue;
+            }
+            // ADR 0025 Phase 2 + Phase 4b: SIGINT safe-point check.
+            // v7 round-3 cosmetic: order placed AFTER `method_return`
+            // to match `dispatch_until`'s ordering (method_return →
+            // fiber_yield_pending → interrupt → fuel). dispatch has
+            // no fiber path so the middle item is absent. See
+            // `dispatch_until` below for the full safety rationale.
+            #[cfg(unix)]
+            if let Some(action) = self.safe_point_interrupt_action() {
+                action.deliver(self)?;
                 continue;
             }
             let (proto_idx, ip) = {

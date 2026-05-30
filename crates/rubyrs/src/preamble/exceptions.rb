@@ -117,7 +117,27 @@ end
 ## bare `rescue` clause must NOT swallow a Ctrl+C interrupt — same
 ## rationale as ResourceExhausted above. CRuby places SignalException
 ## and SystemExit directly under Exception for this reason.
+## v7 round-3 parity: CRuby's `SignalException.new(msg = nil, signo = nil)`
+## takes an optional second arg carrying the Unix signal number,
+## exposed as `#signo`. Subclasses (e.g. `Interrupt`) inherit
+## the same shape.
 class SignalException < Exception
+  def initialize(*args)
+    case args.length
+    when 0
+      @signo = nil
+      super(self.class.name)
+    when 1
+      @signo = nil
+      super(args[0])
+    when 2
+      @signo = args[1]
+      super(args[0])
+    else
+      raise ArgumentError, "wrong number of arguments (given #{args.length}, expected 0..2)"
+    end
+  end
+  attr_reader :signo
 end
 ## SIGINT-shaped signals (Ctrl+C in a CLI). CRuby instantiates this
 ## from the default INT handler. rubyrs's signal-handling capability
@@ -154,7 +174,9 @@ class SystemExit < Exception
   def initialize(*args)
     if args.length == 0
       @status = 0
-      super("SystemExit")
+      # v7 round-3 parity: CRuby's `SystemExit.new` returns
+      # an instance with message="exit", not "SystemExit".
+      super("exit")
     elsif args.length == 1
       arg = args[0]
       if arg.is_a?(Integer)

@@ -807,6 +807,77 @@ fn phase_4c_at_exit_without_block_raises_local_jump_error() {
 }
 
 #[test]
+fn v7_sleep_accepts_rational() {
+    // Round-3 review parity: CRuby accepts any Numeric for
+    // sleep; rubyrs v6 only Int / Float. v7 adds Rational.
+    use std::sync::{Arc, Mutex};
+    let recorded: Arc<Mutex<Vec<std::time::Duration>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded_for_cfg = Arc::clone(&recorded);
+    let cfg = rubyrs::Config {
+        sleep_for: Some(std::sync::Arc::new(move |d_opt, _flag| {
+            if let Some(d) = d_opt {
+                recorded_for_cfg.lock().unwrap().push(d);
+            }
+            std::time::Duration::ZERO
+        })),
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.eval("sleep(Rational(1, 2))", "v7_sleep_rational.rb").expect("eval");
+    let durations = recorded.lock().unwrap().clone();
+    assert_eq!(durations.len(), 1);
+    // 1/2 = 0.5 → Duration::from_secs_f64(0.5).
+    assert_eq!(durations[0], std::time::Duration::from_secs_f64(0.5));
+}
+
+#[test]
+fn v7_system_exit_no_args_message_matches_cruby() {
+    // Round-3 review parity: CRuby's `SystemExit.new` (no args)
+    // has message "exit", not the class name.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"puts SystemExit.new.message"##,
+        "v7_systemexit_msg.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "exit\n");
+}
+
+#[test]
+fn v7_signal_exception_2_arg_form_and_signo() {
+    // Round-3 review parity: CRuby's
+    // `SignalException.new(msg, signo)` exposes #signo.
+    // Interrupt inherits the same shape.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        e1 = SignalException.new("got signal", 15)
+        puts "msg=#{e1.message} signo=#{e1.signo}"
+
+        e2 = Interrupt.new("ctrl+c", 2)
+        puts "msg=#{e2.message} signo=#{e2.signo}"
+
+        e3 = Interrupt.new("plain msg only")
+        puts "msg=#{e3.message} signo=#{e3.signo.inspect}"
+
+        e4 = SignalException.new
+        puts "msg=#{e4.message} signo=#{e4.signo.inspect}"
+        "##,
+        "v7_signal_exception_signo.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "msg=got signal signo=15\n\
+         msg=ctrl+c signo=2\n\
+         msg=plain msg only signo=nil\n\
+         msg=SignalException signo=nil\n",
+    );
+}
+
+#[test]
 fn v7_signal_trap_rejects_sigkill_and_sigstop() {
     // CRuby raises ArgumentError("can't trap reserved signal:
     // SIGKILL") and SIGSTOP. Round-3 review parity gap.

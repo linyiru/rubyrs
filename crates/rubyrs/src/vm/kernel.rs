@@ -637,9 +637,19 @@ impl Vm {
                     [] => None,
                     [Value::Int(n)] => Some(*n as f64),
                     [Value::Float(f)] => Some(*f),
+                    // v7 round-3 parity: accept Rational. CRuby
+                    // accepts any Numeric (Rational, BigDecimal,
+                    // etc.); we cover the common one here.
+                    // BigDecimal not yet implemented; BigInt
+                    // converts via to_f only when secs fits f64
+                    // — fall through to TypeError otherwise.
+                    [Value::Rational(id)] => {
+                        let r = self.heap.rational(*id);
+                        Some(r.num as f64 / r.den as f64)
+                    }
                     [other] => return Some(Err(self.trap(RubyError::TypeError {
                         msg: format!(
-                            "sleep duration must be Integer or Float, got {}",
+                            "sleep duration must be Integer / Float / Rational, got {}",
                             other.type_name(),
                         ),
                     }))),
