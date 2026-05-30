@@ -3081,20 +3081,32 @@ fn integer_to_r_and_rationalize() {
         rt.eval(script, "integer_to_r.rb").expect("eval");
         assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
     }
-    // Errors.
-    for (script, expected_class) in [
-        ("5.to_r(99)",            "ArgumentError"),
-        ("5.rationalize(1, 2)",   "ArgumentError"),
-        // BigInt recv: Phase C.4 widens; today RangeError.
-        #[cfg(feature = "bignum")]
-        ("(2**64).to_r",          "RangeError"),
+    // Errors — pin both class AND message wording for the arity
+    // shapes (CRuby uses "expected 0" for zero-arg methods, not
+    // "expected 0..0"; "expected 0..1" reserved for true ranges).
+    for (script, expected_class, expected_msg) in [
+        ("5.to_r(99)",          "ArgumentError", "wrong number of arguments (given 1, expected 0)"),
+        ("5.rationalize(1, 2)", "ArgumentError", "wrong number of arguments (given 2, expected 0..1)"),
     ] {
         let err = rt.eval(script, "integer_to_r_err.rb").unwrap_err();
         match err.err {
-            rubyrs::RubyError::Uncaught { ref class_name, .. } => {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
                 assert_eq!(class_name, expected_class, "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
             }
             ref other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+    // BigInt recv: Phase C.4 widens; today RangeError. Only class
+    // pin — message is internal.
+    #[cfg(feature = "bignum")]
+    {
+        let err = rt.eval("(2**64).to_r", "integer_to_r_bignum.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, .. } => {
+                assert_eq!(class_name, "RangeError");
+            }
+            ref other => panic!("expected RangeError, got {:?}", other),
         }
     }
 }

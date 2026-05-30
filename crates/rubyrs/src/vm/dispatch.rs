@@ -5179,10 +5179,20 @@ impl Vm {
         if recv_is_integer && (&*name == "to_r" || &*name == "rationalize") {
             let max_arity: usize = if &*name == "rationalize" { 1 } else { 0 };
             if args.len() > max_arity {
+                // CRuby uses "expected 0" for 0-arg methods, not
+                // "expected 0..0" — the range form is reserved for
+                // a true range with > 0 spread (e.g. "expected 0..1"
+                // for rationalize). Sibling arity guards above
+                // follow the same convention.
+                let expected = if max_arity == 0 {
+                    "0".to_string()
+                } else {
+                    format!("0..{}", max_arity)
+                };
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!(
-                        "wrong number of arguments (given {}, expected 0..{})",
-                        args.len(), max_arity,
+                        "wrong number of arguments (given {}, expected {})",
+                        args.len(), expected,
                     ),
                 }));
             }

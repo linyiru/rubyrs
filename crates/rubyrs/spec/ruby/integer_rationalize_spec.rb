@@ -29,6 +29,12 @@ describe "Integer#rationalize" do
     assert_raises("ArgumentError") { 5.rationalize(0.1, 0.01) }
   end
 
-  # skipped (method-not-implemented): BigInt receiver. Same as
-  # integer_to_r_spec — Phase C.4 widens i64 num/den to BigInt.
+  # skipped (method-not-implemented): it "returns the receiver as a Rational" do
+  #   # upstream core/integer/rationalize_spec.rb, bignum branch
+  #   # of the receiver-as-Rational test
+  #   bn = 2**64
+  #   assert_eq(bn.rationalize, Rational(bn, 1))
+  # end
+  # Phase C.4 widens RationalRepr's i64 num/den to BigInt; today
+  # `Integer#rationalize` raises RangeError for BigInt magnitudes.
 end
