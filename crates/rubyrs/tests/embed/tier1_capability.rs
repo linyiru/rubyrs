@@ -526,6 +526,143 @@ fn phase_4a_signal_trap_unknown_handler_string_raises() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn phase_4b_safe_point_invokes_trap_block_instead_of_raising() {
+    // ADR 0025 Phase 4b: when `signal_traps[SIGINT]` is
+    // `Block(...)`, the safe-point invokes the block instead
+    // of raising Interrupt. Verify by:
+    //   1. installing a trap block that sets a marker.
+    //   2. setting the flag from a background thread.
+    //   3. running a busy loop in Ruby.
+    //   4. the loop exits cleanly when the marker is set
+    //      (which only happens if the trap fired).
+    let _lock = signal_test_lock();
+    let cfg = rubyrs::Config {
+        install_signal_handler: true,
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+
+    let flag = rt._test_interrupt_pending_arc();
+    let flag_for_thread = std::sync::Arc::clone(&flag);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        flag_for_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        $caught = false
+        Signal.trap("INT") { puts "trap fired"; $caught = true }
+        i = 0
+        while !$caught && i < 100_000_000
+          i += 1
+        end
+        puts "loop exit caught=#{$caught}"
+        "##,
+        "phase4b_block_handler.rb",
+    ).expect("eval should complete cleanly (no Interrupt raise)");
+    let out = buf.snapshot();
+    assert!(
+        out.starts_with("trap fired\n"),
+        "trap block should fire first; got {out:?}",
+    );
+    assert!(
+        out.ends_with("loop exit caught=true\n"),
+        "loop should observe $caught=true after trap; got {out:?}",
+    );
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+}
+
+#[cfg(unix)]
+#[test]
+fn phase_4b_ignore_handler_clears_flag_without_raising() {
+    // `Signal.trap("INT", "IGNORE")` makes SIGINT a no-op.
+    // Background thread sets the flag; safe-point sees Ignore;
+    // flag clears; loop completes normally.
+    let _lock = signal_test_lock();
+    let cfg = rubyrs::Config {
+        install_signal_handler: true,
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+
+    let flag = rt._test_interrupt_pending_arc();
+    let flag_for_thread = std::sync::Arc::clone(&flag);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        flag_for_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        Signal.trap("INT", "IGNORE")
+        i = 0
+        # Bounded loop because Ignore wouldn't break us out of
+        # an infinite one. Cap is well above the time it takes
+        # the background thread to flip + the safe-point to
+        # observe + the flag to clear.
+        while i < 5_000_000
+          i += 1
+        end
+        puts "completed iterations=#{i}"
+        "##,
+        "phase4b_ignore.rb",
+    ).expect("eval should complete cleanly when SIGINT is ignored");
+    assert_eq!(buf.snapshot(), "completed iterations=5000000\n");
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+}
+
+#[cfg(unix)]
+#[test]
+fn phase_4b_default_handler_still_raises_interrupt() {
+    // After installing a block and then restoring "DEFAULT",
+    // the safe-point reverts to the Phase 2 behavior:
+    // raise Interrupt. Verifies the round-trip + that
+    // round-tripping doesn't leak state.
+    let _lock = signal_test_lock();
+    let cfg = rubyrs::Config {
+        install_signal_handler: true,
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+
+    let flag = rt._test_interrupt_pending_arc();
+    let flag_for_thread = std::sync::Arc::clone(&flag);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        flag_for_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        Signal.trap("INT") { puts "trap A" }
+        Signal.trap("INT", "DEFAULT")  # restore default
+        begin
+          i = 0
+          while true
+            i += 1
+          end
+        rescue Interrupt
+          puts "caught Interrupt"
+        end
+        "##,
+        "phase4b_default_restored.rb",
+    ).expect("eval should complete with rescue catching");
+    assert_eq!(buf.snapshot(), "caught Interrupt\n");
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+}
+
 #[test]
 fn exit_raises_system_exit_caught_with_status() {
     // ADR 0025 Phase 0.5b: `Kernel#exit(N)` raises SystemExit
