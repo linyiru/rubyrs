@@ -37,4 +37,15 @@ describe "Integer#to_r" do
   #   bn = 2**64
   #   assert_eq(bn.to_r, Rational(bn, 1))
   # end
+
+  # skipped (method-not-implemented): i64::MIN edge — Phase C.4
+  # follow-up. `make_rational` rejects i64::MIN num/den because
+  # the canonical-form sign normalization would call `.abs()` on
+  # the magnitude (panics in debug for `i64::MIN.abs()`). CRuby
+  # returns `Rational(-9223372036854775808, 1)`. Lifts together
+  # with the BigInt receiver case above when RationalRepr widens.
+  #
+  # it "returns Rational(i64::MIN, 1) for the smallest fixnum" do
+  #   assert_eq((-(2**62 + 2**62)).to_r, Rational(-(2**62 + 2**62), 1))
+  # end
 end

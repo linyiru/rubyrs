@@ -14,7 +14,7 @@ count below is also the passing count.
 |---|---|
 | Files | 149 |
 | Examples in corpus | 923 |
-| Skipped `it` traces | 156 |
+| Skipped `it` traces | 157 |
 
 ### Skipped traces by category
 
@@ -22,7 +22,7 @@ count below is also the passing count.
 |---|---|
 | `divergent` | 2 |
 | `fixture` | 53 |
-| `method-not-implemented` | 82 |
+| `method-not-implemented` | 83 |
 | `mock` | 19 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -42,7 +42,7 @@ Find blocks unlocked by a future feature with e.g.
 | BasicObject | 3 | 15 | 0 |
 | Block | 1 | 8 | 0 |
 | Hash | 40 | 193 | 51 |
-| Integer | 37 | 319 | 31 |
+| Integer | 37 | 319 | 32 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
 | Rational | 4 | 17 | 0 |
@@ -152,7 +152,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_round_spec.rb` | Integer#round | `core/integer/round_spec.rb + shared/to_i.rb + shared/integer_rounding.rb` | 14 | 3 |
 | `integer_succ_spec.rb` | Integer#succ / Integer#next | `core/integer/succ_spec.rb + core/integer/next_spec.rb + shared/next.rb` | 5 | 4 |
 | `integer_times_spec.rb` | Integer#times | `core/integer/times_spec.rb` | 7 | 1 |
-| `integer_to_r_spec.rb` | Integer#to_r | `core/integer/to_r_spec.rb` | 4 | 1 |
+| `integer_to_r_spec.rb` | Integer#to_r | `core/integer/to_r_spec.rb` | 4 | 2 |
 | `integer_to_s_spec.rb` | Integer#to_s | `core/integer/to_s_spec.rb` | 6 | 2 |
 | `integer_truncate_spec.rb` | Integer#truncate | `core/integer/truncate_spec.rb + shared/to_i.rb + shared/integer_rounding.rb` | 6 | 0 |
 | `integer_upto_spec.rb` | Integer#upto [stop] when self and stop are Integers | `core/integer/upto_spec.rb` | 5 | 1 |
