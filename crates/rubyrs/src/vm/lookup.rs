@@ -476,6 +476,16 @@ impl Vm {
             // dispatch arms and both surface in BasicObject's
             // reflection registry.
             | "instance_exec" | "instance_eval"
+            // Receiver-side method introspection — `methods` /
+            // `public_methods` / `private_methods` /
+            // `protected_methods` / `singleton_methods` are
+            // implemented as universal dispatch arms in
+            // `Vm::do_call`. Non-Object/non-Class receivers
+            // succeed by returning an empty Array (rubyrs's
+            // subset doesn't enumerate Kernel-level entries per
+            // value), so feature detection can stay universal.
+            | "methods" | "public_methods" | "private_methods" | "protected_methods"
+            | "singleton_methods"
         ) {
             return true;
         }
