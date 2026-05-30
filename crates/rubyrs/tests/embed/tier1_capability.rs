@@ -664,6 +664,149 @@ fn phase_4b_default_handler_still_raises_interrupt() {
 }
 
 #[test]
+fn phase_4c_at_exit_runs_lifo_on_normal_eval_completion() {
+    // ADR 0025 Phase 4c: at_exit handlers fire in LIFO order
+    // when the eval body completes normally. Returns the
+    // original eval result.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        puts "main start"
+        at_exit { puts "A (registered 1st)" }
+        at_exit { puts "B (registered 2nd)" }
+        at_exit { puts "C (registered 3rd, fires 1st)" }
+        puts "main end"
+        "##,
+        "phase4c_lifo.rb",
+    ).expect("eval should succeed");
+    assert_eq!(
+        buf.snapshot(),
+        "main start\n\
+         main end\n\
+         C (registered 3rd, fires 1st)\n\
+         B (registered 2nd)\n\
+         A (registered 1st)\n",
+    );
+}
+
+#[test]
+fn phase_4c_at_exit_runs_on_system_exit_unwind() {
+    // The canonical CRuby pattern: `exit` raises SystemExit
+    // which propagates UP THROUGH at_exit handlers. The
+    // handlers must fire BEFORE the embedder sees the trap.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    let err = rt.eval(
+        r##"
+        at_exit { puts "atexit fires on SystemExit" }
+        exit 7
+        "##,
+        "phase4c_systemexit.rb",
+    ).expect_err("expected SystemExit Trap");
+    let rubyrs::RubyError::Uncaught { class_name, .. } = &err.err else {
+        panic!("expected SystemExit Uncaught, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "SystemExit");
+    // The handler MUST have run before we got Err.
+    assert_eq!(buf.snapshot(), "atexit fires on SystemExit\n");
+}
+
+#[test]
+fn phase_4c_exit_bang_invokes_process_exit_with_status() {
+    // ADR 0025 Phase 0.5b semantic: `exit!(status)` invokes
+    // the host's `Config::process_exit` closure with the
+    // requested status. In production (CLI binary), the
+    // closure calls `std::process::exit` and never returns,
+    // so at_exit handlers are SKIPPED.
+    //
+    // In test-host scenarios where the closure intercepts +
+    // returns (e.g. unit-testing a script that calls exit!),
+    // execution falls through — at_exit handlers DO run on
+    // the eval's natural return. That's a documented embed-
+    // model adaptation: at_exit semantics are tied to the
+    // closure's behavior. Test verifies the closure receives
+    // the right status; the at_exit-skip semantic is
+    // delegated to the production closure's `process::exit`
+    // contract.
+    use std::sync::{Arc, Mutex};
+    let exit_status: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));
+    let exit_status_for_cfg = Arc::clone(&exit_status);
+    let cfg = rubyrs::Config {
+        process_exit: Some(std::sync::Arc::new(move |status| {
+            *exit_status_for_cfg.lock().unwrap() = Some(status);
+        })),
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.eval(
+        r##"exit! 5"##,
+        "phase4c_exit_bang.rb",
+    ).expect("eval");
+    assert_eq!(*exit_status.lock().unwrap(), Some(5));
+}
+
+#[cfg(unix)]
+#[test]
+fn phase_4c_trap_calls_exit_runs_at_exit_handlers() {
+    // The fully-integrated CRuby pattern:
+    //   trap("INT") { exit }   # graceful Ctrl+C shutdown
+    //   at_exit { cleanup }    # always-runs cleanup
+    //
+    // Send the flag via background thread; trap fires; exit
+    // raises SystemExit; at_exit runs the cleanup; embedder
+    // sees the SystemExit Trap with the cleanup already done.
+    let _lock = signal_test_lock();
+    let cfg = rubyrs::Config {
+        install_signal_handler: true,
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+
+    let flag = rt._test_interrupt_pending_arc();
+    let flag_for_thread = std::sync::Arc::clone(&flag);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        flag_for_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    let err = rt.eval(
+        r##"
+        at_exit { puts "cleanup" }
+        Signal.trap("INT") { puts "trap"; exit 0 }
+        i = 0
+        while true; i += 1; end
+        "##,
+        "phase4c_trap_exit_atexit.rb",
+    ).expect_err("expected SystemExit trap");
+    let rubyrs::RubyError::Uncaught { class_name, .. } = &err.err else {
+        panic!("expected SystemExit Uncaught, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "SystemExit");
+    assert_eq!(buf.snapshot(), "trap\ncleanup\n");
+    let _ = rt._test_interrupt_pending_load_and_clear(true);
+}
+
+#[test]
+fn phase_4c_at_exit_without_block_raises_local_jump_error() {
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("at_exit", "phase4c_no_block.rb").unwrap_err();
+    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+        panic!("expected LocalJumpError, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "LocalJumpError");
+    assert!(
+        message.contains("no block given (at_exit)"),
+        "unexpected: {message}",
+    );
+}
+
+#[test]
 fn exit_raises_system_exit_caught_with_status() {
     // ADR 0025 Phase 0.5b: `Kernel#exit(N)` raises SystemExit
     // with status=N. The user-script `rescue SystemExit => e`

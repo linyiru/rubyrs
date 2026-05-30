@@ -52,6 +52,7 @@ impl Vm {
                 | "exit"
                 | "exit!"
                 | "abort"
+                | "at_exit"
                 | "__rubyrs_signal_trap"
                 | "__method__"
                 | "__callee__"
@@ -186,7 +187,7 @@ impl Vm {
                         &*name,
                         "puts" | "p" | "pp" | "print" | "require" |
                         "sprintf" | "format" | "__time_now_raw" | "sleep" |
-                        "exit" | "exit!" | "abort" | "__rubyrs_signal_trap" |
+                        "exit" | "exit!" | "abort" | "at_exit" | "__rubyrs_signal_trap" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
                         "eval" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?"
@@ -813,6 +814,17 @@ impl Vm {
             //   Default → "DEFAULT" String
             //   Ignore  → "IGNORE"  String
             //   Block(id) → Value::Block(id)
+            // ADR 0025 Phase 4c: `Kernel#at_exit` without an
+            // attached block reaches this arm via `do_call`'s
+            // `builtin_call` invocation. CRuby raises LocalJumpError;
+            // we match. The WITH-block form is intercepted in
+            // `do_call_block`'s no_recv arm (alongside `lambda` /
+            // `proc`) where the block ObjId is in scope.
+            "at_exit" => {
+                Some(Err(self.trap(RubyError::LocalJumpError {
+                    msg: "no block given (at_exit)".into(),
+                })))
+            }
             "__rubyrs_signal_trap" => {
                 if args.len() != 3 {
                     return Some(Err(self.trap(RubyError::ArgumentError {

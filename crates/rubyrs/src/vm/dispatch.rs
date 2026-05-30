@@ -7233,6 +7233,19 @@ impl Vm {
                 self.stack.push(Value::Block(block));
                 return Ok(());
             }
+            // ADR 0025 Phase 4c: `Kernel#at_exit { ... }` — record the
+            // block for end-of-eval execution; return the block as a
+            // Proc value for CRuby parity (`at_exit` returns the Proc
+            // that was registered, allowing the caller to introspect
+            // it). Drained LIFO by `Runtime::eval` after `eval_inner`
+            // returns. Must live alongside `lambda`/`proc` here in the
+            // block-form dispatch because `builtin_call` doesn't
+            // receive the attached block.
+            if args.is_empty() && &*name == "at_exit" {
+                self.at_exit_handlers.push(block);
+                self.stack.push(Value::Block(block));
+                return Ok(());
+            }
             if let Some(res) = self.builtin_call(&name, &args) {
                 let v = res?;
                 // See suppress_call_result_push doc on Vm —

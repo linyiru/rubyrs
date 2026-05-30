@@ -515,6 +515,19 @@ pub(crate) struct Vm {
     /// switches between raise / no-op / re-entrant block
     /// invocation based on the state.
     pub(crate) signal_traps: std::collections::HashMap<i32, SignalHandlerState>,
+    /// ADR 0025 Phase 4c: `Kernel#at_exit { ... }` handlers
+    /// registered for end-of-eval execution. Drained LIFO by
+    /// the public `Runtime::eval` wrapper after `eval_inner`
+    /// returns — runs on both happy-path (Ok result) and
+    /// SystemExit / other Trap paths. Skipped only by
+    /// `Kernel#exit!` (which calls `Config::process_exit`
+    /// and never returns to Rust).
+    ///
+    /// CRuby model: at_exit handlers fire at process end.
+    /// Embed model adaptation: each `Runtime::eval()` call is
+    /// the "process" — handlers drain at its end. Documented
+    /// in `Kernel#at_exit`'s docstring.
+    pub(crate) at_exit_handlers: Vec<crate::value::ObjId>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) heap: Heap,
@@ -840,6 +853,7 @@ impl Vm {
             interrupt_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             suppress_interrupt: 0,
             signal_traps: std::collections::HashMap::new(),
+            at_exit_handlers: Vec::new(),
             stack: Vec::with_capacity(1024),
             frames: vec![],
             heap: Heap::new(),
