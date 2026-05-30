@@ -53,10 +53,19 @@ describe "Hash#each_slice" do
     assert_eq(each_slice_with_return, :returned)
   end
 
-  # Note: the no-block form is not vendored — CRuby returns an
-  # Enumerator there; rubyrs returns the materialised Array
-  # directly. `.to_a` on the result is a no-op so the canonical
-  # `h.each_slice(2).to_a` idiom still works.
+  it "no-block form: .to_a yields the same shape as the block form" do
+    # CRuby returns an Enumerator; rubyrs returns the
+    # materialised Array directly (see hash.rs Enumerator
+    # stub). `.to_a` on either is a no-op vs a forced
+    # materialisation respectively — both produce the same
+    # nested-Array shape, so the canonical
+    # `h.each_slice(2).to_a` idiom stays portable.
+    h = {a: 1, b: 2, c: 3, d: 4, e: 5}
+    assert_eq(
+      h.each_slice(2).to_a,
+      [[[:a, 1], [:b, 2]], [[:c, 3], [:d, 4]], [[:e, 5]]]
+    )
+  end
 end
 
 describe "Hash#each_cons" do
@@ -93,6 +102,17 @@ describe "Hash#each_cons" do
       :unreached
     end
     assert_eq(each_cons_with_return, :returned)
+  end
+
+  it "no-block form: .to_a yields the same shape as the block form" do
+    # Mirrors the each_slice no-block test — CRuby returns
+    # an Enumerator; rubyrs returns the materialised
+    # windows Array. `.to_a` is portable across both.
+    h = {a: 1, b: 2, c: 3, d: 4}
+    assert_eq(
+      h.each_cons(2).to_a,
+      [[[:a, 1], [:b, 2]], [[:b, 2], [:c, 3]], [[:c, 3], [:d, 4]]]
+    )
   end
 end
 
