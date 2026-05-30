@@ -4,14 +4,14 @@
 //! into a realistic Bundler-shape host:
 //!
 //! 1. `Config::allow_filesystem_io: true`   — the gemspec needs
-//!    to `require_relative "lib/version"`, so the capability is on.
+//!    to `require "fakegem/version"`, so the capability is on.
 //! 2. `Config::allowed_paths: Some([gem_root])` — but scoped to
 //!    the gem root; attempting to read `/etc/passwd` (or anything
 //!    outside) traps with `IOError`.
 //! 3. `Config::load_paths: Some([gem_root.join("lib")])` —
-//!    declarative `$LOAD_PATH` seed so `require "version"`
-//!    resolves the bundled file. No synthetic `$LOAD_PATH.unshift`
-//!    as the first eval.
+//!    declarative `$LOAD_PATH` seed so `require "fakegem/version"`
+//!    resolves `lib/fakegem/version.rb` (the Bundler convention).
+//!    No synthetic `$LOAD_PATH.unshift` as the first eval.
 //! 4. `Runtime::eval` panic→Trap boundary — defensive net for any
 //!    Rust panic in a host-fn callback (registered via
 //!    `register_fn`).
@@ -218,8 +218,11 @@ fn main() {
                 assert_eq!(cap.deps.len(), 2);
             }
             Err(t) => {
-                eprintln!("  ❌ unexpected trap: {}", rt.format_trap(&t));
-                std::process::exit(1);
+                // Panic (not std::process::exit) so the GemRoot
+                // guard's Drop runs during unwind and the
+                // tempdir is cleaned up. std::process::exit
+                // bypasses Drop unconditionally.
+                panic!("Phase 1 unexpected trap: {}", rt.format_trap(&t));
             }
         }
     }
@@ -248,8 +251,8 @@ fn main() {
                 println!("     {message}");
             }
             other => {
-                eprintln!("  ❌ wrong trap shape: {other:?}");
-                std::process::exit(1);
+                // Panic to let GemRoot::drop run; see Phase 1 above.
+                panic!("Phase 2 wrong trap shape: {other:?}");
             }
         }
     }
@@ -290,8 +293,8 @@ fn main() {
                 println!("     {msg}");
             }
             other => {
-                eprintln!("  ❌ wrong trap shape: {other:?}");
-                std::process::exit(1);
+                // Panic to let GemRoot::drop run; see Phase 1 above.
+                panic!("Phase 3 wrong trap shape: {other:?}");
             }
         }
 
