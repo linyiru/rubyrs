@@ -2494,6 +2494,21 @@ impl Vm {
     // the name empty until a future StoreConst hook lands;
     // most real-world uses (`include` an anonymous helper)
     // don't depend on the name-promote behaviour.
+    // Tier-1 2b: `Proc.new` without an explicit block raises
+    // ArgumentError, matching CRuby 3.x (which removed implicit
+    // block capture from caller). Without this check the
+    // default Object#new path returns a Proc-class instance
+    // that has no `.call` arm — `.call` on it raises a
+    // confusing NoMethodError instead of the canonical
+    // "tried to create Proc object without a block".
+    if name_id == new_id
+        && let Value::Class(cls) = &recv
+        && cls.name.as_str() == "Proc"
+    {
+        return Err(self.trap(RubyError::ArgumentError {
+            msg: "tried to create Proc object without a block".to_string(),
+        }));
+    }
     if name_id == new_id
         && let Value::Class(cls) = &recv
         && cls.name.as_str() == "Module"
@@ -7630,6 +7645,30 @@ impl Vm {
                 self.stack.push(Value::Sym(name_sym));
                 return Ok(());
             }
+        }
+        // Tier-1 2b: `Proc.new { ... }` returns the captured
+        // block as a Value::Block (which then accepts `.call /
+        // [] / () / yield` via the existing block-call arm).
+        // CRuby treats Proc.new as just a Proc wrapper around
+        // the block — no separate Proc object type; rubyrs's
+        // Value::Block already IS the Proc shape.
+        if &*name == "new"
+            && let Some(Value::Class(cls)) = &recv
+            && cls.name.as_str() == "Proc"
+        {
+            if let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+                // Honor a user `def Proc.new` override (parallel
+                // to Hash / Module).
+                let target_self = Value::Class(cls.clone());
+                return self.invoke_method_with_block(m, target_self, args, Some(block));
+            }
+            if !args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                }));
+            }
+            self.stack.push(Value::Block(block));
+            return Ok(());
         }
         if &*name == "new"
             && let Some(Value::Class(cls)) = &recv

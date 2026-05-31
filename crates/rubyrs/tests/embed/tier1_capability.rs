@@ -2183,3 +2183,76 @@ fn tier1_2c_warn_default_sink_is_silent() {
         .expect("eval");
     assert_eq!(stdout_buf.snapshot(), "");
 }
+
+#[test]
+fn tier1_2b_proc_new_with_block_captures_it() {
+    // Tier-1 2b: `Proc.new { ... }` returns the block as a
+    // Value::Block — `.call` then dispatches through the
+    // existing block-call arm. Pre-fix Proc.new fell through
+    // to Object#new producing an empty Proc instance with no
+    // `.call` method.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        pr = Proc.new { |a, b| a + b }
+        puts pr.class
+        puts pr.call(2, 3)
+        "##,
+        "tier1_2b_proc_new.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "Proc\n5\n");
+}
+
+#[test]
+fn tier1_2b_proc_new_without_block_raises_argument_error() {
+    // Tier-1 2b: `Proc.new` with no explicit block raises
+    // ArgumentError, matching CRuby 3.x (which removed the
+    // implicit-block-from-caller capture form).
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        begin
+          Proc.new
+        rescue ArgumentError => e
+          puts "ok: #{e.message}"
+        end
+        "##,
+        "tier1_2b_proc_new_noblock.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "ok: tried to create Proc object without a block\n",
+    );
+}
+
+#[test]
+fn tier1_2b_proc_new_implicit_capture_also_raises() {
+    // Tier-1 2b: `Proc.new` inside a method that has a
+    // block_arg STILL raises (no implicit capture). The
+    // explicit form `Proc.new(&blk)` is the surviving
+    // capture API (out of scope for this commit).
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def make
+          Proc.new
+        end
+        begin
+          make { :x }
+        rescue ArgumentError => e
+          puts "ok: #{e.message}"
+        end
+        "##,
+        "tier1_2b_proc_new_implicit.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "ok: tried to create Proc object without a block\n",
+    );
+}
