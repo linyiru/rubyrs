@@ -59,7 +59,17 @@ fn build_fake_gem() -> GemRoot {
         .join(format!("rubyrs-gemspec-eval-{}", std::process::id()));
     let _ = fs::remove_dir_all(&raw); // clean slate
     fs::create_dir_all(&raw).expect("mkdir gem root");
+    // Commit the guard IMMEDIATELY after `create_dir_all` — same
+    // shape as `TempDirGuard` in tests/embed/filesystem_sandbox.rs
+    // (per PR #283 review). A panic in canonicalize / further
+    // fs::write calls below otherwise leaks the partially-init'd
+    // dir because no RAII would own it yet. `.path` gets updated
+    // to the canonical form after canonicalize succeeds; both
+    // forms refer to the same on-disk inode so `remove_dir_all`
+    // cleans correctly either way.
+    let mut guard = GemRoot { path: raw.clone() };
     let root = fs::canonicalize(&raw).expect("canonicalize gem root");
+    guard.path = root.clone();
     // Lay out a minimal but realistic gem structure — matches the
     // Bundler convention `lib/<gemname>/version.rb` which
     // `require "fakegem/version"` resolves to:
@@ -120,12 +130,19 @@ s.add_dependency "puma", "~> 6.0"
     // the gem root, but its cleanup wasn't covered by GemRoot's
     // RAII guard and the file was never actually read by the
     // sandbox check — flagged in PR #302 review.)
-    GemRoot { path: root }
+    guard
 }
 
 // ---------- Captured gemspec metadata ----------
 
-#[derive(Default, Debug)]
+// Clone so the Phase 1 success arm can snapshot the captured
+// state in one go and drop the RefCell borrow IMMEDIATELY
+// rather than holding it across the println!/assert_eq! block.
+// A future maintainer adding a debug eval (`rt.eval(...)`) inside
+// that arm would otherwise re-enter the closure that does
+// `captured.borrow_mut()`, tripping BorrowMutError with a
+// confusing diagnostic.
+#[derive(Default, Debug, Clone)]
 struct CapturedSpec {
     name: Option<String>,
     version: Option<String>,
@@ -133,6 +150,29 @@ struct CapturedSpec {
 }
 
 // ---------- The host ----------
+
+/// Single source of truth for the scoped Runtime config the three
+/// phases share. Extracting this avoids drift between phases: a
+/// future contributor tightening one phase's sandbox can't
+/// silently leave the others under a looser policy than the
+/// doc-comment promises.
+fn make_rt(gem_root: &std::path::Path) -> Runtime {
+    Runtime::with_config(Config {
+        // Capability gate ON — the gemspec uses `require`, which
+        // is a load-class FS op.
+        allow_filesystem_io: true,
+        // Scope: only the gem root tree. Any read outside
+        // (Phase 2 tries `/etc/passwd`) traps with IOError
+        // before the syscall.
+        allowed_paths: Some(vec![gem_root.to_path_buf()]),
+        // Seed $LOAD_PATH with the gem's lib/ so
+        // `require "fakegem/version"` resolves the bundled file
+        // declaratively. No synthetic `$LOAD_PATH.unshift` as
+        // the first eval.
+        load_paths: Some(vec![gem_root.join("lib")]),
+        ..Default::default()
+    })
+}
 
 fn main() {
     println!("================================================================");
@@ -155,21 +195,7 @@ fn main() {
     println!("[Phase 1] Evaluate fakegem.gemspec under the scoped sandbox");
     println!("----------------------------------------------------------------");
     {
-        let mut rt = Runtime::with_config(Config {
-            // Capability gate ON — the gemspec uses `require`,
-            // which is a load-class FS op.
-            allow_filesystem_io: true,
-            // Scope: only the gem root tree. Any read outside
-            // (Phase 2 below tries `/etc/passwd`) traps with
-            // IOError before the syscall.
-            allowed_paths: Some(vec![gem_root.path.clone()]),
-            // Seed $LOAD_PATH with the gem's lib/ so
-            // `require "fakegem/version"` resolves the bundled
-            // file declaratively, with no synthetic
-            // `$LOAD_PATH.unshift` as the first eval.
-            load_paths: Some(vec![gem_root.path.join("lib")]),
-            ..Default::default()
-        });
+        let mut rt = make_rt(&gem_root.path);
 
         // ----------- host_fn callbacks ----------
         let cap1 = captured.clone();
@@ -205,7 +231,10 @@ fn main() {
 
         match rt.eval(&source, gemspec_path.to_str().expect("utf-8 path")) {
             Ok(_) => {
-                let cap = captured.borrow();
+                // Snapshot + drop the borrow immediately. See
+                // CapturedSpec's docstring for why we don't hold
+                // the borrow across the println!/assert_eq! block.
+                let cap = captured.borrow().clone();
                 println!("  ✅ gemspec evaluated cleanly");
                 println!("     name    = {:?}", cap.name);
                 println!("     version = {:?}", cap.version);
@@ -245,12 +274,7 @@ fn main() {
     println!("\n[Phase 2] Attempt out-of-scope read — must trap IOError");
     println!("----------------------------------------------------------------");
     {
-        let mut rt = Runtime::with_config(Config {
-            allow_filesystem_io: true,
-            allowed_paths: Some(vec![gem_root.path.clone()]),
-            load_paths: Some(vec![gem_root.path.join("lib")]),
-            ..Default::default()
-        });
+        let mut rt = make_rt(&gem_root.path);
         // Try to read /etc/passwd — well outside the gem root.
         let trap = rt
             .eval(r#"File.read("/etc/passwd")"#, "<phase2>")
@@ -284,12 +308,7 @@ fn main() {
     // of the eval call (and restore the previous hook after).
     // Out of scope for this demo; the contract is correct.
     {
-        let mut rt = Runtime::with_config(Config {
-            allow_filesystem_io: true,
-            allowed_paths: Some(vec![gem_root.path.clone()]),
-            load_paths: Some(vec![gem_root.path.join("lib")]),
-            ..Default::default()
-        });
+        let mut rt = make_rt(&gem_root.path);
         rt.register_fn("explode", |_| {
             panic!("simulated host-fn bug");
         });
