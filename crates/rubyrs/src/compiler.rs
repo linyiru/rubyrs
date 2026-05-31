@@ -135,7 +135,54 @@ fn try_call_compile_time_intercept(
     interner: &mut Interner,
     cc: &mut u32,
 ) -> bool {
-    // attr_reader / attr_writer / attr_accessor
+    // Legacy `attr :name, true` (1.8 accessor form): single
+    // Symbol arg followed by a literal `true` / `false`. Treated
+    // as reader + writer (when `true`) or reader only (when
+    // `false`). CRuby 3.4 still accepts this with a warning; the
+    // sinatra-4 load chain doesn't hit this branch but rack-4
+    // gems in the wild do. Intercept it BEFORE the all-symbols
+    // gate below so the BoolLit arg doesn't push it through to
+    // the runtime dispatch path (which would NoMethodError).
+    // (TRY_RUNS pass-10 layer #10.)
+    if receiver.is_none()
+        && name == "attr"
+        && args.len() == 2
+        && let Expr::SymbolLit(sym_name) = &args[0].node
+        && let Expr::BoolLit(accessor) = &args[1].node
+    {
+        let do_reader = true;
+        let do_writer = *accessor;
+        let sym_name = sym_name.clone();
+        let ivar_name = format!("@{}", sym_name);
+        if do_reader {
+            let body = vec![SExpr { span: args[0].span, node: Expr::IVarRead(ivar_name.clone()) }];
+            let pidx = compile_proto(
+                sym_name.clone(), vec![], &body,
+                b.filename.clone(), protos, interner, cc,
+            );
+            let nid = interner.intern(&sym_name);
+            b.emit(Op::DefMethod(nid, pidx as u32));
+        }
+        if do_writer {
+            let setter_name = format!("{sym_name}=");
+            let val_read = SExpr { span: args[0].span, node: Expr::LVarRead("val".into()) };
+            let body = vec![SExpr {
+                span: args[0].span,
+                node: Expr::IVarWrite(ivar_name.clone(), Box::new(val_read)),
+            }];
+            let pidx = compile_proto(
+                setter_name.clone(), vec!["val".into()], &body,
+                b.filename.clone(), protos, interner, cc,
+            );
+            let nid = interner.intern(&setter_name);
+            b.emit(Op::DefMethod(nid, pidx as u32));
+        }
+        b.emit(Op::LoadNil);
+        return true;
+    }
+
+    // attr_reader / attr_writer / attr_accessor / attr (legacy
+    // reader form — `attr :a`, `attr :a, :b`).
     if receiver.is_none()
         && let Some((do_reader, do_writer)) = crate::ast::attr_reader_writer_flags(name)
         && args.iter().all(|a| matches!(a.node, Expr::SymbolLit(_)))

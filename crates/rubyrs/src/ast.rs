@@ -534,6 +534,17 @@ pub(crate) fn attr_reader_writer_flags(name: &str) -> Option<(bool, bool)> {
         "attr_reader"   => Some((true,  false)),
         "attr_writer"   => Some((false, true)),
         "attr_accessor" => Some((true,  true)),
+        // `attr :name` (single or multi-symbol form) is the
+        // pre-1.9 legacy alias for `attr_reader`. The 1.8-only
+        // `attr :name, true` accessor form is NOT handled here
+        // — that one needs a non-Symbol second arg and is
+        // routed through a dedicated arm in the intercept (it
+        // falls through this match so the intercept can detect
+        // the `true` literal). rackup-2.2.1/lib/rackup/stream.rb
+        // and rack-3.1.10/lib/rack/builder.rb use the bare
+        // single-symbol form; sinatra-4 transitively requires
+        // both. (TRY_RUNS pass-10 layer #10.)
+        "attr"          => Some((true,  false)),
         _ => None,
     }
 }
