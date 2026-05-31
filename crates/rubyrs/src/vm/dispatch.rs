@@ -640,7 +640,8 @@ impl Vm {
         // `proc_curry_compose.rb` under STRESS_GC=1 — the
         // BoundMethod survives but its `recv` points at a Dead
         // slot, panicking later in `class_of`.
-        if name == "method" && args.len() == 1
+        if matches!(name, "method" | "singleton_method" | "public_method")
+            && args.len() == 1
             && let Value::Sym(bound_name_id) = &args[0] {
                 // Snapshot the resolved Method at capture time so
                 // `bm.call` survives a subsequent `remove_method`
@@ -665,6 +666,77 @@ impl Vm {
                         _ => None,
                     },
                 };
+                // `singleton_method` / `public_method` narrow the
+                // snapshot match relative to plain `method`:
+                //
+                //   * `singleton_method(:name)` — installed
+                //     DIRECTLY on the eigenclass (Value::Object)
+                //     or in `cls.singleton_methods` (Value::Class).
+                //     Inherited methods from the receiver's real
+                //     class don't count; raise NameError if the
+                //     method is reachable via dispatch but isn't
+                //     a singleton entry.
+                //
+                //   * `public_method(:name)` — same chain as
+                //     `method`, but raises NameError if the
+                //     captured Method's visibility is Private.
+                //     Protected stays allowed; CRuby raises for
+                //     Private only.
+                let recv_inspect_for_err = || {
+                    recv.to_inspect(&self.heap, &self.interner)
+                };
+                let name_str = self.interner.resolve(*bound_name_id).to_string();
+                if name == "singleton_method" {
+                    let is_singleton = match &recv {
+                        Value::Object(id) => {
+                            if let crate::heap::HeapObj::Instance(inst) = self.heap.get(*id) {
+                                inst.singleton_class
+                                    .as_ref()
+                                    .is_some_and(|sc| sc.methods.borrow().contains_key(bound_name_id))
+                            } else {
+                                false
+                            }
+                        }
+                        Value::Class(c) => {
+                            c.singleton_methods.borrow().contains_key(bound_name_id)
+                        }
+                        _ => false,
+                    };
+                    if !is_singleton {
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!(
+                                "undefined singleton method '{}' for '{}'",
+                                name_str,
+                                recv_inspect_for_err(),
+                            ),
+                        }));
+                    }
+                } else if name == "public_method" {
+                    // CRuby rejects both Private and Protected
+                    // here (only Public passes). Build the
+                    // visibility-label string for the exact
+                    // CRuby-shape error message.
+                    let vis = snapshot
+                        .as_ref()
+                        .map(|m| m.visibility.get());
+                    let label = match vis {
+                        Some(crate::value::Visibility::Private) => Some("private"),
+                        Some(crate::value::Visibility::Protected) => Some("protected"),
+                        _ => None,
+                    };
+                    if let Some(label) = label {
+                        let cls_name = match self.class_of(&recv) {
+                            Value::Class(c) => c.name.clone(),
+                            _ => "Object".to_string(),
+                        };
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!(
+                                "method '{}' for class '{}' is {}",
+                                name_str, cls_name, label,
+                            ),
+                        }));
+                    }
+                }
                 let mut g = crate::vm::PinGuard::new(self);
                 g.pin(recv.clone());
                 g.vm.maybe_gc();
