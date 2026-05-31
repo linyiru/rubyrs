@@ -207,10 +207,20 @@ impl Vm {
                     // stack; the handler's compiled code ends in `Op::Raise`
                     // which will pop it and rethrow after the ensure body
                     // has run.
-                    self.stack.push(exc);
+                    self.stack.push(exc.clone());
                 } else if let Some(slot) = h.bind_slot {
-                    f.locals.borrow_mut()[slot as usize] = exc;
+                    f.locals.borrow_mut()[slot as usize] = exc.clone();
                 }
+                // ADR 0025 deferred follow-up: expose the in-flight
+                // exception as `$!` inside the rescue / ensure body.
+                // Tier-1 simplification: no save/restore — `$!`
+                // persists after the body exits (CRuby's
+                // dynamically-scoped behavior would revert it).
+                // The canonical `rescue => e; puts $!.message; end`
+                // pattern works; nested-rescue corner cases are
+                // a documented divergence.
+                let bang_sym = self.interner.intern("$!");
+                self.globals.insert(bang_sym, exc);
                 return Ok(());
             }
             // No matching handler in this frame — pop it and try the caller.

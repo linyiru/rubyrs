@@ -2025,3 +2025,55 @@ fn install_signal_handler_true_sets_flag_on_real_sigint() {
         "flag must be false after clear",
     );
 }
+
+#[test]
+fn adr_0025_followup_dollar_bang_set_in_rescue_body() {
+    // ADR 0025 round-3 deferred follow-up: `$!` exposes the
+    // rescued exception inside a `rescue` body. Pre-fix `$!`
+    // was always nil in rubyrs, breaking the canonical
+    // `rescue => e; puts $!.message; end` idiom.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        begin
+          raise RuntimeError.new("boom")
+        rescue => e
+          puts "match: #{$!.equal?(e)}"
+          puts "msg: #{$!.message}"
+        end
+        "##,
+        "adr_0025_dollar_bang.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "match: true\nmsg: boom\n");
+}
+
+#[test]
+fn adr_0025_followup_abort_no_args_consults_dollar_bang() {
+    // ADR 0025 round-3 deferred follow-up: `abort` with no
+    // args reads `$!` and writes `<class>: <message>` before
+    // raising SystemExit(1). Pre-fix the no-args path wrote
+    // nothing.
+    let cfg = rubyrs::Config {
+        process_exit: Some(std::sync::Arc::new(|_status| {
+            // Test scaffold: don't actually std::process::exit;
+            // let abort's SystemExit propagate as a Trap.
+        })),
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    let _ = rt.eval(
+        r##"
+        begin
+          raise RuntimeError.new("boom")
+        rescue
+          abort
+        end
+        "##,
+        "adr_0025_abort_dollar_bang.rb",
+    );
+    assert_eq!(buf.snapshot(), "RuntimeError: boom\n");
+}

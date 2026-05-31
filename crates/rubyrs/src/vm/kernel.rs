@@ -743,6 +743,17 @@ impl Vm {
             "abort" => {
                 // Optional message argument prints to stderr; in
                 // either case, exit(1) follows.
+                //
+                // ADR 0025 deferred follow-up: no-args `abort`
+                // consults `$!` — when called mid-rescue, CRuby
+                // writes "<exc-class>: <exc-message>" to stderr
+                // before raising SystemExit(1). Pre-fix the
+                // no-args path was silent.
+                //
+                // (stdout vs stderr: rubyrs's IO model exposes
+                // only `Vm::stdout`, so the message lands there.
+                // Documented divergence — fixing requires adding
+                // a stderr channel to Vm.)
                 if args.len() > 1 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
                         msg: format!(
@@ -759,7 +770,23 @@ impl Vm {
                             other.type_name(),
                         ),
                     }))),
-                    None => None,
+                    None => {
+                        // No-args: consult `$!`. If it's an
+                        // Object with a class + message, format
+                        // CRuby-style. If nil, no message.
+                        let bang_sym = self.interner.intern("$!");
+                        match self.globals.get(&bang_sym).cloned() {
+                            Some(Value::Object(id)) => {
+                                let cls_name = self.heap.real_class_of(id).name.clone();
+                                let msg_sym = self.interner.intern("@message");
+                                let inner = self.heap.instance(id).ivars.get(&msg_sym).cloned()
+                                    .map(|v| v.to_display(&self.heap, &self.interner))
+                                    .unwrap_or_default();
+                                Some(format!("{cls_name}: {inner}"))
+                            }
+                            _ => None,
+                        }
+                    }
                 };
                 if let Some(m) = msg.as_ref() {
                     if m.ends_with('\n') {
