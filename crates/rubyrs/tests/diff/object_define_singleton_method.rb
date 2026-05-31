@@ -52,6 +52,23 @@ puts sym.class.name
 puts Object.new.respond_to?(:define_singleton_method)
 puts C.respond_to?(:define_singleton_method)
 
+# (8b) Cycle-4: bare-call inside a class body (no_recv, no
+# block) bridges to the receiver-form arm so the user sees
+# ArgumentError instead of NoMethodError. Mirrors how
+# `define_method` already worked.
+class CD
+  begin
+    define_singleton_method
+  rescue ArgumentError
+    puts "barecall-noargs-argerr"
+  end
+  begin
+    define_singleton_method(:x)
+  rescue ArgumentError
+    puts "barecall-noblock-argerr"
+  end
+end
+
 # (9) Cycle-1: primitive receiver gets NoMethodError (closer
 # to CRuby than the previous ArgumentError, though CRuby
 # raises TypeError "can't define singleton" — runtime

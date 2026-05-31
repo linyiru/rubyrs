@@ -3144,6 +3144,16 @@ impl Vm {
                     // lookup.rs's respond_to whitelist (PR #245
                     // Copilot round 2 #1).
                     | "define_method"
+                    // `define_singleton_method` joins the bridge
+                    // for the same reason: bare bare form inside
+                    // a class body (no_recv, no block) needs to
+                    // reach the receiver-form arm at line ~5427
+                    // so the user sees ArgumentError / TypeError
+                    // instead of NoMethodError. Block-form has
+                    // its own no_recv handling in
+                    // `do_call_block` (line ~6964).
+                    // PR #309 cycle-4.
+                    | "define_singleton_method"
                 );
                 // `allocate` gets the same Module fence as
                 // lookup.rs's respond_to gate so bare `allocate`
