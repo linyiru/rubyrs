@@ -329,7 +329,7 @@ impl Vm {
             // frames + ensures until landing on the yielding
             // method. If the walk drains the frame stack, exit.
             if let Some(mb) = self.pending_method_break.as_ref() {
-                if !mb.suspended && self.frames.len() - 1 == mb.target_frame_idx {
+                if !mb.suspended && self.frames.len() - 1 >= mb.target_frame_idx {
                     self.continue_method_break()?;
                     if self.frames.is_empty() { return Ok(()); }
                     continue;
@@ -548,18 +548,23 @@ impl Vm {
             // signal to its own caller. Running more ops here
             // would burn fuel inside a frame about to be discarded.
             if self.method_return.is_some() { return Ok(()); }
-            // ADR 0024 Phase A.5: block-break in flight from an
-            // Op::Yield case (b). Only fire continue_method_break
-            // when the top frame IS the yielding method — at any
-            // other depth we'd pop frames out from under a Rust
-            // iter driver (step_block etc.) whose for-loop hasn't
-            // yet returned to its caller. The intervening block
-            // frames pop naturally via their own Op::Return; the
-            // break value rides through step_block's
-            // BlockStep::Break path until the outer iter driver
-            // returns to the bytecode level that owns the target.
+            // ADR 0024 Phase A.5/A.9: block-break in flight
+            // from an Op::Yield case (b). Fire
+            // continue_method_break when the target frame is
+            // at-or-above the current top AND within our
+            // dispatch scope (target_frame_idx >= until_depth).
+            // Cases:
+            //   - target == top: A.5 single-method case.
+            //   - target < top: A.9 multi-method case — pop
+            //     intermediate frames (running their ensures)
+            //     until reaching target.
+            // If target < until_depth, the target sits in a
+            // frame our outer driver owns — bail and let the
+            // outer dispatch level fire continue_method_break.
             if let Some(mb) = self.pending_method_break.as_ref() {
-                if !mb.suspended && self.frames.len() - 1 == mb.target_frame_idx {
+                if !mb.suspended && mb.target_frame_idx >= until_depth
+                    && self.frames.len() - 1 >= mb.target_frame_idx
+                {
                     self.continue_method_break()?;
                     if self.frames.len() <= until_depth { return Ok(()); }
                     continue;
@@ -1702,11 +1707,24 @@ impl Vm {
                     // working end-to-end. Without this, drivers
                     // would treat the block return as a normal
                     // value and keep iterating.
-                    yguard.vm.pending_method_break = Some(crate::vm::MethodBreak {
-                        value: block_return_value.clone(),
-                        target_frame_idx: yielding_idx,
-                        suspended: false,
-                    });
+                    //
+                    // Phase A.9: don't overwrite an
+                    // already-pending break. Multi-method-frame
+                    // shapes like `def f; g { |x| yield x }; end;
+                    // def g; xs.each { |x| yield x }; end;
+                    // f { break }` have several nested Op::Yield
+                    // wrappers each running case (b) on the way
+                    // out. The INNERMOST one (lexically closest to
+                    // the breaking block) has the right target —
+                    // outer wrappers should leave that target
+                    // alone and just propagate.
+                    if yguard.vm.pending_method_break.is_none() {
+                        yguard.vm.pending_method_break = Some(crate::vm::MethodBreak {
+                            value: block_return_value.clone(),
+                            target_frame_idx: yielding_idx,
+                            suspended: false,
+                        });
+                    }
                     yguard.vm.stack.push(block_return_value);
                     drop(yguard);
                     return Ok(true);

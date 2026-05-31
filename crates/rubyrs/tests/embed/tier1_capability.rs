@@ -1393,6 +1393,94 @@ fn adr_0024_phase_a7_doubly_forwarded_yield_resolves_lexically() {
 }
 
 #[test]
+fn adr_0024_phase_a9_break_unwinds_through_intermediate_method() {
+    // ADR 0024 Phase A.9: `f { break v }` where f forwards
+    // its block to g and g yields via an iter — the break
+    // must unwind THROUGH g (skipping g's remaining body)
+    // to land at f. Pre-A.9 the outer Op::Yield case (b)
+    // overwrote pending_method_break with g's index, so
+    // break landed at g and f's body continued past the
+    // call.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def f
+          g { |x| yield x }
+          puts "f after-unreachable"
+        end
+        def g
+          [1,2,3].each { |x| yield x }
+          puts "g after-unreachable"
+        end
+        result = f { |v| break "br-#{v}" if v == 2 }
+        puts "result=#{result}"
+        "##,
+        "adr_0024_a9_multi_frame.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "result=br-2\n");
+}
+
+#[test]
+fn adr_0024_phase_a9_runs_ensures_along_unwind_chain() {
+    // Phase A.9: ensures in every method frame the break
+    // unwinds through must run, inner-most first.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def x1
+          begin
+            x2 { |v| yield v }
+          ensure
+            puts "x1 ensure"
+          end
+        end
+        def x2
+          begin
+            [10,20].each { |v| yield v }
+          ensure
+            puts "x2 ensure"
+          end
+        end
+        puts(x1 { |v| break "got #{v}" if v == 20 })
+        "##,
+        "adr_0024_a9_ensures_chain.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "x2 ensure\nx1 ensure\ngot 20\n");
+}
+
+#[test]
+fn adr_0024_phase_a9_three_level_unwind() {
+    // Phase A.9: three levels of method forwarding unwind
+    // cleanly to the lexical owner.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def aa
+          bb { |x| yield x }
+          puts "aa unreachable"
+        end
+        def bb
+          cc { |x| yield x }
+          puts "bb unreachable"
+        end
+        def cc
+          [1,2,3].each { |x| yield x }
+          puts "cc unreachable"
+        end
+        puts(aa { |v| break "v=#{v}" if v == 2 })
+        "##,
+        "adr_0024_a9_three_levels.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "v=2\n");
+}
+
+#[test]
 fn adr_0024_phase_a3_kernel_loop_works_with_break() {
     // ADR 0024 Phase A.3: top-level `def loop` installed in
     // preamble. The canonical CRuby idiom should work:
