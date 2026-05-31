@@ -120,9 +120,25 @@ pub(crate) fn is_shared_flag(flag: &Arc<AtomicBool>) -> bool {
     }
 }
 
+/// Largest accepted integer signal number — platform NSIG-1.
+/// CRuby's `Signal.trap(n, ...)` rejects integers above this
+/// at parse time rather than letting signal-hook fail at
+/// install. Linux's signal table reserves 1..=64 (32 standard
+/// + 32 real-time); macOS / BSD top out at 31. Build-time
+/// constant so the range check inlines into a single
+/// comparison.
+#[cfg(target_os = "linux")]
+const NSIG_MAX: i64 = 64;
+#[cfg(not(target_os = "linux"))]
+const NSIG_MAX: i64 = 31;
+
 /// ADR 0025 Phase 4a: normalize a Ruby-side signal-name
 /// argument to a Unix signal number. Accepted shapes:
-/// - `Integer` (1..=64, the legal POSIX signal range).
+/// - `Integer` (1..=NSIG_MAX — platform-dependent: Linux 64,
+///   macOS/BSD 31). Round-3 follow-up: was unconditionally
+///   1..=64 pre-fix; CRuby rejects numbers outside the
+///   platform's `NSIG` range at parse time rather than at
+///   `signal-hook` install time.
 /// - `Symbol` or `String`: bare short name (`"INT"`, `:INT`)
 ///   or `SIG`-prefixed (`"SIGINT"`, `:SIGINT`). Both
 ///   case-insensitive isn't needed — CRuby is also case-
@@ -138,7 +154,7 @@ pub(crate) fn parse_signal_name(
 ) -> Option<i32> {
     use crate::value::Value;
     match v {
-        Value::Int(n) if (1..=64).contains(n) => Some(*n as i32),
+        Value::Int(n) if (1..=NSIG_MAX).contains(n) => Some(*n as i32),
         Value::Sym(id) => parse_str(interner.resolve(*id)),
         Value::Str(s) => parse_str(&s.to_string_lossy()),
         _ => None,
@@ -211,6 +227,42 @@ mod tests {
         // is what matters, not the identity).
         let arc = install_signals(false);
         assert!(!arc.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn parse_signal_name_accepts_in_range_int() {
+        let interner = crate::intern::Interner::new();
+        // 2 (SIGINT) is in every platform's signal table.
+        assert_eq!(
+            parse_signal_name(&crate::value::Value::Int(2), &interner),
+            Some(2),
+        );
+        // Edge: NSIG_MAX itself is accepted.
+        assert_eq!(
+            parse_signal_name(&crate::value::Value::Int(NSIG_MAX), &interner),
+            Some(NSIG_MAX as i32),
+        );
+    }
+
+    #[test]
+    fn parse_signal_name_rejects_out_of_range_int() {
+        let interner = crate::intern::Interner::new();
+        // 0 is below the legal range.
+        assert_eq!(
+            parse_signal_name(&crate::value::Value::Int(0), &interner),
+            None,
+        );
+        // Just past NSIG_MAX — platform-specific (65 on Linux,
+        // 32 on macOS/BSD).
+        assert_eq!(
+            parse_signal_name(&crate::value::Value::Int(NSIG_MAX + 1), &interner),
+            None,
+        );
+        // 100 is past NSIG on every supported platform.
+        assert_eq!(
+            parse_signal_name(&crate::value::Value::Int(100), &interner),
+            None,
+        );
     }
 
     #[test]
