@@ -335,6 +335,21 @@ impl Vm {
                     continue;
                 }
             }
+            // ADR 0024 Phase A.8: break-after-Fiber-resume
+            // recovery (see dispatch_until_inner for full
+            // rationale).
+            if self.break_signaled && self.frames.last()
+                .map(|f| f.pending_yield)
+                .unwrap_or(false)
+            {
+                self.break_signaled = false;
+                let target_idx = self.frames.len() - 1;
+                self.frames[target_idx].pending_yield = false;
+                let value = self.stack.pop().unwrap_or(Value::Nil);
+                self.begin_method_break(value, target_idx)?;
+                if self.frames.is_empty() { return Ok(()); }
+                continue;
+            }
             // Non-local return unwind. `Op::ReturnMethod` sets
             // `method_return`; here we honour it by popping any
             // block frames between us and the enclosing method,
@@ -549,6 +564,31 @@ impl Vm {
                     if self.frames.len() <= until_depth { return Ok(()); }
                     continue;
                 }
+            }
+            // ADR 0024 Phase A.8: break-after-Fiber-resume
+            // recovery. The original Op::Yield wrapper that
+            // would have observed `break_signaled` was on the
+            // Rust stack that Fiber.yield unwound; after a
+            // subsequent resume, the block can run more
+            // statements + break with no Rust-side observer
+            // left. `pending_yield` on the top frame survived
+            // the FiberSnapshot stash (per-Frame, deep-copied)
+            // — that's our marker that this method's Op::Yield
+            // wrapper is gone. Pop the break value off the
+            // operand stack (Op::Return pushed it as the
+            // block's return), clear the marker, and fire
+            // the Phase A.4/A.5 unwind walk.
+            if self.break_signaled && self.frames.last()
+                .map(|f| f.pending_yield)
+                .unwrap_or(false)
+            {
+                self.break_signaled = false;
+                let target_idx = self.frames.len() - 1;
+                self.frames[target_idx].pending_yield = false;
+                let value = self.stack.pop().unwrap_or(Value::Nil);
+                self.begin_method_break(value, target_idx)?;
+                if self.frames.len() <= until_depth { return Ok(()); }
+                continue;
             }
             // P1c.2 (ADR 0023): Fiber.yield(v) sets this slot
             // and we exit so `resume_fiber` can observe the
@@ -1557,17 +1597,26 @@ impl Vm {
                     // the yielding-method's IP past Op::Yield —
                     // which is the NEXT op, NOT this same Op::Yield.
                     //
-                    // Wait — the IP for `self.frames[yielding_idx].ip`
+                    // The IP for `self.frames[yielding_idx].ip`
                     // was advanced BEFORE we entered the match
                     // arm (top of the dispatch loop). So past-yield
                     // is already the IP. On resume, dispatch fetches
                     // that next op, not Op::Yield. The synchronous
                     // wrapper's break-check is therefore SKIPPED on
-                    // the resume path. **Limitation**: a block-break
-                    // delivered AFTER a Fiber-yield resume can't be
-                    // observed by this Op::Yield's wrapper (we're
-                    // long gone from this Rust frame). Phase A
-                    // round 2 follow-up to design that.
+                    // the resume path.
+                    //
+                    // ADR 0024 Phase A.8: the resume-side recovery
+                    // lives in `dispatch_until_inner` /
+                    // `dispatch` as a top-of-loop check. When the
+                    // resumed block runs `break`, `break_signaled`
+                    // gets set and the block frame pops naturally;
+                    // the dispatch loop then observes
+                    // `break_signaled && top_frame.pending_yield`
+                    // and routes the value through
+                    // `begin_method_break` — same A.4/A.5
+                    // ensure-aware unwind machinery, just driven
+                    // from a different entry point because the
+                    // original Op::Yield Rust wrapper is gone.
                     return Ok(true);
                 }
 

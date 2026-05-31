@@ -1045,6 +1045,83 @@ mod tests {
         }
     }
 
+    /// ADR 0024 Phase A.8: a `break` from a yielded block
+    /// AFTER a Fiber.yield/resume cycle must still propagate
+    /// to the yielding method. Pre-A.8 the original Op::Yield
+    /// wrapper was discarded when Fiber.yield unwound the
+    /// Rust stack, so `break_signaled` after resume had no
+    /// observer — the block frame popped, `f` continued past
+    /// `yield` as if the block had returned normally with the
+    /// break value, but no method-frame unwind ran.
+    #[test]
+    fn adr_0024_a8_break_after_fiber_resume() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            def f
+              v = yield
+              "f after-yield-unreachable: v=#{v.inspect}"
+            end
+            body = proc {
+              r = f do
+                __rubyrs_fiber_yield(:before)
+                break "broken"
+              end
+              "fib done, r=#{r.inspect}"
+            }
+            fib = __rubyrs_fiber_new(body)
+            a = __rubyrs_fiber_resume(fib, nil)
+            b = __rubyrs_fiber_resume(fib, nil)
+            "first=#{a.inspect} second=#{b.inspect}"
+        "##, "adr_0024_a8.rb").expect("eval");
+        match r {
+            Value::Str(s) => assert_eq!(
+                s.to_string_lossy(),
+                "first=:before second=\"fib done, r=\\\"broken\\\"\"",
+            ),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    /// Phase A.8: break-after-resume also runs the yielding
+    /// method's `ensure` chain on the way out — same A.4
+    /// machinery, just invoked from the dispatch loop's
+    /// recovery path instead of Op::Yield's direct wrapper.
+    #[test]
+    fn adr_0024_a8_break_after_resume_runs_ensure() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            $log = []
+            def f
+              begin
+                yield
+                $log << "unreachable"
+              ensure
+                $log << "f ensure"
+              end
+            end
+            body = proc {
+              r = f do
+                __rubyrs_fiber_yield(:before)
+                break "broken"
+              end
+              "r=#{r.inspect}"
+            }
+            fib = __rubyrs_fiber_new(body)
+            __rubyrs_fiber_resume(fib, nil)
+            second = __rubyrs_fiber_resume(fib, nil)
+            "second=#{second.inspect} log=#{$log.inspect}"
+        "##, "adr_0024_a8_ensure.rb").expect("eval");
+        match r {
+            Value::Str(s) => assert_eq!(
+                s.to_string_lossy(),
+                "second=\"r=\\\"broken\\\"\" log=[\"f ensure\"]",
+            ),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
     /// P1c.2c: resume's arg becomes the yielded
     /// expression's return value in the body bytecode.
     /// Verifies the placeholder-pop + arg-push logic in
