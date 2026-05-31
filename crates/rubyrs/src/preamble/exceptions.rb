@@ -15,8 +15,16 @@
 # Rust side and reads the `superclass` chain stored here.
 
 class Exception
-  def initialize(msg)
-    @message = msg
+  def initialize(msg = nil)
+    # CRuby: `RuntimeError.new` (no explicit message) defaults
+    # @message to the class name. `puts RuntimeError.new` then
+    # renders as `RuntimeError`, and `inspect` as
+    # `#<RuntimeError: RuntimeError>`. Required for the
+    # `e1.message == "iteration reached an end"`-style super
+    # calls in subclass constructors (`StopIteration` etc.)
+    # to keep working: passing nil from a subclass that wants
+    # the class-name fallback was previously an ArgumentError.
+    @message = msg.nil? ? self.class.name : msg
   end
   def message
     @message

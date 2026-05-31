@@ -5985,10 +5985,46 @@ impl Vm {
                 self.stack.push(Value::new_str(s));
                 return Ok(());
             }
-            let cls_name = match self.class_of(&recv) {
-                Value::Class(c) => c.name.clone(),
-                _ => "Object".to_string(),
+            let cls_rc = match self.class_of(&recv) {
+                Value::Class(c) => Some(c),
+                _ => None,
             };
+            let cls_name = cls_rc.as_ref()
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "Object".to_string());
+            // Tier-1 2a: Exception subclasses render as
+            // `#<ClassName: message>` (or bare `#<ClassName>`
+            // when message is empty / matches the class name —
+            // matches CRuby's default Exception#inspect).
+            // Receiver must be a real heap instance with an
+            // `@message` ivar; primitive types fall through to
+            // the universal hex form.
+            if let (Some(cls), Value::Object(id)) = (&cls_rc, &recv) {
+                let exc_id = self.interner.intern("Exception");
+                let exc_cls = self.classes.get(&exc_id).cloned();
+                let is_exc = exc_cls.as_ref()
+                    .is_some_and(|ec| super::class_is_a(cls, ec));
+                if is_exc {
+                    let msg_sym = self.interner.intern("@message");
+                    let msg = self.heap.instance(*id).ivars.get(&msg_sym).cloned()
+                        .map(|v| v.to_display(&self.heap, &self.interner))
+                        .unwrap_or_default();
+                    // CRuby always renders Exception subclasses
+                    // as `#<ClassName: message>` — even when the
+                    // message equals the class name (the default
+                    // for `RaiseClass.new` with no args). Only
+                    // the truly-empty-message case (rare;
+                    // requires `RaiseClass.new("")`) drops to
+                    // bare `#<ClassName>`.
+                    let s = if msg.is_empty() {
+                        format!("#<{cls_name}>")
+                    } else {
+                        format!("#<{cls_name}: {msg}>")
+                    };
+                    self.stack.push(Value::new_str(s));
+                    return Ok(());
+                }
+            }
             let oid = object_id_for(&recv);
             let s = format!("#<{}:0x{:016x}>", cls_name, oid);
             self.stack.push(Value::new_str(s));

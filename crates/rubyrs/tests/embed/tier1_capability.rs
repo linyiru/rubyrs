@@ -2077,3 +2077,69 @@ fn adr_0025_followup_abort_no_args_consults_dollar_bang() {
     );
     assert_eq!(buf.snapshot(), "RuntimeError: boom\n");
 }
+
+#[test]
+fn tier1_2a_exception_inspect_includes_message() {
+    // Tier-1 2a: Exception subclasses render as
+    // `#<ClassName: message>`. Pre-fix the universal
+    // `Object#inspect` fallback emitted `#<Class:0xHEX>`
+    // for every Exception instance, polluting every
+    // diagnostic / log path that inspected `$!`.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        puts RuntimeError.new("oops").inspect
+        puts ArgumentError.new("bad").inspect
+        class MyError < StandardError; end
+        puts MyError.new("custom").inspect
+        "##,
+        "tier1_2a_exc_inspect.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "#<RuntimeError: oops>\n\
+         #<ArgumentError: bad>\n\
+         #<MyError: custom>\n",
+    );
+}
+
+#[test]
+fn tier1_2a_exception_new_no_args_defaults_message_to_class_name() {
+    // Tier-1 2a follow-on: `Exception#initialize` accepts
+    // no-args and defaults `@message` to the class name.
+    // CRuby parity: `RuntimeError.new.message` → "RuntimeError",
+    // and inspect shows `#<RuntimeError: RuntimeError>`.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        e = RuntimeError.new
+        puts e.message
+        puts e.inspect
+        "##,
+        "tier1_2a_exc_default.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "RuntimeError\n#<RuntimeError: RuntimeError>\n");
+}
+
+#[test]
+fn tier1_2a_plain_object_keeps_hex_form() {
+    // Plain Object instances (non-Exception) keep the
+    // `#<Class:0xHEX>` fallback; the new Exception-detect
+    // arm must not catch them.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        class Foo; end
+        s = Foo.new.inspect
+        puts s.start_with?("#<Foo:0x")
+        "##,
+        "tier1_2a_plain_object.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "true\n");
+}
