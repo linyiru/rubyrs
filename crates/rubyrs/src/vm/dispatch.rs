@@ -3118,6 +3118,27 @@ impl Vm {
             // shared `pub(crate) const &[&str]` consumed by
             // both sites — out of scope for this PR but tracked
             // as a follow-up by Copilot review #1.)
+            //
+            // `define_singleton_method` is also valid with an
+            // Object instance as self (top-level `main` or
+            // inside any instance method body). The
+            // Value::Class branch below handles the
+            // bare-in-class-body case; this small bridge
+            // covers the Object-self case by re-entering as
+            // explicit-receiver. Without it, bare-call no_recv
+            // misses both the Class bridge and the receiver-
+            // form arm, surfacing as NoMethodError instead of
+            // CRuby's ArgumentError / TypeError. Block-form is
+            // already handled by `do_call_block`'s own no_recv
+            // path. PR #309 cycle-5.
+            if matches!(&self_val, Value::Object(_))
+                && &*name == "define_singleton_method"
+            {
+                let argc = args.len();
+                self.stack.push(self_val.clone());
+                for a in args { self.stack.push(a); }
+                return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
+            }
             if let Value::Class(cls) = &self_val {
                 let in_set = matches!(&*name,
                     "new" | "name" | "to_s" | "inspect"

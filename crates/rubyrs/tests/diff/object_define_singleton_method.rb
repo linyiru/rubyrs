@@ -69,6 +69,26 @@ class CD
   end
 end
 
+# (8c) Cycle-5: bare-call inside an instance method body
+# (no_recv, self = Value::Object) bridges to the receiver-form
+# arm the same way bare-in-class-body does. The cycle-4 bridge
+# only covered Value::Class self; instance-method self landed
+# at NoMethodError until cycle-5.
+# (Top-level bare `define_singleton_method(:x)` is unaffected
+# — rubyrs's toplevel `self` is Nil rather than CRuby's `main`
+# Object, so that path is independently broken at a layer this
+# PR doesn't address.)
+class CE
+  def m
+    begin
+      define_singleton_method(:x)
+    rescue ArgumentError
+      puts "inst-method-barecall-argerr"
+    end
+  end
+end
+CE.new.m
+
 # (9) Cycle-1: primitive receiver gets NoMethodError (closer
 # to CRuby than the previous ArgumentError, though CRuby
 # raises TypeError "can't define singleton" — runtime
