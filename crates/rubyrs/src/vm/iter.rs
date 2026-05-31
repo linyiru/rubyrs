@@ -1872,6 +1872,97 @@ impl Vm {
                 if saw_int { return Ok(Some(Value::Nil)); }
                 Some(if low < snapshot.len() { snapshot[low].clone() } else { Value::Nil })
             }
+            // `arr.each_slice(n) { |slice| ... }` — yield each
+            // consecutive group of n elements as a single Array
+            // argument; return the receiver (CRuby parity, post-
+            // 2.7). Last slice may be shorter than n. The cycle-6
+            // closure + `vm.pinned.truncate(baseline)` per-iter
+            // scope pattern (from Hash#each_slice) releases the
+            // slice pin at end of each iteration, on every exit
+            // path including check_alloc / step_block traps.
+            (Value::Array(id), "each_slice", [Value::Int(n)]) => {
+                if *n <= 0 {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: format!("invalid slice size: {}", n),
+                    }));
+                }
+                let id = *id;
+                let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                let snapshot: Vec<Value> = self.heap.array(id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(id));
+                g.pin(Value::Block(block));
+                // Snapshot elements need their own pins: slices
+                // are built per-chunk inside the loop, so between
+                // iterations only the receiver Array is pinned —
+                // a block that mutates the receiver (`arr.clear`,
+                // `arr.shift`) would otherwise drop element roots.
+                for v in &snapshot {
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                'outer: for chunk in snapshot.chunks(n_usz) {
+                    let iter_baseline = g.vm.pinned.len();
+                    let step_result: Result<BlockStep, Trap> = (|| {
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let slice_id = g.vm.heap.alloc(HeapObj::Array(chunk.to_vec()));
+                        g.vm.pinned.push(Value::Array(slice_id));
+                        g.vm.step_block(block, vec![Value::Array(slice_id)], pre_frames)
+                    })();
+                    g.vm.pinned.truncate(iter_baseline);
+                    match step_result? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break 'outer; }
+                        BlockStep::Value(_) => {}
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(id)))
+            }
+            // `arr.each_cons(n) { |window| ... }` — sliding window
+            // of n consecutive elements; return the receiver. No
+            // yields when receiver has fewer than n elements.
+            // Windows share element identity automatically (each
+            // `win.to_vec()` clones the Copy `Value`s — heap-ref
+            // Values keep their ObjId, so identity is preserved).
+            (Value::Array(id), "each_cons", [Value::Int(n)]) => {
+                if *n <= 0 {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: format!("invalid size: {}", n),
+                    }));
+                }
+                let id = *id;
+                let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                let snapshot: Vec<Value> = self.heap.array(id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(id));
+                g.pin(Value::Block(block));
+                for v in &snapshot {
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                if snapshot.len() >= n_usz {
+                    'outer: for win in snapshot.windows(n_usz) {
+                        let iter_baseline = g.vm.pinned.len();
+                        let step_result: Result<BlockStep, Trap> = (|| {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let wid = g.vm.heap.alloc(HeapObj::Array(win.to_vec()));
+                            g.vm.pinned.push(Value::Array(wid));
+                            g.vm.step_block(block, vec![Value::Array(wid)], pre_frames)
+                        })();
+                        g.vm.pinned.truncate(iter_baseline);
+                        match step_result? {
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                            BlockStep::Break(r) => { early = Some(r); break 'outer; }
+                            BlockStep::Value(_) => {}
+                        }
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(id)))
+            }
             // `arr.chunk_while { |a, b| pred(a, b) }` — partition
             // into runs of consecutive elements where the block
             // returns truthy for the pair (a=prev, b=current).
