@@ -85,12 +85,12 @@ end
         root.join("fakegem.gemspec"),
         // Realistic gemspec shape, simplified. host_register_*
         // callbacks capture each spec field as the script runs.
-        // The `require_relative` form would be more idiomatic for
-        // a gemspec, but `require "fakegem/version"` exercises
-        // the load_paths-driven resolver which is the rubund use
-        // case (gemspecs in the wild use both).
+        // No `$LOAD_PATH.unshift` in the fixture — the require
+        // MUST resolve via the host-supplied `Config::load_paths`
+        // seed, not a script-side mutation. That's the contract
+        // Phase 1 is validating; an inline unshift would mask a
+        // broken seed.
         r#"
-$LOAD_PATH.unshift File.expand_path("lib", __dir__) rescue nil
 require "fakegem/version"
 
 class Spec
@@ -145,7 +145,8 @@ fn main() {
     println!("gem root: {root_str}");
     println!("  ├─ fakegem.gemspec");
     println!("  └─ lib/");
-    println!("      └─ version.rb\n");
+    println!("      └─ fakegem/");
+    println!("          └─ version.rb\n");
 
     let captured = Rc::new(RefCell::new(CapturedSpec::default()));
 
@@ -215,7 +216,19 @@ fn main() {
                 // `lib/fakegem/version.rb` — load_paths-driven
                 // resolution worked.
                 assert_eq!(cap.version.as_deref(), Some("1.2.3"));
-                assert_eq!(cap.deps.len(), 2);
+                // Exact-contents assertion — a buggy host callback
+                // that swapped, duplicated, or corrupted entries
+                // would slip past a bare `.len() == 2` check. The
+                // demo is meant to validate the full captured
+                // gemspec tuple, so lock the order and the
+                // (name, version) pairs.
+                assert_eq!(
+                    cap.deps,
+                    vec![
+                        ("rack".to_string(), ">= 3.0".to_string()),
+                        ("puma".to_string(), "~> 6.0".to_string()),
+                    ],
+                );
             }
             Err(t) => {
                 // Panic (not std::process::exit) so the GemRoot
