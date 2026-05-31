@@ -757,6 +757,21 @@ impl Vm {
                 let pre_frames = self.frames.len();
                 self.invoke_block(*bid, args)?;
                 self.dispatch_until(pre_frames)?;
+                // ADR 0024 Phase A.6 round 2: stored Proc tried
+                // to `break` after returning to its caller. There
+                // was no Op::Yield wrapper above the block (it
+                // was invoked via `.call`, not `yield`), so
+                // `break_signaled` has no observer above. CRuby
+                // raises `LocalJumpError: break from proc-closure`.
+                if self.break_signaled {
+                    self.break_signaled = false;
+                    // Discard the break value the block left on
+                    // the stack — it won't be the call's result.
+                    self.stack.pop();
+                    return Err(self.trap(crate::error::RubyError::LocalJumpError {
+                        msg: "break from proc-closure".to_string(),
+                    }));
+                }
                 return Ok(CallableOutcome::Handled);
             }
         // `Proc#arity` — CRuby-shape arity for the block. Block

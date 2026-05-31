@@ -412,36 +412,34 @@ impl Vm {
                     self.begin_method_break(val.clone(), owner_idx)?;
                     if self.frames.is_empty() { return Ok(()); }
                 } else {
-                    // Legacy fallback: walk block frames, then
-                    // pop one method frame. Matches the pre-#285
-                    // behavior so Tier-1 stays compatible when
-                    // `method_return_locals` doesn't pin down a
-                    // lexical owner in the live stack.
-                    while let Some(f) = self.frames.last() {
-                        if !f.is_block { break; }
-                        let f = self.frames.pop().unwrap();
-                        self.stack.truncate(f.base_sp);
-                        if f.is_class_body {
-                            let _cls = self.class_stack.pop()
-                                .expect("ICE: class_stack empty unwinding through class_eval (fallback)");
-                            self.class_visibility_stack.pop();
-                        }
-                    }
-                    if let Some(f) = self.frames.pop() {
-                        self.stack.truncate(f.base_sp);
-                        if f.is_class_body {
-                            let cls = self.class_stack.pop()
-                                .expect("ICE: class_stack empty on method-return (fallback)");
-                            self.class_visibility_stack.pop();
-                            self.stack.push(Value::Class(cls));
-                        } else if let Some(replacement) = f.swap_return {
-                            self.stack.push(replacement);
-                        } else {
-                            self.stack.push(val);
-                        }
-                        if self.frames.is_empty() { return Ok(()); }
-                    } else {
-                        return Ok(());
+                    // ADR 0024 Phase A.6 round 2: stored Proc
+                    // tried to `return` after its lexical owner
+                    // (the def that created the Proc) has already
+                    // returned — `method_return_locals` doesn't
+                    // pin down any live frame. CRuby's response is
+                    // `LocalJumpError: unexpected return`; route
+                    // through `unwind_with_exception` so user
+                    // rescue handlers can catch it.
+                    let _ = val; // unwind discards the would-be return value
+                    let trap = self.trap(RubyError::LocalJumpError {
+                        msg: "unexpected return".to_string(),
+                    });
+                    let exc = match self.trap_to_exception(&trap) {
+                        Some(e) => e,
+                        None => return Err(trap),
+                    };
+                    let original_bt = trap.backtrace.clone();
+                    let original_class = trap.err.class_name().to_string();
+                    let original_msg = trap.err.message();
+                    match self.unwind_with_exception(exc) {
+                        Ok(()) => continue,
+                        Err(_) => return Err(Trap {
+                            err: RubyError::Uncaught {
+                                class_name: original_class,
+                                message: original_msg,
+                            },
+                            backtrace: original_bt,
+                        }),
                     }
                 }
                 continue;

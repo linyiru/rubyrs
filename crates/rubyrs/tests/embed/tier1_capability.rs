@@ -1481,6 +1481,59 @@ fn adr_0024_phase_a9_three_level_unwind() {
 }
 
 #[test]
+fn adr_0024_phase_a10_return_from_stored_proc_raises_local_jump_error() {
+    // ADR 0024 Phase A.6 round 2: a stored Proc that calls
+    // `return` after its lexical owner has already returned
+    // must raise `LocalJumpError: unexpected return`,
+    // matching CRuby. Pre-fix the legacy fallback in
+    // dispatch()'s method_return arm raw-popped and the
+    // script silently completed.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        def make_pr
+          proc { return :early }
+        end
+        pr = make_pr
+        begin
+          pr.call
+          puts "no-raise"
+        rescue LocalJumpError => e
+          puts "lje: #{e.message}"
+        end
+        "##,
+        "adr_0024_a10_return.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "lje: unexpected return\n");
+}
+
+#[test]
+fn adr_0024_phase_a10_break_from_stored_proc_raises_local_jump_error() {
+    // ADR 0024 Phase A.6 round 2: a stored Proc that calls
+    // `break` (invoked via `.call`, not yielded to by a
+    // wrapping method) must raise
+    // `LocalJumpError: break from proc-closure`.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        pr = proc { break :early }
+        begin
+          pr.call
+          puts "no-raise"
+        rescue LocalJumpError => e
+          puts "lje: #{e.message}"
+        end
+        "##,
+        "adr_0024_a10_break.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "lje: break from proc-closure\n");
+}
+
+#[test]
 fn adr_0024_phase_a3_kernel_loop_works_with_break() {
     // ADR 0024 Phase A.3: top-level `def loop` installed in
     // preamble. The canonical CRuby idiom should work:
