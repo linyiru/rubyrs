@@ -52,6 +52,7 @@ impl Vm {
                 | "exit"
                 | "exit!"
                 | "abort"
+                | "warn"
                 | "at_exit"
                 | "__rubyrs_signal_trap"
                 | "__method__"
@@ -187,7 +188,7 @@ impl Vm {
                         &*name,
                         "puts" | "p" | "pp" | "print" | "require" |
                         "sprintf" | "format" | "__time_now_raw" | "sleep" |
-                        "exit" | "exit!" | "abort" | "at_exit" | "__rubyrs_signal_trap" |
+                        "exit" | "exit!" | "abort" | "warn" | "at_exit" | "__rubyrs_signal_trap" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
                         "eval" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?"
@@ -750,10 +751,8 @@ impl Vm {
                 // before raising SystemExit(1). Pre-fix the
                 // no-args path was silent.
                 //
-                // (stdout vs stderr: rubyrs's IO model exposes
-                // only `Vm::stdout`, so the message lands there.
-                // Documented divergence — fixing requires adding
-                // a stderr channel to Vm.)
+                // Tier-1 2c: now writes to `Vm::stderr` (was
+                // stdout before the stderr channel landed).
                 if args.len() > 1 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
                         msg: format!(
@@ -790,12 +789,31 @@ impl Vm {
                 };
                 if let Some(m) = msg.as_ref() {
                     if m.ends_with('\n') {
-                        let _ = write!(self.stdout, "{m}");
+                        let _ = write!(self.stderr, "{m}");
                     } else {
-                        let _ = writeln!(self.stdout, "{m}");
+                        let _ = writeln!(self.stderr, "{m}");
                     }
                 }
                 raise_system_exit(self, 1, msg.as_deref().unwrap_or("exit"))
+            }
+            "warn" => {
+                // Tier-1 2c: `Kernel#warn(*msgs)` writes each
+                // argument + "\n" to `Vm::stderr`. CRuby joins
+                // multiple args with newlines (one terminator
+                // each, including trailing); `warn` accepts any
+                // arity. Tier-1 simplification: ignores the
+                // `uplevel:` / `category:` kwargs CRuby exposes
+                // (not in the rubyrs subset yet) — positional
+                // args only.
+                for arg in args {
+                    let s = arg.to_display(&self.heap, &self.interner);
+                    if s.ends_with('\n') {
+                        let _ = write!(self.stderr, "{s}");
+                    } else {
+                        let _ = writeln!(self.stderr, "{s}");
+                    }
+                }
+                Some(Ok(Value::Nil))
             }
             "exit!" => {
                 let status = match parse_exit_status(args) {

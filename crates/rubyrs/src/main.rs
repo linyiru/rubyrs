@@ -334,6 +334,7 @@ fn main() {
     let mut rt = Runtime::with_config(cfg);
     trace.at("runtime_ready");
     rt.set_stdout(Box::new(std::io::stdout()));
+    rt.set_stderr(Box::new(std::io::stderr()));
     // Stage 7d: expose `_http_server` host fns to scripts
     // when the feature is built in. Keeps the binary
     // useful for prefork subprocess tests + examples.

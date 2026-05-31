@@ -724,6 +724,13 @@ pub(crate) struct Vm {
     /// Native-code holding pen for heap values across GC points; see ADR 0005.
     pub(crate) pinned: Vec<Value>,
     pub(crate) stdout: Box<dyn std::io::Write>,
+    /// Tier-1 2c: separate channel for `warn` / `abort` no-args /
+    /// future `STDERR.puts` / `$stderr.write`. Defaults to
+    /// `std::io::sink()` so embedders that don't care don't see
+    /// any output — same defensive default as `stdout`. The CLI
+    /// binary wires this to `std::io::stderr()`; tests can wire a
+    /// capturing buffer.
+    pub(crate) stderr: Box<dyn std::io::Write>,
     pub(crate) stress_gc: bool,
     /// Mirror of `Config::allow_filesystem_io`. Set by
     /// `apply_config` (and the preamble snapshot path); read by
@@ -1076,6 +1083,7 @@ impl Vm {
             // The CLI binary `rubyrs` wires it to process stdout in
             // `main.rs` so `rubyrs script.rb` behaves like CRuby.
             stdout: Box::new(std::io::sink()),
+            stderr: Box::new(std::io::sink()),
             // Default to false; Config-driven `stress_gc` flows in
             // via `Runtime::apply_config`. The previous `env::var`
             // read here meant `Vm::new` indirectly hit a wasi

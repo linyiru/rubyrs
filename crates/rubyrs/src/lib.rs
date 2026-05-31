@@ -2287,6 +2287,18 @@ RUBY_ENGINE = "ruby".freeze
         self.vm.stdout = w;
     }
 
+    /// Tier-1 2c: install the writer that `Kernel#warn`,
+    /// `Kernel#abort` no-args, and future `$stderr` /
+    /// `STDERR.puts` send their output to. Defaults to
+    /// `std::io::sink()` (silent) — same secure-by-default
+    /// posture as [`set_stdout`]. The CLI binary `rubyrs` wires
+    /// this to `std::io::stderr()`; library embedders typically
+    /// install a capturing buffer in tests and a real stderr
+    /// handle in production.
+    pub fn set_stderr(&mut self, w: Box<dyn Write>) {
+        self.vm.stderr = w;
+    }
+
     /// Snapshot of the per-call-site inline-cache hit / miss
     /// counters accumulated since this `Runtime` was constructed.
     /// Returns a meaningful `IcStats` only when rubyrs was built

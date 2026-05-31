@@ -1714,14 +1714,13 @@ fn exit_bang_invokes_injected_closure_with_status() {
 fn abort_prints_message_then_raises_system_exit_with_status_1() {
     // ADR 0025 Phase 0.5b: `Kernel#abort(msg)` writes msg
     // (with trailing newline) and then raises
-    // SystemExit.new(1). Documented divergence: CRuby writes
-    // to stderr; rubyrs writes to the standard Vm sink (no
-    // separate stderr in the current OutputSink abstraction —
-    // ADR 0021 follow-up). Subject to revision when stderr
-    // sink lands.
+    // SystemExit.new(1). Tier-1 2c: now writes to stderr
+    // (was stdout pre-stderr-sink-landing).
     let mut rt = rubyrs::Runtime::new();
-    let buf = SharedBuf::new();
-    rt.set_stdout(Box::new(buf.clone()));
+    let stdout_buf = SharedBuf::new();
+    let stderr_buf = SharedBuf::new();
+    rt.set_stdout(Box::new(stdout_buf.clone()));
+    rt.set_stderr(Box::new(stderr_buf.clone()));
     rt.eval(
         r##"
         begin
@@ -1732,7 +1731,8 @@ fn abort_prints_message_then_raises_system_exit_with_status_1() {
         "##,
         "abort_with_msg.rb",
     ).expect("eval");
-    assert_eq!(buf.snapshot(), "boom\ncaught: status=1\n");
+    assert_eq!(stdout_buf.snapshot(), "caught: status=1\n");
+    assert_eq!(stderr_buf.snapshot(), "boom\n");
 }
 
 #[test]
@@ -2063,8 +2063,10 @@ fn adr_0025_followup_abort_no_args_consults_dollar_bang() {
         ..rubyrs::Config::default()
     };
     let mut rt = rubyrs::Runtime::with_config(cfg);
-    let buf = SharedBuf::new();
-    rt.set_stdout(Box::new(buf.clone()));
+    let stdout_buf = SharedBuf::new();
+    let stderr_buf = SharedBuf::new();
+    rt.set_stdout(Box::new(stdout_buf.clone()));
+    rt.set_stderr(Box::new(stderr_buf.clone()));
     let _ = rt.eval(
         r##"
         begin
@@ -2075,7 +2077,9 @@ fn adr_0025_followup_abort_no_args_consults_dollar_bang() {
         "##,
         "adr_0025_abort_dollar_bang.rb",
     );
-    assert_eq!(buf.snapshot(), "RuntimeError: boom\n");
+    // Tier-1 2c: abort's message now lands on stderr, not stdout.
+    assert_eq!(stdout_buf.snapshot(), "");
+    assert_eq!(stderr_buf.snapshot(), "RuntimeError: boom\n");
 }
 
 #[test]
@@ -2142,4 +2146,40 @@ fn tier1_2a_plain_object_keeps_hex_form() {
         "tier1_2a_plain_object.rb",
     ).expect("eval");
     assert_eq!(buf.snapshot(), "true\n");
+}
+
+#[test]
+fn tier1_2c_warn_writes_to_stderr() {
+    // Tier-1 2c: `Kernel#warn(msg)` writes to the Vm's
+    // stderr channel, not stdout. Multi-arg form prints
+    // one line per argument (CRuby parity).
+    let mut rt = rubyrs::Runtime::new();
+    let stdout_buf = SharedBuf::new();
+    let stderr_buf = SharedBuf::new();
+    rt.set_stdout(Box::new(stdout_buf.clone()));
+    rt.set_stderr(Box::new(stderr_buf.clone()));
+    rt.eval(
+        r##"
+        warn "first"
+        warn "a", "b", "c"
+        puts "stdout"
+        "##,
+        "tier1_2c_warn.rb",
+    ).expect("eval");
+    assert_eq!(stdout_buf.snapshot(), "stdout\n");
+    assert_eq!(stderr_buf.snapshot(), "first\na\nb\nc\n");
+}
+
+#[test]
+fn tier1_2c_warn_default_sink_is_silent() {
+    // Tier-1 2c secure-by-default: a Runtime with no explicit
+    // `set_stderr` discards warn output (matches the
+    // `set_stdout`-not-called posture). Embedders opt into
+    // seeing diagnostics.
+    let mut rt = rubyrs::Runtime::new();
+    let stdout_buf = SharedBuf::new();
+    rt.set_stdout(Box::new(stdout_buf.clone()));
+    rt.eval(r#"warn "silent""#, "tier1_2c_warn_silent.rb")
+        .expect("eval");
+    assert_eq!(stdout_buf.snapshot(), "");
 }
