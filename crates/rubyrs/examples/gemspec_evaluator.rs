@@ -28,9 +28,12 @@
 //! Run with: `cargo run --release --example gemspec_evaluator`
 //!
 //! No external setup needed — the example materializes a fake
-//! gem under `CARGO_TARGET_TMPDIR` (when run via `cargo test`) or
-//! `std::env::temp_dir()` (the normal `cargo run` case) and
-//! tears it down on exit via the `GemRoot` RAII guard.
+//! gem under `std::env::temp_dir()` and tears it down on exit
+//! via the `GemRoot` RAII guard. (Earlier drafts tried to read
+//! `CARGO_TARGET_TMPDIR` via `option_env!` for a "cargo test"
+//! path, but examples never run via `cargo test` and Cargo only
+//! sets that env var at runtime for integration tests anyway —
+//! `option_env!` is compile-time, so the branch never fired.)
 
 use std::cell::RefCell;
 use std::fs;
@@ -52,12 +55,8 @@ impl Drop for GemRoot {
 }
 
 fn build_fake_gem() -> GemRoot {
-    // Use the env-provided test target dir if running under cargo
-    // test; fall back to env::temp_dir() for direct `cargo run`.
-    let base = option_env!("CARGO_TARGET_TMPDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let raw = base.join(format!("rubyrs-gemspec-eval-{}", std::process::id()));
+    let raw = std::env::temp_dir()
+        .join(format!("rubyrs-gemspec-eval-{}", std::process::id()));
     let _ = fs::remove_dir_all(&raw); // clean slate
     fs::create_dir_all(&raw).expect("mkdir gem root");
     let root = fs::canonicalize(&raw).expect("canonicalize gem root");
