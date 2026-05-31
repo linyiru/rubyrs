@@ -2256,3 +2256,62 @@ fn tier1_2b_proc_new_implicit_capture_also_raises() {
         "ok: tried to create Proc object without a block\n",
     );
 }
+
+#[test]
+fn dunder_dir_works_with_explicit_self_receiver() {
+    // Pre-fix `self.__dir__` raised NoMethodError because
+    // the `__dir__` arm in `do_call` was gated by the
+    // `if no_recv` branch — only bare `__dir__` reached it.
+    // CRuby exposes `__dir__` as a Kernel private instance
+    // method, so `self.__dir__` (the "explicit self for
+    // private" exception) must work at every scope.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        # toplevel: self is the main object
+        a = self.__dir__
+        # instance method body: self is the Foo instance
+        class Foo
+          def dir; self.__dir__; end
+        end
+        b = Foo.new.dir
+        # class method body: self is the class
+        class Bar
+          def self.dir; self.__dir__; end
+        end
+        c = Bar.dir
+        puts (a == b && b == c) ? "all match" : "diverged"
+        puts a.start_with?("/") || a == "."
+        "##,
+        "dunder_dir_self.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "all match\ntrue\n");
+}
+
+#[test]
+fn dunder_dir_with_third_party_receiver_raises() {
+    // Other receivers (`obj.__dir__`, `"x".__dir__`) fail —
+    // CRuby surfaces this as "private method called", rubyrs
+    // currently as the broader "undefined method" (private-
+    // method-error parity is a separate Tier-1 gap). Either
+    // shape is correct here; what matters is that the call
+    // doesn't silently return.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r##"
+        class Foo; end
+        begin
+          Foo.new.__dir__
+          puts "leaked"
+        rescue NoMethodError => e
+          puts "ok: #{e.class}"
+        end
+        "##,
+        "dunder_dir_third_party.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot(), "ok: NoMethodError\n");
+}

@@ -3184,6 +3184,72 @@ impl Vm {
         if no_recv && self.try_dispatch_no_recv_builtin_or_host(&name, name_id, &args)? {
             return Ok(());
         }
+        // `__dir__` — Kernel private instance method. CRuby
+        // allows two call shapes:
+        //   - bare `__dir__` (implicit self / no_recv)
+        //   - `self.__dir__` (explicit `self` receiver — the
+        //     one private-method exception)
+        // Any other receiver (`obj.__dir__`, `42.__dir__`) is
+        // a "private method called" NoMethodError. Pre-fix the
+        // arm only fired in the `no_recv` branch below; even
+        // `self.__dir__` (the canonical idiom for forwarding
+        // through `module_function`-style helpers) raised
+        // NoMethodError.
+        if &*name == "__dir__" && args.is_empty() {
+            let is_implicit = recv.is_none();
+            // Identity-compare the receiver with the current
+            // frame's `self_val`. Matches the discriminator
+            // pattern used by `equal?` (line 5236+): same-shape
+            // arms for the heap variants, value match for the
+            // primitives. Lets `self.__dir__` work from inside
+            // any method body (`self` is the singleton receiver
+            // expected to call its own private methods).
+            let frame_self = self.frames.last().map(|f| &f.self_val);
+            let is_self = matches!((&recv, frame_self), (Some(r), Some(s)) if {
+                use std::rc::Rc;
+                match (r, s) {
+                    (Value::Nil, Value::Nil) => true,
+                    (Value::Bool(a), Value::Bool(b)) => a == b,
+                    (Value::Int(a), Value::Int(b)) => a == b,
+                    (Value::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
+                    (Value::Sym(a), Value::Sym(b)) => a == b,
+                    (Value::Object(a), Value::Object(b)) => a == b,
+                    (Value::Class(a), Value::Class(b)) => Rc::ptr_eq(a, b),
+                    (Value::Str(a), Value::Str(b)) => Rc::ptr_eq(a, b),
+                    _ => false,
+                }
+            });
+            if !is_implicit && !is_self {
+                // Fall through to the normal method-lookup path
+                // so the resulting NoMethodError carries the
+                // correct receiver class name in its message.
+            } else {
+            use std::path::Path;
+            let fname = self.frames.last()
+                .map(|f| self.protos[f.proto_idx].filename.to_string())
+                .unwrap_or_default();
+            let lexical_parent = |fname: &str| -> String {
+                Path::new(fname).parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| ".".to_string())
+            };
+            let wide_open = self.allow_filesystem_io && self.allowed_paths.is_none();
+            let dir = if wide_open {
+                match std::fs::canonicalize(&fname) {
+                    Ok(real) => real.parent()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| ".".to_string()),
+                    Err(_) => lexical_parent(&fname),
+                }
+            } else {
+                lexical_parent(&fname)
+            };
+            self.stack.push(Value::new_str(dir));
+            return Ok(());
+            }
+        }
         if no_recv {
             // Bare `send(:foo)` / `__send__(:foo)` — CRuby treats
             // these as `self.send(:foo)`. Resolve target and re-aim
@@ -3413,69 +3479,9 @@ impl Vm {
                     return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
                 }
             }
-            // `__dir__` — returns the directory of the source
-            // file the call lexically appears in. CRuby's
-            // contract is "canonicalized absolute path" — it
-            // calls `File.realpath(__FILE__)` first, so
-            // symlinks resolve and `..` segments collapse.
-            // We canonicalize the proto's stored filename via
-            // `fs::canonicalize` (follows symlinks, fails if
-            // the path doesn't exist) and then take its
-            // parent; on canonicalize failure (typically when
-            // `__dir__` runs from an `eval`'d inline string
-            // whose "filename" is a synthetic label like
-            // `<inline>`) we fall back to the lexical
-            // `Path::parent` of the raw filename. Lets
-            // vendored Ruby helpers do
-            // `$LOAD_PATH.unshift __dir__` and match what
-            // CRuby resolves through symlinked gem-vendor
-            // trees.
-            if &*name == "__dir__" && args.is_empty() {
-                use std::path::Path;
-                let fname = self.frames.last()
-                    .map(|f| self.protos[f.proto_idx].filename.to_string())
-                    .unwrap_or_default();
-                // When `allow_filesystem_io` is true, canonicalize
-                // for the symlink-resolved parent (matches CRuby);
-                // otherwise (sandbox on), skip the canonicalize
-                // syscall and return the lexical parent directly —
-                // the same shape the existing `Err(_) =>` fallback
-                // already produces when canonicalize fails.
-                // Empty-parent guard: `Path::new("test.rb").parent()`
-                // returns `Some("")` (not None), so a bare unwrap_or
-                // wouldn't collapse the empty case to ".". Filter the
-                // empty string out alongside None — both mean
-                // "no enclosing directory in the lexical path",
-                // which `__dir__` reports as ".".
-                let lexical_parent = |fname: &str| -> String {
-                    Path::new(fname).parent()
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| ".".to_string())
-                };
-                // Mirrors File.expand_path's mode selection: only
-                // touch the host FS (canonicalize → symlink-resolved
-                // parent) in the wide-open shape (sandbox on AND no
-                // allowlist). Under `allowed_paths: Some(_)`,
-                // canonicalize would resolve symlinks anywhere on
-                // the host — same info-leak shape File.expand_path
-                // closed. Fall back to lexical parent in every
-                // other case, matching the Err(_) arm above.
-                let wide_open = self.allow_filesystem_io && self.allowed_paths.is_none();
-                let dir = if wide_open {
-                    match std::fs::canonicalize(&fname) {
-                        Ok(real) => real.parent()
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| ".".to_string()),
-                        Err(_) => lexical_parent(&fname),
-                    }
-                } else {
-                    lexical_parent(&fname)
-                };
-                self.stack.push(Value::new_str(dir));
-                return Ok(());
-            }
+            // (`__dir__` is now handled by the hoisted arm
+            // above the `if no_recv` block — Kernel mixin
+            // parity. Don't add a duplicate here.)
             // Mirror the fast-path guard above (`can_try_toplevel_fast_path`
             // around line 345): the toplevel cache slot key
             // (`TOPLEVEL_METHOD_CACHE_KEY`) doesn't carry the
