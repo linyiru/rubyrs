@@ -5196,6 +5196,35 @@ impl Vm {
                     ),
                 }));
             }
+            // `rationalize(eps)` — CRuby's MRI calls `f_nonzero_p`
+            // on eps internally which raises NoMethodError on
+            // non-Numeric args. We surface the more standard
+            // TypeError "X can't be coerced into Float" shape
+            // (eps is conceptually a Float tolerance). Nil is
+            // explicitly accepted as "use default tolerance".
+            // The eps value itself is ignored for Integer
+            // receivers (no fractional part), but the type check
+            // matters for parity with what Float#rationalize
+            // (Phase C.4) will enforce.
+            if &*name == "rationalize" && args.len() == 1 {
+                let is_numeric_or_nil = matches!(
+                    &args[0],
+                    Value::Int(_) | Value::Float(_) | Value::Nil | Value::Rational(_)
+                ) || {
+                    #[cfg(feature = "bignum")]
+                    { matches!(&args[0], Value::BigInt(_)) }
+                    #[cfg(not(feature = "bignum"))]
+                    { false }
+                };
+                if !is_numeric_or_nil {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "{} can't be coerced into Float",
+                            crate::vm::numeric::type_name_for_coerce(&args[0]),
+                        ),
+                    }));
+                }
+            }
             // Coerce receiver to i64 — BigInt num/den is Phase C.4.
             let num = match &recv {
                 Value::Int(n) => *n,

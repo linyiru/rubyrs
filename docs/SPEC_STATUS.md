@@ -13,7 +13,7 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 149 |
-| Examples in corpus | 923 |
+| Examples in corpus | 924 |
 | Skipped `it` traces | 157 |
 
 ### Skipped traces by category
@@ -42,7 +42,7 @@ Find blocks unlocked by a future feature with e.g.
 | BasicObject | 3 | 15 | 0 |
 | Block | 1 | 8 | 0 |
 | Hash | 40 | 193 | 51 |
-| Integer | 37 | 319 | 32 |
+| Integer | 37 | 320 | 32 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
 | Rational | 4 | 17 | 0 |
@@ -147,7 +147,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_nobits_spec.rb` | Integer#nobits? | `core/integer/nobits_spec.rb` | 5 | 1 |
 | `integer_odd_spec.rb` | Integer#odd? | `core/integer/odd_spec.rb` | 5 | 1 |
 | `integer_pow_spec.rb` | Integer#pow | `core/integer/pow_spec.rb` | 7 | 0 |
-| `integer_rationalize_spec.rb` | Integer#rationalize | `core/integer/rationalize_spec.rb` | 3 | 1 |
+| `integer_rationalize_spec.rb` | Integer#rationalize | `core/integer/rationalize_spec.rb` | 4 | 1 |
 | `integer_right_shift_spec.rb` | Integer#>> | `core/integer/right_shift_spec.rb` | 26 | 0 |
 | `integer_round_spec.rb` | Integer#round | `core/integer/round_spec.rb + shared/to_i.rb + shared/integer_rounding.rb` | 14 | 3 |
 | `integer_succ_spec.rb` | Integer#succ / Integer#next | `core/integer/succ_spec.rb + core/integer/next_spec.rb + shared/next.rb` | 5 | 4 |

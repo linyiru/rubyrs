@@ -3084,9 +3084,16 @@ fn integer_to_r_and_rationalize() {
     // Errors — pin both class AND message wording for the arity
     // shapes (CRuby uses "expected 0" for zero-arg methods, not
     // "expected 0..0"; "expected 0..1" reserved for true ranges).
+    // Non-numeric eps for rationalize surfaces TypeError matching
+    // the `X can't be coerced into Float` shape (eps is
+    // conceptually a Float tolerance, even though Integer recv
+    // ignores it).
     for (script, expected_class, expected_msg) in [
-        ("5.to_r(99)",          "ArgumentError", "wrong number of arguments (given 1, expected 0)"),
-        ("5.rationalize(1, 2)", "ArgumentError", "wrong number of arguments (given 2, expected 0..1)"),
+        ("5.to_r(99)",            "ArgumentError", "wrong number of arguments (given 1, expected 0)"),
+        ("5.rationalize(1, 2)",   "ArgumentError", "wrong number of arguments (given 2, expected 0..1)"),
+        ("5.rationalize(:sym)",   "TypeError",     "Symbol can't be coerced into Float"),
+        ("5.rationalize(\"x\")",  "TypeError",     "String can't be coerced into Float"),
+        ("5.rationalize([])",     "TypeError",     "Array can't be coerced into Float"),
     ] {
         let err = rt.eval(script, "integer_to_r_err.rb").unwrap_err();
         match err.err {

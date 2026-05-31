@@ -29,6 +29,15 @@ describe "Integer#rationalize" do
     assert_raises("ArgumentError") { 5.rationalize(0.1, 0.01) }
   end
 
+  it "raises TypeError when eps is not Numeric or nil" do
+    # CRuby's MRI internally calls `f_nonzero_p(eps)` which raises
+    # NoMethodError on non-Numeric args; rubyrs surfaces the more
+    # standard `X can't be coerced into Float` TypeError shape.
+    assert_raises("TypeError") { 5.rationalize(:sym) }
+    assert_raises("TypeError") { 5.rationalize("x") }
+    assert_raises("TypeError") { 5.rationalize([]) }
+  end
+
   # skipped (method-not-implemented): it "returns the receiver as a Rational" do
   #   # upstream core/integer/rationalize_spec.rb, bignum branch
   #   # of the receiver-as-Rational test
