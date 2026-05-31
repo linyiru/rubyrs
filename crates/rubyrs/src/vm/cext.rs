@@ -710,6 +710,15 @@ pub(crate) fn cext_dispatch(
             Vec::with_capacity(arg_handles.len() + 1);
         invoke_args.push(self_handle);
         invoke_args.extend_from_slice(&arg_handles);
+        // ADR 0025 deferred follow-up: increment `cext_depth`
+        // around the C invocation so `Fiber.yield` mid-cext
+        // raises `FiberError` instead of unwinding the Rust
+        // stack through C frames. The guard's Drop decrements
+        // on every exit path — Returned, Raised (longjmp safely
+        // back into Rust), or panic. SAFETY: vm_ptr is the same
+        // pointer all the other cext_dispatch sites use; valid
+        // for this dispatch's lifetime per ADR 0013.
+        let _depth_guard = crate::vm::CextDepthGuard::enter(&mut *vm_ptr);
         let raised = rubyrs_cext::raise::invoke_with_raise(
             func, arity, &invoke_args,
         );

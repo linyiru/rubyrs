@@ -1694,6 +1694,41 @@ mod tests {
     /// `cext_depth == 0`. Regression guard against a
     /// future change that accidentally trips the check on
     /// the happy path.
+    /// ADR 0025 deferred follow-up: `CextDepthGuard` increments
+    /// `cext_depth` on `enter` and decrements on `Drop`, even
+    /// when the guarded scope returns early via `?` or panics.
+    /// Pinned here (not vm.rs) because the existing
+    /// `cext_depth`-aware tests live in the fiber mod and
+    /// share the same Vm setup.
+    #[cfg(feature = "cext")]
+    #[test]
+    fn cext_depth_guard_balances_enter_and_drop() {
+        let rt = crate::Runtime::new();
+        // Borrow Vm via the runtime's internal handle. The
+        // guard's enter/drop bracketing is what's under test.
+        let vm_ptr: *mut crate::vm::Vm = {
+            // SAFETY: Runtime owns the Vm; ptr is valid for
+            // the duration of `rt`'s scope. We don't escape it.
+            let r = &rt as *const _ as *mut crate::Runtime;
+            unsafe { &mut (*r).vm as *mut _ }
+        };
+        let vm = unsafe { &mut *vm_ptr };
+        assert_eq!(vm.cext_depth, 0, "counter starts at 0");
+        {
+            let _g1 = crate::vm::CextDepthGuard::enter(vm);
+            assert_eq!(_g1.vm.cext_depth, 1, "enter increments");
+            {
+                let _g2 = crate::vm::CextDepthGuard::enter(_g1.vm);
+                assert_eq!(_g2.vm.cext_depth, 2, "nested enter stacks");
+            }
+            // _g2 dropped → counter back to 1.
+            assert_eq!(_g1.vm.cext_depth, 1, "inner drop balances");
+        }
+        // _g1 dropped → counter back to 0.
+        let vm = unsafe { &mut *vm_ptr };
+        assert_eq!(vm.cext_depth, 0, "outer drop balances");
+    }
+
     #[test]
     fn fiber_yield_works_when_cext_depth_zero() {
         let mut rt = crate::Runtime::new();

@@ -419,6 +419,41 @@ impl Drop for SuppressInterruptGuard<'_> {
     }
 }
 
+/// ADR 0025 deferred follow-up: RAII guard for `Vm::cext_depth`.
+/// Wrapped around each `cext_dispatch` invocation that crosses
+/// into a C extension's exported function. `Drop` decrements
+/// even on panic / longjmp-via-`invoke_with_raise`-error path,
+/// so a cext that raises or otherwise unwinds doesn't leave the
+/// counter stuck >0 (which would permanently disable
+/// `Fiber.yield` for the rest of the Vm's lifetime).
+///
+/// `Fiber.yield`'s guard (`vm/fiber.rs::__rubyrs_fiber_yield`)
+/// reads `cext_depth > 0` and raises `FiberError` rather than
+/// unwinding the Rust stack through C frames that don't expect
+/// Ruby control flow. The guard is `_fiber`-gated; without
+/// `_fiber` the counter ticks but has no consumer (counter is
+/// always-present so the cext bridge doesn't need feature-gated
+/// code paths).
+#[cfg(feature = "cext")]
+pub(crate) struct CextDepthGuard<'a> {
+    pub(crate) vm: &'a mut Vm,
+}
+
+#[cfg(feature = "cext")]
+impl<'a> CextDepthGuard<'a> {
+    pub(crate) fn enter(vm: &'a mut Vm) -> Self {
+        vm.cext_depth = vm.cext_depth.saturating_add(1);
+        Self { vm }
+    }
+}
+
+#[cfg(feature = "cext")]
+impl Drop for CextDepthGuard<'_> {
+    fn drop(&mut self) {
+        self.vm.cext_depth = self.vm.cext_depth.saturating_sub(1);
+    }
+}
+
 /// ADR 0024 Phase A: RAII guard for `Vm::yield_recursion_depth`.
 /// `enter` increments + range-checks against `max_yield_recursion`
 /// (returns `ResourceExhausted` Trap if exceeded); `Drop`
@@ -931,8 +966,12 @@ pub(crate) struct Vm {
     /// designed re-entry path, and fiber.resume → bytecode
     /// → Fiber.yield is the normal flow we WANT to work.
     ///
-    /// cfg(_fiber)-gated.
-    #[cfg(feature = "_fiber")]
+    /// Ungated (was `_fiber`-only before the production cext
+    /// bridge sites started incrementing this) — the field is
+    /// always present so `cext_dispatch` can drive it
+    /// unconditionally. The Fiber.yield guard remains
+    /// `_fiber`-gated; without `_fiber` the counter ticks but
+    /// has no consumer.
     pub(crate) cext_depth: u32,
     /// P1e.1 (ADR 0023 v2 §"Risks" #2): cap on concurrently-live
     /// Fibers. Set from `Config::max_live_fibers`.
@@ -1131,7 +1170,6 @@ impl Vm {
             fiber_yield_pending: None,
             #[cfg(feature = "_fiber")]
             current_fiber_id: None,
-            #[cfg(feature = "_fiber")]
             cext_depth: 0,
             #[cfg(feature = "_fiber")]
             max_live_fibers: None,
