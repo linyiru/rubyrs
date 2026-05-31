@@ -672,7 +672,7 @@ fn allowlist_blocks_require_relative_traversal() {
 }
 
 #[test]
-#[cfg(all(not(target_os = "wasi"), unix))]
+#[cfg(all(not(target_os = "wasi"), unix, feature = "cext"))]
 fn allowlist_blocks_cext_via_symlink_target() {
     // Defends the symlink-tight contract on the load family. Place
     // a (placeholder) .dylib at /allowed/inner.{so,dylib} as a

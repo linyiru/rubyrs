@@ -390,6 +390,7 @@ fn float_eql_and_hash_are_type_strict_siblings_to_integer() {
 }
 
 #[test]
+#[cfg(feature = "regex")]
 fn equal_q_handles_sibling_heap_variants_via_identity() {
     // Phase B.7 drive-by: `Object#equal?` mirrored its BigInt arm
     // pattern for the four other heap-allocated variants that

@@ -461,6 +461,7 @@ fn frame_cap_traps_deep_recursion() {
 }
 
 #[test]
+#[cfg(feature = "regex")]
 fn interpolated_regex_respects_max_symbols_cap() {
     // PR #99 review coverage: dynamic patterns intern into the
     // same interner used by `String#to_sym`, so the same

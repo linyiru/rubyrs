@@ -266,9 +266,25 @@ fn ruby_spec_microrunner_all_examples_pass() {
             .and_then(|n| n.to_str())
             .map(|n| n.ends_with("_spec.rb"))
             .unwrap_or(false);
-        if is_spec {
-            entries.push(path);
+        if !is_spec {
+            continue;
         }
+        // Per-feature skip list. `string_gsub_spec.rb` /
+        // `string_sub_spec.rb` exercise `/pattern/` regex
+        // literals at file scope — they syntax-error before
+        // any `it` block runs when rubyrs is built without
+        // the `regex` Cargo feature. Skipping is correct
+        // here (the specs are NOT testing absence-of-regex
+        // behavior); the regex-on test profile exercises
+        // them.
+        #[cfg(not(feature = "regex"))]
+        {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if matches!(name, "string_gsub_spec.rb" | "string_sub_spec.rb") {
+                continue;
+            }
+        }
+        entries.push(path);
     }
     assert!(!entries.is_empty(), "no spec files found in {}", dir.display());
 
