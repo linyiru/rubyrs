@@ -3311,6 +3311,27 @@ impl Vm {
             // shared `pub(crate) const &[&str]` consumed by
             // both sites — out of scope for this PR but tracked
             // as a follow-up by Copilot review #1.)
+            //
+            // `define_singleton_method` is also valid with an
+            // Object instance as self (top-level `main` or
+            // inside any instance method body). The
+            // Value::Class branch below handles the
+            // bare-in-class-body case; this small bridge
+            // covers the Object-self case by re-entering as
+            // explicit-receiver. Without it, bare-call no_recv
+            // misses both the Class bridge and the receiver-
+            // form arm, surfacing as NoMethodError instead of
+            // CRuby's ArgumentError / TypeError. Block-form is
+            // already handled by `do_call_block`'s own no_recv
+            // path. PR #309 cycle-5.
+            if matches!(&self_val, Value::Object(_))
+                && &*name == "define_singleton_method"
+            {
+                let argc = args.len();
+                self.stack.push(self_val.clone());
+                for a in args { self.stack.push(a); }
+                return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
+            }
             if let Value::Class(cls) = &self_val {
                 let in_set = matches!(&*name,
                     "new" | "name" | "to_s" | "inspect"
@@ -3337,6 +3358,16 @@ impl Vm {
                     // lookup.rs's respond_to whitelist (PR #245
                     // Copilot round 2 #1).
                     | "define_method"
+                    // `define_singleton_method` joins the bridge
+                    // for the same reason: bare bare form inside
+                    // a class body (no_recv, no block) needs to
+                    // reach the receiver-form arm at line ~5427
+                    // so the user sees ArgumentError / TypeError
+                    // instead of NoMethodError. Block-form has
+                    // its own no_recv handling in
+                    // `do_call_block` (line ~6964).
+                    // PR #309 cycle-4.
+                    | "define_singleton_method"
                 );
                 // `allocate` gets the same Module fence as
                 // lookup.rs's respond_to gate so bare `allocate`
@@ -5651,6 +5682,49 @@ impl Vm {
             self.stack.push(recv);
             return Ok(());
         }
+        // `obj.define_singleton_method(...)` without a block —
+        // mirror the block-form arm's arity / type validation
+        // so the user sees an ArgumentError / TypeError instead
+        // of NoMethodError. Gated on the same receiver shapes
+        // the block-form arm actually supports (Value::Object
+        // and Value::Class); other receivers fall through to
+        // the normal NoMethodError path (matching what CRuby
+        // does at the TypeError "can't define singleton"
+        // surface — close enough for primitives that don't
+        // accept the install at all).
+        if &*name == "define_singleton_method"
+            && matches!(&recv, Value::Object(_) | Value::Class(_))
+        {
+            match args.len() {
+                0 => return Err(self.trap(RubyError::ArgumentError {
+                    msg: "wrong number of arguments (given 0, expected 1..2)".into(),
+                }),),
+                1 => {
+                    // Validate the name argument so callers get
+                    // TypeError on a non-Symbol/String name even
+                    // without a block. CRuby validates name
+                    // before complaining about the missing block.
+                    match &args[0] {
+                        Value::Sym(_) | Value::Str(_) => {}
+                        other => return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "wrong argument type {} (expected Symbol or String)",
+                                other.type_name(),
+                            ),
+                        })),
+                    }
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: "tried to create Proc object without a block".into(),
+                    }));
+                }
+                2 => return Err(self.trap(RubyError::ArgumentError {
+                    msg: "the 2-arg Proc/UnboundMethod form of `Object#define_singleton_method` is not yet supported by rubyrs Tier-1".into(),
+                })),
+                n => return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
+                })),
+            }
+        }
         // `Object#dup` / `Object#clone` — universal shallow
         // copy. Primitive arms in vm/string.rs / vm/array.rs /
         // vm/hash.rs intercept their own receivers earlier in
@@ -7283,6 +7357,118 @@ impl Vm {
         // installed Method so outer-scope locals stay live.
         // CRuby returns the method name as a Symbol.
         // (TRY_RUNS pass-9.7d layer #21.)
+        // `obj.define_singleton_method(:name) { ... }` —
+        // runtime path covering the cases the compiler shortcut
+        // at `compiler.rs:213` doesn't catch (dynamic dispatch
+        // via __send__, `singleton_method`-returning methods,
+        // etc.). For Value::Object the install target is the
+        // receiver's eigenclass (materialized via
+        // `ensure_singleton_class`); for Value::Class it goes
+        // straight into the class's `singleton_methods` table
+        // so `C.define_singleton_method(:foo) { ... }` adds a
+        // class method. Primitive receivers raise NoMethodError
+        // (CRuby reports "can't define singleton" TypeError, but
+        // routing the dispatch arm to do that requires plumbing
+        // we don't have here — Tier-2 polish).
+        //
+        // Known limitation: this short-circuit fires before
+        // user-method lookup, so a user `def self.define_singleton_method`
+        // override on a Class is shadowed. Mirrors the pre-existing
+        // Object-extras precedence gap documented at iter.rs's
+        // tap/itself comment (bb4df50c, PR #290 cycle-3).
+        // The proper fix is a user-override probe (see the
+        // `send` arm in dispatch.rs:513) applied to the whole
+        // built-in install family — tracked as Tier-2 follow-up.
+        if &*name == "define_singleton_method" {
+            let target_recv = recv.clone().or_else(|| {
+                self.frames.last().map(|f| f.self_val.clone())
+            });
+            // Arity matches `define_method` (1 → block install;
+            // 2 → Proc/Method second-arg form, still
+            // unsupported; other → ArgumentError).
+            match args.len() {
+                1 => {}
+                2 => return Err(self.trap(RubyError::ArgumentError {
+                    msg: "the 2-arg Proc/UnboundMethod form of `Object#define_singleton_method` is not yet supported by rubyrs Tier-1".into(),
+                })),
+                n => return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
+                })),
+            }
+            let name_sym = match &args[0] {
+                Value::Sym(s) => *s,
+                Value::Str(s) => {
+                    let raw = s.to_string_lossy();
+                    if let Some(max) = self.max_symbols
+                        && !self.interner.contains(&raw) && self.interner.len() >= max {
+                            return Err(self.trap(RubyError::ResourceExhausted {
+                                msg: format!("interner exhausted: {} symbols", max),
+                            }));
+                        }
+                    self.interner.intern(&raw)
+                }
+                other => return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "wrong argument type {} (expected Symbol or String)",
+                        other.type_name(),
+                    ),
+                })),
+            };
+            let (proto_idx, captured, param_start, n_params) = {
+                let bh = self.heap.block(block);
+                (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
+            };
+            let proto = &self.protos[proto_idx];
+            let params = proto.params.clone();
+            // `defining_class` anchors `super` lookups inside
+            // the installed method. For Object receivers the
+            // anchor is the eigenclass (super walks its
+            // superclass chain into the original class);
+            // for Class receivers the anchor is the class whose
+            // `singleton_methods` table we're writing into, so
+            // `super` inside a class method walks the metaclass
+            // chain. Without an anchor, `super` raises
+            // "outside of method" — mirrors the static
+            // singleton install at step.rs:1273.
+            match target_recv {
+                Some(Value::Object(id)) => {
+                    let sc = self.heap.ensure_singleton_class(id);
+                    let m = std::rc::Rc::new(crate::value::Method {
+                        params,
+                        proto_idx,
+                        fixed_arity: None,
+                        defining_class: Some(std::rc::Rc::downgrade(&sc)),
+                        visibility: std::cell::Cell::new(crate::value::Visibility::Public),
+                        closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                        builtin: None,
+                    });
+                    sc.methods.borrow_mut().insert(name_sym, m);
+                }
+                Some(Value::Class(c)) => {
+                    let m = std::rc::Rc::new(crate::value::Method {
+                        params,
+                        proto_idx,
+                        fixed_arity: None,
+                        defining_class: Some(std::rc::Rc::downgrade(&c)),
+                        visibility: std::cell::Cell::new(crate::value::Visibility::Public),
+                        closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                        builtin: None,
+                    });
+                    c.singleton_methods.borrow_mut().insert(name_sym, m);
+                }
+                Some(other) => return Err(self.trap(RubyError::NoMethodError {
+                    kind: crate::error::NoMethodErrorKind::Missing,
+                    method: format!("undefined method '{}' called", &*name),
+                    recv_type: std::borrow::Cow::Borrowed(other.type_name()),
+                })),
+                None => return Err(self.trap(RubyError::ArgumentError {
+                    msg: "no receiver for define_singleton_method".into(),
+                })),
+            }
+            self.method_gen = self.method_gen.wrapping_add(1);
+            self.stack.push(Value::Sym(name_sym));
+            return Ok(());
+        }
         if &*name == "define_method" {
             // Track whether we picked the target via explicit
             // receiver vs no_recv (bare call in class body). The
