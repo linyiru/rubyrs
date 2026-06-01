@@ -1875,6 +1875,97 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Range(id)))
             }
+            // `(b..e).chunk_while { |a, b| pred(a, b) }` —
+            // partition the Range into runs of consecutive Ints
+            // where the block returns truthy for the adjacent
+            // pair (a=prev, b=current). Falsy starts a new chunk.
+            // Returns an Array of Array-chunks (NOT the receiver
+            // — unlike each_slice/each_cons). Walks lazily by
+            // Int counter so huge ranges don't materialise
+            // upfront. Only Int+Int endpoints supported;
+            // Str+Str raises RuntimeError (lockstep with
+            // lookup.rs:756, same fallback as each_slice/each_cons).
+            (Value::Range(id), "chunk_while", []) => {
+                let (bi, ei, excl) = {
+                    let r = self.heap.range(*id);
+                    match (&r.begin, &r.end) {
+                        (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: "Range#chunk_while with non-Int endpoints is not yet implemented in rubyrs".to_string(),
+                        })),
+                    }
+                };
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Range(id));
+                g.pin(Value::Block(block));
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                // Exclusive end at i64::MIN means empty range —
+                // see each_slice arm for the checked_sub
+                // rationale (Range#sum precedent).
+                let end_inc = if excl {
+                    match ei.checked_sub(1) {
+                        Some(v) => v,
+                        None => return Ok(Some(Value::Array(result_id))),
+                    }
+                } else { ei };
+                if bi > end_inc {
+                    return Ok(Some(Value::Array(result_id)));
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut current_chunk: Vec<Value> = vec![Value::Int(bi)];
+                let mut early: Option<Value> = None;
+                let mut prev = bi;
+                // Loop only fires for ranges with at least 2
+                // elements; single-element ranges flush
+                // `current_chunk` as the only chunk via the
+                // trailing flush below.
+                if bi < end_inc {
+                    let mut cur = bi + 1;
+                    'outer: loop {
+                        // step_block under per-iter pin scope:
+                        // baseline snapshot + call + truncate.
+                        // No closure needed here — the call has
+                        // no `?` so straight-line code suffices;
+                        // truncate runs even on Err because we
+                        // pull `step_result` out before `?`-ing.
+                        let iter_baseline = g.vm.pinned.len();
+                        let step_result = g.vm.step_block(block, vec![Value::Int(prev), Value::Int(cur)], pre_frames);
+                        g.vm.pinned.truncate(iter_baseline);
+                        let r = match step_result? {
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                            BlockStep::Break(r) => { early = Some(r); break 'outer; }
+                            BlockStep::Value(r) => r,
+                        };
+                        if r.is_truthy() {
+                            current_chunk.push(Value::Int(cur));
+                        } else {
+                            // Flush current_chunk, start fresh.
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let chunk_id = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current_chunk)));
+                            g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
+                            current_chunk.push(Value::Int(cur));
+                        }
+                        prev = cur;
+                        if cur == end_inc { break; }
+                        cur += 1;
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                // Trailing chunk (always non-empty on a non-
+                // empty range — we seeded it with `Value::Int(bi)`).
+                if !current_chunk.is_empty() {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let chunk_id = g.vm.heap.alloc(HeapObj::Array(current_chunk));
+                    g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
+                }
+                Some(Value::Array(result_id))
+            }
             (Value::Array(id), "each_with_index", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));

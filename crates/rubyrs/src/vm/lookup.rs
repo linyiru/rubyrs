@@ -653,7 +653,7 @@ impl Vm {
                 "each_with_index" | "each_with_object" |
                 "partition" | "min_by" | "max_by" |
                 "group_by" | "sort_by" | "sort" |
-                "each_slice" | "each_cons"
+                "each_slice" | "each_cons" | "chunk_while"
             ),
             Value::Bool(_) | Value::Nil => matches!(name, "to_s" | "inspect" | "dup" | "clone"),
             // Phase C.1 readers + Phase C.2 arithmetic / comparison.
