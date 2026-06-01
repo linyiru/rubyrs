@@ -41,6 +41,13 @@ impl Drop for GemRoot {
 /// don't collide. Uses the early-commit-then-update-path pattern
 /// (PR #283 review) so any panic during init still triggers
 /// cleanup via Drop.
+///
+/// Callers conventionally bind the first tuple element as
+/// `_root_keep_alive` (the intent-bearing `_` prefix suppresses
+/// the unused-variable lint while the suffix discourages a
+/// 'simplification' refactor to bare `_`, which would discard
+/// the `GemRoot` immediately and drop the tempdir BEFORE the
+/// test runs).
 fn build_fake_gem(tag: &str) -> (GemRoot, PathBuf) {
     let raw = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("rubund-validation-{tag}-{}", std::process::id()));
@@ -124,7 +131,7 @@ fn phase1_gemspec_evaluates_under_scoped_sandbox() {
         deps: Vec<(String, String)>,
     }
 
-    let (_guard, root) = build_fake_gem("phase1");
+    let (_root_keep_alive, root) = build_fake_gem("phase1");
     let mut rt = make_rt(&root);
     let captured = Rc::new(RefCell::new(Captured::default()));
 
@@ -179,7 +186,7 @@ fn phase1_gemspec_evaluates_under_scoped_sandbox() {
 
 #[test]
 fn phase2_out_of_scope_read_traps_ioerror() {
-    let (_guard, root) = build_fake_gem("phase2");
+    let (_root_keep_alive, root) = build_fake_gem("phase2");
     let mut rt = make_rt(&root);
     let trap = rt
         .eval(r#"File.read("/etc/passwd")"#, "<phase2>")
@@ -198,7 +205,7 @@ fn phase2_out_of_scope_read_traps_ioerror() {
 
 #[test]
 fn phase3_host_fn_panic_becomes_runtime_error_trap() {
-    let (_guard, root) = build_fake_gem("phase3");
+    let (_root_keep_alive, root) = build_fake_gem("phase3");
     let mut rt = make_rt(&root);
     rt.register_fn("explode", |_| panic!("simulated host-fn bug"));
     let trap = rt
