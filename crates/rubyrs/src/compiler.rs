@@ -313,6 +313,7 @@ fn compile_def_arm(
     params: &[String],
     defaults: &[Option<SExpr>],
     rest: &Option<String>,
+    n_required_post: u16,
     kw_params: &[(String, Option<SExpr>)],
     kw_rest: &Option<String>,
     block_param: &Option<String>,
@@ -322,7 +323,17 @@ fn compile_def_arm(
     interner: &mut Interner,
     cc: &mut u32,
 ) {
-    let n_required_positional = defaults.iter().take_while(|d| d.is_none()).count() as u16;
+    // `defaults` is laid out as `[pre_rest_required..., optionals...,
+    // post_rest_required...]` — both required runs carry `None`, only
+    // the middle optionals carry `Some(default_expr)`. So
+    // `n_pre_rest = total - n_optional - n_required_post`. Counting the
+    // leading-None run wouldn't distinguish the post-required tail when
+    // there are no optionals, so we derive both required counts from
+    // `defaults.len()` and `n_required_post` instead.
+    let n_optional = defaults.iter().filter(|d| d.is_some()).count() as u16;
+    let n_required_positional = (defaults.len() as u16)
+        .saturating_sub(n_optional)
+        .saturating_sub(n_required_post);
     let mut effective_params: Vec<String> = params.to_vec();
     if let Some(rname) = rest {
         effective_params.push(rname.clone());
@@ -348,6 +359,7 @@ fn compile_def_arm(
     if let Some(rname) = rest {
         protos[proto_idx].rest_param = Some(rname.clone());
     }
+    protos[proto_idx].n_required_post = n_required_post;
     protos[proto_idx].kw_param_defaults = kw_lit_defaults;
     if let Some(krname) = kw_rest {
         let slot_name = if krname.is_empty() { "__kw_rest_anon".to_string() } else { krname.clone() };
@@ -858,6 +870,7 @@ impl ProtoBuilder {
     pub(crate) fn build(self, name: String, params: Vec<String>, n_required_positional: u16, lexical_scope: Vec<crate::intern::SymId>) -> Proto {
         Proto {
             name, params, n_required_positional,
+            n_required_post: 0,
             rest_param: None,
             kw_param_defaults: vec![],
             kw_rest_param: None,
@@ -1292,9 +1305,9 @@ pub(crate) fn compile_expr(
         Expr::Call { receiver, name, args, kwargs_trailing } => {
             compile_call_arm(b, receiver, name, args, *kwargs_trailing, protos, interner, cc);
         }
-        Expr::Def { name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body } => {
+        Expr::Def { name, params, defaults, rest, n_required_post, kw_params, kw_rest, block_param, receiver, body } => {
             compile_def_arm(
-                b, name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body,
+                b, name, params, defaults, rest, *n_required_post, kw_params, kw_rest, block_param, receiver, body,
                 protos, interner, cc,
             );
         }

@@ -42,6 +42,8 @@ mod reset;
 mod resource_caps;
 #[path = "embed/tier1_capability.rs"]
 mod tier1_capability;
+#[path = "embed/m27_rubyrs_const.rs"]
+mod m27_rubyrs_const;
 
 use std::cell::RefCell;
 use std::io::Write;

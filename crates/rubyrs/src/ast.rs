@@ -285,6 +285,13 @@ pub(crate) enum Expr {
         /// the last positional slot collapse into a fresh Array
         /// bound to this name. `None` means no rest param.
         rest: Option<String>,
+        /// M27 A4: count of required positional params that come
+        /// AFTER the rest splat (`def mid(a, *b, c, d)` → 2).
+        /// Appended to `params` after the optionals; CRuby grammar
+        /// requires them only when `rest` is `Some`. Plumbed to
+        /// the binder so the trailing args go to the post slots
+        /// before the rest gathers the middle.
+        n_required_post: u16,
         /// Keyword parameters: `def foo(name:, age: 0)` collects
         /// `("name", None)` and `("age", Some(IntLit(0)))`.
         /// Order is source order. None default = required.
@@ -2033,6 +2040,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let mut params: Vec<String> = Vec::new();
         let mut defaults: Vec<Option<SExpr>> = Vec::new();
         let mut rest: Option<String> = None;
+        let mut n_required_post: u16 = 0;
         let mut kw_params: Vec<(String, Option<SExpr>)> = Vec::new();
         let mut kw_rest: Option<String> = None;
         let mut block_param: Option<String> = None;
@@ -2105,6 +2113,18 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     defaults.push(Some(tr(ctx, &op.value())));
                 }
             }
+            // M27 A4: post-rest required params (`def mid(a, *b, c)`'s
+            // `c`). Appended to `params` AFTER the optionals so the
+            // binder can peel them off the tail of args. CRuby grammar
+            // requires `*rest` to precede them; we don't enforce it
+            // here (prism does at parse time).
+            for r in p.posts().iter() {
+                if let Some(rp) = r.as_required_parameter_node() {
+                    params.push(cid_to_string(rp.name()));
+                    defaults.push(None);
+                    n_required_post += 1;
+                }
+            }
         }
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
@@ -2122,7 +2142,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // any other expression (instance-level singleton on a
         // Value::Object) at compile time.
         let receiver = n.receiver().map(|r| Box::new(tr(ctx, &r)));
-        return sp(node, Expr::Def { name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body });
+        return sp(node, Expr::Def { name, params, defaults, rest, n_required_post, kw_params, kw_rest, block_param, receiver, body });
     }
     if let Some(n) = node.as_range_node() {
         // Beginless / endless ranges (`..3`, `1..`) are not yet supported;
@@ -2436,8 +2456,8 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // synthetic Defs we generate when expanding `attr_*` calls.
         let mk_singleton_def = |bn: &Node<'_>, def_translated: Expr| -> Option<SExpr> {
             if let Expr::Def {
-                name, params, defaults, rest, kw_params, kw_rest,
-                block_param, receiver: _, body,
+                name, params, defaults, rest, n_required_post,
+                kw_params, kw_rest, block_param, receiver: _, body,
             } = def_translated {
                 let receiver = if needs_local {
                     sp(bn, Expr::LVarRead(synth_local.clone()))
@@ -2445,8 +2465,8 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     recv_expr.clone()
                 };
                 Some(sp(bn, Expr::Def {
-                    name, params, defaults, rest, kw_params, kw_rest,
-                    block_param,
+                    name, params, defaults, rest, n_required_post,
+                    kw_params, kw_rest, block_param,
                     receiver: Some(Box::new(receiver)),
                     body,
                 }))
@@ -2515,6 +2535,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             let def = Expr::Def {
                                 name: sym_name.clone(),
                                 params: vec![], defaults: vec![], rest: None,
+                                n_required_post: 0,
                                 kw_params: vec![], kw_rest: None, block_param: None,
                                 receiver: None,
                                 body,
@@ -2530,6 +2551,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             let def = Expr::Def {
                                 name: setter_name,
                                 params: vec!["val".into()], defaults: vec![], rest: None,
+                                n_required_post: 0,
                                 kw_params: vec![], kw_rest: None, block_param: None,
                                 receiver: None,
                                 body,

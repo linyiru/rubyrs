@@ -562,6 +562,15 @@ pub(crate) struct Proto {
     /// because the prologue runs after positional slots are
     /// bound — there's no compile-time-literal restriction.
     pub(crate) n_required_positional: u16,
+    /// M27 A4: required positional params that come AFTER the rest
+    /// splat (`def mid(a, *b, c, d)` → 2). Only non-zero when
+    /// `rest_param` is `Some` (CRuby grammar requires rest before
+    /// any post-required). At call time the binder peels the last
+    /// `n_required_post` args off and gives them to the trailing
+    /// slots BEFORE the rest binding gathers the middle. Without
+    /// this, `def mid(a, *b, c); mid(1,2,3,4,5)` bound a=1,
+    /// b=[2,3,4,5], c=nil instead of CRuby's a=1, b=[2,3,4], c=5.
+    pub(crate) n_required_post: u16,
     /// `Some(name)` for `def foo(*args)` — the rest-parameter
     /// name. At call time, args past the last positional slot
     /// gather into a fresh Array stored in the local named here.

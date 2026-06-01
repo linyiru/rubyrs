@@ -6495,7 +6495,13 @@ impl Vm {
             - kw_count
             - (if has_kw_rest { 1 } else { 0 })
             - (if has_block_param { 1 } else { 0 });
-        let required = proto.n_required_positional as usize;
+        // M27 A4: split required count into pre-rest and post-rest.
+        // `n_required_positional` is the leading required (pre-rest);
+        // `n_required_post` is the trailing required (after `*rest`).
+        // CRuby's arity check sums them — both groups are mandatory.
+        let required_pre = proto.n_required_positional as usize;
+        let n_required_post = proto.n_required_post as usize;
+        let required = required_pre + n_required_post;
         // Pop trailing Hash arg (if present and we expect kw
         // params) — those entries become keyword bindings, not
         // positional args.
@@ -6544,11 +6550,31 @@ impl Vm {
         // is what the prologue consults to tell "caller-supplied"
         // from "left for default-eval".
         let mut locals = vec_nil(n_locals);
-        // Bind up to positional_max args into positional slots; any
-        // overflow flows into the rest slot as a fresh Array.
-        let positional_take = given.min(positional_max);
+        // M27 A4: peel `n_required_post` args off the tail before the
+        // pre-rest / optional / rest binder runs. The post slots live
+        // at `[positional_max - n_required_post .. positional_max]`
+        // (params order is `[pre_req..., opt..., post_req...]` then
+        // rest/kw/block tail). For `def mid(a, *b, c); mid(1,2,3,4,5)`:
+        //   - post_args = [5], bound to slot `c` (positional_max - 1).
+        //   - mid_args = [1,2,3,4]; first goes to slot `a`, the rest
+        //     (3 items) gather into the Array bound to `b`.
+        // Without n_required_post the existing logic bound c = nil
+        // and the rest Array absorbed [2,3,4,5].
+        let mut args = args;
+        let post_args: Vec<Value> = if n_required_post > 0 && args.len() >= n_required_post {
+            args.split_off(args.len() - n_required_post)
+        } else {
+            Vec::new()
+        };
+        let given_after_post = args.len();
+        let pre_take = given_after_post.min(positional_max - n_required_post);
+        // Bind up to (positional_max - n_required_post) args into the
+        // pre+optional slots; any overflow flows into the rest slot.
+        let positional_take = pre_take; // legacy name still used by the
+                                        // frame's n_given_positional
+                                        // record + default-arg prologue
         let mut args_iter = args.into_iter();
-        for slot in locals.iter_mut().take(positional_take) {
+        for slot in locals.iter_mut().take(pre_take) {
             *slot = args_iter.next().unwrap();
         }
         if has_rest {
@@ -6601,6 +6627,17 @@ impl Vm {
                 g.vm.heap.alloc(HeapObj::Array(rest_vec))
             };
             locals[rest_slot] = Value::Array(arr_id);
+        }
+        // M27 A4: bind the post-rest required slots. They live AT THE
+        // TAIL of the positional region (`[positional_max -
+        // n_required_post .. positional_max]`); the rest slot — which
+        // we just wrote (when present) — sits AFTER them. `post_args`
+        // was peeled off args before the pre/rest binder ran.
+        if n_required_post > 0 {
+            let post_start = positional_max - n_required_post;
+            for (i, v) in post_args.into_iter().enumerate() {
+                locals[post_start + i] = v;
+            }
         }
         // Bind keyword params. kw names live at the tail of
         // m.params; for each, look up the corresponding key in
@@ -6860,6 +6897,7 @@ impl Vm {
                 name: "<callable-forwarder>".to_string(),
                 params: Vec::new(),
                 n_required_positional: 0,
+                n_required_post: 0,
                 rest_param: None,
                 kw_param_defaults: Vec::new(),
                 kw_rest_param: None,
@@ -6943,6 +6981,7 @@ impl Vm {
                 name: "<method-compose-forwarder>".to_string(),
                 params: Vec::new(),
                 n_required_positional: 0,
+                n_required_post: 0,
                 rest_param: None,
                 kw_param_defaults: Vec::new(),
                 kw_rest_param: None,
@@ -8515,6 +8554,7 @@ impl Vm {
             // dispatch, which is variadic).
             params: vec!["args".to_string()],
             n_required_positional: 0,
+            n_required_post: 0,
             rest_param: Some("args".to_string()),
             kw_param_defaults: vec![],
             kw_rest_param: None,
