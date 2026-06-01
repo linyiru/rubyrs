@@ -3407,15 +3407,47 @@ mod tests {
     #[test]
     fn install_signal_handler_flag_does_not_break_serve() {
         use std::io::{Read, Write};
-        use std::net::TcpStream;
+        use std::net::{TcpListener, TcpStream};
         use std::thread;
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
-        let server_addr = "127.0.0.1:18101";
+        // Pick a free port at test start via a kernel-assigned
+        // bind + drop. Pre-fix the test hardcoded `:18101`, which
+        // raced against TIME_WAIT from prior `cargo test` runs and
+        // hit EADDRINUSE under parallel-lib-test load (the
+        // observed flake — 4 of 5 reruns failed with
+        // "Address already in use (os error 48)" before this fix).
+        // Free-port discovery has a TOCTOU window (another process
+        // could grab the port between drop and re-bind), but on
+        // the single test host that runs `cargo test` the risk is
+        // bounded; reusable across tests, no global mutex needed.
+        let server_port = {
+            let probe = TcpListener::bind("127.0.0.1:0").expect("probe bind");
+            let port = probe.local_addr().expect("local_addr").port();
+            drop(probe);
+            port
+        };
+        let server_addr = format!("127.0.0.1:{server_port}");
+        let client_addr = server_addr.clone();
 
         let client_thread = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(250));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            // Retry the connect for up to 2 s with 25 ms backoff
+            // instead of a single shot at 250 ms. The server's
+            // bind latency under parallel-cargo-test load can
+            // exceed any fixed sleep; polling waits exactly as
+            // long as needed and returns immediately once the
+            // listener accepts. Read timeout stays at 3 s for
+            // the response itself.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut client = loop {
+                match TcpStream::connect(&client_addr) {
+                    Ok(s) => break s,
+                    Err(_) if Instant::now() < deadline => {
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(e) => panic!("connect: {e}"),
+                }
+            };
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client
                 .write_all(b"GET /sig HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
