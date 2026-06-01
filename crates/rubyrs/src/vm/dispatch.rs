@@ -304,6 +304,58 @@ impl Vm {
         true
     }
 
+    /// `Integer#chr(encoding)` — CRuby widens the accepted range up to
+    /// U+10FFFF and returns the multi-byte String for the codepoint in
+    /// the requested encoding. rubyrs models only UTF-8 (ADR 0020), so
+    /// we intercept when the sole argument is an `Encoding` instance and
+    /// emit the UTF-8 encoding of the codepoint.
+    ///
+    /// Returns `Ok(true)` when handled (result pushed), `Ok(false)` to
+    /// fall through to the stateless `numeric_call` (which raises the
+    /// CRuby-shaped "no implicit conversion of X into Encoding" TypeError
+    /// for a non-Encoding argument), and `Err` with a `RangeError` for an
+    /// out-of-range / invalid codepoint — matching CRuby's two message
+    /// shapes ("N out of char range" vs "invalid codepoint 0xN in UTF-8").
+    ///
+    /// Needs `&mut self` because recognising the `Encoding` object
+    /// requires the heap that the stateless `numeric_call` free function
+    /// can't see — same rationale as `try_push_string_encoding`.
+    pub(crate) fn try_push_int_chr_encoding(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        args: &[Value],
+    ) -> Result<bool, Trap> {
+        let cp = match recv {
+            Value::Int(n) if name == "chr" && args.len() == 1 => *n,
+            _ => return Ok(false),
+        };
+        // Only intercept when the arg is an Encoding instance; otherwise
+        // fall through so the stateless path raises the TypeError.
+        let is_encoding = matches!(&args[0], Value::Object(id)
+            if self.heap.class_of(*id).name == "Encoding");
+        if !is_encoding {
+            return Ok(false);
+        }
+        if cp < 0 || cp > 0x10_FFFF {
+            return Err(self.trap(RubyError::RangeError {
+                msg: format!("{cp} out of char range"),
+            }));
+        }
+        match char::from_u32(cp as u32) {
+            Some(c) => {
+                let mut s = String::with_capacity(c.len_utf8());
+                s.push(c);
+                self.stack.push(Value::new_str(s));
+                Ok(true)
+            }
+            // In range but not a Unicode scalar value (a surrogate).
+            None => Err(self.trap(RubyError::RangeError {
+                msg: format!("invalid codepoint 0x{cp:X} in UTF-8"),
+            })),
+        }
+    }
+
     /// Re-entrant dispatch entry for C extensions calling back into
     /// Ruby via `rb_funcall*`. Invokes `recv.method(args)` through
     /// the normal `do_call` path, leaving the result on the stack
@@ -4010,6 +4062,9 @@ impl Vm {
             return Ok(());
         }
 
+        if self.try_push_int_chr_encoding(&recv, &name, &args)? {
+            return Ok(());
+        }
         if self.try_push_string_encoding(&recv, &name, &args) {
             return Ok(());
         }
@@ -8062,6 +8117,9 @@ impl Vm {
             return Ok(());
         }
 
+        if self.try_push_int_chr_encoding(&recv, &name, &args)? {
+            return Ok(());
+        }
         if self.try_push_string_encoding(&recv, &name, &args) {
             return Ok(());
         }
