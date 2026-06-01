@@ -5958,11 +5958,19 @@ impl Vm {
                     let snap_clone = snap.clone();
                     (rv.clone(), nid, params, defining_rc, snap_clone)
                 };
-                // Mirror Method#source_location's snapshot-or-
-                // live-lookup fallback (cycle-1 review): if the
-                // snapshot was dropped, resolve the method on
-                // the receiver's dispatch class so inspect's
-                // suffix stays consistent with source_location.
+                // Reuse the snapshot-or-live-lookup pattern
+                // Method#source_location uses (cycle-1 review):
+                // when the snapshot was dropped, resolve the
+                // method against the receiver's class so the
+                // suffix still appears. We use
+                // `heap.class_of` here (eigenclass-aware) to
+                // match the capture path at the `method` arm
+                // — `source_location` uses `Vm::class_of`
+                // (real class, skips singletons), so the two
+                // can diverge on snapshot-less singleton
+                // methods; this path errs on the side of
+                // finding the method that the BoundMethod was
+                // originally captured against.
                 let src_suffix = {
                     let m = snap_for_src.or_else(|| match &recv_v {
                         Value::Object(id) => {
@@ -9043,10 +9051,12 @@ fn object_hash_inner(
 /// `params.len()`.
 /// Resolve a Method's definition site to the ` filename:line`
 /// suffix CRuby's `Method#inspect` appends. Returns an empty
-/// string if the source location can't be determined — keeps
-/// the rest of the `#<Method: ...>` rendering working for
-/// methods without a real proto (forwarders, synthetic
-/// preamble methods).
+/// string only when there's no proto at all (e.g. an
+/// out-of-range `proto_idx`) or when a builtin has no
+/// `source_label` — when the proto exists but its source
+/// text isn't registered we emit ` filename:0`, mirroring
+/// `Method#source_location`'s `[filename, 0]` return for
+/// the same case.
 ///
 /// Built-in Methods (Kernel reflection records etc.) carry
 /// their own `source_label` on the BuiltinMeta; surface it
