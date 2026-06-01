@@ -5945,7 +5945,7 @@ impl Vm {
             // fallback wins, losing the receiver/owner class and
             // method name that defensive logging idioms rely on.
             if let Value::BoundMethod(bid) = &recv {
-                let (recv_v, name_id, params, defining_rc) = {
+                let (recv_v, name_id, params, defining_rc, src_suffix) = {
                     let (rv, nid, snap) = self.heap.bound_method_full(*bid);
                     let params = snap
                         .as_ref()
@@ -5955,7 +5955,11 @@ impl Vm {
                         .as_ref()
                         .and_then(|m| m.defining_class.as_ref())
                         .and_then(|w| w.upgrade());
-                    (rv.clone(), nid, params, defining_rc)
+                    let src_suffix = snap
+                        .as_ref()
+                        .map(|m| method_source_suffix(m, &self.protos, &self.sources))
+                        .unwrap_or_default();
+                    (rv.clone(), nid, params, defining_rc, src_suffix)
                 };
                 let method_name = self.interner.resolve(name_id).to_string();
                 // Singleton methods (`def obj.foo`): defining
@@ -5992,8 +5996,8 @@ impl Vm {
                     };
                     let oid = object_id_for(&recv_v);
                     format!(
-                        "#<Method: #<{}:0x{:016x}>.{}({})>",
-                        real_class, oid, method_name, params
+                        "#<Method: #<{}:0x{:016x}>.{}({}){}>",
+                        real_class, oid, method_name, params, src_suffix
                     )
                 } else {
                     let recv_class = match self.class_of(&recv_v) {
@@ -6005,13 +6009,13 @@ impl Vm {
                         Some(d) if d != recv_class => format!("{}({})", recv_class, d),
                         _ => recv_class,
                     };
-                    format!("#<Method: {}#{}({})>", class_part, method_name, params)
+                    format!("#<Method: {}#{}({}){}>", class_part, method_name, params, src_suffix)
                 };
                 self.stack.push(Value::new_str(s));
                 return Ok(());
             }
             if let Value::UnboundMethod(uid) = &recv {
-                let (class_name, name_id, params) = {
+                let (class_name, name_id, params, src_suffix) = {
                     let (cls, nid, snap) = self.heap.unbound_method_full(*uid);
                     let params = snap
                         .as_ref()
@@ -6029,10 +6033,17 @@ impl Vm {
                         .and_then(|w| w.upgrade())
                         .map(|c| c.name.clone())
                         .unwrap_or_else(|| cls.name.clone());
-                    (defining, nid, params)
+                    let src_suffix = snap
+                        .as_ref()
+                        .map(|m| method_source_suffix(m, &self.protos, &self.sources))
+                        .unwrap_or_default();
+                    (defining, nid, params, src_suffix)
                 };
                 let method_name = self.interner.resolve(name_id).to_string();
-                let s = format!("#<UnboundMethod: {}#{}({})>", class_name, method_name, params);
+                let s = format!(
+                    "#<UnboundMethod: {}#{}({}){}>",
+                    class_name, method_name, params, src_suffix
+                );
                 self.stack.push(Value::new_str(s));
                 return Ok(());
             }
@@ -9008,6 +9019,48 @@ fn object_hash_inner(
 ///   if block_param.is_some():   one slot for the block name
 /// Total derived by subtracting the tail counters from
 /// `params.len()`.
+/// Resolve a Method's definition site to the ` filename:line`
+/// suffix CRuby's `Method#inspect` appends. Returns an empty
+/// string if the source location can't be determined — keeps
+/// the rest of the `#<Method: ...>` rendering working for
+/// methods without a real proto (forwarders, synthetic
+/// preamble methods).
+///
+/// Built-in Methods (Kernel reflection records etc.) carry
+/// their own `source_label` on the BuiltinMeta; surface it
+/// the same way `Method#source_location` does — paste the
+/// label plus the meta's recorded line. `source_label: None`
+/// (BasicObject's C-defined methods in CRuby) renders no
+/// suffix, matching the source_location-returns-nil case.
+fn method_source_suffix(
+    method: &crate::value::Method,
+    protos: &[crate::bytecode::Proto],
+    sources: &std::collections::HashMap<std::rc::Rc<str>, std::rc::Rc<str>>,
+) -> String {
+    if let Some(meta) = &method.builtin {
+        return match meta.source_label {
+            Some(label) => format!(" {}:{}", label, meta.source_line),
+            None => String::new(),
+        };
+    }
+    let Some(proto) = protos.get(method.proto_idx) else {
+        return String::new();
+    };
+    let filename = &proto.filename;
+    let first_offset = proto.op_spans.first().map(|s| s.byte_offset).unwrap_or(0);
+    let line = sources
+        .get(&**filename)
+        .map(|src| crate::error::line_col(src, first_offset).0)
+        .unwrap_or(0);
+    // Skip the suffix when we have no real line info (e.g.
+    // synth protos without source text registered). Better to
+    // omit than to render `path:0` which CRuby never produces.
+    if line == 0 {
+        return String::new();
+    }
+    format!(" {}:{}", filename, line)
+}
+
 fn format_method_params(proto: &crate::bytecode::Proto) -> String {
     let mut parts: Vec<String> = Vec::new();
     let n_total = proto.params.len();
