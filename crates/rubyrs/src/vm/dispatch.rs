@@ -304,6 +304,102 @@ impl Vm {
         true
     }
 
+    /// `Integer#chr(encoding)` — CRuby widens the accepted range and
+    /// returns the codepoint encoded in the requested encoding. We
+    /// intercept when the sole argument is an `Encoding` instance and
+    /// branch on its name, handling the three encodings the preamble
+    /// exposes exactly as CRuby does:
+    ///
+    /// - **UTF-8** — 0..=U+10FFFF (minus surrogates) → multi-byte UTF-8.
+    /// - **US-ASCII** — 0..=0x7F → the byte; 0x80..=0xFF → RangeError
+    ///   "invalid codepoint 0xN in US-ASCII"; otherwise out-of-range.
+    /// - **ASCII-8BIT** (BINARY) — 0..=0xFF → that single raw byte
+    ///   (binary-safe: `RStr` is byte-backed, so 0x80..=0xFF — which is
+    ///   not valid UTF-8 — round-trips through `#bytes`); else out-of-range.
+    ///
+    /// Returns `Ok(true)` when handled (result pushed), `Ok(false)` to
+    /// fall through to the stateless `numeric_call` (which raises the
+    /// CRuby-shaped "no implicit conversion of X into Encoding" TypeError
+    /// for a non-Encoding argument), and `Err(RangeError)` for an
+    /// out-of-range / invalid codepoint.
+    ///
+    /// Needs `&mut self` because recognising the `Encoding` object and
+    /// reading its `@name` require the heap that the stateless
+    /// `numeric_call` free function can't see — same rationale as
+    /// `try_push_string_encoding`.
+    pub(crate) fn try_push_int_chr_encoding(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        args: &[Value],
+    ) -> Result<bool, Trap> {
+        let cp = match recv {
+            Value::Int(n) if name == "chr" && args.len() == 1 => *n,
+            _ => return Ok(false),
+        };
+        // The arg must be an Encoding instance; otherwise fall through so
+        // the stateless path raises the TypeError. Use `real_class_of`,
+        // not `class_of`: the latter returns the singleton class when one
+        // is installed, so an Encoding with a singleton method (e.g.
+        // `def Encoding::UTF_8.foo; end`) would otherwise miss this check.
+        let enc_id = match &args[0] {
+            Value::Object(id) if self.heap.real_class_of(*id).name == "Encoding" => *id,
+            _ => return Ok(false),
+        };
+        let name_sym = self.interner.intern("@name");
+        let enc_name = match self.heap.instance(enc_id).ivars.get(&name_sym) {
+            Some(Value::Str(s)) => s.to_string_lossy(),
+            // Not a recognisable Encoding instance — fall through.
+            _ => return Ok(false),
+        };
+
+        // `out_of_range` is built lazily (only when a bound is actually
+        // exceeded) — the success path is hot (e.g. JSON `\u` decoding)
+        // and shouldn't allocate an error string it never uses.
+        let out_of_range = || format!("{cp} out of char range");
+        match enc_name.as_str() {
+            "UTF-8" => {
+                if !(0..=0x10_FFFF).contains(&cp) {
+                    return Err(self.trap(RubyError::RangeError { msg: out_of_range() }));
+                }
+                match char::from_u32(cp as u32) {
+                    Some(c) => {
+                        let mut s = String::with_capacity(c.len_utf8());
+                        s.push(c);
+                        self.stack.push(Value::new_str(s));
+                        Ok(true)
+                    }
+                    // In range but not a Unicode scalar value (a surrogate).
+                    None => Err(self.trap(RubyError::RangeError {
+                        msg: format!("invalid codepoint 0x{cp:X} in UTF-8"),
+                    })),
+                }
+            }
+            "US-ASCII" => {
+                if !(0..=0xFF).contains(&cp) {
+                    return Err(self.trap(RubyError::RangeError { msg: out_of_range() }));
+                }
+                if cp > 0x7F {
+                    return Err(self.trap(RubyError::RangeError {
+                        msg: format!("invalid codepoint 0x{cp:X} in US-ASCII"),
+                    }));
+                }
+                self.stack.push(Value::new_str((cp as u8 as char).to_string()));
+                Ok(true)
+            }
+            "ASCII-8BIT" => {
+                if !(0..=0xFF).contains(&cp) {
+                    return Err(self.trap(RubyError::RangeError { msg: out_of_range() }));
+                }
+                // A single raw byte (binary-safe via the byte-backed RStr).
+                self.stack.push(Value::new_str_bytes(vec![cp as u8]));
+                Ok(true)
+            }
+            // Some other (unmodelled) encoding — fall through.
+            _ => Ok(false),
+        }
+    }
+
     /// Re-entrant dispatch entry for C extensions calling back into
     /// Ruby via `rb_funcall*`. Invokes `recv.method(args)` through
     /// the normal `do_call` path, leaving the result on the stack
@@ -4250,6 +4346,9 @@ impl Vm {
             return Ok(());
         }
 
+        if self.try_push_int_chr_encoding(&recv, &name, &args)? {
+            return Ok(());
+        }
         if self.try_push_string_encoding(&recv, &name, &args) {
             return Ok(());
         }
@@ -8583,6 +8682,9 @@ impl Vm {
             return Ok(());
         }
 
+        if self.try_push_int_chr_encoding(&recv, &name, &args)? {
+            return Ok(());
+        }
         if self.try_push_string_encoding(&recv, &name, &args) {
             return Ok(());
         }

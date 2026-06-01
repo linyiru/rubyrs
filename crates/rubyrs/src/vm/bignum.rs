@@ -1966,6 +1966,19 @@ impl Vm {
             }));
         }
         if name == "chr" && recv_is_bigint && args.len() == 1 {
+            // `chr(encoding)` on a BigInt: any BigInt is far beyond
+            // U+10FFFF, so CRuby raises `RangeError: bignum out of char
+            // range` (matching the 0-arg path) once it accepts the
+            // Encoding argument. Only a non-Encoding argument yields the
+            // TypeError. (Encoding recognised via `real_class_of` so an
+            // instance carrying a singleton method still matches.)
+            let is_encoding = matches!(&args[0], Value::Object(id)
+                if self.heap.real_class_of(*id).name == "Encoding");
+            if is_encoding {
+                return Err(self.trap(RubyError::RangeError {
+                    msg: "bignum out of char range".to_string(),
+                }));
+            }
             return Err(self.trap(RubyError::TypeError {
                 msg: format!(
                     "no implicit conversion of {} into Encoding",

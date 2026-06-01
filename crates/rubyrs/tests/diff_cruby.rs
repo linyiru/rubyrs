@@ -127,6 +127,7 @@ fn run_diff(name: &str) {
 #[test] fn string_transform() { run_diff("string_transform"); }
 #[test] fn int_bits() { run_diff("int_bits"); }
 #[test] fn integer_chr() { run_diff("integer_chr"); }
+#[test] fn integer_chr_encoding() { run_diff("integer_chr_encoding"); }
 #[test] fn string_new() { run_diff("string_new"); }
 #[test] fn string_each_byte() { run_diff("string_each_byte"); }
 #[test] fn integer_to_s_radix() { run_diff("integer_to_s_radix"); }
