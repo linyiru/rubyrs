@@ -1794,7 +1794,69 @@ impl Vm {
                             // CRuby: empty-sep split returns each character.
                             src.chars().map(|c| Value::new_str(c.to_string())).collect()
                         } else {
+                            // CRuby's `split` with no (or zero) limit drops
+                            // trailing empty fields: `"a,,".split(",")` =>
+                            // ["a"]. Rust's `str::split` keeps them, so trim.
+                            let mut parts: Vec<&str> = src.split(sep_s.as_str()).collect();
+                            while parts.last() == Some(&"") {
+                                parts.pop();
+                            }
+                            parts.into_iter().map(Value::new_str).collect()
+                        };
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(id))
+                    }
+                    ("split", [Value::Str(sep), Value::Int(limit)]) => {
+                        // `split(sep, limit)` — CRuby semantics:
+                        //   limit > 0  : at most `limit` fields; the last
+                        //                holds the unsplit remainder; no
+                        //                trailing-empty removal.
+                        //   limit == 0 : like 1-arg `split` (drop trailing
+                        //                empty fields).
+                        //   limit < 0  : split fully, keep trailing empties.
+                        let sep_s = sep.to_string_lossy();
+                        let src = s.to_string_lossy();
+                        let limit = *limit;
+                        let elems: Vec<Value> = if sep_s.is_empty() {
+                            // Empty sep splits into characters; a positive
+                            // limit keeps the first `limit-1` chars and
+                            // joins the rest into the final field.
+                            let cs: Vec<char> = src.chars().collect();
+                            if limit > 0 && cs.len() as i64 > limit {
+                                let n = (limit - 1) as usize;
+                                let mut v: Vec<Value> = cs[..n]
+                                    .iter()
+                                    .map(|c| Value::new_str(c.to_string()))
+                                    .collect();
+                                let rest: String = cs[n..].iter().collect();
+                                v.push(Value::new_str(rest));
+                                v
+                            } else {
+                                let mut v: Vec<Value> =
+                                    cs.iter().map(|c| Value::new_str(c.to_string())).collect();
+                                // CRuby quirk: empty separator + negative
+                                // limit appends a trailing "" for a
+                                // non-empty string (`"abc".split("",-1)` =>
+                                // ["a","b","c",""]); empty string => [].
+                                if limit < 0 && !cs.is_empty() {
+                                    v.push(Value::new_str(String::new()));
+                                }
+                                v
+                            }
+                        } else if limit > 0 {
+                            src.splitn(limit as usize, sep_s.as_str())
+                                .map(Value::new_str)
+                                .collect()
+                        } else if limit < 0 {
                             src.split(sep_s.as_str()).map(Value::new_str).collect()
+                        } else {
+                            // limit == 0: drop trailing empty fields.
+                            let mut parts: Vec<&str> = src.split(sep_s.as_str()).collect();
+                            while parts.last() == Some(&"") {
+                                parts.pop();
+                            }
+                            parts.into_iter().map(Value::new_str).collect()
                         };
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Array(elems));
