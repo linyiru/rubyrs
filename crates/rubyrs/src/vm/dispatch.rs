@@ -5935,15 +5935,15 @@ impl Vm {
                 return Ok(());
             }
             // BoundMethod / UnboundMethod: render
-            //   `#<Method: RecvClass#name(params)>`
-            //   `#<Method: RecvClass(DefiningClass)#name(params)>`
-            //   `#<UnboundMethod: DefiningClass#name(params)>`
-            // mirroring CRuby's form. The source-location suffix
-            // (`path:line`) CRuby tacks on is omitted — we don't
-            // track per-method definition location yet. Without
-            // this short-circuit the universal `#<Method:0xHEX>`
-            // fallback wins, losing the receiver/owner class and
-            // method name that defensive logging idioms rely on.
+            //   `#<Method: RecvClass#name(params) filename:line>`
+            //   `#<Method: RecvClass(DefiningClass)#name(params) filename:line>`
+            //   `#<UnboundMethod: DefiningClass#name(params) filename:line>`
+            // mirroring CRuby's form, including the trailing
+            // ` filename:line` source-location suffix produced by
+            // `method_source_suffix`. Without this short-circuit
+            // the universal `#<Method:0xHEX>` fallback wins,
+            // losing the receiver/owner class and method name
+            // that defensive logging idioms rely on.
             if let Value::BoundMethod(bid) = &recv {
                 let (recv_v, name_id, params, defining_rc, snap_for_src) = {
                     let (rv, nid, snap) = self.heap.bound_method_full(*bid);
@@ -9033,22 +9033,6 @@ fn object_hash_inner(
     h.finish() as i64
 }
 
-/// Render a `Proto`'s parameter list in the form CRuby's
-/// `Method#inspect` uses — required positional bare,
-/// optional positional with `=...`, rest with `*`, required
-/// keyword with `:`, optional keyword with `: ...`, kw-rest
-/// with `**`, block with `&`. Anonymous rest/kw-rest collapse
-/// to bare `*` / `**`. Layout of `Proto.params` (set up in
-/// `compile_def`):
-///   [0..n_total_pos)    positional (required + optional, in
-///                       source order); first
-///                       `n_required_positional` are required.
-///   if rest_param.is_some():  one slot for the rest name
-///   then len(kw_param_defaults) keyword slots
-///   if kw_rest_param.is_some(): one slot for the kw-rest name
-///   if block_param.is_some():   one slot for the block name
-/// Total derived by subtracting the tail counters from
-/// `params.len()`.
 /// Resolve a Method's definition site to the ` filename:line`
 /// suffix CRuby's `Method#inspect` appends. Returns an empty
 /// string only when there's no proto at all (e.g. an
@@ -9092,6 +9076,22 @@ fn method_source_suffix(
     format!(" {}:{}", filename, line)
 }
 
+/// Render a `Proto`'s parameter list in the form CRuby's
+/// `Method#inspect` uses — required positional bare,
+/// optional positional with `=...`, rest with `*`, required
+/// keyword with `:`, optional keyword with `: ...`, kw-rest
+/// with `**`, block with `&`. Anonymous rest/kw-rest collapse
+/// to bare `*` / `**`. Layout of `Proto.params` (set up in
+/// `compile_def`):
+///   [0..n_total_pos)    positional (required + optional, in
+///                       source order); first
+///                       `n_required_positional` are required.
+///   if rest_param.is_some():  one slot for the rest name
+///   then len(kw_param_defaults) keyword slots
+///   if kw_rest_param.is_some(): one slot for the kw-rest name
+///   if block_param.is_some():   one slot for the block name
+/// Total derived by subtracting the tail counters from
+/// `params.len()`.
 fn format_method_params(proto: &crate::bytecode::Proto) -> String {
     let mut parts: Vec<String> = Vec::new();
     let n_total = proto.params.len();
