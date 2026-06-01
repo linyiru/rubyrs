@@ -235,3 +235,14 @@ cc.workspace = true
 # Tier 1 binary lean.
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
+
+# M27 D — `tests/diff_framework.rs` needs JSON manifest parsing
+# (serde + serde_json) and the same regex engine the rubyrs lib
+# uses for transcript normalisation. All three are already in the
+# workspace transitive closure (regex via the `regex` default
+# feature; serde via num-bigint / hyper); pinned here so the test
+# binary can name them directly without an opt-in shim.
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"

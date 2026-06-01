@@ -1388,6 +1388,8 @@ dependencies = [
  "regex",
  "ruby-prism",
  "rubyrs-cext",
+ "serde",
+ "serde_json",
  "signal-hook",
  "socket2 0.5.10",
  "tokio",

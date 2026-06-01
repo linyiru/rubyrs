@@ -798,3 +798,61 @@ jobs:
           name: lcov-${{ github.run_id }}
           path: lcov.info
           retention-days: 30
+
+  framework-parity:
+    name: Framework parity (smoke)
+    # M27 D / ADR 0026 v2 §"Compatibility contract" — the
+    # "same code runs on both" claim becomes a CI gate. Each menu
+    # item gets a fixture under
+    # `crates/rubyrs/tests/diff_framework/fixtures/`; the test
+    # spawns rubyrs and CRuby side-by-side, replays a declarative
+    # route matrix, and byte-diffs the response transcripts after
+    # an optional normalisation pass.
+    #
+    # Standalone job (not folded into `Test`) per ADR 0026 v2
+    # §Negative consequences "tiered parity (smoke per PR, full
+    # matrix nightly)": a gem-install / upstream-version flake
+    # here should NOT block core regressions, and each menu item
+    # (Sinatra now, JSON / ActiveSupport-lite / Sequel-lite next)
+    # adds a row to this job's matrix, not the Test job's.
+    #
+    # Smoke tier: ubuntu only, one Ruby version, the hello_smoke
+    # fixture (stdlib-only, no gem deps). Sinatra parity matrix
+    # joins once `fixtures/sinatra_hello/` lands; `gem install
+    # sinatra` step turns on then.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Ruby
+        # 3.4 to match the `Test` job above so the parity oracle
+        # tracks the same MRI version the rest of CI runs against.
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-parity-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run framework-parity tests
+        # The diff_framework binary is `#[cfg(feature =
+        # "_http_server")]` so the harness only compiles with the
+        # battery enabled — feature gate matches the menu's actual
+        # Tier-3 dependency. `_fiber` is bundled so streaming-
+        # capable fixtures work end-to-end. Other features (cext,
+        # regex, bignum) come from `--features default`.
+        run: |
+          cargo test --release \
+            --features default,_http_server,_fiber \
+            --test diff_framework \
+            -- --nocapture

@@ -1,0 +1,27 @@
+{
+  "_doc": "Tier-0 smoke fixture for the diff_framework harness — proves the framework can spawn one runtime, replay a route matrix, and capture a transcript. NO gem dependency (uses the raw Rack-app shape via __rubyrs_http_serve_with_app on rubyrs, and an explicit ::WEBrick-free MRI mini-server on CRuby) so the harness's own correctness doesn't entangle with the Sinatra gem's availability. Full Sinatra parity matrix lives at fixtures/sinatra_hello/ once the M27 D core ships.",
+  "name": "hello_smoke",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 3000,
+    "duration_secs": 6
+  },
+  "cruby": {
+    "required_gems": []
+  },
+  "scenarios": [
+    { "name": "root", "method": "GET", "path": "/" },
+    { "name": "name", "method": "GET", "path": "/hello/world" },
+    {
+      "name": "echo",
+      "method": "POST",
+      "path": "/echo",
+      "headers": { "Content-Type": "text/plain" },
+      "body": "ping from harness"
+    }
+  ],
+  "normalize": [
+    { "pattern": "runtime=[a-z0-9._/-]+", "replacement": "runtime=<this>" }
+  ]
+}
