@@ -175,6 +175,7 @@ fn run_diff(name: &str) {
 #[test] fn string_chomp() { run_diff("string_chomp"); }
 #[test] fn multiwrite_global() { run_diff("multiwrite_global"); }
 #[test] fn retry_keyword() { run_diff("retry_keyword"); }
+#[test] fn module_attr_legacy() { run_diff("module_attr_legacy"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
 #[test] fn user_sort() { run_diff("user_sort"); }
 #[test] fn hash_enumerable() { run_diff("hash_enumerable"); }
@@ -359,6 +360,10 @@ fn run_diff(name: &str) {
 #[test] fn rescue_nested_constant() { run_diff("rescue_nested_constant"); }
 #[test] fn throw_catch() { run_diff("throw_catch"); }
 #[test] fn string_split_limit() { run_diff("string_split_limit"); }
+#[test] fn string_split_awk() { run_diff("string_split_awk"); }
+#[test] fn m27_hash_to_s() { run_diff("m27_hash_to_s"); }
+#[test] fn m27_middle_splat() { run_diff("m27_middle_splat"); }
+#[test] fn m27_define_method_blockarg() { run_diff("m27_define_method_blockarg"); }
 #[test] fn class_qualified_separates() { run_diff("class_qualified_separates"); }
 #[test] fn class_cref_walk() { run_diff("class_cref_walk"); }
 #[test] fn module_nesting() { run_diff("module_nesting"); }

@@ -236,7 +236,14 @@ impl Vm {
                         Some(Value::Array(nid))
                     }
                     ("to_h", []) => Some(Value::Hash(id)),
-                    ("inspect", []) => {
+                    ("inspect", []) | ("to_s", []) => {
+                        // M27 C1: CRuby's `Hash#to_s` is an alias of
+                        // `Hash#inspect` (since 1.9). Pre-fix `to_s` fell
+                        // through to the universal `Object#to_s`
+                        // `#<Hash:0xHEX>` fallback; `"#{h}"` interpolation
+                        // and `puts h` rendered the hex form instead of
+                        // `{k: v}` shape. Funnel both arms through
+                        // `to_inspect`.
                         let s = Value::Hash(id).to_inspect(&self.heap, &self.interner);
                         Some(Value::new_str(s))
                     }

@@ -285,6 +285,13 @@ pub(crate) enum Expr {
         /// the last positional slot collapse into a fresh Array
         /// bound to this name. `None` means no rest param.
         rest: Option<String>,
+        /// M27 A4: count of required positional params that come
+        /// AFTER the rest splat (`def mid(a, *b, c, d)` → 2).
+        /// Appended to `params` after the optionals; CRuby grammar
+        /// requires them only when `rest` is `Some`. Plumbed to
+        /// the binder so the trailing args go to the post slots
+        /// before the rest gathers the middle.
+        n_required_post: u16,
         /// Keyword parameters: `def foo(name:, age: 0)` collects
         /// `("name", None)` and `("age", Some(IntLit(0)))`.
         /// Order is source order. None default = required.
@@ -473,6 +480,18 @@ pub(crate) enum BlockParam {
     /// the anonymous form `|*|` (reserve the slot, drop the
     /// data — analogous to `**` for kwargs).
     Rest(String),
+    /// M27 A1: `|&blk|` named block parameter — captures the
+    /// caller's block as a `Value::Block` (or `Nil` when none was
+    /// passed). The compiler reserves a slot and sets
+    /// `proto.block_param`, so the existing method dispatch path's
+    /// trailing-slot binder (`invoke_method_with_block`) populates
+    /// it automatically when the block is installed AS A METHOD
+    /// via `define_method` and that method is later called with a
+    /// block. For ordinary block invocation (each, map, etc. — no
+    /// caller block) the slot stays `Nil`. Matches the CRuby idiom
+    /// `define_method(:foo) do |arg, &blk| blk.call(arg) end` that
+    /// Sinatra's route table uses heavily.
+    BlockArg(String),
 }
 
 #[derive(Debug, Clone)]
@@ -534,6 +553,21 @@ pub(crate) fn attr_reader_writer_flags(name: &str) -> Option<(bool, bool)> {
         "attr_reader"   => Some((true,  false)),
         "attr_writer"   => Some((false, true)),
         "attr_accessor" => Some((true,  true)),
+        // `attr :name` (single or multi-symbol form) is the
+        // pre-1.9 legacy alias for `attr_reader`. This match
+        // returns the reader-only flags; the 1.8-only
+        // `attr :name, true` accessor form is dispatched in
+        // the compiler intercept (and the `class << X` body
+        // desugar) by a dedicated `(SymbolLit, BoolLit)` arm
+        // that runs BEFORE this helper is consulted. The
+        // all-symbols gate downstream of this helper would
+        // otherwise reject the `BoolLit` second arg as
+        // unsupported. rackup-2.2.1/lib/rackup/stream.rb and
+        // rack-3.1.10/lib/rack/builder.rb use the bare
+        // single-symbol form; sinatra-4 transitively requires
+        // both. (TRY_RUNS pass-10 layer #10; Copilot review
+        // #313 round 1.)
+        "attr"          => Some((true,  false)),
         _ => None,
     }
 }
@@ -1483,6 +1517,19 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                                 let name = rp.name().map(cid_to_string).unwrap_or_default();
                                 out.push(BlockParam::Rest(name));
                             }
+                        // M27 A1: `|&blk|` named block-arg param.
+                        // Prism returns BlockParameterNode directly
+                        // from `p.block()` (alternation node — no
+                        // `as_*` cast needed). Append as a BlockArg
+                        // BlockParam; compile_block reserves a slot
+                        // and sets proto.block_param so
+                        // invoke_method_with_block's trailing-slot
+                        // binder populates it when the block is
+                        // installed as a method.
+                        if let Some(b) = p.block() {
+                            let name = b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string());
+                            out.push(BlockParam::BlockArg(name));
+                        }
                         out
                     })
                     .unwrap_or_default();
@@ -1765,6 +1812,12 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         let name = rp.name().map(cid_to_string).unwrap_or_default();
                         out.push(BlockParam::Rest(name));
                     }
+                // M27 A1: `|&blk|` capture in lambdas, same as for
+                // blocks (see comment above).
+                if let Some(b) = p.block() {
+                    let name = b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string());
+                    out.push(BlockParam::BlockArg(name));
+                }
                 out
             })
             .unwrap_or_default();
@@ -2033,6 +2086,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let mut params: Vec<String> = Vec::new();
         let mut defaults: Vec<Option<SExpr>> = Vec::new();
         let mut rest: Option<String> = None;
+        let mut n_required_post: u16 = 0;
         let mut kw_params: Vec<(String, Option<SExpr>)> = Vec::new();
         let mut kw_rest: Option<String> = None;
         let mut block_param: Option<String> = None;
@@ -2105,6 +2159,18 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     defaults.push(Some(tr(ctx, &op.value())));
                 }
             }
+            // M27 A4: post-rest required params (`def mid(a, *b, c)`'s
+            // `c`). Appended to `params` AFTER the optionals so the
+            // binder can peel them off the tail of args. CRuby grammar
+            // requires `*rest` to precede them; we don't enforce it
+            // here (prism does at parse time).
+            for r in p.posts().iter() {
+                if let Some(rp) = r.as_required_parameter_node() {
+                    params.push(cid_to_string(rp.name()));
+                    defaults.push(None);
+                    n_required_post += 1;
+                }
+            }
         }
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
@@ -2122,7 +2188,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // any other expression (instance-level singleton on a
         // Value::Object) at compile time.
         let receiver = n.receiver().map(|r| Box::new(tr(ctx, &r)));
-        return sp(node, Expr::Def { name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body });
+        return sp(node, Expr::Def { name, params, defaults, rest, n_required_post, kw_params, kw_rest, block_param, receiver, body });
     }
     if let Some(n) = node.as_range_node() {
         // Beginless / endless ranges (`..3`, `1..`) are not yet supported;
@@ -2436,8 +2502,8 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // synthetic Defs we generate when expanding `attr_*` calls.
         let mk_singleton_def = |bn: &Node<'_>, def_translated: Expr| -> Option<SExpr> {
             if let Expr::Def {
-                name, params, defaults, rest, kw_params, kw_rest,
-                block_param, receiver: _, body,
+                name, params, defaults, rest, n_required_post,
+                kw_params, kw_rest, block_param, receiver: _, body,
             } = def_translated {
                 let receiver = if needs_local {
                     sp(bn, Expr::LVarRead(synth_local.clone()))
@@ -2445,8 +2511,8 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     recv_expr.clone()
                 };
                 Some(sp(bn, Expr::Def {
-                    name, params, defaults, rest, kw_params, kw_rest,
-                    block_param,
+                    name, params, defaults, rest, n_required_post,
+                    kw_params, kw_rest, block_param,
                     receiver: Some(Box::new(receiver)),
                     body,
                 }))
@@ -2484,6 +2550,60 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 && call.receiver().is_none()
             {
                 let name = cid_to_string(call.name());
+                // Pre-helper arm: legacy `attr :name, true/false`
+                // accessor form. Single Symbol followed by a
+                // BoolLit second arg. Mirrors compiler.rs's
+                // dedicated `(SymbolLit, BoolLit)` intercept arm
+                // for the normal class-body path. CRuby 3.4 still
+                // accepts this with a suppressed warning; without
+                // the special case the all-symbols gate further
+                // down would reject it as unsupported.
+                // (Copilot review #313 round 1.)
+                if name == "attr" {
+                    let raw_args: Vec<_> = call.arguments()
+                        .map(|args| args.arguments().iter().collect())
+                        .unwrap_or_default();
+                    if raw_args.len() == 2
+                        && let (Some(sym), Some(b)) = (
+                            raw_args[0].as_symbol_node(),
+                            raw_args[1].as_true_node().map(|_| true)
+                                .or_else(|| raw_args[1].as_false_node().map(|_| false)),
+                        )
+                    {
+                        let sym_name = String::from_utf8_lossy(sym.unescaped()).into_owned();
+                        let ivar_name = format!("@{}", sym_name);
+                        // Reader.
+                        let body = vec![sp(bn, Expr::IVarRead(ivar_name.clone()))];
+                        let def = Expr::Def {
+                            name: sym_name.clone(),
+                            params: vec![], defaults: vec![], rest: None,
+                            n_required_post: 0,
+                            kw_params: vec![], kw_rest: None, block_param: None,
+                            receiver: None,
+                            body,
+                        };
+                        if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
+                        // Writer (only when arg is `true`).
+                        if b {
+                            let setter_name = format!("{sym_name}=");
+                            let val_read = sp(bn, Expr::LVarRead("val".into()));
+                            let body = vec![sp(
+                                bn,
+                                Expr::IVarWrite(ivar_name.clone(), Box::new(val_read)),
+                            )];
+                            let def = Expr::Def {
+                                name: setter_name,
+                                params: vec!["val".into()], defaults: vec![], rest: None,
+                                n_required_post: 0,
+                                kw_params: vec![], kw_rest: None, block_param: None,
+                                receiver: None,
+                                body,
+                            };
+                            if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
+                        }
+                        continue;
+                    }
+                }
                 // Decode via the shared helper (paired with
                 // compiler.rs's normal-class-body attr_* arm).
                 // NOTE: zero-arg `attr_accessor` (etc.) is a SILENT
@@ -2515,6 +2635,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             let def = Expr::Def {
                                 name: sym_name.clone(),
                                 params: vec![], defaults: vec![], rest: None,
+                                n_required_post: 0,
                                 kw_params: vec![], kw_rest: None, block_param: None,
                                 receiver: None,
                                 body,
@@ -2530,6 +2651,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             let def = Expr::Def {
                                 name: setter_name,
                                 params: vec!["val".into()], defaults: vec![], rest: None,
+                                n_required_post: 0,
                                 kw_params: vec![], kw_rest: None, block_param: None,
                                 receiver: None,
                                 body,

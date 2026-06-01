@@ -135,7 +135,54 @@ fn try_call_compile_time_intercept(
     interner: &mut Interner,
     cc: &mut u32,
 ) -> bool {
-    // attr_reader / attr_writer / attr_accessor
+    // Legacy `attr :name, true` (1.8 accessor form): single
+    // Symbol arg followed by a literal `true` / `false`. Treated
+    // as reader + writer (when `true`) or reader only (when
+    // `false`). CRuby 3.4 still accepts this with a warning; the
+    // sinatra-4 load chain doesn't hit this branch but rack-4
+    // gems in the wild do. Intercept it BEFORE the all-symbols
+    // gate below so the BoolLit arg doesn't push it through to
+    // the runtime dispatch path (which would NoMethodError).
+    // (TRY_RUNS pass-10 layer #10.)
+    if receiver.is_none()
+        && name == "attr"
+        && args.len() == 2
+        && let Expr::SymbolLit(sym_name) = &args[0].node
+        && let Expr::BoolLit(accessor) = &args[1].node
+    {
+        let do_reader = true;
+        let do_writer = *accessor;
+        let sym_name = sym_name.clone();
+        let ivar_name = format!("@{}", sym_name);
+        if do_reader {
+            let body = vec![SExpr { span: args[0].span, node: Expr::IVarRead(ivar_name.clone()) }];
+            let pidx = compile_proto(
+                sym_name.clone(), vec![], &body,
+                b.filename.clone(), protos, interner, cc,
+            );
+            let nid = interner.intern(&sym_name);
+            b.emit(Op::DefMethod(nid, pidx as u32));
+        }
+        if do_writer {
+            let setter_name = format!("{sym_name}=");
+            let val_read = SExpr { span: args[0].span, node: Expr::LVarRead("val".into()) };
+            let body = vec![SExpr {
+                span: args[0].span,
+                node: Expr::IVarWrite(ivar_name.clone(), Box::new(val_read)),
+            }];
+            let pidx = compile_proto(
+                setter_name.clone(), vec!["val".into()], &body,
+                b.filename.clone(), protos, interner, cc,
+            );
+            let nid = interner.intern(&setter_name);
+            b.emit(Op::DefMethod(nid, pidx as u32));
+        }
+        b.emit(Op::LoadNil);
+        return true;
+    }
+
+    // attr_reader / attr_writer / attr_accessor / attr (legacy
+    // reader form — `attr :a`, `attr :a, :b`).
     if receiver.is_none()
         && let Some((do_reader, do_writer)) = crate::ast::attr_reader_writer_flags(name)
         && args.iter().all(|a| matches!(a.node, Expr::SymbolLit(_)))
@@ -313,6 +360,7 @@ fn compile_def_arm(
     params: &[String],
     defaults: &[Option<SExpr>],
     rest: &Option<String>,
+    n_required_post: u16,
     kw_params: &[(String, Option<SExpr>)],
     kw_rest: &Option<String>,
     block_param: &Option<String>,
@@ -322,7 +370,17 @@ fn compile_def_arm(
     interner: &mut Interner,
     cc: &mut u32,
 ) {
-    let n_required_positional = defaults.iter().take_while(|d| d.is_none()).count() as u16;
+    // `defaults` is laid out as `[pre_rest_required..., optionals...,
+    // post_rest_required...]` — both required runs carry `None`, only
+    // the middle optionals carry `Some(default_expr)`. So
+    // `n_pre_rest = total - n_optional - n_required_post`. Counting the
+    // leading-None run wouldn't distinguish the post-required tail when
+    // there are no optionals, so we derive both required counts from
+    // `defaults.len()` and `n_required_post` instead.
+    let n_optional = defaults.iter().filter(|d| d.is_some()).count() as u16;
+    let n_required_positional = (defaults.len() as u16)
+        .saturating_sub(n_optional)
+        .saturating_sub(n_required_post);
     let mut effective_params: Vec<String> = params.to_vec();
     if let Some(rname) = rest {
         effective_params.push(rname.clone());
@@ -348,6 +406,7 @@ fn compile_def_arm(
     if let Some(rname) = rest {
         protos[proto_idx].rest_param = Some(rname.clone());
     }
+    protos[proto_idx].n_required_post = n_required_post;
     protos[proto_idx].kw_param_defaults = kw_lit_defaults;
     if let Some(krname) = kw_rest {
         let slot_name = if krname.is_empty() { "__kw_rest_anon".to_string() } else { krname.clone() };
@@ -858,6 +917,7 @@ impl ProtoBuilder {
     pub(crate) fn build(self, name: String, params: Vec<String>, n_required_positional: u16, lexical_scope: Vec<crate::intern::SymId>) -> Proto {
         Proto {
             name, params, n_required_positional,
+            n_required_post: 0,
             rest_param: None,
             kw_param_defaults: vec![],
             kw_rest_param: None,
@@ -1292,9 +1352,9 @@ pub(crate) fn compile_expr(
         Expr::Call { receiver, name, args, kwargs_trailing } => {
             compile_call_arm(b, receiver, name, args, *kwargs_trailing, protos, interner, cc);
         }
-        Expr::Def { name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body } => {
+        Expr::Def { name, params, defaults, rest, n_required_post, kw_params, kw_rest, block_param, receiver, body } => {
             compile_def_arm(
-                b, name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body,
+                b, name, params, defaults, rest, *n_required_post, kw_params, kw_rest, block_param, receiver, body,
                 protos, interner, cc,
             );
         }
@@ -1794,6 +1854,10 @@ pub(crate) fn compile_block(
                     // the rest slot would go into child_slots
                     // alongside the leading required ones.
                 }
+                BlockParam::BlockArg(_) => {
+                    // `&blk` inside a destructure (`|(a, &b)|`)
+                    // isn't legal Ruby; defensive skip.
+                }
             }
         }
         jobs.push(Job::Job(parent_slot, child_slots));
@@ -1813,6 +1877,16 @@ pub(crate) fn compile_block(
     let mut top_destructures: Vec<(u16, &[BlockParam], String)> = Vec::new();
     let mut rest_slot: u16 = u16::MAX;
     let mut n_required: u16 = 0;
+    // M27 A1: when a `|*rest|` or `|&blk|` param is present we also
+    // remember the slot name so the proto's `rest_param` /
+    // `block_param` fields can be stamped after the slot dance
+    // finishes. Without these, a block installed AS A METHOD via
+    // `Module#define_method` has its rest / block-arg slots reserved
+    // in `locals` but `invoke_method_with_block`'s binder skips them
+    // (`has_rest` / `has_block_param` both false), so `*args` arrived
+    // empty and `&blk` arrived Nil.
+    let mut rest_param_name: Option<String> = None;
+    let mut block_arg_name: Option<String> = None;
     for (i, p) in block_params.iter().enumerate() {
         match p {
             BlockParam::Single(name) => {
@@ -1835,6 +1909,12 @@ pub(crate) fn compile_block(
                 // enforces this at parse time; defensive overwrite
                 // just keeps the last one if we ever extend.
                 rest_slot = s;
+                rest_param_name = Some(slot_name);
+            }
+            BlockParam::BlockArg(name) => {
+                let slot_name = if name == "&" { format!("__blkarg_{i}") } else { name.clone() };
+                b.define_local_slot(&slot_name);
+                block_arg_name = Some(slot_name);
             }
         }
     }
@@ -1890,13 +1970,25 @@ pub(crate) fn compile_block(
     // destructure block params we use the synthesised anonymous
     // name in the call-interface slot; the named inner locals
     // are not part of params (they aren't fed by the caller).
-    let proto_params: Vec<String> = block_params.iter().enumerate().filter_map(|(i, p)| match p {
-        BlockParam::Single(n) => Some(n.clone()),
-        BlockParam::Destructure(_) => Some(format!("__destruct_{i}")),
-        // Rest param isn't part of the call-interface params
-        // (invoke_block populates it via the rest-collector
-        // loop, not the per-arg fill).
-        BlockParam::Rest(_) => None,
+    // M27 A1: `proto_params` carries every slot name the
+    // method-style binder needs to see (positional, rest, block).
+    // Block-as-block invocation (`invoke_block`) doesn't read
+    // `proto.params` for arity / slot count — it uses the
+    // `BlockHandle::n_params` + `rest_slot` fields stored on the
+    // heap value directly. So including rest and block-arg names
+    // here is invisible to that path but lets
+    // `invoke_method_with_block`'s subtractive `positional_max`
+    // math work when the same proto is installed as a method via
+    // `Module#define_method`.
+    let proto_params: Vec<String> = block_params.iter().enumerate().map(|(i, p)| match p {
+        BlockParam::Single(n) => n.clone(),
+        BlockParam::Destructure(_) => format!("__destruct_{i}"),
+        BlockParam::Rest(name) => {
+            if name.is_empty() { format!("__rest_{i}") } else { name.clone() }
+        }
+        BlockParam::BlockArg(name) => {
+            if name == "&" { format!("__blkarg_{i}") } else { name.clone() }
+        }
     }).collect();
     let proto_param_count = proto_params.len();
     let idx = protos.len();
@@ -1921,6 +2013,19 @@ pub(crate) fn compile_block(
     // range is empty and the runtime loop is a noop, so we don't
     // need to special-case it.
     protos.last_mut().expect("ICE: just pushed").block_body_local_start = body_local_start;
+    // M27 A1: stamp the block proto with `rest_param` /
+    // `block_param` so when it's installed AS A METHOD (via
+    // Module#define_method), invoke_method_with_block's binder
+    // sees the same trailing-slot layout it uses for `def`-built
+    // methods. For ordinary block invocation (each, map, …) the
+    // BlockHandle stores its own `n_params` + `rest_slot`, so
+    // these proto fields aren't consulted on that path.
+    if let Some(name) = rest_param_name {
+        protos.last_mut().expect("ICE: just pushed").rest_param = Some(name);
+    }
+    if let Some(name) = block_arg_name {
+        protos.last_mut().expect("ICE: just pushed").block_param = Some(name);
+    }
     if parent.n_locals < block_n_locals {
         parent.n_locals = block_n_locals;
     }

@@ -6505,27 +6505,87 @@ impl Vm {
         if let Some(cl) = &m.closure {
             let given = args.len();
             let n_params = cl.n_params as usize;
-            if given != n_params {
-                return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected {})", given, n_params),
-                }));
-            }
-            self.check_frames()?;
             let proto_idx = m.proto_idx;
             let proto_n_locals = self.protos[proto_idx].n_locals as usize;
             let param_start = cl.param_start as usize;
+            // M27 A1: when the underlying block proto has a `|*rest|`
+            // parameter (`define_method(:m) do |*args| … end`), allow
+            // arity `>= n_params` and gather overflow into the rest
+            // slot's Array; otherwise enforce strict equality (the
+            // pre-M27 behaviour). Look up rest + block-arg slot
+            // positions in the proto's param list BEFORE the
+            // `caps.borrow_mut()` so the same borrow can drive every
+            // write.
+            let has_rest = self.protos[proto_idx].rest_param.is_some();
+            if (has_rest && given < n_params) || (!has_rest && given != n_params) {
+                let expected = if has_rest { format!("{}+", n_params) } else { format!("{}", n_params) };
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected {})", given, expected),
+                }));
+            }
+            self.check_frames()?;
+            let rest_slot: Option<usize> = self.protos[proto_idx].rest_param.as_ref()
+                .and_then(|name| self.protos[proto_idx].params.iter().position(|p| p == name))
+                .map(|idx| param_start + idx);
+            // M27 A1: when the underlying block proto has a `|&blk|`
+            // parameter, look up its slot in the closure's locals
+            // BEFORE the locals borrow_mut and bind the caller's block
+            // there. CRuby's `define_method(:m) do |&blk| blk.call end;
+            // obj.m { ... }` idiom (Sinatra's route table) needs this
+            // — without it the slot stayed Nil because the closure
+            // path skipped the method-style trailing-slot binder.
+            let block_arg_slot: Option<usize> = self.protos[proto_idx].block_param.as_ref()
+                .and_then(|bname| self.protos[proto_idx].params.iter()
+                    .position(|p| p == bname))
+                .map(|idx| param_start + idx);
             // Block params live *after* the captured frame's n_locals
             // (block locals layout inherits the parent — see ADR 0004).
             // Resize the shared Vec if a previous invocation hasn't
             // already grown it.
+            //
+            // Rest-aware arg binding: first `n_params` args go into
+            // the Single/Destructure slots; overflow gathers into the
+            // rest slot as a fresh Array. Without rest the loop binds
+            // exactly `given == n_params` slots.
+            // Pre-allocate the rest Array (if any) BEFORE taking the
+            // `caps.borrow_mut()` so the heap calls don't reborrow.
+            // Split args into the head (positional) + tail (rest)
+            // here so the borrow_mut just writes them into slots.
+            // Empty rest is still a fresh `[]` so the body sees an
+            // Array (not Nil) at the slot — matches CRuby's
+            // `*args` arity contract.
+            let (head_args, rest_arr_id): (Vec<Value>, Option<crate::value::ObjId>) = if rest_slot.is_some() {
+                let mut args = args;
+                let rest_vec: Vec<Value> = if given > n_params {
+                    args.split_off(n_params)
+                } else {
+                    Vec::new()
+                };
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::Array(rest_vec));
+                (args, Some(id))
+            } else {
+                (args, None)
+            };
+            let cl = m.closure.as_ref().unwrap();
             {
                 let mut caps = cl.captured.borrow_mut();
                 let need = param_start.max(proto_n_locals);
                 if caps.len() < need {
                     caps.resize(need, Value::Nil);
                 }
-                for (i, a) in args.into_iter().enumerate() {
+                for (i, a) in head_args.into_iter().enumerate() {
                     caps[param_start + i] = a;
+                }
+                if let (Some(slot), Some(id)) = (rest_slot, rest_arr_id) {
+                    caps[slot] = Value::Array(id);
+                }
+                if let Some(slot) = block_arg_slot {
+                    caps[slot] = match block {
+                        Some(id) => Value::Block(id),
+                        None => Value::Nil,
+                    };
                 }
             }
             self.frames.push(Frame {
@@ -6534,7 +6594,16 @@ impl Vm {
                 locals: cl.captured.clone(),
                 self_val,
                 base_sp: self.stack.len(),
-                is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), is_block: false,
+                // M27 A2/A3: `define_method`'d method bodies don't
+                // expose the caller's block via `block_given?` or
+                // `yield` — CRuby treats the body as a Proc, so
+                // `yield` raises LocalJumpError and `block_given?`
+                // returns false. The block is reachable only through
+                // an explicit `|&blk|` slot (bound above), which keeps
+                // the explicit-capture idiom working without polluting
+                // the implicit-yield surface. Setting `block_arg:
+                // None` here is what enforces both.
+                is_class_body: false, swap_return: None, block_arg: None, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), is_block: false,
                 // `define_method` enforces exact arity (no
                 // defaults), so all params are "given".
                 n_given_positional: given as u16,
@@ -6591,7 +6660,13 @@ impl Vm {
             - kw_count
             - (if has_kw_rest { 1 } else { 0 })
             - (if has_block_param { 1 } else { 0 });
-        let required = proto.n_required_positional as usize;
+        // M27 A4: split required count into pre-rest and post-rest.
+        // `n_required_positional` is the leading required (pre-rest);
+        // `n_required_post` is the trailing required (after `*rest`).
+        // CRuby's arity check sums them — both groups are mandatory.
+        let required_pre = proto.n_required_positional as usize;
+        let n_required_post = proto.n_required_post as usize;
+        let required = required_pre + n_required_post;
         // Pop trailing Hash arg (if present and we expect kw
         // params) — those entries become keyword bindings, not
         // positional args.
@@ -6640,11 +6715,31 @@ impl Vm {
         // is what the prologue consults to tell "caller-supplied"
         // from "left for default-eval".
         let mut locals = vec_nil(n_locals);
-        // Bind up to positional_max args into positional slots; any
-        // overflow flows into the rest slot as a fresh Array.
-        let positional_take = given.min(positional_max);
+        // M27 A4: peel `n_required_post` args off the tail before the
+        // pre-rest / optional / rest binder runs. The post slots live
+        // at `[positional_max - n_required_post .. positional_max]`
+        // (params order is `[pre_req..., opt..., post_req...]` then
+        // rest/kw/block tail). For `def mid(a, *b, c); mid(1,2,3,4,5)`:
+        //   - post_args = [5], bound to slot `c` (positional_max - 1).
+        //   - mid_args = [1,2,3,4]; first goes to slot `a`, the rest
+        //     (3 items) gather into the Array bound to `b`.
+        // Without n_required_post the existing logic bound c = nil
+        // and the rest Array absorbed [2,3,4,5].
+        let mut args = args;
+        let post_args: Vec<Value> = if n_required_post > 0 && args.len() >= n_required_post {
+            args.split_off(args.len() - n_required_post)
+        } else {
+            Vec::new()
+        };
+        let given_after_post = args.len();
+        let pre_take = given_after_post.min(positional_max - n_required_post);
+        // Bind up to (positional_max - n_required_post) args into the
+        // pre+optional slots; any overflow flows into the rest slot.
+        let positional_take = pre_take; // legacy name still used by the
+                                        // frame's n_given_positional
+                                        // record + default-arg prologue
         let mut args_iter = args.into_iter();
-        for slot in locals.iter_mut().take(positional_take) {
+        for slot in locals.iter_mut().take(pre_take) {
             *slot = args_iter.next().unwrap();
         }
         if has_rest {
@@ -6697,6 +6792,17 @@ impl Vm {
                 g.vm.heap.alloc(HeapObj::Array(rest_vec))
             };
             locals[rest_slot] = Value::Array(arr_id);
+        }
+        // M27 A4: bind the post-rest required slots. They live AT THE
+        // TAIL of the positional region (`[positional_max -
+        // n_required_post .. positional_max]`); the rest slot — which
+        // we just wrote (when present) — sits AFTER them. `post_args`
+        // was peeled off args before the pre/rest binder ran.
+        if n_required_post > 0 {
+            let post_start = positional_max - n_required_post;
+            for (i, v) in post_args.into_iter().enumerate() {
+                locals[post_start + i] = v;
+            }
         }
         // Bind keyword params. kw names live at the tail of
         // m.params; for each, look up the corresponding key in
@@ -6956,6 +7062,7 @@ impl Vm {
                 name: "<callable-forwarder>".to_string(),
                 params: Vec::new(),
                 n_required_positional: 0,
+                n_required_post: 0,
                 rest_param: None,
                 kw_param_defaults: Vec::new(),
                 kw_rest_param: None,
@@ -7039,6 +7146,7 @@ impl Vm {
                 name: "<method-compose-forwarder>".to_string(),
                 params: Vec::new(),
                 n_required_positional: 0,
+                n_required_post: 0,
                 rest_param: None,
                 kw_param_defaults: Vec::new(),
                 kw_rest_param: None,
@@ -8614,6 +8722,7 @@ impl Vm {
             // dispatch, which is variadic).
             params: vec!["args".to_string()],
             n_required_positional: 0,
+            n_required_post: 0,
             rest_param: Some("args".to_string()),
             kw_param_defaults: vec![],
             kw_rest_param: None,

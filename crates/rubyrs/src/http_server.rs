@@ -2216,11 +2216,24 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         "install_signal_handler", "idle_timeout_ms", "on_error",
     ];
     rt.register_fn("__rubyrs_http_serve_with_app", |args| {
-        let (addr_str, duration_secs, block_id, opts) = match args {
-            [Value::Str(addr), Value::Int(secs), Value::Block(id)] => {
-                (addr.to_string_lossy(), *secs, *id, ServeOptions::default())
+        // M27 B1 (ADR 0026 v2 / GAP #3): the Rack contract is "app
+        // responds to #call(env)". Any Value that satisfies that is
+        // an acceptable app — Proc/Lambda (Value::Block), BoundMethod
+        // / CurriedProc, and arbitrary user objects with `def call`.
+        // For non-Block values we coerce to a forwarder Block via
+        // `Vm::coerce_callable_to_block` so the downstream
+        // `call_ruby_block_sync` path stays unchanged.
+        //
+        // Coercion is rejected with a clear ArgumentError for values
+        // whose `.call` dispatch isn't wired up (Nil, Int, etc.) —
+        // matches CRuby's "NoMethodError: undefined method `call'"
+        // surface but at the registration boundary, not deep in a
+        // request.
+        let (addr_str, duration_secs, app_value, opts) = match args {
+            [Value::Str(addr), Value::Int(secs), app] => {
+                (addr.to_string_lossy(), *secs, app.clone(), ServeOptions::default())
             }
-            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Hash(hash_id)] => {
+            [Value::Str(addr), Value::Int(secs), app, Value::Hash(hash_id)] => {
                 let ptr = crate::vm::current_vm_ptr();
                 if ptr.is_null() {
                     return Err(Trap {
@@ -2235,16 +2248,56 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 // only for parser interner lookups.
                 let vm = unsafe { &*ptr };
                 let parsed = parse_serve_options(vm, *hash_id, WITH_APP_OPTION_KEYS)?;
-                (addr.to_string_lossy(), *secs, *id, parsed)
+                (addr.to_string_lossy(), *secs, app.clone(), parsed)
             }
             _ => {
                 return Err(Trap {
                     err: RubyError::ArgumentError {
-                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, options: Hash = {}) — options keys: per_request_fuel, max_body_bytes, io_deadline_ms, max_headers, install_signal_handler, idle_timeout_ms, on_error"
+                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda/#call-responder, options: Hash = {}) — options keys: per_request_fuel, max_body_bytes, io_deadline_ms, max_headers, install_signal_handler, idle_timeout_ms, on_error"
                             .to_string(),
                     },
                     backtrace: vec![],
                 });
+            }
+        };
+        // Coerce non-Block values into a forwarder Block. Already a
+        // Block? short-circuit. BoundMethod / CurriedProc / arbitrary
+        // user instance with `def call` → `coerce_callable_to_block`
+        // wraps with a synthetic `<callable-forwarder>` proto whose
+        // body is `self.call(*args)`. Reject value types whose
+        // `.call` dispatch is structurally never going to work
+        // (Nil/Bool/Int/Float/Sym/Str) up-front so the error
+        // surfaces at registration, not deep in the first request.
+        let block_id = match app_value {
+            Value::Block(id) => id,
+            ref other => {
+                if matches!(
+                    other,
+                    Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+                    | Value::Sym(_) | Value::Str(_)
+                ) {
+                    return Err(Trap {
+                        err: RubyError::ArgumentError {
+                            msg: format!(
+                                "Rack app must respond to #call(env) — got {} which has no `call` method",
+                                other.type_name()
+                            ),
+                        },
+                        backtrace: vec![],
+                    });
+                }
+                let ptr = crate::vm::current_vm_ptr();
+                if ptr.is_null() {
+                    return Err(Trap {
+                        err: RubyError::RuntimeError {
+                            msg: "internal: CURRENT_VM_PTR null in __rubyrs_http_serve_with_app coercion".to_string(),
+                        },
+                        backtrace: vec![],
+                    });
+                }
+                // SAFETY: ADR 0013 — &mut Vm parked by invoke_host_fn.
+                let vm = unsafe { &mut *ptr };
+                vm.coerce_callable_to_block(app_value.clone())?
             }
         };
         let per_request_fuel = opts.per_request_fuel;
@@ -4134,6 +4187,83 @@ mod tests {
         assert!(
             response_text.contains(r#"body={"name":"rubyrs","ok":true}"#),
             "expected the POST body echoed back from rack.input.read, got:\n{response_text}",
+        );
+    }
+
+    /// M27 B1 (ADR 0026 v2 / GAP #3): `__rubyrs_http_serve_with_app`
+    /// accepts any `#call`-responder as the app, not just
+    /// `Value::Block`. A `class App; def call(env); …; end; end`
+    /// instance — the canonical Sinatra modular shape — now works
+    /// without a `->(env) { App.new.call(env) }` wrapper.
+    ///
+    /// Pre-fix the host fn pattern-matched on `Value::Block(id)`
+    /// and rejected an Object receiver with ArgumentError; users
+    /// had to wrap with a lambda even though the receiver already
+    /// satisfies the Rack contract.
+    #[test]
+    fn http_serve_with_app_accepts_instance_with_def_call() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18101";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(
+                b"GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            ).expect("write");
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).expect("read");
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // App is a plain instance with `def call(env)` — no lambda
+        // wrapper, exactly what `App.new` would give Rack in CRuby.
+        rt.eval(&format!(r#"
+            class App
+              def call(env)
+                [200, {{"Content-Type" => "text/plain"}}, ["from def call: #{{env['PATH_INFO']}}"]]
+              end
+            end
+            __rubyrs_http_serve_with_app("{server_addr}", 1, App.new, {{ per_request_fuel: 1_000_000 }})
+        "#), "m27_b1_def_call_app.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200 OK, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("from def call: /hello"),
+            "expected def-call response body, got:\n{response_text}",
+        );
+    }
+
+    /// M27 B1 negative case: passing a non-callable (e.g. Integer,
+    /// Symbol) is rejected at registration time with a clear
+    /// "Rack app must respond to #call(env)" ArgumentError, NOT
+    /// deep in the first request as a NoMethodError. Matches the
+    /// CRuby user-experience for the same mistake (modulo error
+    /// class — rubyrs raises early to keep the failure mode honest).
+    #[test]
+    fn http_serve_with_app_rejects_non_callable_app() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let trap = rt.eval(
+            r#"__rubyrs_http_serve_with_app("127.0.0.1:18103", 1, 42)"#,
+            "m27_b1_int_app.rb",
+        );
+        let msg = format!("{trap:?}");
+        assert!(
+            msg.contains("ArgumentError") && msg.contains("respond to #call"),
+            "expected ArgumentError 'must respond to #call', got: {msg}",
         );
     }
 

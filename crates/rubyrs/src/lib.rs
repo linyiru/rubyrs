@@ -2216,6 +2216,27 @@ Encoding::BINARY = Encoding::ASCII_8BIT
 RUBY_VERSION = "3.4.0".freeze
 RUBY_PLATFORM = "rubyrs".freeze
 RUBY_ENGINE = "ruby".freeze
+## M27 GAP #4: the unambiguous "we're rubyrs" sentinel for
+## library adapter shims. CRuby leaves this undefined; rubyrs
+## pins it to a frozen String so `defined?(RUBYRS)` is the
+## canonical detection idiom and value-equality
+## (`RUBYRS == "rubyrs"`) also works.
+##
+## Why a sibling sentinel, not changing RUBY_ENGINE itself —
+## existing gems (msgpack, sidekiq, …) gate behaviour on
+## `RUBY_ENGINE == "ruby"` to opt into modern code paths; a
+## "rubyrs" RUBY_ENGINE would break those, masking real bugs
+## behind degraded fallbacks. RUBYRS is the additive surface
+## that lets external adapter shims (per ADR 0026 v2
+## §Anti-pattern) feature-detect us without disrupting the
+## "look like MRI for gem-compat" posture.
+##
+## Anti-pattern reminder (ADR 0026 v2): this constant is for
+## EXTERNAL shim files (e.g. `sinatra_compat.rb`) only — the
+## blessed in-tree reimpls (`rubyrs/sinatra`, etc.) MUST NOT
+## engine-branch on it, because that creates parity-test escape
+## hatches the CI matrix can't observe.
+RUBYRS = "rubyrs".freeze
 ## `class MatchData; ... end` is loaded from
 ## `preamble/match_data.rb` BEFORE this `PREAMBLE` eval — the
 ## Rust-side `Vm::materialize_match_data` needs the class to
