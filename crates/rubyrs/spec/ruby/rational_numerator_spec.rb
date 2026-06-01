@@ -1,7 +1,8 @@
 # Adapted from ruby/spec core/rational/numerator_spec.rb at
 # upstream commit 448cb340 (2026-05). Hand-polished:
 # - `.should ==` → `assert_eq`.
-# - Phase C.4 BigInt num/den cases skipped.
+# - omitted (Phase C.4): BigInt num/den cases. Not included as
+#   skipped-trace blocks; lift together with C.4 widening.
 
 describe "Rational#numerator" do
   it "returns the numerator" do

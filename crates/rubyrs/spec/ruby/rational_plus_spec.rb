@@ -1,9 +1,10 @@
 # Adapted from ruby/spec core/rational/plus_spec.rb at upstream
 # commit 448cb340 (2026-05). Hand-polished:
 # - `.should ==` → `assert_eq`.
-# - skipped (Phase C.4): cases that overflow i64 in checked
-#   arithmetic — `try_rational_binop` raises RangeError where
-#   CRuby would promote num/den to BigInt.
+# - omitted (Phase C.4): cases that would overflow i64 in
+#   checked arithmetic — `try_rational_binop` raises RangeError
+#   where CRuby would promote num/den to BigInt. Not included
+#   as skipped-trace blocks; lift together with C.4 widening.
 
 describe "Rational#+ when given a Rational" do
   it "returns the sum of self and the other Rational" do
