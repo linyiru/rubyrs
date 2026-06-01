@@ -1988,7 +1988,48 @@ impl Vm {
                             .map(|real| self.responds_to(&Value::Class(real.clone()), old_id))
                             .unwrap_or(false);
                         if let Some(cls) = &cls_ref {
-                            let primitive_hit = self.primitive_class_responds_to(&cls.name, old_id);
+                            // Walk the superclass chain looking for
+                            // a primitive class that responds to the
+                            // source method. `class P < Hash;
+                            // alias_method :a, :to_h; end`: cls=P
+                            // has name "P" (not a primitive), but
+                            // Hash is in the primitive whitelist
+                            // and responds to `to_h`. Without the
+                            // walk, the immediate-class probe at
+                            // primitive_class_responds_to(&cls.name,
+                            // ...) misses and we wrongly raise
+                            // NameError. rack-3.1.10's
+                            // lib/rack/query_parser.rb:197 needs
+                            // exactly this:
+                            //   class Params < Hash
+                            //     alias_method :to_params_hash, :to_h
+                            //   end
+                            // (TRY_RUNS pass-10 layer #11.)
+                            let mut primitive_hit = false;
+                            // Rc-pointer visited set defends the
+                            // walker against an adversarial cyclic
+                            // superclass graph (`A.superclass = B;
+                            // B.superclass = A`) that cext or
+                            // direct manipulation can construct —
+                            // CRuby rejects the cycle at
+                            // insertion, rubyrs doesn't enforce
+                            // that today. Mirrors the
+                            // `Rc::as_ptr` guard
+                            // `lookup_method_uncached` (lookup.rs)
+                            // already uses for the same shape on
+                            // includes/prepends.
+                            // (Code-review #320 round 1.)
+                            let mut visited: std::collections::HashSet<*const crate::value::Class> =
+                                std::collections::HashSet::new();
+                            let mut walker: Option<Rc<Class>> = Some(cls.clone());
+                            while let Some(c) = walker {
+                                if !visited.insert(Rc::as_ptr(&c)) { break; }
+                                if self.primitive_class_responds_to(&c.name, old_id) {
+                                    primitive_hit = true;
+                                    break;
+                                }
+                                walker = c.superclass.borrow().clone();
+                            }
                             if primitive_hit || shell_class_whitelist_hit {
                                 let forwarder_cls = probe_cls.as_ref().unwrap_or(cls);
                                 let synth = self.synth_primitive_forwarder(forwarder_cls, old_id);
