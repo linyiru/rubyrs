@@ -2493,13 +2493,10 @@ impl Vm {
     // intrinsic lives in `do_call_block`; this arm handles the
     // no-block shapes that CRuby validates here, ordered to
     // match CRuby's actual validation sequence (arity first,
-    // then missing-block). The 2-arg Proc/UnboundMethod form
-    // (`define_method(:foo, proc { … })`) is NOT yet supported
-    // in rubyrs Tier-1 — it falls through to standard dispatch
-    // and surfaces as NoMethodError so a caller that hits the
-    // unsupported shape gets a clear "not implemented" signal.
-    // A future PR landing the 2-arg form should swap that
-    // fall-through for the install arm.
+    // then missing-block). The 2-arg form
+    // (`define_method(:foo, proc { … })` / Method / UnboundMethod)
+    // is implemented at the 2-arg case below via
+    // `install_method_from_value` — see PR #321.
     // (PR #245 Copilot round 2 #2 + round 4 #1 + round 5 #1.)
     if name == "define_method"
         && let Value::Class(cls) = &recv
@@ -2517,20 +2514,14 @@ impl Vm {
         //                 (given 0, expected 1..2)"
         //   1 arg, none → ArgumentError "tried to create Proc
         //                 object without a block"
-        //   2 args      → Proc/UnboundMethod install form, NOT yet
-        //                 supported in rubyrs Tier-1; raise an
-        //                 ArgumentError that names the actual
-        //                 cause. (code-review #245 round 7 #3 —
-        //                 previously fell through to NoMethodError,
-        //                 which misleadingly claimed the method
-        //                 was undefined when dispatch actually
-        //                 reached this arm. NotImplementedError
-        //                 would be more semantically accurate but
-        //                 RubyError lacks a registered variant for
-        //                 it, and Uncaught is by design not
-        //                 catchable by `rescue` — ArgumentError
-        //                 with an explicit "not yet supported"
-        //                 message is the best catchable shape.)
+        //   2 args      → Proc / Method / UnboundMethod install
+        //                 form (PR #321) — args[1] is the body
+        //                 source, name is args[0]. Built-in
+        //                 method bodies (snapshot=None, e.g.
+        //                 `m = obj.method(:object_id)`) raise
+        //                 TypeError because rubyrs needs a real
+        //                 Proto to install; a name-forwarding
+        //                 fallback is a Tier-2 follow-up.
         //   3+ args     → ArgumentError "wrong number of arguments
         //                 (given N, expected 1..2)"
         match args.len() {
@@ -8191,7 +8182,15 @@ impl Vm {
                 match snap {
                     Some(m) => Ok(MethodSource::Snapshot(m.clone())),
                     None => Err(RubyError::TypeError {
-                        msg: "BoundMethod source has no captured body (rubyrs limitation)".into(),
+                        // Built-in / universal-arm methods don't
+                        // carry a Proto so we can't install them
+                        // verbatim — CRuby's Method objects can
+                        // wrap primitive dispatch and rubyrs's
+                        // can't yet. Tier-2 follow-up: install
+                        // a synthetic name-forwarding Method
+                        // body that re-dispatches by SymId on
+                        // the new receiver. PR #321 cycle-3.
+                        msg: "BoundMethod source has no Proto body (rubyrs limitation: built-in methods can't be re-installed via define_method yet)".into(),
                     }),
                 }
             }
@@ -8218,7 +8217,12 @@ impl Vm {
                 match snap {
                     Some(m) => Ok(MethodSource::Snapshot(m)),
                     None => Err(RubyError::TypeError {
-                        msg: "UnboundMethod source has no captured body (rubyrs limitation)".into(),
+                        // Same rubyrs limitation as BoundMethod
+                        // sources: built-in / universal-arm
+                        // methods don't expose a Proto. Tier-2
+                        // follow-up is a name-forwarding
+                        // synthetic body. PR #321 cycle-3.
+                        msg: "UnboundMethod source has no Proto body (rubyrs limitation: built-in methods can't be re-installed via define_method yet)".into(),
                     }),
                 }
             }
