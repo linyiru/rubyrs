@@ -19,6 +19,25 @@
 # The runtime label printed identifies which line is which when
 # comparing logs.
 require "json"
+# Oj is opt-in via env knob: BENCH_OJ=1. CRuby-only gem (C
+# extension); rubyrs doesn't load it because flori_native pattern
+# applies (different gem, different mode-driven shape). When set,
+# the script runs an extra column alongside JSON.parse /
+# JSON.generate using `Oj.load(s, mode: :strict)` /
+# `Oj.dump(obj, mode: :strict)` — that's the apples-to-apples
+# subset (no Ruby Object encoding, no extras). On rubyrs the
+# require is skipped silently (no NameError) so the same script
+# stays cross-runtime runnable.
+HAVE_OJ = begin
+  require "oj"
+  true
+rescue LoadError, RuntimeError
+  # rubyrs raises RuntimeError ("cannot find C ext: oj") rather
+  # than LoadError when a cext gem isn't loadable in its
+  # sandboxed environment; catch both so the script stays
+  # cross-runtime runnable.
+  false
+end
 
 ITERS = Integer(ENV["ITERS"] || "5000")
 RUNS = Integer(ENV["RUNS"] || "3")
@@ -91,3 +110,11 @@ end
 bench("parse",            RUNS, ITERS) { JSON.parse(JSON_BYTES) }
 bench("generate",         RUNS, ITERS) { JSON.generate(OBJ) }
 bench("round_trip",       RUNS, ITERS) { JSON.generate(JSON.parse(JSON_BYTES)) }
+
+if HAVE_OJ
+  puts ""
+  puts "-- Oj (mode: :strict) ----------"
+  bench("oj_parse",       RUNS, ITERS) { Oj.load(JSON_BYTES, mode: :strict) }
+  bench("oj_generate",    RUNS, ITERS) { Oj.dump(OBJ, mode: :strict) }
+  bench("oj_round_trip",  RUNS, ITERS) { Oj.dump(Oj.load(JSON_BYTES, mode: :strict), mode: :strict) }
+end
