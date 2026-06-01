@@ -358,6 +358,7 @@ fn run_diff(name: &str) {
 #[test] fn rescue_nested_constant() { run_diff("rescue_nested_constant"); }
 #[test] fn throw_catch() { run_diff("throw_catch"); }
 #[test] fn string_split_limit() { run_diff("string_split_limit"); }
+#[test] fn string_split_awk() { run_diff("string_split_awk"); }
 #[test] fn class_qualified_separates() { run_diff("class_qualified_separates"); }
 #[test] fn class_cref_walk() { run_diff("class_cref_walk"); }
 #[test] fn module_nesting() { run_diff("module_nesting"); }

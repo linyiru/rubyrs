@@ -1793,6 +1793,12 @@ impl Vm {
                         let elems: Vec<Value> = if sep_s.is_empty() {
                             // CRuby: empty-sep split returns each character.
                             src.chars().map(|c| Value::new_str(c.to_string())).collect()
+                        } else if sep_s == " " {
+                            // CRuby AWK-style special case: a literal " "
+                            // (single space) splits on runs of any whitespace
+                            // AND strips leading + trailing empty tokens.
+                            // Equivalent to the no-arg `split` form.
+                            src.split_whitespace().map(Value::new_str).collect()
                         } else {
                             // CRuby's `split` with no (or zero) limit drops
                             // trailing empty fields: `"a,,".split(",")` =>
@@ -1843,6 +1849,79 @@ impl Vm {
                                     v.push(Value::new_str(String::new()));
                                 }
                                 v
+                            }
+                        } else if sep_s == " " {
+                            // CRuby AWK-style special case (mirror of the
+                            // 1-arg arm above): a literal " " splits on
+                            // runs of any whitespace and strips the leading
+                            // empty token. Limit interacts as follows:
+                            //   limit == 0  : drop trailing empty(s) (same
+                            //                 shape as 1-arg "split(\" \")").
+                            //   limit < 0   : keep ONE trailing empty if the
+                            //                 source ended in whitespace
+                            //                 ("  a  b  c  ".split(" ", -1)
+                            //                 → ["a","b","c",""]).
+                            //   limit > 0   : skip leading WS, then take the
+                            //                 first `limit-1` WS-delimited
+                            //                 tokens; the last field is the
+                            //                 unsplit remainder (including
+                            //                 any trailing whitespace).
+                            let trimmed_start = src.trim_start();
+                            // CRuby quirk: a NON-empty all-whitespace input
+                            // with `limit != 0` returns `[""]`, not `[]`.
+                            // (`limit == 0` drops trailing empties so even
+                            // that single "" gets removed → `[]`.) An empty
+                            // source string returns `[]` regardless of limit.
+                            let only_ws_nonempty = !src.is_empty() && trimmed_start.is_empty();
+                            if limit > 0 {
+                                if only_ws_nonempty {
+                                    vec![Value::new_str(String::new())]
+                                } else {
+                                    let mut out: Vec<String> = Vec::with_capacity(limit as usize);
+                                    let mut remainder = trimmed_start;
+                                    while (out.len() as i64) < limit - 1 {
+                                        match remainder.find(char::is_whitespace) {
+                                            Some(idx) => {
+                                                out.push(remainder[..idx].to_string());
+                                                // Skip the WS run at idx so
+                                                // the next token starts on
+                                                // a non-WS char.
+                                                remainder = remainder[idx..].trim_start();
+                                                if remainder.is_empty() { break; }
+                                            }
+                                            None => break,
+                                        }
+                                    }
+                                    if !remainder.is_empty() || !out.is_empty() {
+                                        out.push(remainder.to_string());
+                                    }
+                                    out.into_iter().map(Value::new_str).collect()
+                                }
+                            } else if limit < 0 {
+                                if only_ws_nonempty {
+                                    vec![Value::new_str(String::new())]
+                                } else {
+                                    let mut parts: Vec<Value> = trimmed_start
+                                        .split_whitespace()
+                                        .map(Value::new_str)
+                                        .collect();
+                                    // Trailing whitespace at end of source
+                                    // => one final "" field. CRuby quirk:
+                                    // the sentinel is independent of how
+                                    // many whitespace chars trailed.
+                                    if !src.is_empty()
+                                        && src.chars().last().is_some_and(char::is_whitespace)
+                                        && !parts.is_empty()
+                                    {
+                                        parts.push(Value::new_str(String::new()));
+                                    }
+                                    parts
+                                }
+                            } else {
+                                // limit == 0 → same as 1-arg form (always
+                                // drops trailing empties, including the
+                                // all-WS-input collapses-to-[] case).
+                                src.split_whitespace().map(Value::new_str).collect()
                             }
                         } else if limit > 0 {
                             src.splitn(limit as usize, sep_s.as_str())
