@@ -408,7 +408,10 @@ jobs:
           # PushRescue, and the per-arm Rational checked-arith
           # `.ok_or_else(overflow)` sites. All `.expect("ICE: ...")`
           # / `.unwrap()` after `is_some` guards; not user-reachable.
-          check crates/rubyrs/src/vm/dispatch.rs     47
+          # Bumped 47 → 48 when PR #318 merged master: the M27 batch
+          # (#call-responder Rack app + define_method block capture)
+          # added one ICE-class assert on the dispatch path.
+          check crates/rubyrs/src/vm/dispatch.rs     48
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /
@@ -434,7 +437,11 @@ jobs:
           # vanished mid-walk")` / frame-existence asserts at the
           # walk's suspension + landing sites. Same invariant
           # pattern as the existing `pending_loop_transfer` arms.
-          check crates/rubyrs/src/vm/step.rs         79
+          # Bumped 79 → 81 by PR #315 (Sinatra Tier-1 fixes): the
+          # `dispatch_until_inner` in-scope unwind arms (non-local
+          # return + AlreadyCaught) and the `Op::Raise` bare-`raise`
+          # `$!` re-raise added ICE-class frame/state asserts.
+          check crates/rubyrs/src/vm/step.rs         81
           # Bumped 10 → 14 (+4) by PR #178 (step-block iter
           # refactor extracting Select/Reject accumulator logic).
           # Each accumulator path adds one `acc_id.unwrap()` —
@@ -585,7 +592,10 @@ jobs:
           # `.expect("ICE: failed to load X preamble")` each.
           # Same author-controlled-source ICE pattern as the other
           # 11 preamble loads.
-          check crates/rubyrs/src/lib.rs       14
+          # Bumped 14 → 15 by PR #315: the `preamble/throw_catch.rb`
+          # load (Kernel#catch/#throw) adds its own
+          # `.expect("ICE: failed to load throw/catch preamble")`.
+          check crates/rubyrs/src/lib.rs       15
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
           # never went down, just up here. See docs/PANIC_AUDIT.md.
