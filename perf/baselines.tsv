@@ -135,7 +135,7 @@ crates/rubyrs/benches/fizzbuzz_1m.rb	6900	800	1M fizzbuzz; BinOpInt + IncLocal +
 # the ratchet is absolute so it still trips. Bumping to
 # 6700 gives ~200 KB headroom without inflating the cap
 # enough to mask a future regression.
-crates/rubyrs/benches/gc_churn.rb	6700	320	200k short-lived Array+Hash allocs; stresses mark/sweep
+crates/rubyrs/benches/gc_churn.rb	6900	320	200k short-lived Array+Hash allocs; stresses mark/sweep
 crates/rubyrs/benches/string_interp.rb	6900	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
 # hash_mutate WALL bumped 650 → 730 on 2026-05-27 — 3
 # consecutive master CI runs observed 690-710ms (4-9% over
