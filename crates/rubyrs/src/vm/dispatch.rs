@@ -5945,7 +5945,7 @@ impl Vm {
             // fallback wins, losing the receiver/owner class and
             // method name that defensive logging idioms rely on.
             if let Value::BoundMethod(bid) = &recv {
-                let (recv_v, name_id, params, defining_rc, src_suffix) = {
+                let (recv_v, name_id, params, defining_rc, snap_for_src) = {
                     let (rv, nid, snap) = self.heap.bound_method_full(*bid);
                     let params = snap
                         .as_ref()
@@ -5955,11 +5955,27 @@ impl Vm {
                         .as_ref()
                         .and_then(|m| m.defining_class.as_ref())
                         .and_then(|w| w.upgrade());
-                    let src_suffix = snap
-                        .as_ref()
-                        .map(|m| method_source_suffix(m, &self.protos, &self.sources))
-                        .unwrap_or_default();
-                    (rv.clone(), nid, params, defining_rc, src_suffix)
+                    let snap_clone = snap.clone();
+                    (rv.clone(), nid, params, defining_rc, snap_clone)
+                };
+                // Mirror Method#source_location's snapshot-or-
+                // live-lookup fallback (cycle-1 review): if the
+                // snapshot was dropped, resolve the method on
+                // the receiver's dispatch class so inspect's
+                // suffix stays consistent with source_location.
+                let src_suffix = {
+                    let m = snap_for_src.or_else(|| match &recv_v {
+                        Value::Object(id) => {
+                            let cls = self.heap.class_of(*id);
+                            self.lookup_method_uncached(&cls, name_id)
+                        }
+                        _ => match self.class_of(&recv_v) {
+                            Value::Class(cls) => self.lookup_method_uncached(&cls, name_id),
+                            _ => None,
+                        },
+                    });
+                    m.map(|m| method_source_suffix(&m, &self.protos, &self.sources))
+                        .unwrap_or_default()
                 };
                 let method_name = self.interner.resolve(name_id).to_string();
                 // Singleton methods (`def obj.foo`): defining
@@ -6033,9 +6049,15 @@ impl Vm {
                         .and_then(|w| w.upgrade())
                         .map(|c| c.name.clone())
                         .unwrap_or_else(|| cls.name.clone());
-                    let src_suffix = snap
-                        .as_ref()
-                        .map(|m| method_source_suffix(m, &self.protos, &self.sources))
+                    // Mirror Method#source_location: live-lookup
+                    // fallback against the captured class when
+                    // the snapshot is gone, so inspect's suffix
+                    // stays consistent with source_location.
+                    // Cycle-1 review.
+                    let m_for_src = snap.clone()
+                        .or_else(|| self.lookup_method_uncached(&cls, nid));
+                    let src_suffix = m_for_src
+                        .map(|m| method_source_suffix(&m, &self.protos, &self.sources))
                         .unwrap_or_default();
                     (defining, nid, params, src_suffix)
                 };
@@ -9052,12 +9074,11 @@ fn method_source_suffix(
         .get(&**filename)
         .map(|src| crate::error::line_col(src, first_offset).0)
         .unwrap_or(0);
-    // Skip the suffix when we have no real line info (e.g.
-    // synth protos without source text registered). Better to
-    // omit than to render `path:0` which CRuby never produces.
-    if line == 0 {
-        return String::new();
-    }
+    // Even at line 0 (synth proto without source text)
+    // we emit ` filename:0` rather than suppressing the
+    // suffix, so `inspect` and `source_location` agree on
+    // every method — `Method#source_location` returns
+    // [filename, 0] in the same case. Cycle-1 review.
     format!(" {}:{}", filename, line)
 }
 
