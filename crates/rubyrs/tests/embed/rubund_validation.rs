@@ -1,13 +1,14 @@
 //! CI-gated mirror of `examples/gemspec_evaluator.rs`.
 //!
 //! The example file is the human-readable narrative of the
-//! rubund-style host shape (println!-driven walkthrough), but
-//! `cargo test` doesn't compile or run examples — a contract
+//! rubund-style host shape (println!-driven walkthrough).
+//! `cargo test` DOES compile example targets to verify they
+//! build, but it does NOT run them — so a runtime contract
 //! regression in how the four embed-API hardening features
-//! compose would ship silently. This file is the test
-//! counterpart: three #[test] functions covering the same three
-//! phases, asserting via standard test plumbing so failures land
-//! red in CI.
+//! compose would ship silently even if `cargo test` is green.
+//! This file is the test counterpart: three #[test] functions
+//! covering the same three phases, asserting via standard test
+//! plumbing so failures land red in CI on every run.
 //!
 //! Features under composition:
 //!   1. `Config::allow_filesystem_io: true`   — capability gate

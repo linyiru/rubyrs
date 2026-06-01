@@ -124,12 +124,16 @@ s.add_dependency "puma", "~> 6.0"
 "#,
     )
     .expect("write gemspec");
-    // Phase 2's out-of-scope read uses `/etc/passwd` — universally
-    // present on the platforms this example targets, no fixture
-    // needed. (An earlier draft planted a per-process file outside
-    // the gem root, but its cleanup wasn't covered by GemRoot's
-    // RAII guard and the file was never actually read by the
-    // sandbox check — flagged in PR #302 review.)
+    // Phase 2's out-of-scope read uses `/etc/passwd` as the
+    // probe path. The file does NOT need to exist for the test
+    // to pass — the allowlist check fires lexically before any
+    // syscall, so the trap is raised whether the path resolves
+    // to a real inode or not. That makes the demo portable to
+    // any platform `cargo run` works on, including Windows
+    // where /etc/passwd is absent. (An earlier draft planted a
+    // per-process fixture file outside the gem root for the
+    // same purpose, but its cleanup wasn't covered by GemRoot's
+    // RAII guard — flagged in PR #302 review.)
     guard
 }
 
