@@ -696,18 +696,57 @@ impl Vm {
                 //     getter fails at capture time rather than
                 //     at the later `.call`.
                 if name == "singleton_method" {
+                    // Walk the eigenclass's own table PLUS its
+                    // transitive includes / prepends so methods
+                    // brought in by `obj.extend(M)` or
+                    // `class << self; prepend M; end` are
+                    // reachable — matches `Object#singleton_methods`
+                    // (vm/dispatch.rs:4550 walk_chain). Without
+                    // this widening, `c.singleton_methods` would
+                    // list `:m` while `c.singleton_method(:m)`
+                    // raised NameError, contradicting itself.
+                    // PR #314 cycle-4.
+                    fn chain_has(
+                        c: &std::rc::Rc<crate::value::Class>,
+                        target: crate::intern::SymId,
+                        visited: &mut Vec<*const crate::value::Class>,
+                    ) -> bool {
+                        let ptr = std::rc::Rc::as_ptr(c);
+                        if visited.contains(&ptr) { return false; }
+                        visited.push(ptr);
+                        if c.methods.borrow().contains_key(&target) { return true; }
+                        for inc in c.includes.borrow().iter() {
+                            if chain_has(inc, target, visited) { return true; }
+                        }
+                        for pre in c.prepends.borrow().iter() {
+                            if chain_has(pre, target, visited) { return true; }
+                        }
+                        false
+                    }
                     let is_singleton = match &recv {
                         Value::Object(id) => {
                             if let crate::heap::HeapObj::Instance(inst) = self.heap.get(*id) {
-                                inst.singleton_class
-                                    .as_ref()
-                                    .is_some_and(|sc| sc.methods.borrow().contains_key(bound_name_id))
+                                inst.singleton_class.as_ref().is_some_and(|sc| {
+                                    let mut visited = Vec::new();
+                                    chain_has(sc, *bound_name_id, &mut visited)
+                                })
                             } else {
                                 false
                             }
                         }
                         Value::Class(c) => {
-                            c.singleton_methods.borrow().contains_key(bound_name_id)
+                            // Class-level singleton table; also
+                            // honour `singleton_prepends` walked
+                            // the same way `singleton_methods`
+                            // does for Class receivers.
+                            if c.singleton_methods.borrow().contains_key(bound_name_id) {
+                                true
+                            } else {
+                                let mut visited = Vec::new();
+                                c.singleton_prepends.borrow().iter().any(|p| {
+                                    chain_has(p, *bound_name_id, &mut visited)
+                                })
+                            }
                         }
                         _ => false,
                     };

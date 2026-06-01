@@ -105,6 +105,24 @@ puts K.public_method(:cls_m).call
 # snapshot is None but responds_to is true → must NOT raise.
 puts K.public_method(:new).is_a?(Method)
 
+# Cycle-4: singleton_method must also reach methods brought in
+# via obj.extend(M) / class << self; prepend M; end — the
+# eigenclass's transitive includes/prepends count, matching
+# the PR #303 Object#singleton_methods walk. Pre-fix the
+# getter raised NameError even though singleton_methods
+# listed the entry, contradicting itself.
+module Mext
+  def from_extend; "extended"; end
+end
+module Pnested; def nested; "Pnested"; end; end
+module Qcombo; include Pnested; def direct_q; "Qcombo"; end; end
+oe = Object.new
+oe.extend(Mext)
+puts oe.singleton_method(:from_extend).call
+oe.extend(Qcombo)
+puts oe.singleton_method(:direct_q).call
+puts oe.singleton_method(:nested).call
+
 # Cycle-3: error message for Class receivers must reference
 # the eigenclass-shell form (CRuby: \"#<Class:K>\"), not
 # `Vm::class_of(K) == \"Class\"`. Pre-fix the message read
