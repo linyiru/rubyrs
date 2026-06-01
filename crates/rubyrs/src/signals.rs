@@ -192,7 +192,13 @@ fn parse_str(s: &str) -> Option<i32> {
 
 // ---- Non-Unix fallback (Windows, WASI, etc.) ----
 
+// On non-unix targets (wasm32-wasip1, Windows) the function is the
+// fallback definition the unix `is_shared_flag` callers would
+// otherwise be missing. Some build profiles (wasm CI smoke without
+// `_fiber`) end up never importing it, so `-D warnings` flags it as
+// dead. Keep the symbol present for API uniformity across platforms.
 #[cfg(not(unix))]
+#[allow(dead_code)]
 pub(crate) fn is_shared_flag(_flag: &Arc<AtomicBool>) -> bool {
     false
 }
