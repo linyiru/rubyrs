@@ -504,10 +504,12 @@ pub(crate) fn build_rack_env(
 /// the new instance stays rooted on the operand stack until it is moved
 /// into the pinned hash, with no GC in between.
 ///
-/// Encoding: rubyrs Strings are UTF-8 (ADR 0020 pending). The body is
-/// decoded lossily — a non-UTF-8 request body sees U+FFFD substitutions
-/// until an encoding tag lands. Documented limitation; bodies that are
-/// JSON / form-encoded / UTF-8 text round-trip exactly.
+/// Encoding: the body is wrapped byte-verbatim via `Value::new_str_bytes`
+/// so binary uploads (multipart files, gzipped payloads, raw protobuf,
+/// etc.) round-trip without U+FFFD substitution. Matches Rack's contract
+/// that `rack.input` is a byte stream, not a decoded String. Apps that
+/// want text re-decode explicitly (`.read.force_encoding("UTF-8")` /
+/// `.force_encoding(charset)`).
 ///
 /// If the `StringIO` constant isn't present (a build that skipped the
 /// preamble), `rack.input` is left absent and apps see `nil` — the
@@ -531,7 +533,11 @@ fn install_rack_input(
             return Ok(());
         }
     };
-    let body_val = Value::new_str(String::from_utf8_lossy(body_bytes).into_owned());
+    // Byte-verbatim wrap — Rack's `rack.input` is a byte stream. See the
+    // function's doc comment for the rationale; pre-fix this used
+    // `String::from_utf8_lossy` and silently replaced invalid UTF-8 with
+    // U+FFFD, breaking binary uploads.
+    let body_val = Value::new_str_bytes(body_bytes.to_vec());
 
     let mut pg = crate::vm::PinGuard::new(vm);
     pg.pin(Value::Hash(env_id));
@@ -2125,9 +2131,19 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     // we embed the same vendored source via `include_str!` and eval it
     // here. Idempotent: re-running reopens the same class. See
     // `install_rack_input`.
+    //
+    // Failure is a CI-level configuration error (the embedded source is
+    // a build-time artefact, not user input), so panic with the trap
+    // surfaced — silent `let _ =` would leave `rack.input` permanently
+    // nil and turn every body-reading Rack app into a confusing
+    // empty-body bug.
     {
         const STRINGIO_SRC: &str = include_str!("stdlib_vendor/stringio.rb");
-        let _ = rt.eval(STRINGIO_SRC, "<rubyrs:stringio>");
+        if let Err(trap) = rt.eval(STRINGIO_SRC, "<rubyrs:stringio>") {
+            panic!(
+                "ICE: _http_server failed to load vendored StringIO preamble: {trap:?}"
+            );
+        }
     }
 
     rt.register_fn("__rubyrs_http_serve_hardcoded", |args| {
