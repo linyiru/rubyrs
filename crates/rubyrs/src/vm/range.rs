@@ -376,7 +376,7 @@ impl Vm {
                         // would underflow to `min` and make the
                         // loop yield once; checked_sub maps it to
                         // an early-return empty Array. Same
-                        // pattern as the sum arm at range.rs:386.
+                        // pattern as the Range#sum arm.
                         let end_inc = if excl {
                             match ei.checked_sub(1) {
                                 Some(v) => v,

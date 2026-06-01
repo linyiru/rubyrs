@@ -56,7 +56,10 @@ describe "Range#each_slice" do
   it "exclusive end at i64::MIN is empty (no slice yielded)" do
     # The exclusive bound conversion uses checked_sub — saturating
     # subtraction would underflow back to min and yield one slice.
-    m = -(2**63)
+    # Build i64::MIN from in-range i64 literals so the spec stays
+    # valid under no-bignum builds (where `-(2**63)` would
+    # saturate to `-i64::MAX` and miss the real edge).
+    m = -9_223_372_036_854_775_807 - 1
     seen = []
     (m...m).each_slice(1) { |s| seen << s }
     assert_eq(seen, [])
@@ -111,7 +114,9 @@ describe "Range#each_cons" do
   end
 
   it "exclusive end at i64::MIN is empty (no window yielded)" do
-    m = -(2**63)
+    # See each_slice i64::MIN spec — built from in-range i64
+    # literals to stay valid under no-bignum builds.
+    m = -9_223_372_036_854_775_807 - 1
     seen = []
     (m...m).each_cons(1) { |w| seen << w }
     assert_eq(seen, [])

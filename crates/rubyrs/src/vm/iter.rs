@@ -1711,8 +1711,8 @@ impl Vm {
                 // (`min...min`). `saturating_sub` would underflow
                 // to `min` and yield once; checked_sub maps it to
                 // an empty-range early return (matches the
-                // no-block arm in range.rs and the sum arm
-                // pattern at range.rs:386).
+                // no-block arm in range.rs and the Range#sum arm
+                // pattern).
                 let end_inc = if excl {
                     match ei.checked_sub(1) {
                         Some(v) => v,
