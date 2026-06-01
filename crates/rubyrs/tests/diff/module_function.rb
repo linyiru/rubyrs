@@ -73,6 +73,6 @@ err = begin
   Object.new.send(:module_function)
   "no-raise"
 rescue NoMethodError => e
-  e.message.include?("module_function") ? "rejected" : "other-#{e.message}"
+  e.message.include?("module_function") ? "rejected" : "other-NoMethodError"
 end
-puts "main-context=#{err.length > 0}"
+puts "main-context=#{err}"
