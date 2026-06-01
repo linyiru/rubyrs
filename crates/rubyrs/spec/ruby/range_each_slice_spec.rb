@@ -52,6 +52,16 @@ describe "Range#each_slice" do
   it "no-block form: .to_a yields the same shape as the block form" do
     assert_eq((1..5).each_slice(2).to_a, [[1, 2], [3, 4], [5]])
   end
+
+  it "exclusive end at i64::MIN is empty (no slice yielded)" do
+    # The exclusive bound conversion uses checked_sub — saturating
+    # subtraction would underflow back to min and yield one slice.
+    m = -(2**63)
+    seen = []
+    (m...m).each_slice(1) { |s| seen << s }
+    assert_eq(seen, [])
+    assert_eq((m...m).each_slice(1).to_a, [])
+  end
 end
 
 describe "Range#each_cons" do
@@ -98,5 +108,13 @@ describe "Range#each_cons" do
 
   it "no-block form: .to_a yields the same shape as the block form" do
     assert_eq((1..4).each_cons(2).to_a, [[1, 2], [2, 3], [3, 4]])
+  end
+
+  it "exclusive end at i64::MIN is empty (no window yielded)" do
+    m = -(2**63)
+    seen = []
+    (m...m).each_cons(1) { |w| seen << w }
+    assert_eq(seen, [])
+    assert_eq((m...m).each_cons(1).to_a, [])
   end
 end

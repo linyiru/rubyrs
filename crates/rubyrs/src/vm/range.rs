@@ -6,7 +6,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{ObjId, Value};
 
-use super::Vm;
+use super::{PinGuard, Vm};
 
 impl Vm {
     pub(crate) fn range_collection_call(
@@ -371,16 +371,41 @@ impl Vm {
                             }));
                         }
                         let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
-                        let end_inc = if excl { ei.saturating_sub(1) } else { ei };
+                        // Exclusive end at i64::MIN means an empty
+                        // range (`min...min`). `saturating_sub(1)`
+                        // would underflow to `min` and make the
+                        // loop yield once; checked_sub maps it to
+                        // an early-return empty Array. Same
+                        // pattern as the sum arm at range.rs:386.
+                        let end_inc = if excl {
+                            match ei.checked_sub(1) {
+                                Some(v) => v,
+                                None => {
+                                    self.maybe_gc();
+                                    self.check_alloc()?;
+                                    let oid = self.heap.alloc(HeapObj::Array(Vec::new()));
+                                    return Ok(Some(Value::Array(oid)));
+                                }
+                            }
+                        } else { ei };
+                        // Pin each freshly-allocated slice id as
+                        // we build the outer chunks Vec — the Vec
+                        // is a Rust local, not a GC root, so any
+                        // intervening `maybe_gc()` between alloc
+                        // and the final outer alloc could sweep
+                        // earlier slice ids. PinGuard's Drop
+                        // releases them on every exit path.
+                        let mut g = PinGuard::new(self);
                         let mut chunks: Vec<Value> = Vec::new();
                         let mut current: Vec<Value> = Vec::with_capacity(n_usz.min(64));
                         let mut i = bi;
                         while i <= end_inc {
                             current.push(Value::Int(i));
                             if current.len() == n_usz {
-                                self.maybe_gc();
-                                self.check_alloc()?;
-                                let cid = self.heap.alloc(HeapObj::Array(std::mem::take(&mut current)));
+                                g.vm.maybe_gc();
+                                g.vm.check_alloc()?;
+                                let cid = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current)));
+                                g.pin(Value::Array(cid));
                                 chunks.push(Value::Array(cid));
                                 current = Vec::with_capacity(n_usz.min(64));
                             }
@@ -388,14 +413,15 @@ impl Vm {
                             i += 1;
                         }
                         if !current.is_empty() {
-                            self.maybe_gc();
-                            self.check_alloc()?;
-                            let cid = self.heap.alloc(HeapObj::Array(current));
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let cid = g.vm.heap.alloc(HeapObj::Array(current));
+                            g.pin(Value::Array(cid));
                             chunks.push(Value::Array(cid));
                         }
-                        self.maybe_gc();
-                        self.check_alloc()?;
-                        let oid = self.heap.alloc(HeapObj::Array(chunks));
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let oid = g.vm.heap.alloc(HeapObj::Array(chunks));
                         Some(Value::Array(oid))
                     }
                     ("each_cons", [Value::Int(n)]) => {
@@ -405,7 +431,20 @@ impl Vm {
                             }));
                         }
                         let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
-                        let end_inc = if excl { ei.saturating_sub(1) } else { ei };
+                        // See each_slice arm above — checked_sub
+                        // for the exclusive-end-at-i64::MIN edge.
+                        let end_inc = if excl {
+                            match ei.checked_sub(1) {
+                                Some(v) => v,
+                                None => {
+                                    self.maybe_gc();
+                                    self.check_alloc()?;
+                                    let oid = self.heap.alloc(HeapObj::Array(Vec::new()));
+                                    return Ok(Some(Value::Array(oid)));
+                                }
+                            }
+                        } else { ei };
+                        let mut g = PinGuard::new(self);
                         let mut windows: Vec<Value> = Vec::new();
                         let mut buf: std::collections::VecDeque<Value> =
                             std::collections::VecDeque::with_capacity(n_usz.min(64));
@@ -414,18 +453,19 @@ impl Vm {
                             if buf.len() == n_usz { buf.pop_front(); }
                             buf.push_back(Value::Int(i));
                             if buf.len() == n_usz {
-                                self.maybe_gc();
-                                self.check_alloc()?;
+                                g.vm.maybe_gc();
+                                g.vm.check_alloc()?;
                                 let win: Vec<Value> = buf.iter().cloned().collect();
-                                let wid = self.heap.alloc(HeapObj::Array(win));
+                                let wid = g.vm.heap.alloc(HeapObj::Array(win));
+                                g.pin(Value::Array(wid));
                                 windows.push(Value::Array(wid));
                             }
                             if i == end_inc { break; }
                             i += 1;
                         }
-                        self.maybe_gc();
-                        self.check_alloc()?;
-                        let oid = self.heap.alloc(HeapObj::Array(windows));
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let oid = g.vm.heap.alloc(HeapObj::Array(windows));
                         Some(Value::Array(oid))
                     }
                     // Range#step(n) without a block returns a

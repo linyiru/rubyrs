@@ -1707,7 +1707,18 @@ impl Vm {
                 g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
-                let end_inc = if excl { ei.saturating_sub(1) } else { ei };
+                // Exclusive end at i64::MIN means an empty range
+                // (`min...min`). `saturating_sub` would underflow
+                // to `min` and yield once; checked_sub maps it to
+                // an empty-range early return (matches the
+                // no-block arm in range.rs and the sum arm
+                // pattern at range.rs:386).
+                let end_inc = if excl {
+                    match ei.checked_sub(1) {
+                        Some(v) => v,
+                        None => return Ok(Some(Value::Range(id))),
+                    }
+                } else { ei };
                 let mut current: Vec<Value> = Vec::with_capacity(n_usz.min(64));
                 let mut i = bi;
                 while i <= end_inc {
@@ -1779,7 +1790,13 @@ impl Vm {
                 g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
-                let end_inc = if excl { ei.saturating_sub(1) } else { ei };
+                // See each_slice arm for the i64::MIN edge.
+                let end_inc = if excl {
+                    match ei.checked_sub(1) {
+                        Some(v) => v,
+                        None => return Ok(Some(Value::Range(id))),
+                    }
+                } else { ei };
                 let mut window: std::collections::VecDeque<Value> =
                     std::collections::VecDeque::with_capacity(n_usz.min(64));
                 let mut i = bi;
