@@ -12,8 +12,8 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 149 |
-| Examples in corpus | 924 |
+| Files | 150 |
+| Examples in corpus | 944 |
 | Skipped `it` traces | 157 |
 
 ### Skipped traces by category
@@ -45,6 +45,7 @@ Find blocks unlocked by a future feature with e.g.
 | Integer | 37 | 320 | 32 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
+| Range | 1 | 20 | 0 |
 | Rational | 4 | 17 | 0 |
 | String | 23 | 159 | 24 |
 | UnboundMethod | 4 | 18 | 0 |
@@ -170,6 +171,7 @@ Find blocks unlocked by a future feature with e.g.
 | `method_source_location_spec.rb` | Method#source_location | `core/method/source_location_spec.rb` | 2 | 0 |
 | `method_to_proc_spec.rb` | Method#to_proc | `core/method/to_proc_spec.rb` | 7 | 0 |
 | `method_unbind_spec.rb` | Method#unbind | `core/method/unbind_spec.rb` | 4 | 0 |
+| `range_each_slice_spec.rb` | Range#each_slice | `core/range/each_slice_spec.rb / each_cons_spec.rb (Enumerable-inherited behaviour)` | 20 | 0 |
 | `rational_denominator_spec.rb` | Rational#denominator | `core/rational/denominator_spec.rb` | 3 | 0 |
 | `rational_equal_value_spec.rb` | Rational#== when given a Rational | `core/rational/equal_value_spec.rb (Rational#==)` | 7 | 0 |
 | `rational_numerator_spec.rb` | Rational#numerator | `core/rational/numerator_spec.rb` | 2 | 0 |

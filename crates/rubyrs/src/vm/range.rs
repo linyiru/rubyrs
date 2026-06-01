@@ -191,6 +191,22 @@ impl Vm {
                             return Ok(Some(Value::Bool(lo_ok && hi_ok)));
                         }
                         ("exclude_end?", []) => return Ok(Some(Value::Bool(excl))),
+                        // each_slice / each_cons on non-Int (e.g.
+                        // Str+Str) ranges: lookup.rs:646 lists both
+                        // as `respond_to? = true` for any Range, so
+                        // falling through to NoMethodError would
+                        // contradict the lockstep contract at
+                        // lookup.rs:756. Raise RuntimeError with an
+                        // explicit "not yet implemented" message —
+                        // same fallback as the zero-arg find_index
+                        // path at array.rs:357 (PR #308 cycle 3).
+                        ("each_slice", [Value::Int(_)]) | ("each_cons", [Value::Int(_)]) => {
+                            return Err(self.trap(RubyError::RuntimeError {
+                                msg: format!(
+                                    "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                                ),
+                            }));
+                        }
                         _ => return Ok(None),
                     }
                 }

@@ -53,6 +53,19 @@ describe "Range#each_slice" do
     assert_eq((1..5).each_slice(2).to_a, [[1, 2], [3, 4], [5]])
   end
 
+  it "non-Int endpoints raise (not NoMethodError) to keep respond_to? consistent" do
+    # `('a'..'z').respond_to?(:each_slice)` is true via the
+    # Range whitelist. See the matching each_cons spec for
+    # rationale.
+    caught = nil
+    begin
+      ('a'..'e').each_slice(2) { |_| }
+    rescue => e
+      caught = e.class.to_s
+    end
+    assert_eq(caught, "RuntimeError")
+  end
+
   it "exclusive end at i64::MIN is empty (no slice yielded)" do
     # The exclusive bound conversion uses checked_sub — saturating
     # subtraction would underflow back to min and yield one slice.
@@ -111,6 +124,21 @@ describe "Range#each_cons" do
 
   it "no-block form: .to_a yields the same shape as the block form" do
     assert_eq((1..4).each_cons(2).to_a, [[1, 2], [2, 3], [3, 4]])
+  end
+
+  it "non-Int endpoints raise (not NoMethodError) to keep respond_to? consistent" do
+    # `('a'..'z').respond_to?(:each_cons)` is true via the
+    # Range whitelist. Falling through to NoMethodError would
+    # contradict that — match the find_index-zero-arg precedent
+    # by raising RuntimeError instead (Str+Str support remains
+    # a separate PR).
+    caught = nil
+    begin
+      ('a'..'e').each_cons(2) { |_| }
+    rescue => e
+      caught = e.class.to_s
+    end
+    assert_eq(caught, "RuntimeError")
   end
 
   it "exclusive end at i64::MIN is empty (no window yielded)" do

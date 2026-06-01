@@ -1697,7 +1697,23 @@ impl Vm {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {
                         (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
-                        _ => return Ok(None),
+                        // Str+Str ranges (e.g. ('a'..'z')) are
+                        // supported by Range#each via str_succ
+                        // but not yet by each_slice / each_cons.
+                        // Returning Ok(None) here used to fall
+                        // through to NoMethodError — but
+                        // `respond_to?(:each_slice)` is true
+                        // for any Range, so that contradicted
+                        // the lockstep contract documented at
+                        // lookup.rs:756. Raise RuntimeError
+                        // instead (same fallback shape as the
+                        // zero-arg find_index path in
+                        // array.rs:357 / PR #308 cycle 3).
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
+                        })),
                     }
                 };
                 let id = *id;
@@ -1780,7 +1796,23 @@ impl Vm {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {
                         (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
-                        _ => return Ok(None),
+                        // Str+Str ranges (e.g. ('a'..'z')) are
+                        // supported by Range#each via str_succ
+                        // but not yet by each_slice / each_cons.
+                        // Returning Ok(None) here used to fall
+                        // through to NoMethodError — but
+                        // `respond_to?(:each_slice)` is true
+                        // for any Range, so that contradicted
+                        // the lockstep contract documented at
+                        // lookup.rs:756. Raise RuntimeError
+                        // instead (same fallback shape as the
+                        // zero-arg find_index path in
+                        // array.rs:357 / PR #308 cycle 3).
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
+                        })),
                     }
                 };
                 let id = *id;
@@ -2680,7 +2712,23 @@ impl Vm {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {
                         (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
-                        _ => return Ok(None),
+                        // Str+Str ranges (e.g. ('a'..'z')) are
+                        // supported by Range#each via str_succ
+                        // but not yet by each_slice / each_cons.
+                        // Returning Ok(None) here used to fall
+                        // through to NoMethodError — but
+                        // `respond_to?(:each_slice)` is true
+                        // for any Range, so that contradicted
+                        // the lockstep contract documented at
+                        // lookup.rs:756. Raise RuntimeError
+                        // instead (same fallback shape as the
+                        // zero-arg find_index path in
+                        // array.rs:357 / PR #308 cycle 3).
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
+                        })),
                     }
                 };
                 let end_inc = if excl { ei - 1 } else { ei };
@@ -2707,7 +2755,23 @@ impl Vm {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {
                         (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
-                        _ => return Ok(None),
+                        // Str+Str ranges (e.g. ('a'..'z')) are
+                        // supported by Range#each via str_succ
+                        // but not yet by each_slice / each_cons.
+                        // Returning Ok(None) here used to fall
+                        // through to NoMethodError — but
+                        // `respond_to?(:each_slice)` is true
+                        // for any Range, so that contradicted
+                        // the lockstep contract documented at
+                        // lookup.rs:756. Raise RuntimeError
+                        // instead (same fallback shape as the
+                        // zero-arg find_index path in
+                        // array.rs:357 / PR #308 cycle 3).
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
+                        })),
                     }
                 };
                 let end_inc = if excl { ei - 1 } else { ei };
@@ -2733,7 +2797,23 @@ impl Vm {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {
                         (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
-                        _ => return Ok(None),
+                        // Str+Str ranges (e.g. ('a'..'z')) are
+                        // supported by Range#each via str_succ
+                        // but not yet by each_slice / each_cons.
+                        // Returning Ok(None) here used to fall
+                        // through to NoMethodError — but
+                        // `respond_to?(:each_slice)` is true
+                        // for any Range, so that contradicted
+                        // the lockstep contract documented at
+                        // lookup.rs:756. Raise RuntimeError
+                        // instead (same fallback shape as the
+                        // zero-arg find_index path in
+                        // array.rs:357 / PR #308 cycle 3).
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
+                        })),
                     }
                 };
                 let end_inc = if excl { ei - 1 } else { ei };
@@ -3832,7 +3912,23 @@ impl Vm {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {
                         (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
-                        _ => return Ok(None),
+                        // Str+Str ranges (e.g. ('a'..'z')) are
+                        // supported by Range#each via str_succ
+                        // but not yet by each_slice / each_cons.
+                        // Returning Ok(None) here used to fall
+                        // through to NoMethodError — but
+                        // `respond_to?(:each_slice)` is true
+                        // for any Range, so that contradicted
+                        // the lockstep contract documented at
+                        // lookup.rs:756. Raise RuntimeError
+                        // instead (same fallback shape as the
+                        // zero-arg find_index path in
+                        // array.rs:357 / PR #308 cycle 3).
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
+                        })),
                     }
                 };
                 let mut g = PinGuard::new(self);
@@ -3877,7 +3973,23 @@ impl Vm {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {
                         (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
-                        _ => return Ok(None),
+                        // Str+Str ranges (e.g. ('a'..'z')) are
+                        // supported by Range#each via str_succ
+                        // but not yet by each_slice / each_cons.
+                        // Returning Ok(None) here used to fall
+                        // through to NoMethodError — but
+                        // `respond_to?(:each_slice)` is true
+                        // for any Range, so that contradicted
+                        // the lockstep contract documented at
+                        // lookup.rs:756. Raise RuntimeError
+                        // instead (same fallback shape as the
+                        // zero-arg find_index path in
+                        // array.rs:357 / PR #308 cycle 3).
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
+                        })),
                     }
                 };
                 let end_inc = if excl { ei - 1 } else { ei };
