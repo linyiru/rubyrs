@@ -51,3 +51,35 @@ puts "writer?=#{d.respond_to?(:y=)}"
 ## Shape 5: respond_to? advertises only what was defined.
 puts "A-instance-methods=#{A.instance_methods(false).sort.inspect}"
 puts "C-instance-methods=#{C.instance_methods(false).sort.inspect}"
+
+## Shape 6: `class << X` body — singleton-class desugar must
+## also handle the bare reader form AND the legacy accessor
+## form. Pre-fix (Copilot review #313 round 1) the legacy
+## `attr :x, true` form raised SyntaxError because the
+## singleton-class desugar rejected the BoolLit arg.
+class E
+  class << self
+    attr :sr
+  end
+end
+E.instance_variable_set(:@sr, "singleton-r")
+puts "sing-reader=#{E.sr}"
+puts "sing-reader-writer?=#{E.respond_to?(:sr=)}"
+
+class F
+  class << self
+    attr :sw, true
+  end
+end
+F.sw = "singleton-rw"
+puts "sing-accessor=#{F.sw}"
+puts "sing-accessor-writer?=#{F.respond_to?(:sw=)}"
+
+class G
+  class << self
+    attr :sf, false
+  end
+end
+G.instance_variable_set(:@sf, "reader-only-via-false")
+puts "sing-false=#{G.sf}"
+puts "sing-false-writer?=#{G.respond_to?(:sf=)}"

@@ -535,15 +535,19 @@ pub(crate) fn attr_reader_writer_flags(name: &str) -> Option<(bool, bool)> {
         "attr_writer"   => Some((false, true)),
         "attr_accessor" => Some((true,  true)),
         // `attr :name` (single or multi-symbol form) is the
-        // pre-1.9 legacy alias for `attr_reader`. The 1.8-only
-        // `attr :name, true` accessor form is NOT handled here
-        // — that one needs a non-Symbol second arg and is
-        // routed through a dedicated arm in the intercept (it
-        // falls through this match so the intercept can detect
-        // the `true` literal). rackup-2.2.1/lib/rackup/stream.rb
-        // and rack-3.1.10/lib/rack/builder.rb use the bare
+        // pre-1.9 legacy alias for `attr_reader`. This match
+        // returns the reader-only flags; the 1.8-only
+        // `attr :name, true` accessor form is dispatched in
+        // the compiler intercept (and the `class << X` body
+        // desugar) by a dedicated `(SymbolLit, BoolLit)` arm
+        // that runs BEFORE this helper is consulted. The
+        // all-symbols gate downstream of this helper would
+        // otherwise reject the `BoolLit` second arg as
+        // unsupported. rackup-2.2.1/lib/rackup/stream.rb and
+        // rack-3.1.10/lib/rack/builder.rb use the bare
         // single-symbol form; sinatra-4 transitively requires
-        // both. (TRY_RUNS pass-10 layer #10.)
+        // both. (TRY_RUNS pass-10 layer #10; Copilot review
+        // #313 round 1.)
         "attr"          => Some((true,  false)),
         _ => None,
     }
@@ -2495,6 +2499,58 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 && call.receiver().is_none()
             {
                 let name = cid_to_string(call.name());
+                // Pre-helper arm: legacy `attr :name, true/false`
+                // accessor form. Single Symbol followed by a
+                // BoolLit second arg. Mirrors compiler.rs's
+                // dedicated `(SymbolLit, BoolLit)` intercept arm
+                // for the normal class-body path. CRuby 3.4 still
+                // accepts this with a suppressed warning; without
+                // the special case the all-symbols gate further
+                // down would reject it as unsupported.
+                // (Copilot review #313 round 1.)
+                if name == "attr" {
+                    let raw_args: Vec<_> = call.arguments()
+                        .map(|args| args.arguments().iter().collect())
+                        .unwrap_or_default();
+                    if raw_args.len() == 2
+                        && let (Some(sym), Some(b)) = (
+                            raw_args[0].as_symbol_node(),
+                            raw_args[1].as_true_node().map(|_| true)
+                                .or_else(|| raw_args[1].as_false_node().map(|_| false)),
+                        )
+                    {
+                        let sym_name = String::from_utf8_lossy(sym.unescaped()).into_owned();
+                        let ivar_name = format!("@{}", sym_name);
+                        // Reader.
+                        let body = vec![sp(bn, Expr::IVarRead(ivar_name.clone()))];
+                        let def = Expr::Def {
+                            name: sym_name.clone(),
+                            params: vec![], defaults: vec![], rest: None,
+                            kw_params: vec![], kw_rest: None, block_param: None,
+                            receiver: None,
+                            body,
+                        };
+                        if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
+                        // Writer (only when arg is `true`).
+                        if b {
+                            let setter_name = format!("{sym_name}=");
+                            let val_read = sp(bn, Expr::LVarRead("val".into()));
+                            let body = vec![sp(
+                                bn,
+                                Expr::IVarWrite(ivar_name.clone(), Box::new(val_read)),
+                            )];
+                            let def = Expr::Def {
+                                name: setter_name,
+                                params: vec!["val".into()], defaults: vec![], rest: None,
+                                kw_params: vec![], kw_rest: None, block_param: None,
+                                receiver: None,
+                                body,
+                            };
+                            if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
+                        }
+                        continue;
+                    }
+                }
                 // Decode via the shared helper (paired with
                 // compiler.rs's normal-class-body attr_* arm).
                 // NOTE: zero-arg `attr_accessor` (etc.) is a SILENT
