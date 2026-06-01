@@ -4106,12 +4106,15 @@ impl Vm {
                                     }
                                     self.interner.intern(&lossy)
                                 }
-                                other => return Err(self.trap(RubyError::TypeError {
-                                    msg: format!(
-                                        "{} is not a symbol nor a string",
-                                        other.type_name(),
-                                    ),
-                                })),
+                                other => {
+                                    let inspected = other.to_inspect(&self.heap, &self.interner);
+                                    return Err(self.trap(RubyError::TypeError {
+                                        msg: format!(
+                                            "{} is not a symbol nor a string",
+                                            inspected,
+                                        ),
+                                    }));
+                                }
                             };
                             match methods.get(&sid) {
                                 Some(m) => out.push((sid, m.clone())),
@@ -4134,7 +4137,13 @@ impl Vm {
                             params: m.params.clone(),
                             proto_idx: m.proto_idx,
                             fixed_arity: m.fixed_arity,
-                            defining_class: m.defining_class.clone(),
+                            // Singleton copy anchors at the class
+                            // that physically holds it (matches
+                            // other singleton-install paths and
+                            // keeps `super` / `Method#owner`
+                            // anchored consistently). (Code-review
+                            // #324 round 4.)
+                            defining_class: Some(std::rc::Rc::downgrade(cls)),
                             visibility: Cell::new(Visibility::Public),
                             closure: m.closure.clone(),
                             builtin: m.builtin.clone(),
