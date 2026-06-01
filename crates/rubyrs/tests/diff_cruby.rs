@@ -391,3 +391,4 @@ fn run_diff(name: &str) {
 #[cfg(feature = "stdlib")]
 #[test] fn stdlib_strscan() { run_diff("stdlib_strscan"); }
 #[test] fn fixed_arity_fast_path() { run_diff("fixed_arity_fast_path"); }
+#[test] fn reopen_primitive_bare_call() { run_diff("reopen_primitive_bare_call"); }

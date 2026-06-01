@@ -3628,6 +3628,64 @@ impl Vm {
                 self.invoke_method(m, self_val.clone(), args)?;
                 return Ok(());
             }
+            // Bare calls inside reopened-primitive method bodies —
+            // `class Integer; def to_json; to_s; end; end` shape.
+            // The Object arm above only fires for `Value::Object`
+            // self; primitive selves (Int / Str / Sym / Float /
+            // Array / Hash / TrueClass / FalseClass / NilClass /
+            // ...) previously fell through to method_missing /
+            // NoMethodError, even though `self.<name>` works fine.
+            // The narrower `respond_to?`-only fix (~line 3924)
+            // documented this gap explicitly; user code in the
+            // wild — every `to_json` / `as_json` mixin shape
+            // installed via reopening basic types — needs bare
+            // call lookup on the primitive's class.
+            //
+            // Two-tier resolution:
+            //   1. `lookup_method_uncached` on the primitive's
+            //      class — catches user-defined sibling methods
+            //      (`def helper; ...; end` plus `def caller;
+            //      helper; end`).
+            //   2. If step 1 doesn't find a Ruby-level method,
+            //      bridge to the receiver-form dispatch by
+            //      pushing `self_val + args` back on the stack
+            //      and re-entering `do_call` with `no_recv=false`.
+            //      Same pattern as the Class-bridge whitelist
+            //      below. Catches primitive-only methods like
+            //      `to_s` / `inspect` that live in the
+            //      `try_fast_primitive` / primitive-arm path,
+            //      not the class method table.
+            //
+            // Gated on `!matches!(Object | Class | Nil)` so the
+            // Object and Class arms above stay authoritative for
+            // their shapes, AND Nil-self stays on the toplevel
+            // method path (rubyrs uses Value::Nil as the toplevel
+            // `main` self; bridging from Nil would clobber the
+            // `def foo; ...; end at the top level` slow path
+            // below at ~line 3708, surfacing as NoMethodError
+            // for NilClass instead of CRuby's correct
+            // ArgumentError on arity mismatch). A real reopened
+            // `class NilClass; def helper; ...; def caller;
+            // helper; end; end` with bare-call sibling can still
+            // be expressed via explicit `self.helper`; the
+            // limitation is documented in SUBSET.md as the
+            // mirror-image of this fix.
+            if !matches!(&self_val, Value::Object(_) | Value::Class(_) | Value::Nil) {
+                if let Value::Class(cls) = self.class_of(&self_val) {
+                    if let Some(m) = self.lookup_method_uncached(&cls, name_id) {
+                        self.invoke_method(m, self_val.clone(), args)?;
+                        return Ok(());
+                    }
+                }
+                // No Ruby-level method — bridge to receiver form
+                // so primitive dispatch (Int#to_s, Str#length,
+                // Sym#to_s, …) fires the same arm the explicit
+                // `self.foo` lowering would have hit.
+                let argc = args.len();
+                self.stack.push(self_val.clone());
+                for a in args { self.stack.push(a); }
+                return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
+            }
             // Bare calls on Class instances inside `class Foo
             // ... end` bodies and `def self.X` singleton methods.
             // Each whitelisted name has a receiver-form arm

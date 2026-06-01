@@ -522,7 +522,7 @@ end
 
 class Integer
   def to_json(*)
-    self.to_s
+    to_s
   end
 end
 
@@ -540,7 +540,7 @@ end
 
 class Symbol
   def to_json(*)
-    JSON.escape_string(self.to_s)
+    JSON.escape_string(to_s)
   end
 end
 
@@ -605,20 +605,20 @@ end
 
 class Symbol
   def as_json(*)
-    self.to_s
+    to_s
   end
 end
 
 class Array
   def as_json(*)
-    self.map { |v| v.as_json }
+    map { |v| v.as_json }
   end
 end
 
 class Hash
   def as_json(*)
     out = {}
-    self.each { |k, v| out[k.is_a?(Symbol) ? k.to_s : k] = v.as_json }
+    each { |k, v| out[k.is_a?(Symbol) ? k.to_s : k] = v.as_json }
     out
   end
 end
@@ -629,6 +629,6 @@ class Object
   # to override this with the full Rails-adjacent behaviour
   # without breaking rubyrs's existing JSON surface.
   def as_json(*)
-    self.to_s
+    to_s
   end
 end
