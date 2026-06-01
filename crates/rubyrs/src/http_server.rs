@@ -464,7 +464,10 @@ pub(crate) fn build_rack_env(
 
     // rack.* keys
     pairs.push((key("rack.url_scheme"), val(scheme.to_string())));
-    pairs.push((key("rack.input"), Value::Nil));   // TODO stage 4c.3: StringIO
+    // `rack.input` is added by the caller AFTER the hash is allocated:
+    // it wraps the request body in a `StringIO`, which is a heap object
+    // that must be GC-rooted across its construction (see
+    // `install_rack_input`). Omitting it here keeps the key unique.
     pairs.push((key("rack.errors"), Value::Nil));  // TODO stage 4c.3: stderr sink
     pairs.push((key("rack.version"), Value::Nil)); // TODO stage 4c.3: [1, 6]
     pairs.push((key("rack.multithread"), Value::Bool(false)));
@@ -478,6 +481,77 @@ pub(crate) fn build_rack_env(
     // a single synchronous block with no intervening
     // allocations, so no GC roots issue arises.
     vm.heap.alloc(HeapObj::Hash(HashObj::with_pairs(pairs)))
+}
+
+/// Wrap the request body in a `StringIO` and install it as
+/// `env["rack.input"]` (Rack SPEC §"The Input Stream"). Called by the
+/// per-request handler right after `build_rack_env` allocates the env
+/// hash — this is the stage-4c.3 wiring ADR 0022 left as a TODO.
+///
+/// Construction: the `StringIO` class is loaded once at
+/// `register_host_fns` time from the vendored `stdlib_vendor/stringio.rb`.
+/// We build an instance by dispatching `StringIO.new(body)` through the
+/// normal `do_call` path and then *driving it to completion* with
+/// `dispatch_until` — the same invoke-then-drive pattern every native
+/// iterator uses. (Plain `do_call` only pushes the `initialize` frame;
+/// the bytecode runs when the dispatch loop turns, so we must turn it
+/// ourselves here since there's no outer loop above a Rust call site.)
+///
+/// GC: the freshly-built env hash is pinned for the duration, because
+/// constructing the StringIO allocates (the instance + its `initialize`
+/// body) and could otherwise sweep the not-yet-rooted hash. The body
+/// String is `Rc`-backed (interned, not heap-swept), so it needs no pin;
+/// the new instance stays rooted on the operand stack until it is moved
+/// into the pinned hash, with no GC in between.
+///
+/// Encoding: rubyrs Strings are UTF-8 (ADR 0020 pending). The body is
+/// decoded lossily — a non-UTF-8 request body sees U+FFFD substitutions
+/// until an encoding tag lands. Documented limitation; bodies that are
+/// JSON / form-encoded / UTF-8 text round-trip exactly.
+///
+/// If the `StringIO` constant isn't present (a build that skipped the
+/// preamble), `rack.input` is left absent and apps see `nil` — the
+/// pre-fix behaviour, no regression.
+fn install_rack_input(
+    vm: &mut crate::vm::Vm,
+    env_id: crate::value::ObjId,
+    body_bytes: &[u8],
+) -> Result<(), crate::error::Trap> {
+    use crate::value::Value;
+
+    // Classes resolve from `vm.classes` (checked before `vm.constants`
+    // in normal const lookup — see vm/step.rs), so look there first.
+    let sio_class = {
+        let sym = vm.interner.intern("StringIO");
+        if let Some(c) = vm.classes.get(&sym).cloned() {
+            Value::Class(c)
+        } else if let Some(c) = vm.constants.get(&sym).cloned() {
+            c
+        } else {
+            return Ok(());
+        }
+    };
+    let body_val = Value::new_str(String::from_utf8_lossy(body_bytes).into_owned());
+
+    let mut pg = crate::vm::PinGuard::new(vm);
+    pg.pin(Value::Hash(env_id));
+
+    let new_sym = pg.vm.interner.intern("new");
+    let pre_frames = pg.vm.frames.len();
+    pg.vm.stack.push(sio_class);
+    pg.vm.stack.push(body_val);
+    pg.vm.do_call(new_sym, 1, /* no_recv = */ false, /* cache_id = */ u16::MAX)?;
+    // Drive `initialize` to completion. `new` uses the frame's
+    // `swap_return` so the value left on the stack is the INSTANCE, not
+    // initialize's return value.
+    pg.vm.dispatch_until(pre_frames)?;
+    let sio = pg.vm.stack.pop().unwrap_or(Value::Nil);
+
+    pg.vm
+        .heap
+        .hash_mut(env_id)
+        .push((Value::new_str("rack.input".to_string()), sio));
+    Ok(())
 }
 
 /// Invoke a Ruby block synchronously from Rust and return
@@ -1626,6 +1700,15 @@ async fn handle_request_with_app(
             vm.fuel = Some(n);
         }
 
+        // Root the app block for the duration of this request. It is
+        // held only as a Rust `ObjId` (not a GC root), and
+        // `reset_between_requests_inner` just cleared `pinned`. Building
+        // `rack.input` now runs user Ruby (`StringIO#initialize`) that
+        // can allocate and, under GC, would otherwise sweep the app
+        // block before we invoke it (caught by `STRESS_GC=1`). The next
+        // request's reset clears this pin again.
+        vm.pinned.push(Value::Block(block_id));
+
         let env_id = build_rack_env(
             vm,
             &method_str,
@@ -1637,9 +1720,24 @@ async fn handle_request_with_app(
             peer_addr,
             "http",  // PoC stage 4c.3: HTTPS via _http_server_tls battery (H5)
         );
+        // Stage 4c.3: wrap the buffered body in a StringIO and install
+        // it as env["rack.input"] so the app can read POST/PUT bodies.
+        if let Err(trap) = install_rack_input(vm, env_id, &body_vec) {
+            vm.pinned.pop(); // balance the app-block pin before early return
+            return Ok(error_response(
+                500,
+                format!("internal: failed to build rack.input: {}", trap.err.message()),
+            ));
+        }
         let env_val = Value::Hash(env_id);
 
-        match call_ruby_block_sync(vm, block_id, vec![env_val.clone()]) {
+        // Run the app, then drop the app-block pin (balances the push
+        // above; the eval boundary asserts pinned is balanced). The app
+        // block isn't needed past this point — marshalling and on_error
+        // operate on the result + env, not the block.
+        let app_outcome = call_ruby_block_sync(vm, block_id, vec![env_val.clone()]);
+        vm.pinned.pop();
+        match app_outcome {
             Ok(app_result) => marshal_rack_response(vm, app_result)
                 .map_err(|msg| (500, msg)),
             Err(trap) => {
@@ -2019,6 +2117,18 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     // below. Idempotent — re-registration overwrites.
     #[cfg(feature = "_fiber")]
     crate::vm::fiber::register_host_fns(rt);
+
+    // Stage 4c.3: load the vendored `StringIO` so the per-request
+    // handler can wrap each request body as `env["rack.input"]` (Rack
+    // SPEC). The battery depends on StringIO regardless of the `stdlib`
+    // feature (the `stdlib_vendor` module itself is `stdlib`-gated), so
+    // we embed the same vendored source via `include_str!` and eval it
+    // here. Idempotent: re-running reopens the same class. See
+    // `install_rack_input`.
+    {
+        const STRINGIO_SRC: &str = include_str!("stdlib_vendor/stringio.rb");
+        let _ = rt.eval(STRINGIO_SRC, "<rubyrs:stringio>");
+    }
 
     rt.register_fn("__rubyrs_http_serve_hardcoded", |args| {
         // Argument shape: (bind_addr: String, duration_secs: Integer)
@@ -3866,6 +3976,148 @@ mod tests {
         assert!(
             response_text.contains("len=36;"),
             "expected len=36 in body (body string is 36 bytes), got:\n{response_text}",
+        );
+    }
+
+    /// Regression: an exception raised inside a native-iterator block
+    /// (`each { ... raise ... }`) must be caught by a `rescue` that is
+    /// in scope but OUTSIDE the block, even when the whole thing runs
+    /// under a Rust-invoked Rack block (`call_ruby_block_sync` →
+    /// `step_block` → `dispatch_until`).
+    ///
+    /// Before the `dispatch_until_inner` `AlreadyCaught` scope-check fix,
+    /// the `AlreadyCaught` resume signal (emitted after
+    /// `unwind_with_exception` redirected IP to the in-scope handler)
+    /// was re-emitted past the outermost `dispatch_until` instead of
+    /// being consumed, so the exception escaped to the Rust caller as an
+    /// uncaught "Rack app raised" error. This is the exception analog of
+    /// the non-local `return` fix; it's what makes Sinatra's
+    /// exception-based `halt`/`redirect` (and any app `rescue` around a
+    /// route table loop) work.
+    #[test]
+    fn call_ruby_block_sync_catches_exception_from_iterator_block_in_scope() {
+        use crate::value::Value;
+        let mut rt = crate::Runtime::new();
+        rt.register_fn("__sentinel_call_block", |args| {
+            let block_id = match args.first() {
+                Some(Value::Block(id)) => *id,
+                _ => return Err(crate::error::Trap {
+                    err: crate::error::RubyError::ArgumentError {
+                        msg: "expected block as first arg".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            let block_args: Vec<Value> = args[1..].to_vec();
+            let ptr = crate::vm::current_vm_ptr();
+            assert!(!ptr.is_null(), "vm ptr must be set");
+            // SAFETY: ADR 0013 — outer &mut Vm parked; re-borrow time-disjoint.
+            let vm = unsafe { &mut *ptr };
+            super::call_ruby_block_sync(vm, block_id, block_args)
+        });
+
+        // raise inside `each`, rescued in the same lambda.
+        rt.eval(r#"
+            app = ->(env) {
+              begin
+                [1, 2, 3].each { |x| raise "boom-#{x}" if x == 2 }
+                "no-raise"
+              rescue => e
+                "caught: #{e.message}"
+              end
+            }
+            result = __sentinel_call_block(app, {"REQUEST_METHOD" => "GET"})
+            raise "want \"caught: boom-2\" got #{result.inspect}" unless result == "caught: boom-2"
+        "#, "exc_from_iter_in_scope.rb")
+            .expect("exception from iterator block caught by in-scope rescue under Rust block");
+
+        // Sinatra-shape: a custom exception (halt) raised in a helper
+        // inside a route loop, rescued one frame down — exception carries
+        // a payload through.
+        rt.eval(r#"
+            class HaltLike < StandardError
+              attr_reader :triplet
+              def initialize(t); @triplet = t; super("halt"); end
+            end
+            def dispatch(verb)
+              begin
+                [["GET","root"],["POST","submit"]].each { |v, name|
+                  raise HaltLike.new([403, "forbidden:#{name}"]) if v == verb
+                }
+                [404, "not found"]
+              rescue HaltLike => e
+                e.triplet
+              end
+            end
+            app = ->(env) { dispatch(env["REQUEST_METHOD"]) }
+            result = __sentinel_call_block(app, {"REQUEST_METHOD" => "POST"})
+            raise "want [403, \"forbidden:submit\"] got #{result.inspect}" \
+              unless result == [403, "forbidden:submit"]
+        "#, "exc_halt_shape.rb")
+            .expect("halt-shape custom exception caught under Rust block");
+    }
+
+    /// Stage 4c.3 regression: `env["rack.input"]` is a StringIO over
+    /// the request body, and the app can `.read` it back. This is the
+    /// gap that made write-side web apps (POST/PUT, form/JSON bodies)
+    /// impossible — see `install_rack_input`.
+    #[test]
+    fn rack_input_exposes_request_body_as_readable_stringio() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18097";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let body = r#"{"name":"rubyrs","ok":true}"#;
+            let req = format!(
+                "POST /echo HTTP/1.1\r\n\
+                 Host: localhost\r\n\
+                 Content-Length: {}\r\n\
+                 Content-Type: application/json\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            client.write_all(req.as_bytes()).expect("write");
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).expect("read");
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // The app reads the body from rack.input and echoes it, plus the
+        // class name (proving it's an IO-like StringIO, not the raw
+        // String or nil).
+        rt.eval(&format!(r#"
+            app = ->(env) {{
+              io = env["rack.input"]
+              body = io.read
+              out = "class=#{{io.class}};body=#{{body}}"
+              [200, {{"Content-Type" => "text/plain"}}, [out]]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app, {{ per_request_fuel: 1_000_000 }})
+        "#), "stage_4c3_rack_input.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200 OK, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("class=StringIO;"),
+            "expected rack.input to be a StringIO, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains(r#"body={"name":"rubyrs","ok":true}"#),
+            "expected the POST body echoed back from rack.input.read, got:\n{response_text}",
         );
     }
 
