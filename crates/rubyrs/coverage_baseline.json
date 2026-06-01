@@ -8,7 +8,8 @@
     "crates/rubyrs/src/http_server.rs": "behind the `_http_server` Cargo feature; the default CI coverage run uses default features",
     "crates/rubyrs/src/stdlib_vendor.rs": "behind the `stdlib` Cargo feature; default CI build excludes",
     "crates/rubyrs/src/vm/cext_wasi.rs": "cfg(target_os = \"wasi\") gated; only compiled on wasm32-wasip1, not on the Linux coverage runner",
-    "crates/rubyrs/src/vm/fiber.rs": "behind the `_fiber` Cargo feature; the default CI coverage run uses default features (matches the http_server / stdlib pattern above)"
+    "crates/rubyrs/src/vm/fiber.rs": "behind the `_fiber` Cargo feature; the default CI coverage run uses default features (matches the http_server / stdlib pattern above)",
+    "crates/rubyrs/src/json_native.rs": "behind the `_json_native` Cargo feature (serde_json accelerator for the pure JSON canon, ADR 0019 Rule 6); default CI build excludes"
   },
   "files": {
     "crates/rubund/src/main.rs": 0,
@@ -40,7 +41,7 @@
     "crates/rubyrs/src/vm/array.rs": 89,
     "crates/rubyrs/src/vm/bignum.rs": 82,
     "crates/rubyrs/src/vm/cext.rs": 84,
-    "crates/rubyrs/src/vm/dispatch.rs": 87,
+    "crates/rubyrs/src/vm/dispatch.rs": 85,
     "crates/rubyrs/src/vm/fileops.rs": 80,
     "crates/rubyrs/src/vm/gc.rs": 90,
     "crates/rubyrs/src/vm/hash.rs": 97,
@@ -51,7 +52,7 @@
     "crates/rubyrs/src/vm/numeric.rs": 93,
     "crates/rubyrs/src/vm/primitive.rs": 77,
     "crates/rubyrs/src/vm/raise.rs": 96,
-    "crates/rubyrs/src/vm/range.rs": 87,
+    "crates/rubyrs/src/vm/range.rs": 85,
     "crates/rubyrs/src/vm/sprintf.rs": 83,
     "crates/rubyrs/src/vm/step.rs": 88,
     "crates/rubyrs/src/vm/string.rs": 89,
