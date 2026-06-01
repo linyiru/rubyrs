@@ -1929,16 +1929,11 @@ impl Vm {
                 if bi < end_inc {
                     let mut cur = bi + 1;
                     'outer: loop {
-                        // step_block under per-iter pin scope:
-                        // baseline snapshot + call + truncate.
-                        // No closure needed here — the call has
-                        // no `?` so straight-line code suffices;
-                        // truncate runs even on Err because we
-                        // pull `step_result` out before `?`-ing.
-                        let iter_baseline = g.vm.pinned.len();
-                        let step_result = g.vm.step_block(block, vec![Value::Int(prev), Value::Int(cur)], pre_frames);
-                        g.vm.pinned.truncate(iter_baseline);
-                        let r = match step_result? {
+                        // No per-iter pins to manage (the args
+                        // are Int Values, not heap-ref) — call
+                        // step_block directly, matching the
+                        // Array/Hash chunk_while arms.
+                        let r = match g.vm.step_block(block, vec![Value::Int(prev), Value::Int(cur)], pre_frames)? {
                             BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                             BlockStep::Break(r) => { early = Some(r); break 'outer; }
                             BlockStep::Value(r) => r,
