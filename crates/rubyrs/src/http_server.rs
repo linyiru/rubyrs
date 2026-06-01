@@ -3005,6 +3005,33 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
 mod tests {
     use super::*;
 
+    /// Kernel-assigned free port for self-spawning-server tests.
+    /// Replaces the hardcoded `127.0.0.1:18XXX` shape that all
+    /// the originally-written tests used: bind a probe listener
+    /// to `:0`, read the port the kernel handed out, drop the
+    /// probe. The port then gets re-bound by the test's
+    /// server-under-test — there's a TOCTOU window where
+    /// another process could grab it, but on the single host
+    /// running `cargo test` that's bounded and historically
+    /// hasn't bitten. The motivating fix (PR fixing the
+    /// `install_signal_handler_flag_does_not_break_serve`
+    /// flake) covers the same shape inline; this helper exists
+    /// so the rest of the test mod's ~40 hardcoded-port
+    /// sites can preemptively migrate without each carrying
+    /// a copy of the probe-bind boilerplate.
+    ///
+    /// Returns a `String` shaped `"127.0.0.1:NNNN"` so it
+    /// plugs into both `TcpStream::connect(&addr)` AND
+    /// `format!("__rubyrs_http_serve_with_app(\"{addr}\", ...)")`
+    /// the way the old `&'static str` literal did.
+    fn free_test_addr() -> String {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("free_test_addr: probe bind");
+        let port = probe.local_addr().expect("local_addr").port();
+        drop(probe);
+        format!("127.0.0.1:{port}")
+    }
+
     #[test]
     fn default_config_has_no_bind() {
         let cfg = HttpServerConfig::default();
@@ -3293,11 +3320,13 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18099";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             // 50 distinct headers — way above the cap of 5
             // (Host counts as 1, so 49 X-Custom-N + Host =
@@ -3311,7 +3340,7 @@ mod tests {
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         // 7-arg form: max_headers = 5
         let mut rt = crate::Runtime::new();
@@ -3347,11 +3376,13 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18100";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             // 10 headers — well under hyper's default (100)
             let mut req = String::from("GET /normal HTTP/1.1\r\nHost: localhost\r\n");
@@ -3363,7 +3394,7 @@ mod tests {
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         // 7-arg form with max_headers = 0 (use hyper default)
         let mut rt = crate::Runtime::new();
@@ -3430,7 +3461,9 @@ mod tests {
         let server_addr = format!("127.0.0.1:{server_port}");
         let client_addr = server_addr.clone();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             // Retry the connect for up to 2 s with 25 ms backoff
             // instead of a single shot at 250 ms. The server's
             // bind latency under parallel-cargo-test load can
@@ -3455,7 +3488,7 @@ mod tests {
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -3517,11 +3550,13 @@ mod tests {
         use std::thread;
         use std::time::{Duration, Instant};
 
-        let server_addr = "127.0.0.1:18102";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
-            let client = TcpStream::connect(server_addr).expect("connect");
+            let client = TcpStream::connect(&server_addr).expect("connect");
             // Generous read timeout — we expect the server
             // to FIN well before this fires; the assertion
             // below catches the regression if it doesn't.
@@ -3530,7 +3565,7 @@ mod tests {
             let started = Instant::now();
             let result = (&client).read_to_end(&mut buf);
             (started.elapsed(), result.is_ok(), buf.len())
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -3637,17 +3672,19 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18103";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /boom HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -3697,17 +3734,19 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18104";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /boom HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -3756,12 +3795,14 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18105";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
             let read_one = |path: &str| {
-                let mut client = TcpStream::connect(server_addr).expect("connect");
+                let mut client = TcpStream::connect(&server_addr).expect("connect");
                 client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
                 let req = format!(
                     "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
@@ -3774,7 +3815,7 @@ mod tests {
             let r1 = read_one("/runaway");
             let r2 = read_one("/ok");
             (r1, r2)
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -3834,11 +3875,13 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18097";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             // Claim 100-byte body, send 10, pause.
             client.write_all(
@@ -3859,7 +3902,7 @@ mod tests {
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         // 6-arg form: fuel=1M, max_body=10K, io_deadline=300ms
         let mut rt = crate::Runtime::new();
@@ -3900,11 +3943,13 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18098";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(
                 b"POST /slow HTTP/1.1\r\n\
@@ -3921,7 +3966,7 @@ mod tests {
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         // io_deadline_ms = 0 → no timeout
         let mut rt = crate::Runtime::new();
@@ -3962,11 +4007,13 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18095";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             // 50 KB POST body — way above the 100-byte cap.
             let big_body = "x".repeat(50_000);
@@ -3987,7 +4034,7 @@ mod tests {
             // bytes we received.
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -4030,11 +4077,13 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18096";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let body = "hello, world! (small body under cap)";
             let req = format!(
@@ -4050,7 +4099,7 @@ mod tests {
             let mut response = Vec::new();
             client.read_to_end(&mut response).expect("read");
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -4169,11 +4218,13 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18097";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let body = r#"{"name":"rubyrs","ok":true}"#;
             let req = format!(
@@ -4189,7 +4240,7 @@ mod tests {
             let mut response = Vec::new();
             client.read_to_end(&mut response).expect("read");
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -4239,11 +4290,13 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18101";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(
                 b"GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -4251,7 +4304,7 @@ mod tests {
             let mut response = Vec::new();
             client.read_to_end(&mut response).expect("read");
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -4321,15 +4374,17 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18094";
+        let server_addr = free_test_addr();
 
         // Client thread: sends two requests, verifies each.
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
 
             // Request 1 — runaway path. Connect fresh,
             // send, read response.
-            let mut c1 = TcpStream::connect(server_addr).expect("connect 1");
+            let mut c1 = TcpStream::connect(&server_addr).expect("connect 1");
             c1.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             c1.write_all(
                 b"GET /runaway HTTP/1.1\r\n\
@@ -4344,7 +4399,7 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
 
             // Request 2 — well-behaved path.
-            let mut c2 = TcpStream::connect(server_addr).expect("connect 2");
+            let mut c2 = TcpStream::connect(&server_addr).expect("connect 2");
             c2.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             c2.write_all(
                 b"GET /ok HTTP/1.1\r\n\
@@ -4357,7 +4412,7 @@ mod tests {
                 String::from_utf8_lossy(&r1).into_owned(),
                 String::from_utf8_lossy(&r2).into_owned(),
             )
-        });
+        }});
 
         // Server: lambda checks $req_count global (should
         // be 0 every request — reset_between_requests
@@ -4436,11 +4491,13 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18091";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(
                 b"GET /users/42?verbose=1 HTTP/1.1\r\n\
@@ -4451,7 +4508,7 @@ mod tests {
             let mut response = Vec::new();
             client.read_to_end(&mut response).expect("read response");
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -4534,18 +4591,20 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18111";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /a3 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -4694,18 +4753,20 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18113";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /p2a HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -4752,18 +4813,20 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18114";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /p2a HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -4806,18 +4869,20 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18115";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /p2a HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -4868,18 +4933,20 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18130";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -4924,18 +4991,20 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18131";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -4993,12 +5062,14 @@ mod tests {
         use std::thread;
         use std::time::{Duration, Instant};
 
-        let server_addr = "127.0.0.1:18132";
+        let server_addr = free_test_addr();
         let sleep_ms: u64 = 500;
 
-        let client_thread = thread::spawn(move || -> (String, Option<Duration>, Option<Duration>) {
+        let client_thread = {
+            let server_addr = server_addr.clone();
+            thread::spawn(move || -> (String, Option<Duration>, Option<Duration>) {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             client.write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
@@ -5027,7 +5098,7 @@ mod tests {
                 }
             }
             (String::from_utf8_lossy(&buf).into_owned(), first_at, second_at)
-        });
+        })};
 
         let mut rt = crate::Runtime::new();
         // Test-private sleep helper — real wall-clock sleep
@@ -5104,19 +5175,21 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18150";
+        let server_addr = free_test_addr();
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /x HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         let log_for_fn = Arc::clone(&log);
@@ -5179,19 +5252,21 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18151";
+        let server_addr = free_test_addr();
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /x HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         let log_for_fn = Arc::clone(&log);
@@ -5257,19 +5332,21 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18152";
+        let server_addr = free_test_addr();
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /x HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         let log_for_fn = Arc::clone(&log);
@@ -5344,12 +5421,14 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18180";
+        let server_addr = free_test_addr();
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             client.write_all(b"GET /d HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
@@ -5375,7 +5454,7 @@ mod tests {
             let _ = client.shutdown(Shutdown::Both);
             drop(client);
             total
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         // Inject sleep so the body can pause long enough for
@@ -5490,16 +5569,18 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18190";
+        let server_addr = free_test_addr();
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
         // Client stays connected the WHOLE TIME — never
         // disconnects. The only way close can fire is when
         // the server's duration elapses and the tokio
         // runtime cancels the body's task.
-        let client_thread = thread::spawn(move || -> Vec<u8> {
+        let client_thread = {
+            let server_addr = server_addr.clone();
+            thread::spawn(move || -> Vec<u8> {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(4))).unwrap();
             client.write_all(b"GET /s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
@@ -5509,7 +5590,7 @@ mod tests {
             let mut buf = Vec::new();
             let _ = client.read_to_end(&mut buf);
             buf
-        });
+        })};
 
         let mut rt = crate::Runtime::new();
         rt.register_fn("__rubyrs_test_sleep_ms", |args| {
@@ -5619,13 +5700,15 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18160";
+        let server_addr = free_test_addr();
         let recorded_counts: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
             for _ in 0..3 {
-                let mut client = TcpStream::connect(server_addr).expect("connect");
+                let mut client = TcpStream::connect(&server_addr).expect("connect");
                 client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
                 client.write_all(b"GET /a HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                     .expect("write");
@@ -5636,7 +5719,7 @@ mod tests {
                 // and re-arm before the next syn lands.
                 thread::sleep(Duration::from_millis(100));
             }
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         let recorded_for_fn = Arc::clone(&recorded_counts);
@@ -5713,13 +5796,15 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18161";
+        let server_addr = free_test_addr();
         let recorded_counts: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
             for _ in 0..2 {
-                let mut client = TcpStream::connect(server_addr).expect("connect");
+                let mut client = TcpStream::connect(&server_addr).expect("connect");
                 client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
                 client.write_all(b"GET /e HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                     .expect("write");
@@ -5727,7 +5812,7 @@ mod tests {
                 let _ = client.read_to_end(&mut response);
                 thread::sleep(Duration::from_millis(100));
             }
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         let recorded_for_fn = Arc::clone(&recorded_counts);
@@ -5794,18 +5879,20 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18170";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /e HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -5853,19 +5940,21 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18171";
+        let server_addr = free_test_addr();
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /w HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         let log_for_fn = Arc::clone(&log);
@@ -5936,18 +6025,20 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18172";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /f HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -5998,18 +6089,20 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18173";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /c HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -6075,12 +6168,14 @@ mod tests {
         use std::thread;
         use std::time::{Duration, Instant};
 
-        let server_addr = "127.0.0.1:18174";
+        let server_addr = free_test_addr();
         let body_delay_ms: u64 = 400;
 
-        let client_thread = thread::spawn(move || -> (String, Option<Duration>, Option<Duration>) {
+        let client_thread = {
+            let server_addr = server_addr.clone();
+            thread::spawn(move || -> (String, Option<Duration>, Option<Duration>) {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             client.write_all(b"GET /h HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
@@ -6112,7 +6207,7 @@ mod tests {
                 }
             }
             (String::from_utf8_lossy(&buf).into_owned(), headers_at, chunk_at)
-        });
+        })};
 
         let mut rt = crate::Runtime::new();
         rt.register_fn("__rubyrs_test_sleep_ms", |args| {
@@ -6204,7 +6299,7 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18175";
+        let server_addr = free_test_addr();
         // 30 literal yields. We'd prefer `30.times { |i|
         // yield "ch_#{i}\n" }` but a Fiber + iter-block-
         // parameter scoping bug surfaces with that form
@@ -6215,9 +6310,11 @@ mod tests {
         // loop), which is what this test is for.
         const N_CHUNKS: usize = 30;
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
             client.write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
@@ -6239,7 +6336,7 @@ mod tests {
                 }
             }
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -6341,18 +6438,20 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18176";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /t HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -6414,18 +6513,20 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18112";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET /a3 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -6457,11 +6558,13 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18092";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(
                 b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -6469,7 +6572,7 @@ mod tests {
             let mut response = Vec::new();
             client.read_to_end(&mut response).expect("read");
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -6502,11 +6605,13 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18093";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(
                 b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -6514,7 +6619,7 @@ mod tests {
             let mut response = Vec::new();
             client.read_to_end(&mut response).expect("read");
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -6823,16 +6928,18 @@ mod tests {
         // overlap because stage 2 uses :0). Other tests
         // using fixed ports should pick non-overlapping
         // values.
-        let server_addr = "127.0.0.1:18083";
+        let server_addr = free_test_addr();
 
         // Client thread: connect after a brief delay, send
         // an HTTP GET, slurp the response. The delay
         // ensures the server has bound + entered its
         // accept loop before we connect; without it the
         // connect can race the bind.
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(200));
-            let mut client = TcpStream::connect(server_addr).expect("connect to ruby-started server");
+            let mut client = TcpStream::connect(&server_addr).expect("connect to ruby-started server");
             client
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
@@ -6844,7 +6951,7 @@ mod tests {
             let mut response = Vec::new();
             client.read_to_end(&mut response).expect("read response");
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         // Main thread: run Ruby that starts the server for
         // 1 second. After auto-shutdown, Ruby returns the
@@ -7135,11 +7242,13 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18140";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client
                 .write_all(b"GET /boot HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
@@ -7147,7 +7256,7 @@ mod tests {
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -7240,18 +7349,20 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let server_addr = "127.0.0.1:18142";
+        let server_addr = free_test_addr();
 
-        let client_thread = thread::spawn(move || {
+        let client_thread = thread::spawn({
+            let server_addr = server_addr.clone();
+            move || {
             thread::sleep(Duration::from_millis(250));
-            let mut client = TcpStream::connect(server_addr).expect("connect");
+            let mut client = TcpStream::connect(&server_addr).expect("connect");
             client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             client.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write");
             let mut response = Vec::new();
             let _ = client.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        }});
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
@@ -7364,7 +7475,13 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let addr: SocketAddr = "127.0.0.1:18131".parse().unwrap();
+        // Kernel-assigned free port via free_test_addr() then
+        // parse-back through SocketAddr — the rest of the test
+        // takes a SocketAddr (passes into bind_reuseport_v4), so
+        // we keep the `addr` variable name and just switch the
+        // numeric source. Matches the rest of the test mod's
+        // post-migration shape.
+        let addr: SocketAddr = free_test_addr().parse().unwrap();
 
         let client_thread = thread::spawn(move || {
             thread::sleep(Duration::from_millis(250));
