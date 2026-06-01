@@ -3338,13 +3338,19 @@ impl Vm {
             }
             // 2-arg `define_method` / `define_singleton_method`
             // in a class body — intercept BEFORE the bridge
-            // re-enters as explicit-recv, so the install
+            // re-enters as explicit-recv. For
+            // `define_method` this matters because the install
             // inherits the surrounding class-body visibility
-            // (which the bridge re-entry would have lost). The
+            // (which the bridge re-entry would have lost); the
             // recv-form arm in `try_dispatch_class_intrinsics`
-            // defaults to Public for the 2-arg form precisely
+            // defaults to Public for that 2-arg form precisely
             // because this intercept takes the no_recv path
-            // first. PR #321 cycle-1.
+            // first. For `define_singleton_method` the install
+            // is always Public regardless of context (matching
+            // the block-form arm and CRuby's class-method
+            // semantics), but it's intercepted here too so the
+            // bridge whitelist doesn't need to special-case
+            // arity. PR #321 cycle-1.
             if matches!(&*name, "define_method" | "define_singleton_method")
                 && args.len() == 2
                 && let Value::Class(cls) = &self_val
@@ -8191,10 +8197,17 @@ impl Vm {
             }
             Value::UnboundMethod(id) => {
                 let (defining, _, snap) = self.heap.unbound_method_full(*id);
-                // CRuby parity: `bind` insists the receiver's
-                // class be `defining_class` or a subclass. We
-                // apply the same rule at install time.
-                if !crate::vm::class_is_a(target_cls, &defining) {
+                // Mirror the `UnboundMethod#bind` fence at
+                // dispatch.rs:928 — Kernel and Modules are
+                // universally bindable in CRuby; only
+                // Class-owned UnboundMethods enforce the
+                // subclass check. Prior implementation was too
+                // strict and rejected
+                // `C.define_method(:x, M.instance_method(:x))`.
+                if defining.name.as_str() != "Kernel"
+                    && !defining.is_module
+                    && !crate::vm::class_is_a(target_cls, &defining)
+                {
                     return Err(RubyError::TypeError {
                         msg: format!(
                             "bind argument must be a subclass of {}",

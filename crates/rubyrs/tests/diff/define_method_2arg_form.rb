@@ -93,3 +93,23 @@ end
 # Target.safe_x is Public despite Caller's surrounding `private`
 puts Target.public_instance_methods(false).include?(:safe_x)
 puts Target.private_instance_methods(false).include?(:safe_x)
+
+# (12) Cycle-2: Module-owned UnboundMethods bind universally
+# (CRuby parity — Module.instance_method(:m).bind(obj) succeeds
+# regardless of obj's class hierarchy, mirroring the
+# existing UnboundMethod#bind fence).
+module Mod_bind
+  def universal_m
+    "universal"
+  end
+end
+class Recv_unrelated; end
+um_mod = Mod_bind.instance_method(:universal_m)
+Recv_unrelated.define_method(:from_mod, um_mod)
+puts Recv_unrelated.new.from_mod
+
+# Kernel UnboundMethods are likewise universally bindable.
+class Recv_kern; end
+um_kern = Kernel.instance_method(:object_id)
+Recv_kern.define_method(:my_oid, um_kern)
+puts Recv_kern.new.my_oid.is_a?(Integer)
