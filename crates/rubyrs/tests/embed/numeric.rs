@@ -3233,6 +3233,70 @@ fn rational_phase_c2_arithmetic_and_comparison() {
 }
 
 #[test]
+#[cfg(feature = "bignum")]
+fn rational_phase_c4_1_bigint_widening() {
+    // Phase C.4.1 — RationalRepr num/den widened to BigInt under
+    // bignum. Operands that fit i64 individually but whose product
+    // exceeds i64 used to raise RangeError ("Rational result
+    // overflows i64") in Phase C.1–C.3; now stay Rational with
+    // canonical BigInt storage. Kernel#Rational still takes i64
+    // args (BigInt-arg widening tracked as C.4.2).
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        (
+            "puts (Rational(10**18, 3) * Rational(10**18, 7)).inspect",
+            "(1000000000000000000000000000000000000/21)",
+        ),
+        (
+            "puts (Rational(10**18, 1) + Rational(10**18, 1)).inspect",
+            "(2000000000000000000/1)",
+        ),
+        (
+            "puts (Rational(10**18, 3) * Rational(10**18, 7)).numerator",
+            "1000000000000000000000000000000000000",
+        ),
+        ("puts (Rational(10**18, 3) * Rational(10**18, 7)).denominator", "21"),
+        (
+            "puts ((Rational(10**18, 3) * 2) <=> (Rational(10**18, 3) * 3))",
+            "-1",
+        ),
+        ("puts ((Rational(10**18, 1) * 10).to_f / 10**19)", "1.0"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "rational_c41.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+}
+
+#[test]
+#[cfg(not(feature = "bignum"))]
+fn rational_phase_c4_1_overflow_preserved_without_bignum() {
+    // Phase C.4.1 — no-bignum tier preserves the i64 overflow →
+    // RangeError contract from Phase C.1–C.3 (WASM CI gate runs
+    // this path). Pins the behavior so a future "always widen"
+    // refactor would have to consciously break it.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt
+        .eval(
+            "Rational(10**9, 1) * Rational(10**10, 1)",
+            "rational_c41_nobignum.rb",
+        )
+        .unwrap_err();
+    match err.err {
+        rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+            assert_eq!(class_name, "RangeError");
+            assert!(
+                message.contains("overflows i64"),
+                "expected i64 overflow message, got {:?}",
+                message,
+            );
+        }
+        ref other => panic!("expected RangeError, got {:?}", other),
+    }
+}
+
+#[test]
 fn rational_survives_stress_gc() {
     // Regression guard for the visit_value mark hole Copilot
     // flagged on PR #297: without an arm for `Value::Rational`,

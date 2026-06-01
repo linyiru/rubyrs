@@ -146,17 +146,114 @@ pub(crate) struct TypedDataObj {
     pub(crate) dfree: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
 }
 
-/// Heap representation of a Rational number (Phase C.1).
+/// Heap representation of a Rational number.
 /// Canonical form: `den > 0`, `gcd(|num|, den) == 1`. The
 /// invariants are enforced by `Kernel#Rational(n, d)` at the
 /// constructor boundary so every reader (numerator / denominator /
-/// to_s / inspect) can trust them without re-normalizing. i64 num
-/// and den are the Phase C.1 storage; widening to BigInt num/den
-/// is tracked as Phase C.4.
+/// to_s / inspect) can trust them without re-normalizing.
+///
+/// Storage is cfg-dual to keep the no-bignum tier (WASM CI gate)
+/// alive: under `bignum`, num/den are arbitrary-precision BigInt
+/// (Phase C.4.1 widening — lifts the i64::MIN / 2**64-receiver
+/// limits documented in PR #310). Without `bignum`, num/den stay
+/// i64 and arithmetic overflow surfaces as RangeError, matching
+/// Phase C.1–C.3 behavior. `Display` works identically on both
+/// since both types implement `fmt::Display`.
+///
+/// `Copy` is only derivable on the i64 form (BigInt isn't `Copy`).
+/// The 2 historical `*self.heap.rational(*id)` deref-copy sites
+/// now use `.clone()` instead.
+#[cfg(feature = "bignum")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RationalRepr {
+    pub(crate) num: num_bigint::BigInt,
+    pub(crate) den: num_bigint::BigInt,
+}
+
+#[cfg(not(feature = "bignum"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RationalRepr {
     pub(crate) num: i64,
     pub(crate) den: i64,
+}
+
+/// `r == n` for a canonical Rational and i64. Cross-multiplies
+/// without intermediate overflow: i128 widening covers the no-
+/// bignum tier (max i64 × i64 = i128); BigInt path is infallible.
+#[cfg(feature = "bignum")]
+pub(crate) fn rational_eq_int(r: &RationalRepr, n: i64) -> bool {
+    use num_bigint::BigInt;
+    BigInt::from(n) * &r.den == r.num
+}
+#[cfg(not(feature = "bignum"))]
+pub(crate) fn rational_eq_int(r: &RationalRepr, n: i64) -> bool {
+    (n as i128) * (r.den as i128) == r.num as i128
+}
+
+/// Lossy f64 demote for a canonical Rational. Used by Float
+/// cross-type equality / comparison and by `Rational#to_f`.
+/// Under bignum the BigInt division goes through f64 via
+/// `bigint_to_f64_sign_preserving`; under no-bignum it's the
+/// straight `num/den` cast.
+#[cfg(feature = "bignum")]
+pub(crate) fn rational_to_f64(r: &RationalRepr) -> f64 {
+    crate::vm::bignum::bigint_to_f64_sign_preserving(&r.num)
+        / crate::vm::bignum::bigint_to_f64_sign_preserving(&r.den)
+}
+#[cfg(not(feature = "bignum"))]
+pub(crate) fn rational_to_f64(r: &RationalRepr) -> f64 {
+    r.num as f64 / r.den as f64
+}
+
+/// `r <=> other` cross-multiply. Returns `None` for non-numeric
+/// `other` (caller surfaces as `Value::Nil`). Canonical `den > 0`
+/// on both sides, so cross-multiply preserves sign. Bigint path
+/// uses BigInt::cmp directly; no-bignum path uses i128 widening.
+pub(crate) fn rational_cmp_other(
+    r: &RationalRepr,
+    other: &Value,
+    heap: &Heap,
+) -> Option<std::cmp::Ordering> {
+    #[cfg(feature = "bignum")]
+    {
+        use num_bigint::BigInt;
+        match other {
+            Value::Rational(oid) => {
+                let o = heap.rational(*oid);
+                let lhs = &r.num * &o.den;
+                let rhs = &o.num * &r.den;
+                Some(lhs.cmp(&rhs))
+            }
+            Value::Int(n) => {
+                let rhs = BigInt::from(*n) * &r.den;
+                Some(r.num.cmp(&rhs))
+            }
+            Value::BigInt(id) => {
+                let rhs = heap.bigint(*id) * &r.den;
+                Some(r.num.cmp(&rhs))
+            }
+            Value::Float(f) => rational_to_f64(r).partial_cmp(f),
+            _ => None,
+        }
+    }
+    #[cfg(not(feature = "bignum"))]
+    {
+        match other {
+            Value::Rational(oid) => {
+                let o = heap.rational(*oid);
+                let lhs = (r.num as i128) * (o.den as i128);
+                let rhs = (o.num as i128) * (r.den as i128);
+                Some(lhs.cmp(&rhs))
+            }
+            Value::Int(n) => {
+                let lhs = r.num as i128;
+                let rhs = (*n as i128) * (r.den as i128);
+                Some(lhs.cmp(&rhs))
+            }
+            Value::Float(f) => rational_to_f64(r).partial_cmp(f),
+            _ => None,
+        }
+    }
 }
 
 /// A Ruby Range. For our subset, both endpoints must be `Value::Int`.
@@ -1283,21 +1380,21 @@ impl Value {
             // needed on the cross-multiply.
             (Value::Rational(rid), Value::Int(n)) => {
                 let r = heap.rational(*rid);
-                (*n as i128) * (r.den as i128) == r.num as i128
+                rational_eq_int(r, *n)
             }
             (Value::Int(n), Value::Rational(rid)) => {
                 let r = heap.rational(*rid);
-                (*n as i128) * (r.den as i128) == r.num as i128
+                rational_eq_int(r, *n)
             }
             (Value::Rational(rid), Value::Float(f)) => {
                 if !f.is_finite() { return false; }
                 let r = heap.rational(*rid);
-                (r.num as f64 / r.den as f64) == *f
+                rational_to_f64(r) == *f
             }
             (Value::Float(f), Value::Rational(rid)) => {
                 if !f.is_finite() { return false; }
                 let r = heap.rational(*rid);
-                *f == (r.num as f64 / r.den as f64)
+                *f == rational_to_f64(r)
             }
             _ => false,
         }
