@@ -2006,8 +2006,24 @@ impl Vm {
                             //   end
                             // (TRY_RUNS pass-10 layer #11.)
                             let mut primitive_hit = false;
+                            // Rc-pointer visited set defends the
+                            // walker against an adversarial cyclic
+                            // superclass graph (`A.superclass = B;
+                            // B.superclass = A`) that cext or
+                            // direct manipulation can construct —
+                            // CRuby rejects the cycle at
+                            // insertion, rubyrs doesn't enforce
+                            // that today. Mirrors the
+                            // `Rc::as_ptr` guard
+                            // `lookup_method_uncached` (lookup.rs)
+                            // already uses for the same shape on
+                            // includes/prepends.
+                            // (Code-review #320 round 1.)
+                            let mut visited: std::collections::HashSet<*const crate::value::Class> =
+                                std::collections::HashSet::new();
                             let mut walker: Option<Rc<Class>> = Some(cls.clone());
                             while let Some(c) = walker {
+                                if !visited.insert(Rc::as_ptr(&c)) { break; }
                                 if self.primitive_class_responds_to(&c.name, old_id) {
                                     primitive_hit = true;
                                     break;
