@@ -1883,8 +1883,9 @@ impl Vm {
             // — unlike each_slice/each_cons). Walks lazily by
             // Int counter so huge ranges don't materialise
             // upfront. Only Int+Int endpoints supported;
-            // Str+Str raises RuntimeError (lockstep with
-            // lookup.rs:756, same fallback as each_slice/each_cons).
+            // Str+Str raises RuntimeError to keep `respond_to?`
+            // (Vm::responds_to in lookup.rs) consistent with the
+            // dispatcher — same fallback as each_slice/each_cons.
             (Value::Range(id), "chunk_while", []) => {
                 let (bi, ei, excl) = {
                     let r = self.heap.range(*id);
