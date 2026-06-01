@@ -5172,6 +5172,81 @@ impl Vm {
             self.stack.push(Value::Array(arr_id));
             return Ok(());
         }
+        // Phase C.3 — `Integer#to_r` and `Integer#rationalize` are
+        // pure constructors (no fractional part) so they trivially
+        // build `Rational(self, 1)`. Lives here in dispatch.rs (not
+        // primitive_call) because heap.alloc is needed.
+        //
+        // `Integer#rationalize(eps=nil)` accepts an optional
+        // tolerance arg per CRuby but the eps value itself is
+        // ignored — only meaningful for Float#rationalize
+        // (Phase C.4). Type-checks the arg below: Numeric / nil
+        // accepted, anything else raises TypeError. 2+ args raise
+        // CRuby's ArgumentError.
+        if recv_is_integer && (&*name == "to_r" || &*name == "rationalize") {
+            let max_arity: usize = if &*name == "rationalize" { 1 } else { 0 };
+            if args.len() > max_arity {
+                // CRuby uses "expected 0" for 0-arg methods, not
+                // "expected 0..0" — the range form is reserved for
+                // a true range with > 0 spread (e.g. "expected 0..1"
+                // for rationalize). Sibling arity guards above
+                // follow the same convention.
+                let expected = if max_arity == 0 {
+                    "0".to_string()
+                } else {
+                    format!("0..{}", max_arity)
+                };
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected {})",
+                        args.len(), expected,
+                    ),
+                }));
+            }
+            // `rationalize(eps)` — CRuby's MRI calls `f_nonzero_p`
+            // on eps internally which raises NoMethodError on
+            // non-Numeric args. We surface the more standard
+            // TypeError "X can't be coerced into Float" shape
+            // (eps is conceptually a Float tolerance). Nil is
+            // explicitly accepted as "use default tolerance".
+            // The eps value itself is ignored for Integer
+            // receivers (no fractional part), but the type check
+            // matters for parity with what Float#rationalize
+            // (Phase C.4) will enforce.
+            if &*name == "rationalize" && args.len() == 1 {
+                let is_numeric_or_nil = matches!(
+                    &args[0],
+                    Value::Int(_) | Value::Float(_) | Value::Nil | Value::Rational(_)
+                ) || {
+                    #[cfg(feature = "bignum")]
+                    { matches!(&args[0], Value::BigInt(_)) }
+                    #[cfg(not(feature = "bignum"))]
+                    { false }
+                };
+                if !is_numeric_or_nil {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "{} can't be coerced into Float",
+                            crate::vm::numeric::type_name_for_coerce(&args[0]),
+                        ),
+                    }));
+                }
+            }
+            // Coerce receiver to i64 — BigInt num/den is Phase C.4.
+            let num = match &recv {
+                Value::Int(n) => *n,
+                #[cfg(feature = "bignum")]
+                Value::BigInt(_) => {
+                    return Err(self.trap(RubyError::RangeError {
+                        msg: "Rational components must fit in i64".to_string(),
+                    }));
+                }
+                _ => unreachable!("guarded by recv_is_integer"),
+            };
+            let v = self.make_rational(num, 1)?;
+            self.stack.push(v);
+            return Ok(());
+        }
         if let Value::Int(_) = &recv && &*name == "digits" && args.len() > 1 {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!(

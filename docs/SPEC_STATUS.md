@@ -12,9 +12,9 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 143 |
-| Examples in corpus | 899 |
-| Skipped `it` traces | 154 |
+| Files | 149 |
+| Examples in corpus | 924 |
+| Skipped `it` traces | 157 |
 
 ### Skipped traces by category
 
@@ -22,7 +22,7 @@ count below is also the passing count.
 |---|---|
 | `divergent` | 2 |
 | `fixture` | 53 |
-| `method-not-implemented` | 80 |
+| `method-not-implemented` | 83 |
 | `mock` | 19 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -42,9 +42,10 @@ Find blocks unlocked by a future feature with e.g.
 | BasicObject | 3 | 15 | 0 |
 | Block | 1 | 8 | 0 |
 | Hash | 40 | 193 | 51 |
-| Integer | 35 | 312 | 29 |
+| Integer | 37 | 320 | 32 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
+| Rational | 4 | 17 | 0 |
 | String | 23 | 159 | 24 |
 | UnboundMethod | 4 | 18 | 0 |
 
@@ -146,10 +147,12 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_nobits_spec.rb` | Integer#nobits? | `core/integer/nobits_spec.rb` | 5 | 1 |
 | `integer_odd_spec.rb` | Integer#odd? | `core/integer/odd_spec.rb` | 5 | 1 |
 | `integer_pow_spec.rb` | Integer#pow | `core/integer/pow_spec.rb` | 7 | 0 |
+| `integer_rationalize_spec.rb` | Integer#rationalize | `core/integer/rationalize_spec.rb` | 4 | 1 |
 | `integer_right_shift_spec.rb` | Integer#>> | `core/integer/right_shift_spec.rb` | 26 | 0 |
 | `integer_round_spec.rb` | Integer#round | `core/integer/round_spec.rb + shared/to_i.rb + shared/integer_rounding.rb` | 14 | 3 |
 | `integer_succ_spec.rb` | Integer#succ / Integer#next | `core/integer/succ_spec.rb + core/integer/next_spec.rb + shared/next.rb` | 5 | 4 |
 | `integer_times_spec.rb` | Integer#times | `core/integer/times_spec.rb` | 7 | 1 |
+| `integer_to_r_spec.rb` | Integer#to_r | `core/integer/to_r_spec.rb` | 4 | 2 |
 | `integer_to_s_spec.rb` | Integer#to_s | `core/integer/to_s_spec.rb` | 6 | 2 |
 | `integer_truncate_spec.rb` | Integer#truncate | `core/integer/truncate_spec.rb + shared/to_i.rb + shared/integer_rounding.rb` | 6 | 0 |
 | `integer_upto_spec.rb` | Integer#upto [stop] when self and stop are Integers | `core/integer/upto_spec.rb` | 5 | 1 |
@@ -167,6 +170,10 @@ Find blocks unlocked by a future feature with e.g.
 | `method_source_location_spec.rb` | Method#source_location | `core/method/source_location_spec.rb` | 2 | 0 |
 | `method_to_proc_spec.rb` | Method#to_proc | `core/method/to_proc_spec.rb` | 7 | 0 |
 | `method_unbind_spec.rb` | Method#unbind | `core/method/unbind_spec.rb` | 4 | 0 |
+| `rational_denominator_spec.rb` | Rational#denominator | `core/rational/denominator_spec.rb` | 3 | 0 |
+| `rational_equal_value_spec.rb` | Rational#== when given a Rational | `core/rational/equal_value_spec.rb (Rational#==)` | 7 | 0 |
+| `rational_numerator_spec.rb` | Rational#numerator | `core/rational/numerator_spec.rb` | 2 | 0 |
+| `rational_plus_spec.rb` | Rational#+ when given a Rational | `core/rational/plus_spec.rb` | 5 | 0 |
 | `singleton_method_spec.rb` | def obj.name | `core/basicobject/singleton_method_spec.rb + core/kernel/define_singleton_method_spec.rb` | 7 | 0 |
 | `string_capitalize_spec.rb` | String#capitalize | `core/string/capitalize_spec.rb` | 9 | 1 |
 | `string_center_spec.rb` | String#center | `core/string/center_spec.rb` | 4 | 2 |

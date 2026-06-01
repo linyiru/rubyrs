@@ -3056,6 +3056,71 @@ fn rational_phase_c1_construction_and_readers() {
 }
 
 #[test]
+fn integer_to_r_and_rationalize() {
+    // Phase C.3 — `Integer#to_r` and `Integer#rationalize`. Both
+    // return `Rational(self, 1)`. rationalize accepts (and
+    // ignores) an optional epsilon arg per CRuby; the eps is
+    // only meaningful for Float#rationalize (Phase C.4).
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        ("puts 5.to_r.inspect",             "(5/1)"),
+        ("puts (-3).to_r.inspect",          "(-3/1)"),
+        ("puts 0.to_r.inspect",             "(0/1)"),
+        ("puts 5.to_r.numerator",           "5"),
+        ("puts 5.to_r.denominator",         "1"),
+        ("puts 5.rationalize.inspect",      "(5/1)"),
+        ("puts (-3).rationalize.inspect",   "(-3/1)"),
+        // rationalize accepts a Numeric / nil eps and ignores
+        // its value (only Float#rationalize uses eps, Phase C.4).
+        // Non-Numeric eps raises TypeError — covered in spec.
+        ("puts 5.rationalize(0.001).inspect", "(5/1)"),
+        ("puts 5.rationalize(nil).inspect",   "(5/1)"),
+        ("puts 5.respond_to?(:to_r)",       "true"),
+        ("puts 5.respond_to?(:rationalize)","true"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "integer_to_r.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // Errors — pin both class AND message wording for the arity
+    // shapes (CRuby uses "expected 0" for zero-arg methods, not
+    // "expected 0..0"; "expected 0..1" reserved for true ranges).
+    // Non-numeric eps for rationalize surfaces TypeError matching
+    // the `X can't be coerced into Float` shape (eps is
+    // conceptually a Float tolerance, even though Integer recv
+    // ignores it).
+    for (script, expected_class, expected_msg) in [
+        ("5.to_r(99)",            "ArgumentError", "wrong number of arguments (given 1, expected 0)"),
+        ("5.rationalize(1, 2)",   "ArgumentError", "wrong number of arguments (given 2, expected 0..1)"),
+        ("5.rationalize(:sym)",   "TypeError",     "Symbol can't be coerced into Float"),
+        ("5.rationalize(\"x\")",  "TypeError",     "String can't be coerced into Float"),
+        ("5.rationalize([])",     "TypeError",     "Array can't be coerced into Float"),
+    ] {
+        let err = rt.eval(script, "integer_to_r_err.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+    // BigInt recv: Phase C.4 widens; today RangeError. Only class
+    // pin — message is internal.
+    #[cfg(feature = "bignum")]
+    {
+        let err = rt.eval("(2**64).to_r", "integer_to_r_bignum.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, .. } => {
+                assert_eq!(class_name, "RangeError");
+            }
+            ref other => panic!("expected RangeError, got {:?}", other),
+        }
+    }
+}
+
+#[test]
 fn rational_phase_c2_arithmetic_and_comparison() {
     // Phase C.2 surface — `+ - * / <=>` + comparisons on Rational
     // operands, plus cross-type promotion (Int and Float) routed
