@@ -62,11 +62,12 @@ module M4
 end
 puts "M4.hello=#{M4.hello}"
 
-## Shape 5: `Object.new.send(:module_function)` — explicit
-## dispatch from a non-Module receiver. CRuby raises
-## NoMethodError ("private method `module_function' called").
-## Post-#324 round 2 rubyrs falls through (the intercept arm
-## only fires for `Value::Class` receivers), so the runtime
+## Shape 5: `Object.new.send(:module_function)` — `send`
+## bypasses private-method checks, so the resulting error is
+## an UNDEFINED-method NoMethodError (Object instances don't
+## define module_function at all). Post-#324 round 2 rubyrs
+## falls through (the intercept arm only fires for
+## `Value::Class` receivers), so the runtime undefined-method
 ## NoMethodError surfaces naturally. Substring-tolerant
 ## check on the message accepts both interpreters' wording.
 err = begin
