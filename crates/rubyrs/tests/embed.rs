@@ -40,6 +40,8 @@ mod numeric;
 mod reset;
 #[path = "embed/resource_caps.rs"]
 mod resource_caps;
+#[path = "embed/rubund_validation.rs"]
+mod rubund_validation;
 #[path = "embed/tier1_capability.rs"]
 mod tier1_capability;
 #[path = "embed/m27_rubyrs_const.rs"]

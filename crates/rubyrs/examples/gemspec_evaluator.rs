@@ -1,0 +1,327 @@
+//! End-to-end rubund-style gemspec evaluator host.
+//!
+//! Demonstrates the four embed-API hardening features composing
+//! into a realistic Bundler-shape host:
+//!
+//! 1. `Config::allow_filesystem_io: true`   — the gemspec needs
+//!    to `require "fakegem/version"`, so the capability is on.
+//! 2. `Config::allowed_paths: Some([gem_root])` — but scoped to
+//!    the gem root; attempting to read `/etc/passwd` (or anything
+//!    outside) traps with `IOError`.
+//! 3. `Config::load_paths: Some([gem_root.join("lib")])` —
+//!    declarative `$LOAD_PATH` seed so `require "fakegem/version"`
+//!    resolves `lib/fakegem/version.rb` (the Bundler convention).
+//!    No synthetic `$LOAD_PATH.unshift` as the first eval.
+//! 4. `Runtime::eval` panic→Trap boundary — defensive net for any
+//!    Rust panic in a host-fn callback (registered via
+//!    `register_fn`).
+//!
+//! What this example simulates: rubund's gemspec evaluator reading
+//! a real gem's `.gemspec` file to extract metadata
+//! (name / version / dependencies). The host CAN'T just regex the
+//! gemspec because gemspecs are Ruby code — they can call methods,
+//! interpolate from constants, do conditional version bumps, etc.
+//! So the host evals it under a tight sandbox, captures the
+//! resulting `Gem::Specification.new` data via host_fn callbacks,
+//! and rejects any escape attempts.
+//!
+//! Run with: `cargo run --release --example gemspec_evaluator`
+//!
+//! See also: `tests/embed/rubund_validation.rs` mirrors the
+//! three phases below as `#[test]` functions so a contract
+//! regression lands red in CI (`cargo test` doesn't RUN
+//! examples, only compiles them). Keep the two artifacts
+//! synchronised when adding a phase or tightening a contract.
+//!
+//! No external setup needed — the example materializes a fake
+//! gem under `std::env::temp_dir()` and tears it down on exit
+//! via the `GemRoot` RAII guard. (Earlier drafts tried to read
+//! `CARGO_TARGET_TMPDIR` via `option_env!` for a "cargo test"
+//! path, but examples never run via `cargo test` and Cargo only
+//! sets that env var at runtime for integration tests anyway —
+//! `option_env!` is compile-time, so the branch never fired.)
+
+use std::cell::RefCell;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+use rubyrs::{RubyError, Runtime, Value};
+
+// Shared module pulled from `examples/gemspec_evaluator_fixture/`.
+// The test mirror `tests/embed/rubund_validation.rs` includes the
+// same module via a relative path, so the rubund-shape Config
+// helper can't drift between the two artifacts.
+#[path = "gemspec_evaluator_fixture/helpers.rs"]
+mod helpers;
+use helpers::make_rt;
+
+// ---------- Tempdir RAII guard (test-style cleanup) ----------
+
+struct GemRoot {
+    path: PathBuf,
+}
+
+impl Drop for GemRoot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Allocate an empty gem root under `std::env::temp_dir()`.
+/// Uses the early-commit-then-update-path pattern (PR #283 review)
+/// so any panic during init still triggers cleanup via Drop.
+///
+/// `write_fixture` layers the gemspec / version.rb on top — only
+/// Phase 1 needs that; Phase 2 reads no in-root file and Phase 3
+/// doesn't open the root at all. Splitting the helpers keeps each
+/// phase's setup honest about its actual dependencies.
+fn alloc_gem_root() -> GemRoot {
+    let raw = std::env::temp_dir()
+        .join(format!("rubyrs-gemspec-eval-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&raw); // clean slate
+    fs::create_dir_all(&raw).expect("mkdir gem root");
+    // Commit the guard IMMEDIATELY after `create_dir_all` — same
+    // shape as `TempDirGuard` in tests/embed/filesystem_sandbox.rs
+    // (per PR #283 review). A panic in canonicalize otherwise
+    // leaks the partially-init'd dir because no RAII would own
+    // it yet. `.path` gets updated to the canonical form after
+    // canonicalize succeeds; both forms refer to the same on-disk
+    // inode so `remove_dir_all` cleans correctly either way.
+    let mut guard = GemRoot { path: raw.clone() };
+    let root = fs::canonicalize(&raw).expect("canonicalize gem root");
+    guard.path = root;
+    guard
+}
+
+/// Write the Bundler-shape gemspec fixture into an existing gem
+/// root. Phase 1 only — Phase 2/3 don't read these files.
+///
+/// Layout matches the Bundler convention `lib/<gemname>/version.rb`
+/// which `require "fakegem/version"` resolves to (with the host's
+/// `Config::load_paths` seed pointing at `<root>/lib`):
+///   <root>/
+///     fakegem.gemspec   (the file we evaluate)
+///     lib/
+///       fakegem/
+///         version.rb   (the require'd file)
+// Ruby fixture sources pulled at compile time from the shared
+// fixture directory. The test mirror in
+// `tests/embed/rubund_validation.rs` includes the same files, so
+// edits propagate to both artifacts and can't drift.
+const VERSION_RB: &str = include_str!("gemspec_evaluator_fixture/version.rb");
+const FAKEGEM_GEMSPEC: &str = include_str!("gemspec_evaluator_fixture/fakegem.gemspec");
+
+fn write_fixture(root: &Path) {
+    fs::create_dir_all(root.join("lib/fakegem")).expect("mkdir lib/fakegem");
+    fs::write(root.join("lib/fakegem/version.rb"), VERSION_RB).expect("write version.rb");
+    fs::write(root.join("fakegem.gemspec"), FAKEGEM_GEMSPEC).expect("write gemspec");
+}
+
+// ---------- Captured gemspec metadata ----------
+
+// Clone so the Phase 1 success arm can snapshot the captured
+// state in one go and drop the RefCell borrow IMMEDIATELY
+// rather than holding it across the println!/assert_eq! block.
+// A future maintainer adding a debug eval (`rt.eval(...)`) inside
+// that arm would otherwise re-enter the closure that does
+// `captured.borrow_mut()`, tripping BorrowMutError with a
+// confusing diagnostic.
+#[derive(Default, Debug, Clone)]
+struct CapturedSpec {
+    name: Option<String>,
+    version: Option<String>,
+    deps: Vec<(String, String)>,
+}
+
+// ---------- The host ----------
+
+fn main() {
+    println!("================================================================");
+    println!("  rubund-style gemspec evaluator — embed-API hardening field test");
+    println!("================================================================\n");
+
+    let gem_root = alloc_gem_root();
+    write_fixture(&gem_root.path);
+    let root_str = gem_root.path.to_string_lossy().into_owned();
+    println!("gem root: {root_str}");
+    println!("  ├─ fakegem.gemspec");
+    println!("  └─ lib/");
+    println!("      └─ fakegem/");
+    println!("          └─ version.rb\n");
+
+    let captured = Rc::new(RefCell::new(CapturedSpec::default()));
+
+    // ============================================================
+    // Phase 1: Evaluate the gemspec under the full sandbox.
+    // ============================================================
+    println!("[Phase 1] Evaluate fakegem.gemspec under the scoped sandbox");
+    println!("----------------------------------------------------------------");
+    {
+        let mut rt = make_rt(&gem_root.path);
+
+        // ----------- host_fn callbacks ----------
+        let cap1 = captured.clone();
+        rt.register_fn("host_register_name", move |args| {
+            if let [Value::Str(name)] = args {
+                cap1.borrow_mut().name = Some(name.to_string_lossy());
+            }
+            Ok(Value::Nil)
+        });
+        let cap2 = captured.clone();
+        rt.register_fn("host_register_version", move |args| {
+            if let [Value::Str(v)] = args {
+                cap2.borrow_mut().version = Some(v.to_string_lossy());
+            }
+            Ok(Value::Nil)
+        });
+        let cap3 = captured.clone();
+        rt.register_fn("host_register_dependency", move |args| {
+            if let [Value::Str(name), Value::Str(ver)] = args {
+                cap3.borrow_mut()
+                    .deps
+                    .push((name.to_string_lossy(), ver.to_string_lossy()));
+            }
+            Ok(Value::Nil)
+        });
+
+        // Read the gemspec source ourselves (the host owns
+        // file I/O — rubyrs doesn't see the read), then hand the
+        // contents to eval. This is the rubund-style pattern: the
+        // sandbox protects the SCRIPT, not the host's own reads.
+        let gemspec_path = gem_root.path.join("fakegem.gemspec");
+        let source = fs::read_to_string(&gemspec_path).expect("read gemspec");
+
+        match rt.eval(&source, gemspec_path.to_str().expect("utf-8 path")) {
+            Ok(_) => {
+                // Snapshot + drop the borrow immediately. See
+                // CapturedSpec's docstring for why we don't hold
+                // the borrow across the println!/assert_eq! block.
+                let cap = captured.borrow().clone();
+                println!("  ✅ gemspec evaluated cleanly");
+                println!("     name    = {:?}", cap.name);
+                println!("     version = {:?}", cap.version);
+                println!("     deps    = {:?}", cap.deps);
+                assert_eq!(cap.name.as_deref(), Some("fakegem"));
+                // The interpolated VERSION constant came from
+                // `lib/fakegem/version.rb` — load_paths-driven
+                // resolution worked.
+                assert_eq!(cap.version.as_deref(), Some("1.2.3"));
+                // Exact-contents assertion — a buggy host callback
+                // that swapped, duplicated, or corrupted entries
+                // would slip past a bare `.len() == 2` check. The
+                // demo is meant to validate the full captured
+                // gemspec tuple, so lock the order and the
+                // (name, version) pairs.
+                assert_eq!(
+                    cap.deps,
+                    vec![
+                        ("rack".to_string(), ">= 3.0".to_string()),
+                        ("puma".to_string(), "~> 6.0".to_string()),
+                    ],
+                );
+            }
+            Err(t) => {
+                // Panic (not std::process::exit) so the GemRoot
+                // guard's Drop runs during unwind and the
+                // tempdir is cleaned up. std::process::exit
+                // bypasses Drop unconditionally.
+                panic!("Phase 1 unexpected trap: {}", rt.format_trap(&t));
+            }
+        }
+    }
+
+    // ============================================================
+    // Phase 2: Confirm out-of-scope reads trap with IOError.
+    // ============================================================
+    println!("\n[Phase 2] Attempt out-of-scope read — must trap IOError");
+    println!("----------------------------------------------------------------");
+    {
+        let mut rt = make_rt(&gem_root.path);
+        // Try to read /etc/passwd — well outside the gem root.
+        // The file does NOT need to exist for this test to pass:
+        // the allowlist check fires lexically (resolve + starts_with)
+        // BEFORE any syscall, so the trap raises whether the path
+        // resolves to a real inode or not. That makes the demo
+        // portable to any platform `cargo run` works on, including
+        // Windows where /etc/passwd is absent.
+        let trap = rt
+            .eval(r#"File.read("/etc/passwd")"#, "<phase2>")
+            .expect_err("read of /etc/passwd MUST trap under scoped sandbox");
+        match &trap.err {
+            RubyError::Uncaught { class_name, message }
+                if class_name == "IOError" && message.contains("outside Config::allowed_paths") =>
+            {
+                println!("  ✅ IOError raised:");
+                println!("     {message}");
+            }
+            other => {
+                // Panic to let GemRoot::drop run; see Phase 1 above.
+                panic!("Phase 2 wrong trap shape: {other:?}");
+            }
+        }
+    }
+
+    // ============================================================
+    // Phase 3: Demonstrate the panic→Trap boundary.
+    // ============================================================
+    println!("\n[Phase 3] Host-fn panic → RuntimeError Trap");
+    println!("----------------------------------------------------------------");
+    // Note on stderr noise: Rust's default panic hook prints a
+    // `thread 'main' panicked at ...` line to stderr BEFORE
+    // `catch_unwind` catches the unwind. The catch still works —
+    // eval returns Err(Trap) as expected — but the host sees the
+    // panic-hook message above the trap text. Production hosts
+    // that want clean output should install a no-op
+    // `std::panic::set_hook(Box::new(|_| {}))` for the duration
+    // of the eval call (and restore the previous hook after).
+    // Out of scope for this demo; the contract is correct.
+    //
+    // Note on config: Phase 3 uses `Runtime::new()` (secure-by-
+    // default), NOT `make_rt`. The panic→Trap contract is a
+    // baseline Runtime feature (PR #279), independent of any
+    // sandbox config — using the rubund-shape config here would
+    // mask a regression that let a DIFFERENT panic site fire
+    // (e.g. require-walk panic, if Phase 3 ever ate a require)
+    // because the assertion still matches on payload string.
+    // Minimal config makes the assertion mean what it says.
+    {
+        let mut rt = Runtime::new();
+        rt.register_fn("explode", |_| {
+            panic!("simulated host-fn bug");
+        });
+        let trap = rt
+            .eval(r#"explode"#, "<phase3>")
+            .expect_err("panicking host_fn MUST convert to Trap, not crash");
+        match &trap.err {
+            RubyError::RuntimeError { msg }
+                if msg.contains("host-side panic during eval")
+                    && msg.contains("simulated host-fn bug") =>
+            {
+                println!("  ✅ Panic converted to RuntimeError Trap:");
+                println!("     {msg}");
+            }
+            other => {
+                // Panic to let GemRoot::drop run; see Phase 1 above.
+                panic!("Phase 3 wrong trap shape: {other:?}");
+            }
+        }
+
+        // Critical bit: the Runtime is still usable after the
+        // caught panic — Vm state was scrubbed in the catch's Err
+        // arm (the per-eval cleanup contract). A long-running
+        // host loop (rubund batch evaluator, _http_server request
+        // handler) survives one bad gemspec without crashing.
+        let v = rt
+            .eval(r#"1 + 2"#, "<phase3-post>")
+            .expect("post-panic eval must succeed — Runtime should be reusable");
+        assert!(matches!(v, Value::Int(3)));
+        println!("  ✅ Runtime remained usable after caught panic");
+    }
+
+    println!("\n================================================================");
+    println!("  All four embed-API hardening contracts validated end-to-end.");
+    println!("================================================================");
+    // GemRoot's Drop runs at scope exit (and on panic), cleaning
+    // up the tempdir. No manual cleanup needed.
+}
