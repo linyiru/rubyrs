@@ -62,18 +62,17 @@ module M4
 end
 puts "M4.hello=#{M4.hello}"
 
-## Shape 5: out-of-context bare `module_function`. CRuby
-## raises NameError at top-level (it's a Module private
-## method, so implicit-self dispatch from `main` fails as
-## a private call from the wrong receiver). rubyrs treats it
-## as a silent no-op — documented Tier-1 divergence on the
-## error path. The substring check accepts either outcome
-## so a future fix can land cleanly. (Pinned via include?
-## rather than full message to avoid version-fragility.)
+## Shape 5: `Object.new.send(:module_function)` — explicit
+## dispatch from a non-Module receiver. CRuby raises
+## NoMethodError ("private method `module_function' called").
+## Post-#324 round 2 rubyrs falls through (the intercept arm
+## only fires for `Value::Class` receivers), so the runtime
+## NoMethodError surfaces naturally. Substring-tolerant
+## check on the message accepts both interpreters' wording.
 err = begin
   Object.new.send(:module_function)
   "no-raise"
-rescue StandardError => e
+rescue NoMethodError => e
   e.message.include?("module_function") ? "rejected" : "other-#{e.message}"
 end
 puts "main-context=#{err.length > 0}"

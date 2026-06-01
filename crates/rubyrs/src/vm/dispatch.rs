@@ -4052,53 +4052,96 @@ impl Vm {
             // copied to the module's singleton class as public
             // module-level functions). Symbol-arg form retroactively
             // converts the listed already-defined instance methods.
-            // Outside a class body it's a no-op (matches CRuby's
-            // toplevel behavior). (TRY_RUNS pass-10 layer #12 —
-            // rack-3.1.10/lib/rack/utils.rb:37 + 161 use both forms
-            // during sinatra-4's load chain.)
-            if &*name == "module_function" {
-                if let Value::Class(cls) = &self_val {
-                    if args.is_empty() {
-                        // Bare form: subsequent defs in this body
-                        // SHOULD become private instance methods
-                        // AND get auto-copied to the module's
-                        // singleton class. Tier-1 takes the
-                        // partial-correctness path: switch the
-                        // current visibility to Private (so the
-                        // instance copy is private) but DO NOT
-                        // auto-mirror to singleton. This is enough
-                        // to LOAD past `rack/utils.rb:37` style
-                        // patterns; `Rack::Utils.escape_html(...)`
-                        // calls at request time still fail
-                        // (singleton dispatch finds no method).
-                        // Documented gap below; the explicit
-                        // Symbol-arg form (line 161 in same file)
-                        // does the proper dual-install.
-                        if let Some(top) = self.class_visibility_stack.last_mut() {
-                            *top = crate::value::Visibility::Private;
-                        }
-                    } else {
-                        // Symbol/String args: retroactively
-                        // module-function-ify each named method.
-                        // Copy from instance methods to singleton
-                        // methods; mark the instance copy private.
-                        let methods_snapshot: Vec<(crate::intern::SymId, std::rc::Rc<crate::value::Method>)> = {
-                            let methods = cls.methods.borrow();
-                            args.iter()
-                                .filter_map(|a| match a {
-                                    Value::Sym(s) => Some(*s),
-                                    Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
-                                    _ => None,
-                                })
-                                .filter_map(|sid| methods.get(&sid).map(|m| (sid, m.clone())))
-                                .collect()
-                        };
-                        for (sid, m) in methods_snapshot {
-                            cls.singleton_methods.borrow_mut().insert(sid, m.clone());
-                            m.visibility.set(crate::value::Visibility::Private);
-                        }
-                        self.method_gen = self.method_gen.wrapping_add(1);
+            // Only intercepted for `Value::Class` receivers — other
+            // receivers fall through so CRuby-style NoMethodError /
+            // NameError surfaces naturally. (TRY_RUNS pass-10 layer
+            // #12 — rack-3.1.10/lib/rack/utils.rb:37 + 161 use both
+            // forms during sinatra-4's load chain.)
+            //
+            // Tier-1 divergences (documented):
+            //   - Bare form switches visibility to Private but does
+            //     NOT auto-mirror subsequent defs to the singleton
+            //     class — `M.bare_def_method(...)` calls fail at
+            //     request time. Full fix needs a Visibility::
+            //     ModuleFunction variant and DefMethod dual-install
+            //     routing. Enough for LOAD probe; runtime calls
+            //     are the next layer.
+            //   - Bare `module_function` from a non-Class receiver
+            //     was previously a silent no-op; now falls through
+            //     so the runtime can raise the right error.
+            if &*name == "module_function"
+                && let Value::Class(cls) = &self_val
+            {
+                if args.is_empty() {
+                    if let Some(top) = self.class_visibility_stack.last_mut() {
+                        *top = crate::value::Visibility::Private;
                     }
+                } else {
+                    // Symbol/String args: install a FRESH Method
+                    // on the singleton with Public visibility, and
+                    // flip the original instance method to Private.
+                    // (Sharing the Rc — as the round-1 version did
+                    // — would propagate `Private` to the singleton
+                    // copy too because Method.visibility is a Cell
+                    // shared through the Rc. CRuby's contract is
+                    // "instance private, singleton public". Code-
+                    // review #324 round 1.)
+                    use crate::value::{Method, Visibility};
+                    use std::cell::Cell;
+                    let snapshot: Vec<(crate::intern::SymId, std::rc::Rc<Method>)> = {
+                        let methods = cls.methods.borrow();
+                        let mut out = Vec::with_capacity(args.len());
+                        for a in &args {
+                            let sid = match a {
+                                Value::Sym(s) => *s,
+                                Value::Str(s) => {
+                                    let lossy = s.to_string_lossy();
+                                    if let Some(max) = self.max_symbols
+                                        && !self.interner.contains(&lossy)
+                                        && self.interner.len() >= max
+                                    {
+                                        return Err(self.trap(RubyError::ResourceExhausted {
+                                            msg: format!("interner exhausted: {} symbols", max),
+                                        }));
+                                    }
+                                    self.interner.intern(&lossy)
+                                }
+                                other => return Err(self.trap(RubyError::TypeError {
+                                    msg: format!(
+                                        "{} is not a symbol nor a string",
+                                        other.type_name(),
+                                    ),
+                                })),
+                            };
+                            match methods.get(&sid) {
+                                Some(m) => out.push((sid, m.clone())),
+                                None => {
+                                    let nm = self.interner.resolve(sid).to_string();
+                                    return Err(self.trap(RubyError::NameError {
+                                        msg: format!(
+                                            "undefined method `{}' for module `{}'",
+                                            nm, cls.name,
+                                        ),
+                                    }));
+                                }
+                            }
+                        }
+                        out
+                    };
+                    for (sid, m) in snapshot {
+                        let singleton_copy = std::rc::Rc::new(Method {
+                            params: m.params.clone(),
+                            proto_idx: m.proto_idx,
+                            fixed_arity: m.fixed_arity,
+                            defining_class: m.defining_class.clone(),
+                            visibility: Cell::new(Visibility::Public),
+                            closure: m.closure.clone(),
+                            builtin: m.builtin.clone(),
+                        });
+                        cls.singleton_methods.borrow_mut().insert(sid, singleton_copy);
+                        m.visibility.set(Visibility::Private);
+                    }
+                    self.method_gen = self.method_gen.wrapping_add(1);
                 }
                 self.stack.push(Value::Nil);
                 return Ok(());

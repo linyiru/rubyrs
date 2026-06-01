@@ -696,6 +696,7 @@ impl Vm {
                     | "constants"
                     | "autoload" | "autoload?" | "const_defined?" | "const_get" | "private_constant" | "public_constant"
                     | "deprecate_constant"
+                    | "module_function"
                     | "singleton_class"
                     // Bridge keeping the bare-call shape (inside a
                     // class body, e.g. `class C; class_eval(...); end`)
