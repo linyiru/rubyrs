@@ -389,8 +389,7 @@ impl Vm {
                     return Err(self.trap(RubyError::RangeError { msg: out_of_range }));
                 }
                 // A single raw byte (binary-safe via the byte-backed RStr).
-                let s = crate::value::RStr::from_bytes(vec![cp as u8]);
-                self.stack.push(Value::Str(std::rc::Rc::new(s)));
+                self.stack.push(Value::new_str_bytes(vec![cp as u8]));
                 Ok(true)
             }
             // Some other (unmodelled) encoding — fall through.
