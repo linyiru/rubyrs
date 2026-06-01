@@ -355,6 +355,7 @@ fn run_diff(name: &str) {
 #[test] fn block_arg_nil() { run_diff("block_arg_nil"); }
 #[test] fn rescue_multi_class() { run_diff("rescue_multi_class"); }
 #[test] fn rescue_constant_path() { run_diff("rescue_constant_path"); }
+#[test] fn rescue_nested_constant() { run_diff("rescue_nested_constant"); }
 #[test] fn class_qualified_separates() { run_diff("class_qualified_separates"); }
 #[test] fn class_cref_walk() { run_diff("class_cref_walk"); }
 #[test] fn module_nesting() { run_diff("module_nesting"); }

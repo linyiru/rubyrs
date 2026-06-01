@@ -2586,12 +2586,46 @@ impl Vm {
                 // If neither hits, `filter_class` stays `None` and
                 // the handler fails every match check — closer to
                 // CRuby than silently catching everything.
-                let filter = self.classes.get(&filter_sym).cloned().or_else(|| {
-                    match self.constants.get(&filter_sym) {
-                        Some(Value::Class(c)) => Some(c.clone()),
-                        _ => None,
+                // Resolve the rescue-class name through the lexical
+                // nesting, exactly like `Op::LoadConstChain` resolves a
+                // bare constant read. The compiler stamps only the bare
+                // source sym (e.g. `Sig`), but a class defined as
+                // `module M; class Sig` is keyed in `self.classes` by
+                // its QUALIFIED sym (`M::Sig`) — so a plain
+                // `classes.get("Sig")` missed it and `rescue Sig` inside
+                // `module M` never matched, letting the exception escape
+                // (the `raise` side already resolves via the lexical
+                // chain, so the two sides disagreed). Walk the enclosing
+                // scopes innermost-first, qualifying the bare name, then
+                // fall back to the bare lookup (covers top-level classes
+                // and `rescue Foo::Bar` whose sym is already qualified).
+                let filter = {
+                    let proto_idx = self.frames.last().expect("ICE: PushRescue no frame").proto_idx;
+                    let lex = self.protos[proto_idx].lexical_scope.clone();
+                    let mut found = None;
+                    if !lex.is_empty() {
+                        let bare_name = self.interner.resolve(filter_sym).to_string();
+                        for scope_sym in &lex {
+                            let scope_name = self.interner.resolve(*scope_sym).to_string();
+                            let qualified = format!("{scope_name}::{bare_name}");
+                            let qsym = self.interner.intern(&qualified);
+                            if let Some(c) = self.classes.get(&qsym).cloned() {
+                                found = Some(c);
+                                break;
+                            }
+                            if let Some(Value::Class(c)) = self.constants.get(&qsym) {
+                                found = Some(c.clone());
+                                break;
+                            }
+                        }
                     }
-                });
+                    found
+                        .or_else(|| self.classes.get(&filter_sym).cloned())
+                        .or_else(|| match self.constants.get(&filter_sym) {
+                            Some(Value::Class(c)) => Some(c.clone()),
+                            _ => None,
+                        })
+                };
                 self.frames.last_mut().expect("ICE: PushRescue no frame").rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
                     filter_class: filter, loop_depth_at_push: loop_depth,
