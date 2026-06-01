@@ -232,6 +232,30 @@ item N:
 
 ## Critical path: M27
 
+> **Status (2026-06): M27 shipped.** Batches A1/A2/A3/A4 (block params,
+> middle-splat, define_method block capture), B1/B2 (`#call`-able Rack
+> app + `RUBYRS` sentinel), C1 (`Hash#to_s`), and D (parity harness +
+> `hello_smoke` + `sinatra_hello` fixtures + `framework-parity` CI job)
+> are all on master. See commits `bbafff6c` … `c4e0511f`. The harness
+> lives at `crates/rubyrs/tests/diff_framework/`; menu item 1 (Sinatra)
+> now has byte-diff parity gated on every PR.
+>
+> **Two known harness deltas absorbed via manifest normalize rules** —
+> recording them here so future menu fixtures don't relearn:
+>
+> 1. **`require "<gem>"` side effects.** classic-style Sinatra
+>    autostarts a Puma server at port 4567 from `require "sinatra"`'s
+>    at_exit hook; the harness's gem-availability probe would clobber
+>    its own free-port pick. Fixtures **must** declare `required_gems`
+>    using the no-autostart entrypoint (`sinatra/base`, not `sinatra`).
+> 2. **Header ordering between Sinatra+WEBrick and rubyrs's
+>    `_http_server` battery.** WEBrick emits `Location, Content-Type`;
+>    rubyrs emits the reverse. `run_matrix` collects filtered headers
+>    into a `BTreeMap` so the transcript is canonical (sorted) before
+>    byte-diff. Additionally, WEBrick appends `;charset=utf-8` to
+>    default Content-Type; rubyrs emits bare media type. Both are
+>    valid per RFC 7231 §3.1.1.5 — fixtures normalize via a regex rule.
+
 The next milestone is **M27 — Block-parameter AST family + parity
 harness v2**:
 

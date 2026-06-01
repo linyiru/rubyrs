@@ -1,5 +1,14 @@
 # PoC: the same Sinatra app on CRuby **and** rubyrs
 
+> **Status (2026-06):** superseded as a CI gate by the M27 D parity
+> harness — see [`crates/rubyrs/tests/diff_framework/fixtures/sinatra_hello/`](../../crates/rubyrs/tests/diff_framework/fixtures/sinatra_hello/).
+> That fixture runs the same 18-route matrix on every PR via the
+> `framework-parity` CI job. This PoC stays in-tree as the readable
+> walkthrough + GAPS.md investigation log; new gap discoveries should
+> still land here, but the source of truth for "did parity regress?" is
+> the diff_framework fixture.
+
+
 **Goal (from the brief):** one `app.rb` that runs unmodified on CRuby —
 backed by the real `sinatra` gem — *and* on rubyrs, backed by a vendored
 micro-Sinatra running on rubyrs's native `_http_server` battery. Same

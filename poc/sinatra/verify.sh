@@ -2,6 +2,13 @@
 # verify.sh — run the SAME app.rb on CRuby and rubyrs, hit the same routes,
 # and prove the responses are identical.
 #
+# SUPERSEDED (2026-06): the M27 D harness at
+# `crates/rubyrs/tests/diff_framework/fixtures/sinatra_hello/` runs the
+# same 18-route matrix as a Rust integration test on every PR via the
+# `framework-parity` CI job — that is the authoritative parity gate now.
+# This script stays as a hand-runnable walk-through for the GAPS.md
+# investigation log; CI no longer invokes it.
+#
 # Usage:
 #   poc/sinatra/verify.sh                 # build rubyrs if needed, run both
 #   RUBYRS_BIN=/path/to/rubyrs poc/sinatra/verify.sh
