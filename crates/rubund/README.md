@@ -131,10 +131,16 @@ Two further examples (`real_install`, `manekineko_install`) bridge
 into an embedded Ruby interpreter (`rubyrs`) to evaluate real
 `Gemfile` DSLs end-to-end. Both run under rubyrs's secure-by-
 default Runtime — the Gemfile DSL eval cannot escape the sandbox
-via `File.read` or `require`, and a panicking host_fn callback
-surfaces as a recoverable Trap instead of crashing the host
-(see rubyrs PRs #268 / #279 / #288 / #302 for the underlying
-embed-API hardening).
+via `File.read` or `require`. A panic inside the eval (ICE-class
+`.unwrap()` in the VM, host_fn callback that itself `panic!`s)
+is caught by rubyrs at the `Runtime::eval` boundary and returned
+as `Err(Trap)` rather than unwinding through the host — so the
+host process survives the Ruby-side fault. These PoC examples
+choose to format the Trap and `panic!` themselves on `Err`
+(simple PoC behaviour), but a production CLI could skip the bad
+gem, retry, or surface a user-friendly error and continue. See
+rubyrs PRs #268 / #279 / #288 / #302 for the underlying embed-API
+hardening.
 
 ---
 
