@@ -5701,7 +5701,7 @@ impl Vm {
             match args.len() {
                 0 => return Err(self.trap(RubyError::ArgumentError {
                     msg: "wrong number of arguments (given 0, expected 1..2)".into(),
-                }),),
+                })),
                 1 => {
                     // Validate the name argument so callers get
                     // TypeError on a non-Symbol/String name even
@@ -7444,24 +7444,21 @@ impl Vm {
                 return self.invoke_method_with_block(m, recv_val, args, Some(block));
             }
             if let Some(target_cls) = target_cls {
-                // Arity arrangement matches the no-block arm above:
+                // Arity:
                 //   0       → wrong-arity ArgumentError
-                //   1       → install the block (path below)
-                //   2       → 2-arg Proc/UnboundMethod form NOT
-                //             yet supported (even with a block,
-                //             CRuby silently drops the block and
-                //             uses the proc — too subtle to fake);
-                //             raise NoMethodError so the caller
-                //             gets a clear "not implemented" signal
+                //   1       → install the attached block
+                //   2       → Proc/Method/UnboundMethod install
+                //             from args[1] via the shared
+                //             helper. CRuby silently drops any
+                //             attached block in this shape and
+                //             uses args[1] — we honour that by
+                //             routing through the `two_arg_form`
+                //             branch below before reading the
+                //             block payload.
                 //   3+      → wrong-arity ArgumentError
                 // CRuby's wording is `expected 1..2` even when a
                 // block is attached, so we use the same message
                 // across both arms (PR #245 Copilot round 6 #1).
-                // 2-arg variant: CRuby silently drops the
-                // attached block and uses args[1] as the body
-                // source. Handle it before the block-form
-                // install path below so the rest of the path
-                // can assume a 1-arg + block shape.
                 let two_arg_form = args.len() == 2;
                 match args.len() {
                     1 | 2 => {}
@@ -8226,7 +8223,7 @@ impl Vm {
                     }),
                 }
             }
-            Value::CurriedProc(_) => Err(RubyError::ArgumentError {
+            Value::CurriedProc(_) => Err(RubyError::TypeError {
                 msg: "CurriedProc as define_method source is not yet supported by rubyrs Tier-1".into(),
             }),
             other => Err(RubyError::TypeError {
