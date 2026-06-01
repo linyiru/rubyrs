@@ -5752,18 +5752,20 @@ impl Vm {
                     }));
                 }
             }
-            // Coerce receiver to i64 — BigInt num/den is Phase C.4.
-            let num = match &recv {
-                Value::Int(n) => *n,
+            // Phase C.4.2: BigInt receiver routes through the
+            // BigInt make_rational entry; small Int receivers
+            // continue through `make_rational(i64, 1)` which
+            // already widens internally under bignum.
+            let v = match &recv {
+                Value::Int(n) => self.make_rational(*n, 1)?,
                 #[cfg(feature = "bignum")]
-                Value::BigInt(_) => {
-                    return Err(self.trap(RubyError::RangeError {
-                        msg: "Rational components must fit in i64".to_string(),
-                    }));
+                Value::BigInt(id) => {
+                    use num_bigint::BigInt;
+                    let num = self.heap.bigint(*id).clone();
+                    self.make_rational_bigint(num, BigInt::from(1))?
                 }
                 _ => unreachable!("guarded by recv_is_integer"),
             };
-            let v = self.make_rational(num, 1)?;
             self.stack.push(v);
             return Ok(());
         }

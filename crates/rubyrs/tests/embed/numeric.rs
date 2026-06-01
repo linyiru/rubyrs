@@ -3106,18 +3106,10 @@ fn integer_to_r_and_rationalize() {
             ref other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
         }
     }
-    // BigInt recv: Phase C.4 widens; today RangeError. Only class
-    // pin — message is internal.
-    #[cfg(feature = "bignum")]
-    {
-        let err = rt.eval("(2**64).to_r", "integer_to_r_bignum.rb").unwrap_err();
-        match err.err {
-            rubyrs::RubyError::Uncaught { ref class_name, .. } => {
-                assert_eq!(class_name, "RangeError");
-            }
-            ref other => panic!("expected RangeError, got {:?}", other),
-        }
-    }
+    // BigInt recv: Phase C.4.2 widens — was RangeError pre-C.4.2,
+    // now stays Rational with canonical BigInt num. The widened
+    // behavior gets its own focused coverage in
+    // `rational_phase_c4_2_bigint_to_r_and_kernel` below.
 }
 
 #[test]
@@ -3266,6 +3258,49 @@ fn rational_phase_c4_1_bigint_widening() {
         rt.set_stdout(Box::new(buf.clone()));
         rt.eval(script, "rational_c41.rb").expect("eval");
         assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+}
+
+#[test]
+#[cfg(feature = "bignum")]
+fn rational_phase_c4_2_bigint_to_r_and_kernel() {
+    // Phase C.4.2 — Integer#to_r / #rationalize accept BigInt
+    // receivers and i64::MIN; Kernel#Rational accepts BigInt
+    // args. Pre-C.4.2 each of these raised RangeError ("Rational
+    // components must fit in i64").
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        // Integer#to_r — BigInt receiver
+        ("puts (2**64).to_r.inspect", "(18446744073709551616/1)"),
+        ("puts (2**64).rationalize.inspect", "(18446744073709551616/1)"),
+        // Integer#to_r — i64::MIN (was the .abs() panic edge)
+        (
+            "puts (-(2**62 + 2**62)).to_r.inspect",
+            "(-9223372036854775808/1)",
+        ),
+        // Kernel#Rational — BigInt num
+        ("puts Rational(2**64).inspect", "(18446744073709551616/1)"),
+        // Kernel#Rational — BigInt num + small den, gcd reduces
+        ("puts Rational(2**64, 2**64 * 2).inspect", "(1/2)"),
+        // Kernel#Rational — small num + BigInt den
+        ("puts Rational(2, 2**64).inspect", "(1/9223372036854775808)"),
+        // Rational(bn, bn) → canonical (1/1)
+        ("puts Rational(2**100, 2**100).inspect", "(1/1)"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "rational_c42.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // Errors — Kernel#Rational(big, 0) is still ZeroDivisionError.
+    let err = rt
+        .eval("Rational(2**64, 0)", "rational_c42_zero.rb")
+        .unwrap_err();
+    match err.err {
+        rubyrs::RubyError::Uncaught { ref class_name, .. } => {
+            assert_eq!(class_name, "ZeroDivisionError");
+        }
+        ref other => panic!("expected ZeroDivisionError, got {:?}", other),
     }
 }
 

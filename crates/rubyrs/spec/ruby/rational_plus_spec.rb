@@ -1,10 +1,10 @@
 # Adapted from ruby/spec core/rational/plus_spec.rb at upstream
 # commit 448cb340 (2026-05). Hand-polished:
 # - `.should ==` → `assert_eq`.
-# - omitted (Phase C.4): cases that would overflow i64 in
-#   checked arithmetic — `try_rational_binop` raises RangeError
-#   where CRuby would promote num/den to BigInt. Not included
-#   as skipped-trace blocks; lift together with C.4 widening.
+# - `bignum_value` cases gated as `bignum_it` so they only run
+#   on the profile where `try_rational_binop` carries
+#   arbitrary-precision arithmetic (Phase C.4.1 widening).
+#   Without bignum, i64 overflow still raises RangeError.
 
 describe "Rational#+ when given a Rational" do
   it "returns the sum of self and the other Rational" do
@@ -41,5 +41,20 @@ describe "Rational#+ when given a non-Numeric" do
     assert_raises("TypeError") { Rational(1, 2) + "x" }
     assert_raises("TypeError") { Rational(1, 2) + nil }
     assert_raises("TypeError") { Rational(1, 2) + :sym }
+  end
+end
+
+describe "Rational#+ with BigInt-magnitude operands" do
+  bignum_it "bignum: stays Rational when the product exceeds i64" do
+    # Operands fit i64 individually; intermediate product 10**36
+    # does not. Pre-C.4.1 raised RangeError; widened storage now
+    # carries the BigInt through.
+    assert_eq(Rational(10**18, 3) + Rational(10**18, 7),
+              Rational(10 * 10**18, 21))
+  end
+
+  bignum_it "bignum: accepts a BigInt receiver" do
+    bn = 2**64
+    assert_eq(Rational(bn, 1) + Rational(1, 1), Rational(bn + 1, 1))
   end
 end
