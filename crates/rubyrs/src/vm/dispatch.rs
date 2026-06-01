@@ -4117,10 +4117,11 @@ impl Vm {
                                 Some(m) => out.push((sid, m.clone())),
                                 None => {
                                     let nm = self.interner.resolve(sid).to_string();
+                                    let kind = if cls.is_module { "module" } else { "class" };
                                     return Err(self.trap(RubyError::NameError {
                                         msg: format!(
-                                            "undefined method `{}' for module `{}'",
-                                            nm, cls.name,
+                                            "undefined method `{}' for {} `{}'",
+                                            nm, kind, cls.name,
                                         ),
                                     }));
                                 }
