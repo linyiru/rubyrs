@@ -1854,6 +1854,10 @@ pub(crate) fn compile_block(
                     // the rest slot would go into child_slots
                     // alongside the leading required ones.
                 }
+                BlockParam::BlockArg(_) => {
+                    // `&blk` inside a destructure (`|(a, &b)|`)
+                    // isn't legal Ruby; defensive skip.
+                }
             }
         }
         jobs.push(Job::Job(parent_slot, child_slots));
@@ -1873,6 +1877,16 @@ pub(crate) fn compile_block(
     let mut top_destructures: Vec<(u16, &[BlockParam], String)> = Vec::new();
     let mut rest_slot: u16 = u16::MAX;
     let mut n_required: u16 = 0;
+    // M27 A1: when a `|*rest|` or `|&blk|` param is present we also
+    // remember the slot name so the proto's `rest_param` /
+    // `block_param` fields can be stamped after the slot dance
+    // finishes. Without these, a block installed AS A METHOD via
+    // `Module#define_method` has its rest / block-arg slots reserved
+    // in `locals` but `invoke_method_with_block`'s binder skips them
+    // (`has_rest` / `has_block_param` both false), so `*args` arrived
+    // empty and `&blk` arrived Nil.
+    let mut rest_param_name: Option<String> = None;
+    let mut block_arg_name: Option<String> = None;
     for (i, p) in block_params.iter().enumerate() {
         match p {
             BlockParam::Single(name) => {
@@ -1895,6 +1909,12 @@ pub(crate) fn compile_block(
                 // enforces this at parse time; defensive overwrite
                 // just keeps the last one if we ever extend.
                 rest_slot = s;
+                rest_param_name = Some(slot_name);
+            }
+            BlockParam::BlockArg(name) => {
+                let slot_name = if name == "&" { format!("__blkarg_{i}") } else { name.clone() };
+                b.define_local_slot(&slot_name);
+                block_arg_name = Some(slot_name);
             }
         }
     }
@@ -1950,13 +1970,25 @@ pub(crate) fn compile_block(
     // destructure block params we use the synthesised anonymous
     // name in the call-interface slot; the named inner locals
     // are not part of params (they aren't fed by the caller).
-    let proto_params: Vec<String> = block_params.iter().enumerate().filter_map(|(i, p)| match p {
-        BlockParam::Single(n) => Some(n.clone()),
-        BlockParam::Destructure(_) => Some(format!("__destruct_{i}")),
-        // Rest param isn't part of the call-interface params
-        // (invoke_block populates it via the rest-collector
-        // loop, not the per-arg fill).
-        BlockParam::Rest(_) => None,
+    // M27 A1: `proto_params` carries every slot name the
+    // method-style binder needs to see (positional, rest, block).
+    // Block-as-block invocation (`invoke_block`) doesn't read
+    // `proto.params` for arity / slot count — it uses the
+    // `BlockHandle::n_params` + `rest_slot` fields stored on the
+    // heap value directly. So including rest and block-arg names
+    // here is invisible to that path but lets
+    // `invoke_method_with_block`'s subtractive `positional_max`
+    // math work when the same proto is installed as a method via
+    // `Module#define_method`.
+    let proto_params: Vec<String> = block_params.iter().enumerate().map(|(i, p)| match p {
+        BlockParam::Single(n) => n.clone(),
+        BlockParam::Destructure(_) => format!("__destruct_{i}"),
+        BlockParam::Rest(name) => {
+            if name.is_empty() { format!("__rest_{i}") } else { name.clone() }
+        }
+        BlockParam::BlockArg(name) => {
+            if name == "&" { format!("__blkarg_{i}") } else { name.clone() }
+        }
     }).collect();
     let proto_param_count = proto_params.len();
     let idx = protos.len();
@@ -1981,6 +2013,19 @@ pub(crate) fn compile_block(
     // range is empty and the runtime loop is a noop, so we don't
     // need to special-case it.
     protos.last_mut().expect("ICE: just pushed").block_body_local_start = body_local_start;
+    // M27 A1: stamp the block proto with `rest_param` /
+    // `block_param` so when it's installed AS A METHOD (via
+    // Module#define_method), invoke_method_with_block's binder
+    // sees the same trailing-slot layout it uses for `def`-built
+    // methods. For ordinary block invocation (each, map, …) the
+    // BlockHandle stores its own `n_params` + `rest_slot`, so
+    // these proto fields aren't consulted on that path.
+    if let Some(name) = rest_param_name {
+        protos.last_mut().expect("ICE: just pushed").rest_param = Some(name);
+    }
+    if let Some(name) = block_arg_name {
+        protos.last_mut().expect("ICE: just pushed").block_param = Some(name);
+    }
     if parent.n_locals < block_n_locals {
         parent.n_locals = block_n_locals;
     }

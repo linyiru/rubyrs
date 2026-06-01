@@ -480,6 +480,18 @@ pub(crate) enum BlockParam {
     /// the anonymous form `|*|` (reserve the slot, drop the
     /// data — analogous to `**` for kwargs).
     Rest(String),
+    /// M27 A1: `|&blk|` named block parameter — captures the
+    /// caller's block as a `Value::Block` (or `Nil` when none was
+    /// passed). The compiler reserves a slot and sets
+    /// `proto.block_param`, so the existing method dispatch path's
+    /// trailing-slot binder (`invoke_method_with_block`) populates
+    /// it automatically when the block is installed AS A METHOD
+    /// via `define_method` and that method is later called with a
+    /// block. For ordinary block invocation (each, map, etc. — no
+    /// caller block) the slot stays `Nil`. Matches the CRuby idiom
+    /// `define_method(:foo) do |arg, &blk| blk.call(arg) end` that
+    /// Sinatra's route table uses heavily.
+    BlockArg(String),
 }
 
 #[derive(Debug, Clone)]
@@ -1505,6 +1517,19 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                                 let name = rp.name().map(cid_to_string).unwrap_or_default();
                                 out.push(BlockParam::Rest(name));
                             }
+                        // M27 A1: `|&blk|` named block-arg param.
+                        // Prism returns BlockParameterNode directly
+                        // from `p.block()` (alternation node — no
+                        // `as_*` cast needed). Append as a BlockArg
+                        // BlockParam; compile_block reserves a slot
+                        // and sets proto.block_param so
+                        // invoke_method_with_block's trailing-slot
+                        // binder populates it when the block is
+                        // installed as a method.
+                        if let Some(b) = p.block() {
+                            let name = b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string());
+                            out.push(BlockParam::BlockArg(name));
+                        }
                         out
                     })
                     .unwrap_or_default();
@@ -1787,6 +1812,12 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         let name = rp.name().map(cid_to_string).unwrap_or_default();
                         out.push(BlockParam::Rest(name));
                     }
+                // M27 A1: `|&blk|` capture in lambdas, same as for
+                // blocks (see comment above).
+                if let Some(b) = p.block() {
+                    let name = b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string());
+                    out.push(BlockParam::BlockArg(name));
+                }
                 out
             })
             .unwrap_or_default();
