@@ -1,4 +1,4 @@
-# Method#inspect / UnboundMethod#inspect now embed the
+# Method#inspect / UnboundMethod#inspect now embeds the
 # ` filename:line` suffix CRuby tacks on. Earlier fixtures
 # (method_inspect_format.rb / method_inspect_params.rb /
 # method_inspect_singleton.rb) stripped the suffix to dodge

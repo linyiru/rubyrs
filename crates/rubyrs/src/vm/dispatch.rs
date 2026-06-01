@@ -5959,10 +5959,10 @@ impl Vm {
                     (rv.clone(), nid, params, defining_rc, snap_clone)
                 };
                 // Reuse the snapshot-or-live-lookup pattern
-                // Method#source_location uses (cycle-1 review):
-                // when the snapshot was dropped, resolve the
-                // method against the receiver's class so the
-                // suffix still appears. We use
+                // Method#source_location uses: when no snapshot
+                // was stored, resolve the method against the
+                // receiver's class so the suffix still appears.
+                // We use
                 // `heap.class_of` here (eigenclass-aware) to
                 // match the capture path at the `method` arm
                 // — `source_location` uses `Vm::class_of`
@@ -6059,9 +6059,9 @@ impl Vm {
                         .unwrap_or_else(|| cls.name.clone());
                     // Mirror Method#source_location: live-lookup
                     // fallback against the captured class when
-                    // the snapshot is gone, so inspect's suffix
-                    // stays consistent with source_location.
-                    // Cycle-1 review.
+                    // no snapshot was stored, so inspect's
+                    // suffix stays consistent with
+                    // source_location.
                     let m_for_src = snap.clone()
                         .or_else(|| self.lookup_method_uncached(&cls, nid));
                     let src_suffix = m_for_src
@@ -9072,7 +9072,7 @@ fn method_source_suffix(
     // we emit ` filename:0` rather than suppressing the
     // suffix, so `inspect` and `source_location` agree on
     // every method — `Method#source_location` returns
-    // [filename, 0] in the same case. Cycle-1 review.
+    // [filename, 0] in the same case.
     format!(" {}:{}", filename, line)
 }
 
