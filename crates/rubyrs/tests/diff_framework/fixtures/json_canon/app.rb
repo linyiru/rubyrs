@@ -1,0 +1,87 @@
+# Tier-1 JSON canon parity — runs `require "json"` on both
+# runtimes. CRuby loads stdlib json; rubyrs resolves to the
+# embedded pure-Ruby canon at src/stdlib_vendor/json.rb (gated
+# behind the `stdlib` Cargo feature — framework-parity CI job
+# builds with `--features default,stdlib,...`). No engine-aware
+# compat shim — the require name is identical, the API surface
+# the script touches is the cross-impl-stable subset.
+require "json"
+
+# ---- generate over canonical types ----
+puts JSON.generate(nil)
+puts JSON.generate(true)
+puts JSON.generate(false)
+puts JSON.generate(0)
+puts JSON.generate(42)
+puts JSON.generate(-17)
+puts JSON.generate("")
+puts JSON.generate("hello")
+puts JSON.generate("a\"b\\c\nd\te")
+puts JSON.generate([])
+puts JSON.generate([1, 2, 3])
+puts JSON.generate(["a", true, nil, 42])
+puts JSON.generate({})
+puts JSON.generate({"k" => "v"})
+puts JSON.generate({"name" => "rubyrs", "ver" => 4, "ok" => true, "tags" => ["ruby", "rust"]})
+
+# Symbol-key stringification (CRuby's `to_s`-on-key convention).
+puts JSON.generate({a: 1, b: [2, 3]})
+
+# Nested structures.
+nested = {
+  "level1" => {
+    "level2" => {
+      "level3" => ["deep", true, nil, 0]
+    }
+  }
+}
+puts JSON.generate(nested)
+
+# Control-char escaping ranges (< 0x20 → \uXXXX).
+puts JSON.generate("\x00\x01\x1F end")
+
+# ---- parse + round-trip ----
+SAMPLES = [
+  'null',
+  'true',
+  'false',
+  '42',
+  '-7',
+  '0',
+  '"hello"',
+  '"with \"quotes\" and \\\\"',
+  '"newline \n tab \t"',
+  '[]',
+  '[1, 2, 3]',
+  '["a", true, null, 0]',
+  '{}',
+  '{"k": "v"}',
+  '{"name":"rubyrs","ver":4,"tags":["ruby","rust"],"ok":true,"nope":false,"nil":null,"count":42}',
+  '  [  1  ,  2  ,  3  ]  ',
+  '{"nested":{"deep":{"value":[1,true,null]}}}'
+]
+
+SAMPLES.each do |src|
+  parsed = JSON.parse(src)
+  # Print the inspect of the parsed value AND the re-serialised
+  # form — covers both "did we parse the right shape?" and
+  # "did we serialise it back to the canonical compact form?"
+  puts "parse: #{parsed.inspect}"
+  puts "gen:   #{JSON.generate(parsed)}"
+end
+
+# ---- error paths ----
+# We compare ONLY the exception class, not the message text —
+# error messages aren't part of the API contract and CRuby's
+# stdlib + the pure-Ruby canon legitimately differ on phrasing.
+begin
+  JSON.parse("{bad")
+rescue JSON::ParserError => e
+  puts "err.class=#{e.class}"
+end
+
+begin
+  JSON.parse("[1, 2,")
+rescue JSON::ParserError => e
+  puts "err.class=#{e.class}"
+end

@@ -675,3 +675,8 @@ fn sinatra_hello() {
 fn json_smoke() {
     run_fixture("json_smoke");
 }
+
+#[test]
+fn json_canon() {
+    run_fixture("json_canon");
+}

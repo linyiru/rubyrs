@@ -1,0 +1,11 @@
+{
+  "_doc": "ADR-0026-v2 menu item 2 — pure-Ruby JSON canon parity. Same app.rb runs `require 'json'` and exercises the canonical JSON.parse / JSON.generate API on both runtimes. rubyrs resolves `require 'json'` to the embedded `src/stdlib_vendor/json.rb` (gated behind the `stdlib` Cargo feature); CRuby loads stdlib's `json`. Byte-diff of stdout proves the pure-Ruby canon matches CRuby's emit/round-trip semantics on the deterministic subset (Null / Bool / Integer / Float / String / Array / Hash). Float divergence is a known class-`h` deviation per ADR 0019; this fixture stays in the bit-exact subset.",
+  "name": "json_canon",
+  "script": {
+    "path": "app.rb",
+    "timeout_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["json"]
+  }
+}

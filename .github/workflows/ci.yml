@@ -869,10 +869,14 @@ jobs:
         # "_http_server")]` so the harness only compiles with the
         # battery enabled — feature gate matches the menu's actual
         # Tier-3 dependency. `_fiber` is bundled so streaming-
-        # capable fixtures work end-to-end. Other features (cext,
-        # regex, bignum) come from `--features default`.
+        # capable fixtures work end-to-end. `stdlib` activates the
+        # embedded pure-Ruby canon (src/stdlib_vendor/*.rb) so
+        # fixtures like `json_canon` resolve `require "json"` to
+        # the in-tree JSON impl rather than the lenient stub.
+        # Other features (cext, regex, bignum) come from
+        # `--features default`.
         run: |
           cargo test --release \
-            --features default,_http_server,_fiber \
+            --features default,stdlib,_http_server,_fiber \
             --test diff_framework \
             -- --nocapture
