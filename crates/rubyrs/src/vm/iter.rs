@@ -1679,6 +1679,137 @@ impl Vm {
                     _ => return Ok(None),
                 }
             }
+            // `(b..e).each_slice(n) { |slice| ... }` — yield each
+            // consecutive group of n Ints from the Range as one
+            // Array argument; return the receiver Range. Same
+            // closure + `vm.pinned.truncate(baseline)` per-iter
+            // scope pattern as Hash / Array each_slice (PRs
+            // #311 / #312). Only Int+Int endpoints supported —
+            // matches `iter_range_filter` convention; Str+Str
+            // ranges fall through to NoMethodError.
+            (Value::Range(id), "each_slice", [Value::Int(n)]) => {
+                if *n <= 0 {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: format!("invalid slice size: {}", n),
+                    }));
+                }
+                let (bi, ei, excl) = {
+                    let r = self.heap.range(*id);
+                    match (&r.begin, &r.end) {
+                        (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
+                        _ => return Ok(None),
+                    }
+                };
+                let id = *id;
+                let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Range(id));
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                let end_inc = if excl { ei.saturating_sub(1) } else { ei };
+                let mut current: Vec<Value> = Vec::with_capacity(n_usz.min(64));
+                let mut i = bi;
+                while i <= end_inc {
+                    current.push(Value::Int(i));
+                    if current.len() == n_usz {
+                        let iter_baseline = g.vm.pinned.len();
+                        let chunk = std::mem::take(&mut current);
+                        let step_result: Result<BlockStep, Trap> = (|| {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let slice_id = g.vm.heap.alloc(HeapObj::Array(chunk));
+                            g.vm.pinned.push(Value::Array(slice_id));
+                            g.vm.step_block(block, vec![Value::Array(slice_id)], pre_frames)
+                        })();
+                        g.vm.pinned.truncate(iter_baseline);
+                        match step_result? {
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                            BlockStep::Break(r) => { early = Some(r); break; }
+                            BlockStep::Value(_) => {}
+                        }
+                        current = Vec::with_capacity(n_usz.min(64));
+                    }
+                    // Bail before overflow on `i += 1` when end_inc == i64::MAX.
+                    if i == end_inc { break; }
+                    i += 1;
+                }
+                // Trailing partial chunk — only when no break fired.
+                if early.is_none() && !current.is_empty() {
+                    let iter_baseline = g.vm.pinned.len();
+                    let chunk = std::mem::take(&mut current);
+                    let step_result: Result<BlockStep, Trap> = (|| {
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let slice_id = g.vm.heap.alloc(HeapObj::Array(chunk));
+                        g.vm.pinned.push(Value::Array(slice_id));
+                        g.vm.step_block(block, vec![Value::Array(slice_id)], pre_frames)
+                    })();
+                    g.vm.pinned.truncate(iter_baseline);
+                    match step_result? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); }
+                        BlockStep::Value(_) => {}
+                    }
+                }
+                Some(early.unwrap_or(Value::Range(id)))
+            }
+            // `(b..e).each_cons(n) { |window| ... }` — sliding
+            // window of n consecutive Ints; return receiver.
+            // Maintains an n-element ring buffer (cheap on Int-
+            // sized usize), yields when full. No yields when
+            // range length < n.
+            (Value::Range(id), "each_cons", [Value::Int(n)]) => {
+                if *n <= 0 {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: format!("invalid size: {}", n),
+                    }));
+                }
+                let (bi, ei, excl) = {
+                    let r = self.heap.range(*id);
+                    match (&r.begin, &r.end) {
+                        (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
+                        _ => return Ok(None),
+                    }
+                };
+                let id = *id;
+                let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Range(id));
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                let end_inc = if excl { ei.saturating_sub(1) } else { ei };
+                let mut window: std::collections::VecDeque<Value> =
+                    std::collections::VecDeque::with_capacity(n_usz.min(64));
+                let mut i = bi;
+                'outer: while i <= end_inc {
+                    if window.len() == n_usz {
+                        window.pop_front();
+                    }
+                    window.push_back(Value::Int(i));
+                    if window.len() == n_usz {
+                        let iter_baseline = g.vm.pinned.len();
+                        let win_vec: Vec<Value> = window.iter().cloned().collect();
+                        let step_result: Result<BlockStep, Trap> = (|| {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let wid = g.vm.heap.alloc(HeapObj::Array(win_vec));
+                            g.vm.pinned.push(Value::Array(wid));
+                            g.vm.step_block(block, vec![Value::Array(wid)], pre_frames)
+                        })();
+                        g.vm.pinned.truncate(iter_baseline);
+                        match step_result? {
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                            BlockStep::Break(r) => { early = Some(r); break 'outer; }
+                            BlockStep::Value(_) => {}
+                        }
+                    }
+                    if i == end_inc { break; }
+                    i += 1;
+                }
+                Some(early.unwrap_or(Value::Range(id)))
+            }
             (Value::Array(id), "each_with_index", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));

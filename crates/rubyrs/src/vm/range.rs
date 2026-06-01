@@ -356,6 +356,78 @@ impl Vm {
                         let nid = self.heap.alloc(HeapObj::Array(elems));
                         Some(Value::Array(nid))
                     }
+                    // `r.each_slice(n)` / `r.each_cons(n)` —
+                    // no-block (Enumerator) forms. CRuby returns
+                    // an Enumerator; rubyrs returns the
+                    // materialised Array of slices/windows
+                    // directly, matching the Array / Hash family
+                    // (Enumerator-stub strategy). `.to_a` on
+                    // either is a no-op vs forced materialisation
+                    // — same shape. Block forms in iter.rs.
+                    ("each_slice", [Value::Int(n)]) => {
+                        if *n <= 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("invalid slice size: {}", n),
+                            }));
+                        }
+                        let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                        let end_inc = if excl { ei.saturating_sub(1) } else { ei };
+                        let mut chunks: Vec<Value> = Vec::new();
+                        let mut current: Vec<Value> = Vec::with_capacity(n_usz.min(64));
+                        let mut i = bi;
+                        while i <= end_inc {
+                            current.push(Value::Int(i));
+                            if current.len() == n_usz {
+                                self.maybe_gc();
+                                self.check_alloc()?;
+                                let cid = self.heap.alloc(HeapObj::Array(std::mem::take(&mut current)));
+                                chunks.push(Value::Array(cid));
+                                current = Vec::with_capacity(n_usz.min(64));
+                            }
+                            if i == end_inc { break; }
+                            i += 1;
+                        }
+                        if !current.is_empty() {
+                            self.maybe_gc();
+                            self.check_alloc()?;
+                            let cid = self.heap.alloc(HeapObj::Array(current));
+                            chunks.push(Value::Array(cid));
+                        }
+                        self.maybe_gc();
+                        self.check_alloc()?;
+                        let oid = self.heap.alloc(HeapObj::Array(chunks));
+                        Some(Value::Array(oid))
+                    }
+                    ("each_cons", [Value::Int(n)]) => {
+                        if *n <= 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("invalid size: {}", n),
+                            }));
+                        }
+                        let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                        let end_inc = if excl { ei.saturating_sub(1) } else { ei };
+                        let mut windows: Vec<Value> = Vec::new();
+                        let mut buf: std::collections::VecDeque<Value> =
+                            std::collections::VecDeque::with_capacity(n_usz.min(64));
+                        let mut i = bi;
+                        while i <= end_inc {
+                            if buf.len() == n_usz { buf.pop_front(); }
+                            buf.push_back(Value::Int(i));
+                            if buf.len() == n_usz {
+                                self.maybe_gc();
+                                self.check_alloc()?;
+                                let win: Vec<Value> = buf.iter().cloned().collect();
+                                let wid = self.heap.alloc(HeapObj::Array(win));
+                                windows.push(Value::Array(wid));
+                            }
+                            if i == end_inc { break; }
+                            i += 1;
+                        }
+                        self.maybe_gc();
+                        self.check_alloc()?;
+                        let oid = self.heap.alloc(HeapObj::Array(windows));
+                        Some(Value::Array(oid))
+                    }
                     // Range#step(n) without a block returns a
                     // step-arithmetic Array. The block form is
                     // covered separately in collection_call_block.
