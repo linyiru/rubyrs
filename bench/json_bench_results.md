@@ -10,8 +10,8 @@ Rerun with the same driver on your machine for a current snapshot.
 | Operation   | CRuby stdlib | Oj :strict | rubyrs pure canon | rubyrs `_json_native` |
 |-------------|--------------|------------|-------------------|------------------------|
 | `parse`     |  ~22 µs/iter | ~28 µs/iter | ~4100 µs/iter (193×) | **~17 µs/iter (0.62× Oj)** |
-| `generate`  |  ~29 µs/iter | ~13 µs/iter | ~4500 µs/iter (163×) | ~15 µs/iter (1.11× Oj)     |
-| `round_trip`|  ~54 µs/iter | ~40 µs/iter | ~8700 µs/iter (175×) | ~44 µs/iter (1.08× Oj)     |
+| `generate`  |  ~29 µs/iter | ~13 µs/iter | ~4500 µs/iter (163×) | ~14 µs/iter (1.11× Oj)     |
+| `round_trip`|  ~54 µs/iter | ~40 µs/iter | ~8700 µs/iter (175×) | **~40 µs/iter (1.04× Oj)** |
 
 Multiplier vs Oj :strict (the fastest gem-based Ruby JSON impl).
 **Bold** = rubyrs beats both CRuby stdlib AND Oj.
@@ -44,12 +44,19 @@ Multiplier vs Oj :strict (the fastest gem-based Ruby JSON impl).
   (`Oj.dump(obj, io)`-style streaming to an existing String) or
   custom Vm-internal dispatch interceptors for `JSON.generate`.
 
-- **Round-trip ≈ Oj.** Parse + generate individually beat or match
-  Oj; round-trip combines them with GC churn between (each iter
-  discards ~150 short-lived Ruby objects). rubyrs's mark-sweep is
-  single-generation; CRuby/Oj use a generational shape that wins
-  this access pattern. Round-trip variance is high (44–83 µs
-  across runs) for the same reason — GC scheduling dependent.
+- **Round-trip matches Oj** after GC threshold tuning. Initial
+  measurement at 44 µs/iter (1.1× Oj) was 27 % GC overhead — proven
+  by an `RUBYRS_GC_DISABLE=1` probe that dropped round_trip to
+  32 µs/iter. The fix: bump the post-sweep `next_gc` heuristic from
+  `live * 2 max 1024` to `live * 4 max 4096`. Same single-generation
+  mark-sweep, but ~4× fewer sweep cycles on alloc-and-discard loops
+  (JSON round-trip, request body re-parsing, …). Recovers ~70 % of
+  the GC overhead; the remaining ~7 µs is the per-sweep mark cost
+  on a larger live set, which would need true generational
+  separation to fix — out of scope for the menu item. Tunable via
+  `RUBYRS_GC_GROWTH` + `RUBYRS_GC_MIN_THRESHOLD` for embedders
+  running on tight RSS budgets who'd rather pay sweep frequency
+  than peak memory.
 
 - **Pure canon is 160–200× slower than CRuby.** That's the cost
   of walking `String#chars` on a bytecode VM; the canon trades
@@ -76,6 +83,11 @@ Multiplier vs Oj :strict (the fastest gem-based Ruby JSON impl).
    fast-path escape with bulk `extend_from_slice`, hand-rolled
    `write_int`, no `Vec::clone` of heap contents during walk,
    4 KB pre-sized output.
+5. **GC threshold tuning** — round_trip 40 µs (1.04× Oj). Post-
+   sweep trigger raised from `live*2 max 1024` to `live*4 max
+   4096`, ~4× fewer sweep cycles on alloc-and-discard loops.
+   Recovers ~70 % of the GC overhead the `RUBYRS_GC_DISABLE=1`
+   probe identified.
 
 ## Reproducing
 

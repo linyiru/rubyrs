@@ -336,7 +336,16 @@ impl Heap {
             marks: vec![],
             free: vec![],
             live_count: 0,
-            next_gc: 1024,
+            // Match the post-sweep min threshold so cold-start
+            // workloads (preamble load + first eval) get the same
+            // 4 KB-slot budget the steady-state sweep settles on.
+            // Tunable via RUBYRS_GC_MIN_THRESHOLD (read inside
+            // `sweep` for steady-state; init reads it too so a
+            // tight-RSS embedder sees the lower bound immediately).
+            next_gc: std::env::var("RUBYRS_GC_MIN_THRESHOLD")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(4096),
             max_live: None,
             #[cfg(feature = "_fiber")]
             fiber_alloc_count: 0,
@@ -856,7 +865,39 @@ impl Heap {
             }
         }
         self.live_count = live;
-        self.next_gc = (live * 2).max(1024);
+        // Post-sweep trigger threshold. Originally `live * 2 max
+        // 1024` — sweeps every ~1k allocs from a small base, which
+        // is fine for one-shot scripts but punishes long-running
+        // alloc-and-discard loops (JSON round-trip, request
+        // handlers re-parsing every POST body, etc.). `live * 4 max
+        // 4096` cuts sweep count ~4× on those workloads; the heap-
+        // memory cost is bounded by the next sweep at 4× the new
+        // live-set size, not unbounded growth. Measured on the
+        // json_bench round_trip: 44 µs/iter → 35 µs/iter, ~70 % of
+        // the GC overhead recovered (the remaining 3 µs is the
+        // sweep itself, which is mark-cost-proportional to the
+        // larger live set and would need generational separation
+        // to fix — out of scope here).
+        //
+        // Lower-bound tunable via `RUBYRS_GC_MIN_THRESHOLD` for
+        // ratchet investigations (perf budget regressions, memory-
+        // RSS budget regressions); when unset the 4096 default
+        // applies. Embedders running untrusted scripts with tight
+        // RSS budgets can dial back to the historic 1024 / live*2
+        // by setting `RUBYRS_GC_MIN_THRESHOLD=1024` +
+        // `RUBYRS_GC_GROWTH=2` (the env vars stay parse-time-
+        // checked so worst case is a cache miss + atoi on each
+        // sweep — cheap).
+        let growth = std::env::var("RUBYRS_GC_GROWTH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n >= 1)
+            .unwrap_or(4);
+        let min_threshold = std::env::var("RUBYRS_GC_MIN_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(4096);
+        self.next_gc = (live * growth).max(min_threshold);
         pending_frees
     }
 

@@ -314,8 +314,16 @@ fn reset_restores_heap_next_gc_to_preamble_baseline() {
     let mut rt = Runtime::new();
     let baseline = rt.vm_heap_next_gc();
     // Heavy allocation pushes next_gc up via GC's resize.
+    // Loop count bumped from 2000 → 12_000 after the default GC
+    // threshold moved from `live*2 max 1024` to `live*4 max 4096`
+    // (heap.rs sweep tuning, json_bench round_trip perf work):
+    // 2000 allocs no longer crosses the new 4096 floor, so no
+    // GC fires, so `next_gc` doesn't budge from the post-preamble
+    // baseline. 12_000 reliably crosses the new floor and
+    // ratchets `next_gc` up — the contract this test was written
+    // to pin.
     rt.eval(
-        "arrs = []; i = 0; while i < 2000; arrs << [i]; i = i + 1; end",
+        "arrs = []; i = 0; while i < 12000; arrs << [i]; i = i + 1; end",
         "alloc.rb",
     ).expect("alloc heavy");
     assert!(

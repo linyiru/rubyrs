@@ -260,6 +260,27 @@ impl Vm {
 
     pub(crate) fn maybe_gc(&mut self) {
         if !self.stress_gc && !self.heap.should_gc() { return; }
+        // `RUBYRS_GC_DISABLE=1` short-circuits the actual sweep — for
+        // perf experiments only (heap grows unbounded until the
+        // process exits). Acts as a profiling probe: if a workload's
+        // wall time drops sharply with GC disabled, the workload is
+        // GC-bound and worth tuning; if it stays flat, GC isn't the
+        // bottleneck and optimisation effort goes elsewhere.
+        //
+        // Validated on the json_bench round_trip workload (5000
+        // parse+generate iters discarding ~150 short-lived objects
+        // each): baseline 44 µs/iter, with disable 32 µs/iter — so
+        // ~27 % of round_trip wall is GC. The next_gc growth
+        // factor (heap.rs's `live * 2 max 1024`) is what determines
+        // sweep frequency; bumping it cuts sweep count linearly.
+        // The env knob below stays in for ongoing perf-regression
+        // investigations (mirrors `RUBYRS_IC_STATS` shape).
+        if std::env::var_os("RUBYRS_GC_DISABLE").is_some() {
+            // Bump next_gc out of reach so we don't even re-enter
+            // the gather/walk machinery on the next allocation.
+            self.heap.next_gc = usize::MAX;
+            return;
+        }
         // Gather roots: stack + every frame's locals + self_val + swap_return
         // + pinned (native-code accumulators). class_stack holds Rc<Class>
         // which isn't GC-managed, so we don't need to walk it.
