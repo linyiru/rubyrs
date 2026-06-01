@@ -67,18 +67,6 @@ rescue NameError
   puts "ne-public-missing"
 end
 
-# Cycle-2: public_method must NOT raise NameError for
-# universal arms / built-ins that have no per-class Method
-# entry but DO dispatch (e.g. `Object#to_s`, `Class#new`).
-# Cycle-1's snapshot-is-None branch wrongly triggered for
-# these; cycle-2 consults `responds_to` so only truly-missing
-# methods raise.
-puts c.public_method(:to_s).call.start_with?("#<C:")
-puts c.public_method(:object_id).call.is_a?(Integer)
-# Class receiver should also reach class-level built-ins like
-# `:new`
-puts K.public_method(:new).is_a?(Method)
-
 # (3) Class receiver — singleton_method reads
 # cls.singleton_methods (i.e. class methods)
 class K
@@ -100,6 +88,22 @@ begin
 rescue NameError
   puts "ne-K-new"
 end
+
+# Cycle-2: public_method must NOT raise NameError for
+# universal arms / built-ins that have no per-class Method
+# entry but DO dispatch (e.g. `Object#to_s`, `Class#new`).
+# Cycle-1's snapshot-is-None branch wrongly triggered for
+# these; cycle-2 consults `responds_to` so only truly-missing
+# methods raise.
+puts c.public_method(:to_s).call.start_with?("#<C:")
+puts c.public_method(:object_id).call.is_a?(Integer)
+# Cycle-2: Class receiver — `method`/`public_method` must
+# also reach `cls.singleton_methods` (the cycle-1 snapshot
+# lookup used `Vm::class_of` and missed every class method).
+puts K.public_method(:cls_m).call
+# Class-level built-in like `:new` reaches dispatch arm,
+# snapshot is None but responds_to is true → must NOT raise.
+puts K.public_method(:new).is_a?(Method)
 
 # (4) Returned value is a BoundMethod that calls correctly
 m1 = c.public_method(:pub)
