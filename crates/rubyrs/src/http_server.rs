@@ -6225,6 +6225,74 @@ mod tests {
         );
     }
 
+    /// Regression: a non-local `return` from inside a native-iterator
+    /// block (`each { ... return ... }`) must be consumed by its
+    /// enclosing Ruby method even when that method is reached THROUGH a
+    /// Rust-invoked block (the Rack-app entry: `call_ruby_block_sync`
+    /// → `step_block` → `dispatch_until`).
+    ///
+    /// Before the `dispatch_until_inner` lexical-aware-unwind fix, the
+    /// `method_return` signal escaped all the way to `call_ruby_block_sync`
+    /// and surfaced as `RuntimeError: block invoked from Rust raised
+    /// `return` — no enclosing Ruby method to unwind to`, even though the
+    /// `return`'s target method (`find_even`) was squarely in scope.
+    ///
+    /// This is the exact shape every Sinatra/Rack route table uses
+    /// (`routes.each { |r| return r.call if r.match?(path) }`), so it is
+    /// load-bearing for hosting a real web DSL.
+    #[test]
+    fn call_ruby_block_sync_consumes_nonlocal_return_from_in_scope_method() {
+        use crate::value::Value;
+        let mut rt = crate::Runtime::new();
+        rt.register_fn("__sentinel_call_block", |args| {
+            let block_id = match args.first() {
+                Some(Value::Block(id)) => *id,
+                _ => return Err(crate::error::Trap {
+                    err: crate::error::RubyError::ArgumentError {
+                        msg: "expected block as first arg".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            let block_args: Vec<Value> = args[1..].to_vec();
+            let ptr = crate::vm::current_vm_ptr();
+            assert!(!ptr.is_null(), "vm ptr must be set");
+            // SAFETY: ADR 0013 — outer &mut Vm parked; re-borrow time-disjoint.
+            let vm = unsafe { &mut *ptr };
+            super::call_ruby_block_sync(vm, block_id, block_args)
+        });
+
+        // `return` from inside `each`, in a method called from the
+        // Rust-invoked Rack lambda. The target method is in scope, so the
+        // return must be consumed and its value flow back as the lambda's
+        // result.
+        rt.eval(r#"
+            def find_even(env)
+              [1, 2, 3, 4].each { |x| return "even=#{x}" if x % 2 == 0 }
+              "none"
+            end
+            app = ->(env) { find_even(env) }
+            result = __sentinel_call_block(app, {"REQUEST_METHOD" => "GET"})
+            raise "want \"even=2\" got #{result.inspect}" unless result == "even=2"
+        "#, "nonlocal_return_in_scope.rb")
+            .expect("non-local return from in-scope method under Rust block");
+
+        // Nested one level deeper (lambda -> call -> dispatch -> each),
+        // the canonical Sinatra dispatch shape.
+        rt.eval(r#"
+            def dispatch(verb)
+              routes = [["GET", "root"], ["POST", "submit"]]
+              routes.each { |v, name| return "matched=#{name}" if v == verb }
+              "not_found"
+            end
+            app = ->(env) { dispatch(env["REQUEST_METHOD"]) }
+            result = __sentinel_call_block(app, {"REQUEST_METHOD" => "POST"})
+            raise "want \"matched=submit\" got #{result.inspect}" \
+              unless result == "matched=submit"
+        "#, "nonlocal_return_dispatch_shape.rb")
+            .expect("Sinatra-shape dispatch with return-from-each under Rust block");
+    }
+
     /// Stage 4b verification: confirm that
     /// `current_vm_ptr()` returns a non-null pointer when
     /// called inside a host fn body. This proves the

@@ -546,12 +546,45 @@ impl Vm {
 
     fn dispatch_until_inner(&mut self, until_depth: usize) -> Result<(), Trap> {
         while self.frames.len() > until_depth {
-            // A non-local return signal means we're about to
-            // unwind past `until_depth` anyway. Exit early and
-            // let the iterator driver (our caller) propagate the
-            // signal to its own caller. Running more ops here
-            // would burn fuel inside a frame about to be discarded.
-            if self.method_return.is_some() { return Ok(()); }
+            // Non-local return signal. Two cases, distinguished by
+            // whether the return's lexical owner (the method frame it
+            // targets) lives WITHIN this dispatch_until scope:
+            //
+            //  - Owner is at/below `until_depth` (or unknown): we're
+            //    about to unwind past our boundary anyway. Exit early
+            //    and let the iterator driver (our caller) propagate the
+            //    signal — the original behaviour, and the common case
+            //    for `coll.each { return }` driven from the top-level
+            //    loop, where the target method sits below us.
+            //
+            //  - Owner is INSIDE our scope (`owner_idx >= until_depth`):
+            //    the method being returned-from is one we're driving
+            //    (e.g. a Ruby method called from a Rust-invoked Rack
+            //    block via `call_ruby_block_sync` → `step_block`). The
+            //    top-level `step` loop would consume the return at the
+            //    owner frame; we must do the same here, otherwise the
+            //    signal escapes all the way to the Rust caller and is
+            //    reported as "no enclosing Ruby method to unwind to".
+            //    Mirrors the lexical-aware unwind in the main loop and
+            //    the in-scope check used for `pending_method_break`
+            //    just below.
+            if self.method_return.is_some() {
+                let owner_idx: Option<usize> = match &self.method_return_locals {
+                    Some(rc) => self.frames.iter().rposition(
+                        |f| !f.is_block && std::rc::Rc::ptr_eq(&f.locals, rc),
+                    ),
+                    None => None,
+                };
+                match owner_idx {
+                    Some(idx) if idx >= until_depth => {
+                        let val = self.take_method_return().unwrap();
+                        self.begin_method_break(val, idx)?;
+                        if self.frames.len() <= until_depth { return Ok(()); }
+                        continue;
+                    }
+                    _ => return Ok(()),
+                }
+            }
             // ADR 0024 Phase A.5/A.9: block-break in flight
             // from an Op::Yield case (b). Fire
             // continue_method_break when the target frame is
@@ -685,14 +718,36 @@ impl Vm {
                 Ok(true) => {}
                 Ok(false) => return Ok(()),
                 Err(trap) => {
-                    // `AlreadyCaught` is the bubble-out signal that
-                    // the iter driver above us must abort. Don't
-                    // try to resume locally — re-emit so step_block
-                    // and the iter driver see it. The OUTERMOST
-                    // `dispatch` (script frame) is the one that
-                    // consumes AlreadyCaught and resumes at the
-                    // redirected handler IP.
+                    // `AlreadyCaught` means `unwind_with_exception`
+                    // already redirected IP to a rescue handler and
+                    // popped frames down to it (the handler is now the
+                    // top frame). Whoever's dispatch scope OWNS that
+                    // handler frame must consume the signal and resume;
+                    // everyone below must bubble it out so the iter
+                    // driver(s) between the raise site and the handler
+                    // abort cleanly.
+                    //
+                    // The owner test is "is the handler frame within MY
+                    // scope?" — i.e. `frames.len() > until_depth` (the
+                    // loop condition). If so, `continue` and the next op
+                    // fetch lands on the redirected handler IP. If the
+                    // handler sits below us, re-emit.
+                    //
+                    // Pre-fix this arm re-emitted unconditionally,
+                    // assuming the outermost *main-loop* `dispatch`
+                    // (step.rs `dispatch` fn) would consume it. That
+                    // holds for top-level scripts, but NOT when the
+                    // outermost executor is itself a `dispatch_until`
+                    // (e.g. a Rack app invoked from Rust via
+                    // `call_ruby_block_sync` → `step_block`): there the
+                    // signal escaped to the Rust caller and surfaced as
+                    // an uncaught "Rack app raised" error even though a
+                    // `rescue` was in scope. Mirrors the non-local
+                    // `return` fix in this same function.
                     if matches!(trap.err, RubyError::AlreadyCaught) {
+                        if self.frames.len() > until_depth {
+                            continue;
+                        }
                         return Err(trap);
                     }
                     // Same convert-to-rescue dance as `dispatch`.
