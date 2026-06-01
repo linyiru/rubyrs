@@ -2685,7 +2685,22 @@ impl Vm {
                 self.frames.last_mut().expect("ICE: PopEnsure no frame").rescues.pop();
             }
             Op::Raise => {
-                let v = self.stack.pop().unwrap_or(Value::Nil);
+                let mut v = self.stack.pop().unwrap_or(Value::Nil);
+                // Bare `raise` (no args) compiles to `LoadNil; Raise` and
+                // means "re-raise the current exception" — `$!`, set on
+                // `globals` while a rescue/ensure body runs. Consult it
+                // when the operand is nil. If there is no current
+                // exception, fall back to a `RuntimeError` ("unhandled
+                // exception"), matching CRuby's bare-`raise`-with-no-
+                // context behaviour. (The ensure-rethrow path pushes a
+                // real exception object, never nil, so it is unaffected.)
+                if matches!(v, Value::Nil) {
+                    let bang = self.interner.intern("$!");
+                    match self.globals.get(&bang).cloned() {
+                        Some(cur) if !matches!(cur, Value::Nil) => v = cur,
+                        _ => v = Value::new_str("unhandled exception".to_string()),
+                    }
+                }
                 let exc = self.normalize_exception(v);
                 self.unwind_with_exception(exc)?;
                 // If unwind redirected IP to a handler in a
