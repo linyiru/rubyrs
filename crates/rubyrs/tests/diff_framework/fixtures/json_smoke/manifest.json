@@ -1,0 +1,16 @@
+{
+  "_doc": "Tier-1 script-mode fixture proving the diff_framework harness can run gem-dependent NON-server fixtures. JSON parity-by-parser-round-trip: same app.rb runs JSON::Ext::Parser on both runtimes — rubyrs loads the flori-json-cext parser.bundle, CRuby loads `json/ext` from stdlib. Both expose the same JSON::Ext::Parser API; the script invokes it and puts the results for byte-diff. Full ADR-0026-v2 menu item 2 (pure-Ruby JSON canon + _json_native accel) is a separate ~1–2 week landing; this fixture validates that the framework hosts the surface.",
+  "name": "json_smoke",
+  "script": {
+    "path": "app.rb",
+    "timeout_secs": 30
+  },
+  "cruby": {
+    "required_gems": ["json/ext"]
+  },
+  "rubyrs": {
+    "required_cext_examples": [
+      { "name": "flori-json-cext", "artifacts": ["parser"] }
+    ]
+  }
+}

@@ -63,8 +63,20 @@ static TEST_SERIAL: Mutex<()> = Mutex::new(());
 #[derive(Deserialize, Debug)]
 struct Manifest {
     name: String,
-    server: ServerSpec,
+    // Exactly one of `server` / `script` must be set. `server` boots
+    // a long-running HTTP server and replays a route matrix (the
+    // Sinatra-shape fixtures). `script` runs a one-shot script and
+    // byte-diffs stdout (the JSON-shape fixtures — gem-dependent but
+    // no server). Validated in run_fixture.
+    #[serde(default)]
+    server: Option<ServerSpec>,
+    #[serde(default)]
+    script: Option<ScriptSpec>,
+    #[serde(default)]
     cruby: CrubySpec,
+    #[serde(default)]
+    rubyrs: RubyrsSpec,
+    #[serde(default)]
     scenarios: Vec<Scenario>,
     #[serde(default)]
     normalize: Vec<NormalizeRule>,
@@ -78,10 +90,44 @@ struct ServerSpec {
     duration_secs: u64,
 }
 
+#[derive(Deserialize, Debug)]
+struct ScriptSpec {
+    /// Script to run on both runtimes. Stdout byte-diffed; non-zero
+    /// exit on either side fails the test.
+    path: String,
+    /// Wall-clock cap. Past this, the child is killed and the test
+    /// fails with a timeout message. Mirrors the server-mode
+    /// `duration_secs` safety net.
+    timeout_secs: u64,
+}
+
 #[derive(Deserialize, Debug, Default)]
 struct CrubySpec {
     #[serde(default)]
     required_gems: Vec<String>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct RubyrsSpec {
+    /// Cext examples that must have been built (via their build.sh)
+    /// for this fixture to run on the rubyrs side. Each entry is an
+    /// `examples/<name>/` directory holding `<artifact>.bundle` (mac)
+    /// or `<artifact>.so` (linux) files; the harness verifies the
+    /// artifacts exist and exports `RUBYRS_<NAME>_DIR` env vars
+    /// pointing at each example dir so the fixture's compat shim
+    /// can `require` them by absolute path. Skip-not-fail if any
+    /// artifact is missing.
+    #[serde(default)]
+    required_cext_examples: Vec<CextExampleSpec>,
+}
+
+#[derive(Deserialize, Debug)]
+struct CextExampleSpec {
+    /// `examples/<name>/` directory under crates/rubyrs.
+    name: String,
+    /// Artifact stems (no extension); the harness checks for
+    /// `<name>.{bundle|so}` per host OS.
+    artifacts: Vec<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -389,6 +435,88 @@ fn normalize(transcript: &str, rules: &[NormalizeRule]) -> String {
     out
 }
 
+/// Run a script-mode fixture: invoke `cmd` on `fixture/<script.path>`,
+/// capture stdout, return it for byte-diff. Stderr is drained in the
+/// background (same rationale as `spawn_server` — finite OS pipe
+/// buffer would otherwise block the child on heavy logging). A
+/// timeout fires after `script.timeout_secs` to keep a hung fixture
+/// from stalling the suite indefinitely.
+fn probe_script(
+    label: &str,
+    mut cmd: Command,
+    fixture: &Path,
+    spec: &ScriptSpec,
+) -> Result<String, String> {
+    let script_path = fixture.join(&spec.path);
+    let mut child = cmd
+        .arg(&script_path)
+        .current_dir(fixture)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{label} spawn: {e}"))?;
+    let stderr_pipe = child.stderr.take().expect("child stderr piped");
+    let err_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let err_clone = err_buf.clone();
+    let err_handle = std::thread::spawn(move || {
+        let mut reader = stderr_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => err_clone.lock().unwrap_or_else(|p| p.into_inner()).extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+    let stdout_pipe = child.stdout.take().expect("child stdout piped");
+    let out_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let out_clone = out_buf.clone();
+    let out_handle = std::thread::spawn(move || {
+        let mut reader = stdout_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => out_clone.lock().unwrap_or_else(|p| p.into_inner()).extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(spec.timeout_secs);
+    let exit = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("{label} wait: {e}")),
+        }
+    };
+    let _ = out_handle.join();
+    let _ = err_handle.join();
+    let stdout = String::from_utf8_lossy(&out_buf.lock().unwrap_or_else(|p| p.into_inner())).into_owned();
+    let stderr = String::from_utf8_lossy(&err_buf.lock().unwrap_or_else(|p| p.into_inner())).into_owned();
+
+    match exit {
+        None => Err(format!(
+            "{label} script timed out after {}s\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            spec.timeout_secs
+        )),
+        Some(s) if !s.success() => Err(format!(
+            "{label} script exited non-zero ({:?})\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            s.code()
+        )),
+        Some(_) => Ok(stdout),
+    }
+}
+
 fn probe(
     label: &str,
     mut cmd: Command,
@@ -419,6 +547,39 @@ fn probe(
     Ok(transcript)
 }
 
+fn cext_artifact_ext() -> &'static str {
+    if cfg!(target_os = "macos") { "bundle" } else { "so" }
+}
+
+/// Returns Some(per-example-dir map) if all required cext artifacts
+/// are present; None otherwise (caller skips). The map's keys are
+/// the env-var names the harness will set on the rubyrs subprocess
+/// (`RUBYRS_<UPPER_NAME>_DIR`); values are absolute paths.
+fn collect_cext_examples(spec: &RubyrsSpec) -> Option<std::collections::BTreeMap<String, PathBuf>> {
+    let examples_dir = manifest_dir().join("examples");
+    let mut env_pairs = std::collections::BTreeMap::new();
+    let ext = cext_artifact_ext();
+    for ex in &spec.required_cext_examples {
+        let dir = examples_dir.join(&ex.name);
+        for artifact in &ex.artifacts {
+            let path = dir.join(format!("{artifact}.{ext}"));
+            if !path.exists() {
+                eprintln!(
+                    "missing cext artifact: {} (build with `bash crates/rubyrs/examples/{}/build.sh`)",
+                    path.display(),
+                    ex.name,
+                );
+                return None;
+            }
+        }
+        // RUBYRS_FLORI_JSON_CEXT_DIR-style name. Hyphens → underscores,
+        // then uppercased.
+        let env_name = format!("RUBYRS_{}_DIR", ex.name.replace('-', "_").to_uppercase());
+        env_pairs.insert(env_name, dir);
+    }
+    Some(env_pairs)
+}
+
 fn run_fixture(fixture_name: &str) {
     let _guard = TEST_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let fixture = fixtures_dir().join(fixture_name);
@@ -430,18 +591,41 @@ fn run_fixture(fixture_name: &str) {
     let manifest: Manifest = serde_json::from_str(&manifest_src)
         .unwrap_or_else(|e| panic!("parse manifest.json for `{fixture_name}`: {e}"));
 
+    let mode_check = (manifest.server.is_some(), manifest.script.is_some());
+    assert!(
+        matches!(mode_check, (true, false) | (false, true)),
+        "manifest must declare exactly one of `server` / `script` (got server={}, script={})",
+        mode_check.0, mode_check.1,
+    );
+
+    // Verify required rubyrs cext artifacts exist; skip-not-fail
+    // when missing. CI is expected to build them before invoking
+    // the framework-parity job (per-example `build.sh`).
+    let cext_env = match collect_cext_examples(&manifest.rubyrs) {
+        Some(env) => env,
+        None => {
+            eprintln!("skipping diff_framework::{fixture_name} — required rubyrs cext artifact missing");
+            return;
+        }
+    };
+
     // rubyrs side — always probed (the binary is our own).
-    let rubyrs_transcript = probe(
-        "rubyrs",
-        {
-            let mut c = Command::new(rubyrs_bin());
-            c.env("HARNESS_RUNTIME_HINT", "rubyrs");
-            c
-        },
-        &fixture,
-        &manifest.server,
-        &manifest.scenarios,
-    ).unwrap_or_else(|e| panic!("rubyrs probe for `{fixture_name}`: {e}"));
+    let rubyrs_cmd_factory = || {
+        let mut c = Command::new(rubyrs_bin());
+        c.env("HARNESS_RUNTIME_HINT", "rubyrs");
+        for (k, v) in &cext_env {
+            c.env(k, v);
+        }
+        c
+    };
+    let rubyrs_transcript = if let Some(srv) = &manifest.server {
+        probe("rubyrs", rubyrs_cmd_factory(), &fixture, srv, &manifest.scenarios)
+            .unwrap_or_else(|e| panic!("rubyrs probe for `{fixture_name}`: {e}"))
+    } else {
+        let sc = manifest.script.as_ref().unwrap();
+        probe_script("rubyrs", rubyrs_cmd_factory(), &fixture, sc)
+            .unwrap_or_else(|e| panic!("rubyrs script for `{fixture_name}`: {e}"))
+    };
 
     // CRuby side — skip-not-fail when ruby missing or a required
     // gem isn't `require`-able. Mirrors `diff_cruby.rs`. CI is
@@ -459,13 +643,14 @@ fn run_fixture(fixture_name: &str) {
             return;
         }
     }
-    let cruby_transcript = probe(
-        "cruby",
-        Command::new("ruby"),
-        &fixture,
-        &manifest.server,
-        &manifest.scenarios,
-    ).unwrap_or_else(|e| panic!("cruby probe for `{fixture_name}`: {e}"));
+    let cruby_transcript = if let Some(srv) = &manifest.server {
+        probe("cruby", Command::new("ruby"), &fixture, srv, &manifest.scenarios)
+            .unwrap_or_else(|e| panic!("cruby probe for `{fixture_name}`: {e}"))
+    } else {
+        let sc = manifest.script.as_ref().unwrap();
+        probe_script("cruby", Command::new("ruby"), &fixture, sc)
+            .unwrap_or_else(|e| panic!("cruby script for `{fixture_name}`: {e}"))
+    };
 
     let rn = normalize(&rubyrs_transcript, &manifest.normalize);
     let cn = normalize(&cruby_transcript, &manifest.normalize);
@@ -484,4 +669,9 @@ fn hello_smoke() {
 #[test]
 fn sinatra_hello() {
     run_fixture("sinatra_hello");
+}
+
+#[test]
+fn json_smoke() {
+    run_fixture("json_smoke");
 }

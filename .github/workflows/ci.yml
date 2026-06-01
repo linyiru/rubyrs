@@ -854,6 +854,16 @@ jobs:
           key: ${{ runner.os }}-cargo-parity-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: Build flori-json-cext bundles (json_smoke fixture)
+        # `fixtures/json_smoke/` requires the flori-json-cext
+        # parser bundle on the rubyrs side; without it the harness
+        # skip-not-fails the fixture. build.sh recompiles rubyrs
+        # first (cheap — the test job below also builds release),
+        # then compiles the vendored flori/json sources with the
+        # rubyrs cext header shims. PROFILE=release matches the
+        # binary the framework-parity tests will dlopen against.
+        run: PROFILE=release bash crates/rubyrs/examples/flori-json-cext/build.sh
+
       - name: Run framework-parity tests
         # The diff_framework binary is `#[cfg(feature =
         # "_http_server")]` so the harness only compiles with the
