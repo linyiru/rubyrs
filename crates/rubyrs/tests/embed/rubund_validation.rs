@@ -36,8 +36,9 @@ impl Drop for GemRoot {
     }
 }
 
-/// Build a fake gem at `<CARGO_TARGET_TMPDIR>/rubund-validation-<tag>-<pid>`.
-/// Tag distinguishes per-test directories so parallel test runs
+/// Allocate an empty gem root at
+/// `<CARGO_TARGET_TMPDIR>/rubund-validation-<tag>-<pid>`. Tag
+/// distinguishes per-test directories so parallel test runs
 /// don't collide. Uses the early-commit-then-update-path pattern
 /// (PR #283 review) so any panic during init still triggers
 /// cleanup via Drop.
@@ -48,7 +49,13 @@ impl Drop for GemRoot {
 /// 'simplification' refactor to bare `_`, which would discard
 /// the `GemRoot` immediately and drop the tempdir BEFORE the
 /// test runs).
-fn build_fake_gem(tag: &str) -> (GemRoot, PathBuf) {
+///
+/// Phase 1 layers the gemspec fixture on top via
+/// `write_fixture(&root)`; Phase 2 only needs the root path
+/// itself (for the allowlist config) so it calls this helper
+/// directly; Phase 3 doesn't need a gem root at all (host-fn
+/// panic-catch is config-independent) so it doesn't call here.
+fn alloc_gem_root(tag: &str) -> (GemRoot, PathBuf) {
     let raw = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("rubund-validation-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&raw);
@@ -58,7 +65,17 @@ fn build_fake_gem(tag: &str) -> (GemRoot, PathBuf) {
     let mut guard = GemRoot { path: raw.clone() };
     let root = std::fs::canonicalize(&raw).expect("canonicalize gem root");
     guard.path = root.clone();
+    (guard, root)
+}
 
+/// Write the Bundler-shape fixture (`lib/fakegem/version.rb` +
+/// `fakegem.gemspec`) into an already-allocated gem root. Only
+/// Phase 1 needs this — Phase 2's allowlist test doesn't read
+/// any in-root file; Phase 3 doesn't open the root at all.
+/// Splitting `alloc` from `write` makes the per-phase setup
+/// honest about what each test actually depends on, so a future
+/// fixture edit can't silently change a phase's effective scope.
+fn write_fixture(root: &Path) {
     // Bundler layout: `lib/<gemname>/version.rb`. The Phase-1
     // gemspec requires "fakegem/version", which load_paths
     // resolves to lib/fakegem/version.rb.
@@ -102,7 +119,6 @@ s.add_dependency "puma", "~> 6.0"
 "#,
     )
     .expect("write gemspec");
-    (guard, root)
 }
 
 /// Shared Config shape across phases — single source of truth,
@@ -131,7 +147,8 @@ fn phase1_gemspec_evaluates_under_scoped_sandbox() {
         deps: Vec<(String, String)>,
     }
 
-    let (_root_keep_alive, root) = build_fake_gem("phase1");
+    let (_root_keep_alive, root) = alloc_gem_root("phase1");
+    write_fixture(&root);
     let mut rt = make_rt(&root);
     let captured = Rc::new(RefCell::new(Captured::default()));
 
@@ -186,7 +203,11 @@ fn phase1_gemspec_evaluates_under_scoped_sandbox() {
 
 #[test]
 fn phase2_out_of_scope_read_traps_ioerror() {
-    let (_root_keep_alive, root) = build_fake_gem("phase2");
+    // Phase 2 only needs the gem root path for the allowlist
+    // config — never reads any fixture file. Calling
+    // `alloc_gem_root` (not `write_fixture`) keeps the test's
+    // setup honest about its actual dependency.
+    let (_root_keep_alive, root) = alloc_gem_root("phase2");
     let mut rt = make_rt(&root);
     let trap = rt
         .eval(r#"File.read("/etc/passwd")"#, "<phase2>")
@@ -205,8 +226,18 @@ fn phase2_out_of_scope_read_traps_ioerror() {
 
 #[test]
 fn phase3_host_fn_panic_becomes_runtime_error_trap() {
-    let (_root_keep_alive, root) = build_fake_gem("phase3");
-    let mut rt = make_rt(&root);
+    // Phase 3 uses the secure-by-default `Runtime::new()` — not
+    // `make_rt`. The panic→Trap contract is a baseline Runtime
+    // feature (PR #279), independent of any sandbox config; if
+    // we used the rubund-shape config here, a future regression
+    // that let a DIFFERENT panic site fire (e.g. during require-
+    // walk if Phase 3 ever ate a require statement) would still
+    // be caught and the assertion would still pass with the
+    // payload string preserved through unwind — locking in the
+    // weaker contract "any Runtime catches host_fn panics" by
+    // accident. Minimal config makes the assertion mean what
+    // its docstring says.
+    let mut rt = Runtime::new();
     rt.register_fn("explode", |_| panic!("simulated host-fn bug"));
     let trap = rt
         .eval(r#"explode"#, "<phase3>")

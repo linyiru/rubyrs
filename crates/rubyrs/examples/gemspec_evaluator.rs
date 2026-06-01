@@ -37,7 +37,7 @@
 
 use std::cell::RefCell;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use rubyrs::{Config, RubyError, Runtime, Value};
@@ -54,30 +54,44 @@ impl Drop for GemRoot {
     }
 }
 
-fn build_fake_gem() -> GemRoot {
+/// Allocate an empty gem root under `std::env::temp_dir()`.
+/// Uses the early-commit-then-update-path pattern (PR #283 review)
+/// so any panic during init still triggers cleanup via Drop.
+///
+/// `write_fixture` layers the gemspec / version.rb on top — only
+/// Phase 1 needs that; Phase 2 reads no in-root file and Phase 3
+/// doesn't open the root at all. Splitting the helpers keeps each
+/// phase's setup honest about its actual dependencies.
+fn alloc_gem_root() -> GemRoot {
     let raw = std::env::temp_dir()
         .join(format!("rubyrs-gemspec-eval-{}", std::process::id()));
     let _ = fs::remove_dir_all(&raw); // clean slate
     fs::create_dir_all(&raw).expect("mkdir gem root");
     // Commit the guard IMMEDIATELY after `create_dir_all` — same
     // shape as `TempDirGuard` in tests/embed/filesystem_sandbox.rs
-    // (per PR #283 review). A panic in canonicalize / further
-    // fs::write calls below otherwise leaks the partially-init'd
-    // dir because no RAII would own it yet. `.path` gets updated
-    // to the canonical form after canonicalize succeeds; both
-    // forms refer to the same on-disk inode so `remove_dir_all`
-    // cleans correctly either way.
+    // (per PR #283 review). A panic in canonicalize otherwise
+    // leaks the partially-init'd dir because no RAII would own
+    // it yet. `.path` gets updated to the canonical form after
+    // canonicalize succeeds; both forms refer to the same on-disk
+    // inode so `remove_dir_all` cleans correctly either way.
     let mut guard = GemRoot { path: raw.clone() };
     let root = fs::canonicalize(&raw).expect("canonicalize gem root");
-    guard.path = root.clone();
-    // Lay out a minimal but realistic gem structure — matches the
-    // Bundler convention `lib/<gemname>/version.rb` which
-    // `require "fakegem/version"` resolves to:
-    //   <root>/
-    //     fakegem.gemspec   (the file we evaluate)
-    //     lib/
-    //       fakegem/
-    //         version.rb   (the require'd file)
+    guard.path = root;
+    guard
+}
+
+/// Write the Bundler-shape gemspec fixture into an existing gem
+/// root. Phase 1 only — Phase 2/3 don't read these files.
+///
+/// Layout matches the Bundler convention `lib/<gemname>/version.rb`
+/// which `require "fakegem/version"` resolves to (with the host's
+/// `Config::load_paths` seed pointing at `<root>/lib`):
+///   <root>/
+///     fakegem.gemspec   (the file we evaluate)
+///     lib/
+///       fakegem/
+///         version.rb   (the require'd file)
+fn write_fixture(root: &Path) {
     fs::create_dir_all(root.join("lib/fakegem")).expect("mkdir lib/fakegem");
     fs::write(
         root.join("lib/fakegem/version.rb"),
@@ -124,17 +138,6 @@ s.add_dependency "puma", "~> 6.0"
 "#,
     )
     .expect("write gemspec");
-    // Phase 2's out-of-scope read uses `/etc/passwd` as the
-    // probe path. The file does NOT need to exist for the test
-    // to pass — the allowlist check fires lexically before any
-    // syscall, so the trap is raised whether the path resolves
-    // to a real inode or not. That makes the demo portable to
-    // any platform `cargo run` works on, including Windows
-    // where /etc/passwd is absent. (An earlier draft planted a
-    // per-process fixture file outside the gem root for the
-    // same purpose, but its cleanup wasn't covered by GemRoot's
-    // RAII guard — flagged in PR #302 review.)
-    guard
 }
 
 // ---------- Captured gemspec metadata ----------
@@ -183,7 +186,8 @@ fn main() {
     println!("  rubund-style gemspec evaluator — embed-API hardening field test");
     println!("================================================================\n");
 
-    let gem_root = build_fake_gem();
+    let gem_root = alloc_gem_root();
+    write_fixture(&gem_root.path);
     let root_str = gem_root.path.to_string_lossy().into_owned();
     println!("gem root: {root_str}");
     println!("  ├─ fakegem.gemspec");
@@ -311,8 +315,17 @@ fn main() {
     // `std::panic::set_hook(Box::new(|_| {}))` for the duration
     // of the eval call (and restore the previous hook after).
     // Out of scope for this demo; the contract is correct.
+    //
+    // Note on config: Phase 3 uses `Runtime::new()` (secure-by-
+    // default), NOT `make_rt`. The panic→Trap contract is a
+    // baseline Runtime feature (PR #279), independent of any
+    // sandbox config — using the rubund-shape config here would
+    // mask a regression that let a DIFFERENT panic site fire
+    // (e.g. require-walk panic, if Phase 3 ever ate a require)
+    // because the assertion still matches on payload string.
+    // Minimal config makes the assertion mean what it says.
     {
-        let mut rt = make_rt(&gem_root.path);
+        let mut rt = Runtime::new();
         rt.register_fn("explode", |_| {
             panic!("simulated host-fn bug");
         });
