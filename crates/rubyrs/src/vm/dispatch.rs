@@ -8125,10 +8125,11 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
 }
 
 /// Outcome of a `define_method` / `define_singleton_method`
-/// 2-arg form install request. Pulls the (proto_idx, closure,
-/// visibility) shape out of a Proc / Method / UnboundMethod
-/// argument so the install path stays the same as the
-/// block-form (`def_method_install_block_payload`).
+/// 2-arg form install request. Pulls the body description out
+/// of a Proc / Method / UnboundMethod argument so the install
+/// path stays the same as the block-form. Visibility is
+/// applied later by the caller (built into the Method by
+/// `build_method_from_value`), not stored on this enum.
 enum MethodSource {
     Proc {
         proto_idx: usize,
