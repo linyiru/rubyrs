@@ -1797,6 +1797,22 @@ impl Vm {
                         None => return Ok(Some(Value::Range(id))),
                     }
                 } else { ei };
+                // Early-return when range_len < n — no windows
+                // can be yielded and walking the full range
+                // would buffer up to range_len ints for nothing
+                // (mirrors Array#each_cons' `len >= n` guard).
+                // Overflow on `end_inc - bi + 1` (e.g.
+                // `i64::MIN..i64::MAX`) → range_len is larger
+                // than any i64, so don't early-return.
+                let too_short = if bi > end_inc {
+                    true
+                } else {
+                    match end_inc.checked_sub(bi).and_then(|d| d.checked_add(1)) {
+                        Some(len) => len < *n,
+                        None => false,
+                    }
+                };
+                if too_short { return Ok(Some(Value::Range(id))); }
                 let mut window: std::collections::VecDeque<Value> =
                     std::collections::VecDeque::with_capacity(n_usz.min(64));
                 let mut i = bi;

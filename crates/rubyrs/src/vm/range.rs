@@ -444,6 +444,25 @@ impl Vm {
                                 }
                             }
                         } else { ei };
+                        // Early-return empty when range_len < n
+                        // — no windows can be yielded; avoid the
+                        // O(range_len) scan + buffering. Overflow
+                        // on `end_inc - bi + 1` is treated as
+                        // "len is huge, don't early-return".
+                        let too_short = if bi > end_inc {
+                            true
+                        } else {
+                            match end_inc.checked_sub(bi).and_then(|d| d.checked_add(1)) {
+                                Some(len) => len < *n,
+                                None => false,
+                            }
+                        };
+                        if too_short {
+                            self.maybe_gc();
+                            self.check_alloc()?;
+                            let oid = self.heap.alloc(HeapObj::Array(Vec::new()));
+                            return Ok(Some(Value::Array(oid)));
+                        }
                         let mut g = PinGuard::new(self);
                         let mut windows: Vec<Value> = Vec::new();
                         let mut buf: std::collections::VecDeque<Value> =
