@@ -1754,29 +1754,35 @@ mod tests {
             raise "4byte"  unless 0x1F600.chr(Encoding::UTF_8).bytes == [0xF0, 0x9F, 0x98, 0x80]
             raise "max"    unless 0x10FFFF.chr(Encoding::UTF_8).bytes.length == 4
 
-            # RangeError: out-of-range (negative / > U+10FFFF) and surrogates
-            def raises(klass)
-              begin; yield; false; rescue klass; true; end
+            # RangeError: assert the EXACT message so this always-on test
+            # verifies the two distinct CRuby shapes ("N out of char range"
+            # vs "invalid codepoint 0xN in <enc>") itself — not only via the
+            # ruby-dependent diff fixture. `err_msg` returns the message if
+            # the expected class is raised, nil otherwise (a wrong class
+            # propagates and fails the eval).
+            def err_msg(klass)
+              begin; yield; nil; rescue klass => e; e.message; end
             end
-            raise "neg"    unless raises(RangeError) { (-1).chr(Encoding::UTF_8) }
-            raise "overmax" unless raises(RangeError) { 0x110000.chr(Encoding::UTF_8) }
-            raise "sur_lo" unless raises(RangeError) { 0xD800.chr(Encoding::UTF_8) }
-            raise "sur_hi" unless raises(RangeError) { 0xDFFF.chr(Encoding::UTF_8) }
+            raise "neg"     unless err_msg(RangeError) { (-1).chr(Encoding::UTF_8) } == "-1 out of char range"
+            raise "overmax" unless err_msg(RangeError) { 0x110000.chr(Encoding::UTF_8) } == "1114112 out of char range"
+            raise "sur_lo"  unless err_msg(RangeError) { 0xD800.chr(Encoding::UTF_8) } == "invalid codepoint 0xD800 in UTF-8"
+            raise "sur_hi"  unless err_msg(RangeError) { 0xDFFF.chr(Encoding::UTF_8) } == "invalid codepoint 0xDFFF in UTF-8"
 
             # US-ASCII: 0..0x7F -> the byte; 0x80..0xFF -> invalid codepoint;
             # > 0xFF -> out of char range.
             raise "usascii_ok"  unless 0x41.chr(Encoding::US_ASCII).bytes == [0x41]
-            raise "usascii_inv" unless raises(RangeError) { 0xE9.chr(Encoding::US_ASCII) }
-            raise "usascii_oor" unless raises(RangeError) { 256.chr(Encoding::US_ASCII) }
+            raise "usascii_inv" unless err_msg(RangeError) { 0xE9.chr(Encoding::US_ASCII) } == "invalid codepoint 0xE9 in US-ASCII"
+            raise "usascii_oor" unless err_msg(RangeError) { 256.chr(Encoding::US_ASCII) } == "256 out of char range"
 
             # ASCII-8BIT: 0..0xFF -> a single raw byte (binary-safe, incl.
             # the non-UTF-8 0x80..0xFF range); > 0xFF -> out of char range.
             raise "binary_lo"  unless 0x41.chr(Encoding::ASCII_8BIT).bytes == [0x41]
             raise "binary_hi"  unless 0xE9.chr(Encoding::ASCII_8BIT).bytes == [0xE9]
-            raise "binary_oor" unless raises(RangeError) { 256.chr(Encoding::ASCII_8BIT) }
+            raise "binary_oor" unless err_msg(RangeError) { 256.chr(Encoding::ASCII_8BIT) } == "256 out of char range"
 
-            # non-Encoding argument falls through to TypeError (NOT RangeError)
-            raise "type"   unless raises(TypeError) { 0x41.chr(123) }
+            # non-Encoding argument falls through to TypeError (NOT RangeError);
+            # a non-nil message confirms a TypeError (not a RangeError) was raised.
+            raise "type" unless err_msg(TypeError) { 0x41.chr(123) }
             "#,
             "<test:integer_chr_encoding>",
         )
