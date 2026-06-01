@@ -137,6 +137,7 @@ impl Vm {
     ///   - Integer × Rational     → Rational
     ///   - Rational × Float       → Float (Float dominates)
     ///   - Float × Rational       → Float
+    ///
     /// Phase C.4 widens Integer-side to BigInt num/den.
     pub(crate) fn try_rational_binop(
         &mut self,
@@ -202,31 +203,36 @@ impl Vm {
             return Ok(None);
         }
         // Checked arithmetic on i64 — overflow → RangeError
-        // (Phase C.4 promotes to BigInt num/den).
-        let overflow = || -> Trap {
+        // (Phase C.4 promotes to BigInt num/den). `fn` (not a
+        // closure) so it satisfies `FnOnce` by-value on every
+        // call site without forcing the surrounding closures to
+        // be `Copy`/`Clone` — clippy 1.95's `redundant_closure`
+        // lint would otherwise demand passing the bare ident,
+        // which requires that property.
+        fn overflow() -> Trap {
             Trap::new(RubyError::RangeError {
                 msg: "Rational result overflows i64 (Phase C.4)".to_string(),
             })
-        };
+        }
         match kind {
             K::Add => {
                 // (an*bd + bn*ad) / (ad*bd)
-                let p1 = an.checked_mul(bd).ok_or_else(|| overflow())?;
-                let p2 = bn.checked_mul(ad).ok_or_else(|| overflow())?;
-                let num = p1.checked_add(p2).ok_or_else(|| overflow())?;
-                let den = ad.checked_mul(bd).ok_or_else(|| overflow())?;
+                let p1 = an.checked_mul(bd).ok_or_else(overflow)?;
+                let p2 = bn.checked_mul(ad).ok_or_else(overflow)?;
+                let num = p1.checked_add(p2).ok_or_else(overflow)?;
+                let den = ad.checked_mul(bd).ok_or_else(overflow)?;
                 Ok(Some(self.make_rational(num, den)?))
             }
             K::Sub => {
-                let p1 = an.checked_mul(bd).ok_or_else(|| overflow())?;
-                let p2 = bn.checked_mul(ad).ok_or_else(|| overflow())?;
-                let num = p1.checked_sub(p2).ok_or_else(|| overflow())?;
-                let den = ad.checked_mul(bd).ok_or_else(|| overflow())?;
+                let p1 = an.checked_mul(bd).ok_or_else(overflow)?;
+                let p2 = bn.checked_mul(ad).ok_or_else(overflow)?;
+                let num = p1.checked_sub(p2).ok_or_else(overflow)?;
+                let den = ad.checked_mul(bd).ok_or_else(overflow)?;
                 Ok(Some(self.make_rational(num, den)?))
             }
             K::Mul => {
-                let num = an.checked_mul(bn).ok_or_else(|| overflow())?;
-                let den = ad.checked_mul(bd).ok_or_else(|| overflow())?;
+                let num = an.checked_mul(bn).ok_or_else(overflow)?;
+                let den = ad.checked_mul(bd).ok_or_else(overflow)?;
                 Ok(Some(self.make_rational(num, den)?))
             }
             K::Div => {
@@ -236,8 +242,8 @@ impl Vm {
                     }));
                 }
                 // r / s = (an*bd) / (ad*bn)
-                let num = an.checked_mul(bd).ok_or_else(|| overflow())?;
-                let den = ad.checked_mul(bn).ok_or_else(|| overflow())?;
+                let num = an.checked_mul(bd).ok_or_else(overflow)?;
+                let den = ad.checked_mul(bn).ok_or_else(overflow)?;
                 Ok(Some(self.make_rational(num, den)?))
             }
             K::Mod => {
@@ -1671,7 +1677,7 @@ impl Vm {
             return Err(self.trap(RubyError::NoMethodError {
                 kind: crate::error::NoMethodErrorKind::Private,
                 method: name.to_string(),
-                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
+                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(recv)),
             }));
         }
         if vis == Visibility::Protected && !bypass_visibility {
@@ -1693,7 +1699,7 @@ impl Vm {
                 return Err(self.trap(RubyError::NoMethodError {
                     kind: crate::error::NoMethodErrorKind::Protected,
                     method: name.to_string(),
-                    recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
+                    recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(recv)),
                 }));
             }
         }
@@ -5847,7 +5853,7 @@ impl Vm {
         // less surprising than silent NoMethodError.
         if args.is_empty() && matches!(&*name, "tap" | "then" | "yield_self") {
             return Err(self.trap(crate::error::RubyError::LocalJumpError {
-                msg: format!("no block given (yield)"),
+                msg: "no block given (yield)".to_string(),
             }));
         }
         // `Object#frozen?` — universal, no args.

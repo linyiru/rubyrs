@@ -391,6 +391,11 @@ impl Clone for HostFnSlot {
 /// 3. Future: `at_exit` drain (ADR 0025 Phase 5b extension),
 ///    `ensure` block executor, any other "must-complete
 ///    cleanup" path.
+// `#[allow(dead_code)]` — the guard's only callers gate themselves
+// behind `cfg(unix)` (signal-hook is unix-only). The non-unix
+// builds (wasm32-wasip1, Windows) compile the type for API
+// uniformity but never instantiate it.
+#[allow(dead_code)]
 pub(crate) struct SuppressInterruptGuard<'a> {
     pub(crate) vm: &'a mut Vm,
 }
@@ -401,6 +406,7 @@ impl<'a> SuppressInterruptGuard<'a> {
     /// reads `suppress_interrupt == 0` and skips delivery
     /// when nonzero — so deliveries land at the next safe
     /// point AFTER this guard drops.
+    #[allow(dead_code)]
     pub(crate) fn enter(vm: &'a mut Vm) -> Self {
         vm.suppress_interrupt = vm.suppress_interrupt.saturating_add(1);
         Self { vm }
@@ -668,6 +674,12 @@ pub(crate) struct Vm {
     /// default); CLI binary fills this with
     /// `std::thread::sleep`. See `Config::sleep_for` for
     /// rationale + ADR 0017 Rule 1 closure pattern.
+    // clippy::type_complexity — the Fn signature is the
+    // contract the embed host implements (deadline + interrupt
+    // flag → elapsed Duration); extracting it to a `type` alias
+    // here would just hide the contract one level. The mirror
+    // `Config::sleep_for` field uses the same shape.
+    #[allow(clippy::type_complexity)]
     pub(crate) sleep_for: Option<std::sync::Arc<
         dyn Fn(Option<std::time::Duration>, &std::sync::atomic::AtomicBool) -> std::time::Duration
             + Send + Sync,
@@ -972,6 +984,7 @@ pub(crate) struct Vm {
     /// unconditionally. The Fiber.yield guard remains
     /// `_fiber`-gated; without `_fiber` the counter ticks but
     /// has no consumer.
+    #[allow(dead_code)]
     pub(crate) cext_depth: u32,
     /// P1e.1 (ADR 0023 v2 §"Risks" #2): cap on concurrently-live
     /// Fibers. Set from `Config::max_live_fibers`.

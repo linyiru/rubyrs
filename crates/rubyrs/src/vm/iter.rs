@@ -218,6 +218,7 @@ impl Vm {
     ///   - `any?` / `all?` / `none?` / `find` yield a SINGLE
     ///     `[k, v]` pair Array (Enumerable-inherited shape),
     ///     so `|pair|` blocks and `&:sym` to_proc work.
+    ///
     /// `find` returns the same pair Array it yielded.
     pub(crate) fn iter_hash_filter(&mut self, id: ObjId, mode: IterMode, block: ObjId) -> Result<Value, Trap> {
         let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();

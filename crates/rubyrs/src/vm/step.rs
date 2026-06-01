@@ -165,13 +165,18 @@ fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
 /// safe-point treats `cext_depth == 0` as the constant `true`.
 /// Production cext entry/exit paths will gate this counter
 /// when the cext bridge integration lands (separate work item).
+// `#[allow(dead_code)]` on both arms — only the SIGINT safe-point
+// check (cfg(unix)) calls this helper. Non-unix builds compile both
+// arms for the cfg-fan-out but never reach the call site.
 #[cfg(feature = "_fiber")]
 #[inline]
+#[allow(dead_code)]
 fn cext_depth_zero(vm: &crate::vm::Vm) -> bool {
     vm.cext_depth == 0
 }
 #[cfg(not(feature = "_fiber"))]
 #[inline]
+#[allow(dead_code)]
 fn cext_depth_zero(_vm: &crate::vm::Vm) -> bool {
     true
 }
@@ -328,12 +333,13 @@ impl Vm {
             // continue_method_break now walks intermediate
             // frames + ensures until landing on the yielding
             // method. If the walk drains the frame stack, exit.
-            if let Some(mb) = self.pending_method_break.as_ref() {
-                if !mb.suspended && self.frames.len() - 1 >= mb.target_frame_idx {
-                    self.continue_method_break()?;
-                    if self.frames.is_empty() { return Ok(()); }
-                    continue;
-                }
+            if let Some(mb) = self.pending_method_break.as_ref()
+                && !mb.suspended
+                && self.frames.len() > mb.target_frame_idx
+            {
+                self.continue_method_break()?;
+                if self.frames.is_empty() { return Ok(()); }
+                continue;
             }
             // ADR 0024 Phase A.8: break-after-Fiber-resume
             // recovery (see dispatch_until_inner for full
@@ -559,14 +565,14 @@ impl Vm {
             // If target < until_depth, the target sits in a
             // frame our outer driver owns — bail and let the
             // outer dispatch level fire continue_method_break.
-            if let Some(mb) = self.pending_method_break.as_ref() {
-                if !mb.suspended && mb.target_frame_idx >= until_depth
-                    && self.frames.len() - 1 >= mb.target_frame_idx
-                {
-                    self.continue_method_break()?;
-                    if self.frames.len() <= until_depth { return Ok(()); }
-                    continue;
-                }
+            if let Some(mb) = self.pending_method_break.as_ref()
+                && !mb.suspended
+                && mb.target_frame_idx >= until_depth
+                && self.frames.len() > mb.target_frame_idx
+            {
+                self.continue_method_break()?;
+                if self.frames.len() <= until_depth { return Ok(()); }
+                continue;
             }
             // ADR 0024 Phase A.8: break-after-Fiber-resume
             // recovery. The original Op::Yield wrapper that
@@ -2600,10 +2606,10 @@ impl Vm {
                 // iterating, push spurious results, and possibly
                 // re-raise on the next iter — corrupting the
                 // rescue's stack snapshot.
-                if let Some(&d) = self.dispatch_until_depths.last() {
-                    if self.frames.len() <= d {
-                        return Err(self.trap(RubyError::AlreadyCaught));
-                    }
+                if let Some(&d) = self.dispatch_until_depths.last()
+                    && self.frames.len() <= d
+                {
+                    return Err(self.trap(RubyError::AlreadyCaught));
                 }
             }
             Op::Break => {
@@ -2687,10 +2693,10 @@ impl Vm {
                     // Same boundary check as Op::Raise — if
                     // unwind crossed out of our dispatch_until's
                     // scope, signal the iter driver above us.
-                    if let Some(&d) = self.dispatch_until_depths.last() {
-                        if self.frames.len() <= d {
-                            return Err(self.trap(RubyError::AlreadyCaught));
-                        }
+                    if let Some(&d) = self.dispatch_until_depths.last()
+                        && self.frames.len() <= d
+                    {
+                        return Err(self.trap(RubyError::AlreadyCaught));
                     }
                 }
             }

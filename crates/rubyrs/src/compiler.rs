@@ -696,6 +696,13 @@ fn compile_begin_arm(
 /// and the special forms (`__seq__`, `raise`, BinOp fusion);
 /// falls through to a generic `emit_method_call` when none
 /// matched.
+///
+/// `clippy::too_many_arguments` — the function plumbs the
+/// compile-context (`ProtoBuilder`, `protos`, `interner`, `cc`)
+/// alongside the call's own four bits of AST. Grouping them into
+/// a struct just to please the lint would hide the call shape
+/// and isn't worth the indirection.
+#[allow(clippy::too_many_arguments)]
 fn compile_call_arm(
     b: &mut ProtoBuilder,
     receiver: &Option<Box<SExpr>>,

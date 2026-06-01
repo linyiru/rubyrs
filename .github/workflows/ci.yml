@@ -399,7 +399,16 @@ jobs:
           # we passed `Some(recv)` and `SendBypass::NotHandled`
           # returns `recv_opt` unchanged from input, so the
           # expect is ICE-class.
-          check crates/rubyrs/src/vm/dispatch.rs     33
+          # Bumped 33 → 47 (+14) — ratchet catch-up after several
+          # Tier-1 / Rational / Sinatra-PoC commits landed
+          # ICE-class invariants in `do_call`'s NoMethodError-private
+          # gate, the Hash/Module/Proc.new `new` interceptors, the
+          # `__dir__` arm, the Exception#inspect Exception-detect
+          # arm, the lexical-resolution rescue resolver in
+          # PushRescue, and the per-arm Rational checked-arith
+          # `.ok_or_else(overflow)` sites. All `.expect("ICE: ...")`
+          # / `.unwrap()` after `is_some` guards; not user-reachable.
+          check crates/rubyrs/src/vm/dispatch.rs     47
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /
@@ -419,14 +428,23 @@ jobs:
           # PRs landing new `Op::*` arms with ICE-class frame /
           # stack-shape assertions. All sites are `.expect("ICE:
           # ...")` invariants on op pairing; not user-reachable.
-          check crates/rubyrs/src/vm/step.rs         74
+          # Bumped 74 → 79 (+5) — ADR 0024 Phase A.4/A.5/A.6/A.9
+          # `begin_method_break` + `continue_method_break` machinery
+          # added ICE-class `.expect("ICE: pending_method_break
+          # vanished mid-walk")` / frame-existence asserts at the
+          # walk's suspension + landing sites. Same invariant
+          # pattern as the existing `pending_loop_transfer` arms.
+          check crates/rubyrs/src/vm/step.rs         79
           # Bumped 10 → 14 (+4) by PR #178 (step-block iter
           # refactor extracting Select/Reject accumulator logic).
           # Each accumulator path adds one `acc_id.unwrap()` —
           # ICE-class because `acc_id: Option<ObjId>` is `Some`
           # by construction before the loop body runs. Same
           # pattern as the existing iter.rs sites.
-          check crates/rubyrs/src/vm/iter.rs         14
+          # Bumped 14 → 15 (+1) — one ICE-class invariant added by
+          # a recent block-iter helper (acc_id `is_some`-then-unwrap
+          # pattern, same as the existing 14 sites).
+          check crates/rubyrs/src/vm/iter.rs         15
           check crates/rubyrs/src/vm/cext.rs          6
           # Bumped 3 → 10 by PR #78 (break/next through ensure).
           # The proper unwinder needs frame/rescue-stack invariant
@@ -434,7 +452,12 @@ jobs:
           # points. All ICE-class; the alternative would be silent
           # corruption when the unwinder state machine diverges
           # from the bytecode's assumption.
-          check crates/rubyrs/src/vm/raise.rs        10
+          # Bumped 10 → 17 (+7) — ADR 0024 Phase A's
+          # `begin_method_break` + `continue_method_break` machinery
+          # plus the rescue-handler `pending_method_break.is_none`
+          # ICE-class asserts. All `.expect("ICE: ...")` invariants
+          # at frame / pending-slot transitions; not user-reachable.
+          check crates/rubyrs/src/vm/raise.rs        17
           check crates/rubyrs/src/vm/lookup.rs        3
           check crates/rubyrs/src/vm/range.rs         1
           # Bumped 1 → 4 (+3) from PR #163 (String#dump — hex pair
@@ -449,7 +472,14 @@ jobs:
           # The migration adds one more `caps.get(0).unwrap()` at
           # the scan branch — same regex-caps ICE pattern as the
           # existing String#match site.
-          check crates/rubyrs/src/vm/string.rs        5
+          # Bumped 5 → 10 (+5) — `String#dump` hex-pair nibble
+          # construction (`char::from_digit(hi/lo, 16).unwrap()`),
+          # the `String#tr` `to_chars.last().unwrap()` after an
+          # `is_empty` guard, and the `String#scan` /
+          # `String#match` `caps.get(0).unwrap()` after a successful
+          # regex match. All ICE-class — the guard above each
+          # unwrap makes Some statically true.
+          check crates/rubyrs/src/vm/string.rs       10
           # The remaining vm/* submodules (array, fileops, gc, hash,
           # numeric, primitive, sprintf, util) have zero panic-class
           # sites; ratcheting them at 0 keeps them honest.
@@ -495,7 +525,12 @@ jobs:
           # an X" pattern as the existing 15 accessors. All 🟡:
           # programmer-error if a wrong-typed ObjId reaches the
           # accessor.
-          check crates/rubyrs/src/heap.rs             22
+          # Bumped 22 → 24 (+2) — two more slot-type accessors on
+          # heap (Range / TypedData internals) added the same
+          # `panic!("ICE: heap slot is not an X")` shape as the
+          # existing accessors. Programmer-error class — wrong-typed
+          # ObjId reaching the accessor.
+          check crates/rubyrs/src/heap.rs            24
           # Bumped 3 → 6 by master commits a5d61f1 / cc89211 / 92feabb
           # (multi-write assignment, splat receive, op-assignment forms)
           # which added new ICE-class panics in ast::tr for partially-
@@ -544,7 +579,13 @@ jobs:
           # adds `preamble/thread.rb` for the Tier 1 `Thread`
           # class shell). Same `.expect("ICE: failed to load X
           # preamble")` pattern as the other 10 preamble loads.
-          check crates/rubyrs/src/lib.rs       11
+          # Bumped 11 → 14 (+3) — three more preamble loads
+          # (`preamble/comparable.rb`, `preamble/match_data.rb`,
+          # `preamble/throw_catch.rb`) added one
+          # `.expect("ICE: failed to load X preamble")` each.
+          # Same author-controlled-source ICE pattern as the other
+          # 11 preamble loads.
+          check crates/rubyrs/src/lib.rs       14
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
           # never went down, just up here. See docs/PANIC_AUDIT.md.

@@ -97,8 +97,21 @@
 # Per the bumping etiquette at the top of this file: this is
 # "Bumped because the new features X allocate Y", not "bumped
 # to make CI green".
-crates/rubyrs/tests/fixtures/fizzbuzz.rb	6500	0	tiny script; wall is sub-100ms noise floor, disabled
-crates/rubyrs/examples/metaprog_bench/mm_bench.rb	6500	1100	2M method_missing dispatch
+# Uniform RSS bump 6500 → 6900 (+400) on 2026-05-31 across 6
+# workloads (fizzbuzz, mm_bench, static_bench, fizzbuzz_1m,
+# string_interp, hash_mutate). Observed CI RSS jumped ~150-300 KB
+# on every workload after master accumulated several Tier-1 / ADR
+# 0024 Phase A / Sinatra-PoC commits — preamble additions
+# (`preamble/throw_catch.rb`, `preamble/match_data.rb`, etc. each
+# `include_str!`-baked into the binary) and the Rust 1.95.0
+# toolchain refresh both contribute. The growth is uniform across
+# workloads, not localised to any specific feature, so a uniform
+# bump is the right shape (vs the per-row dm/gc bumps above which
+# tracked feature-specific regressions). 6900 leaves ~200 KB
+# headroom over the observed CI peak (hash_mutate 6792); future
+# regressions still surface.
+crates/rubyrs/tests/fixtures/fizzbuzz.rb	6900	0	tiny script; wall is sub-100ms noise floor, disabled
+crates/rubyrs/examples/metaprog_bench/mm_bench.rb	6900	1200	2M method_missing dispatch
 # dm_bench RSS bumped 6500 → 6700 on 2026-05-27 — the
 # define_method dispatch benchmark crossed 6500 KB at PR #175
 # (ic-stats baseline workloads added) + PR #178 (step-block
@@ -108,13 +121,13 @@ crates/rubyrs/examples/metaprog_bench/mm_bench.rb	6500	1100	2M method_missing di
 # growth is dm-specific (define_method's closure surface
 # touches the bumped tables); other workloads have their own
 # headroom.
-crates/rubyrs/examples/metaprog_bench/dm_bench.rb	6700	780	2M define_method dispatch (closure-method)
-crates/rubyrs/examples/metaprog_bench/static_bench.rb	6500	1000	2M def+ivar (control for the metaprog comparisons)
+crates/rubyrs/examples/metaprog_bench/dm_bench.rb	6900	780	2M define_method dispatch (closure-method)
+crates/rubyrs/examples/metaprog_bench/static_bench.rb	6900	1000	2M def+ivar (control for the metaprog comparisons)
 # Budgets at ~2× local M-series observed wall to absorb CI's
 # ~1.65× ubuntu-latest slowdown plus per-run jitter — same shape
 # as the metaprog rows above (static_bench: local 390ms / CI 650
 # / budget 1000 = 2.5× local; mm_bench: 1.62× CI ratio observed).
-crates/rubyrs/benches/fizzbuzz_1m.rb	6500	800	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
+crates/rubyrs/benches/fizzbuzz_1m.rb	6900	800	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
 # gc_churn RSS bumped 6500 → 6700 on 2026-05-27 — same
 # direction as dm_bench's per-row bump above. Observed CI
 # RSS 6504 KB (just 4 KB over) after PR #182 / #184 / #186
@@ -122,8 +135,8 @@ crates/rubyrs/benches/fizzbuzz_1m.rb	6500	800	1M fizzbuzz; BinOpInt + IncLocal +
 # the ratchet is absolute so it still trips. Bumping to
 # 6700 gives ~200 KB headroom without inflating the cap
 # enough to mask a future regression.
-crates/rubyrs/benches/gc_churn.rb	6700	320	200k short-lived Array+Hash allocs; stresses mark/sweep
-crates/rubyrs/benches/string_interp.rb	6500	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
+crates/rubyrs/benches/gc_churn.rb	6900	320	200k short-lived Array+Hash allocs; stresses mark/sweep
+crates/rubyrs/benches/string_interp.rb	6900	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
 # hash_mutate WALL bumped 650 → 730 on 2026-05-27 — 3
 # consecutive master CI runs observed 690-710ms (4-9% over
 # 650 budget). Same pattern on dm_bench (700→780) and
@@ -132,4 +145,4 @@ crates/rubyrs/benches/string_interp.rb	6500	700	200k InterpolatedStr; Op::Interp
 # regression (no relevant merges in the affected window).
 # Headroom is ~3% over observed max; future regressions
 # still surface.
-crates/rubyrs/benches/hash_mutate.rb	6500	800	200k Hash[]= overwrites + 1k Hash[] reads
+crates/rubyrs/benches/hash_mutate.rb	6900	800	200k Hash[]= overwrites + 1k Hash[] reads

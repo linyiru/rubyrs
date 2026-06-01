@@ -124,7 +124,7 @@ pub(crate) fn is_shared_flag(flag: &Arc<AtomicBool>) -> bool {
 /// CRuby's `Signal.trap(n, ...)` rejects integers above this
 /// at parse time rather than letting signal-hook fail at
 /// install. Linux's signal table reserves 1..=64 (32 standard
-/// + 32 real-time); macOS / BSD top out at 31. Build-time
+/// plus 32 real-time); macOS / BSD top out at 31. Build-time
 /// constant so the range check inlines into a single
 /// comparison.
 #[cfg(target_os = "linux")]
@@ -192,7 +192,13 @@ fn parse_str(s: &str) -> Option<i32> {
 
 // ---- Non-Unix fallback (Windows, WASI, etc.) ----
 
+// On non-unix targets (wasm32-wasip1, Windows) the function is the
+// fallback definition the unix `is_shared_flag` callers would
+// otherwise be missing. Some build profiles (wasm CI smoke without
+// `_fiber`) end up never importing it, so `-D warnings` flags it as
+// dead. Keep the symbol present for API uniformity across platforms.
 #[cfg(not(unix))]
+#[allow(dead_code)]
 pub(crate) fn is_shared_flag(_flag: &Arc<AtomicBool>) -> bool {
     false
 }

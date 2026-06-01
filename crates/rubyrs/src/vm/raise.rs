@@ -489,6 +489,7 @@ impl Vm {
 /// Returns None when the Interrupt class is missing (preamble
 /// not loaded or a host disabled Phase 0). The caller falls back
 /// to a host-level `RubyError::Interrupt` Trap in that case.
+#[allow(dead_code)]
 pub(crate) fn build_interrupt_exception(vm: &mut crate::vm::Vm) -> Option<crate::value::Value> {
     use crate::heap::HeapObj;
     use crate::value::{Instance, RStr, Value};

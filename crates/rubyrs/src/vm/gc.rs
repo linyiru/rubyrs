@@ -23,7 +23,15 @@ use crate::value::Value;
 /// (script-side `rescue IOError` catches FS failures), load ops
 /// (require/require_relative/cext_require) want `LoadError`
 /// (`rescue LoadError` catches "feature unavailable").
+// `#[allow(dead_code)]` on `Load` — the variant exists for the
+// `require`/`require_relative`/`cext_require` callers gated behind
+// `cfg(feature = "stdlib")` (require family) / `cfg(feature =
+// "cext")` (cext_require). Non-default-features builds compile the
+// enum but never construct `Load`. Variant kept distinct (not
+// merged into `Io`) so the LoadError mapping stays explicit when
+// the require family is built in.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum PathTrapKind {
     Io,
     Load,
@@ -160,6 +168,7 @@ impl Vm {
     /// but the scope-violation trap class is `LoadError` so
     /// `rescue LoadError` catches it like CRuby's
     /// require-failure exception.
+    #[allow(dead_code)]
     pub(crate) fn check_load_allowed(
         &self,
         op: &str,
