@@ -118,3 +118,59 @@ puts JSON.load('{"a":1}').inspect
 # so a literal Hash is the cross-runtime compatible call style.
 puts "--- symbolize_names ---"
 puts JSON.parse('{"a":1,"b":{"c":2}}', { symbolize_names: true }).inspect
+
+# ---- JSON::State ----
+# State is the formatting-options bag CRuby uses internally;
+# we expose it as forward-compat for callers that build a
+# reusable State and pass it to generate(). Cross-runtime
+# parity over the accessors + the generate(obj, state) path.
+puts "--- JSON::State ---"
+s = JSON::State.new(indent: "    ", space: "  ", allow_nan: true)
+puts s.indent.inspect
+puts s.space.inspect
+puts s.allow_nan?
+puts JSON.generate({"a" => 1}, s)
+
+# ---- max_nesting ----
+# Default-deep payload (>100 levels) rejected; explicit
+# max_nesting opt enforced; class is JSON::NestingError, base
+# is JSON::JSONError. Tests both parse and generate paths.
+puts "--- max_nesting ---"
+begin
+  JSON.parse("[" * 200 + "]" * 200)
+  puts "default-deep parse: no error"
+rescue JSON::NestingError => e
+  puts "default-deep parse: NestingError"
+end
+begin
+  JSON.generate([[[[1]]]], { max_nesting: 2 })
+  puts "deep gen: no error"
+rescue JSON::NestingError => e
+  puts "deep gen: NestingError"
+end
+begin
+  JSON.parse("[[[[1]]]]", { max_nesting: 2 })
+  puts "deep parse: no error"
+rescue JSON::NestingError => e
+  puts "deep parse: NestingError"
+end
+
+# ---- Exception base class ----
+# `JSON::JSONError` is the shared parent of Parser / Nesting /
+# Generator errors — user code can rescue the base class instead
+# of enumerating each subclass. Generator path tested via the
+# allow_nan=false Float-NaN reject (a fall-through to `to_s` is
+# CRuby's Object-arg behaviour, which is class-`h` divergence
+# from our stricter raise; the fixture stays on the bit-exact
+# subset).
+puts "--- JSONError base ---"
+begin
+  JSON.parse("xxx")
+rescue JSON::JSONError => e
+  puts "JSONError caught: #{e.class}"
+end
+begin
+  JSON.generate(0.0 / 0.0)
+rescue JSON::JSONError => e
+  puts "JSONError caught: #{e.class}"
+end

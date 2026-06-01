@@ -47,15 +47,72 @@
 # implementations; that's an accepted Rule 6 deviation.
 
 module JSON
-  class ParserError < StandardError; end
-  class GeneratorError < StandardError; end
+  # Exception hierarchy matches CRuby's `json` gem so user
+  # code's `rescue JSON::JSONError` / `rescue JSON::ParserError`
+  # / `rescue JSON::NestingError` clauses port unchanged.
+  class JSONError < StandardError; end
+  class ParserError < JSONError; end
+  class GeneratorError < JSONError; end
+  class NestingError < JSONError; end
+
+  # Default depth limit for parse + generate. Matches CRuby's
+  # `JSON.generate`/`JSON.parse` default (100). Pass `false` or
+  # `0` via `max_nesting:` to disable.
+  MAX_NESTING_DEFAULT = 100
+
+  # JSON::State — formatting + safety options bag. CRuby exposes
+  # this as `JSON::Ext::Generator::State` (the C-ext flavour),
+  # aliased here as the documented `JSON::State` constant.
+  # User code that constructs / inspects a State instance to
+  # configure `generate(obj, state)` ports unchanged.
+  #
+  # Init accepts a Hash (positional) so a trailing
+  # `JSON::State.new(indent: "  ", max_nesting: 5)` caller
+  # works the same as `JSON::State.new({indent: "  ", max_nesting: 5})`
+  # — rubyrs + CRuby both coerce the trailing key/value pairs
+  # into the positional Hash slot.
+  class State
+    attr_reader :indent, :space, :space_before, :object_nl, :array_nl, :max_nesting
+
+    def initialize(opts = nil)
+      opts = {} if opts.nil?
+      @indent       = opts[:indent]       || ""
+      @space        = opts[:space]        || ""
+      @space_before = opts[:space_before] || ""
+      @object_nl    = opts[:object_nl]    || ""
+      @array_nl     = opts[:array_nl]     || ""
+      @allow_nan    = opts[:allow_nan]    ? true : false
+      # CRuby's State treats `max_nesting: 0` as "unlimited".
+      # `nil` falls back to the default; `false` is the
+      # documented opt-out marker (we encode it as 0 too).
+      if opts.has_key?(:max_nesting)
+        v = opts[:max_nesting]
+        @max_nesting = (v == false || v.nil?) ? 0 : v
+      else
+        @max_nesting = MAX_NESTING_DEFAULT
+      end
+    end
+
+    def allow_nan?
+      @allow_nan
+    end
+
+    # Predicate accessor matching CRuby's; lets fixture / user
+    # code `state.indent? ? ... : ...` if they need to detect a
+    # formatting State without inspecting bytes.
+    def indent?
+      !@indent.empty?
+    end
+  end
 
   # ---- Parse ----
 
   def self.parse(str, opts = nil)
     raise ParserError, "input must be a String" unless str.is_a?(String)
     symbolize = opts && opts[:symbolize_names] ? true : false
-    p = Parser.new(str, symbolize)
+    max_nest = opts && opts.has_key?(:max_nesting) ? opts[:max_nesting] : MAX_NESTING_DEFAULT
+    max_nest = 0 if max_nest == false || max_nest.nil?
+    p = Parser.new(str, symbolize, max_nest)
     p.parse_top
   end
 
@@ -70,11 +127,24 @@ module JSON
   end
 
   class Parser
-    def initialize(str, symbolize_names = false)
+    def initialize(str, symbolize_names = false, max_nesting = MAX_NESTING_DEFAULT)
       @chars = str.chars
       @len = @chars.length
       @pos = 0
       @symbolize_names = symbolize_names
+      @max_nesting = max_nesting
+      @depth = 0
+    end
+
+    def enter_nest
+      @depth += 1
+      if @max_nesting > 0 && @depth > @max_nesting
+        raise NestingError, "nesting of #{@depth} is too deep"
+      end
+    end
+
+    def leave_nest
+      @depth -= 1
     end
 
     def parse_top
@@ -119,11 +189,13 @@ module JSON
     end
 
     def parse_object
+      enter_nest
       @pos += 1
       obj = {}
       skip_ws
       if peek == "}"
         @pos += 1
+        leave_nest
         return obj
       end
       loop do
@@ -142,6 +214,7 @@ module JSON
           @pos += 1
         elsif c == "}"
           @pos += 1
+          leave_nest
           return obj
         else
           raise ParserError, "expected ',' or '}' at position #{@pos}"
@@ -150,11 +223,13 @@ module JSON
     end
 
     def parse_array
+      enter_nest
       @pos += 1
       arr = []
       skip_ws
       if peek == "]"
         @pos += 1
+        leave_nest
         return arr
       end
       loop do
@@ -166,6 +241,7 @@ module JSON
           @pos += 1
         elsif c == "]"
           @pos += 1
+          leave_nest
           return arr
         else
           raise ParserError, "expected ',' or ']' at position #{@pos}"
@@ -278,15 +354,15 @@ module JSON
 
   # ---- Generate ----
 
-  # `opts` is a positional Hash (NOT a kwargs splat) to dodge
-  # the Ruby-3 trailing-hash auto-coerce: a caller writing
-  # `JSON.generate({"a" => 1})` would otherwise see its sole
-  # Hash arg eaten as kwargs by rubyrs's call-site lowering,
-  # leaving `obj` unbound. The trade is one extra `opts[:key]`
-  # lookup per call vs. the deserialisation grenade.
+  # `opts` is a positional Hash OR a JSON::State (NOT a kwargs
+  # splat) to dodge the Ruby-3 trailing-hash auto-coerce: a
+  # caller writing `JSON.generate({"a" => 1})` would otherwise
+  # see its sole Hash arg eaten as kwargs by rubyrs's call-site
+  # lowering, leaving `obj` unbound. The trade is one extra
+  # `opts[:key]` lookup per call vs. the deserialisation grenade.
   def self.generate(obj, opts = nil)
-    allow_nan = opts && opts[:allow_nan]
-    generate_with(obj, "", "", "", "", allow_nan ? true : false)
+    state = state_from_opts(opts, "", "", "", "", false, MAX_NESTING_DEFAULT)
+    generate_with(obj, state.indent, state.space, state.object_nl, state.array_nl, state.allow_nan?, state.max_nesting, 0)
   end
 
   # `JSON.dump` is essentially `JSON.generate` with permissive
@@ -302,9 +378,38 @@ module JSON
   # space before the colon, one after), `,\n` between siblings,
   # `\n` after the opening brace/bracket, closing brace/bracket
   # back at the parent's indent level. Empty containers stay
-  # compact (`[]` / `{}`).
-  def self.pretty_generate(obj)
-    generate_with(obj, "  ", " ", "\n", "\n", false)
+  # compact (`[]` / `{}`). User can override via opts/State.
+  def self.pretty_generate(obj, opts = nil)
+    state = state_from_opts(opts, "  ", " ", "\n", "\n", false, MAX_NESTING_DEFAULT)
+    generate_with(obj, state.indent, state.space, state.object_nl, state.array_nl, state.allow_nan?, state.max_nesting, 0)
+  end
+
+  # Normalise `opts` (Hash | JSON::State | nil) into a State
+  # whose unset fields fall back to the per-method defaults
+  # passed by the caller. Centralises the "Hash or State or
+  # nothing" branching so `generate` / `pretty_generate` share
+  # one path.
+  def self.state_from_opts(opts, def_indent, def_space, def_obj_nl, def_arr_nl, def_allow_nan, def_max_nest)
+    return State.new({
+      indent: def_indent,
+      space: def_space,
+      object_nl: def_obj_nl,
+      array_nl: def_arr_nl,
+      allow_nan: def_allow_nan,
+      max_nesting: def_max_nest,
+    }) if opts.nil?
+    return opts if opts.is_a?(State)
+    # Hash path: caller-provided keys override the per-method
+    # defaults; missing keys keep the defaults.
+    merged = {
+      indent: opts.has_key?(:indent) ? opts[:indent] : def_indent,
+      space: opts.has_key?(:space) ? opts[:space] : def_space,
+      object_nl: opts.has_key?(:object_nl) ? opts[:object_nl] : def_obj_nl,
+      array_nl: opts.has_key?(:array_nl) ? opts[:array_nl] : def_arr_nl,
+      allow_nan: opts.has_key?(:allow_nan) ? opts[:allow_nan] : def_allow_nan,
+      max_nesting: opts.has_key?(:max_nesting) ? opts[:max_nesting] : def_max_nest,
+    }
+    State.new(merged)
   end
 
   # Core recursive serializer. `indent` is the per-level indent
@@ -313,7 +418,7 @@ module JSON
   # inside object / array bodies. Compact mode passes empty
   # strings throughout, producing the exact byte output CRuby's
   # default `JSON.generate` emits.
-  def self.generate_with(obj, indent, space, obj_nl, arr_nl, allow_nan, depth = 0)
+  def self.generate_with(obj, indent, space, obj_nl, arr_nl, allow_nan, max_nest, depth)
     case obj
     when nil then "null"
     when true then "true"
@@ -335,13 +440,19 @@ module JSON
     when Symbol then escape_string(obj.to_s)
     when Array
       return "[]" if obj.empty?
+      if max_nest > 0 && depth + 1 > max_nest
+        raise NestingError, "nesting of #{depth + 1} is too deep"
+      end
       inner_indent = indent * (depth + 1)
       outer_indent = indent * depth
       parts = []
-      obj.each { |v| parts << inner_indent + generate_with(v, indent, space, obj_nl, arr_nl, allow_nan, depth + 1) }
+      obj.each { |v| parts << inner_indent + generate_with(v, indent, space, obj_nl, arr_nl, allow_nan, max_nest, depth + 1) }
       "[" + arr_nl + parts.join("," + arr_nl) + arr_nl + outer_indent + "]"
     when Hash
       return "{}" if obj.empty?
+      if max_nest > 0 && depth + 1 > max_nest
+        raise NestingError, "nesting of #{depth + 1} is too deep"
+      end
       inner_indent = indent * (depth + 1)
       outer_indent = indent * depth
       parts = []
@@ -350,7 +461,7 @@ module JSON
         # to_s before emitting (Symbol → its name; Integer →
         # its decimal repr). We mirror that here.
         key_s = k.is_a?(String) ? k : k.to_s
-        parts << inner_indent + escape_string(key_s) + ":" + space + generate_with(v, indent, space, obj_nl, arr_nl, allow_nan, depth + 1)
+        parts << inner_indent + escape_string(key_s) + ":" + space + generate_with(v, indent, space, obj_nl, arr_nl, allow_nan, max_nest, depth + 1)
       end
       "{" + obj_nl + parts.join("," + obj_nl) + obj_nl + outer_indent + "}"
     else
@@ -442,5 +553,82 @@ end
 class Hash
   def to_json(*)
     JSON.generate(self)
+  end
+end
+
+# `as_json` convention — ActiveSupport-shape Object→JSON-friendly-
+# value coercion. Vanilla CRuby `json` does NOT define this; rubyrs
+# exposes it as forward-compat so user code that pre-normalises via
+# `.as_json` (a common Rails-adjacent idiom) works the same on both
+# runtimes. Cross-runtime fixture deliberately avoids touching this
+# surface — it's a rubyrs-side affordance, not a parity claim.
+#
+# Per-class semantics match ActiveSupport's `to_json/as_json`
+# split: primitives return self; collections recurse; Symbols
+# stringify; Object#as_json falls through to to_s.
+
+class NilClass
+  def as_json(*)
+    nil
+  end
+end
+
+class TrueClass
+  def as_json(*)
+    true
+  end
+end
+
+class FalseClass
+  def as_json(*)
+    false
+  end
+end
+
+class Integer
+  def as_json(*)
+    self
+  end
+end
+
+class Float
+  def as_json(*)
+    self
+  end
+end
+
+class String
+  def as_json(*)
+    self
+  end
+end
+
+class Symbol
+  def as_json(*)
+    self.to_s
+  end
+end
+
+class Array
+  def as_json(*)
+    self.map { |v| v.as_json }
+  end
+end
+
+class Hash
+  def as_json(*)
+    out = {}
+    self.each { |k, v| out[k.is_a?(Symbol) ? k.to_s : k] = v.as_json }
+    out
+  end
+end
+
+class Object
+  # Default fallback: ActiveSupport's convention is `to_s`. The
+  # blessed-gem-menu ActiveSupport-lite (menu item 3) is allowed
+  # to override this with the full Rails-adjacent behaviour
+  # without breaking rubyrs's existing JSON surface.
+  def as_json(*)
+    self.to_s
   end
 end
