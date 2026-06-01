@@ -15,21 +15,24 @@ categories = ["parser-implementations", "command-line-utilities"]
 name = "rubund"
 path = "src/main.rs"
 
-# rubyrs is workspace-internal. The path-dep below is for the
-# bridge examples that evaluate real Gemfile DSL under the
-# embed-API hardening features (`Config::allow_filesystem_io`,
+# rubyrs is workspace-internal. The path+version dep below is
+# for the bridge examples that evaluate real Gemfile DSL under
+# the embed-API hardening features (`Config::allow_filesystem_io`,
 # `Config::allowed_paths`, `Config::load_paths`, panic→Trap
-# boundary; see rubyrs PRs #268 / #279 / #288 / #302). The dep
-# was previously lifted because `cargo publish` rejects
-# unresolved path deps and rubyrs isn't on crates.io yet;
-# restored as a dev-dependency so the bridge stays buildable
-# in-workspace. When rubyrs ships, switch this to the
-# `path = "..." + version = "..."` shape so
-# `cargo publish -p rubund` resolves the version-pinned form
-# against the registry (Cargo prefers the registry version at
-# publish time and the local path during workspace builds).
+# boundary; see rubyrs PRs #268 / #279 / #288 / #302).
+#
+# Why `path + version` (and not just `path`): Cargo rejects
+# `cargo publish` on a crate with a path-only dep. The
+# version is the registry pin that publishes will use;
+# workspace builds prefer the path (because the path is
+# present), so local development is unaffected. When rubyrs
+# ships on crates.io as 0.1.x, `cargo publish -p rubund`
+# becomes a no-code-change action; until then it fails with
+# "no matching package `rubyrs` found" which is the right
+# failure mode to surface (clearer than "path-only deps not
+# allowed").
 [dev-dependencies]
-rubyrs = { path = "../rubyrs" }
+rubyrs = { path = "../rubyrs", version = "0.1.0" }
 ureq.workspace = true
 tar.workspace = true
 flate2.workspace = true

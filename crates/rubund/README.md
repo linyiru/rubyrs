@@ -17,11 +17,14 @@ Two further proof-of-concept installers (`real_install`,
 first-class Cargo examples under
 [`examples/`](examples/) and run via
 `cargo run --release -p rubund --example real_install` /
-`--example manekineko_install -- <path/to/Gemfile>`. They depend
-on the workspace-internal `rubyrs` path-dep (lifted from
-`[dependencies]` so `cargo publish -p rubund` can complete
-once rubyrs ships on crates.io; see the comment on rubund's
-`Cargo.toml`).
+`--example manekineko_install -- <path/to/Gemfile>`. They use
+the workspace-internal `rubyrs` crate via a `path + version`
+dev-dep (path resolves during workspace builds, version pin
+takes over at publish time once rubyrs ships on crates.io —
+see the comment on rubund's `Cargo.toml`). Until rubyrs is
+published, `cargo publish -p rubund` fails with "no matching
+package `rubyrs` found"; everything else (local build, examples,
+tests) works unchanged.
 
 The library half is what to use today. The CLI half is what's
 under construction.
@@ -202,10 +205,11 @@ that interpreter — `rubund` is its first non-test embedder. Keeping
 both crates in the same workspace turns every breaking change in the
 embedding API into a same-day build failure.
 
-(For this first crates.io release the `rubyrs` dependency is
-temporarily lifted — `rubyrs` is not yet published — so the bridge
-that the CLI's `--demo` flag previously exercised is on hold. It
-returns once `rubyrs`, or its eventual successor name, ships.)
+The `rubyrs` dep is a `path + version` dev-dep (workspace path
+during local builds; registry version pin takes over at publish
+time). The bridge examples are runnable today via
+`cargo run --example`; only `cargo publish -p rubund` blocks
+until rubyrs is on crates.io.
 
 ---
 
