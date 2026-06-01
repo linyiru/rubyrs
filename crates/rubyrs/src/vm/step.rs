@@ -165,13 +165,18 @@ fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
 /// safe-point treats `cext_depth == 0` as the constant `true`.
 /// Production cext entry/exit paths will gate this counter
 /// when the cext bridge integration lands (separate work item).
+// `#[allow(dead_code)]` on both arms — only the SIGINT safe-point
+// check (cfg(unix)) calls this helper. Non-unix builds compile both
+// arms for the cfg-fan-out but never reach the call site.
 #[cfg(feature = "_fiber")]
 #[inline]
+#[allow(dead_code)]
 fn cext_depth_zero(vm: &crate::vm::Vm) -> bool {
     vm.cext_depth == 0
 }
 #[cfg(not(feature = "_fiber"))]
 #[inline]
+#[allow(dead_code)]
 fn cext_depth_zero(_vm: &crate::vm::Vm) -> bool {
     true
 }

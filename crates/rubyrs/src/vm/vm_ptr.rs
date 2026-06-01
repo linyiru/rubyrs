@@ -56,6 +56,12 @@ pub(crate) fn current_vm_ptr() -> *mut Vm {
 /// `with_caught_unwind` boundary) would leave a stale Vm pointer in
 /// `CURRENT_VM_PTR`; a subsequent host-fn call would then dereference
 /// it as a fresh `*mut Vm`, hitting use-after-free or worse.
+// `#[allow(dead_code)]` — both the guard and `with_vm_ptr_set` are
+// the cext bridge's save/restore primitive; the only callers live
+// behind `cfg(feature = "cext")`. Non-cext builds (wasm32-wasip1
+// `--no-default-features`, library embeds that opt out) compile
+// the symbols for API uniformity but never invoke them.
+#[allow(dead_code)]
 pub(crate) struct VmPtrGuard {
     prev: *mut Vm,
 }
@@ -71,6 +77,7 @@ impl Drop for VmPtrGuard {
 /// or panic unwinding — via [`VmPtrGuard`]. Save/restore lets nested
 /// cext calls (rb_funcallv → another host fn) work without the inner
 /// call clobbering the outer's pointer.
+#[allow(dead_code)]
 pub(crate) fn with_vm_ptr_set<R>(vm_ptr: *mut Vm, f: impl FnOnce() -> R) -> R {
     let prev = CURRENT_VM_PTR.with(|c| c.replace(vm_ptr));
     let _guard = VmPtrGuard { prev };

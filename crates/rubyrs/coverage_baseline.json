@@ -27,7 +27,7 @@
     "crates/rubyrs/src/ast.rs": 91,
     "crates/rubyrs/src/bytecode.rs": 100,
     "crates/rubyrs/src/compiler.rs": 98,
-    "crates/rubyrs/src/error.rs": 94,
+    "crates/rubyrs/src/error.rs": 91,
     "crates/rubyrs/src/heap.rs": 85,
     "crates/rubyrs/src/intern.rs": 100,
     "crates/rubyrs/src/lib.rs": 96,

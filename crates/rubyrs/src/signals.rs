@@ -124,7 +124,7 @@ pub(crate) fn is_shared_flag(flag: &Arc<AtomicBool>) -> bool {
 /// CRuby's `Signal.trap(n, ...)` rejects integers above this
 /// at parse time rather than letting signal-hook fail at
 /// install. Linux's signal table reserves 1..=64 (32 standard
-/// + 32 real-time); macOS / BSD top out at 31. Build-time
+/// plus 32 real-time); macOS / BSD top out at 31. Build-time
 /// constant so the range check inlines into a single
 /// comparison.
 #[cfg(target_os = "linux")]
