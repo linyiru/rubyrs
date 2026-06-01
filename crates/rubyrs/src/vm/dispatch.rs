@@ -338,9 +338,12 @@ impl Vm {
             _ => return Ok(false),
         };
         // The arg must be an Encoding instance; otherwise fall through so
-        // the stateless path raises the TypeError.
+        // the stateless path raises the TypeError. Use `real_class_of`,
+        // not `class_of`: the latter returns the singleton class when one
+        // is installed, so an Encoding with a singleton method (e.g.
+        // `def Encoding::UTF_8.foo; end`) would otherwise miss this check.
         let enc_id = match &args[0] {
-            Value::Object(id) if self.heap.class_of(*id).name == "Encoding" => *id,
+            Value::Object(id) if self.heap.real_class_of(*id).name == "Encoding" => *id,
             _ => return Ok(false),
         };
         let name_sym = self.interner.intern("@name");
