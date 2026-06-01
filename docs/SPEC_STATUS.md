@@ -12,8 +12,8 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 142 |
-| Examples in corpus | 884 |
+| Files | 143 |
+| Examples in corpus | 899 |
 | Skipped `it` traces | 154 |
 
 ### Skipped traces by category
@@ -38,7 +38,7 @@ Find blocks unlocked by a future feature with e.g.
 
 | Class | Files | Examples | Skipped |
 |---|---|---|---|
-| Array | 21 | 103 | 49 |
+| Array | 22 | 118 | 49 |
 | BasicObject | 3 | 15 | 0 |
 | Block | 1 | 8 | 0 |
 | Hash | 40 | 193 | 51 |
@@ -58,6 +58,7 @@ Find blocks unlocked by a future feature with e.g.
 | `array_clear_spec.rb` | Array#clear | `core/array/clear_spec.rb` | 6 | 0 |
 | `array_compact_spec.rb` | Array#compact | `core/array/compact_spec.rb` | 5 | 0 |
 | `array_count_spec.rb` | Array#count | `core/array/count_spec.rb` | 3 | 0 |
+| `array_each_slice_spec.rb` | Array#each_slice | `core/array/each_slice_spec.rb / each_cons_spec.rb (Enumerable-inherited behaviour)` | 15 | 0 |
 | `array_empty_spec.rb` | Array#empty? | `core/array/empty_spec.rb` | 1 | 0 |
 | `array_find_index_spec.rb` | Array#find_index | `core/array/index_spec.rb + find_index_spec.rb` | 12 | 0 |
 | `array_first_spec.rb` | Array#first | `core/array/first_spec.rb` | 11 | 4 |
