@@ -29,16 +29,10 @@
 #
 # What this DOES NOT implement (deferred — file follow-ups when
 # concrete fixtures need them):
-#   - `JSON.pretty_generate`, `JSON.dump`, `JSON.load`, `to_json`
-#     mixin on basic types
-#   - Options: `allow_nan`, `max_nesting`, `symbolize_names`,
-#     `quirks_mode`, `object_class`
+#   - Options: `allow_nan`, `quirks_mode`, `object_class`
 #   - `JSON::Ext::Parser` / `JSON::Ext::Generator` (the C-ext
 #     classes — flori-json-cext already covers that surface in
 #     the `examples/` directory)
-#   - Unicode surrogate-pair decoding in `\uXXXX` escapes —
-#     non-BMP characters in JSON input outside the parser's
-#     scope here. Class-`h` divergence per ADR 0019.
 #
 # Float divergence (ADR 0019 class `h`): both runtimes use
 # Ruby's `Float#to_s`, so round-trip behaviour matches CRuby
@@ -352,19 +346,26 @@ module JSON
           when "r" then out += "\r"
           when "t" then out += "\t"
           when "u"
-            if @pos + 4 > @len
-              raise ParserError, "truncated \\u escape at position #{@pos}"
+            cp = parse_hex4
+            # Combine a UTF-16 surrogate pair into one astral code
+            # point, matching CRuby: a high surrogate (D800..DBFF)
+            # must be followed by a \uXXXX low surrogate (DC00..DFFF).
+            if cp >= 0xD800 && cp <= 0xDBFF &&
+               @chars[@pos] == "\\" && @chars[@pos + 1] == "u"
+              @pos += 2
+              lo = parse_hex4
+              if lo >= 0xDC00 && lo <= 0xDFFF
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
+              else
+                # Not a valid low surrogate: emit the high surrogate's
+                # code point and let `lo` fall through as its own char.
+                out += cp.chr(Encoding::UTF_8)
+                cp = lo
+              end
             end
-            hex = @chars[@pos] + @chars[@pos + 1] + @chars[@pos + 2] + @chars[@pos + 3]
-            @pos += 4
-            cp = hex.to_i(16)
-            # Surrogate-pair decoding is a deferred extension
-            # (see file header); we emit the code point as-is.
-            # ASCII range comes out byte-clean; non-BMP code
-            # points get the Ruby chr behaviour for that
-            # codepoint (which encodes UTF-8 above U+007F when
-            # the host String encoding permits).
-            out += cp.chr
+            # Encode the code point as UTF-8 (chr(UTF_8) widens the
+            # accepted range to U+10FFFF; bare chr only covers 0..255).
+            out += cp.chr(Encoding::UTF_8)
           else
             raise ParserError, "bad escape '\\#{esc}' at position #{@pos}"
           end
@@ -374,6 +375,16 @@ module JSON
         end
       end
       raise ParserError, "unterminated string"
+    end
+
+    # Read the four hex digits of a \uXXXX escape and advance past them.
+    def parse_hex4
+      if @pos + 4 > @len
+        raise ParserError, "truncated \\u escape at position #{@pos}"
+      end
+      hex = @chars[@pos] + @chars[@pos + 1] + @chars[@pos + 2] + @chars[@pos + 3]
+      @pos += 4
+      hex.to_i(16)
     end
 
     def parse_number
