@@ -1734,4 +1734,40 @@ mod tests {
         assert_eq!(fnv1a_64(b"a"),      0xaf63dc4c8601ec8c);
         assert_eq!(fnv1a_64(b"foobar"), 0x85944171f73967e8);
     }
+
+    /// Always-on coverage for `Integer#chr(Encoding::UTF_8)` (the
+    /// `try_push_int_chr_encoding` interceptor). Exercises every branch
+    /// — success across all four UTF-8 widths, the two RangeError
+    /// shapes, and the non-Encoding fall-through to TypeError — without
+    /// depending on `ruby` being on PATH (the diff_cruby fixture skips
+    /// when it isn't). Self-asserting Ruby so a mismatch fails the eval.
+    #[test]
+    fn integer_chr_encoding_utf8_covers_all_branches() {
+        let mut rt = crate::Runtime::new();
+        rt.eval(
+            r#"
+            # success: 1/2/3/4-byte UTF-8 widths + null + max codepoint
+            raise "ascii"  unless 0x41.chr(Encoding::UTF_8) == "A"
+            raise "null"   unless 0.chr(Encoding::UTF_8).bytes == [0]
+            raise "2byte"  unless 0xE9.chr(Encoding::UTF_8).bytes == [0xC3, 0xA9]
+            raise "3byte"  unless 0x20AC.chr(Encoding::UTF_8).bytes == [0xE2, 0x82, 0xAC]
+            raise "4byte"  unless 0x1F600.chr(Encoding::UTF_8).bytes == [0xF0, 0x9F, 0x98, 0x80]
+            raise "max"    unless 0x10FFFF.chr(Encoding::UTF_8).bytes.length == 4
+
+            # RangeError: out-of-range (negative / > U+10FFFF) and surrogates
+            def raises(klass)
+              begin; yield; false; rescue klass; true; end
+            end
+            raise "neg"    unless raises(RangeError) { (-1).chr(Encoding::UTF_8) }
+            raise "overmax" unless raises(RangeError) { 0x110000.chr(Encoding::UTF_8) }
+            raise "sur_lo" unless raises(RangeError) { 0xD800.chr(Encoding::UTF_8) }
+            raise "sur_hi" unless raises(RangeError) { 0xDFFF.chr(Encoding::UTF_8) }
+
+            # non-Encoding argument falls through to TypeError (NOT RangeError)
+            raise "type"   unless raises(TypeError) { 0x41.chr(123) }
+            "#,
+            "<test:integer_chr_encoding>",
+        )
+        .expect("Integer#chr(Encoding::UTF_8) all branches match");
+    }
 }
