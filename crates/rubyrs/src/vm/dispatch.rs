@@ -679,13 +679,12 @@ impl Vm {
                 //
                 //   * `public_method(:name)` — same chain as
                 //     `method`, but raises NameError if the
-                //     captured Method's visibility is Private.
-                //     Protected stays allowed; CRuby raises for
-                //     Private only.
-                let recv_inspect_for_err = || {
-                    recv.to_inspect(&self.heap, &self.interner)
-                };
-                let name_str = self.interner.resolve(*bound_name_id).to_string();
+                //     captured Method's visibility is Private
+                //     OR Protected. Only Public passes. Also
+                //     raises NameError when the method is
+                //     entirely missing (snapshot is None) so the
+                //     getter fails at capture time rather than
+                //     at the later `.call`.
                 if name == "singleton_method" {
                     let is_singleton = match &recv {
                         Value::Object(id) => {
@@ -703,11 +702,12 @@ impl Vm {
                         _ => false,
                     };
                     if !is_singleton {
+                        let name_str = self.interner.resolve(*bound_name_id).to_string();
+                        let recv_str = recv.to_inspect(&self.heap, &self.interner);
                         return Err(self.trap(RubyError::NameError {
                             msg: format!(
                                 "undefined singleton method '{}' for '{}'",
-                                name_str,
-                                recv_inspect_for_err(),
+                                name_str, recv_str,
                             ),
                         }));
                     }
@@ -715,26 +715,33 @@ impl Vm {
                     // CRuby rejects both Private and Protected
                     // here (only Public passes). Build the
                     // visibility-label string for the exact
-                    // CRuby-shape error message.
-                    let vis = snapshot
-                        .as_ref()
-                        .map(|m| m.visibility.get());
-                    let label = match vis {
-                        Some(crate::value::Visibility::Private) => Some("private"),
-                        Some(crate::value::Visibility::Protected) => Some("protected"),
-                        _ => None,
+                    // CRuby-shape error message. Missing methods
+                    // (snapshot is None) also raise NameError —
+                    // CRuby reports `undefined method` rather
+                    // than `is private/protected` in that case.
+                    let label_or_missing = match snapshot.as_ref().map(|m| m.visibility.get()) {
+                        None => Some(None),
+                        Some(crate::value::Visibility::Private) => Some(Some("private")),
+                        Some(crate::value::Visibility::Protected) => Some(Some("protected")),
+                        Some(crate::value::Visibility::Public) => None,
                     };
-                    if let Some(label) = label {
+                    if let Some(label) = label_or_missing {
+                        let name_str = self.interner.resolve(*bound_name_id).to_string();
                         let cls_name = match self.class_of(&recv) {
                             Value::Class(c) => c.name.clone(),
                             _ => "Object".to_string(),
                         };
-                        return Err(self.trap(RubyError::NameError {
-                            msg: format!(
+                        let msg = match label {
+                            Some(vis_label) => format!(
                                 "method '{}' for class '{}' is {}",
-                                name_str, cls_name, label,
+                                name_str, cls_name, vis_label,
                             ),
-                        }));
+                            None => format!(
+                                "undefined method '{}' for class '{}'",
+                                name_str, cls_name,
+                            ),
+                        };
+                        return Err(self.trap(RubyError::NameError { msg }));
                     }
                 }
                 let mut g = crate::vm::PinGuard::new(self);

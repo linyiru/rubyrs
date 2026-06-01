@@ -9,7 +9,9 @@
 #                       eigenclass (Object) or
 #                       cls.singleton_methods (Class)
 #   public_method     — full chain; NameError if visibility
-#                       is Private (Protected stays allowed)
+#                       is Private OR Protected, and also
+#                       NameError if the method doesn't exist
+#                       (Only Public passes — CRuby parity)
 
 class C
   def pub; "public"; end
@@ -54,6 +56,15 @@ begin
   c.public_method(:prot)
 rescue NameError
   puts "ne-public-prot"
+end
+
+# Cycle-1: public_method must also raise NameError on a
+# missing method — capturing should fail at getter time, not
+# defer to call time.
+begin
+  c.public_method(:nope)
+rescue NameError
+  puts "ne-public-missing"
 end
 
 # (3) Class receiver — singleton_method reads
