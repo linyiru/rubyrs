@@ -13,10 +13,18 @@ it does.
 
 Two further proof-of-concept installers (`real_install`,
 `manekineko_install`) bridge into an embedded Ruby interpreter
-(`rubyrs`) to evaluate real Gemfiles end-to-end. They live in
-[`examples-rubyrs-deferred/`](examples-rubyrs-deferred/) for this
-release because their dep (`rubyrs`) is not yet on crates.io; they
-return as first-class Cargo examples once that dep ships.
+(`rubyrs`) to evaluate real Gemfiles end-to-end. They are
+first-class Cargo examples under
+[`examples/`](examples/) and run via
+`cargo run --release -p rubund --example real_install` /
+`--example manekineko_install -- <path/to/Gemfile>`. They use
+the workspace-internal `rubyrs` crate via a `path + version`
+dev-dep (path resolves during workspace builds, version pin
+takes over at publish time once rubyrs ships on crates.io —
+see the comment on rubund's `Cargo.toml`). Until rubyrs is
+published, `cargo publish -p rubund` fails with "no matching
+package `rubyrs` found"; everything else (local build, examples,
+tests) works unchanged.
 
 The library half is what to use today. The CLI half is what's
 under construction.
@@ -28,7 +36,7 @@ under construction.
 | What | Why it matters |
 | :--- | :--- |
 | **Zero-copy lockfile parser** | Parses `Gemfile.lock` by borrowing directly into the input buffer — zero heap allocations for string tokens. A 1,379-line production lockfile is parsed in **~147 µs**. |
-| **Bounded parallel installer (PoC)** | The deferred [`manekineko_install`](examples-rubyrs-deferred/manekineko_install.rs) proof-of-concept drives a 16-worker thread pool over `std::sync::mpsc` to saturate network I/O without tripping macOS file-descriptor limits. Lives in `examples-rubyrs-deferred/` until `rubyrs` ships; not yet a CLI command. |
+| **Bounded parallel installer (PoC)** | The [`manekineko_install`](examples/manekineko_install.rs) example drives a 16-worker thread pool over `std::sync::mpsc` to saturate network I/O without tripping macOS file-descriptor limits. Runs under rubyrs's secure-by-default Runtime (no FS access, no `require`-walking, panic→Trap boundary). Not yet a CLI command. |
 | **Single static binary** | No Ruby runtime required at the target machine. Ship one binary. |
 
 ---
@@ -45,11 +53,10 @@ Measured against the real-world **manekineko** project (196 gems, 1,379-line loc
 
 The lockfile parse number is from the `lockfile_parser` integration
 test on a 1,379-line production lockfile. The install numbers come
-from the deferred
-[`manekineko_install`](examples-rubyrs-deferred/manekineko_install.rs)
-PoC fetching the same project's 196 gems; it depends on `rubyrs`
-and is not currently runnable via `cargo run --example`, nor is it
-yet driven by a `rubund install` command.
+from the [`manekineko_install`](examples/manekineko_install.rs)
+PoC fetching the same project's 196 gems; it's runnable via
+`cargo run --release -p rubund --example manekineko_install -- <path/to/Gemfile>`
+but not yet driven by a `rubund install` command.
 
 ---
 
@@ -122,10 +129,18 @@ The [`examples/`](examples/) directory contains runnable demonstrations:
 
 Two further examples (`real_install`, `manekineko_install`) bridge
 into an embedded Ruby interpreter (`rubyrs`) to evaluate real
-`Gemfile` DSLs end-to-end. They live at
-[`examples-rubyrs-deferred/`](examples-rubyrs-deferred/) for this
-release because their dep (`rubyrs`) is not yet on crates.io. They
-return as first-class examples once that dep ships.
+`Gemfile` DSLs end-to-end. Both run under rubyrs's secure-by-
+default Runtime — the Gemfile DSL eval cannot escape the sandbox
+via `File.read` or `require`. A panic inside the eval (ICE-class
+`.unwrap()` in the VM, host_fn callback that itself `panic!`s)
+is caught by rubyrs at the `Runtime::eval` boundary and returned
+as `Err(Trap)` rather than unwinding through the host — so the
+host process survives the Ruby-side fault. These PoC examples
+choose to format the Trap and `panic!` themselves on `Err`
+(simple PoC behaviour), but a production CLI could skip the bad
+gem, retry, or surface a user-friendly error and continue. See
+rubyrs PRs #268 / #279 / #288 / #302 for the underlying embed-API
+hardening.
 
 ---
 
@@ -159,12 +174,13 @@ crates/rubund/
 │   └── parser.rs     # Zero-copy state-machine Gemfile.lock parser
 ├── tests/
 │   └── lockfile_parser.rs       # Integration tests
-├── examples/                    # Cargo-discovered, build without extra deps
-│   ├── lockfile_parser.rs       # Timing & pretty-print demo
-│   └── c_ext_cache.rs           # C extension compilation & caching
-└── examples-rubyrs-deferred/    # Not discovered by Cargo; need `rubyrs`
+└── examples/                    # All Cargo-discovered
+    ├── lockfile_parser.rs       # Timing & pretty-print demo
+    ├── c_ext_cache.rs           # C extension compilation & caching
     ├── real_install.rs          # Single-gem fetch + extract via rubyrs
-    └── manekineko_install.rs    # 16-worker parallel installer via rubyrs
+    ├── manekineko_install.rs    # 16-worker parallel installer via rubyrs
+    └── manekineko_install_fixtures/
+        └── minimal_gemfile      # Smoke-test fixture for manekineko_install
 ```
 
 ### Parser Design
@@ -195,10 +211,11 @@ that interpreter — `rubund` is its first non-test embedder. Keeping
 both crates in the same workspace turns every breaking change in the
 embedding API into a same-day build failure.
 
-(For this first crates.io release the `rubyrs` dependency is
-temporarily lifted — `rubyrs` is not yet published — so the bridge
-that the CLI's `--demo` flag previously exercised is on hold. It
-returns once `rubyrs`, or its eventual successor name, ships.)
+The `rubyrs` dep is a `path + version` dev-dep (workspace path
+during local builds; registry version pin takes over at publish
+time). The bridge examples are runnable today via
+`cargo run --example`; only `cargo publish -p rubund` blocks
+until rubyrs is on crates.io.
 
 ---
 

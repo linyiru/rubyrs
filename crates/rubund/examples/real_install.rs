@@ -19,7 +19,7 @@ use std::time::Instant;
 use std::os::unix::fs::symlink;
 
 use flate2::read::GzDecoder;
-use rubyrs::{Runtime, Value};
+use rubyrs::{Config, Runtime, Value};
 use tar::Archive;
 
 // ---------- Configurations ----------
@@ -89,7 +89,24 @@ fn main() {
 // -----------------------------------------------------------------------------
 fn run_rubyrs_eval() -> Vec<GemRequirement> {
     let start_time = Instant::now();
-    let mut rt = Runtime::new();
+    // Secure-by-default Runtime — the rubund-style host shape.
+    // We pass an untrusted-shaped Gemfile (in production: read
+    // from disk and supplied by the user / a remote dep), so:
+    //   - `allow_filesystem_io: false` (Default) — script can't
+    //      read / write any host file via `File.*` / `require`.
+    //   - `allowed_paths: None` (Default) — moot under bool=false,
+    //      but locked in for documentation.
+    //   - `load_paths: None` (Default) — the Gemfile DSL we eval
+    //      is inline; no host-supplied `.rb` files to require.
+    // Runtime::with_config makes those defaults explicit at the
+    // call site; a future Gemfile that legitimately needs to
+    // require a vendored helper would flip the relevant fields
+    // here, and the change would be obvious in a diff. The
+    // panic→Trap boundary (`Runtime::eval` wraps in catch_unwind,
+    // see rubyrs PR #279) applies automatically — a malformed
+    // Gemfile that triggers a host-fn panic surfaces as a
+    // recoverable Trap, not a SIGABRT.
+    let mut rt = Runtime::with_config(Config::default());
     let requirements = Rc::new(RefCell::new(Vec::<GemRequirement>::new()));
 
     // Register our host callbacks
@@ -139,7 +156,15 @@ fn run_rubyrs_eval() -> Vec<GemRequirement> {
         DSL.new.run!
     "#, GEM_NAME, GEM_VERSION);
 
-    rt.eval(&gemfile, "Gemfile").unwrap();
+    // Use rubund's Trap-aware error surface rather than `.unwrap()`
+    // so a malformed Gemfile or sandbox violation produces a
+    // human-readable message instead of a Rust panic shape.
+    // `Runtime::format_trap` resolves filename:line + the script-
+    // level exception class (e.g. `IOError` if a Gemfile somehow
+    // does `File.read` despite the off-by-default cap).
+    if let Err(trap) = rt.eval(&gemfile, "Gemfile") {
+        panic!("Gemfile eval failed: {}", rt.format_trap(&trap));
+    }
 
     println!("  └─ ⚡ Gemfile parsed dynamically in: {:?}", start_time.elapsed());
     requirements.borrow().clone()

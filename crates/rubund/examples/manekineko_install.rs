@@ -15,7 +15,7 @@ use std::sync::mpsc;
 use std::os::unix::fs::symlink;
 
 use flate2::read::GzDecoder;
-use rubyrs::{Runtime, Value};
+use rubyrs::{Config, Runtime, Value};
 use tar::Archive;
 
 const GLOBAL_CACHE_DIR: &str = "./.rubund_global_cache";
@@ -90,7 +90,15 @@ fn main() {
 // Step 1: Parse production Gemfile in 0.5ms using rubyrs
 // -----------------------------------------------------------------------------
 fn run_rubyrs_eval(gemfile_path: &Path) -> Vec<GemRequirement> {
-    let mut rt = Runtime::new();
+    // Secure-by-default Runtime — see real_install.rs for the
+    // full rationale of why each Config field stays at Default
+    // for rubund's host shape. Production Gemfiles like the
+    // manekineko fixture are untrusted code from gem authors;
+    // they should NOT be able to escape the sandbox via
+    // `File.read`, `require`, or panic the host process via a
+    // bad host_fn callback. The panic→Trap boundary applies
+    // automatically (rubyrs PR #279).
+    let mut rt = Runtime::with_config(Config::default());
     let requirements = Rc::new(RefCell::new(Vec::<GemRequirement>::new()));
 
     // Register dynamic 'gem' host function with variable arity in Rust
@@ -121,7 +129,11 @@ fn run_rubyrs_eval(gemfile_path: &Path) -> Vec<GemRequirement> {
     let processed_content = preprocess_gemfile(&raw_content);
 
     let start_time = Instant::now();
-    rt.eval(&processed_content, "Gemfile").unwrap();
+    // Trap-aware error surface — see real_install.rs for why we
+    // format the trap instead of unwrapping it.
+    if let Err(trap) = rt.eval(&processed_content, "Gemfile") {
+        panic!("Gemfile eval failed: {}", rt.format_trap(&trap));
+    }
     println!("  └─ ⚡ Gemfile evaluated by rubyrs in: {:?}", start_time.elapsed());
 
     requirements.borrow().clone()
