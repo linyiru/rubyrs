@@ -356,7 +356,7 @@ impl Vm {
         let out_of_range = format!("{cp} out of char range");
         match enc_name.as_str() {
             "UTF-8" => {
-                if cp < 0 || cp > 0x10_FFFF {
+                if !(0..=0x10_FFFF).contains(&cp) {
                     return Err(self.trap(RubyError::RangeError { msg: out_of_range }));
                 }
                 match char::from_u32(cp as u32) {
@@ -373,7 +373,7 @@ impl Vm {
                 }
             }
             "US-ASCII" => {
-                if cp < 0 || cp > 0xFF {
+                if !(0..=0xFF).contains(&cp) {
                     return Err(self.trap(RubyError::RangeError { msg: out_of_range }));
                 }
                 if cp > 0x7F {
@@ -385,7 +385,7 @@ impl Vm {
                 Ok(true)
             }
             "ASCII-8BIT" => {
-                if cp < 0 || cp > 0xFF {
+                if !(0..=0xFF).contains(&cp) {
                     return Err(self.trap(RubyError::RangeError { msg: out_of_range }));
                 }
                 // A single raw byte (binary-safe via the byte-backed RStr).
