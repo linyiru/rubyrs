@@ -353,11 +353,14 @@ impl Vm {
             _ => return Ok(false),
         };
 
-        let out_of_range = format!("{cp} out of char range");
+        // `out_of_range` is built lazily (only when a bound is actually
+        // exceeded) — the success path is hot (e.g. JSON `\u` decoding)
+        // and shouldn't allocate an error string it never uses.
+        let out_of_range = || format!("{cp} out of char range");
         match enc_name.as_str() {
             "UTF-8" => {
                 if !(0..=0x10_FFFF).contains(&cp) {
-                    return Err(self.trap(RubyError::RangeError { msg: out_of_range }));
+                    return Err(self.trap(RubyError::RangeError { msg: out_of_range() }));
                 }
                 match char::from_u32(cp as u32) {
                     Some(c) => {
@@ -374,7 +377,7 @@ impl Vm {
             }
             "US-ASCII" => {
                 if !(0..=0xFF).contains(&cp) {
-                    return Err(self.trap(RubyError::RangeError { msg: out_of_range }));
+                    return Err(self.trap(RubyError::RangeError { msg: out_of_range() }));
                 }
                 if cp > 0x7F {
                     return Err(self.trap(RubyError::RangeError {
@@ -386,7 +389,7 @@ impl Vm {
             }
             "ASCII-8BIT" => {
                 if !(0..=0xFF).contains(&cp) {
-                    return Err(self.trap(RubyError::RangeError { msg: out_of_range }));
+                    return Err(self.trap(RubyError::RangeError { msg: out_of_range() }));
                 }
                 // A single raw byte (binary-safe via the byte-backed RStr).
                 self.stack.push(Value::new_str_bytes(vec![cp as u8]));
