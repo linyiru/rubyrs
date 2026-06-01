@@ -486,6 +486,14 @@ impl Vm {
             // value), so feature detection can stay universal.
             | "methods" | "public_methods" | "private_methods" | "protected_methods"
             | "singleton_methods"
+            // Method getter triple — `method` is universal too;
+            // `singleton_method` / `public_method` join as
+            // narrowed siblings (NameError when the lookup
+            // doesn't match the variant's filter). Dispatch
+            // succeeds for every receiver that `method(:name)`
+            // already worked on; primitive arms intercept their
+            // own bound-method shapes elsewhere.
+            | "method" | "singleton_method" | "public_method"
         ) {
             return true;
         }

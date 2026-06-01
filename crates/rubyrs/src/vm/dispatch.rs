@@ -839,7 +839,8 @@ impl Vm {
         // `proc_curry_compose.rb` under STRESS_GC=1 — the
         // BoundMethod survives but its `recv` points at a Dead
         // slot, panicking later in `class_of`.
-        if name == "method" && args.len() == 1
+        if matches!(name, "method" | "singleton_method" | "public_method")
+            && args.len() == 1
             && let Value::Sym(bound_name_id) = &args[0] {
                 // Snapshot the resolved Method at capture time so
                 // `bm.call` survives a subsequent `remove_method`
@@ -859,11 +860,167 @@ impl Vm {
                         let cls = self.heap.class_of(*id);
                         self.lookup_method_uncached(&cls, *bound_name_id)
                     }
+                    // Class receivers store their class-method
+                    // entries in `cls.singleton_methods`, not in
+                    // the per-instance method table. Use the
+                    // same helper as explicit `cls.foo`
+                    // dispatch so `K.public_method(:cls_m)`
+                    // finds class methods correctly. The old
+                    // `Vm::class_of(K)` would return the `Class`
+                    // class and miss every class-method
+                    // (PR #314 cycle-2).
+                    Value::Class(cls) => self.lookup_class_singleton_method(cls, *bound_name_id),
                     _ => match self.class_of(&recv) {
                         Value::Class(cls) => self.lookup_method_uncached(&cls, *bound_name_id),
                         _ => None,
                     },
                 };
+                // `singleton_method` / `public_method` narrow the
+                // snapshot match relative to plain `method`:
+                //
+                //   * `singleton_method(:name)` — installed
+                //     DIRECTLY on the eigenclass (Value::Object)
+                //     or in `cls.singleton_methods` (Value::Class).
+                //     Inherited methods from the receiver's real
+                //     class don't count; raise NameError if the
+                //     method is reachable via dispatch but isn't
+                //     a singleton entry.
+                //
+                //   * `public_method(:name)` — same chain as
+                //     `method`, but raises NameError if the
+                //     captured Method's visibility is Private
+                //     OR Protected. Only Public passes. Also
+                //     raises NameError when the method is
+                //     entirely missing (snapshot is None) so the
+                //     getter fails at capture time rather than
+                //     at the later `.call`.
+                if name == "singleton_method" {
+                    // Walk the eigenclass's own table PLUS its
+                    // transitive includes / prepends so methods
+                    // brought in by `obj.extend(M)` or
+                    // `class << self; prepend M; end` are
+                    // reachable — matches `Object#singleton_methods`
+                    // (vm/dispatch.rs:4550 walk_chain). Without
+                    // this widening, `c.singleton_methods` would
+                    // list `:m` while `c.singleton_method(:m)`
+                    // raised NameError, contradicting itself.
+                    // PR #314 cycle-4.
+                    fn chain_has(
+                        c: &std::rc::Rc<crate::value::Class>,
+                        target: crate::intern::SymId,
+                        visited: &mut Vec<*const crate::value::Class>,
+                    ) -> bool {
+                        let ptr = std::rc::Rc::as_ptr(c);
+                        if visited.contains(&ptr) { return false; }
+                        visited.push(ptr);
+                        if c.methods.borrow().contains_key(&target) { return true; }
+                        for inc in c.includes.borrow().iter() {
+                            if chain_has(inc, target, visited) { return true; }
+                        }
+                        for pre in c.prepends.borrow().iter() {
+                            if chain_has(pre, target, visited) { return true; }
+                        }
+                        false
+                    }
+                    let is_singleton = match &recv {
+                        Value::Object(id) => {
+                            if let crate::heap::HeapObj::Instance(inst) = self.heap.get(*id) {
+                                inst.singleton_class.as_ref().is_some_and(|sc| {
+                                    let mut visited = Vec::new();
+                                    chain_has(sc, *bound_name_id, &mut visited)
+                                })
+                            } else {
+                                false
+                            }
+                        }
+                        Value::Class(c) => {
+                            // Class-level singleton table; also
+                            // honour `singleton_prepends` walked
+                            // the same way `singleton_methods`
+                            // does for Class receivers.
+                            if c.singleton_methods.borrow().contains_key(bound_name_id) {
+                                true
+                            } else {
+                                let mut visited = Vec::new();
+                                c.singleton_prepends.borrow().iter().any(|p| {
+                                    chain_has(p, *bound_name_id, &mut visited)
+                                })
+                            }
+                        }
+                        _ => false,
+                    };
+                    if !is_singleton {
+                        let name_str = self.interner.resolve(*bound_name_id).to_string();
+                        let recv_str = recv.to_inspect(&self.heap, &self.interner);
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!(
+                                "undefined singleton method '{}' for '{}'",
+                                name_str, recv_str,
+                            ),
+                        }));
+                    }
+                } else if name == "public_method" {
+                    // CRuby rejects both Private and Protected
+                    // here (only Public passes). Treat the
+                    // captured snapshot's visibility as the
+                    // primary signal; if no snapshot exists
+                    // (primitive arms, built-ins like
+                    // Class#new, universal arms like `to_s` /
+                    // `inspect`), consult `responds_to` to tell
+                    // truly-missing-method from
+                    // missing-Method-entry-but-dispatchable.
+                    let vis = snapshot.as_ref().map(|m| m.visibility.get());
+                    let label = match vis {
+                        Some(crate::value::Visibility::Private) => Some("private"),
+                        Some(crate::value::Visibility::Protected) => Some("protected"),
+                        Some(crate::value::Visibility::Public) => None,
+                        // No Method entry — defer to
+                        // `responds_to` (PR #314 cycle-2). If
+                        // the receiver actually dispatches this
+                        // name, we shouldn't lie via NameError.
+                        None => {
+                            if self.responds_to(&recv, *bound_name_id) {
+                                None
+                            } else {
+                                // Sentinel — same shape as
+                                // CRuby's "undefined method"
+                                // branch below.
+                                Some("__missing__")
+                            }
+                        }
+                    };
+                    if let Some(tag) = label {
+                        let name_str = self.interner.resolve(*bound_name_id).to_string();
+                        // For Class receivers, use the eigenclass-
+                        // shell form `#<Class:K>` (matches CRuby).
+                        // For Object receivers, use the class of
+                        // the instance. Falling back to
+                        // `self.class_of(&recv)` would return
+                        // "Class" / "Module" for Class receivers
+                        // — the cycle-3 review caught this giving
+                        // `for class 'Class'` instead of
+                        // `for class 'K'` / `'#<Class:K>'`.
+                        let cls_name = match &recv {
+                            Value::Class(c) => format!("#<Class:{}>", c.name),
+                            _ => match self.class_of(&recv) {
+                                Value::Class(c) => c.name.clone(),
+                                _ => "Object".to_string(),
+                            },
+                        };
+                        let msg = if tag == "__missing__" {
+                            format!(
+                                "undefined method '{}' for class '{}'",
+                                name_str, cls_name,
+                            )
+                        } else {
+                            format!(
+                                "method '{}' for class '{}' is {}",
+                                name_str, cls_name, tag,
+                            )
+                        };
+                        return Err(self.trap(RubyError::NameError { msg }));
+                    }
+                }
                 let mut g = crate::vm::PinGuard::new(self);
                 g.pin(recv.clone());
                 g.vm.maybe_gc();
