@@ -1892,7 +1892,9 @@ impl Vm {
                     match (&r.begin, &r.end) {
                         (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
                         _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
-                            msg: "Range#chunk_while with non-Int endpoints is not yet implemented in rubyrs".to_string(),
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
                         })),
                     }
                 };
