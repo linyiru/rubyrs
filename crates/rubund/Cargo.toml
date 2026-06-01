@@ -15,15 +15,21 @@ categories = ["parser-implementations", "command-line-utilities"]
 name = "rubund"
 path = "src/main.rs"
 
-# The `rubyrs` dep that drove the CLI's old `--demo` flag — and two
-# examples that bridge into a real Ruby interpreter for Gemfile DSL
-# evaluation — is currently lifted. `rubyrs` is not yet on crates.io
-# (its name is still being finalised), and `cargo publish` rejects
-# unresolved path deps. The bridge code lives at
-# `examples-rubyrs-deferred/` and returns once `rubyrs` (or its
-# successor name) ships.
-
+# rubyrs is workspace-internal. The path-dep below is for the
+# bridge examples that evaluate real Gemfile DSL under the
+# embed-API hardening features (`Config::allow_filesystem_io`,
+# `Config::allowed_paths`, `Config::load_paths`, panic→Trap
+# boundary; see rubyrs PRs #268 / #279 / #288 / #302). The dep
+# was previously lifted because `cargo publish` rejects
+# unresolved path deps and rubyrs isn't on crates.io yet;
+# restored as a dev-dependency so the bridge stays buildable
+# in-workspace. When rubyrs ships, switch this to the
+# `path = "..." + version = "..."` shape so
+# `cargo publish -p rubund` resolves the version-pinned form
+# against the registry (Cargo prefers the registry version at
+# publish time and the local path during workspace builds).
 [dev-dependencies]
+rubyrs = { path = "../rubyrs" }
 ureq.workspace = true
 tar.workspace = true
 flate2.workspace = true

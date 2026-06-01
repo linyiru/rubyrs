@@ -1,0 +1,22 @@
+# Minimal Gemfile fixture covering only the DSL shapes that
+# `manekineko_install.rs`'s host_fn callbacks understand: bare
+# `gem`, single version constraint, `source` directive, `ruby`
+# directive, `git_source` block. No kwargs (`require: false`,
+# `platforms: :mri`), no `platforms` directive, no block-form
+# `group :a, :b do ... end` — those would need additional
+# host_fn registrations in the example.
+#
+# Used as a smoke-test fixture for the rubyrs embed-API
+# integration: confirms that the secure-by-default Runtime
+# (Config { allow_filesystem_io: false, ..Default::default() })
+# successfully parses the DSL without needing FS access or
+# require-walking, and that a Trap-aware error surface works
+# under the panic→Trap boundary.
+source "https://rubygems.org"
+ruby "3.4.0"
+
+gem "rake"
+gem "rails", "~> 8.0.0"
+gem "rack", ">= 3.0", "< 4.0"
+gem "puma"
+gem "redis", "5.0.0"
