@@ -4121,10 +4121,22 @@ impl Vm {
                                 None => {
                                     let nm = self.interner.resolve(sid).to_string();
                                     let kind = if cls.is_module { "module" } else { "class" };
+                                    // Anonymous Module/Class shells have
+                                    // an empty `cls.name`; fall back to
+                                    // the kind label ("Module"/"Class")
+                                    // so the error stays actionable —
+                                    // mirrors the allocate TypeError
+                                    // path at ~line 3032. (Code-review
+                                    // #324 round 6.)
+                                    let display = if cls.name.is_empty() {
+                                        if cls.is_module { "Module" } else { "Class" }
+                                    } else {
+                                        &cls.name
+                                    };
                                     return Err(self.trap(RubyError::NameError {
                                         msg: format!(
                                             "undefined method `{}' for {} `{}'",
-                                            nm, kind, cls.name,
+                                            nm, kind, display,
                                         ),
                                     }));
                                 }
