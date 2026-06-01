@@ -6,7 +6,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{ObjId, Value};
 
-use super::Vm;
+use super::{PinGuard, Vm};
 
 impl Vm {
     pub(crate) fn range_collection_call(
@@ -191,6 +191,22 @@ impl Vm {
                             return Ok(Some(Value::Bool(lo_ok && hi_ok)));
                         }
                         ("exclude_end?", []) => return Ok(Some(Value::Bool(excl))),
+                        // each_slice / each_cons on non-Int (e.g.
+                        // Str+Str) ranges: lookup.rs:646 lists both
+                        // as `respond_to? = true` for any Range, so
+                        // falling through to NoMethodError would
+                        // contradict the lockstep contract at
+                        // lookup.rs:756. Raise RuntimeError with an
+                        // explicit "not yet implemented" message —
+                        // same fallback as the zero-arg find_index
+                        // path at array.rs:357 (PR #308 cycle 3).
+                        ("each_slice", [Value::Int(_)]) | ("each_cons", [Value::Int(_)]) => {
+                            return Err(self.trap(RubyError::RuntimeError {
+                                msg: format!(
+                                    "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                                ),
+                            }));
+                        }
                         _ => return Ok(None),
                     }
                 }
@@ -355,6 +371,137 @@ impl Vm {
                         self.maybe_gc();
                         let nid = self.heap.alloc(HeapObj::Array(elems));
                         Some(Value::Array(nid))
+                    }
+                    // `r.each_slice(n)` / `r.each_cons(n)` —
+                    // no-block (Enumerator) forms. CRuby returns
+                    // an Enumerator; rubyrs returns the
+                    // materialised Array of slices/windows
+                    // directly, matching the Array / Hash family
+                    // (Enumerator-stub strategy). `.to_a` on
+                    // either is a no-op vs forced materialisation
+                    // — same shape. Block forms in iter.rs.
+                    ("each_slice", [Value::Int(n)]) => {
+                        if *n <= 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("invalid slice size: {}", n),
+                            }));
+                        }
+                        let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                        // Exclusive end at i64::MIN means an empty
+                        // range (`min...min`). `saturating_sub(1)`
+                        // would underflow to `min` and make the
+                        // loop yield once; checked_sub maps it to
+                        // an early-return empty Array. Same
+                        // pattern as the Range#sum arm.
+                        let end_inc = if excl {
+                            match ei.checked_sub(1) {
+                                Some(v) => v,
+                                None => {
+                                    self.maybe_gc();
+                                    self.check_alloc()?;
+                                    let oid = self.heap.alloc(HeapObj::Array(Vec::new()));
+                                    return Ok(Some(Value::Array(oid)));
+                                }
+                            }
+                        } else { ei };
+                        // Pin each freshly-allocated slice id as
+                        // we build the outer chunks Vec — the Vec
+                        // is a Rust local, not a GC root, so any
+                        // intervening `maybe_gc()` between alloc
+                        // and the final outer alloc could sweep
+                        // earlier slice ids. PinGuard's Drop
+                        // releases them on every exit path.
+                        let mut g = PinGuard::new(self);
+                        let mut chunks: Vec<Value> = Vec::new();
+                        let mut current: Vec<Value> = Vec::with_capacity(n_usz.min(64));
+                        let mut i = bi;
+                        while i <= end_inc {
+                            current.push(Value::Int(i));
+                            if current.len() == n_usz {
+                                g.vm.maybe_gc();
+                                g.vm.check_alloc()?;
+                                let cid = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current)));
+                                g.pin(Value::Array(cid));
+                                chunks.push(Value::Array(cid));
+                                current = Vec::with_capacity(n_usz.min(64));
+                            }
+                            if i == end_inc { break; }
+                            i += 1;
+                        }
+                        if !current.is_empty() {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let cid = g.vm.heap.alloc(HeapObj::Array(current));
+                            g.pin(Value::Array(cid));
+                            chunks.push(Value::Array(cid));
+                        }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let oid = g.vm.heap.alloc(HeapObj::Array(chunks));
+                        Some(Value::Array(oid))
+                    }
+                    ("each_cons", [Value::Int(n)]) => {
+                        if *n <= 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("invalid size: {}", n),
+                            }));
+                        }
+                        let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                        // See each_slice arm above — checked_sub
+                        // for the exclusive-end-at-i64::MIN edge.
+                        let end_inc = if excl {
+                            match ei.checked_sub(1) {
+                                Some(v) => v,
+                                None => {
+                                    self.maybe_gc();
+                                    self.check_alloc()?;
+                                    let oid = self.heap.alloc(HeapObj::Array(Vec::new()));
+                                    return Ok(Some(Value::Array(oid)));
+                                }
+                            }
+                        } else { ei };
+                        // Early-return empty when range_len < n
+                        // — no windows can be yielded; avoid the
+                        // O(range_len) scan + buffering. Overflow
+                        // on `end_inc - bi + 1` is treated as
+                        // "len is huge, don't early-return".
+                        let too_short = if bi > end_inc {
+                            true
+                        } else {
+                            match end_inc.checked_sub(bi).and_then(|d| d.checked_add(1)) {
+                                Some(len) => len < *n,
+                                None => false,
+                            }
+                        };
+                        if too_short {
+                            self.maybe_gc();
+                            self.check_alloc()?;
+                            let oid = self.heap.alloc(HeapObj::Array(Vec::new()));
+                            return Ok(Some(Value::Array(oid)));
+                        }
+                        let mut g = PinGuard::new(self);
+                        let mut windows: Vec<Value> = Vec::new();
+                        let mut buf: std::collections::VecDeque<Value> =
+                            std::collections::VecDeque::with_capacity(n_usz.min(64));
+                        let mut i = bi;
+                        while i <= end_inc {
+                            if buf.len() == n_usz { buf.pop_front(); }
+                            buf.push_back(Value::Int(i));
+                            if buf.len() == n_usz {
+                                g.vm.maybe_gc();
+                                g.vm.check_alloc()?;
+                                let win: Vec<Value> = buf.iter().cloned().collect();
+                                let wid = g.vm.heap.alloc(HeapObj::Array(win));
+                                g.pin(Value::Array(wid));
+                                windows.push(Value::Array(wid));
+                            }
+                            if i == end_inc { break; }
+                            i += 1;
+                        }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let oid = g.vm.heap.alloc(HeapObj::Array(windows));
+                        Some(Value::Array(oid))
                     }
                     // Range#step(n) without a block returns a
                     // step-arithmetic Array. The block form is

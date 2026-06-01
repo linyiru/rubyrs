@@ -1679,6 +1679,202 @@ impl Vm {
                     _ => return Ok(None),
                 }
             }
+            // `(b..e).each_slice(n) { |slice| ... }` — yield each
+            // consecutive group of n Ints from the Range as one
+            // Array argument; return the receiver Range. Same
+            // closure + `vm.pinned.truncate(baseline)` per-iter
+            // scope pattern as Hash / Array each_slice (PRs
+            // #311 / #312). Only Int+Int endpoints supported —
+            // matches `iter_range_filter` convention; Str+Str
+            // ranges fall through to NoMethodError.
+            (Value::Range(id), "each_slice", [Value::Int(n)]) => {
+                if *n <= 0 {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: format!("invalid slice size: {}", n),
+                    }));
+                }
+                let (bi, ei, excl) = {
+                    let r = self.heap.range(*id);
+                    match (&r.begin, &r.end) {
+                        (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
+                        // Str+Str ranges (e.g. ('a'..'z')) are
+                        // supported by Range#each via str_succ
+                        // but not yet by each_slice / each_cons.
+                        // Returning Ok(None) here used to fall
+                        // through to NoMethodError — but
+                        // `respond_to?(:each_slice)` is true
+                        // for any Range, so that contradicted
+                        // the lockstep contract documented at
+                        // lookup.rs:756. Raise RuntimeError
+                        // instead (same fallback shape as the
+                        // zero-arg find_index path in
+                        // array.rs:357 / PR #308 cycle 3).
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
+                        })),
+                    }
+                };
+                let id = *id;
+                let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Range(id));
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                // Exclusive end at i64::MIN means an empty range
+                // (`min...min`). `saturating_sub` would underflow
+                // to `min` and yield once; checked_sub maps it to
+                // an empty-range early return (matches the
+                // no-block arm in range.rs and the Range#sum arm
+                // pattern).
+                let end_inc = if excl {
+                    match ei.checked_sub(1) {
+                        Some(v) => v,
+                        None => return Ok(Some(Value::Range(id))),
+                    }
+                } else { ei };
+                let mut current: Vec<Value> = Vec::with_capacity(n_usz.min(64));
+                let mut i = bi;
+                while i <= end_inc {
+                    current.push(Value::Int(i));
+                    if current.len() == n_usz {
+                        let iter_baseline = g.vm.pinned.len();
+                        let chunk = std::mem::take(&mut current);
+                        let step_result: Result<BlockStep, Trap> = (|| {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let slice_id = g.vm.heap.alloc(HeapObj::Array(chunk));
+                            g.vm.pinned.push(Value::Array(slice_id));
+                            g.vm.step_block(block, vec![Value::Array(slice_id)], pre_frames)
+                        })();
+                        g.vm.pinned.truncate(iter_baseline);
+                        match step_result? {
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                            BlockStep::Break(r) => { early = Some(r); break; }
+                            BlockStep::Value(_) => {}
+                        }
+                        current = Vec::with_capacity(n_usz.min(64));
+                    }
+                    // Bail before overflow on `i += 1` when end_inc == i64::MAX.
+                    if i == end_inc { break; }
+                    i += 1;
+                }
+                // Trailing partial chunk — only when no break fired.
+                if early.is_none() && !current.is_empty() {
+                    let iter_baseline = g.vm.pinned.len();
+                    let chunk = std::mem::take(&mut current);
+                    let step_result: Result<BlockStep, Trap> = (|| {
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let slice_id = g.vm.heap.alloc(HeapObj::Array(chunk));
+                        g.vm.pinned.push(Value::Array(slice_id));
+                        g.vm.step_block(block, vec![Value::Array(slice_id)], pre_frames)
+                    })();
+                    g.vm.pinned.truncate(iter_baseline);
+                    match step_result? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); }
+                        BlockStep::Value(_) => {}
+                    }
+                }
+                Some(early.unwrap_or(Value::Range(id)))
+            }
+            // `(b..e).each_cons(n) { |window| ... }` — sliding
+            // window of n consecutive Ints; return receiver.
+            // Maintains an n-element ring buffer (cheap on Int-
+            // sized usize), yields when full. No yields when
+            // range length < n.
+            (Value::Range(id), "each_cons", [Value::Int(n)]) => {
+                if *n <= 0 {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: format!("invalid size: {}", n),
+                    }));
+                }
+                let (bi, ei, excl) = {
+                    let r = self.heap.range(*id);
+                    match (&r.begin, &r.end) {
+                        (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
+                        // Str+Str ranges (e.g. ('a'..'z')) are
+                        // supported by Range#each via str_succ
+                        // but not yet by each_slice / each_cons.
+                        // Returning Ok(None) here used to fall
+                        // through to NoMethodError — but
+                        // `respond_to?(:each_slice)` is true
+                        // for any Range, so that contradicted
+                        // the lockstep contract documented at
+                        // lookup.rs:756. Raise RuntimeError
+                        // instead (same fallback shape as the
+                        // zero-arg find_index path in
+                        // array.rs:357 / PR #308 cycle 3).
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
+                        })),
+                    }
+                };
+                let id = *id;
+                let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Range(id));
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                // See each_slice arm for the i64::MIN edge.
+                let end_inc = if excl {
+                    match ei.checked_sub(1) {
+                        Some(v) => v,
+                        None => return Ok(Some(Value::Range(id))),
+                    }
+                } else { ei };
+                // Early-return when range_len < n — no windows
+                // can be yielded and walking the full range
+                // would buffer up to range_len ints for nothing
+                // (mirrors Array#each_cons' `len >= n` guard).
+                // Overflow on `end_inc - bi + 1` (e.g.
+                // `i64::MIN..i64::MAX`) → range_len is larger
+                // than any i64, so don't early-return.
+                let too_short = if bi > end_inc {
+                    true
+                } else {
+                    match end_inc.checked_sub(bi).and_then(|d| d.checked_add(1)) {
+                        Some(len) => len < *n,
+                        None => false,
+                    }
+                };
+                if too_short { return Ok(Some(Value::Range(id))); }
+                let mut window: std::collections::VecDeque<Value> =
+                    std::collections::VecDeque::with_capacity(n_usz.min(64));
+                let mut i = bi;
+                'outer: while i <= end_inc {
+                    if window.len() == n_usz {
+                        window.pop_front();
+                    }
+                    window.push_back(Value::Int(i));
+                    if window.len() == n_usz {
+                        let iter_baseline = g.vm.pinned.len();
+                        let win_vec: Vec<Value> = window.iter().cloned().collect();
+                        let step_result: Result<BlockStep, Trap> = (|| {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let wid = g.vm.heap.alloc(HeapObj::Array(win_vec));
+                            g.vm.pinned.push(Value::Array(wid));
+                            g.vm.step_block(block, vec![Value::Array(wid)], pre_frames)
+                        })();
+                        g.vm.pinned.truncate(iter_baseline);
+                        match step_result? {
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                            BlockStep::Break(r) => { early = Some(r); break 'outer; }
+                            BlockStep::Value(_) => {}
+                        }
+                    }
+                    if i == end_inc { break; }
+                    i += 1;
+                }
+                Some(early.unwrap_or(Value::Range(id)))
+            }
             (Value::Array(id), "each_with_index", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
@@ -2516,7 +2712,23 @@ impl Vm {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {
                         (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
-                        _ => return Ok(None),
+                        // Str+Str ranges (e.g. ('a'..'z')) are
+                        // supported by Range#each via str_succ
+                        // but not yet by each_slice / each_cons.
+                        // Returning Ok(None) here used to fall
+                        // through to NoMethodError — but
+                        // `respond_to?(:each_slice)` is true
+                        // for any Range, so that contradicted
+                        // the lockstep contract documented at
+                        // lookup.rs:756. Raise RuntimeError
+                        // instead (same fallback shape as the
+                        // zero-arg find_index path in
+                        // array.rs:357 / PR #308 cycle 3).
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
+                        })),
                     }
                 };
                 let end_inc = if excl { ei - 1 } else { ei };
@@ -2543,7 +2755,23 @@ impl Vm {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {
                         (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
-                        _ => return Ok(None),
+                        // Str+Str ranges (e.g. ('a'..'z')) are
+                        // supported by Range#each via str_succ
+                        // but not yet by each_slice / each_cons.
+                        // Returning Ok(None) here used to fall
+                        // through to NoMethodError — but
+                        // `respond_to?(:each_slice)` is true
+                        // for any Range, so that contradicted
+                        // the lockstep contract documented at
+                        // lookup.rs:756. Raise RuntimeError
+                        // instead (same fallback shape as the
+                        // zero-arg find_index path in
+                        // array.rs:357 / PR #308 cycle 3).
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
+                        })),
                     }
                 };
                 let end_inc = if excl { ei - 1 } else { ei };
@@ -2569,7 +2797,23 @@ impl Vm {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {
                         (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
-                        _ => return Ok(None),
+                        // Str+Str ranges (e.g. ('a'..'z')) are
+                        // supported by Range#each via str_succ
+                        // but not yet by each_slice / each_cons.
+                        // Returning Ok(None) here used to fall
+                        // through to NoMethodError — but
+                        // `respond_to?(:each_slice)` is true
+                        // for any Range, so that contradicted
+                        // the lockstep contract documented at
+                        // lookup.rs:756. Raise RuntimeError
+                        // instead (same fallback shape as the
+                        // zero-arg find_index path in
+                        // array.rs:357 / PR #308 cycle 3).
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
+                        })),
                     }
                 };
                 let end_inc = if excl { ei - 1 } else { ei };
@@ -3668,7 +3912,23 @@ impl Vm {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {
                         (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
-                        _ => return Ok(None),
+                        // Str+Str ranges (e.g. ('a'..'z')) are
+                        // supported by Range#each via str_succ
+                        // but not yet by each_slice / each_cons.
+                        // Returning Ok(None) here used to fall
+                        // through to NoMethodError — but
+                        // `respond_to?(:each_slice)` is true
+                        // for any Range, so that contradicted
+                        // the lockstep contract documented at
+                        // lookup.rs:756. Raise RuntimeError
+                        // instead (same fallback shape as the
+                        // zero-arg find_index path in
+                        // array.rs:357 / PR #308 cycle 3).
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
+                        })),
                     }
                 };
                 let mut g = PinGuard::new(self);
@@ -3713,7 +3973,23 @@ impl Vm {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {
                         (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
-                        _ => return Ok(None),
+                        // Str+Str ranges (e.g. ('a'..'z')) are
+                        // supported by Range#each via str_succ
+                        // but not yet by each_slice / each_cons.
+                        // Returning Ok(None) here used to fall
+                        // through to NoMethodError — but
+                        // `respond_to?(:each_slice)` is true
+                        // for any Range, so that contradicted
+                        // the lockstep contract documented at
+                        // lookup.rs:756. Raise RuntimeError
+                        // instead (same fallback shape as the
+                        // zero-arg find_index path in
+                        // array.rs:357 / PR #308 cycle 3).
+                        _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!(
+                                "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
+                            ),
+                        })),
                     }
                 };
                 let end_inc = if excl { ei - 1 } else { ei };
