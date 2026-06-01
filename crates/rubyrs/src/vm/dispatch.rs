@@ -5172,10 +5172,11 @@ impl Vm {
         // primitive_call) because heap.alloc is needed.
         //
         // `Integer#rationalize(eps=nil)` accepts an optional
-        // tolerance arg per CRuby but ignores it — eps is only
-        // meaningful for Float#rationalize (Phase C.4). Any value
-        // is accepted to match CRuby's `5.rationalize(0.1)` shape.
-        // 2+ args raise CRuby's ArgumentError.
+        // tolerance arg per CRuby but the eps value itself is
+        // ignored — only meaningful for Float#rationalize
+        // (Phase C.4). Type-checks the arg below: Numeric / nil
+        // accepted, anything else raises TypeError. 2+ args raise
+        // CRuby's ArgumentError.
         if recv_is_integer && (&*name == "to_r" || &*name == "rationalize") {
             let max_arity: usize = if &*name == "rationalize" { 1 } else { 0 };
             if args.len() > max_arity {

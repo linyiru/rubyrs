@@ -3070,7 +3070,9 @@ fn integer_to_r_and_rationalize() {
         ("puts 5.to_r.denominator",         "1"),
         ("puts 5.rationalize.inspect",      "(5/1)"),
         ("puts (-3).rationalize.inspect",   "(-3/1)"),
-        // rationalize tolerates an ignored argument.
+        // rationalize accepts a Numeric / nil eps and ignores
+        // its value (only Float#rationalize uses eps, Phase C.4).
+        // Non-Numeric eps raises TypeError — covered in spec.
         ("puts 5.rationalize(0.001).inspect", "(5/1)"),
         ("puts 5.rationalize(nil).inspect",   "(5/1)"),
         ("puts 5.respond_to?(:to_r)",       "true"),

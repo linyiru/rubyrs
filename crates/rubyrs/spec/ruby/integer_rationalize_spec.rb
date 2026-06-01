@@ -2,11 +2,13 @@
 # upstream commit 448cb340 (2026-05). Hand-polished:
 # - `.should ==` → `assert_eq`; `should raise_error` → `assert_raises`.
 # - `bignum_value` cases skipped (see integer_to_r_spec rationale).
-# - skipped (method-not-implemented): Rational epsilon arg —
-#   `Integer#rationalize(eps)` accepts any value but ignores it
-#   for Integer receivers (eps only matters for Float#rationalize,
-#   Phase C.4). CRuby allows eps to be any object that responds
-#   to `<`; we accept and ignore.
+# - eps arg: rubyrs validates `Integer#rationalize(eps)` by type
+#   (Numeric / nil) and raises TypeError otherwise — see the
+#   `raises TypeError when eps is not Numeric or nil` it-block
+#   below. CRuby's MRI calls f_nonzero_p internally and raises
+#   NoMethodError on non-Numeric; we surface the more standard
+#   TypeError shape. Eps VALUE is ignored for Integer recv
+#   (no fractional part to discard).
 
 describe "Integer#rationalize" do
   it "returns a Rational with self as numerator and 1 as denominator" do

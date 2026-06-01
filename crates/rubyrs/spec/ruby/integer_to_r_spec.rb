@@ -29,23 +29,21 @@ describe "Integer#to_r" do
     assert_raises("ArgumentError") { 5.to_r(1) }
   end
 
-  # skipped (method-not-implemented): BigInt receiver. Phase C.4
-  # widens RationalRepr's i64 num/den to BigInt; today
-  # `Integer#to_r` raises RangeError for BigInt magnitudes.
-  #
-  # bignum_it "bignum: returns self as Rational with den 1" do
+  # skipped (method-not-implemented): it "returns self as Rational with den 1" do
   #   bn = 2**64
   #   assert_eq(bn.to_r, Rational(bn, 1))
   # end
+  # BigInt receiver. Phase C.4 widens RationalRepr's i64 num/den
+  # to BigInt; today `Integer#to_r` raises RangeError for BigInt
+  # magnitudes.
 
-  # skipped (method-not-implemented): i64::MIN edge — Phase C.4
-  # follow-up. `make_rational` rejects i64::MIN num/den because
-  # the canonical-form sign normalization would call `.abs()` on
-  # the magnitude (panics in debug for `i64::MIN.abs()`). CRuby
-  # returns `Rational(-9223372036854775808, 1)`. Lifts together
-  # with the BigInt receiver case above when RationalRepr widens.
-  #
-  # it "returns Rational(i64::MIN, 1) for the smallest fixnum" do
+  # skipped (method-not-implemented): it "returns Rational(i64::MIN, 1) for the smallest fixnum" do
   #   assert_eq((-(2**62 + 2**62)).to_r, Rational(-(2**62 + 2**62), 1))
   # end
+  # i64::MIN edge — Phase C.4 follow-up. `make_rational` rejects
+  # i64::MIN num/den because the canonical-form sign normalization
+  # would call `.abs()` on the magnitude (panics in debug for
+  # `i64::MIN.abs()`). CRuby returns `Rational(-9223372036854775808, 1)`.
+  # Lifts together with the BigInt receiver case above when
+  # RationalRepr widens.
 end
