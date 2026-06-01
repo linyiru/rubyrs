@@ -17,10 +17,19 @@ puts JSON.parse('-17').inspect
 puts JSON.parse('3.5').inspect
 puts JSON.parse('true').inspect
 
-# --- parse: string escapes + unicode (\uXXXX -> the chr primitive) ---
+# --- parse: string escapes ---
 puts JSON.parse('"tab\tnewline\nquote\"slash\\\\"').inspect
+
+# --- parse: \uXXXX escape decoding (drives the chr primitive). Single-quoted
+# Ruby strings keep \u literal, so these reach the parser as real JSON escapes,
+# exercising the decoder + surrogate-pair path, not the literal passthrough below. ---
+puts JSON.parse('"\u00e9 \u20ac \u4e2d"').inspect   # BMP escapes -> "\u00e9 \u20ac \u4e2d"
+puts JSON.parse('"\ud83d\ude00"').inspect           # surrogate pair -> astral codepoint
+puts JSON.parse('"A\u0009B\u000aC"').inspect         # \u escapes for control chars
+
+# --- parse: literal non-ASCII UTF-8 passes through unchanged ---
 puts JSON.parse('"é € 中"').inspect
-puts JSON.parse('"😀"').inspect          # surrogate pair -> emoji
+puts JSON.parse('"😀"').inspect
 
 # --- parse: symbolize_names option ---
 puts JSON.parse('{"name":"ada","tags":["x","y"]}', symbolize_names: true).inspect
