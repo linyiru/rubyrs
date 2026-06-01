@@ -9065,7 +9065,7 @@ fn method_source_suffix(
     let filename = &proto.filename;
     let first_offset = proto.op_spans.first().map(|s| s.byte_offset).unwrap_or(0);
     let line = sources
-        .get(&**filename)
+        .get(filename.as_ref())
         .map(|src| crate::error::line_col(src, first_offset).0)
         .unwrap_or(0);
     // Even at line 0 (synth proto without source text)
