@@ -85,3 +85,36 @@ begin
 rescue JSON::ParserError => e
   puts "err.class=#{e.class}"
 end
+
+# ---- pretty_generate ----
+puts "--- pretty_generate ---"
+puts JSON.pretty_generate([])
+puts JSON.pretty_generate({})
+puts JSON.pretty_generate(42)
+puts JSON.pretty_generate("hi")
+puts JSON.pretty_generate([1, 2, 3])
+puts JSON.pretty_generate({"a" => 1, "b" => "x"})
+puts JSON.pretty_generate({"a" => [1, 2], "b" => {"c" => true}})
+
+# ---- to_json mixin ----
+puts "--- to_json ---"
+puts 42.to_json
+puts "hi".to_json
+puts nil.to_json
+puts true.to_json
+puts false.to_json
+puts [1, 2].to_json
+puts({"a" => 1}.to_json)
+puts :sym.to_json
+
+# ---- dump / load ----
+puts "--- dump / load ---"
+puts JSON.dump({"a" => 1})
+puts JSON.load('{"a":1}').inspect
+
+# ---- symbolize_names ----
+# Pass via positional Hash (NOT kwargs-shortcut syntax) — the
+# embedded canon's parse signature is `parse(str, opts = nil)`
+# so a literal Hash is the cross-runtime compatible call style.
+puts "--- symbolize_names ---"
+puts JSON.parse('{"a":1,"b":{"c":2}}', { symbolize_names: true }).inspect

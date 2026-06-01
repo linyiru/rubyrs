@@ -52,17 +52,29 @@ module JSON
 
   # ---- Parse ----
 
-  def self.parse(str)
+  def self.parse(str, opts = nil)
     raise ParserError, "input must be a String" unless str.is_a?(String)
-    p = Parser.new(str)
+    symbolize = opts && opts[:symbolize_names] ? true : false
+    p = Parser.new(str, symbolize)
     p.parse_top
   end
 
+  # CRuby's `JSON.load` differs from `JSON.parse` in that it
+  # historically accepted any IO-like input and permits non-
+  # container roots in older Ruby; for the embedded-host
+  # subset we treat it as a String-accepting alias of parse.
+  # Callers that pass IO objects get the same NoMethodError as
+  # any other unsupported input shape.
+  def self.load(str)
+    parse(str)
+  end
+
   class Parser
-    def initialize(str)
+    def initialize(str, symbolize_names = false)
       @chars = str.chars
       @len = @chars.length
       @pos = 0
+      @symbolize_names = symbolize_names
     end
 
     def parse_top
@@ -117,7 +129,8 @@ module JSON
       loop do
         skip_ws
         raise ParserError, "expected string key at position #{@pos}" unless peek == "\""
-        key = parse_string
+        key_str = parse_string
+        key = @symbolize_names ? key_str.to_sym : key_str
         skip_ws
         raise ParserError, "expected ':' at position #{@pos}" unless peek == ":"
         @pos += 1
@@ -265,7 +278,42 @@ module JSON
 
   # ---- Generate ----
 
-  def self.generate(obj)
+  # `opts` is a positional Hash (NOT a kwargs splat) to dodge
+  # the Ruby-3 trailing-hash auto-coerce: a caller writing
+  # `JSON.generate({"a" => 1})` would otherwise see its sole
+  # Hash arg eaten as kwargs by rubyrs's call-site lowering,
+  # leaving `obj` unbound. The trade is one extra `opts[:key]`
+  # lookup per call vs. the deserialisation grenade.
+  def self.generate(obj, opts = nil)
+    allow_nan = opts && opts[:allow_nan]
+    generate_with(obj, "", "", "", "", allow_nan ? true : false)
+  end
+
+  # `JSON.dump` is essentially `JSON.generate` with permissive
+  # defaults; CRuby's variant accepts an optional IO + limit
+  # arg, but the embedded-host subset narrows to "stringify and
+  # return". `allow_nan` defaults true here to mirror CRuby's
+  # historical dump behaviour.
+  def self.dump(obj)
+    generate(obj, { allow_nan: true })
+  end
+
+  # CRuby's default pretty formatting: 2-space indent, ": " (no
+  # space before the colon, one after), `,\n` between siblings,
+  # `\n` after the opening brace/bracket, closing brace/bracket
+  # back at the parent's indent level. Empty containers stay
+  # compact (`[]` / `{}`).
+  def self.pretty_generate(obj)
+    generate_with(obj, "  ", " ", "\n", "\n", false)
+  end
+
+  # Core recursive serializer. `indent` is the per-level indent
+  # string (empty in compact mode); `space` is the gap between
+  # `:` and value; `obj_nl` / `arr_nl` are the line separators
+  # inside object / array bodies. Compact mode passes empty
+  # strings throughout, producing the exact byte output CRuby's
+  # default `JSON.generate` emits.
+  def self.generate_with(obj, indent, space, obj_nl, arr_nl, allow_nan, depth = 0)
     case obj
     when nil then "null"
     when true then "true"
@@ -273,25 +321,38 @@ module JSON
     when Integer then obj.to_s
     when Float
       if obj.nan? || !obj.infinite?.nil?
+        if allow_nan
+          # CRuby's JSON.dump emits NaN/Infinity/-Infinity as
+          # bare tokens (non-standard JSON, accepted by its own
+          # parser). Mirror that surface for `dump`-shape calls.
+          return "NaN" if obj.nan?
+          return obj > 0 ? "Infinity" : "-Infinity"
+        end
         raise GeneratorError, "#{obj} not allowed in JSON"
       end
       obj.to_s
     when String then escape_string(obj)
     when Symbol then escape_string(obj.to_s)
     when Array
+      return "[]" if obj.empty?
+      inner_indent = indent * (depth + 1)
+      outer_indent = indent * depth
       parts = []
-      obj.each { |v| parts << generate(v) }
-      "[" + parts.join(",") + "]"
+      obj.each { |v| parts << inner_indent + generate_with(v, indent, space, obj_nl, arr_nl, allow_nan, depth + 1) }
+      "[" + arr_nl + parts.join("," + arr_nl) + arr_nl + outer_indent + "]"
     when Hash
+      return "{}" if obj.empty?
+      inner_indent = indent * (depth + 1)
+      outer_indent = indent * depth
       parts = []
       obj.each do |k, v|
         # CRuby's JSON.generate stringifies non-String keys via
         # to_s before emitting (Symbol → its name; Integer →
         # its decimal repr). We mirror that here.
         key_s = k.is_a?(String) ? k : k.to_s
-        parts << escape_string(key_s) + ":" + generate(v)
+        parts << inner_indent + escape_string(key_s) + ":" + space + generate_with(v, indent, space, obj_nl, arr_nl, allow_nan, depth + 1)
       end
-      "{" + parts.join(",") + "}"
+      "{" + obj_nl + parts.join("," + obj_nl) + obj_nl + outer_indent + "}"
     else
       raise GeneratorError, "cannot generate JSON from #{obj.class}"
     end
@@ -318,5 +379,68 @@ module JSON
       end
     end
     out + "\""
+  end
+end
+
+# `to_json` mixin on the basic types. CRuby's `json` gem
+# registers these by re-opening each class; mirroring that lets
+# `42.to_json`, `[1,2].to_json`, `{a:1}.to_json` work without
+# the caller having to spell `JSON.generate(...)`. Each method
+# takes an optional state arg for API parity but the embedded
+# canon ignores it (state-driven formatting is the
+# `pretty_generate` knobs which we expose by their own method
+# names).
+
+class NilClass
+  def to_json(*)
+    "null"
+  end
+end
+
+class TrueClass
+  def to_json(*)
+    "true"
+  end
+end
+
+class FalseClass
+  def to_json(*)
+    "false"
+  end
+end
+
+class Integer
+  def to_json(*)
+    self.to_s
+  end
+end
+
+class Float
+  def to_json(*)
+    JSON.generate(self)
+  end
+end
+
+class String
+  def to_json(*)
+    JSON.escape_string(self)
+  end
+end
+
+class Symbol
+  def to_json(*)
+    JSON.escape_string(self.to_s)
+  end
+end
+
+class Array
+  def to_json(*)
+    JSON.generate(self)
+  end
+end
+
+class Hash
+  def to_json(*)
+    JSON.generate(self)
   end
 end
