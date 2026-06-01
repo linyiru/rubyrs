@@ -614,7 +614,10 @@ jobs:
           # loop-scope push/pop dance). ICE-class; the
           # `is_empty()` guard above each `last_mut()` makes the
           # invariant statically true.
-          check crates/rubyrs/src/compiler.rs  7
+          # Bumped 7 → 9 when PR #318 merged master: the M27 batch
+          # (middle-splat `a, *b, c` + legacy `Module#attr`) added two
+          # ICE-class asserts in the compiler.
+          check crates/rubyrs/src/compiler.rs  9
           exit "$fail"
 
   perf-budget:
