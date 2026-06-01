@@ -174,6 +174,7 @@ fn run_diff(name: &str) {
 #[test] fn string_chomp() { run_diff("string_chomp"); }
 #[test] fn multiwrite_global() { run_diff("multiwrite_global"); }
 #[test] fn retry_keyword() { run_diff("retry_keyword"); }
+#[test] fn module_attr_legacy() { run_diff("module_attr_legacy"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
 #[test] fn user_sort() { run_diff("user_sort"); }
 #[test] fn hash_enumerable() { run_diff("hash_enumerable"); }
