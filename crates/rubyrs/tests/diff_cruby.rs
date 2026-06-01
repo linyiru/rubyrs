@@ -93,6 +93,7 @@ fn run_diff(name: &str) {
 #[test] fn method_inspect_format() { run_diff("method_inspect_format"); }
 #[test] fn method_inspect_singleton() { run_diff("method_inspect_singleton"); }
 #[test] fn method_inspect_params() { run_diff("method_inspect_params"); }
+#[test] fn method_inspect_source_location() { run_diff("method_inspect_source_location"); }
 #[test] fn array_hash_content_hash() { run_diff("array_hash_content_hash"); }
 #[test] fn object_itself_tap_then() { run_diff("object_itself_tap_then"); }
 #[test] fn instance_variable_defined() { run_diff("instance_variable_defined"); }
