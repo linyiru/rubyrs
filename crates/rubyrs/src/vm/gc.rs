@@ -242,6 +242,35 @@ impl Vm {
         }))
     }
 
+    /// Build a Trap matching CRuby's wrong-arity-and-type
+    /// surface for "method takes exactly one Integer argument"
+    /// dispatch arms (`each_slice(n)` / `each_cons(n)`):
+    ///   - args.len() != 1     → ArgumentError "wrong number of arguments (given N, expected 1)"
+    ///   - args[0] is Nil      → TypeError "no implicit conversion from nil to integer"
+    ///   - args[0] is non-Int  → TypeError "no implicit conversion of X into Integer"
+    ///
+    /// Used as `return Err(self.arity_error_arg1_int(name, args))`
+    /// in catch-all arms placed after the matching `[Value::Int(n)]`
+    /// arm so the success path is unchanged.
+    pub(crate) fn arity_error_arg1_int(&self, _name: &str, args: &[Value]) -> Trap {
+        if args.len() != 1 {
+            return self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1)",
+                    args.len()
+                ),
+            });
+        }
+        match &args[0] {
+            Value::Nil => self.trap(RubyError::TypeError {
+                msg: "no implicit conversion from nil to integer".to_string(),
+            }),
+            other => self.trap(RubyError::TypeError {
+                msg: format!("no implicit conversion of {} into Integer", other.type_name()),
+            }),
+        }
+    }
+
     /// Build a Trap with a backtrace snapshot taken at the current frame stack.
     pub(crate) fn trap(&self, err: RubyError) -> Trap {
         let mut bt = Vec::with_capacity(self.frames.len());

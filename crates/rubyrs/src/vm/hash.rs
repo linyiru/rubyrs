@@ -474,6 +474,10 @@ impl Vm {
                         let oid = g.vm.heap.alloc(HeapObj::Array(chunks));
                         Some(Value::Array(oid))
                     }
+                    // Wrong-arity / non-Int for Hash#each_slice no-block form.
+                    ("each_slice", _) => {
+                        return Err(self.arity_error_arg1_int(name, args));
+                    }
                     ("each_cons", [Value::Int(n)]) => {
                         if *n <= 0 {
                             return Err(self.trap(crate::error::RubyError::ArgumentError {
@@ -509,6 +513,10 @@ impl Vm {
                         g.vm.check_alloc()?;
                         let oid = g.vm.heap.alloc(HeapObj::Array(windows));
                         Some(Value::Array(oid))
+                    }
+                    // Wrong-arity / non-Int for Hash#each_cons no-block form.
+                    ("each_cons", _) => {
+                        return Err(self.arity_error_arg1_int(name, args));
                     }
                     // `h.find_index(target)` — Int insertion-order
                     // index of the first entry whose `[k, v]`

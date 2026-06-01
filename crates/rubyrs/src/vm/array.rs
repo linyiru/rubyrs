@@ -1278,6 +1278,12 @@ impl Vm {
                         let oid = g.vm.heap.alloc(HeapObj::Array(chunks));
                         Some(Value::Array(oid))
                     }
+                    // Wrong-arity / non-Int for Array#each_slice
+                    // no-block form (block-form gap mirrored by
+                    // iter.rs catch-all).
+                    ("each_slice", _) => {
+                        return Err(self.arity_error_arg1_int(name, args));
+                    }
                     ("each_cons", [Value::Int(n)]) => {
                         if *n <= 0 {
                             return Err(self.trap(RubyError::ArgumentError {
@@ -1300,6 +1306,10 @@ impl Vm {
                         g.vm.maybe_gc();
                         let oid = g.vm.heap.alloc(HeapObj::Array(windows));
                         Some(Value::Array(oid))
+                    }
+                    // Wrong-arity / non-Int for Array#each_cons no-block form.
+                    ("each_cons", _) => {
+                        return Err(self.arity_error_arg1_int(name, args));
                     }
                     // `zip` — pairs each element of `self` with the
                     // same-index element of each Array argument.

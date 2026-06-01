@@ -440,6 +440,10 @@ impl Vm {
                         let oid = g.vm.heap.alloc(HeapObj::Array(chunks));
                         Some(Value::Array(oid))
                     }
+                    // Wrong-arity / non-Int for Range#each_slice no-block form.
+                    ("each_slice", _) => {
+                        return Err(self.arity_error_arg1_int(name, args));
+                    }
                     ("each_cons", [Value::Int(n)]) => {
                         if *n <= 0 {
                             return Err(self.trap(RubyError::ArgumentError {
@@ -502,6 +506,10 @@ impl Vm {
                         g.vm.check_alloc()?;
                         let oid = g.vm.heap.alloc(HeapObj::Array(windows));
                         Some(Value::Array(oid))
+                    }
+                    // Wrong-arity / non-Int for Range#each_cons no-block form.
+                    ("each_cons", _) => {
+                        return Err(self.arity_error_arg1_int(name, args));
                     }
                     // Range#step(n) without a block returns a
                     // step-arithmetic Array. The block form is
