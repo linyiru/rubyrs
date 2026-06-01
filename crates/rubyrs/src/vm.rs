@@ -9,7 +9,7 @@ use crate::intern::{Interner, SymId};
 use crate::value::{Class, FixedArity, Method, ObjId, Value, Visibility};
 
 mod array;
-mod bignum;
+pub(crate) mod bignum;
 #[cfg(feature = "_fiber")]
 pub(crate) mod fiber;
 #[cfg(feature = "cext")]

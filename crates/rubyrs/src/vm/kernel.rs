@@ -426,10 +426,19 @@ impl Vm {
                             // `Rational(Rational(1, 2))` shape, which
                             // CRuby allows but is Phase C.2+ territory.
                             let r = self.heap.rational(*id);
-                            if r.den == 1 { Ok(r.num) }
-                            else { Err(RubyError::TypeError {
-                                msg: format!("can't convert {} into Rational", v.type_name()),
-                            }) }
+                            #[cfg(feature = "bignum")]
+                            let (den_is_one, num_i64) = (
+                                r.den == num_bigint::BigInt::from(1),
+                                i64::try_from(&r.num).ok(),
+                            );
+                            #[cfg(not(feature = "bignum"))]
+                            let (den_is_one, num_i64) = (r.den == 1, Some(r.num));
+                            match (den_is_one, num_i64) {
+                                (true, Some(n)) => Ok(n),
+                                _ => Err(RubyError::TypeError {
+                                    msg: format!("can't convert {} into Rational", v.type_name()),
+                                }),
+                            }
                         }
                         // Float / String coercion comes in Phase C.3
                         // (Float#to_r needs the continued-fraction
@@ -630,7 +639,7 @@ impl Vm {
                     // — fall through to TypeError otherwise.
                     [Value::Rational(id)] => {
                         let r = self.heap.rational(*id);
-                        Some(r.num as f64 / r.den as f64)
+                        Some(crate::heap::rational_to_f64(r))
                     }
                     [other] => return Some(Err(self.trap(RubyError::TypeError {
                         msg: format!(

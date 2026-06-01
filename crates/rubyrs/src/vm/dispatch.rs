@@ -92,9 +92,14 @@ impl Vm {
     /// (num, den). gcd-normalizes and sign-normalizes (`den > 0`)
     /// at the boundary so every `HeapObj::Rational` slot satisfies
     /// the canonical invariants every reader assumes.
-    /// `den == 0` → ZeroDivisionError. i64::MIN num or den →
-    /// RangeError ("Rational components must fit in i64") since
-    /// `.abs()` would panic in debug; Phase C.4 widens to BigInt.
+    /// `den == 0` → ZeroDivisionError.
+    ///
+    /// Under `bignum`: widens to BigInt before normalization — the
+    /// i64::MIN edge / 2**64 receiver paths flagged as Phase C.4
+    /// follow-ups in PR #310 no longer trap. Under no-bignum:
+    /// preserves Phase C.1–C.3 behavior, including the i64::MIN
+    /// RangeError shortcut (since `.abs()` would panic in debug).
+    ///
     /// Numeric values that produce small results (e.g. 4/2 = 2/1
     /// equivalent to Integer 2) STAY as a Value::Rational — CRuby
     /// also keeps the type tag distinct from Integer.
@@ -104,15 +109,58 @@ impl Vm {
                 msg: "divided by 0".to_string(),
             }));
         }
-        if num == i64::MIN || den == i64::MIN {
-            return Err(self.trap(RubyError::RangeError {
-                msg: "Rational components must fit in i64".to_string(),
-            }));
+        #[cfg(feature = "bignum")]
+        {
+            use num_bigint::BigInt;
+            self.make_rational_bigint(BigInt::from(num), BigInt::from(den))
         }
-        let (mut num, mut den) = (num, den);
-        if den < 0 { num = -num; den = -den; }
-        let g = crate::vm::numeric::gcd_i64(num.abs(), den);
-        if g > 1 { num /= g; den /= g; }
+        #[cfg(not(feature = "bignum"))]
+        {
+            if num == i64::MIN || den == i64::MIN {
+                return Err(self.trap(RubyError::RangeError {
+                    msg: "Rational components must fit in i64".to_string(),
+                }));
+            }
+            let (mut num, mut den) = (num, den);
+            if den < 0 { num = -num; den = -den; }
+            let g = crate::vm::numeric::gcd_i64(num.abs(), den);
+            if g > 1 { num /= g; den /= g; }
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::Rational(
+                crate::heap::RationalRepr { num, den },
+            ));
+            Ok(Value::Rational(id))
+        }
+    }
+
+    /// BigInt-arg entry point for `make_rational`. Performs the
+    /// same canonical-form normalization (gcd reduce, `den > 0`)
+    /// on arbitrary-precision operands. Only available under
+    /// `bignum`; Phase C.4.2+ callers (Integer#to_r with BigInt
+    /// receiver, Float#to_r, etc.) use this directly. ZeroDivision
+    /// must be checked by the caller — this entry assumes
+    /// `den != 0`.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn make_rational_bigint(
+        &mut self,
+        mut num: num_bigint::BigInt,
+        mut den: num_bigint::BigInt,
+    ) -> Result<Value, Trap> {
+        use num_bigint::Sign;
+        use num_integer::Integer;
+        debug_assert!(den.sign() != Sign::NoSign, "make_rational_bigint: den == 0");
+        if den.sign() == Sign::Minus {
+            num = -num;
+            den = -den;
+        }
+        // `Integer::gcd` is always non-negative; canonical form needs
+        // gcd(|num|, den) but BigInt's gcd already takes magnitudes.
+        let g = num.gcd(&den);
+        if g != num_bigint::BigInt::from(1) {
+            num /= &g;
+            den /= &g;
+        }
         self.maybe_gc();
         self.check_alloc()?;
         let id = self.heap.alloc(HeapObj::Rational(
@@ -138,7 +186,10 @@ impl Vm {
     ///   - Rational × Float       → Float (Float dominates)
     ///   - Float × Rational       → Float
     ///
-    /// Phase C.4 widens Integer-side to BigInt num/den.
+    /// Under `bignum` the Integer side widens to BigInt and the
+    /// internal arithmetic is infallible (no `RangeError` from
+    /// overflow). Under no-bignum the legacy i64 checked path
+    /// is preserved.
     pub(crate) fn try_rational_binop(
         &mut self,
         kind: crate::bytecode::BinOpKind,
@@ -151,11 +202,11 @@ impl Vm {
         let (a_f, b_f, has_float) = match (a, b) {
             (Value::Float(x), Value::Rational(id)) => {
                 let r = self.heap.rational(*id);
-                (Some(*x), Some(r.num as f64 / r.den as f64), true)
+                (Some(*x), Some(crate::heap::rational_to_f64(r)), true)
             }
             (Value::Rational(id), Value::Float(y)) => {
                 let r = self.heap.rational(*id);
-                (Some(r.num as f64 / r.den as f64), Some(*y), true)
+                (Some(crate::heap::rational_to_f64(r)), Some(*y), true)
             }
             _ => (None, None, false),
         };
@@ -183,82 +234,154 @@ impl Vm {
             };
             return Ok(Some(result));
         }
-        // Resolve both sides to (num, den) pairs. Integer side
-        // synthesises (n, 1). Anything else → fall through.
-        let to_pair = |v: &Value, heap: &crate::heap::Heap| -> Option<(i64, i64)> {
+        // At least one side must be Rational (the Int × Int path
+        // is already covered by apply_int upstream).
+        if !matches!(a, Value::Rational(_)) && !matches!(b, Value::Rational(_)) {
+            return Ok(None);
+        }
+        #[cfg(feature = "bignum")]
+        {
+            // Under bignum the BigInt path handles every operand
+            // shape — Int / BigInt / Rational. Non-numeric → None.
+            return self.rational_binop_bigint(kind, a, b);
+        }
+        #[cfg(not(feature = "bignum"))]
+        {
+            // i64 checked-arithmetic path. Integer side synthesises
+            // (n, 1); Rational side reads canonical (num, den).
+            // Non-Int / non-Rational operands fall through to caller.
+            let to_pair = |v: &Value, heap: &crate::heap::Heap| -> Option<(i64, i64)> {
+                match v {
+                    Value::Int(n) => Some((*n, 1)),
+                    Value::Rational(id) => {
+                        let r = heap.rational(*id);
+                        Some((r.num, r.den))
+                    }
+                    _ => None,
+                }
+            };
+            let (an, ad) = match to_pair(a, &self.heap) { Some(p) => p, None => return Ok(None) };
+            let (bn, bd) = match to_pair(b, &self.heap) { Some(p) => p, None => return Ok(None) };
+            // `fn` (not a closure) so it satisfies `FnOnce` by-value
+            // on every call site without forcing the surrounding
+            // closures to be `Copy`/`Clone`.
+            fn overflow() -> Trap {
+                Trap::new(RubyError::RangeError {
+                    msg: "Rational result overflows i64 (rebuild with --features bignum)".to_string(),
+                })
+            }
+            match kind {
+                K::Add => {
+                    let p1 = an.checked_mul(bd).ok_or_else(overflow)?;
+                    let p2 = bn.checked_mul(ad).ok_or_else(overflow)?;
+                    let num = p1.checked_add(p2).ok_or_else(overflow)?;
+                    let den = ad.checked_mul(bd).ok_or_else(overflow)?;
+                    Ok(Some(self.make_rational(num, den)?))
+                }
+                K::Sub => {
+                    let p1 = an.checked_mul(bd).ok_or_else(overflow)?;
+                    let p2 = bn.checked_mul(ad).ok_or_else(overflow)?;
+                    let num = p1.checked_sub(p2).ok_or_else(overflow)?;
+                    let den = ad.checked_mul(bd).ok_or_else(overflow)?;
+                    Ok(Some(self.make_rational(num, den)?))
+                }
+                K::Mul => {
+                    let num = an.checked_mul(bn).ok_or_else(overflow)?;
+                    let den = ad.checked_mul(bd).ok_or_else(overflow)?;
+                    Ok(Some(self.make_rational(num, den)?))
+                }
+                K::Div => {
+                    if bn == 0 {
+                        return Err(self.trap(RubyError::ZeroDivisionError {
+                            msg: "divided by 0".to_string(),
+                        }));
+                    }
+                    let num = an.checked_mul(bd).ok_or_else(overflow)?;
+                    let den = ad.checked_mul(bn).ok_or_else(overflow)?;
+                    Ok(Some(self.make_rational(num, den)?))
+                }
+                K::Mod => {
+                    // Phase C.2 defers Rational#% — fall through to
+                    // NoMethodError.
+                    let _ = (an, ad, bn, bd);
+                    Ok(None)
+                }
+                K::Lt | K::Le | K::Gt | K::Ge | K::Eq | K::Ne => {
+                    let lhs = (an as i128) * (bd as i128);
+                    let rhs = (bn as i128) * (ad as i128);
+                    Ok(Some(Value::Bool(match kind {
+                        K::Lt => lhs < rhs,
+                        K::Le => lhs <= rhs,
+                        K::Gt => lhs > rhs,
+                        K::Ge => lhs >= rhs,
+                        K::Eq => lhs == rhs,
+                        K::Ne => lhs != rhs,
+                        _ => unreachable!(),
+                    })))
+                }
+            }
+        }
+    }
+
+    /// BigInt-precision arithmetic for `try_rational_binop`. Replaces
+    /// the i64 checked-arithmetic path under `bignum`. Reads each
+    /// side as `(BigInt num, BigInt den)` — Int / BigInt operands
+    /// synthesise `(n, 1)`, Rational operands clone the heap repr.
+    #[cfg(feature = "bignum")]
+    fn rational_binop_bigint(
+        &mut self,
+        kind: crate::bytecode::BinOpKind,
+        a: &Value,
+        b: &Value,
+    ) -> Result<Option<Value>, Trap> {
+        use crate::bytecode::BinOpKind as K;
+        use num_bigint::BigInt;
+        let to_pair = |v: &Value, heap: &crate::heap::Heap| -> Option<(BigInt, BigInt)> {
             match v {
-                Value::Int(n) => Some((*n, 1)),
+                Value::Int(n) => Some((BigInt::from(*n), BigInt::from(1))),
+                Value::BigInt(id) => Some((heap.bigint(*id).clone(), BigInt::from(1))),
                 Value::Rational(id) => {
                     let r = heap.rational(*id);
-                    Some((r.num, r.den))
+                    Some((r.num.clone(), r.den.clone()))
                 }
                 _ => None,
             }
         };
         let (an, ad) = match to_pair(a, &self.heap) { Some(p) => p, None => return Ok(None) };
         let (bn, bd) = match to_pair(b, &self.heap) { Some(p) => p, None => return Ok(None) };
-        // At least one side must be Rational (the Int × Int path
-        // is already covered by apply_int upstream).
-        if !matches!(a, Value::Rational(_)) && !matches!(b, Value::Rational(_)) {
-            return Ok(None);
-        }
-        // Checked arithmetic on i64 — overflow → RangeError
-        // (Phase C.4 promotes to BigInt num/den). `fn` (not a
-        // closure) so it satisfies `FnOnce` by-value on every
-        // call site without forcing the surrounding closures to
-        // be `Copy`/`Clone` — clippy 1.95's `redundant_closure`
-        // lint would otherwise demand passing the bare ident,
-        // which requires that property.
-        fn overflow() -> Trap {
-            Trap::new(RubyError::RangeError {
-                msg: "Rational result overflows i64 (Phase C.4)".to_string(),
-            })
-        }
         match kind {
             K::Add => {
-                // (an*bd + bn*ad) / (ad*bd)
-                let p1 = an.checked_mul(bd).ok_or_else(overflow)?;
-                let p2 = bn.checked_mul(ad).ok_or_else(overflow)?;
-                let num = p1.checked_add(p2).ok_or_else(overflow)?;
-                let den = ad.checked_mul(bd).ok_or_else(overflow)?;
-                Ok(Some(self.make_rational(num, den)?))
+                let num = &an * &bd + &bn * &ad;
+                let den = &ad * &bd;
+                Ok(Some(self.make_rational_bigint(num, den)?))
             }
             K::Sub => {
-                let p1 = an.checked_mul(bd).ok_or_else(overflow)?;
-                let p2 = bn.checked_mul(ad).ok_or_else(overflow)?;
-                let num = p1.checked_sub(p2).ok_or_else(overflow)?;
-                let den = ad.checked_mul(bd).ok_or_else(overflow)?;
-                Ok(Some(self.make_rational(num, den)?))
+                let num = &an * &bd - &bn * &ad;
+                let den = &ad * &bd;
+                Ok(Some(self.make_rational_bigint(num, den)?))
             }
             K::Mul => {
-                let num = an.checked_mul(bn).ok_or_else(overflow)?;
-                let den = ad.checked_mul(bd).ok_or_else(overflow)?;
-                Ok(Some(self.make_rational(num, den)?))
+                let num = &an * &bn;
+                let den = &ad * &bd;
+                Ok(Some(self.make_rational_bigint(num, den)?))
             }
             K::Div => {
-                if bn == 0 {
+                use num_bigint::Sign;
+                if bn.sign() == Sign::NoSign {
                     return Err(self.trap(RubyError::ZeroDivisionError {
                         msg: "divided by 0".to_string(),
                     }));
                 }
-                // r / s = (an*bd) / (ad*bn)
-                let num = an.checked_mul(bd).ok_or_else(overflow)?;
-                let den = ad.checked_mul(bn).ok_or_else(overflow)?;
-                Ok(Some(self.make_rational(num, den)?))
+                let num = &an * &bd;
+                let den = &ad * &bn;
+                Ok(Some(self.make_rational_bigint(num, den)?))
             }
-            K::Mod => {
-                // r % s = r - s * (r / s).floor — Phase C.2
-                // defers Rational#%; let it fall through to
-                // NoMethodError until Phase C.4 (or just call it
-                // here via the formula). For now, return None.
-                let _ = (an, ad, bn, bd);
-                Ok(None)
-            }
-            // Comparison. Cross-multiply with sign-aware compare
-            // (both dens are positive in canonical form).
+            K::Mod => Ok(None),
             K::Lt | K::Le | K::Gt | K::Ge | K::Eq | K::Ne => {
-                let lhs = (an as i128) * (bd as i128);
-                let rhs = (bn as i128) * (ad as i128);
+                // canonical-form `den > 0` on both sides, so the
+                // sign of `an*bd - bn*ad` follows `r1 - r2` directly.
+                let lhs = &an * &bd;
+                let rhs = &bn * &ad;
                 Ok(Some(Value::Bool(match kind {
                     K::Lt => lhs < rhs,
                     K::Le => lhs <= rhs,
@@ -6036,16 +6159,15 @@ impl Vm {
             // needs heap access. The primitive_call arms are now
             // gated to fall through when rhs is Rational.
             if let Value::Rational(oid) = &args[0] {
-                let o = *self.heap.rational(*oid);
+                let o = self.heap.rational(*oid).clone();
                 let result = match &recv {
                     Value::Int(n) => {
-                        // n <=> o.num/o.den ⇔ n*o.den <=> o.num
-                        let lhs = (*n as i128) * (o.den as i128);
-                        let rhs = o.num as i128;
-                        Some(lhs.cmp(&rhs))
+                        // n <=> o ⇔ -(o <=> n)
+                        crate::heap::rational_cmp_other(&o, &Value::Int(*n), &self.heap)
+                            .map(|ord| ord.reverse())
                     }
                     Value::Float(f) => {
-                        let o_f = o.num as f64 / o.den as f64;
+                        let o_f = crate::heap::rational_to_f64(&o);
                         f.partial_cmp(&o_f)
                     }
                     _ => None,
@@ -6530,13 +6652,25 @@ impl Vm {
         // Arithmetic + comparison whitelist expansion lands in
         // Phase C.2.
         if let Value::Rational(id) = &recv {
-            let r = *self.heap.rational(*id);
+            let r = self.heap.rational(*id).clone();
             match (&*name, args.len()) {
                 ("numerator", 0) => {
+                    #[cfg(feature = "bignum")]
+                    {
+                        let v = self.bigint_to_value(r.num)?;
+                        self.stack.push(v);
+                    }
+                    #[cfg(not(feature = "bignum"))]
                     self.stack.push(Value::Int(r.num));
                     return Ok(());
                 }
                 ("denominator", 0) => {
+                    #[cfg(feature = "bignum")]
+                    {
+                        let v = self.bigint_to_value(r.den)?;
+                        self.stack.push(v);
+                    }
+                    #[cfg(not(feature = "bignum"))]
                     self.stack.push(Value::Int(r.den));
                     return Ok(());
                 }
@@ -6547,12 +6681,19 @@ impl Vm {
                 ("to_i", 0) => {
                     // CRuby `to_i` / `to_int` for Rational truncates
                     // toward zero (NOT floor). `(7/2r).to_i == 3`,
-                    // `(-7/2r).to_i == -3`.
+                    // `(-7/2r).to_i == -3`. BigInt `/` is already
+                    // truncating-toward-zero (num_bigint matches Rust).
+                    #[cfg(feature = "bignum")]
+                    {
+                        let v = self.bigint_to_value(&r.num / &r.den)?;
+                        self.stack.push(v);
+                    }
+                    #[cfg(not(feature = "bignum"))]
                     self.stack.push(Value::Int(r.num / r.den));
                     return Ok(());
                 }
                 ("to_f", 0) => {
-                    self.stack.push(Value::Float(r.num as f64 / r.den as f64));
+                    self.stack.push(Value::Float(crate::heap::rational_to_f64(&r)));
                     return Ok(());
                 }
                 // Arity guards for the readers — they take no args.
@@ -6629,25 +6770,7 @@ impl Vm {
                 // -1/0/1 (Int) or nil for non-numeric.
                 ("<=>", 1) => {
                     let other = &args[0];
-                    let result = match other {
-                        Value::Rational(oid) => {
-                            let o = self.heap.rational(*oid);
-                            let lhs = (r.num as i128) * (o.den as i128);
-                            let rhs = (o.num as i128) * (r.den as i128);
-                            Some(lhs.cmp(&rhs))
-                        }
-                        Value::Int(n) => {
-                            // r <=> n: compare (r.num) vs (n * r.den).
-                            let lhs = r.num as i128;
-                            let rhs = (*n as i128) * (r.den as i128);
-                            Some(lhs.cmp(&rhs))
-                        }
-                        Value::Float(f) => {
-                            let r_f = r.num as f64 / r.den as f64;
-                            r_f.partial_cmp(f)
-                        }
-                        _ => None,
-                    };
+                    let result = crate::heap::rational_cmp_other(&r, other, &self.heap);
                     let v = match result {
                         Some(std::cmp::Ordering::Less) => Value::Int(-1),
                         Some(std::cmp::Ordering::Equal) => Value::Int(0),
@@ -9772,7 +9895,7 @@ fn object_hash_inner(
         // values would compare equal but hash to per-ObjId values,
         // breaking Hash key lookup.
         Value::Rational(id) => {
-            let r = *heap.rational(*id);
+            let r = heap.rational(*id);
             11u8.hash(&mut h);
             r.num.hash(&mut h);
             r.den.hash(&mut h);
