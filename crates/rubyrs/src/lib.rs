@@ -1987,6 +1987,15 @@ impl Runtime {
         // `invoke_method_with_block`.
         self.vm.install_kernel_builtins();
         self.vm.install_basic_object_builtins();
+        // Kernel#catch / #throw — tag-based non-local control flow, built
+        // on the exception machinery (needs the exception hierarchy +
+        // Object, both loaded above). It's the mechanism Sinatra uses for
+        // `halt` / `pass`.
+        self.eval_inner(
+            include_str!("preamble/throw_catch.rb"),
+            "<rubyrs:preamble:throw_catch>",
+        )
+            .expect("ICE: failed to load throw/catch preamble");
         // Comparable mixin — comparison-operator fan-out from
         // `<=>`. Loaded ahead of the inline PREAMBLE so any
         // `class X < Comparable` shape (or `is_a?(Comparable)`
