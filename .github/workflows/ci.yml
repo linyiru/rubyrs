@@ -886,10 +886,16 @@ jobs:
         # embedded pure-Ruby canon (src/stdlib_vendor/*.rb) so
         # fixtures like `json_canon` resolve `require "json"` to
         # the in-tree JSON impl rather than the lenient stub.
-        # Other features (cext, regex, bignum) come from
+        # `_json_native` registers the serde_json accelerator —
+        # `json_canon` then exercises the native parse/generate
+        # path (the same one users get with `--features
+        # _json_native` in production), so any byte-diff drift
+        # between the canon and the accelerator surfaces on
+        # every PR rather than only in nightly bench. Other
+        # features (cext, regex, bignum) come from
         # `--features default`.
         run: |
           cargo test --release \
-            --features default,stdlib,_http_server,_fiber \
+            --features default,stdlib,_http_server,_fiber,_json_native \
             --test diff_framework \
             -- --nocapture
