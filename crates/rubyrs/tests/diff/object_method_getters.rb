@@ -105,6 +105,16 @@ puts K.public_method(:cls_m).call
 # snapshot is None but responds_to is true → must NOT raise.
 puts K.public_method(:new).is_a?(Method)
 
+# Cycle-3: error message for Class receivers must reference
+# the eigenclass-shell form (CRuby: \"#<Class:K>\"), not
+# `Vm::class_of(K) == \"Class\"`. Pre-fix the message read
+# `for class 'Class'`, leaking the metaclass instead of K.
+begin
+  K.public_method(:totally_missing_xyz)
+rescue NameError => e
+  puts e.message
+end
+
 # (4) Returned value is a BoundMethod that calls correctly
 m1 = c.public_method(:pub)
 m2 = c.singleton_method(:sing)

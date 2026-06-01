@@ -753,9 +753,21 @@ impl Vm {
                     };
                     if let Some(tag) = label {
                         let name_str = self.interner.resolve(*bound_name_id).to_string();
-                        let cls_name = match self.class_of(&recv) {
-                            Value::Class(c) => c.name.clone(),
-                            _ => "Object".to_string(),
+                        // For Class receivers, use the eigenclass-
+                        // shell form `#<Class:K>` (matches CRuby).
+                        // For Object receivers, use the class of
+                        // the instance. Falling back to
+                        // `self.class_of(&recv)` would return
+                        // "Class" / "Module" for Class receivers
+                        // — the cycle-3 review caught this giving
+                        // `for class 'Class'` instead of
+                        // `for class 'K'` / `'#<Class:K>'`.
+                        let cls_name = match &recv {
+                            Value::Class(c) => format!("#<Class:{}>", c.name),
+                            _ => match self.class_of(&recv) {
+                                Value::Class(c) => c.name.clone(),
+                                _ => "Object".to_string(),
+                            },
                         };
                         let msg = if tag == "__missing__" {
                             format!(
