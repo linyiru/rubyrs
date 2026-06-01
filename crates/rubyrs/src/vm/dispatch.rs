@@ -2540,9 +2540,40 @@ impl Vm {
             1 => return Err(self.trap(RubyError::ArgumentError {
                 msg: "tried to create Proc object without a block".into(),
             })),
-            2 => return Err(self.trap(RubyError::ArgumentError {
-                msg: "the 2-arg Proc/UnboundMethod form of `Module#define_method` is not yet supported by rubyrs Tier-1".into(),
-            })),
+            2 => {
+                // 2-arg Proc / Method / UnboundMethod install.
+                // Name is args[0], source is args[1]. Visibility
+                // inherits from the surrounding class body's
+                // current setting same as the block-form
+                // no_recv path.
+                let name_sym = match &args[0] {
+                    Value::Sym(s) => *s,
+                    Value::Str(s) => {
+                        let raw = s.to_string_lossy();
+                        if let Some(max) = self.max_symbols
+                            && !self.interner.contains(&raw) && self.interner.len() >= max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("interner exhausted: {} symbols", max),
+                                }));
+                            }
+                        self.interner.intern(&raw)
+                    }
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "wrong argument type {} (expected Symbol or String)",
+                            other.type_name(),
+                        ),
+                    })),
+                };
+                let vis = self.class_visibility_stack.last().copied()
+                    .unwrap_or(crate::value::Visibility::Public);
+                let src = args[1].clone();
+                let installed = self
+                    .install_method_from_value(cls, name_sym, &src, vis)
+                    .map_err(|e| self.trap(e))?;
+                self.stack.push(Value::Sym(installed));
+                return Ok(ClassOutcome::Handled);
+            }
             n => return Err(self.trap(RubyError::ArgumentError {
                 msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
             })),
@@ -5637,9 +5668,62 @@ impl Vm {
                         msg: "tried to create Proc object without a block".into(),
                     }));
                 }
-                2 => return Err(self.trap(RubyError::ArgumentError {
-                    msg: "the 2-arg Proc/UnboundMethod form of `Object#define_singleton_method` is not yet supported by rubyrs Tier-1".into(),
-                })),
+                2 => {
+                    // 2-arg form: install args[1] (Proc / Method /
+                    // UnboundMethod) onto recv's eigenclass or
+                    // class-singleton table.
+                    let name_sym = match &args[0] {
+                        Value::Sym(s) => *s,
+                        Value::Str(s) => {
+                            let raw = s.to_string_lossy();
+                            if let Some(max) = self.max_symbols
+                                && !self.interner.contains(&raw) && self.interner.len() >= max {
+                                    return Err(self.trap(RubyError::ResourceExhausted {
+                                        msg: format!("interner exhausted: {} symbols", max),
+                                    }));
+                                }
+                            self.interner.intern(&raw)
+                        }
+                        other => return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "wrong argument type {} (expected Symbol or String)",
+                                other.type_name(),
+                            ),
+                        })),
+                    };
+                    let src = args[1].clone();
+                    let installed = match &recv {
+                        Value::Object(id) => {
+                            // Eigenclass install — methods go on
+                            // the synthetic singleton class's
+                            // own methods table; install_method
+                            // honors that via singleton_target.
+                            let sc = self.heap.ensure_singleton_class(*id);
+                            self.install_method_from_value(
+                                &sc,
+                                name_sym,
+                                &src,
+                                crate::value::Visibility::Public,
+                            )
+                        }
+                        Value::Class(c) => {
+                            // Class receiver → install as a
+                            // class method (cls.singleton_methods),
+                            // matching the block-form arm. The
+                            // generic install_method would route
+                            // into cls.methods (instance methods)
+                            // since the class itself has no
+                            // singleton_target set.
+                            self.install_singleton_method_on_class_from_value(
+                                c, name_sym, &src,
+                            )
+                        }
+                        _ => unreachable!(),
+                    }
+                    .map_err(|e| self.trap(e))?;
+                    self.stack.push(Value::Sym(installed));
+                    return Ok(());
+                }
                 n => return Err(self.trap(RubyError::ArgumentError {
                     msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
                 })),
@@ -7153,14 +7237,13 @@ impl Vm {
             let target_recv = recv.clone().or_else(|| {
                 self.frames.last().map(|f| f.self_val.clone())
             });
-            // Arity matches `define_method` (1 → block install;
-            // 2 → Proc/Method second-arg form, still
-            // unsupported; other → ArgumentError).
+            // Arity matches `define_method`:
+            //   1 → install the block (path below)
+            //   2 → install args[1] (Proc/Method/UnboundMethod);
+            //       CRuby silently drops any attached block
+            let two_arg_form = args.len() == 2;
             match args.len() {
-                1 => {}
-                2 => return Err(self.trap(RubyError::ArgumentError {
-                    msg: "the 2-arg Proc/UnboundMethod form of `Object#define_singleton_method` is not yet supported by rubyrs Tier-1".into(),
-                })),
+                1 | 2 => {}
                 n => return Err(self.trap(RubyError::ArgumentError {
                     msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
                 })),
@@ -7184,6 +7267,39 @@ impl Vm {
                     ),
                 })),
             };
+            // 2-arg form: skip the block payload and install
+            // args[1] via the shared helpers. For Object recv
+            // the install goes onto the eigenclass; for Class
+            // recv it goes into cls.singleton_methods directly
+            // (matching the block-form table-write below).
+            if two_arg_form {
+                let src = args[1].clone();
+                let install_result = match &target_recv {
+                    Some(Value::Object(id)) => {
+                        let sc = self.heap.ensure_singleton_class(*id);
+                        Some(self.install_method_from_value(
+                            &sc,
+                            name_sym,
+                            &src,
+                            crate::value::Visibility::Public,
+                        ))
+                    }
+                    Some(Value::Class(c)) => Some(
+                        self.install_singleton_method_on_class_from_value(
+                            c, name_sym, &src,
+                        ),
+                    ),
+                    _ => None,
+                };
+                if let Some(res) = install_result {
+                    let installed = res.map_err(|e| self.trap(e))?;
+                    self.stack.push(Value::Sym(installed));
+                    return Ok(());
+                }
+                // Non-{Object,Class} receiver — fall through to
+                // the existing match below which raises
+                // NoMethodError / ArgumentError as appropriate.
+            }
             let (proto_idx, captured, param_start, n_params) = {
                 let bh = self.heap.block(block);
                 (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
@@ -7289,11 +7405,14 @@ impl Vm {
                 // CRuby's wording is `expected 1..2` even when a
                 // block is attached, so we use the same message
                 // across both arms (PR #245 Copilot round 6 #1).
+                // 2-arg variant: CRuby silently drops the
+                // attached block and uses args[1] as the body
+                // source. Handle it before the block-form
+                // install path below so the rest of the path
+                // can assume a 1-arg + block shape.
+                let two_arg_form = args.len() == 2;
                 match args.len() {
-                    1 => {}
-                    2 => return Err(self.trap(RubyError::ArgumentError {
-                        msg: "the 2-arg Proc/UnboundMethod form of `Module#define_method` is not yet supported by rubyrs Tier-1".into(),
-                    })),
+                    1 | 2 => {}
                     n => return Err(self.trap(RubyError::ArgumentError {
                         msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
                     })),
@@ -7324,12 +7443,6 @@ impl Vm {
                         ),
                     })),
                 };
-                let (proto_idx, captured, param_start, n_params) = {
-                    let bh = self.heap.block(block);
-                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
-                };
-                let proto = &self.protos[proto_idx];
-                let params = proto.params.clone();
                 // Explicit-receiver path: visibility defaults to
                 // Public (the new method's target class doesn't
                 // share lexical scope with the caller's visibility
@@ -7343,6 +7456,25 @@ impl Vm {
                     self.class_visibility_stack.last().copied()
                         .unwrap_or(crate::value::Visibility::Public)
                 };
+                // 2-arg form (with or without an attached block —
+                // CRuby silently drops the block and uses args[1]).
+                // Route through the shared 2-arg installer; the
+                // block-form path below remains for the 1-arg
+                // case.
+                if two_arg_form {
+                    let src = args[1].clone();
+                    let installed = self
+                        .install_method_from_value(&target_cls, name_sym, &src, vis)
+                        .map_err(|e| self.trap(e))?;
+                    self.stack.push(Value::Sym(installed));
+                    return Ok(());
+                }
+                let (proto_idx, captured, param_start, n_params) = {
+                    let bh = self.heap.block(block);
+                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
+                };
+                let proto = &self.protos[proto_idx];
+                let params = proto.params.clone();
                 let m = std::rc::Rc::new(crate::value::Method {
                     params,
                     proto_idx,
@@ -7940,6 +8072,179 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
         // permissive answer so the gem helper path doesn't trip
         // on Kernel-shared method probes.
         None => is_primitive_class_name(&cls.name),
+    }
+}
+
+/// Outcome of a `define_method` / `define_singleton_method`
+/// 2-arg form install request. Pulls the (proto_idx, closure,
+/// visibility) shape out of a Proc / Method / UnboundMethod
+/// argument so the install path stays the same as the
+/// block-form (`def_method_install_block_payload`).
+enum MethodSource {
+    Proc {
+        proto_idx: usize,
+        params: Vec<String>,
+        closure: crate::value::MethodClosure,
+    },
+    Snapshot(std::rc::Rc<crate::value::Method>),
+}
+
+impl Vm {
+    /// Extract a [`MethodSource`] from the 2nd-positional argument
+    /// of `Module#define_method(:name, src)` /
+    /// `Object#define_singleton_method(:name, src)`. Accepts:
+    ///   * `Value::Block(id)`  — a `Proc`, including `proc { … }`
+    ///     and `Proc.new`. Captures the block's proto + closure
+    ///     verbatim, matching how the block-form install reads
+    ///     its block argument.
+    ///   * `Value::BoundMethod(id)` / `Value::UnboundMethod(id)`
+    ///     — install the captured method snapshot directly.
+    ///     CRuby's `bind` compatibility check on UnboundMethod
+    ///     (target class must inherit from the unbound's class)
+    ///     is enforced here so a cross-hierarchy install raises
+    ///     TypeError up front instead of failing later.
+    ///   * `Value::CurriedProc(id)` — Tier-2 follow-up; emits
+    ///     ArgumentError now.
+    ///   * Anything else → TypeError matching CRuby.
+    fn method_source_from(
+        &self,
+        src: &Value,
+        target_cls: &std::rc::Rc<crate::value::Class>,
+    ) -> Result<MethodSource, RubyError> {
+        match src {
+            Value::Block(bid) => {
+                let bh = self.heap.block(*bid);
+                let proto = &self.protos[bh.proto_idx];
+                Ok(MethodSource::Proc {
+                    proto_idx: bh.proto_idx,
+                    params: proto.params.clone(),
+                    closure: crate::value::MethodClosure {
+                        captured: bh.captured.clone(),
+                        param_start: bh.param_start,
+                        n_params: bh.n_params,
+                    },
+                })
+            }
+            Value::BoundMethod(id) => {
+                let (_, _, snap) = self.heap.bound_method_full(*id);
+                match snap {
+                    Some(m) => Ok(MethodSource::Snapshot(m.clone())),
+                    None => Err(RubyError::TypeError {
+                        msg: "BoundMethod source has no captured body (rubyrs limitation)".into(),
+                    }),
+                }
+            }
+            Value::UnboundMethod(id) => {
+                let (defining, _, snap) = self.heap.unbound_method_full(*id);
+                // CRuby parity: `bind` insists the receiver's
+                // class be `defining_class` or a subclass. We
+                // apply the same rule at install time.
+                if !crate::vm::class_is_a(target_cls, &defining) {
+                    return Err(RubyError::TypeError {
+                        msg: format!(
+                            "bind argument must be a subclass of {}",
+                            defining.name,
+                        ),
+                    });
+                }
+                match snap {
+                    Some(m) => Ok(MethodSource::Snapshot(m)),
+                    None => Err(RubyError::TypeError {
+                        msg: "UnboundMethod source has no captured body (rubyrs limitation)".into(),
+                    }),
+                }
+            }
+            Value::CurriedProc(_) => Err(RubyError::ArgumentError {
+                msg: "CurriedProc as define_method source is not yet supported by rubyrs Tier-1".into(),
+            }),
+            other => Err(RubyError::TypeError {
+                msg: format!(
+                    "wrong argument type {} (expected Proc/Method/UnboundMethod)",
+                    other.type_name(),
+                ),
+            }),
+        }
+    }
+
+    /// Build the [`crate::value::Method`] described by `src`,
+    /// anchored to `defining_class`, without inserting it into
+    /// any table. The caller decides whether the install goes
+    /// into the class's instance-method table (`define_method`)
+    /// or its singleton-method table (`define_singleton_method`
+    /// for a Class receiver), then bumps `method_gen` itself.
+    /// Used by both 2-arg-form paths so the source-decoding
+    /// stays single-sourced.
+    fn build_method_from_value(
+        &self,
+        src: &Value,
+        defining_class: &std::rc::Rc<crate::value::Class>,
+        visibility: crate::value::Visibility,
+    ) -> Result<std::rc::Rc<crate::value::Method>, RubyError> {
+        let source = self.method_source_from(src, defining_class)?;
+        let m = match source {
+            MethodSource::Proc { proto_idx, params, closure } => {
+                std::rc::Rc::new(crate::value::Method {
+                    params,
+                    proto_idx,
+                    fixed_arity: None,
+                    defining_class: Some(std::rc::Rc::downgrade(defining_class)),
+                    visibility: std::cell::Cell::new(visibility),
+                    closure: Some(closure),
+                    builtin: None,
+                })
+            }
+            MethodSource::Snapshot(snap) => {
+                std::rc::Rc::new(crate::value::Method {
+                    params: snap.params.clone(),
+                    proto_idx: snap.proto_idx,
+                    fixed_arity: snap.fixed_arity,
+                    defining_class: Some(std::rc::Rc::downgrade(defining_class)),
+                    visibility: std::cell::Cell::new(visibility),
+                    closure: snap.closure.clone(),
+                    builtin: snap.builtin.clone(),
+                })
+            }
+        };
+        Ok(m)
+    }
+
+    /// `Module#define_method`-style install: routes through
+    /// `Class::install_method`, which redirects via
+    /// `singleton_target` when the class is an eigenclass shell.
+    /// Bumps `method_gen`.
+    fn install_method_from_value(
+        &mut self,
+        target_cls: &std::rc::Rc<crate::value::Class>,
+        name_sym: crate::intern::SymId,
+        src: &Value,
+        visibility: crate::value::Visibility,
+    ) -> Result<crate::intern::SymId, RubyError> {
+        let anchor = target_cls.effective_install_class();
+        let m = self.build_method_from_value(src, &anchor, visibility)?;
+        target_cls.install_method(name_sym, m);
+        self.method_gen = self.method_gen.wrapping_add(1);
+        Ok(name_sym)
+    }
+
+    /// `Object#define_singleton_method`-style install on a
+    /// Class receiver: writes directly into `cls.singleton_methods`
+    /// (matching the block-form arm). The defining_class anchor
+    /// is the class itself so `super` inside the new class
+    /// method walks the metaclass chain.
+    fn install_singleton_method_on_class_from_value(
+        &mut self,
+        cls: &std::rc::Rc<crate::value::Class>,
+        name_sym: crate::intern::SymId,
+        src: &Value,
+    ) -> Result<crate::intern::SymId, RubyError> {
+        let m = self.build_method_from_value(
+            src,
+            cls,
+            crate::value::Visibility::Public,
+        )?;
+        cls.singleton_methods.borrow_mut().insert(name_sym, m);
+        self.method_gen = self.method_gen.wrapping_add(1);
+        Ok(name_sym)
     }
 }
 

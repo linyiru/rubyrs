@@ -101,6 +101,7 @@ fn run_diff(name: &str) {
 #[test] fn object_extend() { run_diff("object_extend"); }
 #[test] fn object_define_singleton_method() { run_diff("object_define_singleton_method"); }
 #[test] fn object_method_getters() { run_diff("object_method_getters"); }
+#[test] fn define_method_2arg_form() { run_diff("define_method_2arg_form"); }
 #[test] fn enumerable_filter() { run_diff("enumerable_filter"); }
 #[test] fn enumerable_aggregate() { run_diff("enumerable_aggregate"); }
 #[test] fn int_string_basics() { run_diff("int_string_basics"); }
