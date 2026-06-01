@@ -107,14 +107,69 @@ module JSON
 
   # ---- Parse ----
 
+  # Detected once at first `parse` / `generate` call: are the
+  # `_json_native` host fns registered? If yes, hot calls route
+  # through serde_json — same Ruby Value shape, same emitted
+  # bytes, ~order-of-magnitude faster on big payloads. If no,
+  # the pure-Ruby `Parser` / `generate_with` recursion is the
+  # authoritative path.
+  NATIVE_AVAILABLE = defined?(__rubyrs_json_native_parse) && defined?(__rubyrs_json_native_generate)
+
   def self.parse(str, opts = nil)
     raise ParserError, "input must be a String" unless str.is_a?(String)
     symbolize = opts && opts[:symbolize_names] ? true : false
     max_nest = opts && opts.has_key?(:max_nesting) ? opts[:max_nesting] : MAX_NESTING_DEFAULT
     max_nest = 0 if max_nest == false || max_nest.nil?
     allow_nan = opts && opts[:allow_nan] ? true : false
+
+    # Native fast path: serde_json handles the heavy lifting,
+    # then if the caller asked for `symbolize_names: true` we
+    # post-walk to convert String keys to Symbol. `allow_nan`
+    # + `max_nesting` options stay on the pure path for now —
+    # serde_json doesn't model "configurable nesting depth"
+    # natively, and the canon's `max_nest > 0` guard would have
+    # to be re-implemented on the Rust side. For the deterministic
+    # default (allow_nan=false, max_nesting=100) AND the inputs
+    # that don't approach the depth limit, the native path is
+    # safe. Any caller that explicitly opted into deep nesting
+    # or NaN tokens falls through to the canon below.
+    if NATIVE_AVAILABLE && !allow_nan && max_nest == MAX_NESTING_DEFAULT
+      begin
+        v = __rubyrs_json_native_parse(str)
+        return symbolize ? deep_symbolize_keys(v) : v
+      rescue RuntimeError => e
+        # serde_json's recursion-limit error reads as "recursion
+        # limit exceeded" — that's the same condition the canon's
+        # `enter_nest` would have raised `JSON::NestingError` for.
+        # Re-raise as the documented class so user rescue clauses
+        # see the contract surface. Other parse errors map to
+        # the generic `JSON::ParserError`.
+        if e.message.include?("recursion limit")
+          raise NestingError, e.message
+        end
+        raise ParserError, e.message
+      end
+    end
+
     p = Parser.new(str, symbolize, max_nest, allow_nan)
     p.parse_top
+  end
+
+  # Walk a parsed tree converting Hash String-keys to Symbol.
+  # Pure Ruby — runs only when the native fast path was taken
+  # AND the caller passed `symbolize_names: true`. Arrays and
+  # Hash values are traversed; non-collection values pass through.
+  def self.deep_symbolize_keys(v)
+    case v
+    when Hash
+      out = {}
+      v.each { |k, val| out[k.is_a?(String) ? k.to_sym : k] = deep_symbolize_keys(val) }
+      out
+    when Array
+      v.map { |x| deep_symbolize_keys(x) }
+    else
+      v
+    end
   end
 
   # `JSON.parse!` — permissive parse with no nesting limit and
@@ -442,6 +497,25 @@ module JSON
   # `opts[:key]` lookup per call vs. the deserialisation grenade.
   def self.generate(obj, opts = nil)
     state = state_from_opts(opts, "", "", "", "", false, MAX_NESTING_DEFAULT)
+    # Native fast path: serde_json's emit produces the same
+    # compact bytes the canon would, but only for the
+    # deterministic subset (Null / Bool / Integer / Float /
+    # String / Array / Hash). Custom-object `to_json` overrides
+    # OR a State with non-default formatting (indent / space /
+    # newlines) needs the pure canon's recursion. The state
+    # below is "default compact" iff all four formatting knobs
+    # are empty strings.
+    is_default_compact = state.indent.empty? && state.space.empty? && state.object_nl.empty? && state.array_nl.empty?
+    if NATIVE_AVAILABLE && is_default_compact && !state.allow_nan? && state.max_nesting == MAX_NESTING_DEFAULT
+      begin
+        return __rubyrs_json_native_generate(obj)
+      rescue RuntimeError => e
+        # Native bailed (NaN, custom Object, unsupported value
+        # — see json_native.rs's `write_value` fall-through).
+        # Re-run on the pure canon which has full Object#to_json
+        # / NaN-with-allow_nan / nested-mixin coverage.
+      end
+    end
     generate_with(obj, state.indent, state.space, state.object_nl, state.array_nl, state.allow_nan?, state.max_nesting, 0)
   end
 

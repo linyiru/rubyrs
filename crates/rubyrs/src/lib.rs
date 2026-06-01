@@ -37,6 +37,8 @@ mod heap;
 #[cfg(feature = "_http_server")]
 mod http_server;
 mod intern;
+#[cfg(feature = "_json_native")]
+mod json_native;
 mod output;
 mod signals;
 #[cfg(feature = "stdlib")]
@@ -57,6 +59,14 @@ pub use http_server::{HttpServerConfig, register_host_fns as register_http_serve
 /// Tier-2 placement.
 #[cfg(feature = "_fiber")]
 pub use vm::fiber::register_host_fns as register_fiber_host_fns;
+/// Register `_json_native` host fns
+/// (`__rubyrs_json_native_generate`, `__rubyrs_json_native_parse`)
+/// onto a `Runtime`. The pure-Ruby JSON canon
+/// (`src/stdlib_vendor/json.rb`) detects the registration via
+/// `defined?(...)` and routes `JSON.parse` / `JSON.generate`'s
+/// hot paths through serde_json. See [`json_native::register_host_fns`].
+#[cfg(feature = "_json_native")]
+pub use json_native::register_host_fns as register_json_native_host_fns;
 
 use std::io::Write;
 use std::path::Path;

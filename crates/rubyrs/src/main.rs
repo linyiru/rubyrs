@@ -340,6 +340,13 @@ fn main() {
     // useful for prefork subprocess tests + examples.
     #[cfg(feature = "_http_server")]
     rubyrs::register_http_server_host_fns(&mut rt);
+    // `_json_native` accelerator: when the feature is built in,
+    // expose `__rubyrs_json_native_*` host fns so the pure-Ruby
+    // JSON canon (stdlib_vendor/json.rb) auto-detects and routes
+    // hot calls through serde_json. Pure-canon path stays as
+    // the reference behaviour for non-accelerator builds.
+    #[cfg(feature = "_json_native")]
+    rubyrs::register_json_native_host_fns(&mut rt);
     let result = rt.eval_file(path);
     trace.at("eval_done");
     match result {
