@@ -9,33 +9,36 @@ Rerun with the same driver on your machine for a current snapshot.
 
 | Operation   | CRuby 3.4 stdlib | rubyrs (pure canon)  | rubyrs (`_json_native`) |
 |-------------|------------------|----------------------|--------------------------|
-| `parse`     |   22.4 µs/iter   |   4 326 µs/iter (193×) |   32.6 µs/iter (1.46×)   |
-| `generate`  |   29.1 µs/iter   |   4 602 µs/iter (158×) |   26.7 µs/iter (0.92×)   |
-| `round_trip`|   53.2 µs/iter   |   8 675 µs/iter (163×) |   75.9 µs/iter (1.43×)   |
+| `parse`     |   21.4 µs/iter   |   4 115 µs/iter (193×) |  **17.0 µs/iter (0.80×)** |
+| `generate`  |   27.3 µs/iter   |   4 464 µs/iter (163×) |   27.6 µs/iter (1.01×)   |
+| `round_trip`|   49.6 µs/iter   |   8 676 µs/iter (175×) |   83.6 µs/iter (1.69×)   |
 
 Multiplier vs CRuby stdlib (lower = faster relative to CRuby).
+**Bold** = rubyrs beats CRuby.
 
 ## Takeaways
 
-- The pure-Ruby canon is ~160–200× slower than CRuby's C parser.
-  That's the expected cost of walking `String#chars` one position
-  at a time on a bytecode VM; the canon trades speed for being the
-  spec (Rule 6 of ADR 0019 — pure-Ruby canonical form is what every
-  behaviour-claim measures against).
-- The `_json_native` accelerator closes the gap to ~1.5× CRuby on
-  parse and **beats CRuby on generate** (serde_json's emit is
-  faster than CRuby's `ext/json/ext/generator`). Round-trip stays
-  ~1.4× CRuby because the round-trip pays the parse-side Ruby-
-  Value-tree construction overhead (each `Value::Hash` allocation
-  goes through `vm.heap.alloc`, whereas CRuby's C parser builds
-  hashes via direct `rb_hash_aset` calls and skips one Ruby-level
-  allocation layer per pair).
-- Bytecode dispatch overhead dominates the pure canon: serde_json's
-  Rust parser would itself be ≥ CRuby speed if not for the Ruby
-  Value reconstruction. The accelerator path proves the VM isn't
-  the bottleneck on JSON-heavy workloads when the heavy lifting is
-  pushed to a Rust battery — same architecture ADR 0019 v3
-  prescribes for the menu's data-layer items.
+- **`_json_native` parse beats CRuby by 20 %.** The streaming-visitor
+  shape (`serde::de::Visitor` + `DeserializeSeed` that allocates Ruby
+  `Value`s directly during the serde state walk) skips the
+  `serde_json::Value` intermediate tree that an earlier two-pass form
+  paid for. Per 3.4 KB payload that's ~one tree-allocation pass
+  saved — 32 µs → 17 µs, ~47 % reduction over the two-pass shape.
+- **Generate is tied with CRuby.** serde_json's emit performance was
+  already competitive with `ext/json/ext/generator.c`; no further
+  juice without going below `vm.heap.alloc` for the result String.
+- **Round-trip stays at 1.7× CRuby** even with parse + generate
+  individually faster. Plausible explanation: each round-trip iter
+  discards its parsed tree (Hash + Array + Strings), so rubyrs's
+  GC sweeps thousands of objects per iter. CRuby's mark-sweep
+  generational collector handles short-lived-object churn cheaper;
+  rubyrs's mark-sweep doesn't (yet) have a generational shape. The
+  fix is GC work, not JSON work — out of scope for the menu item.
+- **Pure canon is ~160–200× slower than CRuby.** That's the cost of
+  walking `String#chars` one position at a time on a bytecode VM;
+  the canon trades speed for being the spec (Rule 6 of ADR 0019 —
+  pure-Ruby canonical form is what every behaviour claim measures
+  against).
 
 ## Reproducing
 

@@ -157,7 +157,7 @@ _fiber = []
 # accelerator is for hot loops (Rack JSON responses, parsing
 # request bodies, …) where bytecode-level dispatch overhead
 # would otherwise dominate.
-_json_native = ["dep:serde_json"]
+_json_native = ["dep:serde_json", "dep:serde"]
 # `_http_server` enables the inbound HTTP server battery per
 # ADR 0022 v4. Pulls in hyper + tokio (current-thread runtime)
 # + http-body-util + bytes for the wire-protocol side; the
@@ -202,6 +202,7 @@ socket2 = { version = "0.5", features = ["all"], optional = true }
 # `_json_native` battery: optional via the feature flag. Pulled
 # in only when an embedder builds with `--features _json_native`
 # so the default Tier-1 binary stays serde_json-free.
+serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true, features = ["preserve_order"] }
 # Stage 7d: libc::fork + waitpid for pre-fork supervisor.
 # Unix-only inside the host fn (cfg(target_family = "unix")).
