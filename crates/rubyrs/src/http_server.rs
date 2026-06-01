@@ -899,8 +899,8 @@ impl hyper::body::Body for FiberResponseBody {
 ///     Pinned by `p2c_streaming_close_fires_on_server_shutdown_with_live_stream`.
 ///
 /// The `if ptr.is_null()` branch is therefore CURRENTLY
-/// UNREACHABLE in the standard hyper + tokio current-thread
-/// + V1 host fn setup. It stays as future-proofing against
+/// UNREACHABLE in the standard hyper + tokio current-thread +
+/// V1 host fn setup. It stays as future-proofing against
 /// refactors that might let a body outlive its host fn (e.g.,
 /// V2 host fns + a different Vm-lifetime model, or a future
 /// scheme that hands bodies off to a worker pool). Removing
