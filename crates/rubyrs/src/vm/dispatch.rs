@@ -4046,6 +4046,63 @@ impl Vm {
             // the listed methods on the current class. Outside a
             // class body these are no-ops returning nil — same
             // shape as CRuby's Module#private at the toplevel.
+            // `module_function` — bare form switches the current
+            // class-body to "module function" visibility mode (new
+            // `def`s become private instance methods AND get
+            // copied to the module's singleton class as public
+            // module-level functions). Symbol-arg form retroactively
+            // converts the listed already-defined instance methods.
+            // Outside a class body it's a no-op (matches CRuby's
+            // toplevel behavior). (TRY_RUNS pass-10 layer #12 —
+            // rack-3.1.10/lib/rack/utils.rb:37 + 161 use both forms
+            // during sinatra-4's load chain.)
+            if &*name == "module_function" {
+                if let Value::Class(cls) = &self_val {
+                    if args.is_empty() {
+                        // Bare form: subsequent defs in this body
+                        // SHOULD become private instance methods
+                        // AND get auto-copied to the module's
+                        // singleton class. Tier-1 takes the
+                        // partial-correctness path: switch the
+                        // current visibility to Private (so the
+                        // instance copy is private) but DO NOT
+                        // auto-mirror to singleton. This is enough
+                        // to LOAD past `rack/utils.rb:37` style
+                        // patterns; `Rack::Utils.escape_html(...)`
+                        // calls at request time still fail
+                        // (singleton dispatch finds no method).
+                        // Documented gap below; the explicit
+                        // Symbol-arg form (line 161 in same file)
+                        // does the proper dual-install.
+                        if let Some(top) = self.class_visibility_stack.last_mut() {
+                            *top = crate::value::Visibility::Private;
+                        }
+                    } else {
+                        // Symbol/String args: retroactively
+                        // module-function-ify each named method.
+                        // Copy from instance methods to singleton
+                        // methods; mark the instance copy private.
+                        let methods_snapshot: Vec<(crate::intern::SymId, std::rc::Rc<crate::value::Method>)> = {
+                            let methods = cls.methods.borrow();
+                            args.iter()
+                                .filter_map(|a| match a {
+                                    Value::Sym(s) => Some(*s),
+                                    Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
+                                    _ => None,
+                                })
+                                .filter_map(|sid| methods.get(&sid).map(|m| (sid, m.clone())))
+                                .collect()
+                        };
+                        for (sid, m) in methods_snapshot {
+                            cls.singleton_methods.borrow_mut().insert(sid, m.clone());
+                            m.visibility.set(crate::value::Visibility::Private);
+                        }
+                        self.method_gen = self.method_gen.wrapping_add(1);
+                    }
+                }
+                self.stack.push(Value::Nil);
+                return Ok(());
+            }
             if let Some(vis) = visibility_from_name(&name) {
                 if let Value::Class(cls) = &self_val {
                     if args.is_empty() {
