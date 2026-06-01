@@ -3238,7 +3238,7 @@ fn numeric_coerce_basic() {
     ] {
         let buf = SharedBuf::new();
         rt.set_stdout(Box::new(buf.clone()));
-        rt.eval(&format!("{}", script), "coerce.rb").expect("eval");
+        rt.eval(script, "coerce.rb").expect("eval");
         assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
     }
     // Non-Numeric arg → TypeError with CRuby-shape "X can't be

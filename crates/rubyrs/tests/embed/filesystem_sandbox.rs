@@ -522,7 +522,7 @@ fn allowlist_none_is_full_open() {
     // None`, behaviour should match the bool-only mode that
     // shipped in PR #257 — no narrowing. The CLI binary uses
     // exactly this config.
-    let (_guard_none_open, dir, probe) = alloc_tempdir("none-open");
+    let (_guard_none_open, _dir, probe) = alloc_tempdir("none-open");
     let mut rt = Runtime::with_config(Config {
         allow_filesystem_io: true,
         allowed_paths: None,

@@ -296,6 +296,11 @@ pub struct Config {
     /// users that want deterministic timing in tests can
     /// inject a no-op closure that returns `Duration::ZERO`
     /// without sleeping.
+    // clippy::type_complexity — the Fn signature IS the embed
+    // host's sleep contract (deadline + interrupt flag → elapsed
+    // Duration). A `type` alias would hide what the field
+    // documents inline.
+    #[allow(clippy::type_complexity)]
     pub sleep_for: Option<std::sync::Arc<
         dyn Fn(Option<std::time::Duration>, &std::sync::atomic::AtomicBool) -> std::time::Duration
             + Send + Sync,
@@ -327,8 +332,8 @@ pub struct Config {
     ///
     /// `false` (the Tier 1 default) gives the Vm a DEDICATED
     /// fresh Arc<AtomicBool> — no shared state with opted-in
-    /// Runtimes, no handler-store visibility. Cost is one Arc
-    /// + AtomicBool per non-opt-in Runtime (negligible) in
+    /// Runtimes, no handler-store visibility. Cost is one
+    /// Arc+AtomicBool per non-opt-in Runtime (negligible) in
     /// exchange for crisp signal isolation: an embed host can
     /// run an opt-in CLI Runtime and an opt-out sandbox
     /// Runtime side-by-side without surprise cross-talk.

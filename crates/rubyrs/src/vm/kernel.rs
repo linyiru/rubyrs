@@ -645,12 +645,12 @@ impl Vm {
                         ),
                     }))),
                 };
-                if let Some(s) = secs_opt {
-                    if s < 0.0 {
-                        return Some(Err(self.trap(RubyError::ArgumentError {
-                            msg: "time interval must not be negative".into(),
-                        })));
-                    }
+                if let Some(s) = secs_opt
+                    && s < 0.0
+                {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "time interval must not be negative".into(),
+                    })));
                 }
                 let Some(src) = self.sleep_for.clone() else {
                     return Some(Err(self.trap(RubyError::RuntimeError {

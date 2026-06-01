@@ -183,8 +183,12 @@ pub(crate) fn float_round_with_half(a: f64, n: i64, mode: HalfMode) -> Result<Va
                 let s = if x >= 0.0 { 1.0 } else { -1.0 };
                 let mag = x.abs();
                 let frac = mag - mag.floor();
+                // Tie (frac == 0.5) on the "toward zero" rule
+                // resolves to `floor`, same as the strict `< 0.5`
+                // branch — collapsed for clippy::if_same_then_else
+                // while keeping the structural symmetry visible
+                // via the comment.
                 if frac > 0.5 { s * mag.ceil() }
-                else if frac < 0.5 { s * mag.floor() }
                 else { s * mag.floor() }
             }
             HalfMode::Even => {

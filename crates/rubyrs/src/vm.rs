@@ -668,6 +668,12 @@ pub(crate) struct Vm {
     /// default); CLI binary fills this with
     /// `std::thread::sleep`. See `Config::sleep_for` for
     /// rationale + ADR 0017 Rule 1 closure pattern.
+    // clippy::type_complexity — the Fn signature is the
+    // contract the embed host implements (deadline + interrupt
+    // flag → elapsed Duration); extracting it to a `type` alias
+    // here would just hide the contract one level. The mirror
+    // `Config::sleep_for` field uses the same shape.
+    #[allow(clippy::type_complexity)]
     pub(crate) sleep_for: Option<std::sync::Arc<
         dyn Fn(Option<std::time::Duration>, &std::sync::atomic::AtomicBool) -> std::time::Duration
             + Send + Sync,
