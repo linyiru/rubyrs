@@ -174,3 +174,42 @@ begin
 rescue JSON::JSONError => e
   puts "JSONError caught: #{e.class}"
 end
+
+# ---- Object#to_json fall-through ----
+# Vanilla CRuby `json` defines Object#to_json that wraps to_s.
+# Our canon mirrors that for cross-runtime parity. Use a class
+# with a deterministic to_s so the byte-diff is stable.
+puts "--- Object#to_json fall-through ---"
+class JCanonProbe
+  def initialize(x); @x = x; end
+  def to_s; "JCanonProbe(@x=#{@x})"; end
+end
+puts JCanonProbe.new(7).to_json
+
+# ---- JSON[] shortcut ----
+puts "--- JSON[] ---"
+puts JSON['{"a":1,"b":2}']
+puts JSON[{"a" => 1}]
+puts JSON[[1, 2, 3]]
+
+# ---- JSON.unparse / pretty_unparse aliases ----
+puts "--- unparse aliases ---"
+puts JSON.unparse({"a" => 1})
+puts JSON.pretty_unparse({"a" => [1, 2]})
+
+# ---- to_json(state) on Array / Hash ----
+puts "--- to_json(state) ---"
+state = JSON::State.new(indent: "    ", space: " ", object_nl: "\n", array_nl: "\n")
+puts [1, 2, 3].to_json(state)
+puts({"a" => [1, 2]}.to_json(state))
+
+# ---- parse! accepts NaN / Infinity ----
+puts "--- parse! NaN/Infinity ---"
+puts JSON.parse!('NaN').nan?
+puts JSON.parse!('Infinity').infinite?
+puts JSON.parse!('-Infinity').infinite?
+# parse! also accepts top-level scalars (same as parse here —
+# the rubyrs Parser doesn't enforce JSON's "value must be an
+# object or array" historical restriction even in plain parse).
+puts JSON.parse!('42')
+puts JSON.parse!('"hello"')

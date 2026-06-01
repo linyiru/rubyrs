@@ -112,8 +112,21 @@ module JSON
     symbolize = opts && opts[:symbolize_names] ? true : false
     max_nest = opts && opts.has_key?(:max_nesting) ? opts[:max_nesting] : MAX_NESTING_DEFAULT
     max_nest = 0 if max_nest == false || max_nest.nil?
-    p = Parser.new(str, symbolize, max_nest)
+    allow_nan = opts && opts[:allow_nan] ? true : false
+    p = Parser.new(str, symbolize, max_nest, allow_nan)
     p.parse_top
+  end
+
+  # `JSON.parse!` — permissive parse with no nesting limit and
+  # NaN/Infinity tokens accepted. Matches CRuby's `parse!`
+  # default of `{max_nesting: false, allow_nan: true}`. User-
+  # supplied opts override.
+  def self.parse!(str, opts = nil)
+    merged = { max_nesting: false, allow_nan: true }
+    if opts
+      opts.each { |k, v| merged[k] = v }
+    end
+    parse(str, merged)
   end
 
   # CRuby's `JSON.load` differs from `JSON.parse` in that it
@@ -126,13 +139,33 @@ module JSON
     parse(str)
   end
 
+  # `JSON[…]` shortcut — dispatches on input type: String input
+  # parses; anything else generates. Mirrors CRuby's
+  # `JSON::[]` convenience method (`JSON[json_str]` ↔
+  # `JSON.parse(json_str)`; `JSON[obj]` ↔ `JSON.generate(obj)`).
+  def self.[](v)
+    v.is_a?(String) ? parse(v) : generate(v)
+  end
+
+  # Deprecated-but-still-present CRuby aliases. Some legacy code
+  # bases still spell `JSON.unparse(obj)`; keeping them as
+  # synonyms means rubyrs accepts the same surface without
+  # forcing a rewrite.
+  def self.unparse(obj, opts = nil)
+    generate(obj, opts)
+  end
+  def self.pretty_unparse(obj, opts = nil)
+    pretty_generate(obj, opts)
+  end
+
   class Parser
-    def initialize(str, symbolize_names = false, max_nesting = MAX_NESTING_DEFAULT)
+    def initialize(str, symbolize_names = false, max_nesting = MAX_NESTING_DEFAULT, allow_nan = false)
       @chars = str.chars
       @len = @chars.length
       @pos = 0
       @symbolize_names = symbolize_names
       @max_nesting = max_nesting
+      @allow_nan = allow_nan
       @depth = 0
     end
 
@@ -178,14 +211,61 @@ module JSON
       when "[" then parse_array
       when "\"" then parse_string
       when "t", "f" then parse_bool
-      when "n" then parse_null
+      when "n"
+        # `null` vs `NaN` discriminator — both start with `n`/`N`
+        # but JSON only spells null lowercase. Capital `N` enters
+        # the NaN path (allow_nan parser flag); the parse_null
+        # arm errors out on anything that isn't exactly `null`.
+        parse_null
+      when "N" then parse_nan
+      when "I", "-"
+        # `Infinity` and `-Infinity` tokens (non-standard JSON,
+        # accepted by parse! and JSON.parse(..., allow_nan: true)).
+        # `-` ambiguous with negative number; the parse_number arm
+        # handles the numeric branch + delegates here when the
+        # next char is `I`.
+        if c == "I" || (c == "-" && @pos + 1 < @len && @chars[@pos + 1] == "I")
+          parse_infinity
+        else
+          parse_number
+        end
       else
-        if c == "-" || "0123456789".include?(c)
+        if "0123456789".include?(c)
           parse_number
         else
           raise ParserError, "unexpected character '#{c}' at position #{@pos}"
         end
       end
+    end
+
+    def parse_nan
+      if @allow_nan && @pos + 3 <= @len &&
+        @chars[@pos] == "N" && @chars[@pos + 1] == "a" && @chars[@pos + 2] == "N"
+        @pos += 3
+        return 0.0 / 0.0
+      end
+      raise ParserError, "bad token at position #{@pos}"
+    end
+
+    def parse_infinity
+      neg = false
+      if @chars[@pos] == "-"
+        neg = true
+        @pos += 1
+      end
+      ident = "Infinity"
+      if !@allow_nan || @pos + ident.length > @len
+        raise ParserError, "bad token at position #{@pos}"
+      end
+      i = 0
+      while i < ident.length
+        if @chars[@pos + i] != ident[i]
+          raise ParserError, "bad token at position #{@pos}"
+        end
+        i += 1
+      end
+      @pos += ident.length
+      neg ? -1.0 / 0.0 : 1.0 / 0.0
     end
 
     def parse_object
@@ -502,6 +582,12 @@ end
 # `pretty_generate` knobs which we expose by their own method
 # names).
 
+# `to_json` mixin — each method takes an optional first `state`
+# arg (Hash or JSON::State or nil). Collections forward it to
+# JSON.generate so `arr.to_json(JSON::State.new(indent: "  "))`
+# emits pretty form; primitives ignore it (formatting state has
+# nothing to do with how `42` or `"x"` renders).
+
 class NilClass
   def to_json(*)
     "null"
@@ -545,14 +631,26 @@ class Symbol
 end
 
 class Array
-  def to_json(*)
-    JSON.generate(self)
+  def to_json(state = nil, *)
+    JSON.generate(self, state)
   end
 end
 
 class Hash
+  def to_json(state = nil, *)
+    JSON.generate(self, state)
+  end
+end
+
+# `Object#to_json` fall-through — anything outside the basic
+# types above stringifies via `to_s` and wraps in JSON quotes.
+# Matches CRuby's vanilla `json` gem behaviour
+# (`Object.new.to_json` → `"\"#<Object:0x...>\""`). Lets user
+# code do `[obj1, obj2].to_json` without raising on objects
+# whose JSON shape is "just stringify me."
+class Object
   def to_json(*)
-    JSON.generate(self)
+    JSON.escape_string(to_s)
   end
 end
 
