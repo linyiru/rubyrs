@@ -1,0 +1,70 @@
+{
+  "_doc": "Tier-1 Sinatra parity fixture — runs the SAME app.rb on both runtimes via the vendored micro-Sinatra (rubyrs) and the real `sinatra` gem (CRuby), then byte-diffs the 18-route transcript. Mirrors poc/sinatra/verify.sh but driven by the diff_framework harness; the PoC is the source of truth for the route matrix.",
+  "name": "sinatra_hello",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 8000,
+    "duration_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sinatra/base"]
+  },
+  "scenarios": [
+    { "name": "root",          "method": "GET",  "path": "/" },
+    { "name": "hello_world",   "method": "GET",  "path": "/hello/world" },
+    { "name": "hello_esc",     "method": "GET",  "path": "/hello/%3Cb%3E" },
+    { "name": "search",        "method": "GET",  "path": "/search?q=hello+world&limit=5" },
+    { "name": "splat",         "method": "GET",  "path": "/say/cats/to/dogs" },
+    { "name": "admin",         "method": "GET",  "path": "/admin" },
+    { "name": "old_redirect",  "method": "GET",  "path": "/old" },
+    { "name": "teapot",        "method": "GET",  "path": "/teapot" },
+    {
+      "name": "echo",
+      "method": "POST",
+      "path": "/echo",
+      "headers": { "Content-Type": "text/plain" },
+      "body": "ping from the same app.rb"
+    },
+    {
+      "name": "form",
+      "method": "POST",
+      "path": "/form",
+      "headers": { "Content-Type": "application/x-www-form-urlencoded" },
+      "body": "name=Ruby&city=Tokyo"
+    },
+    {
+      "name": "whoami",
+      "method": "GET",
+      "path": "/whoami",
+      "headers": { "User-Agent": "poc-agent/1.0" }
+    },
+    {
+      "name": "prefs",
+      "method": "GET",
+      "path": "/prefs",
+      "headers": { "Cookie": "theme=dark" }
+    },
+    { "name": "feature_primary",  "method": "GET", "path": "/feature" },
+    { "name": "feature_fallback", "method": "GET", "path": "/feature?skip=yes" },
+    { "name": "put_resource",     "method": "PUT", "path": "/resource/42" },
+    { "name": "validate_error",   "method": "GET", "path": "/validate" },
+    { "name": "stream",           "method": "GET", "path": "/stream" },
+    { "name": "not_found",        "method": "GET", "path": "/no-such-route" }
+  ],
+  "normalize": [
+    {
+      "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": "rubyrs micro-Sinatra \\(_http_server battery\\)",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "_doc": "Sinatra+WEBrick appends ;charset=utf-8 to default Content-Type; rubyrs's _http_server battery emits the bare media type. Both are valid per RFC 7231 §3.1.1.5; we collapse to the bare form for byte-diff.",
+      "pattern": ";charset=utf-8",
+      "replacement": ""
+    }
+  ]
+}

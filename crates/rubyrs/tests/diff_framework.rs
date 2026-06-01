@@ -234,6 +234,11 @@ fn run_matrix(addr: &str, scenarios: &[Scenario]) -> String {
         let status = status_line.split_whitespace().nth(1).unwrap_or("?");
         out.push_str(&format!("### {} {} {} -> {}\n", s.name, s.method, s.path, status));
         let mut chunked = false;
+        // Collect into BTreeMap so the emit order is canonical (sorted
+        // by header name) — Sinatra's WEBrick handler sends Location
+        // before Content-Type while rubyrs's _http_server emits the
+        // reverse. Sorting eliminates that per-runtime variation.
+        let mut kept: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         for line in lines {
             let (name, val) = match line.find(':') {
                 Some(idx) => (&line[..idx], line[idx + 1..].trim()),
@@ -251,11 +256,14 @@ fn run_matrix(addr: &str, scenarios: &[Scenario]) -> String {
             // WEBrick's `Content-Type` produce identical
             // transcript bytes.
             if matches!(nlc.as_str(), "content-type" | "location") {
-                out.push_str(&title_case_header(name));
-                out.push_str(": ");
-                out.push_str(val);
-                out.push('\n');
+                kept.insert(title_case_header(name), val.to_string());
             }
+        }
+        for (k, v) in &kept {
+            out.push_str(k);
+            out.push_str(": ");
+            out.push_str(v);
+            out.push('\n');
         }
         let body = if chunked { decode_chunked(body_raw) } else { body_raw.to_string() };
         out.push_str("--body--\n");
@@ -412,4 +420,9 @@ fn run_fixture(fixture_name: &str) {
 #[test]
 fn hello_smoke() {
     run_fixture("hello_smoke");
+}
+
+#[test]
+fn sinatra_hello() {
+    run_fixture("sinatra_hello");
 }

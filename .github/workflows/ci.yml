@@ -816,10 +816,10 @@ jobs:
     # (Sinatra now, JSON / ActiveSupport-lite / Sequel-lite next)
     # adds a row to this job's matrix, not the Test job's.
     #
-    # Smoke tier: ubuntu only, one Ruby version, the hello_smoke
-    # fixture (stdlib-only, no gem deps). Sinatra parity matrix
-    # joins once `fixtures/sinatra_hello/` lands; `gem install
-    # sinatra` step turns on then.
+    # Smoke tier: ubuntu only, one Ruby version. Two fixtures so
+    # far: `hello_smoke` (stdlib-only Rack-shape, gates harness
+    # correctness) and `sinatra_hello` (18-route Sinatra matrix,
+    # gates the M27 menu's omakase Sinatra parity claim).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -833,6 +833,16 @@ jobs:
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
+
+      - name: Install parity-matrix gems
+        # `fixtures/sinatra_hello/` requires the real `sinatra` gem
+        # on the CRuby side; rubyrs runs the same `app.rb` via its
+        # vendored `sinatra_lite.rb`. Webrick is bundled with the
+        # gem (sinatra's default-server fallback in the absence of
+        # puma/thin/falcon), so an explicit `gem install webrick`
+        # isn't needed on Ruby 3.4 — `gem install sinatra` pulls
+        # it in transitively.
+        run: gem install sinatra
 
       - name: Cache cargo registry + build
         uses: actions/cache@v5
