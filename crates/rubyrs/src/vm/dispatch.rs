@@ -8153,7 +8153,8 @@ impl Vm {
     ///     is enforced here so a cross-hierarchy install raises
     ///     TypeError up front instead of failing later.
     ///   * `Value::CurriedProc(id)` — Tier-2 follow-up; emits
-    ///     ArgumentError now.
+    ///     TypeError now (consistent with the `other =>` branch
+    ///     for unsupported source kinds).
     ///   * Anything else → TypeError matching CRuby.
     fn method_source_from(
         &self,
