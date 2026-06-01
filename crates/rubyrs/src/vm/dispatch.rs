@@ -2543,9 +2543,15 @@ impl Vm {
             2 => {
                 // 2-arg Proc / Method / UnboundMethod install.
                 // Name is args[0], source is args[1]. Visibility
-                // inherits from the surrounding class body's
-                // current setting same as the block-form
-                // no_recv path.
+                // defaults to Public on the explicit-receiver
+                // path — the bare-in-class-body shape (where
+                // class_visibility_stack matters) is handled
+                // before the bridge re-enters here (PR #321
+                // cycle-1), so reaching this arm means the
+                // caller explicitly wrote `cls.define_method(...)`
+                // and CRuby treats those installs as Public
+                // regardless of the surrounding class body's
+                // visibility mode.
                 let name_sym = match &args[0] {
                     Value::Sym(s) => *s,
                     Value::Str(s) => {
@@ -2565,11 +2571,14 @@ impl Vm {
                         ),
                     })),
                 };
-                let vis = self.class_visibility_stack.last().copied()
-                    .unwrap_or(crate::value::Visibility::Public);
                 let src = args[1].clone();
                 let installed = self
-                    .install_method_from_value(cls, name_sym, &src, vis)
+                    .install_method_from_value(
+                        cls,
+                        name_sym,
+                        &src,
+                        crate::value::Visibility::Public,
+                    )
                     .map_err(|e| self.trap(e))?;
                 self.stack.push(Value::Sym(installed));
                 return Ok(ClassOutcome::Handled);
@@ -3326,6 +3335,52 @@ impl Vm {
                 self.stack.push(self_val.clone());
                 for a in args { self.stack.push(a); }
                 return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
+            }
+            // 2-arg `define_method` / `define_singleton_method`
+            // in a class body — intercept BEFORE the bridge
+            // re-enters as explicit-recv, so the install
+            // inherits the surrounding class-body visibility
+            // (which the bridge re-entry would have lost). The
+            // recv-form arm in `try_dispatch_class_intrinsics`
+            // defaults to Public for the 2-arg form precisely
+            // because this intercept takes the no_recv path
+            // first. PR #321 cycle-1.
+            if matches!(&*name, "define_method" | "define_singleton_method")
+                && args.len() == 2
+                && let Value::Class(cls) = &self_val
+            {
+                let name_sym = match &args[0] {
+                    Value::Sym(s) => *s,
+                    Value::Str(s) => {
+                        let raw = s.to_string_lossy();
+                        if let Some(max) = self.max_symbols
+                            && !self.interner.contains(&raw) && self.interner.len() >= max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("interner exhausted: {} symbols", max),
+                                }));
+                            }
+                        self.interner.intern(&raw)
+                    }
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "wrong argument type {} (expected Symbol or String)",
+                            other.type_name(),
+                        ),
+                    })),
+                };
+                let src = args[1].clone();
+                let vis = self.class_visibility_stack.last().copied()
+                    .unwrap_or(crate::value::Visibility::Public);
+                let installed = if &*name == "define_method" {
+                    self.install_method_from_value(cls, name_sym, &src, vis)
+                } else {
+                    self.install_singleton_method_on_class_from_value(
+                        cls, name_sym, &src,
+                    )
+                }
+                .map_err(|e| self.trap(e))?;
+                self.stack.push(Value::Sym(installed));
+                return Ok(());
             }
             if let Value::Class(cls) = &self_val {
                 let in_set = matches!(&*name,

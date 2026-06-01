@@ -73,3 +73,23 @@ end
 puts C.new.respond_to?(:dbl)
 puts D.new.respond_to?(:add100)
 puts o.respond_to?(:foo)
+
+# (11) Cycle-1: visibility handling — bare define_method inside
+# a `private` block inherits private; explicit-receiver call
+# from inside a `private` block in an unrelated class must NOT
+# leak the caller's visibility onto the target class.
+class Priv
+  private
+  define_method(:bare_2arg, proc { "B" })
+end
+puts Priv.private_instance_methods(false).include?(:bare_2arg)
+puts Priv.public_instance_methods(false).include?(:bare_2arg)
+
+class Target; end
+class Caller
+  private
+  Target.define_method(:safe_x, proc { "x" })
+end
+# Target.safe_x is Public despite Caller's surrounding `private`
+puts Target.public_instance_methods(false).include?(:safe_x)
+puts Target.private_instance_methods(false).include?(:safe_x)
