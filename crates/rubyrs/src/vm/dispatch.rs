@@ -661,6 +661,16 @@ impl Vm {
                         let cls = self.heap.class_of(*id);
                         self.lookup_method_uncached(&cls, *bound_name_id)
                     }
+                    // Class receivers store their class-method
+                    // entries in `cls.singleton_methods`, not in
+                    // the per-instance method table. Use the
+                    // same helper as explicit `cls.foo`
+                    // dispatch so `K.public_method(:cls_m)`
+                    // finds class methods correctly. The old
+                    // `Vm::class_of(K)` would return the `Class`
+                    // class and miss every class-method
+                    // (PR #314 cycle-2).
+                    Value::Class(cls) => self.lookup_class_singleton_method(cls, *bound_name_id),
                     _ => match self.class_of(&recv) {
                         Value::Class(cls) => self.lookup_method_uncached(&cls, *bound_name_id),
                         _ => None,
@@ -713,33 +723,50 @@ impl Vm {
                     }
                 } else if name == "public_method" {
                     // CRuby rejects both Private and Protected
-                    // here (only Public passes). Build the
-                    // visibility-label string for the exact
-                    // CRuby-shape error message. Missing methods
-                    // (snapshot is None) also raise NameError —
-                    // CRuby reports `undefined method` rather
-                    // than `is private/protected` in that case.
-                    let label_or_missing = match snapshot.as_ref().map(|m| m.visibility.get()) {
-                        None => Some(None),
-                        Some(crate::value::Visibility::Private) => Some(Some("private")),
-                        Some(crate::value::Visibility::Protected) => Some(Some("protected")),
+                    // here (only Public passes). Treat the
+                    // captured snapshot's visibility as the
+                    // primary signal; if no snapshot exists
+                    // (primitive arms, built-ins like
+                    // Class#new, universal arms like `to_s` /
+                    // `inspect`), consult `responds_to` to tell
+                    // truly-missing-method from
+                    // missing-Method-entry-but-dispatchable.
+                    let vis = snapshot.as_ref().map(|m| m.visibility.get());
+                    let label = match vis {
+                        Some(crate::value::Visibility::Private) => Some("private"),
+                        Some(crate::value::Visibility::Protected) => Some("protected"),
                         Some(crate::value::Visibility::Public) => None,
+                        // No Method entry — defer to
+                        // `responds_to` (PR #314 cycle-2). If
+                        // the receiver actually dispatches this
+                        // name, we shouldn't lie via NameError.
+                        None => {
+                            if self.responds_to(&recv, *bound_name_id) {
+                                None
+                            } else {
+                                // Sentinel — same shape as
+                                // CRuby's "undefined method"
+                                // branch below.
+                                Some("__missing__")
+                            }
+                        }
                     };
-                    if let Some(label) = label_or_missing {
+                    if let Some(tag) = label {
                         let name_str = self.interner.resolve(*bound_name_id).to_string();
                         let cls_name = match self.class_of(&recv) {
                             Value::Class(c) => c.name.clone(),
                             _ => "Object".to_string(),
                         };
-                        let msg = match label {
-                            Some(vis_label) => format!(
-                                "method '{}' for class '{}' is {}",
-                                name_str, cls_name, vis_label,
-                            ),
-                            None => format!(
+                        let msg = if tag == "__missing__" {
+                            format!(
                                 "undefined method '{}' for class '{}'",
                                 name_str, cls_name,
-                            ),
+                            )
+                        } else {
+                            format!(
+                                "method '{}' for class '{}' is {}",
+                                name_str, cls_name, tag,
+                            )
                         };
                         return Err(self.trap(RubyError::NameError { msg }));
                     }
