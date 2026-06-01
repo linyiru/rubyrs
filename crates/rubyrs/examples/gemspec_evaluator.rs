@@ -27,6 +27,12 @@
 //!
 //! Run with: `cargo run --release --example gemspec_evaluator`
 //!
+//! See also: `tests/embed/rubund_validation.rs` mirrors the
+//! three phases below as `#[test]` functions so a contract
+//! regression lands red in CI (`cargo test` doesn't RUN
+//! examples, only compiles them). Keep the two artifacts
+//! synchronised when adding a phase or tightening a contract.
+//!
 //! No external setup needed — the example materializes a fake
 //! gem under `std::env::temp_dir()` and tears it down on exit
 //! via the `GemRoot` RAII guard. (Earlier drafts tried to read
@@ -284,6 +290,12 @@ fn main() {
     {
         let mut rt = make_rt(&gem_root.path);
         // Try to read /etc/passwd — well outside the gem root.
+        // The file does NOT need to exist for this test to pass:
+        // the allowlist check fires lexically (resolve + starts_with)
+        // BEFORE any syscall, so the trap raises whether the path
+        // resolves to a real inode or not. That makes the demo
+        // portable to any platform `cargo run` works on, including
+        // Windows where /etc/passwd is absent.
         let trap = rt
             .eval(r#"File.read("/etc/passwd")"#, "<phase2>")
             .expect_err("read of /etc/passwd MUST trap under scoped sandbox");
