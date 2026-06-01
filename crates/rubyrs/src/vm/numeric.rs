@@ -1763,6 +1763,18 @@ mod tests {
             raise "sur_lo" unless raises(RangeError) { 0xD800.chr(Encoding::UTF_8) }
             raise "sur_hi" unless raises(RangeError) { 0xDFFF.chr(Encoding::UTF_8) }
 
+            # US-ASCII: 0..0x7F -> the byte; 0x80..0xFF -> invalid codepoint;
+            # > 0xFF -> out of char range.
+            raise "usascii_ok"  unless 0x41.chr(Encoding::US_ASCII).bytes == [0x41]
+            raise "usascii_inv" unless raises(RangeError) { 0xE9.chr(Encoding::US_ASCII) }
+            raise "usascii_oor" unless raises(RangeError) { 256.chr(Encoding::US_ASCII) }
+
+            # ASCII-8BIT: 0..0xFF -> a single raw byte (binary-safe, incl.
+            # the non-UTF-8 0x80..0xFF range); > 0xFF -> out of char range.
+            raise "binary_lo"  unless 0x41.chr(Encoding::ASCII_8BIT).bytes == [0x41]
+            raise "binary_hi"  unless 0xE9.chr(Encoding::ASCII_8BIT).bytes == [0xE9]
+            raise "binary_oor" unless raises(RangeError) { 256.chr(Encoding::ASCII_8BIT) }
+
             # non-Encoding argument falls through to TypeError (NOT RangeError)
             raise "type"   unless raises(TypeError) { 0x41.chr(123) }
             "#,
