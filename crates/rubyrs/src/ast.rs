@@ -2577,6 +2577,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         let def = Expr::Def {
                             name: sym_name.clone(),
                             params: vec![], defaults: vec![], rest: None,
+                            n_required_post: 0,
                             kw_params: vec![], kw_rest: None, block_param: None,
                             receiver: None,
                             body,
@@ -2593,6 +2594,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             let def = Expr::Def {
                                 name: setter_name,
                                 params: vec!["val".into()], defaults: vec![], rest: None,
+                                n_required_post: 0,
                                 kw_params: vec![], kw_rest: None, block_param: None,
                                 receiver: None,
                                 body,
