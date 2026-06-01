@@ -46,7 +46,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use rubyrs::{Config, RubyError, Runtime, Value};
+use rubyrs::{RubyError, Runtime, Value};
+
+// Shared module pulled from `examples/gemspec_evaluator_fixture/`.
+// The test mirror `tests/embed/rubund_validation.rs` includes the
+// same module via a relative path, so the rubund-shape Config
+// helper can't drift between the two artifacts.
+#[path = "gemspec_evaluator_fixture/helpers.rs"]
+mod helpers;
+use helpers::make_rt;
 
 // ---------- Tempdir RAII guard (test-style cleanup) ----------
 
@@ -97,53 +105,17 @@ fn alloc_gem_root() -> GemRoot {
 ///     lib/
 ///       fakegem/
 ///         version.rb   (the require'd file)
+// Ruby fixture sources pulled at compile time from the shared
+// fixture directory. The test mirror in
+// `tests/embed/rubund_validation.rs` includes the same files, so
+// edits propagate to both artifacts and can't drift.
+const VERSION_RB: &str = include_str!("gemspec_evaluator_fixture/version.rb");
+const FAKEGEM_GEMSPEC: &str = include_str!("gemspec_evaluator_fixture/fakegem.gemspec");
+
 fn write_fixture(root: &Path) {
     fs::create_dir_all(root.join("lib/fakegem")).expect("mkdir lib/fakegem");
-    fs::write(
-        root.join("lib/fakegem/version.rb"),
-        // Realistic Bundler-shape version file. Defines a constant
-        // the gemspec interpolates into the version string.
-        r#"
-module FakeGem
-  VERSION = "1.2.3"
-end
-"#,
-    )
-    .expect("write version.rb");
-    fs::write(
-        root.join("fakegem.gemspec"),
-        // Realistic gemspec shape, simplified. host_register_*
-        // callbacks capture each spec field as the script runs.
-        // No `$LOAD_PATH.unshift` in the fixture — the require
-        // MUST resolve via the host-supplied `Config::load_paths`
-        // seed, not a script-side mutation. That's the contract
-        // Phase 1 is validating; an inline unshift would mask a
-        // broken seed.
-        r#"
-require "fakegem/version"
-
-class Spec
-  def initialize
-    @name = nil
-    @version = nil
-    @deps = []
-  end
-  def name=(n); @name = n; host_register_name(n); end
-  def version=(v); @version = v; host_register_version(v); end
-  def add_dependency(name, version)
-    @deps << [name, version]
-    host_register_dependency(name, version)
-  end
-end
-
-s = Spec.new
-s.name = "fakegem"
-s.version = FakeGem::VERSION
-s.add_dependency "rack", ">= 3.0"
-s.add_dependency "puma", "~> 6.0"
-"#,
-    )
-    .expect("write gemspec");
+    fs::write(root.join("lib/fakegem/version.rb"), VERSION_RB).expect("write version.rb");
+    fs::write(root.join("fakegem.gemspec"), FAKEGEM_GEMSPEC).expect("write gemspec");
 }
 
 // ---------- Captured gemspec metadata ----------
@@ -163,29 +135,6 @@ struct CapturedSpec {
 }
 
 // ---------- The host ----------
-
-/// Single source of truth for the scoped Runtime config the three
-/// phases share. Extracting this avoids drift between phases: a
-/// future contributor tightening one phase's sandbox can't
-/// silently leave the others under a looser policy than the
-/// doc-comment promises.
-fn make_rt(gem_root: &std::path::Path) -> Runtime {
-    Runtime::with_config(Config {
-        // Capability gate ON — the gemspec uses `require`, which
-        // is a load-class FS op.
-        allow_filesystem_io: true,
-        // Scope: only the gem root tree. Any read outside
-        // (Phase 2 tries `/etc/passwd`) traps with IOError
-        // before the syscall.
-        allowed_paths: Some(vec![gem_root.to_path_buf()]),
-        // Seed $LOAD_PATH with the gem's lib/ so
-        // `require "fakegem/version"` resolves the bundled file
-        // declaratively. No synthetic `$LOAD_PATH.unshift` as
-        // the first eval.
-        load_paths: Some(vec![gem_root.join("lib")]),
-        ..Default::default()
-    })
-}
 
 fn main() {
     println!("================================================================");

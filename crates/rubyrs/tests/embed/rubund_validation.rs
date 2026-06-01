@@ -22,7 +22,19 @@
 
 use std::path::{Path, PathBuf};
 
-use rubyrs::{Config, RubyError, Runtime, Value};
+use rubyrs::{RubyError, Runtime, Value};
+
+// Shared module from `examples/gemspec_evaluator_fixture/`. The
+// example pulls the same module via `#[path = "..."] mod helpers;`,
+// so the rubund-shape Config helper can't drift between this CI
+// gate and the human-readable narrative artifact.
+#[path = "../../examples/gemspec_evaluator_fixture/helpers.rs"]
+mod helpers;
+use helpers::make_rt;
+
+// Ruby fixture sources pulled from the same shared directory.
+const VERSION_RB: &str = include_str!("../../examples/gemspec_evaluator_fixture/version.rb");
+const FAKEGEM_GEMSPEC: &str = include_str!("../../examples/gemspec_evaluator_fixture/fakegem.gemspec");
 
 // ---------- Per-test tempdir guard ----------
 
@@ -78,58 +90,12 @@ fn alloc_gem_root(tag: &str) -> (GemRoot, PathBuf) {
 fn write_fixture(root: &Path) {
     // Bundler layout: `lib/<gemname>/version.rb`. The Phase-1
     // gemspec requires "fakegem/version", which load_paths
-    // resolves to lib/fakegem/version.rb.
+    // resolves to lib/fakegem/version.rb. Both fixture sources
+    // are pulled via include_str! from the shared directory so
+    // the example narrative and this CI gate stay in lockstep.
     std::fs::create_dir_all(root.join("lib/fakegem")).expect("mkdir lib/fakegem");
-    std::fs::write(
-        root.join("lib/fakegem/version.rb"),
-        r#"
-module FakeGem
-  VERSION = "1.2.3"
-end
-"#,
-    )
-    .expect("write version.rb");
-    std::fs::write(
-        root.join("fakegem.gemspec"),
-        // NO inline `$LOAD_PATH.unshift` — the require MUST
-        // resolve via Config::load_paths only. Mirrors the
-        // fixture in examples/gemspec_evaluator.rs.
-        r#"
-require "fakegem/version"
-
-class Spec
-  def initialize
-    @name = nil
-    @version = nil
-    @deps = []
-  end
-  def name=(n); @name = n; host_register_name(n); end
-  def version=(v); @version = v; host_register_version(v); end
-  def add_dependency(name, version)
-    @deps << [name, version]
-    host_register_dependency(name, version)
-  end
-end
-
-s = Spec.new
-s.name = "fakegem"
-s.version = FakeGem::VERSION
-s.add_dependency "rack", ">= 3.0"
-s.add_dependency "puma", "~> 6.0"
-"#,
-    )
-    .expect("write gemspec");
-}
-
-/// Shared Config shape across phases — single source of truth,
-/// no drift between tests.
-fn make_rt(gem_root: &Path) -> Runtime {
-    Runtime::with_config(Config {
-        allow_filesystem_io: true,
-        allowed_paths: Some(vec![gem_root.to_path_buf()]),
-        load_paths: Some(vec![gem_root.join("lib")]),
-        ..Default::default()
-    })
+    std::fs::write(root.join("lib/fakegem/version.rb"), VERSION_RB).expect("write version.rb");
+    std::fs::write(root.join("fakegem.gemspec"), FAKEGEM_GEMSPEC).expect("write gemspec");
 }
 
 // ---------- Phase 1: scope + load_paths composition ----------
