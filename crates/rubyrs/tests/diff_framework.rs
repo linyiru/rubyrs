@@ -45,7 +45,8 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -125,8 +126,19 @@ fn ruby_gem_available(gem: &str) -> bool {
     // some Ruby installs vendor gems without registering them with
     // `gem`, and conversely `gem list` doesn't know about stdlib-
     // promoted libraries like `webrick`.
+    //
+    // `Kernel#exit!` (not `exit`) is the no-side-effect exit — it
+    // skips at_exit handlers. classic-style Sinatra registers an
+    // at_exit hook that boots Puma on port 4567; without exit! the
+    // gem-availability probe would clobber the harness's own
+    // free-port pick. Any gem that uses at_exit for server
+    // autostart (or similar side effects) would have the same
+    // failure mode; exit! defuses the class.
+    let script = format!(
+        "begin; require '{gem}'; rescue LoadError; exit!(1); end; exit!(0)"
+    );
     Command::new("ruby")
-        .args(["-e", &format!("require '{gem}'")])
+        .args(["-e", &script])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -146,20 +158,64 @@ fn pick_free_port() -> u16 {
 /// bind port is passed via `HARNESS_PORT`; its in-process duration
 /// via `HARNESS_SECS`. The framework polls `ready_probe_path` until
 /// 200 OK or timeout — gives the runtime a known boot window.
+///
+/// Returns the child plus a background drainer thread for its
+/// stderr (collected into a shared buffer). The drainer is
+/// essential: with `Stdio::piped()` the OS pipe buffer is finite
+/// (~16–64 KB on macOS/Linux). If the harness only reads stderr
+/// after wait_for_ready fails — but the child happens to come up
+/// fine and then logs heavily during run_matrix (e.g. Puma access
+/// logs, ActiveRecord SQL, Sinatra startup banner) — the child
+/// blocks on stderr write once the buffer fills, freezing the
+/// whole server. Past M27 D debug session lost ~30 min to this.
 fn spawn_server(
     cmd: &mut Command,
     fixture: &Path,
     port: u16,
     spec: &ServerSpec,
-) -> std::process::Child {
-    cmd.arg(fixture.join(&spec.script))
+) -> (std::process::Child, StderrDrain) {
+    let mut child = cmd
+        .arg(fixture.join(&spec.script))
         .current_dir(fixture)
         .env("HARNESS_PORT", port.to_string())
         .env("HARNESS_SECS", spec.duration_secs.to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn server process")
+        .expect("spawn server process");
+    let stderr_pipe = child.stderr.take().expect("child stderr piped");
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let buf_thread = buf.clone();
+    let handle = std::thread::spawn(move || {
+        let mut reader = stderr_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => buf_thread.lock().unwrap_or_else(|p| p.into_inner()).extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+    (child, StderrDrain { buf, handle: Some(handle) })
+}
+
+/// Background-drained stderr buffer. `take()` joins the drainer
+/// thread (closes its read end when the child's stderr pipe shuts)
+/// and returns the accumulated text.
+struct StderrDrain {
+    buf: Arc<Mutex<Vec<u8>>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl StderrDrain {
+    fn take(mut self) -> String {
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+        let bytes = self.buf.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
 }
 
 fn wait_for_ready(addr: &str, ready_path: &str, timeout_ms: u64) -> bool {
@@ -342,21 +398,24 @@ fn probe(
 ) -> Result<String, String> {
     let port = pick_free_port();
     let addr = format!("127.0.0.1:{port}");
-    let mut child = spawn_server(&mut cmd, fixture, port, spec);
+    let (mut child, stderr_drain) = spawn_server(&mut cmd, fixture, port, spec);
     let ready = wait_for_ready(&addr, &spec.ready_probe_path, spec.boot_timeout_ms);
     if !ready {
         let _ = child.kill();
+        let _ = child.wait();
         // Pull stderr for diagnostics — boot failures are almost
         // always a SyntaxError / LoadError visible there.
-        let mut stderr = String::new();
-        if let Some(mut s) = child.stderr.take() {
-            let _ = s.read_to_string(&mut stderr);
-        }
+        let stderr = stderr_drain.take();
         return Err(format!("{label} server failed to become ready within {}ms\nstderr:\n{stderr}", spec.boot_timeout_ms));
     }
     let transcript = run_matrix(&addr, scenarios);
     let _ = child.kill();
     let _ = child.wait();
+    // Drainer thread finishes once the child's stderr pipe closes
+    // (which kill+wait above guarantees). Joining it here keeps the
+    // thread count clean and avoids spurious orphans showing up in
+    // test output across the matrix.
+    drop(stderr_drain.take());
     Ok(transcript)
 }
 
