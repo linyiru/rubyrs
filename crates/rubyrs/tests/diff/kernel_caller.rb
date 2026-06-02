@@ -123,3 +123,11 @@ rescue TypeError => e
   e.message.include?("from nil to integer") ? "type-nil" : "other-TypeError"
 end
 puts "shape8b=#{err}"
+
+## Shape 10: `defined?(caller)` returns "method" — the
+## `__defined_method?` whitelist must recognise this builtin
+## even though it's deliberately NOT in `is_builtin_name`
+## (those two lists serve different purposes — the former
+## gates the `defined?` answer, the latter the toplevel
+## fast-path skip). Code-review #342 round 9.
+puts "shape10=#{defined?(caller).inspect}"

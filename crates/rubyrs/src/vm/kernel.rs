@@ -414,7 +414,7 @@ impl Vm {
                         "sprintf" | "format" | "__time_now_raw" | "sleep" |
                         "exit" | "exit!" | "abort" | "warn" | "at_exit" | "__rubyrs_signal_trap" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
-                        "eval" |
+                        "eval" | "caller" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?"
                     );
                     let host_hit = self.host_fns.contains_key(sid);
