@@ -17,6 +17,7 @@
     { "name": "marked",        "method": "GET", "path": "/marked" },
     { "name": "plugin_version","method": "GET", "path": "/plugin/version" }
   ],
+  "keep_headers": ["X-Meta-Info-Plugin"],
   "normalize": [
     {
       "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",

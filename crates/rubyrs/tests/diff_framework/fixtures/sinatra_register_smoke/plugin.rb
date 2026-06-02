@@ -51,6 +51,16 @@ module Sinatra
       app.before do
         @meta_info_seeded = true
         @meta_info_count = 1
+        # Custom response header — the real-world parallel of
+        # CORS / rate-limit / security-header plugins that
+        # observe their effect via response headers. The fixture
+        # manifest opts this name into the diff transcript via
+        # `keep_headers`, so the header appears in the byte-
+        # diffed output alongside Content-Type / Location.
+        # Mirrors `response.headers["X-Foo"] = "bar"` from a real
+        # plugin; the vendored micro-Sinatra exposes `headers`
+        # as the same per-dispatch Hash the response uses.
+        headers["X-Meta-Info-Plugin"] = "v#{Sinatra::MetaInfo::VERSION}"
       end
 
       app.get "/__meta" do

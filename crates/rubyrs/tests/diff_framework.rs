@@ -80,6 +80,20 @@ struct Manifest {
     scenarios: Vec<Scenario>,
     #[serde(default)]
     normalize: Vec<NormalizeRule>,
+    /// Extra response-header names (case-insensitive) the
+    /// harness should retain in the diff transcript alongside
+    /// the default `Content-Type` + `Location` set. Use for
+    /// fixtures whose plugin / middleware effect is visible
+    /// only in custom headers (CORS `Access-Control-*`, rate-
+    /// limit `X-RateLimit-*`, security `Strict-Transport-
+    /// Security`, etc.). Empty / unset preserves the default
+    /// minimal-header diff. Names are emitted title-cased
+    /// (e.g. "Access-Control-Allow-Origin") so the same
+    /// header from rubyrs (`access-control-allow-origin`)
+    /// and CRuby's WEBrick (mixed case) produce identical
+    /// transcript bytes.
+    #[serde(default)]
+    keep_headers: Vec<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -292,12 +306,21 @@ fn wait_for_ready(addr: &str, ready_path: &str, timeout_ms: u64) -> bool {
 ///
 /// ```text
 /// ### <name> <method> <path> -> <status>
-/// <header lines (filtered to {Content-Type, Location})>
+/// <header lines (filtered to {Content-Type, Location} plus any manifest `keep_headers`)>
 /// --body--
 /// <body bytes>
 /// --end--
 /// ```
-fn run_matrix(addr: &str, scenarios: &[Scenario]) -> String {
+fn run_matrix(addr: &str, scenarios: &[Scenario], extra_keep_headers: &[String]) -> String {
+    // Build a case-insensitive lookup set for the manifest-
+    // declared extra-keep headers. The match in the header-
+    // filter loop compares against the already-lowercased
+    // `nlc`, so pre-lower here once instead of per-line. An
+    // empty manifest list preserves the default-only filter.
+    let extra_keep_lc: std::collections::HashSet<String> = extra_keep_headers
+        .iter()
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
     let mut out = String::new();
     for s in scenarios {
         let mut req = format!(
@@ -357,7 +380,9 @@ fn run_matrix(addr: &str, scenarios: &[Scenario]) -> String {
             // title-case so rubyrs `content-type` and
             // WEBrick's `Content-Type` produce identical
             // transcript bytes.
-            if matches!(nlc.as_str(), "content-type" | "location") {
+            if matches!(nlc.as_str(), "content-type" | "location")
+                || extra_keep_lc.contains(&nlc)
+            {
                 kept.insert(title_case_header(name), val.to_string());
             }
         }
@@ -523,6 +548,7 @@ fn probe(
     fixture: &Path,
     spec: &ServerSpec,
     scenarios: &[Scenario],
+    extra_keep_headers: &[String],
 ) -> Result<String, String> {
     let port = pick_free_port();
     let addr = format!("127.0.0.1:{port}");
@@ -536,7 +562,7 @@ fn probe(
         let stderr = stderr_drain.take();
         return Err(format!("{label} server failed to become ready within {}ms\nstderr:\n{stderr}", spec.boot_timeout_ms));
     }
-    let transcript = run_matrix(&addr, scenarios);
+    let transcript = run_matrix(&addr, scenarios, extra_keep_headers);
     let _ = child.kill();
     let _ = child.wait();
     // Drainer thread finishes once the child's stderr pipe closes
@@ -619,7 +645,7 @@ fn run_fixture(fixture_name: &str) {
         c
     };
     let rubyrs_transcript = if let Some(srv) = &manifest.server {
-        probe("rubyrs", rubyrs_cmd_factory(), &fixture, srv, &manifest.scenarios)
+        probe("rubyrs", rubyrs_cmd_factory(), &fixture, srv, &manifest.scenarios, &manifest.keep_headers)
             .unwrap_or_else(|e| panic!("rubyrs probe for `{fixture_name}`: {e}"))
     } else {
         let sc = manifest.script.as_ref().unwrap();
@@ -644,7 +670,7 @@ fn run_fixture(fixture_name: &str) {
         }
     }
     let cruby_transcript = if let Some(srv) = &manifest.server {
-        probe("cruby", Command::new("ruby"), &fixture, srv, &manifest.scenarios)
+        probe("cruby", Command::new("ruby"), &fixture, srv, &manifest.scenarios, &manifest.keep_headers)
             .unwrap_or_else(|e| panic!("cruby probe for `{fixture_name}`: {e}"))
     } else {
         let sc = manifest.script.as_ref().unwrap();
