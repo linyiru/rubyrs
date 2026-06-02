@@ -1,0 +1,144 @@
+# cargo-deny config — supply-chain gate for the rubyrs workspace.
+#
+# Sister to the panic-budget, perf-budget, and coverage ratchets:
+# CI fails if any dep introduces a CVE (advisories), violates the
+# license allowlist (licenses), or trips a banned-crate rule
+# (bans). Same philosophy: catch supply-chain drift at PR time,
+# not at audit time.
+#
+# Run locally (keep the version in lockstep with the pin in
+# `.github/workflows/ci.yml`'s `supply-chain` job):
+#   cargo install cargo-deny --locked --version 0.19.8
+#   cargo deny check
+#
+# See `docs/DEVELOPMENT.md` for the bump-a-rule etiquette.
+
+[graph]
+# All targets (Linux, macOS, wasm32-wasip1) — every platform the
+# workspace claims to support. Without this, cargo-deny picks
+# only the host's target and silently misses platform-specific
+# deps.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "wasm32-wasip1" },
+]
+# Scan EVERY feature combination's dep tree. CI builds with
+# non-default feature sets (`stdlib,_http_server,_fiber,
+# _json_native`) — deps that only show up behind those features
+# would escape the scan if we left this at the default `false`.
+# `all-features = true` activates all crate features and unions
+# the resulting dep graph; the scan sees the maximal set so
+# nothing slips through.
+all-features = true
+
+# ============================================================
+# Advisories — CVE / unmaintained / unsound checks against the
+# RustSec advisory database.
+# ============================================================
+[advisories]
+# Schema v2 (set explicitly so a future cargo-deny default flip
+# can't silently change interpretation). Under v2 the policy
+# verbs are LOCKED IN BY THE SCHEMA — there are no
+# `vulnerability` / `unsound` / `unmaintained` / `notice`
+# knobs to tune, because:
+#   - vulnerability + unsound: always `deny`
+#   - unmaintained + notice:   always `warn`
+# That's the policy we want (deny known-exploitable / known-
+# unsound, warn on stale-but-functional) so v2 schema delivers
+# it for free. The fields below configure only the v2-tunable
+# axes (`yanked` + the `ignore` allowlist).
+version = 2
+yanked = "deny"
+ignore = [
+    # Add IDs like "RUSTSEC-YYYY-NNNN" with a one-line reason
+    # when an advisory is acknowledged but can't be fixed
+    # immediately (e.g., waiting on upstream patch).
+]
+
+# ============================================================
+# Licenses — what we allow in the dep tree.
+# ============================================================
+[licenses]
+# Permissive license set — standard for a workspace shipping
+# under "MIT OR Apache-2.0" (see top-level Cargo.toml). The
+# allowlist is explicit; anything outside it triggers a build
+# failure with a "license not allowed" message that names the
+# crate.
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "MPL-2.0",
+    "0BSD",
+    # CDLA-Permissive-2.0: Linux Foundation's "Community Data License
+    # Agreement — Permissive 2.0". Obligation profile is comparable to
+    # MIT/Apache-2.0 (attribution-only, no copyleft, no patent grab).
+    # Required because webpki-roots 0.26.x and 1.0.x — pulled in via
+    # ureq's TLS stack — both ship under this SPDX. Without it the gate
+    # fails on its very first run.
+    "CDLA-Permissive-2.0",
+]
+# `confidence-threshold` intentionally omitted — cargo-deny's default
+# (0.8) is the value upstream considers correct for askalono's fuzzy
+# license matching. Raising it tightens classification strictness
+# (rejecting LICENSE files with slightly non-canonical headers, line
+# wraps, extra copyright lines), and we have no specific reason to
+# diverge from upstream's calibration. If a misclassification surfaces
+# later, prefer a [licenses.exceptions] entry over bumping the
+# threshold globally.
+
+# Exceptions for specific crates whose SPDX expression is harder
+# to classify. Each entry needs a justification in the PR that
+# adds it.
+exceptions = [
+    # { allow = ["..."], name = "crate-name", version = "..." },
+]
+
+# ============================================================
+# Bans — duplicate / forbidden crate enforcement.
+# ============================================================
+[bans]
+# Multiple versions of the same crate bloat the binary and slow
+# compile times. Held at `warn` (not `deny`) because the workspace's
+# wasmtime / cranelift dep tree pulls in unavoidable duplicates
+# (hashbrown 0.16+0.17, thiserror 1+2, regex-automata, getrandom
+# 0.2+0.4, webpki-roots 0.26+1.0, etc.) that we don't control and
+# upstream is unlikely to unify in the near term. The duplicate
+# list surfaces in `cargo deny check` output so a *new* duplicate
+# is visible in CI logs, but doesn't block the gate.
+#
+# If a path opens to deny mode later, it would need an explicit
+# `skip-tree = [{ name = "wasmtime" }]` carve-out plus a per-entry
+# inventory; that's a separate scope from this gate's introduction.
+multiple-versions = "warn"
+# `wildcards = "deny"` catches `foo = "*"` deps; we don't have
+# any (all workspace deps pin a version), so this defends
+# against future regressions.
+wildcards = "deny"
+# Crates we explicitly never want in the tree (e.g., known
+# unmaintained alternatives to a healthy crate we already use).
+deny = [
+    # { name = "openssl", reason = "use rustls instead" },
+]
+
+# ============================================================
+# Sources — where can deps come from.
+# ============================================================
+[sources]
+# Only crates.io + git repos we explicitly allowlist. Catches a
+# dep silently switching to a fork / private registry.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
