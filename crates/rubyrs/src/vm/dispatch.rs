@@ -2188,6 +2188,84 @@ impl Vm {
                 self.stack.push(Value::Sym(nid));
                 return Ok(CallableOutcome::Handled);
             }
+        // `m.super_method` — returns the Method/UnboundMethod that
+        // `super` would dispatch to, or nil if no super definition
+        // exists. CRuby parity: walks past the captured Method's
+        // defining class and resolves the name against that class's
+        // ancestor chain. For BoundMethod the result is bound to
+        // the same receiver; for UnboundMethod it's anchored on the
+        // super-defining class.
+        if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
+            && name == "super_method" {
+                if !args.is_empty() {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0)",
+                            args.len()
+                        ),
+                    }));
+                }
+                let (cap_class, m_name_id, snapshot, recv_opt) = match &recv {
+                    Value::BoundMethod(bid) => {
+                        let (r, n, snap) = self.heap.bound_method_full(*bid);
+                        let r = r.clone();
+                        let snap = snap.clone();
+                        let cls = match self.class_of(&r) {
+                            Value::Class(c) => c,
+                            _ => return Err(self.trap(RubyError::TypeError {
+                                msg: "Method receiver has no resolvable class".into(),
+                            })),
+                        };
+                        (cls, n, snap, Some(r))
+                    }
+                    Value::UnboundMethod(uid) => {
+                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                        (cls, n, snap, None)
+                    }
+                    _ => unreachable!(),
+                };
+                // Resolve the current Method's defining class —
+                // snapshot first (capture-time anchor), then live
+                // lookup as fallback. Builtin methods have no
+                // resolvable defining class → super_method is nil.
+                let cur_method = snapshot
+                    .or_else(|| self.lookup_method_uncached(&cap_class, m_name_id));
+                let defining_class = cur_method.as_ref()
+                    .and_then(|m| m.defining_class.as_ref())
+                    .and_then(|w| w.upgrade());
+                let super_resolved = defining_class.and_then(|dc| {
+                    let parent = dc.superclass.borrow().as_ref().cloned();
+                    parent.and_then(|p| self.lookup_method_uncached(&p, m_name_id).map(|m| (p, m)))
+                });
+                match super_resolved {
+                    Some((super_cls, super_method)) => {
+                        let mut g = crate::vm::PinGuard::new(self);
+                        if let Some(r) = recv_opt.as_ref() { g.pin(r.clone()); }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let id = match recv_opt {
+                            Some(r) => g.vm.heap.alloc(HeapObj::BoundMethod {
+                                recv: r,
+                                name_id: m_name_id,
+                                method: Some(super_method),
+                            }),
+                            None => g.vm.heap.alloc(HeapObj::UnboundMethod {
+                                class: super_cls,
+                                name_id: m_name_id,
+                                method: Some(super_method),
+                            }),
+                        };
+                        let v = match &recv {
+                            Value::BoundMethod(_) => Value::BoundMethod(id),
+                            Value::UnboundMethod(_) => Value::UnboundMethod(id),
+                            _ => unreachable!(),
+                        };
+                        g.vm.stack.push(v);
+                    }
+                    None => self.stack.push(Value::Nil),
+                }
+                return Ok(CallableOutcome::Handled);
+            }
         // `m.arity` / `m.parameters` — Method introspection. Walks
         // the captured class chain to find the user-defined Method;
         // if absent (builtin / primitive_call backed), returns
