@@ -53,6 +53,57 @@ fn random_new_no_arg_raises_in_tier1_deterministic_mode() {
 }
 
 #[test]
+fn kernel_rand_raises_with_tier1_pointer_hint() {
+    // ADR 0017 row 131 also excludes the bare `Kernel#rand` /
+    // `Kernel#srand` surface (the implicit default RNG path
+    // that draws system entropy). Previously, calling `rand`
+    // at top level produced a confusing
+    // `undefined method 'rand' for NilClass` — the
+    // toplevel-nil-self dispatch surface fallthrough when the
+    // name was wholly absent. The preamble now defines a
+    // top-level `rand` (and `srand`) that raise
+    // NotImplementedError with a message that points at
+    // `Random.new(seed)`. Pinned here so a future cleanup
+    // can't quietly delete the shim and re-expose the
+    // misleading lookup failure.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("rand(10)", "rand_shim.rb").unwrap_err();
+    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+        panic!("expected Uncaught NotImplementedError, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "NotImplementedError");
+    assert!(
+        message.contains("Random.new(seed)"),
+        "expected pointer to Random.new(seed), got: {}",
+        message,
+    );
+
+    // srand mirrors the same pattern.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("srand(42)", "srand_shim.rb").unwrap_err();
+    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+        panic!("expected Uncaught NotImplementedError, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "NotImplementedError");
+    assert!(
+        message.contains("Random.new(seed)"),
+        "expected pointer to Random.new(seed), got: {}",
+        message,
+    );
+
+    // The shim must be a Tier-1 *catch* — `Random.new(seed)`
+    // still works and produces a deterministic value. If the
+    // shim somehow shadowed the class path this would break.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval("puts Random.new(42).rand(100)", "random_seeded.rb")
+        .expect("Random.new(seed).rand should still work");
+    let snap = buf.snapshot();
+    assert!(snap.trim().parse::<u32>().is_ok(), "expected integer, got {snap:?}");
+}
+
+#[test]
 fn secure_random_seed_setter_makes_output_deterministic() {
     // rubyrs-specific Tier 1 affordance: `SecureRandom.seed = N`
     // reseeds the hidden default `Random` so subsequent calls

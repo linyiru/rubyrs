@@ -113,3 +113,25 @@ class Random
     n.to_f / 4294967296.0
   end
 end
+
+# Top-level `rand` / `srand` are explicitly OUT of Tier 1 per ADR
+# 0017 row 131 — the implicit default RNG uses system entropy,
+# which the deterministic-by-default sandbox excludes. Define the
+# names anyway so callers get a clear, actionable error instead
+# of the confusing "undefined method `rand' for NilClass" the
+# toplevel-nil-self dispatch produces when the name is wholly
+# missing. Same top-level-def pattern as throw_catch.rb.
+def rand(*_args)
+  raise NotImplementedError,
+    "Kernel#rand is not available in rubyrs Tier 1 — the implicit " \
+    "default RNG uses system entropy, which is excluded by ADR 0017. " \
+    "Use `Random.new(seed).rand(...)` with an explicit Integer seed " \
+    "for deterministic Tier-1 random numbers."
+end
+
+def srand(*_args)
+  raise NotImplementedError,
+    "Kernel#srand is not available in rubyrs Tier 1 — there is no " \
+    "implicit default RNG to seed. Construct a Random with an " \
+    "explicit seed instead: `Random.new(seed)`."
+end
