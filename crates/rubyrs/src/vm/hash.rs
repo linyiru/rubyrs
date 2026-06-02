@@ -518,6 +518,17 @@ impl Vm {
                     ("each_cons", _) => {
                         return Err(self.arity_error_arg1_int(name, args));
                     }
+                    // `h.chunk_while(arg)` without a block —
+                    // arity guard mirrors Array's no-block arm
+                    // and the block-form catch-all in iter.rs.
+                    ("chunk_while", many) if !many.is_empty() => {
+                        return Err(self.trap(crate::error::RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 0)",
+                                many.len()
+                            ),
+                        }));
+                    }
                     // `h.find_index(target)` — Int insertion-order
                     // index of the first entry whose `[k, v]`
                     // pair `==` the target, or nil. CRuby's

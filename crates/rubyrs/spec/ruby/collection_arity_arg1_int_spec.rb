@@ -103,4 +103,27 @@ describe "chunk_while arity guards (0-arg method)" do
     assert_eq(klass, "ArgumentError")
     assert_eq(msg, "wrong number of arguments (given 1, expected 0)")
   end
+
+  it "raises ArgumentError on no-block chunk_while with extra args (Array)" do
+    # Without a block, dispatch routes to array.rs / hash.rs /
+    # range.rs no-block arms (not iter.rs). Cycle-1 wired up
+    # the block-form catch-all but not the no-block form —
+    # left chunk_while(N) without block raising NoMethodError
+    # in the lockstep contract violation pattern.
+    klass, msg = caught_pair { [1].chunk_while(1) }
+    assert_eq(klass, "ArgumentError")
+    assert_eq(msg, "wrong number of arguments (given 1, expected 0)")
+  end
+
+  it "raises ArgumentError on no-block chunk_while with extra args (Hash)" do
+    klass, msg = caught_pair { {a: 1}.chunk_while(1) }
+    assert_eq(klass, "ArgumentError")
+    assert_eq(msg, "wrong number of arguments (given 1, expected 0)")
+  end
+
+  it "raises ArgumentError on no-block chunk_while with extra args (Range)" do
+    klass, msg = caught_pair { (1..3).chunk_while(1) }
+    assert_eq(klass, "ArgumentError")
+    assert_eq(msg, "wrong number of arguments (given 1, expected 0)")
+  end
 end

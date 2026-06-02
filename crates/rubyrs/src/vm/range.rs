@@ -511,6 +511,17 @@ impl Vm {
                     ("each_cons", _) => {
                         return Err(self.arity_error_arg1_int(name, args));
                     }
+                    // `r.chunk_while(arg)` without a block —
+                    // arity guard mirrors Array's no-block arm
+                    // and the block-form catch-all in iter.rs.
+                    ("chunk_while", many) if !many.is_empty() => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 0)",
+                                many.len()
+                            ),
+                        }));
+                    }
                     // Range#step(n) without a block returns a
                     // step-arithmetic Array. The block form is
                     // covered separately in collection_call_block.
