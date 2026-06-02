@@ -87,6 +87,24 @@ enum ClassOutcome {
     },
 }
 
+/// Mode selector for `Vm::float_to_rational_value` — distinguishes the
+/// three Float→Rational paths surfaced by Phase C.4.3.
+pub(crate) enum FloatToRationalMode {
+    /// `Float#to_r` and `Kernel#Rational(f)` — exact IEEE-754
+    /// decomposition, no rounding.
+    Lossless,
+    /// `Float#rationalize(eps)` — Stern-Brocot search within ±|eps|.
+    /// The held `Value` is the validated Numeric (Int / BigInt /
+    /// Float / Rational) eps from the caller. Read only by the
+    /// bignum path of `float_to_rational_value`; no-bignum falls
+    /// back to lossless.
+    #[allow(dead_code)]
+    EpsArg(Value),
+    /// Bare `Float#rationalize` — half-ULP search returning the
+    /// simplest Rational that round-trips to this Float.
+    DefaultUlp,
+}
+
 impl Vm {
     /// Allocate a canonical-form `Value::Rational` from raw i64
     /// (num, den). gcd-normalizes and sign-normalizes (`den > 0`)
@@ -177,6 +195,270 @@ impl Vm {
             crate::heap::RationalRepr { num, den },
         ));
         Ok(Value::Rational(id))
+    }
+
+    /// Build the Rational representation of a finite `f64` per
+    /// `mode`:
+    ///   - `Lossless` (used by `Float#to_r` / `Kernel#Rational(f)`):
+    ///     exact `f = sign * mantissa * 2^exp` Rational.
+    ///   - `EpsArg(v)` (used by `Float#rationalize(eps)`): simplest
+    ///     fraction in `[f - |eps|, f + |eps|]`. The interval is
+    ///     computed in f64 arithmetic when `eps` is a Float
+    ///     (matching CRuby's f_sub/f_add behavior) and in exact
+    ///     arithmetic for Integer / Rational eps.
+    ///   - `DefaultUlp` (used by bare `Float#rationalize`): simplest
+    ///     fraction in `[(2m-1)/2^(1-exp), (2m+1)/2^(1-exp)]` — the
+    ///     half-ULP interval covering all reals that round-trip back
+    ///     to this Float. Matches CRuby's default-precision behavior
+    ///     (`0.1.rationalize == (1/10)`).
+    ///
+    /// NaN / ±Inf are filtered by the caller — this method assumes
+    /// `f.is_finite()`.
+    pub(crate) fn float_to_rational_value(
+        &mut self,
+        f: f64,
+        mode: FloatToRationalMode,
+    ) -> Result<Value, Trap> {
+        debug_assert!(f.is_finite(), "float_to_rational_value: NaN/Inf must be filtered upstream");
+        let (sign, mantissa, exp) =
+            crate::vm::numeric::float_decompose(f).expect("finite per debug_assert");
+        if mantissa == 0 {
+            return self.make_rational(0, 1);
+        }
+        #[cfg(feature = "bignum")]
+        {
+            use num_bigint::BigInt;
+            use num_traits::{One, Zero};
+            // Build the lossless (num, den) pair on demand — the
+            // DefaultUlp branch below doesn't need it.
+            let lossless_pair = |sign: i64, mantissa: u64, exp: i32| -> (BigInt, BigInt) {
+                let mant_big = BigInt::from(mantissa);
+                let signed = if sign < 0 { -mant_big } else { mant_big };
+                if exp >= 0 {
+                    (signed << exp as usize, BigInt::one())
+                } else {
+                    (signed, BigInt::one() << (-exp) as usize)
+                }
+            };
+            let eps_v = match &mode {
+                FloatToRationalMode::Lossless => {
+                    let (num, den) = lossless_pair(sign, mantissa, exp);
+                    return self.make_rational_bigint(num, den);
+                }
+                FloatToRationalMode::DefaultUlp => {
+                    // Half-ULP interval (exact, BigInt):
+                    //   a = (2m - 1) * 2^(exp-1)
+                    //   b = (2m + 1) * 2^(exp-1)
+                    // For exp >= 1 the denominator is 1; for exp <= 0
+                    // the numerator carries (2m±1) and den = 2^(1-exp).
+                    // Stern-Brocot only handles positive intervals;
+                    // negate the result for negative `f`.
+                    let mant_a = BigInt::from(2 * mantissa - 1);
+                    let mant_b = BigInt::from(2 * mantissa + 1);
+                    let (a_num, b_num, common_den) = if exp >= 1 {
+                        let shift = (exp - 1) as usize;
+                        (mant_a << shift, mant_b << shift, BigInt::one())
+                    } else {
+                        let shift = (1 - exp) as usize;
+                        (mant_a, mant_b, BigInt::one() << shift)
+                    };
+                    let (p, q) = stern_brocot_simplest(
+                        a_num, common_den.clone(), b_num, common_den,
+                    );
+                    let p = if sign < 0 { -p } else { p };
+                    return self.make_rational_bigint(p, q);
+                }
+                FloatToRationalMode::EpsArg(v) => v,
+            };
+            // rationalize(eps) — Stern-Brocot search within ±|eps|.
+            // CRuby computes the interval endpoints `f - eps` and
+            // `f + eps` in f64 arithmetic when eps is a Float, then
+            // runs Stern-Brocot on the resulting Float-derived
+            // Rationals. Replicating that path so spec/CRuby agree
+            // (e.g. `3.14.rationalize(0.01) == (22/7)`,
+            // `3.14.rationalize(0.001) == (135/43)`). Non-Float
+            // eps stays in exact arithmetic, matching CRuby's
+            // promote-to-Rational behavior for Integer / Rational
+            // eps.
+            //
+            // NaN / ±Inf eps (or overflow in `f ± eps`) → CRuby
+            // raises FloatDomainError; we match. Pre-validate the
+            // eps Float and the interval endpoints so the
+            // `float_decompose(..).expect("finite")` invariant
+            // inside `float_to_rational_pair_signed` holds.
+            let eps_f_opt: Option<f64> = match eps_v {
+                Value::Float(g) => {
+                    if !g.is_finite() {
+                        return Err(self.trap(RubyError::FloatDomainError {
+                            msg: crate::vm::numeric::float_domain_label(*g).to_string(),
+                        }));
+                    }
+                    Some(g.abs())
+                }
+                _ => None,
+            };
+            let (common_den, a_num, b_num) = if let Some(eps_f) = eps_f_opt {
+                if eps_f == 0.0 {
+                    let (num, den) = lossless_pair(sign, mantissa, exp);
+                    return self.make_rational_bigint(num, den);
+                }
+                let a_f = f - eps_f;
+                let b_f = f + eps_f;
+                if !a_f.is_finite() {
+                    return Err(self.trap(RubyError::FloatDomainError {
+                        msg: crate::vm::numeric::float_domain_label(a_f).to_string(),
+                    }));
+                }
+                if !b_f.is_finite() {
+                    return Err(self.trap(RubyError::FloatDomainError {
+                        msg: crate::vm::numeric::float_domain_label(b_f).to_string(),
+                    }));
+                }
+                // Collapsed-interval guard: when eps is smaller than
+                // the local ULP, `f ± eps` rounds back to `f` and the
+                // interval is the single point `f`. Stern-Brocot
+                // assumes `a < b` strictly and would loop forever on
+                // `a == b` (the `c < b` exit test never fires). Bail
+                // to the lossless representation, which is the only
+                // Rational in a single-point interval.
+                if a_f == b_f {
+                    let (num, den) = lossless_pair(sign, mantissa, exp);
+                    return self.make_rational_bigint(num, den);
+                }
+                // Decompose a_f and b_f to a common denominator.
+                let (a_n, a_d) = float_to_rational_pair_signed(a_f);
+                let (b_n, b_d) = float_to_rational_pair_signed(b_f);
+                // Bring to common denominator (b_d * a_d, but both
+                // are powers of 2 so the common one is the larger).
+                if a_d == b_d {
+                    (a_d, a_n, b_n)
+                } else if a_d > b_d {
+                    let factor = &a_d / &b_d;
+                    (a_d, a_n, b_n * factor)
+                } else {
+                    let factor = &b_d / &a_d;
+                    (b_d, a_n * factor, b_n)
+                }
+            } else {
+                let (mut eps_num, eps_den) = self.coerce_to_rational_parts(eps_v)?;
+                if eps_num.sign() == num_bigint::Sign::Minus {
+                    eps_num = -eps_num;
+                }
+                if eps_num.is_zero() {
+                    let (num, den) = lossless_pair(sign, mantissa, exp);
+                    return self.make_rational_bigint(num, den);
+                }
+                let (num, den) = lossless_pair(sign, mantissa, exp);
+                let common_den = &den * &eps_den;
+                let term = &eps_num * &den;
+                let a_num = &num * &eps_den - &term;
+                let b_num = &num * &eps_den + &term;
+                (common_den, a_num, b_num)
+            };
+            // Sign handling: Stern-Brocot below assumes 0 < a <= b.
+            // For negative target, flip and negate the result.
+            let negate_result = if a_num.is_zero() {
+                false
+            } else if a_num.sign() == num_bigint::Sign::Minus
+                && b_num.sign() != num_bigint::Sign::Minus
+            {
+                // Interval straddles zero — return 0 (the simplest).
+                return self.make_rational(0, 1);
+            } else if a_num.sign() == num_bigint::Sign::Minus {
+                true
+            } else {
+                false
+            };
+            let (a_num, b_num) = if negate_result {
+                (-b_num, -a_num)
+            } else {
+                (a_num, b_num)
+            };
+            let (p, q) = stern_brocot_simplest(
+                a_num, common_den.clone(), b_num, common_den,
+            );
+            let p = if negate_result { -p } else { p };
+            self.make_rational_bigint(p, q)
+        }
+        #[cfg(not(feature = "bignum"))]
+        {
+            // No-bignum: try to fit (num, den) in i64. Any Float
+            // whose IEEE-754 decomposition exceeds i64 magnitude
+            // (typical for subnormals or floats with den > 2^62)
+            // raises RangeError — matches the no-bignum tier's
+            // policy for Rational components.
+            let mantissa_i: i64 = mantissa as i64; // ≤ 53 bits, fits
+            let signed = if sign < 0 { -mantissa_i } else { mantissa_i };
+            let (num, den): (i64, i64) = if exp >= 0 {
+                let den = 1i64;
+                let shift = exp as u32;
+                if shift >= 63 {
+                    return Err(self.trap(RubyError::RangeError {
+                        msg: "Float#to_r exceeds i64 magnitude (rebuild with --features bignum)".to_string(),
+                    }));
+                }
+                let num = signed.checked_shl(shift).ok_or_else(|| {
+                    self.trap(RubyError::RangeError {
+                        msg: "Float#to_r exceeds i64 magnitude (rebuild with --features bignum)".to_string(),
+                    })
+                })?;
+                (num, den)
+            } else {
+                let shift = (-exp) as u32;
+                if shift >= 63 {
+                    return Err(self.trap(RubyError::RangeError {
+                        msg: "Float#to_r denominator exceeds i64 (rebuild with --features bignum)".to_string(),
+                    }));
+                }
+                (signed, 1i64 << shift)
+            };
+            // No-bignum: Stern-Brocot needs arbitrary-precision
+            // arithmetic, so both `EpsArg` and `DefaultUlp` modes
+            // fall back to the lossless representation here. The
+            // result is still a valid simpler-or-equal Rational
+            // representation of the value (the contract doesn't
+            // require the simplest, only one within ±eps). Caller-
+            // visible divergence: `0.1.rationalize == (1/10)` under
+            // bignum becomes the lossless huge fraction under no-
+            // bignum. Documented in spec headers.
+            let _ = mode;
+            self.make_rational(num, den)
+        }
+    }
+
+    /// Coerce a validated Numeric arg (Int / BigInt / Float / Rational)
+    /// to a `(BigInt, BigInt)` num/den pair under bignum. Only used
+    /// by `float_to_rational_value` for the rationalize-eps path so
+    /// the eps tolerance can be compared against the lossless target.
+    #[cfg(feature = "bignum")]
+    fn coerce_to_rational_parts(
+        &mut self,
+        v: &Value,
+    ) -> Result<(num_bigint::BigInt, num_bigint::BigInt), Trap> {
+        use num_bigint::BigInt;
+        use num_traits::One;
+        match v {
+            Value::Int(n) => Ok((BigInt::from(*n), BigInt::one())),
+            Value::BigInt(id) => Ok((self.heap.bigint(*id).clone(), BigInt::one())),
+            Value::Float(g) => {
+                debug_assert!(g.is_finite(), "non-finite eps must be filtered upstream");
+                let (sign, mantissa, exp) = crate::vm::numeric::float_decompose(*g)
+                    .expect("finite per debug_assert");
+                if mantissa == 0 { return Ok((BigInt::from(0), BigInt::one())); }
+                let mant_big = BigInt::from(mantissa);
+                let signed = if sign < 0 { -mant_big } else { mant_big };
+                if exp >= 0 {
+                    Ok((signed << exp as usize, BigInt::one()))
+                } else {
+                    Ok((signed, BigInt::one() << (-exp) as usize))
+                }
+            }
+            Value::Rational(id) => {
+                let r = self.heap.rational(*id);
+                Ok((r.num.clone(), r.den.clone()))
+            }
+            _ => unreachable!("eps validated by caller as Numeric (Int / BigInt / Float / Rational); nil rejected at TypeError gate upstream"),
+        }
     }
 
     /// `try_rational_binop` — the `Op::BinOp` arm for Rational
@@ -5956,6 +6238,77 @@ impl Vm {
             self.stack.push(v);
             return Ok(());
         }
+        // Phase C.4.3 — `Float#to_r` and `Float#rationalize`.
+        // `to_r` builds the exact-Rational representation via the
+        // IEEE-754 decomposition `f = sign * mantissa * 2^exp` (no
+        // rounding). `rationalize(eps)` runs the Stern-Brocot
+        // mediant search for the simplest fraction within ±|eps|.
+        // Bare `rationalize` (no eps) runs Stern-Brocot on the
+        // half-ULP interval — returns the simplest Rational that
+        // round-trips back to the same Float, matching CRuby
+        // (`0.1.rationalize == (1/10)`, NOT the lossless to_r).
+        // NaN / ±Inf → FloatDomainError. nil eps rejected with
+        // TypeError; the eps `Value` is validated as Numeric.
+        if let Value::Float(f) = &recv {
+            if &*name == "to_r" || &*name == "rationalize" {
+                let f = *f;
+                let max_arity: usize = if &*name == "rationalize" { 1 } else { 0 };
+                if args.len() > max_arity {
+                    let expected = if max_arity == 0 {
+                        "0".to_string()
+                    } else {
+                        format!("0..{}", max_arity)
+                    };
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected {})",
+                            args.len(), expected,
+                        ),
+                    }));
+                }
+                if !f.is_finite() {
+                    return Err(self.trap(RubyError::FloatDomainError {
+                        msg: crate::vm::numeric::float_domain_label(f).to_string(),
+                    }));
+                }
+                // eps type-check (rationalize only). Numeric required
+                // — nil is REJECTED (CRuby's `Float#rationalize(nil)`
+                // raises NoMethodError 'undefined method abs for nil';
+                // we surface the cleaner TypeError shape).
+                let eps_value: Option<&Value> = if &*name == "rationalize" && args.len() == 1 {
+                    let is_numeric = matches!(
+                        &args[0],
+                        Value::Int(_) | Value::Float(_) | Value::Rational(_)
+                    ) || {
+                        #[cfg(feature = "bignum")]
+                        { matches!(&args[0], Value::BigInt(_)) }
+                        #[cfg(not(feature = "bignum"))]
+                        { false }
+                    };
+                    if !is_numeric {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "{} can't be coerced into Float",
+                                crate::vm::numeric::type_name_for_coerce(&args[0]),
+                            ),
+                        }));
+                    }
+                    Some(&args[0])
+                } else {
+                    None
+                };
+                let mode = if &*name == "to_r" {
+                    FloatToRationalMode::Lossless
+                } else if let Some(eps_v) = eps_value {
+                    FloatToRationalMode::EpsArg(eps_v.clone())
+                } else {
+                    FloatToRationalMode::DefaultUlp
+                };
+                let v = self.float_to_rational_value(f, mode)?;
+                self.stack.push(v);
+                return Ok(());
+            }
+        }
         if let Value::Int(_) = &recv && &*name == "digits" && args.len() > 1 {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!(
@@ -10356,4 +10709,78 @@ fn scramble_ptr(ptr: usize) -> u64 {
     
     
     rs.hash_one(ptr)
+}
+
+/// Convert a finite `f64` to its lossless `(num, den)` Rational pair
+/// with `num` carrying the sign and `den` always a positive power of 2.
+/// Returns `(0, 1)` for ±0.0. Caller is responsible for filtering
+/// NaN / ±Inf upstream — this assumes finiteness.
+#[cfg(feature = "bignum")]
+fn float_to_rational_pair_signed(f: f64) -> (num_bigint::BigInt, num_bigint::BigInt) {
+    use num_bigint::BigInt;
+    use num_traits::One;
+    let (sign, mantissa, exp) =
+        crate::vm::numeric::float_decompose(f).expect("finite per caller contract");
+    if mantissa == 0 {
+        return (BigInt::from(0), BigInt::one());
+    }
+    let mant = BigInt::from(mantissa);
+    let signed = if sign < 0 { -mant } else { mant };
+    if exp >= 0 {
+        (signed << exp as usize, BigInt::one())
+    } else {
+        (signed, BigInt::one() << (-exp) as usize)
+    }
+}
+
+/// Stern-Brocot mediant search — given a closed positive interval
+/// `[a, b]` represented as (num, common_den) pairs (both with
+/// `common_den > 0`), return the simplest fraction `p/q` that
+/// lies in the interval. Matches CRuby's `nurat_rationalize_internal`
+/// for the algorithm used by `Float#rationalize(eps)`.
+///
+/// Preconditions: `0 < a <= b`, both denominators positive.
+/// The caller is responsible for the sign flip when the target
+/// is negative (Stern-Brocot only handles positive intervals).
+#[cfg(feature = "bignum")]
+fn stern_brocot_simplest(
+    mut a_num: num_bigint::BigInt,
+    mut a_den: num_bigint::BigInt,
+    mut b_num: num_bigint::BigInt,
+    mut b_den: num_bigint::BigInt,
+) -> (num_bigint::BigInt, num_bigint::BigInt) {
+    use num_bigint::BigInt;
+    use num_integer::Integer;
+    use num_traits::{One, Zero};
+    let (mut p0, mut q0) = (BigInt::zero(), BigInt::one());
+    let (mut p1, mut q1) = (BigInt::one(), BigInt::zero());
+    let c: BigInt;
+    loop {
+        // c = ceil(a_num / a_den), den > 0.
+        let (q, r) = a_num.div_mod_floor(&a_den);
+        let cc = if r.is_zero() { q } else { q + 1 };
+        // Test cc < b_num/b_den ⇔ cc * b_den < b_num.
+        if &cc * &b_den < b_num {
+            c = cc;
+            break;
+        }
+        let k = &cc - 1;
+        let p2 = &k * &p1 + &p0;
+        let q2 = &k * &q1 + &q0;
+        // t = 1 / (b - k) = b_den / (b_num - k * b_den)
+        let t_num = b_den.clone();
+        let t_den = &b_num - &k * &b_den;
+        // b = 1 / (a - k) = a_den / (a_num - k * a_den)
+        let new_b_num = a_den.clone();
+        let new_b_den = &a_num - &k * &a_den;
+        a_num = t_num;
+        a_den = t_den;
+        b_num = new_b_num;
+        b_den = new_b_den;
+        p0 = p1;
+        q0 = q1;
+        p1 = p2;
+        q1 = q2;
+    }
+    (&c * &p1 + p0, &c * &q1 + q0)
 }

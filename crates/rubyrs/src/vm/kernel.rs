@@ -414,9 +414,27 @@ impl Vm {
                         ),
                     })));
                 }
+                // Phase C.4.3: 1-arg Float delegates to the same
+                // IEEE-754 decomposition used by `Float#to_r`. NaN /
+                // ±Inf surface as FloatDomainError. 2-arg Float
+                // forms (`Rational(1.5, 0.5)`) still fall through
+                // to TypeError until generic Numeric coercion lands.
+                if args.len() == 1 {
+                    if let Value::Float(f) = &args[0] {
+                        let f = *f;
+                        if !f.is_finite() {
+                            return Some(Err(self.trap(RubyError::FloatDomainError {
+                                msg: crate::vm::numeric::float_domain_label(f).to_string(),
+                            })));
+                        }
+                        return Some(self.float_to_rational_value(
+                            f,
+                            crate::vm::dispatch::FloatToRationalMode::Lossless,
+                        ));
+                    }
+                }
                 // Phase C.4.2: accept Int / BigInt / integer-valued
-                // Rational. Float / String coercion is Phase C.4.3
-                // (Float#to_r needs continued-fraction).
+                // Rational.
                 #[cfg(feature = "bignum")]
                 {
                     use num_bigint::BigInt;

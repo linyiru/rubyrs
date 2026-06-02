@@ -12,8 +12,8 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 152 |
-| Examples in corpus | 975 |
+| Files | 154 |
+| Examples in corpus | 986 |
 | Skipped `it` traces | 155 |
 
 ### Skipped traces by category
@@ -41,6 +41,7 @@ Find blocks unlocked by a future feature with e.g.
 | Array | 23 | 134 | 49 |
 | BasicObject | 3 | 15 | 0 |
 | Block | 1 | 8 | 0 |
+| Float | 2 | 11 | 0 |
 | Hash | 40 | 193 | 51 |
 | Integer | 37 | 322 | 30 |
 | Method | 12 | 61 | 1 |
@@ -81,6 +82,8 @@ Find blocks unlocked by a future feature with e.g.
 | `class_eval_spec.rb` | Module#class_eval | `core/module/class_eval_spec.rb` | 6 | 0 |
 | `collection_arity_arg1_int_spec.rb` | Array#each_slice / #each_cons arity & type guards | `core/array/each_slice_spec.rb (error-class assertions)` | 16 | 0 |
 | `define_method_spec.rb` | Module#define_method | `core/module/define_method_spec.rb` | 4 | 0 |
+| `float_rationalize_spec.rb` | Float#rationalize | `core/float/rationalize_spec.rb` | 7 | 0 |
+| `float_to_r_spec.rb` | Float#to_r | `core/float/to_r_spec.rb` | 4 | 0 |
 | `hash_any_spec.rb` | Hash#any? | `core/hash/any_spec.rb` | 5 | 1 |
 | `hash_compact_spec.rb` | Hash#compact | `core/hash/compact_spec.rb` | 2 | 4 |
 | `hash_count_spec.rb` | Hash#count | `core/hash/count_spec.rb + core/enumerable/count_spec.rb` | 3 | 1 |
