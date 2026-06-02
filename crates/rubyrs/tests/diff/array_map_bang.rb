@@ -75,12 +75,17 @@ puts "shape8-collect=#{[1, 2, 3].collect { |x| x + 100 }.inspect}"
 ## this fixture exercises that the pins keep the snapshot
 ## reachable across many allocating block calls.)
 visited = []
-src = [[10, 20], [30, 40], [50, 60], [70, 80]]
-src.map! do |pair|
+# Mix of heap-backed element types — child Arrays AND Rationals
+# — so the pin loop is exercised across more than one ObjId
+# variant. Code-review #348 round 4 caught Rational missing
+## from the pin set; including it here pins down the regression
+## via fixture coverage too.
+src = [[10, 20], Rational(3, 7), [30, 40], Rational(5, 9)]
+src.map! do |elem|
   # Allocate inside the block — gives the heap a reason to GC.
   100.times { Array.new(4) { |i| i * 2 } }
-  visited << pair.first
-  pair.first
+  visited << elem
+  elem
 end
 puts "shape9-visited=#{visited.inspect}"
 puts "shape9-result=#{src.inspect}"

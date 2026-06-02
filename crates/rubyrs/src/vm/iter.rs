@@ -834,6 +834,7 @@ impl Vm {
                             | Value::Block(_)
                             | Value::BoundMethod(_) | Value::UnboundMethod(_)
                             | Value::CurriedProc(_) | Value::Object(_)
+                            | Value::Rational(_)
                     ) {
                         g.pin(v.clone());
                     }
