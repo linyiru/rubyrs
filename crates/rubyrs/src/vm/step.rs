@@ -2572,14 +2572,27 @@ impl Vm {
                 // raises NoMethodError on the nil `@routes`.
                 // (TRY_RUNS pass-12 layer #14.)
                 //
-                // Lookup walks the parent's own singleton
-                // methods only (not its singleton-class
-                // ancestors). CRuby's default `Class#inherited`
-                // is a no-op; we treat "no user override" as
-                // equivalent to "no-op" and skip the dispatch,
-                // which is observationally identical for the
-                // no-override case and avoids an extra method
-                // resolution per class definition.
+                // Lookup uses `lookup_class_singleton_method`,
+                // which walks the parent's singleton_prepends,
+                // own singleton_methods, and then up the
+                // superclass-singleton chain (i.e., picks up
+                // `inherited` defined via `def self.inherited`
+                // on any ancestor of the parent). It does NOT
+                // fall through to `Class`'s instance methods —
+                // so a user monkey-patch like
+                // `class Class; def inherited(sub); end; end`
+                // won't fire here. That's a documented
+                // divergence shared with the broader class-as-
+                // receiver dispatch path (`A.custom_method`
+                // also doesn't pick up Class instance-method
+                // patches today); a proper fix lives at the
+                // dispatch layer, not in this hook. Code-review
+                // #337 round 1.
+                //
+                // CRuby's default `Class#inherited` is a no-op;
+                // when no override resolves we skip the
+                // dispatch entirely (observationally identical
+                // to invoking the no-op default).
                 if was_fresh
                     && !is_module
                     && let Some(parent_cls) = &parent {

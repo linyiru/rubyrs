@@ -73,3 +73,15 @@ class S6Parent
 end
 module S6Mod; end          # not a subclass, no callback
 puts "shape6-module-fired=#{$shape6_fired}"
+
+## Shape 7: inherited resolution walks the SINGLETON ancestor
+## chain — `def self.inherited` defined on a grandparent fires
+## for grandchildren too. This is what `lookup_class_singleton_
+## method` already supports; pins the singleton-walk path.
+class S7Grandparent
+  def self.inherited(sub); puts "gp.inh: #{sub}"; end
+end
+class S7Parent < S7Grandparent; end   # gp.inh fires for parent
+class S7Child < S7Parent; end         # gp.inh ALSO fires for child
+                                      # (inherited resolves via parent's
+                                      # singleton ancestor chain)
