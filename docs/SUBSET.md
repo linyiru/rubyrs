@@ -1052,6 +1052,51 @@ nil.caller_ok         # both: "from helper"
   pins the toplevel-arity ArgumentError surface this exclusion
   preserves.
 
+### Detached inner closures don't write-through to outer-method locals
+
+```ruby
+total = 0
+adders = []
+[1, 2, 3].each { |x| adders << -> { total += x } }
+adders.each(&:call)
+puts total      # rubyrs: 0; CRuby: 6
+```
+
+- The `total += x` inside the saved lambda runs AFTER the
+  enclosing `.each` block has popped. With the per-invocation
+  block-locals model the lambda's captured Rc is the dead
+  block frame's fresh Vec — `propagate_outer_write`'s chain
+  walk stops there because the surrounding method frame is
+  no longer reachable from the dead Vec via any block frame
+  still on the stack.
+- Read-side semantics are unaffected: the lambda still sees
+  its own iteration's `x` (`adders.each { |a| p a.call }` gives
+  the correct per-iteration sequence for a non-mutating
+  closure body).
+- The same bytecode AFTER the closure-in-iter capture fix
+  trades this narrow case for the much more common
+  `[:a, :b, :c].map { |s| -> { s } }` shape — see commit
+  `d397eaa2` for the full design + the
+  `tests/diff/closure_in_iter_capture.rb` regression
+  suite. Pre-d397eaa2 the trade went the other way: write-
+  through worked but per-iter capture was broken, surfacing
+  in plugin / mixin / `define_method`-with-block-capture
+  loops (the M27 A4 batch's claim).
+- Workaround when write-through matters: use a method
+  parameter (closures over method-params alias the
+  method's locals_Rc unchanged), an instance variable on
+  `self`, or a Hash / Array (mutate via the heap object,
+  not via the local-slot write).
+- Why not fully fixed: a CRuby-correct fix needs
+  cell-per-variable closure environments — the locals
+  storage migrates from `Rc<RefCell<Vec<Value>>>` to per-
+  variable `Rc<RefCell<Value>>` cells linked into a chain
+  the BlockHandle holds. That touches every `Op::LoadLocal`
+  / `Op::StoreLocal` / `Op::IncLocal*` plus the
+  `define_method`-installed closure dispatch path.
+  Sized for a separate dedicated landing, not a doc-pass.
+  Tracked as a follow-up if a real consumer needs it.
+
 ## Deferred to outer tiers
 
 Features whose absence is a tier-assignment decision per

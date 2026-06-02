@@ -145,24 +145,45 @@ runtimes.
 
 ---
 
-## Gap #3 — the Rack app must be a `Proc`/`Lambda`, not an arbitrary `call`-able object  **[severity: MEDIUM]**
+## Gap #3 — the Rack app must be a `Proc`/`Lambda`, not an arbitrary `call`-able object  **[severity: MEDIUM] — ✅ FIXED (M27 B1)**
 
-**Repro:** passing a Sinatra-style class/instance (responds to `call`)
-to `__rubyrs_http_serve_with_app` raises `ArgumentError`; only
-`Value::Block` is accepted (`http_server.rs:2094`).
-
-**Preliminary analysis.** The host fn pattern-matches the third argument
-as `Value::Block(id)`. Rack's contract is "any object responding to
-`#call(env)`", which is how real Sinatra hands its `App` *class* to the
-server. The battery currently only understands Procs/lambdas.
-
-**Why it matters:** small, but it leaks into framework design — the
-shim's `run!` has to wrap dispatch in `->(env) { call(env) }` instead of
-passing the app object directly. A future battery revision should accept
-any value responding to `call` (it already does this for response
-*bodies* — see `marshal_rack_response` handling `each`/`call`/`to_a`).
-
-**Workaround:** wrap in a lambda (`vendor/sinatra_lite.rb#run!`).
+> **Status: fixed.** The `__rubyrs_http_serve_with_app` host fn
+> in `crates/rubyrs/src/http_server.rs` (line ~2218) accepts any
+> Rack-style `#call(env)` responder, not just `Value::Block`. The
+> coercion path: `Value::Block` passes through unchanged; anything
+> else (`Value::Object` with `def call`, `Value::BoundMethod`,
+> `Value::CurriedProc`) routes through
+> `Vm::coerce_callable_to_block`, which synthesises a
+> `<callable-forwarder>` proto whose body is `self.call(*args)`.
+> Structurally-impossible value types (Nil / Bool / Int / Float /
+> Sym / Str — primitives that have no `call`) are rejected at
+> the registration boundary with a clear ArgumentError ("Rack
+> app must respond to #call(env) — got Integer which has no
+> `call` method") so the error surfaces immediately instead of
+> deep in the first request.
+>
+> The wider `coerce_callable_to_block` machinery also closes the
+> same gap for `&` block-arg forwarding everywhere else in the
+> VM — `arr.each(&my_callable_object)` works the same way. See
+> the multiple call sites in `vm/dispatch.rs` for the `&` arm.
+>
+> Sentinel: byte-diff-tested via `tests/diff/object_method_getters.rb`
+> + `tests/diff/define_method_2arg_form.rb` which exercise the
+> `method(:call).to_proc` round-trip + `&app_instance`
+> shapes through the same code path. The `sinatra_hello` +
+> `sinatra_plugin_smoke` framework fixtures both bind real
+> Rack apps via `App.run!` — the vendored micro-Sinatra's
+> `run!` still wraps in `->(env) { call(env) }` for clarity,
+> but the host fn no longer REQUIRES that wrap; both call
+> shapes pass.
+>
+> **Repro at the time the gap was recorded:** passing a class
+> instance with `def call(env)` to
+> `__rubyrs_http_serve_with_app` raised ArgumentError because
+> the host fn pattern-matched the third argument as
+> `Value::Block(id)` only. **Current behaviour:** the same
+> shape is accepted and coerced; ArgumentError now fires only
+> for value types that genuinely lack `#call`.
 
 ---
 
