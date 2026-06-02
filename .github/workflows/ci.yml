@@ -652,6 +652,55 @@ jobs:
         # perf/README.md for the rationale and ratchet etiquette.
         run: perf/check.sh
 
+  json-perf-budget:
+    name: Perf budget (JSON bench per-iter)
+    runs-on: ubuntu-latest
+    # Standalone from the script-level `perf-budget` job for the
+    # same reason `framework-parity` is standalone from `Test`:
+    # this gate has a different build (needs `_json_native` +
+    # `stdlib` features, not the default Tier-1 binary the
+    # peak-RSS gate measures) and a different failure mode (per-
+    # iter µs budget, not whole-script wall + RSS). Folding them
+    # into one job would require feature-toggling rebuilds in
+    # the middle, which negates the per-job cache key.
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # Separate cache key from `perf-budget` because the
+          # feature set differs — sharing the cache would
+          # invalidate one job's target/ on every push from the
+          # other.
+          key: ${{ runner.os }}-cargo-json-perf-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-json-perf-
+
+      - name: Build (release, _json_native enabled)
+        # Same feature set the framework-parity job uses for the
+        # json_canon fixture — keeps the binary under perf gate
+        # byte-identical to the one under parity gate, so a
+        # parity-side fix and a perf-side fix can't accidentally
+        # be measuring different binaries.
+        run: |
+          cargo build --release -p rubyrs \
+            --features default,stdlib,_http_server,_fiber,_json_native
+
+      - name: Check JSON bench per-iter budgets
+        # Runs bench/json_bench.rb 3× under reduced ITERS (2000
+        # vs the README default 5000) for sub-3 s gate wall;
+        # the min-of-runs absorbs warm-up + GC the same way the
+        # peak-RSS gate does. Budgets in
+        # bench/json_bench_baselines.tsv per-metric.
+        run: bash bench/json_bench_check.sh
+
   miri:
     name: Miri smoke (Stacked + Tree Borrows)
     # ADR 0013 documents the CURRENT_VM_PTR raw-pointer escape

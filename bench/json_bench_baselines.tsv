@@ -1,0 +1,41 @@
+# JSON bench per-iteration baselines.
+#
+# Format (tab-separated):
+#   <metric>\t<max_per_iter_us>\t<note>
+#
+# Metrics correspond to lines `bench/json_bench.rb` emits:
+#   `parse`       — `JSON.parse(JSON_BYTES)` over the synthetic 3.4 KB
+#                   payload, native (serde::Visitor) path.
+#   `generate`    — `JSON.generate(OBJ)` compact-form emit.
+#   `round_trip`  — `JSON.generate(JSON.parse(JSON_BYTES))`. Sensitive
+#                   to GC churn — guards the threshold tuning shipped
+#                   in commit fc524f8b.
+#
+# Budgets are PER-ITER MICROSECONDS (`per_iter` column the bench
+# prints; 5000 iters × 3 runs, min total / iters). Bench is run with
+# `--features default,stdlib,_http_server,_fiber,_json_native` so the
+# accelerator path is the one being gated; the pure-Ruby canon is
+# ~200× slower and is not represented in this gate (would be a noise
+# floor, not a regression detector).
+#
+# Initial budgets calibrated 2026-06 on ARM macOS local (parse ~17 µs,
+# generate ~14 µs, round_trip ~40 µs) with ~3× headroom for CI runner
+# variance (shared Linux x86 hosts on GitHub Actions can be 2–3× slower
+# than local Apple Silicon at the same workload). Ratchet down once
+# two consecutive CI runs settle below the budget — same etiquette as
+# `perf/baselines.tsv`.
+#
+# Bumping etiquette (when a real regression is intentional):
+#   1. Run the bench locally on the PR branch, capture per_iter µs.
+#   2. Edit this file. The comment immediately above the row must
+#      record: the new value, the prior value, the commit / PR that
+#      drove the change, and one-line "why" (so future readers
+#      reading `git blame` don't reverse-engineer the rationale).
+#   3. NEVER bump for CI noise alone — bump RUNS or ITERS in the
+#      check script first to reduce noise. Bumping the budget for
+#      noise hides real regressions later.
+#
+# Metric         max_us  note
+parse              50    initial — local ~17 µs ARM mac, 3× CI headroom
+generate           50    initial — local ~14 µs ARM mac, 3× CI headroom
+round_trip         150   initial — local ~40 µs ARM mac, ~4× CI headroom (GC variance is higher on round_trip — see fc524f8b)
