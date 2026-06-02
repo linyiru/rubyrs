@@ -854,8 +854,8 @@ impl Vm {
             // whitelist at the top of this fn — don't list them
             // again here. (Keeping `==` historically muddied the
             // story; dropping all four for consistency.)
-            Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "bind_call" | "arity" | "parameters" | ">>" | "<<" | "curry" | "to_proc" | "owner" | "receiver" | "name" | "source_location" | "super_method"),
-            Value::UnboundMethod(_) => matches!(name, "bind" | "bind_call" | "arity" | "parameters" | "owner" | "name" | "source_location" | "super_method"),
+            Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "bind_call" | "arity" | "parameters" | ">>" | "<<" | "curry" | "to_proc" | "owner" | "receiver" | "name" | "source_location" | "super_method" | "dup" | "clone"),
+            Value::UnboundMethod(_) => matches!(name, "bind" | "bind_call" | "arity" | "parameters" | "owner" | "name" | "source_location" | "super_method" | "dup" | "clone"),
             Value::CurriedProc(_) => matches!(name, "call" | "[]" | "()" | "arity"),
         }
     }

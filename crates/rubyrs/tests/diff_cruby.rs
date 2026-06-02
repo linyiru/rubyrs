@@ -358,6 +358,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn method_owner_receiver() { run_diff("method_owner_receiver"); }
 #[test] fn method_name_getter() { run_diff("method_name_getter"); }
 #[test] fn method_super_method() { run_diff("method_super_method"); }
+#[test] fn method_dup_clone() { run_diff("method_dup_clone"); }
 #[test] fn integer_digits_bits() { run_diff("integer_digits_bits"); }
 #[test] fn string_squeeze() { run_diff("string_squeeze"); }
 #[test] fn string_scan() { run_diff("string_scan"); }
