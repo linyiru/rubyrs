@@ -4951,13 +4951,14 @@ impl Vm {
                     // arm but its multi-arg semantics are a separate
                     // PR's scope. Left-to-right preserves the prior
                     // behavior for extend so no untested change
-                    // ships here.
-                    let arg_iter: Box<dyn Iterator<Item = &Value>> = if is_prepend || is_include {
-                        Box::new(args.iter().rev())
-                    } else {
-                        Box::new(args.iter())
-                    };
-                    for a in arg_iter {
+                    // ships here. Branch on the index inside the
+                    // loop instead of allocating a boxed iterator —
+                    // include/prepend is hot enough that a heap
+                    // alloc per call is wasteful.
+                    let reverse_args = is_prepend || is_include;
+                    let n_args = args.len();
+                    for idx in 0..n_args {
+                        let a = if reverse_args { &args[n_args - 1 - idx] } else { &args[idx] };
                         let src = match a {
                             Value::Class(c) => c.clone(),
                             _ => return Err(self.trap(RubyError::TypeError {
@@ -5908,13 +5909,12 @@ impl Vm {
                 let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
                 // Same right-to-left iteration as the no-receiver
                 // arm — see that comment for rationale, including
-                // the extend-not-affected gate.
-                let arg_iter: Box<dyn Iterator<Item = &Value>> = if is_prepend || is_include {
-                    Box::new(args.iter().rev())
-                } else {
-                    Box::new(args.iter())
-                };
-                for a in arg_iter {
+                // the extend-not-affected gate and the index-based
+                // iteration that avoids a boxed-iterator alloc.
+                let reverse_args = is_prepend || is_include;
+                let n_args = args.len();
+                for idx in 0..n_args {
+                    let a = if reverse_args { &args[n_args - 1 - idx] } else { &args[idx] };
                     let src = match a {
                         Value::Class(c) => c.clone(),
                         _ => return Err(self.trap(RubyError::TypeError {
