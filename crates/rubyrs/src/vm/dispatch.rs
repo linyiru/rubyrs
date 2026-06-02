@@ -4949,9 +4949,9 @@ impl Vm {
                     //
                     // Gated to include/prepend: `extend` shares this
                     // arm but its multi-arg semantics are a separate
-                    // PR's scope. Left-to-right preserves the
-                    // pre-#350 behavior for extend so no untested
-                    // change ships here.
+                    // PR's scope. Left-to-right preserves the prior
+                    // behavior for extend so no untested change
+                    // ships here.
                     let arg_iter: Box<dyn Iterator<Item = &Value>> = if is_prepend || is_include {
                         Box::new(args.iter().rev())
                     } else {

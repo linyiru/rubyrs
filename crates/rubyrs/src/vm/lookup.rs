@@ -919,19 +919,17 @@ impl Vm {
     }
 }
 
-/// `child` is-a `ancestor` if `ancestor` appears anywhere in
-/// `child`'s ancestor chain — that is, the superclass walk *plus*
-/// each class's transitive `prepends` and `includes`. Returns true
-/// for `child == ancestor`. Wired into rescue-by-class filter
-/// matching and the `is_a?` / `include?` dispatch arms.
-/// `class_is_a` variant that walks only ONE of the include / prepend
-/// chains (and the same chain transitively through each module's own
-/// chain, plus through the superclass chain). Used by include/prepend
-/// idempotency so `include M; prepend M` succeeds at both steps —
-/// CRuby treats the two chains as distinct insertion slots and the
-/// per-chain reachability is what gates each side.
+/// `class_is_a` variant that walks ONLY one of the include /
+/// prepend chains (and the same chain transitively through each
+/// module's own chain, plus through the superclass chain). Used by
+/// include/prepend idempotency so `include M; prepend M` on the
+/// same target succeeds at both steps — CRuby treats the two
+/// chains as distinct insertion slots and the per-chain
+/// reachability is what gates each side. `walk_prepend=true` walks
+/// the prepend chain; otherwise includes.
 ///
-/// `walk_prepend=true` walks the prepend chain; otherwise includes.
+/// Returns true for `child == target` (and for `current == target`
+/// along the superclass walk) — consistency with `class_is_a`.
 pub(crate) fn class_reaches_via_chain(
     child: &Rc<Class>,
     target: &Rc<Class>,
@@ -968,13 +966,29 @@ pub(crate) fn class_reaches_via_chain(
         // `class_is_a` enforces inside its inner walker.
         if Rc::ptr_eq(&current, target) { return true; }
         let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
-        let chain = if walk_prepend { current.prepends.borrow() } else { current.includes.borrow() };
-        for m in chain.iter() {
+        // Seed visited with `current` so any cyclic include/prepend
+        // graph (`A includes B; B includes A`) that walks back into
+        // `current` short-circuits instead of re-borrowing
+        // `current.includes` / `current.prepends` while it's still
+        // borrowed by `chain` below — that would trigger a RefCell
+        // borrow panic. `lookup_method_uncached` carries the same
+        // defensiveness comment.
+        inc_visited.insert(Rc::as_ptr(&current));
+        // Clone the chain into a Vec so the RefCell borrow ends
+        // before recursion. Otherwise a cyclic graph that walks
+        // through a Module which itself borrows the chain panics.
+        // The chains are typically small (n=0..4), so the alloc cost
+        // is negligible compared to the safety win.
+        let chain_snapshot: Vec<Rc<Class>> = if walk_prepend {
+            current.prepends.borrow().clone()
+        } else {
+            current.includes.borrow().clone()
+        };
+        for m in chain_snapshot.iter() {
             if walks_through(m, target, walk_prepend, &mut inc_visited) {
                 return true;
             }
         }
-        drop(chain);
         let parent = current.superclass.borrow().clone();
         match parent {
             Some(p) => current = p,
@@ -983,6 +997,11 @@ pub(crate) fn class_reaches_via_chain(
     }
 }
 
+/// `child` is-a `ancestor` if `ancestor` appears anywhere in
+/// `child`'s ancestor chain — that is, the superclass walk *plus*
+/// each class's transitive `prepends` and `includes`. Returns true
+/// for `child == ancestor`. Wired into rescue-by-class filter
+/// matching and the `is_a?` / `include?` dispatch arms.
 pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
     fn walks_through(
         node: &Rc<Class>,
