@@ -420,13 +420,14 @@ impl Vm {
                 #[cfg(feature = "bignum")]
                 {
                     use num_bigint::BigInt;
+                    use num_traits::{One, Zero};
                     let to_bigint = |v: &Value, heap: &crate::heap::Heap| -> Result<BigInt, RubyError> {
                         match v {
                             Value::Int(n) => Ok(BigInt::from(*n)),
                             Value::BigInt(id) => Ok(heap.bigint(*id).clone()),
                             Value::Rational(id) => {
                                 let r = heap.rational(*id);
-                                if r.den == BigInt::from(1) {
+                                if r.den.is_one() {
                                     Ok(r.num.clone())
                                 } else {
                                     Err(RubyError::TypeError {
@@ -449,10 +450,9 @@ impl Vm {
                             Err(e) => return Some(Err(self.trap(e))),
                         }
                     } else {
-                        BigInt::from(1)
+                        BigInt::one()
                     };
-                    use num_bigint::Sign;
-                    if den.sign() == Sign::NoSign {
+                    if den.is_zero() {
                         return Some(Err(self.trap(RubyError::ZeroDivisionError {
                             msg: "divided by 0".to_string(),
                         })));

@@ -149,7 +149,8 @@ impl Vm {
     ) -> Result<Value, Trap> {
         use num_bigint::Sign;
         use num_integer::Integer;
-        debug_assert!(den.sign() != Sign::NoSign, "make_rational_bigint: den == 0");
+        use num_traits::{One, Zero};
+        debug_assert!(!den.is_zero(), "make_rational_bigint: den == 0");
         if den.sign() == Sign::Minus {
             num = -num;
             den = -den;
@@ -157,7 +158,7 @@ impl Vm {
         // `Integer::gcd` is always non-negative; canonical form needs
         // gcd(|num|, den) but BigInt's gcd already takes magnitudes.
         let g = num.gcd(&den);
-        if g != num_bigint::BigInt::from(1) {
+        if !g.is_one() {
             num /= &g;
             den /= &g;
         }
@@ -366,8 +367,8 @@ impl Vm {
                 Ok(Some(self.make_rational_bigint(num, den)?))
             }
             K::Div => {
-                use num_bigint::Sign;
-                if bn.sign() == Sign::NoSign {
+                use num_traits::Zero;
+                if bn.is_zero() {
                     return Err(self.trap(RubyError::ZeroDivisionError {
                         msg: "divided by 0".to_string(),
                     }));
