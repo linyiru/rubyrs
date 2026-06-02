@@ -7823,14 +7823,16 @@ impl Vm {
     }
 
     /// Fire `Module.included(target)` / `Module.prepended(target)`
-    /// for each `src` module just inserted into `target`'s include
-    /// / prepend chain. CRuby's contract:
+    /// for each `src` module passed to `include` / `prepend` on
+    /// `target`. CRuby's contract:
     ///   - hook receiver is the included/prepended module (`src`),
     ///     not the target
     ///   - hook is called with `target` as its single argument
     ///   - return value is discarded (hook runs for side effects)
-    ///   - hook fires only for NEW insertions — idempotent re-include
-    ///     already gates the call by the `class_is_a` skip upstream
+    ///   - hook fires on EVERY `include`/`prepend` call, including
+    ///     idempotent re-includes where the chain mutation is a
+    ///     no-op; callers populate `sources` accordingly (do not
+    ///     gate on `class_is_a`)
     ///
     /// Fast-path: if the hook name has never been interned no user
     /// code can have defined an override, so we skip the lookup

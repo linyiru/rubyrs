@@ -1,9 +1,11 @@
 # Module.included(base) / Module.prepended(base) hooks — fire
-# when a module is freshly inserted into a class's include /
-# prepend chain. Receiver of the hook is the module being
-# included/prepended; argument is the target class. Idempotent
-# re-include must NOT re-fire. ActiveSupport::Concern, Rails
-# plugin systems, and Sinatra extensions all hinge on this hook.
+# on every `include M` / `prepend M` call. Receiver of the hook
+# is the module being included/prepended; argument is the target
+# class. CRuby fires the hook on every call regardless of whether
+# the ancestor chain mutates — case (4) below pins that idempotent
+# re-includes still re-fire the callback. ActiveSupport::Concern,
+# Rails plugin systems, and Sinatra extensions all hinge on this
+# hook.
 
 # (1) included — body-form (`class Foo; include M; end`).
 module MA
