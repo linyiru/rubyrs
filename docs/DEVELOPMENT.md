@@ -99,6 +99,14 @@ The embedding-API surface is pinned by `crates/rubyrs/tests/embed.rs`.
 - **`gapscan`** — per-PR diff comment summarising subset-coverage
   changes against real Ruby corpora (via the GitHub Actions
   workflow).
+- **`cargo-deny`** — supply-chain gate: CVEs (RustSec advisory
+  DB), license-policy violations, banned-crate enforcement, and
+  source-registry pinning. Config at workspace-root `deny.toml`;
+  run locally with `cargo deny check` (after
+  `cargo install cargo-deny --locked --version 0.19.8`). Bumping
+  the cargo-deny pin or adding a license/exception is a
+  deliberate commit; the new ruleset must pass locally before
+  push.
 
 ## Clippy
 

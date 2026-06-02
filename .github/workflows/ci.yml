@@ -956,3 +956,46 @@ jobs:
             --features default,stdlib,_http_server,_fiber,_json_native \
             --test diff_framework \
             -- --nocapture
+
+  supply-chain:
+    name: Supply-chain (cargo-deny)
+    # Sister to panic-budget / perf-budget / coverage ratchets:
+    # catches a dep introducing a CVE, license-policy violation,
+    # or banned-crate at PR time rather than at audit time.
+    # Config lives at the workspace-root `deny.toml`; see that
+    # file's header for the bump-a-rule etiquette.
+    #
+    # Standalone job (not folded into `Test`) for the same
+    # reason `framework-parity` is standalone: a transient RustSec
+    # advisory-DB flake or an upstream-license clarification
+    # shouldn't block core regressions. cargo-deny pulls advisory
+    # data on every run, so a network hiccup at the registry
+    # would otherwise cascade into the main Test job.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        # Pin via `cargo install` rather than the upstream
+        # `EmbarkStudios/cargo-deny-action` so the workflow stays
+        # self-contained and version-explicit. The pin is also
+        # explicit so a future cargo-deny rule-set change can't
+        # silently flip CI red. Bumping the pin is a deliberate
+        # commit that re-runs `cargo deny check` locally to
+        # confirm the new ruleset still passes.
+        run: |
+          if ! command -v cargo-deny >/dev/null; then
+            cargo install cargo-deny --locked --version 0.19.8
+          fi
+          cargo deny --version
+
+      - name: Run cargo-deny checks
+        # `cargo deny check` runs all four categories
+        # (advisories, licenses, bans, sources) per the
+        # workspace-root deny.toml. Exits non-zero on any rule
+        # violation; the message names the offending crate +
+        # version + which rule fired.
+        run: cargo deny check
