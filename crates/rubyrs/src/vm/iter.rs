@@ -1737,6 +1737,16 @@ impl Vm {
             // #311 / #312). Only Int+Int endpoints supported —
             // matches `iter_range_filter` convention; Str+Str
             // ranges fall through to NoMethodError.
+            // Float coerce — CRuby truncates `each_slice(2.5)` to
+            // 2 (Integer cast). NaN / ±Inf raise RangeError via
+            // `float_to_int_arg`. Re-dispatch with the converted
+            // Int so the existing Int arm owns the rest of the
+            // logic. Same pattern repeats across the 5 sibling
+            // arms (each_slice/each_cons × Array/Hash/Range).
+            (Value::Range(_), "each_slice", [Value::Float(f)]) => {
+                let n = self.float_to_int_arg(*f)?;
+                return self.collection_call_block(recv, name, &[Value::Int(n)], block);
+            }
             (Value::Range(id), "each_slice", [Value::Int(n)]) => {
                 if *n <= 0 {
                     return Err(self.trap(crate::error::RubyError::ArgumentError {
@@ -1834,6 +1844,10 @@ impl Vm {
             // Wrong-arity / non-Int for Range#each_slice block form.
             (Value::Range(_), "each_slice", _) => {
                 return Err(self.arity_error_arg1_int(name, args));
+            }
+            (Value::Range(_), "each_cons", [Value::Float(f)]) => {
+                let n = self.float_to_int_arg(*f)?;
+                return self.collection_call_block(recv, name, &[Value::Int(n)], block);
             }
             // `(b..e).each_cons(n) { |window| ... }` — sliding
             // window of n consecutive Ints; return receiver.
@@ -2233,6 +2247,10 @@ impl Vm {
             // scope pattern (from Hash#each_slice) releases the
             // slice pin at end of each iteration, on every exit
             // path including check_alloc / step_block traps.
+            (Value::Array(_), "each_slice", [Value::Float(f)]) => {
+                let n = self.float_to_int_arg(*f)?;
+                return self.collection_call_block(recv, name, &[Value::Int(n)], block);
+            }
             (Value::Array(id), "each_slice", [Value::Int(n)]) => {
                 if *n <= 0 {
                     return Err(self.trap(crate::error::RubyError::ArgumentError {
@@ -2286,6 +2304,10 @@ impl Vm {
             // Windows share element identity automatically (each
             // `win.to_vec()` clones the Copy `Value`s — heap-ref
             // Values keep their ObjId, so identity is preserved).
+            (Value::Array(_), "each_cons", [Value::Float(f)]) => {
+                let n = self.float_to_int_arg(*f)?;
+                return self.collection_call_block(recv, name, &[Value::Int(n)], block);
+            }
             (Value::Array(id), "each_cons", [Value::Int(n)]) => {
                 if *n <= 0 {
                     return Err(self.trap(crate::error::RubyError::ArgumentError {
@@ -3434,6 +3456,10 @@ impl Vm {
             // single Array argument; return the receiver Hash
             // (CRuby parity — block-form returns the receiver,
             // not nil). Last slice may be shorter than n.
+            (Value::Hash(_), "each_slice", [Value::Float(f)]) => {
+                let n = self.float_to_int_arg(*f)?;
+                return self.collection_call_block(recv, name, &[Value::Int(n)], block);
+            }
             (Value::Hash(id), "each_slice", [Value::Int(n)]) => {
                 if *n <= 0 {
                     return Err(self.trap(crate::error::RubyError::ArgumentError {
@@ -3506,6 +3532,10 @@ impl Vm {
             // of n consecutive `[k, v]` pair Arrays. No yields
             // when receiver has fewer than n pairs. Returns
             // receiver Hash (CRuby parity).
+            (Value::Hash(_), "each_cons", [Value::Float(f)]) => {
+                let n = self.float_to_int_arg(*f)?;
+                return self.collection_call_block(recv, name, &[Value::Int(n)], block);
+            }
             (Value::Hash(id), "each_cons", [Value::Int(n)]) => {
                 if *n <= 0 {
                     return Err(self.trap(crate::error::RubyError::ArgumentError {

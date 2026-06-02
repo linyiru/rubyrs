@@ -252,6 +252,31 @@ impl Vm {
     /// Used as `return Err(self.arity_error_arg1_int(name, args))`
     /// in catch-all arms placed after the matching `[Value::Int(n)]`
     /// arm so the success path is unchanged.
+    /// Coerce a Float argument to i64 with CRuby's
+    /// `each_slice(2.5) → 2` truncation semantics. NaN and ±Inf
+    /// raise RangeError with CRuby's exact wording (note: the
+    /// short label "Inf" / "-Inf" / "NaN" — NOT
+    /// `float_domain_label`'s "Infinity" / "NaN" used elsewhere).
+    /// Finite-out-of-range floats (e.g. `1e30`) silently
+    /// saturate via the `as i64` cast; CRuby raises there too
+    /// with `"float <%g> out of range of integer"` but exact
+    /// %g-style formatting isn't worth the parity cost for a
+    /// pathological input.
+    pub(crate) fn float_to_int_arg(&self, f: f64) -> Result<i64, Trap> {
+        if f.is_nan() {
+            return Err(self.trap(RubyError::RangeError {
+                msg: "float NaN out of range of integer".to_string(),
+            }));
+        }
+        if f.is_infinite() {
+            let label = if f > 0.0 { "Inf" } else { "-Inf" };
+            return Err(self.trap(RubyError::RangeError {
+                msg: format!("float {label} out of range of integer"),
+            }));
+        }
+        Ok(f as i64)
+    }
+
     pub(crate) fn arity_error_arg1_int(&self, _name: &str, args: &[Value]) -> Trap {
         if args.len() != 1 {
             return self.trap(RubyError::ArgumentError {

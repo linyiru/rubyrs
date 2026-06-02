@@ -380,6 +380,10 @@ impl Vm {
                     // (Enumerator-stub strategy). `.to_a` on
                     // either is a no-op vs forced materialisation
                     // — same shape. Block forms in iter.rs.
+                    ("each_slice", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.range_collection_call(id, name, &[Value::Int(n)]);
+                    }
                     ("each_slice", [Value::Int(n)]) => {
                         if *n <= 0 {
                             return Err(self.trap(RubyError::ArgumentError {
@@ -443,6 +447,10 @@ impl Vm {
                     // Wrong-arity / non-Int for Range#each_slice no-block form.
                     ("each_slice", _) => {
                         return Err(self.arity_error_arg1_int(name, args));
+                    }
+                    ("each_cons", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.range_collection_call(id, name, &[Value::Int(n)]);
                     }
                     ("each_cons", [Value::Int(n)]) => {
                         if *n <= 0 {
