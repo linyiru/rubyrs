@@ -58,8 +58,10 @@ pub(crate) enum Op {
     /// The bignum AST lowering does gcd-reduction and sign-
     /// normalization at parse time so the strings hit `make_rational_bigint`
     /// already canonical (the redundant gcd is then ~free). The
-    /// no-bignum lowering emits the components verbatim and relies
-    /// on `make_rational` to normalize at load time. Per-component
+    /// no-bignum lowering formats each component via a u128
+    /// accumulator with a `u128::MAX` sentinel fallback for the
+    /// (rare) > u128 case, then relies on `make_rational` to
+    /// gcd-reduce + sign-normalize at load time. Per-component
     /// parse cache reuses `bigint_lit_cache` (no new map).
     LoadRational(SymId, SymId),
     /// Pop a Value::Str, compile it as a Regex pattern, push

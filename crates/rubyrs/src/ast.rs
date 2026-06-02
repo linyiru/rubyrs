@@ -753,6 +753,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         {
             use num_bigint::{BigInt, Sign};
             use num_integer::Integer;
+            use num_traits::One;
             let to_bigint = |int_value: ruby_prism::Integer<'_>| -> BigInt {
                 let (negative, digits) = int_value.to_u32_digits();
                 let sign = if negative { Sign::Minus } else { Sign::Plus };
@@ -769,7 +770,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     den = -den;
                 }
                 let g = num.gcd(&den);
-                if g != BigInt::from(1) {
+                if !g.is_one() {
                     num /= &g;
                     den /= &g;
                 }

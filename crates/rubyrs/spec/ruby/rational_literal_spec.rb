@@ -12,8 +12,10 @@ describe "Rational literal" do
     assert_eq((1/2r).denominator, 2)
   end
 
-  it "reduces to canonical form at parse time" do
-    # 3/9r → (1/3), 6/4r → (3/2)
+  it "evaluates to a Rational in canonical form (gcd-reduced)" do
+    # 3/9r → (1/3), 6/4r → (3/2). Bignum tier reduces at parse
+    # time; no-bignum reduces in `make_rational` at load time —
+    # observable behavior is identical from the user's view.
     assert_eq((3/9r).numerator, 1)
     assert_eq((3/9r).denominator, 3)
     assert_eq((6/4r).numerator, 3)

@@ -11,9 +11,10 @@
 # Rational paths now stay Rational on both sides — the fixture
 # avoids displaying those directly to keep the output stable.
 #
-# See `spec/ruby/rational_literal_spec.rb` for the class /
-# numerator / denominator assertions and `tests/embed/numeric.rs`
-# `rational_phase_c4_4_literal_and_pow` for the embed surface.
+# See `crates/rubyrs/spec/ruby/rational_literal_spec.rb` for the
+# class / numerator / denominator assertions and
+# `crates/rubyrs/tests/embed/numeric.rs::rational_phase_c4_4_literal_and_pow`
+# for the embed surface.
 
 # Numeric value of integer-magnitude rationals.
 puts 1000.0r * 1.0          # 1000.0
