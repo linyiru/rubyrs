@@ -68,24 +68,40 @@ runs:
         TOOL: ${{ inputs.tool }}
         WANTED: ${{ inputs.version }}
       run: |
-        # Version-check uses the explicit `~/.cargo/bin/<tool>` path
-        # rather than PATH lookup. `cargo install --force` writes
-        # there unconditionally, so checking that exact location
-        # tests the binary cargo just installed — not whatever a
-        # runner image may have preinstalled in `/usr/bin`, `/usr/
-        # local/bin`, or another PATH entry. Without this, a
-        # preinstalled-and-PATH-prioritized binary would cause the
-        # equality check to compare/print the wrong version and the
-        # cache short-circuit would never engage, even though `cargo
-        # install --force` did write the pinned binary correctly.
-        BIN="$HOME/.cargo/bin/$TOOL"
-        # Parse via semver-anchored grep so a future tool `--version`
-        # format change doesn't break the cache short-circuit (head -1
-        # defends against multi-match output; 2>/dev/null swallows the
-        # missing-binary error and yields empty INSTALLED, which
-        # triggers install).
-        INSTALLED=$("$BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        # Explicit-binary invocation (not PATH lookup) so a runner
+        # image preinstalling a different version can't silently
+        # take over the version check. `cargo install --force`
+        # writes to `$CARGO_HOME/bin/$TOOL` (default `$HOME/.cargo`),
+        # so we check exactly that path. `${CARGO_HOME:-$HOME/.cargo}`
+        # respects the cargo convention even on runners that
+        # override it (self-hosted, container jobs).
+        BIN="${CARGO_HOME:-$HOME/.cargo}/bin/$TOOL"
+        # Subcommand derivation: cargo-llvm-cov (and other cargo
+        # subcommand wrappers — cargo-fuzz, cargo-audit, cargo-vet,
+        # cargo-semver-checks) require argv[1]=='<subcommand>'
+        # before any other args. Invoking the binary directly as
+        # `cargo-llvm-cov --version` exits 1 with "expected
+        # subcommand 'llvm-cov'". Mimic cargo's dispatch by passing
+        # the subcommand (TOOL minus the `cargo-` prefix) as argv[1].
+        # cargo-deny tolerates either form (`cargo-deny --version`
+        # OR `cargo-deny deny --version`), so this form works
+        # uniformly for both today's callers and future
+        # subcommand-wrapper tools.
+        SUBCOMMAND="${TOOL#cargo-}"
+        INSTALLED=$("$BIN" "$SUBCOMMAND" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         if [ "$INSTALLED" != "$WANTED" ]; then
           cargo install "$TOOL" --locked --version "$WANTED" --force
+          # Post-install re-verify: confirm the just-installed
+          # binary actually reports the pinned version. Catches a
+          # corrupted install (network blip → partial binary), a
+          # CARGO_HOME drift between the install step and our BIN
+          # path, or `cargo install` resolving an unexpected
+          # version against a stale registry. Cheap defense-in-
+          # depth — keeps the version contract tight end-to-end.
+          POST=$("$BIN" "$SUBCOMMAND" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+          if [ "$POST" != "$WANTED" ]; then
+            echo "::error::install-pinned-cargo-tool: after install, $BIN reports '$POST', expected '$WANTED'" >&2
+            exit 1
+          fi
         fi
-        "$BIN" --version
+        "$BIN" "$SUBCOMMAND" --version
