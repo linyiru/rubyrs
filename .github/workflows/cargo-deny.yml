@@ -1,4 +1,12 @@
-name: cargo-deny
+# Workflow `name:` is deliberately `CI` (same as the main `ci.yml`
+# workflow). GitHub Actions composes required-status-check labels
+# from `<workflow name> / <job name>` — sharing `name: CI` keeps
+# this gate's check label `CI / Supply-chain (cargo-deny)`,
+# byte-identical to its pre-extract form, so existing branch-
+# protection rules continue to match without a manual cutover.
+# GHA permits duplicate workflow `name:` fields; the unique
+# identifier is the workflow filename.
+name: CI
 
 # Supply-chain gate — sister to panic-budget / perf-budget /
 # coverage ratchets in ci.yml: catches a dep introducing a CVE,
@@ -7,8 +15,9 @@ name: cargo-deny
 # `deny.toml`; see that file's header for the bump-a-rule
 # etiquette.
 #
-# Standalone workflow (extracted from ci.yml in this PR, follow-up
-# to PR #334) for two reasons:
+# Standalone workflow file (split out from `ci.yml` so a
+# `paths:` filter can scope it to dep-tree changes only).
+# Reasons:
 #   1. paths: filter. cargo-deny only needs to run when the dep
 #      tree, the policy file, or this workflow itself changes.
 #      Docs-only and Ruby-source-only PRs skip the ~1-2 min
@@ -17,9 +26,8 @@ name: cargo-deny
 #   2. Isolation. A transient RustSec advisory-DB flake or an
 #      upstream-license clarification shouldn't block core
 #      regressions — keeping cargo-deny in its own workflow file
-#      makes that boundary explicit (matches the rationale that
-#      framework-parity / supply-chain were already standalone
-#      jobs in ci.yml).
+#      makes that boundary explicit (matches framework-parity's
+#      standalone-job precedent already in ci.yml).
 #
 # Weekly cron catches advisory-DB updates that land against a
 # frozen Cargo.lock — without it, a CVE published today against
