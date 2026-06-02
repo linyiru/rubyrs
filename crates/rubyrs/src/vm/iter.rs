@@ -452,7 +452,6 @@ impl Vm {
                 // per-match update inside the loop leaves
                 // `last_match` set to the FINAL match (also
                 // matches CRuby).
-                let last_match_before = g.vm.last_match.take();
                 // Layer #17: dual-engine fallback. Block-form
                 // `gsub`/`sub` with regex receiver iterates via
                 // `captures_iter`; we haven't migrated this
@@ -461,12 +460,19 @@ impl Vm {
                 // follow-up wires it through. Native patterns
                 // (the overwhelming majority) take the existing
                 // fast path unchanged.
+                //
+                // Check BEFORE \`last_match.take()\` so a trap
+                // here doesn't have the side effect of wiping
+                // \`$~\` — the operation never ran, so the
+                // caller's prior \`$~\` should survive untouched.
+                // Code-review #353 round 5.
                 let native = re.as_native().ok_or_else(|| g.vm.trap(crate::error::RubyError::RuntimeError {
                     msg: format!(
                         "regex op 'String#sub/gsub block-form' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
                         re.as_str(),
                     ),
                 }))?;
+                let last_match_before = g.vm.last_match.take();
                 // `captures_iter` gives us group info per match
                 // (find_iter doesn't). Slight cost: each iteration
                 // builds a `Captures` rather than a bare `Match`,
