@@ -89,7 +89,14 @@ allow = [
     # fails on its very first run.
     "CDLA-Permissive-2.0",
 ]
-confidence-threshold = 0.93
+# `confidence-threshold` intentionally omitted — cargo-deny's default
+# (0.8) is the value upstream considers correct for askalono's fuzzy
+# license matching. Raising it tightens classification strictness
+# (rejecting LICENSE files with slightly non-canonical headers, line
+# wraps, extra copyright lines), and we have no specific reason to
+# diverge from upstream's calibration. If a misclassification surfaces
+# later, prefer a [licenses.exceptions] entry over bumping the
+# threshold globally.
 
 # Exceptions for specific crates whose SPDX expression is harder
 # to classify. Each entry needs a justification in the PR that
