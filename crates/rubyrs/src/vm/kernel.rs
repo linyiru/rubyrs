@@ -198,11 +198,24 @@ impl Vm {
                         return Some(Err(self.trap(RubyError::TypeError { msg })));
                     }
                 }
+                // Saturating i64 → usize: on 32-bit targets (the
+                // repo builds `wasm32-wasip1` in CI) `as usize`
+                // would truncate large positives, so a huge
+                // `start` value could wrap back into range and
+                // produce frames instead of `nil`. Clamp to
+                // `usize::MAX` instead — a usize::MAX skip will
+                // never produce frames (since total is bounded
+                // by the actual frame stack depth), preserving
+                // the "beyond depth → nil" behavior on every
+                // target. Code-review #342 round 5.
+                let to_usize_sat = |n: i64| -> usize {
+                    usize::try_from(n).unwrap_or(usize::MAX)
+                };
                 let (skip, limit) = match args {
                     [] => (1usize, usize::MAX),
-                    [Value::Int(n)] if *n >= 0 => (*n as usize, usize::MAX),
+                    [Value::Int(n)] if *n >= 0 => (to_usize_sat(*n), usize::MAX),
                     [Value::Int(n), Value::Int(l)] if *n >= 0 && *l >= 0 => {
-                        (*n as usize, *l as usize)
+                        (to_usize_sat(*n), to_usize_sat(*l))
                     }
                     // Both args are Int (type-checked above) but at
                     // least one is negative.
@@ -219,7 +232,15 @@ impl Vm {
                     // start beyond depth → CRuby returns nil.
                     return Some(Ok(Value::Nil));
                 }
-                let mut out: Vec<Value> = Vec::new();
+                // Capacity hint: at most `total - skip` frames
+                // (collected when limit is unbounded), capped by
+                // `limit` when it's smaller. Avoids the usual
+                // 0/4/8/... reallocation walk under deep stacks
+                // — this runs in hot-path framework code like
+                // Sinatra's `cleaned_caller`. Code-review #342
+                // round 5.
+                let cap = (total - skip).min(limit);
+                let mut out: Vec<Value> = Vec::with_capacity(cap);
                 for (i, f) in self.frames.iter().rev().enumerate() {
                     if i < skip { continue; }
                     if out.len() >= limit { break; }
