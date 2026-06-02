@@ -151,23 +151,63 @@ impl Vm {
                 //     entries.
                 //   - When start exceeds the call depth, CRuby
                 //     returns `nil` (not an empty array).
+                // CRuby distinguishes arity errors from coercion
+                // errors here: wrong NUMBER of args → ArgumentError,
+                // wrong TYPE → TypeError("no implicit conversion of
+                // <X> into Integer"). Mirror that split so code that
+                // catches one but not the other behaves the same.
+                // (Code-review #342 round 1.)
+                if args.len() > 2 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0..2)",
+                            args.len(),
+                        ),
+                    })));
+                }
+                for a in args.iter() {
+                    if !matches!(a, Value::Int(_)) {
+                        // CRuby uses a distinct phrasing for nil
+                        // ("from nil to integer") versus other
+                        // types ("of <Class> into Integer") —
+                        // mirrors the existing nil-arg path in
+                        // `Vm::trap_no_implicit_into_integer`
+                        // (gc.rs:292).
+                        let msg = match a {
+                            Value::Nil => {
+                                "no implicit conversion from nil to integer".to_string()
+                            }
+                            other => {
+                                let type_name = match other {
+                                    Value::Bool(true) => "true",
+                                    Value::Bool(false) => "false",
+                                    Value::Str(_) => "String",
+                                    Value::Sym(_) => "Symbol",
+                                    Value::Float(_) => "Float",
+                                    Value::Array(_) => "Array",
+                                    Value::Hash(_) => "Hash",
+                                    o => o.type_name(),
+                                };
+                                format!(
+                                    "no implicit conversion of {} into Integer",
+                                    type_name,
+                                )
+                            }
+                        };
+                        return Some(Err(self.trap(RubyError::TypeError { msg })));
+                    }
+                }
                 let (skip, limit) = match args {
                     [] => (1usize, usize::MAX),
                     [Value::Int(n)] if *n >= 0 => (*n as usize, usize::MAX),
                     [Value::Int(n), Value::Int(l)] if *n >= 0 && *l >= 0 => {
                         (*n as usize, *l as usize)
                     }
-                    [Value::Int(_)] | [Value::Int(_), Value::Int(_)] => {
-                        return Some(Err(self.trap(RubyError::ArgumentError {
-                            msg: "negative level".to_string(),
-                        })));
-                    }
+                    // Both args are Int (type-checked above) but at
+                    // least one is negative.
                     _ => {
                         return Some(Err(self.trap(RubyError::ArgumentError {
-                            msg: format!(
-                                "wrong number of arguments (given {}, expected 0..2)",
-                                args.len(),
-                            ),
+                            msg: "negative level".to_string(),
                         })));
                     }
                 };
@@ -195,6 +235,18 @@ impl Vm {
                     };
                     let s = format!("{}:{}:in '{}'", proto.filename, line, proto.name);
                     out.push(Value::new_str(s));
+                }
+                // GC discipline mirrors the other Kernel arms that
+                // hand back a fresh heap Array (e.g. `methods` /
+                // `local_variables`): give the heap a chance to
+                // sweep before allocating, then refuse if we'd
+                // blow `Config::max_heap_objects`. `out` holds
+                // only `Value::Str` (`Rc<RStr>` — not on the GC
+                // heap), so no pinning is required across
+                // `maybe_gc`. (Code-review #342 round 1.)
+                self.maybe_gc();
+                if let Err(t) = self.check_alloc() {
+                    return Some(Err(t));
                 }
                 let id = self.heap.alloc(crate::heap::HeapObj::Array(out));
                 Some(Ok(Value::Array(id)))

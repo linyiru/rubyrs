@@ -71,3 +71,22 @@ rescue ArgumentError => e
   "arity"
 end
 puts "shape7=#{err}"
+
+## Shape 8: non-Integer arg raises TypeError (CRuby distinguishes
+## arity vs coercion failures here — code that catches one but
+## not the other depends on this split).
+err = begin
+  caller("1")
+  "no-raise"
+rescue TypeError => e
+  e.message.include?("String into Integer") ? "type-string" : "other-TypeError"
+end
+puts "shape8=#{err}"
+
+err = begin
+  caller(nil)
+  "no-raise"
+rescue TypeError => e
+  e.message.include?("nil into Integer") ? "type-nil" : "other-TypeError"
+end
+puts "shape8b=#{err}"
