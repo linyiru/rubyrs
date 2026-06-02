@@ -42,24 +42,44 @@ pub enum CompiledRegex {
     Fancy(fancy_regex::Regex),
 }
 
-/// Builds either engine. Tries `regex` first; on parse error
-/// (regardless of error kind) retries with `fancy-regex`. If
-/// fancy-regex also rejects, returns its error — the linear
-/// engine's error is less informative for the fancy-only
-/// constructs that motivated the fallback in the first place.
+/// Builds either engine. Tries `regex` first; falls back to
+/// `fancy-regex` ONLY when the linear engine's error is a
+/// genuine syntax problem. Resource-limit failures
+/// (`regex::Error::CompiledTooBig`) are NOT bypassed — they're
+/// the linear engine's safety guard against pathological
+/// pattern sizes, and routing such patterns into the
+/// backtracking engine would defeat the guard. The
+/// CompiledTooBig error surfaces as-is for the caller to trap.
+///
+/// If fancy-regex also rejects, the combined error mentions
+/// both engines' messages so a pattern that's malformed (not
+/// just lookaround-shaped) gives a useful trap.
 pub(crate) fn compile(pattern: &str) -> Result<CompiledRegex, String> {
     match regex::Regex::new(pattern) {
         Ok(re) => Ok(CompiledRegex::Native(re)),
-        Err(native_err) => match fancy_regex::Regex::new(pattern) {
-            Ok(re) => Ok(CompiledRegex::Fancy(re)),
-            Err(fancy_err) => {
-                // Both engines rejected. Prefer the fancy-regex
-                // error message in the output (it covers the
-                // wider syntax surface) but mention the native
-                // failure too — useful when a pattern is so
-                // malformed that both fail.
-                Err(format!("{} (also rejected by regex: {})", fancy_err, native_err))
-            }
+        Err(native_err) => match &native_err {
+            // Syntax error → try fancy-regex. The wider syntax
+            // surface (lookaround, backrefs) is exactly what
+            // fancy-regex exists for.
+            regex::Error::Syntax(_) => match fancy_regex::Regex::new(pattern) {
+                Ok(re) => Ok(CompiledRegex::Fancy(re)),
+                Err(fancy_err) => {
+                    // Both engines rejected. Prefer the
+                    // fancy-regex error message (covers the
+                    // wider surface) but mention the native
+                    // failure too — useful when a pattern is
+                    // genuinely malformed rather than just
+                    // lookaround-shaped.
+                    Err(format!("{} (also rejected by regex: {})", fancy_err, native_err))
+                }
+            },
+            // CompiledTooBig (or any future non-syntax
+            // variant) is a real safety/resource signal from
+            // the linear engine. Surface it as-is — don't
+            // route around the guard by handing the pattern
+            // to fancy-regex's backtracker, which has no
+            // equivalent size limit. (Code-review #353 round 1.)
+            _ => Err(native_err.to_string()),
         },
     }
 }
