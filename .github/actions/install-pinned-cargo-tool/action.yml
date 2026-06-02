@@ -68,15 +68,24 @@ runs:
         TOOL: ${{ inputs.tool }}
         WANTED: ${{ inputs.version }}
       run: |
-        # Version-check before skipping the install. A bare
-        # `command -v "$TOOL"` would let a runner-cached different
-        # version silently take over. Parse via semver-anchored grep
-        # so a future tool `--version` format change doesn't break
-        # the cache short-circuit (head -1 defends against multi-
-        # match output; 2>/dev/null swallows the missing-binary
-        # error and yields empty INSTALLED, which triggers install).
-        INSTALLED=$("$TOOL" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        # Version-check uses the explicit `~/.cargo/bin/<tool>` path
+        # rather than PATH lookup. `cargo install --force` writes
+        # there unconditionally, so checking that exact location
+        # tests the binary cargo just installed — not whatever a
+        # runner image may have preinstalled in `/usr/bin`, `/usr/
+        # local/bin`, or another PATH entry. Without this, a
+        # preinstalled-and-PATH-prioritized binary would cause the
+        # equality check to compare/print the wrong version and the
+        # cache short-circuit would never engage, even though `cargo
+        # install --force` did write the pinned binary correctly.
+        BIN="$HOME/.cargo/bin/$TOOL"
+        # Parse via semver-anchored grep so a future tool `--version`
+        # format change doesn't break the cache short-circuit (head -1
+        # defends against multi-match output; 2>/dev/null swallows the
+        # missing-binary error and yields empty INSTALLED, which
+        # triggers install).
+        INSTALLED=$("$BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         if [ "$INSTALLED" != "$WANTED" ]; then
           cargo install "$TOOL" --locked --version "$WANTED" --force
         fi
-        "$TOOL" --version
+        "$BIN" --version
