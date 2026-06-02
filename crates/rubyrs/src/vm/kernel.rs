@@ -119,6 +119,230 @@ impl Vm {
             // distinguishes the two when method aliasing is
             // involved — we don't model aliases, so both resolve
             // to the same name.
+            // `Kernel#caller` — backtrace as Array<String>. CRuby
+            // shape: `caller(start=1, length=nil)`.
+            //   - `caller` ≡ `caller(1)` — both skip the frame
+            //     containing the `caller` call (the calling
+            //     method's own frame).
+            //   - `caller(0)` — INCLUDES the calling method's
+            //     frame at the head of the array (start is
+            //     absolute, not "additional skip").
+            //   - `caller(n)` — `n` is the absolute start
+            //     index; frames before index `n` are dropped.
+            //     `n` here is NOT relative to the default;
+            //     `caller(2)` skips two frames (one more than
+            //     `caller(1)`).
+            //   - `caller(n, l)` — at most `l` entries
+            //     starting at index `n`.
+            //   - `start > depth` → returns `nil` (not an
+            //     empty array).
+            // Output order is most-recent first (immediate
+            // caller at index 0, older frames later).
+            // Each entry: "filename:line:in 'method'" — single
+            // quotes (CRuby 3.x). Sinatra-4's `cleaned_caller`
+            // (sinatra/base.rb:1913) parses this format with
+            // `split(/:(?=\d|in )/, 3)`, so the colons and
+            // `in '...'` literal must match.
+            //
+            // Tier-1 scope: positional Integer args only. CRuby
+            // also accepts `caller(range)`; that lands as a
+            // follow-up. (TRY_RUNS pass-12 layer #15.)
+            //
+            // INVARIANT — DELIBERATELY NOT IN `is_builtin_name`:
+            // `caller` lives in `builtin_call` (so it dispatches
+            // as a Kernel builtin when no shadow is present) but
+            // is INTENTIONALLY OMITTED from `Vm::is_builtin_name`
+            // at the top of this file. That gate disables the
+            // toplevel-method fast path for builtin names —
+            // including it would prevent user code
+            // (`def caller; end`) from shadowing the builtin,
+            // which CRuby DOES allow (verified via `ruby -e`)
+            // and which the `tests/fixtures/errors/nomethod.rb`
+            // integration test depends on. If you're sweeping
+            // the three sync-required lists into shape, leave
+            // `caller` out of `is_builtin_name`. Code-review
+            // #342 round 6.
+            //
+            // Code-review #342 round 3 corrected the above
+            // explanation — earlier wording said "skip an
+            // additional n frames" / "Ruby caller of the
+            // `caller` call site", both of which read backwards.
+            "caller" => {
+                // CRuby distinguishes arity errors from coercion
+                // errors here: wrong NUMBER of args → ArgumentError,
+                // wrong TYPE → TypeError("no implicit conversion of
+                // <X> into Integer"). Mirror that split so code that
+                // catches one but not the other behaves the same.
+                // (Code-review #342 round 1.)
+                if args.len() > 2 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0..2)",
+                            args.len(),
+                        ),
+                    })));
+                }
+                for a in args.iter() {
+                    // `Value::BigInt` IS an Integer in rubyrs's
+                    // bignum build (just one that doesn't fit
+                    // in i64). Accept it here — converting to
+                    // an in-range value (or raising RangeError
+                    // on overflow) happens below. Without this,
+                    // `caller(2**100)` would produce the absurd
+                    // "no implicit conversion of Integer into
+                    // Integer" message. Code-review #342
+                    // round 7.
+                    //
+                    // The BigInt variant is gated behind the
+                    // `bignum` feature (value.rs:116); in the
+                    // non-bignum build there's no BigInt to
+                    // match against, so the pattern stays
+                    // `Value::Int(_)` only. Code-review #342
+                    // round 8.
+                    #[cfg(feature = "bignum")]
+                    let is_int = matches!(a, Value::Int(_) | Value::BigInt(_));
+                    #[cfg(not(feature = "bignum"))]
+                    let is_int = matches!(a, Value::Int(_));
+                    if !is_int {
+                        // CRuby uses a distinct phrasing for nil
+                        // ("from nil to integer") versus other
+                        // types ("of <Class> into Integer") —
+                        // mirrors the existing nil-arg path at
+                        // `Vm::arity_error_arg1_int` (gc.rs:292).
+                        // Code-review #342 round 2.
+                        let msg = match a {
+                            Value::Nil => {
+                                "no implicit conversion from nil to integer".to_string()
+                            }
+                            other => {
+                                let type_name = match other {
+                                    Value::Bool(true) => "true",
+                                    Value::Bool(false) => "false",
+                                    Value::Str(_) => "String",
+                                    Value::Sym(_) => "Symbol",
+                                    Value::Float(_) => "Float",
+                                    Value::Array(_) => "Array",
+                                    Value::Hash(_) => "Hash",
+                                    o => o.type_name(),
+                                };
+                                format!(
+                                    "no implicit conversion of {} into Integer",
+                                    type_name,
+                                )
+                            }
+                        };
+                        return Some(Err(self.trap(RubyError::TypeError { msg })));
+                    }
+                }
+                // BigInt → i64 coercion: CRuby raises RangeError
+                // ("bignum too big to convert into 'long'") when
+                // the value doesn't fit, NOT TypeError or "negative
+                // level". Convert each arg up front; on overflow,
+                // raise RangeError with CRuby's wording. Done in a
+                // separate sweep from the type-check so the result
+                // can be reused by the match below without
+                // re-borrowing `self.heap` inside the pattern arms.
+                //
+                // The BigInt arm is gated behind the `bignum`
+                // feature; `ToPrimitive` is only needed when the
+                // arm exists, so its import is gated too —
+                // otherwise the non-bignum build trips
+                // `unused_imports`. Code-review #342 round 8.
+                #[cfg(feature = "bignum")]
+                use num_traits::ToPrimitive;
+                let mut converted: Vec<i64> = Vec::with_capacity(args.len());
+                for a in args.iter() {
+                    let n = match a {
+                        Value::Int(n) => *n,
+                        #[cfg(feature = "bignum")]
+                        Value::BigInt(id) => {
+                            match self.heap.bigint(*id).to_i64() {
+                                Some(n) => n,
+                                None => {
+                                    return Some(Err(self.trap(RubyError::RangeError {
+                                        msg: "bignum too big to convert into 'long'".to_string(),
+                                    })));
+                                }
+                            }
+                        }
+                        _ => unreachable!("type-checked above"),
+                    };
+                    converted.push(n);
+                }
+                // Saturating i64 → usize: on 32-bit targets (the
+                // repo builds `wasm32-wasip1` in CI) `as usize`
+                // would truncate large positives, so a huge
+                // `start` value could wrap back into range and
+                // produce frames instead of `nil`. Clamp to
+                // `usize::MAX` instead — a usize::MAX skip will
+                // never produce frames (since total is bounded
+                // by the actual frame stack depth), preserving
+                // the "beyond depth → nil" behavior on every
+                // target. Code-review #342 round 5.
+                let to_usize_sat = |n: i64| -> usize {
+                    usize::try_from(n).unwrap_or(usize::MAX)
+                };
+                let (skip, limit) = match converted.as_slice() {
+                    [] => (1usize, usize::MAX),
+                    [n] if *n >= 0 => (to_usize_sat(*n), usize::MAX),
+                    [n, l] if *n >= 0 && *l >= 0 => {
+                        (to_usize_sat(*n), to_usize_sat(*l))
+                    }
+                    // At least one arg is negative.
+                    _ => {
+                        return Some(Err(self.trap(RubyError::ArgumentError {
+                            msg: "negative level".to_string(),
+                        })));
+                    }
+                };
+                // Walk from top of stack downward; skip `skip`
+                // frames first, then collect up to `limit`.
+                let total = self.frames.len();
+                if skip > total {
+                    // start beyond depth → CRuby returns nil.
+                    return Some(Ok(Value::Nil));
+                }
+                // Capacity hint: at most `total - skip` frames
+                // (collected when limit is unbounded), capped by
+                // `limit` when it's smaller. Avoids the usual
+                // 0/4/8/... reallocation walk under deep stacks
+                // — this runs in hot-path framework code like
+                // Sinatra's `cleaned_caller`. Code-review #342
+                // round 5.
+                let cap = (total - skip).min(limit);
+                let mut out: Vec<Value> = Vec::with_capacity(cap);
+                for (i, f) in self.frames.iter().rev().enumerate() {
+                    if i < skip { continue; }
+                    if out.len() >= limit { break; }
+                    let proto = &self.protos[f.proto_idx];
+                    let op_ip = if f.ip == 0 { 0 } else { f.ip - 1 };
+                    let span = proto
+                        .op_spans
+                        .get(op_ip)
+                        .copied()
+                        .unwrap_or(crate::error::Span::ZERO);
+                    let line = match self.sources.get(proto.filename.as_ref()) {
+                        Some(src) => crate::error::line_col(src, span.byte_offset).0,
+                        None => 0,
+                    };
+                    let s = format!("{}:{}:in '{}'", proto.filename, line, proto.name);
+                    out.push(Value::new_str(s));
+                }
+                // GC discipline mirrors the other Kernel arms that
+                // hand back a fresh heap Array (e.g. `methods` /
+                // `local_variables`): give the heap a chance to
+                // sweep before allocating, then refuse if we'd
+                // blow `Config::max_heap_objects`. `out` holds
+                // only `Value::Str` (`Rc<RStr>` — not on the GC
+                // heap), so no pinning is required across
+                // `maybe_gc`. (Code-review #342 round 1.)
+                self.maybe_gc();
+                if let Err(t) = self.check_alloc() {
+                    return Some(Err(t));
+                }
+                let id = self.heap.alloc(crate::heap::HeapObj::Array(out));
+                Some(Ok(Value::Array(id)))
+            }
             "__method__" | "__callee__" => {
                 let name_opt: Option<String> = {
                     let mut found = None;
@@ -190,7 +414,7 @@ impl Vm {
                         "sprintf" | "format" | "__time_now_raw" | "sleep" |
                         "exit" | "exit!" | "abort" | "warn" | "at_exit" | "__rubyrs_signal_trap" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
-                        "eval" |
+                        "eval" | "caller" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?"
                     );
                     let host_hit = self.host_fns.contains_key(sid);
