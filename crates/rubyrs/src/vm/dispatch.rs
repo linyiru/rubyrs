@@ -9329,6 +9329,66 @@ impl Vm {
             g.vm.stack.push(Value::Hash(hid));
             return Ok(());
         }
+        // `Array.new(size) { |i| block }` — CRuby's three-arg
+        // intercept on the block-form path. Builds a fresh Array
+        // by calling the block once per index 0..size-1, using
+        // each return value as the element. Surfaced as a gap
+        // by the SQLite bench's `Array.new(N) { ... }` pattern.
+        //
+        // Honors a user `def self.new` override on Array (same
+        // precedence rule as the Hash arm above) — the
+        // singleton-method lookup runs first, and only if it
+        // misses do we install the block-form constructor.
+        if &*name == "new"
+            && let Some(Value::Class(cls)) = &recv
+            && cls.name.as_str() == "Array"
+        {
+            if let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+                let target_self = Value::Class(cls.clone());
+                return self.invoke_method_with_block(m, target_self, args, Some(block));
+            }
+            let size: i64 = match args.as_slice() {
+                [] => 0,
+                [Value::Int(n)] => *n,
+                _ => return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 0..1 for block form)", args.len()),
+                })),
+            };
+            if size < 0 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("negative array size ({})", size),
+                }));
+            }
+            // Pin both the block (which the iter closure captures
+            // through frames; if GC reaps it mid-loop the next
+            // step_block call segfaults) and a running Vec<Value>
+            // accumulator (via a placeholder Array allocation).
+            // The accumulator is rebuilt as a real Array at the end
+            // — pinning it as we go would mean N allocations
+            // instead of 1, which defeats the purpose of the
+            // pre-sized Vec.
+            let mut g = PinGuard::new(self);
+            g.pin(Value::Block(block));
+            // pre_frames captures the frame depth so step_block can
+            // detect non-local return / break correctly.
+            let pre_frames = g.vm.frames.len();
+            let mut elems: Vec<Value> = Vec::with_capacity(size.max(0) as usize);
+            for i in 0..size {
+                match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                    super::iter::BlockStep::MethodReturn => return Ok(()),
+                    super::iter::BlockStep::Break(v) => {
+                        g.vm.stack.push(v);
+                        return Ok(());
+                    }
+                    super::iter::BlockStep::Value(v) => elems.push(v),
+                }
+            }
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let aid = g.vm.heap.alloc(HeapObj::Array(elems));
+            g.vm.stack.push(Value::Array(aid));
+            return Ok(());
+        }
         // `instance_eval` / `class_eval` / `module_eval` — swap
         // `self` for the duration of the block. Intercepted here
         // so the receiver-type dispatch below can't claim them

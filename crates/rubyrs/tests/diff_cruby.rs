@@ -481,3 +481,4 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn reopen_primitive_bare_call() { run_diff("reopen_primitive_bare_call"); }
 #[test] fn gsub_block_captures() { run_diff("gsub_block_captures"); }
 #[test] fn match_data_inspect() { run_diff("match_data_inspect"); }
+#[test] fn array_new_block_form() { run_diff("array_new_block_form"); }
