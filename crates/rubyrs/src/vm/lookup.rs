@@ -686,7 +686,7 @@ impl Vm {
                 "flatten" | "join" |
                 "+" | "-" | "concat" | "replace" | "clear" | "take" | "drop" |
                 "find_index" | "index" |
-                "each" | "map" | "select" | "filter" |
+                "each" | "map" | "collect" | "select" | "filter" |
                 "reject" | "find" | "detect" |
                 "any?" | "all?" | "none?" |
                 "each_with_index" | "sort_by" |
@@ -695,6 +695,7 @@ impl Vm {
                 "take_while" | "drop_while" |
                 "zip" |
                 "sort!" | "uniq!" | "compact!" | "flatten!" | "reverse!" |
+                "map!" | "collect!" |
                 "flat_map" | "collect_concat" | "chunk" | "filter_map" |
                 "each_slice" | "each_cons" |
                 "inspect" |

@@ -40,3 +40,14 @@ n = [1, 2, 3]
 r = n.map! { |x| nil }
 puts "shape6-arr=#{n.inspect}"
 puts "shape6-ret-class=#{r.class}"
+
+## Shape 7: `respond_to?` recognises both bang variants and the
+## `collect` alias of `map`. Pins the `Vm::responds_to` Array
+## whitelist; without all four entries, code that conditionally
+## calls these methods (a common idiom in framework code)
+## would silently skip the call. Code-review #348 round 1.
+a = [1, 2, 3]
+puts "shape7-map=#{a.respond_to?(:map)}"
+puts "shape7-collect=#{a.respond_to?(:collect)}"
+puts "shape7-map!=#{a.respond_to?(:map!)}"
+puts "shape7-collect!=#{a.respond_to?(:collect!)}"
