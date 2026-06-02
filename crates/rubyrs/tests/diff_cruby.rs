@@ -183,6 +183,7 @@ fn run_diff(name: &str) {
 #[test] fn module_function() { run_diff("module_function"); }
 #[test] fn anonymous_rest_param() { run_diff("anonymous_rest_param"); }
 #[test] fn class_inherited_hook() { run_diff("class_inherited_hook"); }
+#[test] fn kernel_caller() { run_diff("kernel_caller"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
 #[test] fn user_sort() { run_diff("user_sort"); }
 #[test] fn hash_enumerable() { run_diff("hash_enumerable"); }

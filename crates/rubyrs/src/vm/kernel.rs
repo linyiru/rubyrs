@@ -119,6 +119,86 @@ impl Vm {
             // distinguishes the two when method aliasing is
             // involved — we don't model aliases, so both resolve
             // to the same name.
+            // `Kernel#caller` — backtrace as Array<String>. CRuby
+            // shape:
+            //   caller        → array of formatted frames, skip
+            //                   the current `caller` call site
+            //                   (1 implicit frame)
+            //   caller(n)     → skip an additional `n` frames
+            //                   (so `caller(1)` is "caller of
+            //                   the calling method")
+            //   caller(n, l)  → up to `l` frames starting at n
+            // Each entry: "filename:line:in 'method'" — single
+            // quotes (CRuby 3.x). Sinatra-4's `cleaned_caller`
+            // (sinatra/base.rb:1913) parses this format with
+            // `split(/:(?=\d|in )/, 3)`, so the colons and
+            // `in '...'` literal must match.
+            //
+            // Tier-1 scope: positional Integer args only. CRuby
+            // also accepts `caller(range)`; that lands as a
+            // follow-up. (TRY_RUNS pass-12 layer #15.)
+            "caller" => {
+                // CRuby `caller(start=1, length=nil)`:
+                //   - `caller` and `caller(1)` are equivalent
+                //     (default start=1 skips one frame, namely
+                //     the Ruby caller of the `caller` call site
+                //     — `caller` itself is a builtin, no own
+                //     Ruby frame).
+                //   - `caller(0)` includes the calling method's
+                //     own frame at the head of the array.
+                //   - `caller(n)` skips n frames.
+                //   - `caller(n, len)` returns at most `len`
+                //     entries.
+                //   - When start exceeds the call depth, CRuby
+                //     returns `nil` (not an empty array).
+                let (skip, limit) = match args {
+                    [] => (1usize, usize::MAX),
+                    [Value::Int(n)] if *n >= 0 => (*n as usize, usize::MAX),
+                    [Value::Int(n), Value::Int(l)] if *n >= 0 && *l >= 0 => {
+                        (*n as usize, *l as usize)
+                    }
+                    [Value::Int(_)] | [Value::Int(_), Value::Int(_)] => {
+                        return Some(Err(self.trap(RubyError::ArgumentError {
+                            msg: "negative level".to_string(),
+                        })));
+                    }
+                    _ => {
+                        return Some(Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 0..2)",
+                                args.len(),
+                            ),
+                        })));
+                    }
+                };
+                // Walk from top of stack downward; skip `skip`
+                // frames first, then collect up to `limit`.
+                let total = self.frames.len();
+                if skip > total {
+                    // start beyond depth → CRuby returns nil.
+                    return Some(Ok(Value::Nil));
+                }
+                let mut out: Vec<Value> = Vec::new();
+                for (i, f) in self.frames.iter().rev().enumerate() {
+                    if i < skip { continue; }
+                    if out.len() >= limit { break; }
+                    let proto = &self.protos[f.proto_idx];
+                    let op_ip = if f.ip == 0 { 0 } else { f.ip - 1 };
+                    let span = proto
+                        .op_spans
+                        .get(op_ip)
+                        .copied()
+                        .unwrap_or(crate::error::Span::ZERO);
+                    let line = match self.sources.get(proto.filename.as_ref()) {
+                        Some(src) => crate::error::line_col(src, span.byte_offset).0,
+                        None => 0,
+                    };
+                    let s = format!("{}:{}:in '{}'", proto.filename, line, proto.name);
+                    out.push(Value::new_str(s));
+                }
+                let id = self.heap.alloc(crate::heap::HeapObj::Array(out));
+                Some(Ok(Value::Array(id)))
+            }
             "__method__" | "__callee__" => {
                 let name_opt: Option<String> = {
                     let mut found = None;
