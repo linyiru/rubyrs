@@ -153,6 +153,62 @@ module SQLite3
       raise SQLite3::Exception, "closed database" if @closed
       __rubyrs_sqlite_cache_misses(@handle)
     end
+
+    # `db.prepare(sql) → SQLite3::Statement` — returns a Ruby-
+    # visible prepared statement object the caller holds across
+    # iterations. Mirrors the CRuby sqlite3 gem's pattern;
+    # closes the `select_one_cached` bench gap by skipping the
+    # SQL-string → LRU lookup each `execute` does (the
+    # Statement holds its own opaque handle into a separate
+    # per-thread map). Always close the returned statement
+    # before closing the Database — Database#close auto-sweeps
+    # outstanding statements as a safety net, but explicit
+    # closes keep the map small.
+    def prepare(sql)
+      raise SQLite3::Exception, "closed database" if @closed
+      Statement.new(self, sql)
+    end
+  end
+
+  # Prepared statement — bind + step against a precompiled SQL
+  # string. Mirrors CRuby's `SQLite3::Statement` so user code
+  # ports unchanged. Created via `db.prepare(sql)`; the
+  # constructor calls the host fn once to prepare and stash the
+  # handle. Subsequent `execute(*params)` / `query(*params)`
+  # calls go straight to bind + step (no per-call SQL hashing).
+  class Statement
+    def initialize(db, sql)
+      @db_handle = db.instance_variable_get(:@handle)
+      @handle = __rubyrs_sqlite_prepare(@db_handle, sql)
+      @closed = false
+    end
+
+    # `stmt.execute(*params)` — bind params, step once, return
+    # rows-affected. For SELECT use `query` instead (`execute`
+    # uses the raw_execute path which errors on result-returning
+    # statements, matching the Database method's split).
+    def execute(*params)
+      raise SQLite3::Exception, "closed statement" if @closed
+      __rubyrs_sqlite_stmt_execute(@handle, params)
+    end
+
+    # `stmt.query(*params)` — bind params, step through rows,
+    # return `Array<Array<Value>>` (one inner array per row).
+    def query(*params)
+      raise SQLite3::Exception, "closed statement" if @closed
+      __rubyrs_sqlite_stmt_query(@handle, params)
+    end
+
+    def close
+      return if @closed
+      __rubyrs_sqlite_stmt_close(@handle)
+      @closed = true
+      nil
+    end
+
+    def closed?
+      @closed
+    end
   end
 end
 

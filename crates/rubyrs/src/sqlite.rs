@@ -62,11 +62,46 @@ pub(crate) struct ConnState {
     pub(crate) prepare_active: bool,
 }
 
+/// Standalone prepared statement returned by
+/// `Database#prepare(sql)`. Holds the `Statement<'static>`
+/// transmuted from `Statement<'conn>` PLUS a weak handle back
+/// to its owning Connection so we can validate "the Connection
+/// is still alive" on every call without making the statement
+/// own the Connection. ADR 0027 §"Surface freeze policy" v2
+/// extension — the user-visible `SQLite3::Statement` class
+/// goes here. Closes the `select_one_cached` 12 % bench gap
+/// vs CRuby by skipping the per-call SQL-string → LRU lookup
+/// (each `stmt.execute(args)` hops straight to bind + step).
+pub(crate) struct OwnedStmt {
+    pub(crate) stmt: Statement<'static>,
+    /// Handle of the Connection this Statement borrows from.
+    /// Validated at every call: if the Connection's been closed
+    /// (handle removed from SQLITE_CONNS), the Statement's
+    /// `'static` lifetime is now dangling and any call traps
+    /// `SQLite3::Exception` ("statement orphaned: connection
+    /// was closed").
+    pub(crate) owner_handle: i64,
+}
+
 thread_local! {
     /// Connection map keyed by opaque handle. Per-thread; the
     /// rubyrs VM is single-threaded so this is effectively
     /// per-Vm. ADR 0027 §"Capability host-fns consumed".
     static SQLITE_CONNS: RefCell<HashMap<i64, ConnState>> = RefCell::new(HashMap::new());
+    /// Prepared-statement map keyed by opaque handle (distinct
+    /// from connection handles — the two spaces share
+    /// `NEXT_HANDLE` so a handle is never reused across types).
+    /// The `OwnedStmt::stmt` field is `Statement<'static>`,
+    /// transmuted from a real `Statement<'conn>`. Drop ordering
+    /// here is more subtle than the in-Connection LRU's case:
+    /// these statements outlive their `prepare()` call frame,
+    /// so the runtime invariant is "STMT_HANDLES entry must be
+    /// removed BEFORE the SQLITE_CONNS entry for the same
+    /// `owner_handle`." `__rubyrs_sqlite_close` enforces this
+    /// by sweeping orphaned Statements before removing the
+    /// Connection. Explicit `stmt.close` removes its entry
+    /// individually.
+    static STMT_HANDLES: RefCell<HashMap<i64, OwnedStmt>> = RefCell::new(HashMap::new());
     static NEXT_HANDLE: std::cell::Cell<i64> = const { std::cell::Cell::new(1) };
 }
 
@@ -129,10 +164,21 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
 
     rt.register_fn("__rubyrs_sqlite_close", |args| {
         let handle = handle_arg(args, "__rubyrs_sqlite_close(handle)")?;
+        // SWEEP first: any STMT_HANDLES entry whose
+        // `owner_handle == handle` must drop BEFORE the
+        // SQLITE_CONNS entry, because the Statement<'static>
+        // inside has its true 'conn borrow pointing into the
+        // Connection we're about to drop. Sweep removes the
+        // statements (each drop calls sqlite3_finalize on the
+        // live conn), THEN we drop the Connection.
+        STMT_HANDLES.with(|m| {
+            let mut map = m.borrow_mut();
+            map.retain(|_sh, owned| owned.owner_handle != handle);
+        });
         SQLITE_CONNS.with(|m| {
             // `remove` drops the ConnState, which drops `stmts`
-            // (finalising each cached Statement) THEN `conn` —
-            // load-bearing field order from §4.
+            // (finalising each cached LRU Statement) THEN
+            // `conn` — load-bearing field order from §4.
             m.borrow_mut().remove(&handle);
         });
         Ok(Value::Nil)
@@ -190,6 +236,75 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             Ok(Value::Int(st.cache_misses as i64))
         })
     });
+
+    // ---- Prepared-statement opcodes (Phase 3.1) ----
+    // Closes the select_one_cached bench gap by exposing the
+    // CRuby-shape prepare-once pattern. ADR 0027 §"Surface
+    // freeze policy" v2 extension. The four ops mirror the
+    // Database ones but key on a per-Statement handle held by
+    // the SQLite3::Statement Ruby class.
+
+    rt.register_fn("__rubyrs_sqlite_prepare", |args| {
+        let (handle, sql) = match args {
+            [Value::Int(h), Value::Str(s)] => (*h, s.to_string_lossy()),
+            _ => return Err(arg_err("__rubyrs_sqlite_prepare(handle, sql)")),
+        };
+        let stmt_handle = SQLITE_CONNS.with(|m| -> Result<i64, Trap> {
+            let map = m.borrow();
+            let st = map.get(&handle).ok_or_else(closed_db)?;
+            // SAFETY: Statement borrows from Connection. The
+            // transmute pairs with the runtime invariant
+            // "STMT_HANDLES entry for owner_handle=H must be
+            // removed before SQLITE_CONNS removes H." Enforced
+            // at the close site via sweep_orphaned_stmts.
+            let stmt = unsafe {
+                let real: Statement<'_> = st.conn
+                    .prepare(&sql)
+                    .map_err(|e| map_sqlite_err(e, "prepare"))?;
+                std::mem::transmute::<Statement<'_>, Statement<'static>>(real)
+            };
+            let sh = NEXT_HANDLE.with(|c| {
+                let h = c.get();
+                c.set(h + 1);
+                h
+            });
+            STMT_HANDLES.with(|m| {
+                m.borrow_mut().insert(sh, OwnedStmt { stmt, owner_handle: handle });
+            });
+            Ok(sh)
+        })?;
+        Ok(Value::Int(stmt_handle))
+    });
+
+    rt.register_fn("__rubyrs_sqlite_stmt_execute", |args| {
+        let (stmt_handle, params) = parse_stmt_args(args, "stmt_execute")?;
+        with_stmt(stmt_handle, |st_stmt, vm| {
+            st_stmt.stmt.clear_bindings();
+            bind_params(&mut st_stmt.stmt, &params, vm)?;
+            st_stmt.stmt
+                .raw_execute()
+                .map(|n| Value::Int(n as i64))
+                .map_err(|e| map_sqlite_err(e, "stmt execute"))
+        })
+    });
+
+    rt.register_fn("__rubyrs_sqlite_stmt_query", |args| {
+        let (stmt_handle, params) = parse_stmt_args(args, "stmt_query")?;
+        let max_bytes = with_vm(|vm| vm.sqlite_max_result_bytes);
+        with_stmt(stmt_handle, |st_stmt, vm| {
+            st_stmt.stmt.clear_bindings();
+            bind_params(&mut st_stmt.stmt, &params, vm)?;
+            collect_rows(&mut st_stmt.stmt, vm, max_bytes)
+        })
+    });
+
+    rt.register_fn("__rubyrs_sqlite_stmt_close", |args| {
+        let stmt_handle = handle_arg(args, "__rubyrs_sqlite_stmt_close(stmt_handle)")?;
+        STMT_HANDLES.with(|m| {
+            m.borrow_mut().remove(&stmt_handle);
+        });
+        Ok(Value::Nil)
+    });
 }
 
 // ---- helpers ----
@@ -216,6 +331,73 @@ fn handle_arg(args: &[Value], shape: &str) -> Result<i64, Trap> {
         [Value::Int(h)] => Ok(*h),
         _ => Err(arg_err(shape)),
     }
+}
+
+/// Parameter-shape parser for the statement-handle ops
+/// (`stmt_execute` / `stmt_query`). Same shape as
+/// `parse_exec_args` but the SQL string is implicit (owned by
+/// the Statement) so we only take handle + params.
+fn parse_stmt_args(args: &[Value], op: &str) -> Result<(i64, Vec<Value>), Trap> {
+    match args {
+        [Value::Int(sh)] => Ok((*sh, vec![])),
+        [Value::Int(sh), Value::Array(p)] => {
+            let vm = unsafe { &mut *current_vm_ptr() };
+            let params: Vec<Value> = vm.heap.array(*p).clone();
+            Ok((*sh, params))
+        }
+        _ => Err(arg_err(&format!("__rubyrs_sqlite_{op}(stmt_handle[, params])"))),
+    }
+}
+
+/// Borrow a Statement by handle, run a closure that mutates it
+/// + the Vm, return the result. Centralises the
+/// STMT_HANDLES → Vm-borrow dance so the per-host-fn closures
+/// don't repeat it.
+fn with_stmt<F>(stmt_handle: i64, f: F) -> Result<Value, Trap>
+where
+    F: FnOnce(&mut OwnedStmt, &mut crate::vm::Vm) -> Result<Value, Trap>,
+{
+    let ptr = current_vm_ptr();
+    if ptr.is_null() {
+        return Err(arg_err("sqlite host fn: VM ptr null"));
+    }
+    let vm = unsafe { &mut *ptr };
+    STMT_HANDLES.with(|m| -> Result<Value, Trap> {
+        let mut map = m.borrow_mut();
+        let owned = map.get_mut(&stmt_handle).ok_or_else(|| Trap {
+            err: RubyError::HostException {
+                class_name: "SQLite3::Exception".to_string(),
+                message: "closed statement (or invalid handle)".to_string(),
+            },
+            backtrace: vec![],
+        })?;
+        // Validate the owning Connection is still alive — if
+        // the Database#close swept us, the handle is gone from
+        // the local map already (see the close-site retain); a
+        // dangling Statement would have been dropped there. But
+        // defensive double-check.
+        let alive = SQLITE_CONNS.with(|cm| cm.borrow().contains_key(&owned.owner_handle));
+        if !alive {
+            return Err(Trap {
+                err: RubyError::HostException {
+                    class_name: "SQLite3::Exception".to_string(),
+                    message: "statement orphaned: owning database was closed".to_string(),
+                },
+                backtrace: vec![],
+            });
+        }
+        f(owned, vm)
+    })
+}
+
+/// Short-hand for read-only Vm access from a host fn closure.
+fn with_vm<F, R>(f: F) -> R
+where
+    F: FnOnce(&crate::vm::Vm) -> R,
+{
+    let ptr = current_vm_ptr();
+    let vm = unsafe { &*ptr };
+    f(vm)
 }
 
 fn parse_exec_args(args: &[Value], op: &str) -> Result<(i64, String, Vec<Value>), Trap> {
