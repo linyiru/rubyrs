@@ -944,6 +944,111 @@ m.call(nil)                # both: []
   no_recv path), but the with-recv form `obj.eval(...)` does
   not (see Kernel#eval entry above).
 
+### Bare-call dispatch from inside reopened-NilClass instance methods
+
+```ruby
+class NilClass
+  def helper; "from helper"; end
+  def caller
+    helper            # ← bare call
+  end
+end
+nil.caller            # rubyrs: NoMethodError; CRuby: "from helper"
+nil.send(:helper)     # both: "from helper"
+class NilClass
+  def caller_ok
+    self.helper       # ← explicit self
+  end
+end
+nil.caller_ok         # both: "from helper"
+```
+
+- Bare method calls inside reopened-class instance method bodies
+  reach a primitive-class lookup arm in `vm/dispatch.rs` that
+  finds the sibling method on the receiver's class. The arm is
+  gated on `!matches!(self_val, Value::Nil)` because rubyrs uses
+  `Value::Nil` as the toplevel `main` self too: bridging from
+  a Nil receiver to NilClass-method lookup would turn the
+  CRuby-correct `ArgumentError` from a toplevel arity mismatch
+  (`def one(a); end; one(1, 2)`) into `NoMethodError for NilClass`,
+  breaking the toplevel-method dispatch contract.
+- The two cases (toplevel-main vs real-nil receiver) are
+  indistinguishable at the dispatch site under the current
+  `Value::Nil`-shared representation, so the Nil exclusion
+  is preserved and the reopened-NilClass-bare-call case takes
+  the documented divergence.
+- Workaround: write `self.helper` (or `send(:helper)`) instead
+  of bare `helper`. The primitive-reopen bridge covers Hash /
+  Array / String / Integer / Symbol / Float etc.; only NilClass
+  needs the explicit receiver.
+- Why not fixed at the structural level: closing this would
+  need either (a) lifting toplevel-main to its own `Value`
+  variant — a workspace-wide change touching every dispatch arm
+  and `class_of` site — or (b) frame-context-aware dispatch
+  checking `is_toplevel_frame` on every Nil-receiver call. Both
+  trade real complexity / runtime cost for a rarely-used
+  pattern (`class NilClass` reopens with bare-call siblings).
+  The 1-line `self.` workaround is the right cost-benefit point.
+- Surfaces visible in-tree: `src/stdlib_vendor/active_support_lite.rb`'s
+  `NilClass#present?` / `presence` overrides (rather than
+  inheriting from `Object#present?` which calls bare `blank?`).
+  Test: `crates/rubyrs/tests/diff/reopen_primitive_bare_call.rb`
+  pins the toplevel-arity ArgumentError surface this exclusion
+  preserves.
+
+### `$1` / `$~` inside `String#gsub` block doesn't capture groups
+
+```ruby
+"active_record".gsub(/_([a-z])/) { $1.upcase }
+# rubyrs: NoMethodError: undefined method `upcase' for NilClass
+# CRuby:  "activeRecord"
+
+"active_record".gsub(/_([a-z])/) { |m| m[1].upcase }
+# both: "activeRecord"
+```
+
+- The `$1` / `$~` magic globals don't populate inside the
+  `gsub` block's body on rubyrs; the block's argument is the
+  full match string instead. Mirrors CRuby's `$~`-in-block
+  semantics observationally for unsupported cases.
+- Workaround: use the block argument `|m|` (the full match)
+  and slice manually via `m[index]`. For numbered-capture
+  shapes, this requires knowing the group structure (positions
+  of group 1 / group 2 within `m`); the `active_support_lite`
+  canon's `String#underscore` shows the pattern.
+- Status: Tier-1 gap, no current consumer beyond the
+  active_support_lite canon required it. Track in the
+  "Small unimplemented features" section below; not tier-
+  assigned because the implementation surface is well-known
+  (set `$~` from the MatchData in the gsub block's per-match
+  invocation, mirroring CRuby's `Regexp.last_match` thread-
+  local update).
+
+## Small unimplemented features
+
+Concrete missing-method gaps surfaced during canon authoring
+(M27 D / menu items 2–3). None blocks the menu shipped to
+date — workarounds inline above each canon's source — but
+each would simplify the next canon author's life if
+implemented. Listed here so the next canon spike's GAPS
+phase finds them via grep rather than rediscovering.
+
+- **`Hash#each_with_object(memo) { |(k,v), acc| ... }`** —
+  not on rubyrs's Hash. Canons use
+  `inject(init) { |acc, (k,v)| ...; acc }` instead. Adding
+  it is a 10-line primitive arm in `vm/iter.rs`'s iteration
+  surface.
+- **`Array#each_with_object(memo) { |x, acc| ... }`** — same
+  shape on Array; same `inject`-based workaround.
+- **`$1` / `$~` in `gsub` blocks** — see the dedicated
+  Divergences entry above. Workaround: block arg `|m|` +
+  manual slice.
+
+These are NOT tier-assignment decisions; they're
+straightforward unimplementeds that haven't found a justifying
+consumer yet. The first canon (or user script) to need them
+should land the implementation alongside.
+
 ## Deferred to outer tiers
 
 Features whose absence is a tier-assignment decision per
