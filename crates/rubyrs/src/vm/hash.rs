@@ -904,6 +904,36 @@ impl Vm {
                         }
                         Some(Value::Hash(nid))
                     }
+                    // `h.merge!(other)` / `h.update(other)` — in-place
+                    // counterpart of `merge`: keys in `other` overwrite
+                    // self's (existing keys keep position, new keys
+                    // append in other's order), mutating and returning
+                    // self. `update` is CRuby's alias. The block-form
+                    // conflict-resolver lives in `collection_call_block`
+                    // (vm/iter.rs); this is the blockless path.
+                    ("merge!", [Value::Hash(other)]) | ("update", [Value::Hash(other)]) => {
+                        let extra: Vec<(Value, Value)> = self.heap.hash(*other).clone();
+                        for (k, v) in extra {
+                            let pos = self.heap.hash(id).iter()
+                                .position(|(ek, _)| ek.ruby_eql(&k, &self.heap));
+                            if let Some(p) = pos {
+                                self.heap.hash_mut(id)[p].1 = v;
+                            } else {
+                                self.heap.hash_mut(id).push((k, v));
+                            }
+                        }
+                        Some(Value::Hash(id))
+                    }
+                    // `h.replace(other)` — replace the receiver's
+                    // contents wholesale with `other`'s pairs, in
+                    // place, returning self. Core Ruby; ActiveSupport's
+                    // `deep_transform_keys!` (and the deep symbolize/
+                    // stringify bang methods built on it) rely on it.
+                    ("replace", [Value::Hash(other)]) => {
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(*other).clone();
+                        *self.heap.hash_mut(id) = pairs;
+                        Some(Value::Hash(id))
+                    }
                     ("delete", [k]) => {
                         let pos = self.heap.hash(id).iter()
                             .position(|(key, _)| key.ruby_eql(k, &self.heap));
