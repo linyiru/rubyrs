@@ -1701,9 +1701,25 @@ impl Vm {
                         recv_h.wrapping_mul(0x9E3779B1).wrapping_add(n.0 as i64)
                     }
                     Value::UnboundMethod(uid) => {
+                        // Mirror `eql?`'s identity: hash the
+                        // underlying Method's Rc pointer when the
+                        // capture-class chain resolves one, so two
+                        // UnboundMethods sharing the same definition
+                        // (e.g. `C.instance_method(:foo)` and
+                        // `D.instance_method(:foo)` for `D < C`'s
+                        // inherited foo) satisfy
+                        // `a.eql?(b) ⇒ a.hash == b.hash`. When the
+                        // method isn't resolvable (rare — captured
+                        // class no longer defines it), fall back to
+                        // the captured-class pointer; in that branch
+                        // `eql?` also falls back to class-ptr
+                        // identity, so hash stays consistent.
                         let (cls, n) = self.heap.unbound_method(*uid);
-                        let cls_h = std::rc::Rc::as_ptr(&cls) as i64;
-                        cls_h.wrapping_mul(0x9E3779B1).wrapping_add(n.0 as i64)
+                        let key = match self.lookup_method_uncached(&cls, n) {
+                            Some(m) => std::rc::Rc::as_ptr(&m) as i64,
+                            None => std::rc::Rc::as_ptr(&cls) as i64,
+                        };
+                        key.wrapping_mul(0x9E3779B1).wrapping_add(n.0 as i64)
                     }
                     _ => unreachable!(),
                 };
@@ -6095,11 +6111,18 @@ impl Vm {
         //    both come out true. Acceptable for now — the common
         //    cases (same-shape containers, same-string lookups)
         //    all match CRuby.
-        //  - Object / BoundMethod / UnboundMethod / CurriedProc /
-        //    Block / BigInt: ObjId identity via ruby_eq's
+        //  - Object / BigInt: ObjId identity via ruby_eq's
         //    per-variant arms (matches CRuby's Kernel#eql?
         //    default, which is identity for user objects).
         //  - Class: Rc::ptr_eq via ruby_eq.
+        //  - BoundMethod / UnboundMethod: gated out below —
+        //    handled by the dedicated Method ==/!=/eql? arm
+        //    further down (ruby_eq has no Method case, so the
+        //    universal path would return false even for two
+        //    equivalent Methods).
+        //  - CurriedProc / Block: no ruby_eq case → falls through
+        //    to the catchall (returns false; CRuby's Proc#eql?
+        //    is identity, which our distinct ObjIds approximate).
         //  - Sym / Bool / Nil: identity == value equality for
         //    immediates.
         // Universal `respond_to?(:eql?)` already returns true via

@@ -78,3 +78,13 @@ puts c1.method(:foo).respond_to?(:eql?)        # true
 puts c1.method(:foo).respond_to?(:!=)          # true
 puts u_foo_via_c1.respond_to?(:eql?)           # true
 puts u_foo_via_c1.respond_to?(:!=)             # true
+
+# Hash invariant — eql?-equal Methods must share #hash (Ruby's
+# `a.eql?(b) ⇒ a.hash == b.hash`). This is the rule that makes
+# Method usable as a Hash key; we exercise the rule directly
+# rather than via Hash lookup because the rubyrs Hash internals
+# use a separate ruby_eql identity for key comparison (full
+# Method-as-Hash-key parity is a separate follow-up).
+puts c1.method(:foo).hash == c1.method(:foo).hash    # true
+puts u_foo_via_c1.hash == u_foo_via_c2.hash          # true
+puts u_foo_via_c1.hash == u_foo_via_d.hash           # true — D inherits :foo
