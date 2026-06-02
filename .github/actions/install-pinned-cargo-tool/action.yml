@@ -4,32 +4,17 @@ description: >-
   a registry+binary cache and a strict version-equality check so a
   runner-cached different version can't silently take over.
 
-# Composite action shared by jobs that need a pinned cargo
-# subcommand. Hoisted from PR #339 review #10 (and previously deferred
-# from PR #334). Centralizes the install-pinned-cargo-tool dance so
-# the next gate (cargo-audit, cargo-vet, semver-checks) doesn't fork
-# a third variant.
+# Used by cargo-deny.yml and ci.yml's coverage job. Pin source-of-
+# truth is the caller's `with: version:` input.
 #
-# Design contract:
-#   - Caches `~/.cargo/registry` plus the pinned tool binary at
-#     `~/.cargo/bin/<tool>`. NOT `~/.cargo/git` (no git-dep workflow
-#     uses this; per PR #339 cleanup).
-#   - NOT the workspace `target/` — that's per-job (e.g., the
-#     coverage job needs an instrumented build's target/ which is
-#     orthogonal to the tool install; callers cache that themselves).
-#   - Cache key embeds tool name + version + Cargo.lock hash. Bumping
-#     `version:` bust-invalidates the cache and forces a clean install.
-#   - `restore-keys:` prefix matches on tool+version (without Cargo.lock
-#     hash), so a workspace dep bump that didn't change the tool can
-#     still restore the binary and short-circuit the install.
-#   - Install step parses `<tool> --version` via semver-anchored grep
-#     rather than positional awk, so future `--version` format drift
-#     (extra tokens, leading `v`, multi-line output) doesn't silently
-#     break the cache short-circuit.
-#   - `--force` on mismatch only overwrites the binary in
-#     `~/.cargo/bin`; there is NO cached `target/` for the cargo tool
-#     itself, so an install path is a from-scratch compile (~3-5 min).
-#     The cache makes the steady-state cache-hit path zero-cost.
+# Alternative considered: taiki-e/install-action — fuzz.yml uses it
+# for cargo-fuzz. It fetches prebuilt binaries (faster cache miss
+# than this composite's from-scratch `cargo install`) but is an
+# external dependency. This composite is preferred when the
+# workspace wants self-contained install logic + strict version
+# equality; taiki-e is preferred when prebuilt binaries exist and
+# install speed matters. Either is fine for new gates; both
+# patterns are accepted convention.
 
 inputs:
   tool:
