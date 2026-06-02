@@ -4653,6 +4653,9 @@ impl Vm {
             if matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty()
                 && let Value::Class(target) = &self_val {
                     let is_prepend = &*name == "prepend";
+                    let is_include = &*name == "include";
+                    let target_cls = target.clone();
+                    let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
                     for a in &args {
                         let src = match a {
                             Value::Class(c) => c.clone(),
@@ -4679,16 +4682,31 @@ impl Vm {
                         // `class_is_a`, `include ContainsM` then
                         // `include M` would move `M` ahead of
                         // `ContainsM` and reorder lookup.
-                        if !super::class_is_a(target, &src) {
+                        if !super::class_is_a(&target_cls, &src) {
                             let mut chain = if is_prepend {
-                                target.prepends.borrow_mut()
+                                target_cls.prepends.borrow_mut()
                             } else {
-                                target.includes.borrow_mut()
+                                target_cls.includes.borrow_mut()
                             };
-                            chain.insert(0, src);
+                            chain.insert(0, src.clone());
+                            drop(chain);
+                        }
+                        // CRuby fires the `included` / `prepended`
+                        // hook on EVERY include/prepend call — even
+                        // when the chain mutation is a no-op
+                        // (idempotent re-include). The hook isn't
+                        // gated on chain change; it's documented as
+                        // "called whenever a module is included in
+                        // another module". `extend` shares the same
+                        // arm but its hook is `Module.extended`
+                        // (different signature, separate follow-up).
+                        if is_prepend || is_include {
+                            fire_hooks.push(src);
                         }
                     }
                     self.method_gen = self.method_gen.wrapping_add(1);
+                    let hook_name = if is_prepend { "prepended" } else { "included" };
+                    self.fire_inclusion_hooks(&fire_hooks, &target_cls, hook_name)?;
                     self.stack.push(self_val.clone());
                     return Ok(());
                 }
@@ -5578,8 +5596,13 @@ impl Vm {
                 // Explicit-receiver form: `MyClass.include(Mod)` /
                 // `.prepend(Mod)`. Same chain-push semantics as the
                 // no-receiver form above — see that comment for the
-                // rationale and the prepend-vs-include split.
+                // rationale and the prepend-vs-include split. The
+                // `Module.included` / `Module.prepended` hooks fire
+                // here too, mirroring the no-receiver path.
                 let is_prepend = &*name == "prepend";
+                let is_include = &*name == "include";
+                let target_cls = target.clone();
+                let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
                 for a in &args {
                     let src = match a {
                         Value::Class(c) => c.clone(),
@@ -5593,16 +5616,24 @@ impl Vm {
                     // Full ancestor-chain idempotency, same as the
                     // no-receiver arm — see that comment for the
                     // reorder hazard a shallow vec-check creates.
-                    if !super::class_is_a(target, &src) {
+                    if !super::class_is_a(&target_cls, &src) {
                         let mut chain = if is_prepend {
-                            target.prepends.borrow_mut()
+                            target_cls.prepends.borrow_mut()
                         } else {
-                            target.includes.borrow_mut()
+                            target_cls.includes.borrow_mut()
                         };
-                        chain.insert(0, src);
+                        chain.insert(0, src.clone());
+                        drop(chain);
+                    }
+                    // Hook fires on every call — see no-recv arm
+                    // for rationale.
+                    if is_prepend || is_include {
+                        fire_hooks.push(src);
                     }
                 }
                 self.method_gen = self.method_gen.wrapping_add(1);
+                let hook_name = if is_prepend { "prepended" } else { "included" };
+                self.fire_inclusion_hooks(&fire_hooks, &target_cls, hook_name)?;
                 self.stack.push(recv.clone());
                 return Ok(());
             }
@@ -7789,6 +7820,50 @@ impl Vm {
 
     pub(crate) fn invoke_method(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>) -> Result<(), Trap> {
         self.invoke_method_with_block(m, self_val, args, None)
+    }
+
+    /// Fire `Module.included(target)` / `Module.prepended(target)`
+    /// for each `src` module just inserted into `target`'s include
+    /// / prepend chain. CRuby's contract:
+    ///   - hook receiver is the included/prepended module (`src`),
+    ///     not the target
+    ///   - hook is called with `target` as its single argument
+    ///   - return value is discarded (hook runs for side effects)
+    ///   - hook fires only for NEW insertions — idempotent re-include
+    ///     already gates the call by the `class_is_a` skip upstream
+    ///
+    /// Fast-path: if the hook name has never been interned no user
+    /// code can have defined an override, so we skip the lookup
+    /// entirely (mirroring the `Class.inherited` fast-path in
+    /// step.rs). Lookup uses `lookup_class_singleton_method` so a
+    /// `def self.included(base)` (or `def self.prepended(base)`)
+    /// defined on `src` or any of its singleton ancestors fires;
+    /// a generic `class Module; def included(base); end; end`
+    /// monkey-patch won't reach here — same divergence as the
+    /// `inherited` hook.
+    pub(crate) fn fire_inclusion_hooks(
+        &mut self,
+        sources: &[std::rc::Rc<crate::value::Class>],
+        target: &std::rc::Rc<crate::value::Class>,
+        hook_name: &str,
+    ) -> Result<(), Trap> {
+        if sources.is_empty() || !self.interner.contains(hook_name) {
+            return Ok(());
+        }
+        let hook_id = self.interner.intern(hook_name);
+        for src in sources {
+            if let Some(m) = self.lookup_class_singleton_method(src, hook_id) {
+                let pre_frames = self.frames.len();
+                self.invoke_method(
+                    m,
+                    Value::Class(src.clone()),
+                    vec![Value::Class(target.clone())],
+                )?;
+                self.dispatch_until(pre_frames)?;
+                self.stack.pop();
+            }
+        }
+        Ok(())
     }
 
     fn try_invoke_fixed_method_from_stack(
