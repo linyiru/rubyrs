@@ -73,6 +73,80 @@ fn run_diff(name: &str) {
     );
 }
 
+/// True iff the system `ruby` can `require '<gem_probe>'`. Lets a
+/// gem-oracle diff skip gracefully (rather than fail) on a machine
+/// where the blessed gem isn't installed — mirroring `ruby_available`.
+#[cfg(feature = "stdlib")]
+fn gem_available(gem_probe: &str) -> bool {
+    Command::new("ruby")
+        .arg("-e")
+        .arg(format!("require '{gem_probe}'"))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Like `run_diff`, but the CRuby oracle runs with RubyGems ENABLED so
+/// a blessed off-stdlib gem (e.g. ActiveSupport) is the parity oracle.
+/// The same fixture `require`s the gem name on both runtimes: rubyrs
+/// resolves it to the vendored pure-Ruby canon, CRuby to the real gem.
+///
+/// `gem_probe` is the `require` path used to detect availability; if
+/// the host ruby lacks the gem the test skips (like a missing `ruby`),
+/// so contributors without the gem installed aren't blocked. CI pins
+/// and installs the gem, so the gate is live there.
+#[cfg(feature = "stdlib")]
+fn run_diff_gem(name: &str, gem_probe: &str) {
+    if !ruby_available() {
+        eprintln!("skipping diff_cruby::{} — `ruby` not on PATH", name);
+        return;
+    }
+    if !gem_available(gem_probe) {
+        eprintln!(
+            "skipping diff_cruby::{} — `require '{}'` failed (gem not installed)",
+            name, gem_probe
+        );
+        return;
+    }
+    let dir = manifest_dir().join("tests/diff");
+    let rb_rel = PathBuf::from("tests/diff").join(format!("{name}.rb"));
+    let rb_abs = dir.join(format!("{name}.rb"));
+    assert!(rb_abs.exists(), "missing diff fixture: {}", rb_abs.display());
+
+    let ours = Command::new(rubyrs_bin())
+        .current_dir(manifest_dir())
+        .arg(&rb_rel)
+        .output()
+        .expect("failed to spawn rubyrs");
+    // No `--disable=gems`: the real gem must load on the oracle side.
+    let theirs = Command::new("ruby")
+        .current_dir(manifest_dir())
+        .arg(&rb_rel)
+        .output()
+        .expect("failed to spawn ruby");
+
+    assert!(
+        theirs.status.success(),
+        "CRuby itself failed on {} (probably a fixture bug):\n{}",
+        name,
+        String::from_utf8_lossy(&theirs.stderr)
+    );
+    assert!(
+        ours.status.success(),
+        "rubyrs failed on {} but CRuby succeeded:\nstderr:\n{}",
+        name,
+        String::from_utf8_lossy(&ours.stderr)
+    );
+
+    let ours_stdout = String::from_utf8_lossy(&ours.stdout);
+    let theirs_stdout = String::from_utf8_lossy(&theirs.stdout);
+    assert_eq!(
+        ours_stdout, theirs_stdout,
+        "stdout mismatch for {}:\n--- rubyrs:\n{}\n--- CRuby:\n{}",
+        name, ours_stdout, theirs_stdout,
+    );
+}
+
 #[test] fn integer_basics() { run_diff("integer_basics"); }
 #[test] fn string_basics() { run_diff("string_basics"); }
 #[test] fn array_basics() { run_diff("array_basics"); }
@@ -397,6 +471,11 @@ fn run_diff(name: &str) {
 #[test] fn stdlib_strscan() { run_diff("stdlib_strscan"); }
 #[cfg(feature = "stdlib")]
 #[test] fn json_roundtrip() { run_diff("json_roundtrip"); }
+// ActiveSupport-lite core-ext (ADR 0026 menu item 3). Oracle is the
+// real `activesupport` gem (RubyGems enabled) — pinned + installed in
+// CI; skips locally when the gem isn't present.
+#[cfg(feature = "stdlib")]
+#[test] fn activesupport_core_ext() { run_diff_gem("activesupport_core_ext", "active_support/all"); }
 #[test] fn fixed_arity_fast_path() { run_diff("fixed_arity_fast_path"); }
 #[test] fn reopen_primitive_bare_call() { run_diff("reopen_primitive_bare_call"); }
 #[test] fn gsub_block_captures() { run_diff("gsub_block_captures"); }

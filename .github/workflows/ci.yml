@@ -912,7 +912,16 @@ jobs:
         # against `cannot load such file -- webrick (LoadError)`
         # from hello_smoke (which has no sinatra context).
         # Install both explicitly to cover both fixtures.
-        run: gem install webrick sinatra
+        #
+        # `activesupport` is the blessed-menu pin (ADR 0026 item 3)
+        # for the ActiveSupport-lite parity gates: the `as_lite_canon`
+        # diff_framework fixture AND the `activesupport_core_ext`
+        # diff_cruby gem-oracle below both diff the vendored canon
+        # against this exact gem version. Keep the pin in lock-step
+        # with the version stated in active_support_lite.rb's header.
+        run: |
+          gem install webrick sinatra
+          gem install activesupport -v 8.0.1
 
       - name: Cache cargo registry + build
         uses: actions/cache@v5
@@ -955,6 +964,21 @@ jobs:
           cargo test --release \
             --features default,stdlib,_http_server,_fiber,_json_native \
             --test diff_framework \
+            -- --nocapture
+
+      - name: Run stdlib-canon parity tests (diff_cruby, gem-oracle)
+        # The `stdlib`-gated `diff_cruby` fixtures (json_roundtrip,
+        # activesupport_core_ext) are compiled out of the default
+        # Test job (which builds without `--features stdlib`), so run
+        # them here where the canon AND the blessed gems are both
+        # present. `activesupport_core_ext` uses the gem-oracle
+        # `run_diff_gem` and diffs the vendored ActiveSupport-lite
+        # canon against the pinned `activesupport` installed above;
+        # `json_roundtrip` diffs the JSON canon against CRuby's stdlib.
+        run: |
+          cargo test --release \
+            --features default,stdlib,_http_server,_fiber,_json_native \
+            --test diff_cruby \
             -- --nocapture
 
   supply-chain:
