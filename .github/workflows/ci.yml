@@ -972,6 +972,13 @@ jobs:
     # data on every run, so a network hiccup at the registry
     # would otherwise cascade into the main Test job.
     runs-on: ubuntu-latest
+    # Single source of truth for the cargo-deny pin. Referenced by
+    # the cache key, the install step's version-check, and printed
+    # by `cargo deny --version` after install. Bump in ONE place;
+    # the deny.toml header comment and docs/DEVELOPMENT.md still
+    # need a manual sync (those are docs, not CI logic).
+    env:
+      CARGO_DENY_VERSION: 0.19.8
     steps:
       - uses: actions/checkout@v6
 
@@ -991,8 +998,8 @@ jobs:
           # `cargo install` resolves against the registry index, and a
           # stale registry can fail a from-scratch install on a cache
           # miss. Mirrors the `coverage` job's cache shape (PR #274).
-          key: ${{ runner.os }}-cargo-deny-0.19.8-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-deny-0.19.8-
+          key: ${{ runner.os }}-cargo-deny-${{ env.CARGO_DENY_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-deny-${{ env.CARGO_DENY_VERSION }}-
 
       - name: Install cargo-deny
         # Pin via `cargo install` rather than the upstream
@@ -1003,12 +1010,12 @@ jobs:
         # commit that re-runs `cargo deny check` locally to
         # confirm the new ruleset still passes.
         run: |
-          WANTED=0.19.8
+          WANTED="${CARGO_DENY_VERSION}"
           # Version-check before skipping the install. A bare
           # `command -v cargo-deny` would let a runner-cached
           # different version silently take over and the
-          # workflow comment's "pinned at 0.19.8" claim would be
-          # false. Reinstall if the installed version doesn't
+          # workflow comment's "pinned at $CARGO_DENY_VERSION" claim
+          # would be false. Reinstall if the installed version doesn't
           # match the pin. `--force` only overwrites the binary
           # in `~/.cargo/bin`; there is NO cached `target/` for
           # cargo-deny, so the install path is a from-scratch
