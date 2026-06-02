@@ -1,0 +1,125 @@
+name: cargo-deny
+
+# Supply-chain gate — sister to panic-budget / perf-budget /
+# coverage ratchets in ci.yml: catches a dep introducing a CVE,
+# license-policy violation, or banned-crate at PR time rather
+# than at audit time. Config lives at the workspace-root
+# `deny.toml`; see that file's header for the bump-a-rule
+# etiquette.
+#
+# Standalone workflow (extracted from ci.yml in this PR, follow-up
+# to PR #334) for two reasons:
+#   1. paths: filter. cargo-deny only needs to run when the dep
+#      tree, the policy file, or this workflow itself changes.
+#      Docs-only and Ruby-source-only PRs skip the ~1-2 min
+#      advisory-DB fetch + check pass. Mirrors the convention
+#      established by gapscan-pr.yml.
+#   2. Isolation. A transient RustSec advisory-DB flake or an
+#      upstream-license clarification shouldn't block core
+#      regressions — keeping cargo-deny in its own workflow file
+#      makes that boundary explicit (matches the rationale that
+#      framework-parity / supply-chain were already standalone
+#      jobs in ci.yml).
+#
+# Weekly cron catches advisory-DB updates that land against a
+# frozen Cargo.lock — without it, a CVE published today against
+# a dep we already ship would only surface on the NEXT PR that
+# happens to bump deps. Sunday 12:00 UTC matches the
+# wasm-breakdown.yml convention (off Monday-morning CI peak).
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'Cargo.lock'
+      - '**/Cargo.toml'
+      - 'deny.toml'
+      - '.github/workflows/cargo-deny.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'Cargo.lock'
+      - '**/Cargo.toml'
+      - 'deny.toml'
+      - '.github/workflows/cargo-deny.yml'
+  schedule:
+    - cron: '0 12 * * 0'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-deny:
+    name: Supply-chain (cargo-deny)
+    runs-on: ubuntu-latest
+    # Single source of truth for the cargo-deny pin. Referenced by
+    # the cache key, the install step's version-check, and printed
+    # by `cargo deny --version` after install. Bump in ONE place;
+    # the deny.toml header comment and docs/DEVELOPMENT.md still
+    # need a manual sync (those are docs, not CI logic).
+    env:
+      CARGO_DENY_VERSION: 0.19.8
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + cargo-deny
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-deny
+          # The pinned cargo-deny version is embedded in the key so a
+          # version bump (below) bust-invalidates the cache and forces a
+          # fresh install on the next run. Cargo.lock is hashed because
+          # `cargo install` resolves against the registry index, and a
+          # stale registry can fail a from-scratch install on a cache
+          # miss. Mirrors the `coverage` job's cache shape (PR #274).
+          key: ${{ runner.os }}-cargo-deny-${{ env.CARGO_DENY_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-deny-${{ env.CARGO_DENY_VERSION }}-
+
+      - name: Install cargo-deny
+        # Pin via `cargo install` rather than the upstream
+        # `EmbarkStudios/cargo-deny-action` so the workflow stays
+        # self-contained and version-explicit. The pin is also
+        # explicit so a future cargo-deny rule-set change can't
+        # silently flip CI red. Bumping the pin is a deliberate
+        # commit that re-runs `cargo deny check` locally to
+        # confirm the new ruleset still passes.
+        run: |
+          WANTED="${CARGO_DENY_VERSION}"
+          # Version-check before skipping the install. A bare
+          # `command -v cargo-deny` would let a runner-cached
+          # different version silently take over and the
+          # workflow comment's "pinned at $CARGO_DENY_VERSION" claim
+          # would be false. Reinstall if the installed version doesn't
+          # match the pin. `--force` only overwrites the binary
+          # in `~/.cargo/bin`; there is NO cached `target/` for
+          # cargo-deny, so the install path is a from-scratch
+          # compile (~3-5 min). The cache step above stores the
+          # installed binary itself, which is what makes the
+          # steady-state cache-hit path zero-cost.
+          # Parse via semver-anchored grep rather than positional awk
+          # so a future cargo-deny `--version` format change (extra
+          # tokens, leading `v`, multi-line output) doesn't silently
+          # break the cache short-circuit. `grep -oE` returns the
+          # first semver match, `head -1` defends against multi-match
+          # output. Missing binary → `2>/dev/null` swallows the error
+          # and the pipe yields empty, so INSTALLED='' triggers install.
+          INSTALLED=$(cargo deny --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+          if [ "$INSTALLED" != "$WANTED" ]; then
+            cargo install cargo-deny --locked --version "$WANTED" --force
+          fi
+          cargo deny --version
+
+      - name: Run cargo-deny checks
+        # `cargo deny check` runs all four categories
+        # (advisories, licenses, bans, sources) per the
+        # workspace-root deny.toml. Exits non-zero on any rule
+        # violation; the message names the offending crate +
+        # version + which rule fired.
+        run: cargo deny check
