@@ -20,7 +20,10 @@ anywhere from `77.0%` upward.
 
 ```sh
 # One-shot install — pin matches the CI version so local + CI
-# measurements use the same tool.
+# measurements use the same tool. When bumping, also update
+# `CARGO_LLVM_COV_VERSION` in `.github/workflows/ci.yml` (the
+# coverage job's source of truth); this line below is a
+# manual-sync copy for copy-pasteability.
 cargo install cargo-llvm-cov --locked --version 0.8.7
 
 # Measure
@@ -32,11 +35,15 @@ python3 scripts/coverage_ratchet.py \
     --baseline crates/rubyrs/coverage_baseline.json
 ```
 
-The pinned version lives in `.github/workflows/ci.yml` and is
-embedded in the coverage job's cache key. Bumping it should be a
-deliberate PR: install the new version locally, regenerate
-baselines via `--update`, and commit the JSON diff so reviewers
-can see whether the version change shifted any per-file numbers.
+The pinned version is declared once in the coverage job's
+`env: CARGO_LLVM_COV_VERSION` block in
+`.github/workflows/ci.yml`, then referenced by both the
+`install-pinned-cargo-tool` composite invocation and the
+instrumented-target/ cache key — so a bump can't drift between
+install and cache. Bumping it should be a deliberate PR: install
+the new version locally, regenerate baselines via `--update`, and
+commit the JSON diff so reviewers can see whether the version
+change shifted any per-file numbers.
 
 The HTML report (handy for finding uncovered lines) is one extra flag:
 

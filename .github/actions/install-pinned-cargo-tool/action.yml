@@ -1,0 +1,92 @@
+name: 'Install pinned cargo tool'
+description: >-
+  Installs a cargo subcommand pinned to a specific version, with
+  a registry+binary cache and a strict version-equality check so a
+  runner-cached different version can't silently take over.
+
+# Used by cargo-deny.yml and ci.yml's coverage job. Pin source-of-
+# truth is the caller's `with: version:` input.
+#
+# Alternative considered: taiki-e/install-action — fuzz.yml uses it
+# for cargo-fuzz. It fetches prebuilt binaries (faster cache miss
+# than this composite's from-scratch `cargo install`) but is an
+# external dependency. This composite is preferred when the
+# workspace wants self-contained install logic + strict version
+# equality; taiki-e is preferred when prebuilt binaries exist and
+# install speed matters. Either is fine for new gates; both
+# patterns are accepted convention.
+
+inputs:
+  tool:
+    description: >-
+      Name used as BOTH the crates.io package name (passed to
+      `cargo install <tool>`) AND the installed binary name (used
+      to invoke `<tool> --version` for the equality check, and to
+      key the cache at `~/.cargo/bin/<tool>`). This assumes a 1:1
+      mapping between crate name and binary name — true for
+      `cargo-deny`, `cargo-llvm-cov`, `cargo-audit`, `cargo-vet`,
+      and most cargo subcommands. NOT suitable for crates that
+      install multiple differently-named binaries (e.g. `cargo-edit`
+      ships `cargo-add` / `cargo-rm` / `cargo-upgrade`); if such a
+      tool needs pinning later, generalize this action with a
+      separate `binary:` input.
+    required: true
+  version:
+    description: 'Pinned version (semver, e.g. `0.19.8`).'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Cache registry + ${{ inputs.tool }}
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/bin/${{ inputs.tool }}
+        key: ${{ runner.os }}-cargo-tool-${{ inputs.tool }}-${{ inputs.version }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-tool-${{ inputs.tool }}-${{ inputs.version }}-
+
+    - name: Install ${{ inputs.tool }} (pinned ${{ inputs.version }})
+      shell: bash
+      env:
+        TOOL: ${{ inputs.tool }}
+        WANTED: ${{ inputs.version }}
+      run: |
+        # Explicit-binary invocation (not PATH lookup) so a runner
+        # image preinstalling a different version can't silently
+        # take over the version check. `cargo install --force`
+        # writes to `$CARGO_HOME/bin/$TOOL` (default `$HOME/.cargo`),
+        # so we check exactly that path. `${CARGO_HOME:-$HOME/.cargo}`
+        # respects the cargo convention even on runners that
+        # override it (self-hosted, container jobs).
+        BIN="${CARGO_HOME:-$HOME/.cargo}/bin/$TOOL"
+        # Subcommand derivation: cargo-llvm-cov (and other cargo
+        # subcommand wrappers — cargo-fuzz, cargo-audit, cargo-vet,
+        # cargo-semver-checks) require argv[1]=='<subcommand>'
+        # before any other args. Invoking the binary directly as
+        # `cargo-llvm-cov --version` exits 1 with "expected
+        # subcommand 'llvm-cov'". Mimic cargo's dispatch by passing
+        # the subcommand (TOOL minus the `cargo-` prefix) as argv[1].
+        # cargo-deny tolerates either form (`cargo-deny --version`
+        # OR `cargo-deny deny --version`), so this form works
+        # uniformly for both today's callers and future
+        # subcommand-wrapper tools.
+        SUBCOMMAND="${TOOL#cargo-}"
+        INSTALLED=$("$BIN" "$SUBCOMMAND" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        if [ "$INSTALLED" != "$WANTED" ]; then
+          cargo install "$TOOL" --locked --version "$WANTED" --force
+          # Post-install re-verify: confirm the just-installed
+          # binary actually reports the pinned version. Catches a
+          # corrupted install (network blip → partial binary), a
+          # CARGO_HOME drift between the install step and our BIN
+          # path, or `cargo install` resolving an unexpected
+          # version against a stale registry. Cheap defense-in-
+          # depth — keeps the version contract tight end-to-end.
+          POST=$("$BIN" "$SUBCOMMAND" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+          if [ "$POST" != "$WANTED" ]; then
+            echo "::error::install-pinned-cargo-tool: after install, $BIN reports '$POST', expected '$WANTED'" >&2
+            exit 1
+          fi
+        fi
+        "$BIN" "$SUBCOMMAND" --version

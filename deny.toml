@@ -6,8 +6,9 @@
 # (bans). Same philosophy: catch supply-chain drift at PR time,
 # not at audit time.
 #
-# Run locally (keep the version in lockstep with `CARGO_DENY_VERSION`
-# in `.github/workflows/cargo-deny.yml`):
+# Run locally (keep the version in lockstep with the `version:`
+# input on the `install-pinned-cargo-tool` step in
+# `.github/workflows/cargo-deny.yml`):
 #   cargo install cargo-deny --locked --version 0.19.8
 #   cargo deny check
 #
