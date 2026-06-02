@@ -121,7 +121,7 @@ fn alias_method_raises_name_error_when_source_missing() {
     // ("undefined method ...") when alias_method's source name
     // doesn't resolve. Previously we raised NoMethodError with a
     // misleading `recv_type: "Class"`.
-    let mut rt = Runtime::new();
+    let (mut rt, buf) = rt_with_buf();
     let err = rt.eval(r#"
         class Foo
           alias_method :a, :nonexistent
@@ -218,7 +218,7 @@ fn method_missing_inherited_through_superclass() {
 
 #[test]
 fn missing_without_method_missing_still_raises() {
-    let mut rt = Runtime::new();
+    let (mut rt, buf) = rt_with_buf();
     let err = rt.eval(r#"
         class Empty; end
         Empty.new.missing_method
@@ -294,7 +294,7 @@ fn respond_to_agrees_with_defined_for_host_fns() {
 
 #[test]
 fn define_method_validates_arity() {
-    let mut rt = Runtime::new();
+    let (mut rt, buf) = rt_with_buf();
     let err = rt.eval(r#"
         class Foo
           define_method(:two) { |a, b| a + b }
@@ -304,3 +304,38 @@ fn define_method_validates_arity() {
     assert!(err.err.is("ArgumentError"), "expected ArgumentError, got {:?}", err.err);
 }
 
+
+#[test]
+fn const_path_chained_lookup_from_nested_module() {
+    // Regression for the const-resolution gap that blocked `require
+    // 'rack/utils'` (rack 3.1.10). `QueryParser::Inner` inside
+    // `module Rack::Utils` should cref-walk the head `QueryParser`
+    // → `Rack::QueryParser`, then look up `Inner` inside it.
+    // Pre-fix `build_const_chain` returned None whenever `bare`
+    // contained `::`, so the compiler emitted a flat `LoadConst`
+    // that ignored cref-walking and missed the registered joined
+    // name. Fix: split at the first `::`, cref-walk the head, then
+    // append the tail to every chain entry.
+    let (mut rt, buf) = rt_with_buf();
+    rt.eval(r#"
+        module Foo
+          class QueryParser
+            class Inner < TypeError
+            end
+          end
+          module Utils
+            InnerAlias = QueryParser::Inner
+          end
+        end
+        puts Foo::Utils::InnerAlias
+        puts Foo::Utils::InnerAlias.ancestors.first(2).inspect
+    "#, "const_chain.rb").expect("eval");
+    let out = buf.snapshot();
+    let trimmed = out.trim();
+    assert_eq!(
+        trimmed,
+        "Foo::QueryParser::Inner\n[Foo::QueryParser::Inner, TypeError]",
+        "got: {:?}",
+        trimmed,
+    );
+}

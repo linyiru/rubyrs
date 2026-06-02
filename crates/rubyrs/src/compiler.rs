@@ -969,16 +969,43 @@ fn build_const_chain(
     bare: &str,
     interner: &mut crate::intern::Interner,
 ) -> Option<Vec<crate::intern::SymId>> {
-    if class_path.is_empty() || bare.contains("::") {
+    if class_path.is_empty() {
         return None;
     }
+    // Multi-segment `bare` (e.g. `QueryParser::Inner` from inside
+    // `Foo::Utils`): cref-walk only the FIRST segment, then append
+    // the rest verbatim to every chain entry. CRuby semantics:
+    //   `QueryParser::Inner` inside `Foo::Utils` resolves
+    //   `QueryParser` via cref (finds `Foo::QueryParser`), then
+    //   looks up `Inner` inside it. Since `vm.classes` is keyed by
+    //   joined-name, we approximate by trying each cref-prefixed
+    //   joined name (`Foo::Utils::QueryParser::Inner`,
+    //   `Foo::QueryParser::Inner`, `QueryParser::Inner`) in order.
+    // Pre-fix the `bare.contains("::")` guard returned None and the
+    // caller emitted a flat LoadConst that never matched the
+    // registered joined name — `Foo::QueryParser::Inner` was missed.
+    let (head, tail) = match bare.split_once("::") {
+        Some((h, t)) => (h, Some(t)),
+        None => (bare, None),
+    };
+    let join = |prefix: &str| -> String {
+        let head_qualified = if prefix.is_empty() {
+            head.to_string()
+        } else {
+            format!("{}::{}", prefix, head)
+        };
+        match tail {
+            Some(t) => format!("{}::{}", head_qualified, t),
+            None => head_qualified,
+        }
+    };
     let mut chain: Vec<crate::intern::SymId> =
         Vec::with_capacity(class_path.len() + 1);
     for i in (0..class_path.len()).rev() {
         let prefix = class_path[..=i].join("::");
-        chain.push(interner.intern(&format!("{}::{}", prefix, bare)));
+        chain.push(interner.intern(&join(&prefix)));
     }
-    chain.push(interner.intern(bare));
+    chain.push(interner.intern(&join("")));
     Some(chain)
 }
 
