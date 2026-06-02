@@ -221,7 +221,18 @@ pub(crate) fn string_call(
     };
     Ok(match (recv, name, args) {
         (Value::Str(a), "+", [Value::Str(b)]) => {
-            check(a.borrow().len().saturating_add(b.borrow().len()))?;
+            // Two guards before `extend_from_slice` (same shape
+            // as String#* below): (1) `checked_add` for usize
+            // overflow, (2) `> isize::MAX` for the Vec capacity
+            // ceiling. Both raise CRuby-byte-identical
+            // `ArgumentError "argument too big"`. Without these,
+            // when `max_value_bytes` is None (no cap) two
+            // near-isize::MAX strings panic the host VM at
+            // `extend_from_slice`'s capacity-overflow assert.
+            let new_len = a.borrow().len().checked_add(b.borrow().len()).filter(|&n| n <= isize::MAX as usize).ok_or_else(|| {
+                RubyError::ArgumentError { msg: "argument too big".to_string() }
+            })?;
+            check(new_len)?;
             let mut s = a.borrow().clone();
             s.extend_from_slice(&b.borrow());
             Some(Value::new_str_bytes(s))
