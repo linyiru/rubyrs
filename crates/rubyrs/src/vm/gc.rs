@@ -262,11 +262,20 @@ impl Vm {
             });
         }
         match &args[0] {
+            // Nil uses CRuby's distinct "from nil to integer"
+            // wording rather than "of nil into Integer".
             Value::Nil => self.trap(RubyError::TypeError {
                 msg: "no implicit conversion from nil to integer".to_string(),
             }),
             other => self.trap(RubyError::TypeError {
-                msg: format!("no implicit conversion of {} into Integer", other.type_name()),
+                // Use the coercion-aware name so true/false
+                // render as "true"/"false" (not "Boolean"),
+                // matching CRuby and the rest of the VM's
+                // coercion error sites.
+                msg: format!(
+                    "no implicit conversion of {} into Integer",
+                    super::numeric::type_name_for_coerce(other)
+                ),
             }),
         }
     }

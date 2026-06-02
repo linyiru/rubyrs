@@ -79,19 +79,19 @@ end
 
 describe "chunk_while arity guards (0-arg method)" do
   it "raises ArgumentError on Array#chunk_while(1)" do
-    klass, msg = caught_pair { [1].chunk_while(2) { |_a, _b| true } }
+    klass, msg = caught_pair { [1].chunk_while(1) { |_a, _b| true } }
     assert_eq(klass, "ArgumentError")
     assert_eq(msg, "wrong number of arguments (given 1, expected 0)")
   end
 
   it "raises ArgumentError on Hash#chunk_while(1)" do
-    klass, msg = caught_pair { {a: 1}.chunk_while(2) { |_a, _b| true } }
+    klass, msg = caught_pair { {a: 1}.chunk_while(1) { |_a, _b| true } }
     assert_eq(klass, "ArgumentError")
     assert_eq(msg, "wrong number of arguments (given 1, expected 0)")
   end
 
   it "raises ArgumentError on Range#chunk_while(1)" do
-    klass, msg = caught_pair { (1..3).chunk_while(2) { |_a, _b| true } }
+    klass, msg = caught_pair { (1..3).chunk_while(1) { |_a, _b| true } }
     assert_eq(klass, "ArgumentError")
     assert_eq(msg, "wrong number of arguments (given 1, expected 0)")
   end
