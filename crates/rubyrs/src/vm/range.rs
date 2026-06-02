@@ -303,6 +303,21 @@ impl Vm {
                         let nid = self.heap.alloc(HeapObj::Array(elems));
                         Some(Value::Array(nid))
                     }
+                    // BigInt arg — CRuby raises RangeError (the
+                    // value is too large to fit in a C long).
+                    // Mirrors Array#first/#last's BigInt arms and
+                    // Hash#first BigInt arm. Without this arm,
+                    // BigInt falls into the catch-all and routes
+                    // through `arity_error_arg0_or_1_int`, which
+                    // renders BigInt's `type_name_for_coerce`
+                    // ("Integer") as the nonsensical
+                    // "Integer into Integer" TypeError.
+                    #[cfg(feature = "bignum")]
+                    ("first", [Value::BigInt(_)]) | ("last", [Value::BigInt(_)]) => {
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "bignum too big to convert into `long'".to_string(),
+                        }));
+                    }
                     // Float coerce + catch-all for Range#first /
                     // Range#last (Int+Int branch). Same pattern as
                     // Array#first/#last (PR #349) and Hash#first

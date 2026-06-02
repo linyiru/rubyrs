@@ -64,6 +64,19 @@ describe "Range#first / #last arity & type guards" do
     assert_eq(msg, "float Inf out of range of integer")
   end
 
+  it "raises RangeError on BigInt arg (parity with Array/Hash first/last)" do
+    # Without the cfg-gated BigInt arm, BigInt falls into
+    # arity_error_arg0_or_1_int and renders as the
+    # nonsensical "no implicit conversion of Integer into
+    # Integer" TypeError because type_name_for_coerce(BigInt)
+    # returns "Integer". Matches the BigInt arms already in
+    # Array#first/#last (array.rs:581/647) and Hash#first
+    # (hash.rs:338).
+    klass, msg = caught_pair { (1..5).first(2**70) }
+    assert_eq(klass, "RangeError")
+    assert_eq(msg, "bignum too big to convert into `long'")
+  end
+
   it "raises ArgumentError on multi-arg (Range uses 'expected 1', not '0..1' — CRuby quirk)" do
     # CRuby Range#first / #last use "expected 1" for multi-arg
     # while Array uses "expected 0..1". Match CRuby's exact
