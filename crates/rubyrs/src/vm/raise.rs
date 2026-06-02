@@ -239,6 +239,7 @@ impl Vm {
             if f.is_class_body {
                 self.class_stack.pop();
                 self.class_visibility_stack.pop();
+                self.module_function_active_stack.pop();
             }
             if self.frames.is_empty() {
                 // No rescue clause anywhere — surface the exception
@@ -461,6 +462,7 @@ impl Vm {
                     let cls = self.class_stack.pop()
                         .expect("ICE: class_stack empty unwinding class-body target");
                     self.class_visibility_stack.pop();
+                    self.module_function_active_stack.pop();
                     self.stack.push(crate::value::Value::Class(cls));
                     let _ = mb; // unwind value dropped; class body returns the class
                 } else if let Some(replacement) = popped.swap_return {
@@ -485,6 +487,7 @@ impl Vm {
                 // class-eval-inside-block pop.
                 self.class_stack.pop();
                 self.class_visibility_stack.pop();
+                self.module_function_active_stack.pop();
             }
         }
     }

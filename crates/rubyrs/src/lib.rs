@@ -1667,6 +1667,7 @@ impl Runtime {
         self.vm.toplevel_cvars.clear();
         self.vm.class_stack.clear();
         self.vm.class_visibility_stack.clear();
+        self.vm.module_function_active_stack.clear();
         #[cfg(feature = "regex")]
         {
             self.vm.last_match = None;
@@ -1937,6 +1938,7 @@ impl Runtime {
         self.vm.pinned.clear();
         self.vm.class_stack.clear();
         self.vm.class_visibility_stack.clear();
+        self.vm.module_function_active_stack.clear();
         self.vm.globals.clear();
         // The existing helper already covers 5 control-flow
         // fields — reuse it so this method doesn't drift if

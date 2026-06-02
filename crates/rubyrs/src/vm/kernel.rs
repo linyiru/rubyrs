@@ -2386,6 +2386,7 @@ impl Vm {
                     let cls = self.class_stack.pop()
                         .expect("ICE: class_stack empty unwinding through class_eval (require/_relative)");
                     self.class_visibility_stack.pop();
+                    self.module_function_active_stack.pop();
                     if is_owner {
                         self.stack.push(Value::Class(cls));
                     }
@@ -2653,6 +2654,7 @@ impl Vm {
                     let _cls = self.class_stack.pop()
                         .expect("ICE: class_stack empty unwinding through class_eval (eval_string)");
                     self.class_visibility_stack.pop();
+                    self.module_function_active_stack.pop();
                 }
             }
             if self.frames.len() <= depth_before + 1 {
@@ -2665,6 +2667,7 @@ impl Vm {
                 let cls = self.class_stack.pop()
                     .expect("ICE: class_stack empty on method-return (eval_string)");
                 self.class_visibility_stack.pop();
+                self.module_function_active_stack.pop();
                 self.stack.push(Value::Class(cls));
             } else if let Some(r) = f.swap_return {
                 self.stack.push(r);

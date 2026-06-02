@@ -1931,7 +1931,39 @@ impl Vm {
                     closure: None,
                 builtin: None,
                 });
-                if let Some(cls) = self.class_stack.last() { cls.install_method(name_id, m); }
+                if let Some(cls) = self.class_stack.last() {
+                    cls.install_method(name_id, m.clone());
+                    // `module_function` (bare-form) dual-install:
+                    // after `M.module_function` in a body, every
+                    // subsequent `def name` ALSO installs a public
+                    // clone on `cls.singleton_methods` so
+                    // `M.name(...)` resolves at call time. The
+                    // instance entry above is already stamped
+                    // Private by the visibility-stack flip the
+                    // module_function arm performs; the singleton
+                    // copy carries Public + a fresh
+                    // `visibility: Cell` so flipping one doesn't
+                    // alias to the other (matches the symbol-arg
+                    // arm's per-Method clone in vm/dispatch.rs).
+                    // Anchored at the class itself for `super` /
+                    // `Method#owner` consistency.
+                    let mf_active = self.module_function_active_stack
+                        .last()
+                        .copied()
+                        .unwrap_or(false);
+                    if mf_active {
+                        let singleton_copy = Rc::new(Method {
+                            params: m.params.clone(),
+                            proto_idx: m.proto_idx,
+                            fixed_arity: m.fixed_arity,
+                            defining_class: Some(Rc::downgrade(cls)),
+                            visibility: std::cell::Cell::new(Visibility::Public),
+                            closure: m.closure.clone(),
+                            builtin: m.builtin.clone(),
+                        });
+                        cls.singleton_methods.borrow_mut().insert(name_id, singleton_copy);
+                    }
+                }
                 else { self.toplevel_methods.insert(name_id, m); }
                 // Conservatively invalidate the inline cache — any previous
                 // cache entry could in theory be made stale by this definition.
@@ -2392,6 +2424,7 @@ impl Vm {
                 // `Begin { ensure: [...] }`.
                 // PR #233 code-review #1 / round 3 #1.
                 self.class_visibility_stack.push(Visibility::Public);
+                self.module_function_active_stack.push(false);
                 self.stack.push(Value::Nil);
             }
             Op::PopClassVisibility => {
@@ -2421,6 +2454,7 @@ impl Vm {
                      translator emitted an unbalanced Pop without a matching Push"
                 );
                 self.class_visibility_stack.pop();
+                self.module_function_active_stack.pop();
                 self.stack.push(Value::Nil);
             }
             Op::DefMethodBlock(name_id) => {
@@ -2732,6 +2766,7 @@ impl Vm {
                 }
                 self.class_stack.push(cls.clone());
                 self.class_visibility_stack.push(Visibility::Public);
+                self.module_function_active_stack.push(false);
                 let proto = &self.protos[p_idx as usize];
                 let n_locals = proto.n_locals as usize;
                 self.frames.push(Frame {
@@ -3133,6 +3168,7 @@ impl Vm {
                 if f.is_class_body {
                     let cls = self.class_stack.pop().expect("ICE: class_stack empty on class-body return");
                     self.class_visibility_stack.pop();
+                    self.module_function_active_stack.pop();
                     self.stack.push(Value::Class(cls));
                 } else if let Some(replacement) = f.swap_return {
                     self.stack.push(replacement);

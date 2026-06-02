@@ -5044,22 +5044,37 @@ impl Vm {
             // forms during sinatra-4's load chain.)
             //
             // Tier-1 divergences (documented):
-            //   - Bare form switches visibility to Private but does
-            //     NOT auto-mirror subsequent defs to the singleton
-            //     class — `M.bare_def_method(...)` calls fail at
-            //     request time. Full fix needs a Visibility::
-            //     ModuleFunction variant and DefMethod dual-install
-            //     routing. Enough for LOAD probe; runtime calls
-            //     are the next layer.
             //   - Bare `module_function` from a non-Class receiver
             //     was previously a silent no-op; now falls through
             //     so the runtime can raise the right error.
+            //
+            // (The previously-documented "bare form doesn't auto-
+            // mirror subsequent defs to singleton class" gap is
+            // now closed — `module_function_active_stack` + the
+            // dual-install arm in `Op::DefMethod` mirror new defs
+            // onto `cls.singleton_methods` so `M.bare_def_method
+            // (...)` resolves at runtime. `tests/diff/
+            // module_function_bare.rb` pins the contract.)
             if &*name == "module_function"
                 && let Value::Class(cls) = &self_val
             {
                 if args.is_empty() {
                     if let Some(top) = self.class_visibility_stack.last_mut() {
                         *top = crate::value::Visibility::Private;
+                    }
+                    // Flip the parallel "auto-mirror to singleton"
+                    // flag so subsequent `Op::DefMethod` inside
+                    // this body installs a public clone on
+                    // `cls.singleton_methods` alongside the
+                    // private instance entry. Without this, bare
+                    // `module_function` only flipped the visibility
+                    // and `M.foo` (after a subsequent `def foo`)
+                    // still raised NoMethodError — the documented
+                    // Tier-1 gap that sinatra_jsonp_smoke's
+                    // vendored multi_json shim and modular Sinatra
+                    // plugins both stumbled into.
+                    if let Some(active) = self.module_function_active_stack.last_mut() {
+                        *active = true;
                     }
                 } else {
                     // Symbol/String args: install a FRESH Method

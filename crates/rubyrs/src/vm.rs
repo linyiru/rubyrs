@@ -631,6 +631,20 @@ pub(crate) struct Vm {
     /// with the current visibility, and mutated by the no-arg
     /// `private` / `protected` / `public` calls.
     pub(crate) class_visibility_stack: Vec<Visibility>,
+    /// Parallel to `class_stack` / `class_visibility_stack` —
+    /// `true` once a class body has invoked the bare-form
+    /// `module_function` (no args). Subsequent `Op::DefMethod`
+    /// inside the same body then dual-installs: the instance
+    /// method gets stamped Private (via the visibility stack
+    /// flip module_function already performs), AND a public
+    /// clone goes to the class's `singleton_methods` so
+    /// `Module.method_name(...)` resolves at call time. Cleared
+    /// (popped) when the class body returns. Symbol/string-arg
+    /// `module_function(:foo, :bar)` is unaffected — it
+    /// retroactively installs already-defined methods on the
+    /// singleton (see the dedicated arm in vm/dispatch.rs); the
+    /// flag here governs the FORWARD-LOOKING bare-form contract.
+    pub(crate) module_function_active_stack: Vec<bool>,
     /// Compiled-regex cache. Keyed by the interned source-string
     /// SymId; first `LoadRegex` for a given pattern compiles and
     /// caches, subsequent loads return the same Rc. Cfg-gated on
@@ -1127,6 +1141,7 @@ impl Vm {
             cext_instance_methods: HashMap::new(),
             class_stack: vec![],
             class_visibility_stack: vec![],
+            module_function_active_stack: vec![],
             #[cfg(feature = "regex")]
             regex_cache: HashMap::new(),
             #[cfg(feature = "regex")]
@@ -1397,6 +1412,7 @@ impl Vm {
         self.pinned.clear();
         self.class_stack.clear();
         self.class_visibility_stack.clear();
+        self.module_function_active_stack.clear();
         self.globals.clear();
         self.clear_control_flow_signals();
         #[cfg(feature = "regex")]

@@ -11,14 +11,13 @@
 require "json"
 
 module MultiJson
-  # `def self.foo` rather than `module_function` — rubyrs's
-  # Tier-1 module-visibility model doesn't generate the
-  # singleton-class fallback `module_function` installs (the
-  # call-site `MultiJson.dump(...)` would resolve to "undefined
-  # method `dump' for Class"). `def self.X` produces a method
-  # callable via `MultiJson.X(...)` on both runtimes — same
-  # external contract as `module_function`'d code.
-  def self.dump(obj, opts = {})
+  # Canonical Ruby module-function shape now that rubyrs's
+  # bare `module_function` auto-mirrors subsequent defs onto
+  # the module's singleton class. Matches what most real Ruby
+  # libraries (multi_json gem itself included) write.
+  module_function
+
+  def dump(obj, opts = {})
     if opts && opts[:pretty]
       JSON.pretty_generate(obj)
     else
