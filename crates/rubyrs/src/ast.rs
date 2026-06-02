@@ -2110,7 +2110,21 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             }
             if let Some(r) = p.rest()
                 && let Some(rp) = r.as_rest_parameter_node() {
-                    rest = rp.name().map(|n| cid_to_string(n));
+                    // Anonymous form `def foo(*)` (Ruby 2.0+
+                    // anonymous rest forwarding) has
+                    // `rp.name() == None`. Without a fallback the
+                    // rest slot would be silently dropped — the
+                    // method would compile with arity 0 and reject
+                    // any positional args. Bind to the reserved
+                    // sentinel `*` (invalid as a user identifier)
+                    // so the binder still allocates a sink slot.
+                    // CRuby surfaces the same anonymous rest as
+                    // the Symbol `:*` in Method#parameters
+                    // (`[[:rest, :*]]`), so the sentinel passes
+                    // through introspection unchanged — mirroring
+                    // the existing block-param `&` pattern at
+                    // ~line 2109.
+                    rest = Some(rp.name().map(cid_to_string).unwrap_or_else(|| "*".to_string()));
                 }
             if let Some(r) = p.keyword_rest()
                 && let Some(kr) = r.as_keyword_rest_parameter_node() {
