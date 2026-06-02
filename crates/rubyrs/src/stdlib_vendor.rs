@@ -24,6 +24,14 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         "stringio" => Some(include_str!("stdlib_vendor/stringio.rb")),
         "strscan" => Some(include_str!("stdlib_vendor/strscan.rb")),
         "json" => Some(include_str!("stdlib_vendor/json.rb")),
+        // ActiveSupport-lite menu item 3 (ADR 0026 v2). All three
+        // common require-paths users reach for (`active_support`,
+        // `active_support/all`, `active_support/core_ext`) route
+        // to the same canon — the real gem also funnels into one
+        // load tree, so users don't observe a difference.
+        "active_support"
+        | "active_support/all"
+        | "active_support/core_ext" => Some(include_str!("stdlib_vendor/active_support_lite.rb")),
         _ => None,
     }
 }

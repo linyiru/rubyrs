@@ -2392,6 +2392,14 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util"
         | "rack"
+        // ActiveSupport-lite — menu item 3. Three common require
+        // shapes, all routed to the same canon under `stdlib`
+        // (see `stdlib_vendor::stdlib_vendor_source`). Default
+        // Tier-1 build keeps the lenient stub (constant exists,
+        // methods raise) per the existing whitelist's contract.
+        | "active_support"
+        | "active_support/all"
+        | "active_support/core_ext"
     )
 }
 

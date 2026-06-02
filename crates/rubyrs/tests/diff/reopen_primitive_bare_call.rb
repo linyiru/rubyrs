@@ -62,3 +62,27 @@ begin
 rescue ArgumentError
   puts "argerr"
 end
+
+# --- Block-form: bare-call-with-block inside reopened-primitive
+# method bodies. Parallel of the no-block fix above; covers the
+# `class Hash; def deep_x; each { |k,v| ... }; end; end` shape
+# the ActiveSupport-lite canon needs.
+class Hash
+  def my_each_count
+    n = 0
+    each { |_k, _v| n += 1 }
+    n
+  end
+  def my_inject_sum
+    inject(0) { |acc, (_k, v)| acc + v }
+  end
+end
+p({a: 1, b: 2, c: 3}.my_each_count)
+p({a: 1, b: 2, c: 3}.my_inject_sum)
+
+class Array
+  def my_map_sq
+    map { |x| x * x }
+  end
+end
+p [1, 2, 3].my_map_sq

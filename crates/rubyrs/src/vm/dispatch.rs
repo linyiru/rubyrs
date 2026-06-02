@@ -8928,6 +8928,39 @@ impl Vm {
             // block triggers `do_call_block` instead of `do_call`,
             // and the existing block-form Class bridge below only
             // covers hardcoded primitive names.
+            // Bare-call-with-block inside reopened-primitive method
+            // bodies — `class Hash; def deep_x; each { … }; end; end`
+            // shape. Parallel of the no-block fix in `do_call`
+            // (commit b8feb3ce). The Object arm above only fires for
+            // `Value::Object` self; primitive selves (Hash / Array /
+            // String / Int / Sym / …) previously fell through to
+            // method_missing / NoMethodError, even though
+            // `self.<name> { … }` works fine.
+            //
+            // Same two-tier resolution as do_call's version:
+            //   1. Try `lookup_method_uncached` on the primitive's
+            //      class — catches user-defined sibling methods.
+            //   2. Otherwise, bridge to the receiver-form
+            //      do_call_block by pushing self_val + block + args
+            //      and re-entering with no_recv=false. Receiver-form
+            //      primitive arms (Hash#each, Array#map, …) take
+            //      over.
+            //
+            // Nil exclusion stays load-bearing for the toplevel
+            // ArgumentError surface, same reasoning as do_call.
+            if !matches!(&self_val, Value::Object(_) | Value::Class(_) | Value::Nil) {
+                if let Value::Class(cls) = self.class_of(&self_val) {
+                    if let Some(m) = self.lookup_method_uncached(&cls, name_id) {
+                        self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
+                        return Ok(());
+                    }
+                }
+                let argc = args.len();
+                self.stack.push(self_val.clone());
+                self.stack.push(Value::Block(block));
+                for a in args { self.stack.push(a); }
+                return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
+            }
             if let Value::Class(c) = &self_val
                 && let Some(m) = self.lookup_class_singleton_method(c, name_id) {
                 self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
