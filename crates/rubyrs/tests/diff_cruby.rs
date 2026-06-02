@@ -260,6 +260,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn kernel_caller() { run_diff("kernel_caller"); }
 #[test] fn kernel_dir() { run_diff("kernel_dir"); }
 #[test] fn kernel_load() { run_diff("kernel_load"); }
+#[test] fn array_map_bang() { run_diff("array_map_bang"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
 #[test] fn user_sort() { run_diff("user_sort"); }
 #[test] fn hash_enumerable() { run_diff("hash_enumerable"); }
