@@ -221,7 +221,18 @@ pub(crate) fn string_call(
     };
     Ok(match (recv, name, args) {
         (Value::Str(a), "+", [Value::Str(b)]) => {
-            check(a.borrow().len().saturating_add(b.borrow().len()))?;
+            // Two guards before `extend_from_slice` (same shape
+            // as String#* below): (1) `checked_add` for usize
+            // overflow, (2) `> isize::MAX` for the Vec capacity
+            // ceiling. Both raise CRuby-byte-identical
+            // `ArgumentError "argument too big"`. Without these,
+            // when `max_value_bytes` is None (no cap) two
+            // near-isize::MAX strings panic the host VM at
+            // `extend_from_slice`'s capacity-overflow assert.
+            let new_len = a.borrow().len().checked_add(b.borrow().len()).filter(|&n| n <= isize::MAX as usize).ok_or_else(|| {
+                RubyError::ArgumentError { msg: "argument too big".to_string() }
+            })?;
+            check(new_len)?;
             let mut s = a.borrow().clone();
             s.extend_from_slice(&b.borrow());
             Some(Value::new_str_bytes(s))
@@ -1185,8 +1196,31 @@ pub(crate) fn string_call(
             Some(Value::Float(parsed))
         }
         (Value::Str(a), "*", [Value::Int(n)]) => {
-            let n = (*n).max(0) as usize;
-            check(a.borrow().len().saturating_mul(n))?;
+            // CRuby raises ArgumentError on negative repeat
+            // count; rubyrs previously used `(*n).max(0) as usize`
+            // and silently returned "". Same pattern fixed for
+            // Array#take/#drop in PR #340 / cycle 14.
+            if *n < 0 {
+                return Err(RubyError::ArgumentError {
+                    msg: "negative argument".to_string(),
+                });
+            }
+            // wasm32 saturation guard — sibling pattern from
+            // PR #316/#323/#330's each_slice/each_cons family.
+            // On 32-bit `usize`, `*n as usize` would truncate
+            // large positive i64s; `try_from` saturates instead.
+            let n = usize::try_from(*n).unwrap_or(usize::MAX);
+            // Two guards before `repeat`: (1) `checked_mul` for
+            // usize overflow, (2) `> isize::MAX` for the Vec
+            // capacity ceiling (`Vec::repeat` panics with
+            // "capacity overflow" beyond that). Both raise the
+            // same ArgumentError "argument too big" wording CRuby
+            // uses. Without this, `"abc" * (2**62)` panics the
+            // host VM when `max_value_bytes` is None (no cap).
+            let new_len = a.borrow().len().checked_mul(n).filter(|&n| n <= isize::MAX as usize).ok_or_else(|| {
+                RubyError::ArgumentError { msg: "argument too big".to_string() }
+            })?;
+            check(new_len)?;
             Some(Value::new_str_bytes(a.borrow().repeat(n)))
         }
         (Value::Str(a), "<", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() < *b.borrow())),
