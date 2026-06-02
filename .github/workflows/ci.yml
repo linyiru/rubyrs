@@ -767,6 +767,14 @@ jobs:
     # minor refactors; intentional drops are reviewed via the baseline-
     # JSON diff. See docs/COVERAGE.md.
     runs-on: ubuntu-latest
+    # Single source of truth for the cargo-llvm-cov pin INSIDE this
+    # job. Referenced by both the instrumented-target/ cache key and
+    # the install-pinned-cargo-tool composite invocation, so a bump
+    # in one place can't drift from the other. (docs/COVERAGE.md
+    # carries a literal install-command copy that still requires
+    # manual sync — that's docs, not CI logic.)
+    env:
+      CARGO_LLVM_COV_VERSION: 0.8.7
     steps:
       - uses: actions/checkout@v6
 
@@ -803,8 +811,8 @@ jobs:
           # Embeds the cargo-llvm-cov pin so a version bump
           # bust-invalidates the build artifacts too (instrumentation
           # may change between releases).
-          key: ${{ runner.os }}-coverage-target-llvm-cov-0.8.7-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-coverage-target-llvm-cov-0.8.7-
+          key: ${{ runner.os }}-coverage-target-llvm-cov-${{ env.CARGO_LLVM_COV_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-coverage-target-llvm-cov-${{ env.CARGO_LLVM_COV_VERSION }}-
 
       - name: Install cargo-llvm-cov (pinned)
         # Composite action: cache (registry + binary) + version-pin
@@ -812,13 +820,14 @@ jobs:
         # the prior bespoke `command -v` install which would let a
         # runner-cached different version silently take over.
         #
-        # The pinned 0.8.7 produced the seeded
-        # crates/rubyrs/coverage_baseline.json; keep them in lockstep
-        # when bumping (re-run `--update` against the new tool first).
+        # The pinned version (see CARGO_LLVM_COV_VERSION above) produced
+        # the seeded crates/rubyrs/coverage_baseline.json; keep them in
+        # lockstep when bumping (re-run `--update` against the new tool
+        # first).
         uses: ./.github/actions/install-pinned-cargo-tool
         with:
           tool: cargo-llvm-cov
-          version: 0.8.7
+          version: ${{ env.CARGO_LLVM_COV_VERSION }}
 
       - name: Generate LCOV report
         # `--workspace` covers every crate in the workspace; the ratchet

@@ -32,13 +32,15 @@ python3 scripts/coverage_ratchet.py \
     --baseline crates/rubyrs/coverage_baseline.json
 ```
 
-The pinned version lives as the `version:` input to the
-`install-pinned-cargo-tool` composite action's invocation inside
-the coverage job in `.github/workflows/ci.yml`; the same input is
-embedded in the target/ cache key. Bumping it should be a
-deliberate PR: install the new version locally, regenerate
-baselines via `--update`, and commit the JSON diff so reviewers
-can see whether the version change shifted any per-file numbers.
+The pinned version is declared once in the coverage job's
+`env: CARGO_LLVM_COV_VERSION` block in
+`.github/workflows/ci.yml`, then referenced by both the
+`install-pinned-cargo-tool` composite invocation and the
+instrumented-target/ cache key — so a bump can't drift between
+install and cache. Bumping it should be a deliberate PR: install
+the new version locally, regenerate baselines via `--update`, and
+commit the JSON diff so reviewers can see whether the version
+change shifted any per-file numbers.
 
 The HTML report (handy for finding uncovered lines) is one extra flag:
 
