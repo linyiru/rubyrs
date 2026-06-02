@@ -762,7 +762,7 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Array(*id)))
             }
-            (Value::Array(id), "map", []) => {
+            (Value::Array(id), "map", []) | (Value::Array(id), "collect", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));

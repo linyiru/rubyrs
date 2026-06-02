@@ -51,3 +51,10 @@ puts "shape7-map=#{a.respond_to?(:map)}"
 puts "shape7-collect=#{a.respond_to?(:collect)}"
 puts "shape7-map!=#{a.respond_to?(:map!)}"
 puts "shape7-collect!=#{a.respond_to?(:collect!)}"
+
+## Shape 8: `Array#collect { ... }` actually dispatches to the
+## same arm as `map`. The previous shape pinned `respond_to?`;
+## this one ensures dispatch matches the introspection so we
+## don't regress back to "advertised but raises NoMethodError".
+## Code-review #348 round 2.
+puts "shape8-collect=#{[1, 2, 3].collect { |x| x + 100 }.inspect}"
