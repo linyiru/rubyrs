@@ -935,17 +935,31 @@ pub(crate) fn class_reaches_via_chain(
     target: &Rc<Class>,
     walk_prepend: bool,
 ) -> bool {
+    // Inside `walks_through` we follow BOTH prepend AND include
+    // edges, mirroring `class_is_a` — a module's ancestor graph
+    // is the union of both chains. The outer loop's
+    // `walk_prepend` only selects which top-level chain of
+    // `current` we start scanning from; once we're inside a
+    // module's body we treat it as a full ancestor-graph node
+    // so transitive cross-chain reachability is honored.
+    //
+    // Without this, `prepend Outer` (where Outer includes Inner)
+    // followed by `prepend Inner` would mis-skip CRuby's
+    // idempotency rule and insert Inner again — CRuby treats
+    // Inner as already-reachable through Outer.includes and
+    // makes the second prepend a no-op.
     fn walks_through(
         node: &Rc<Class>,
         target: &Rc<Class>,
-        walk_prepend: bool,
         visited: &mut std::collections::HashSet<*const Class>,
     ) -> bool {
         if Rc::ptr_eq(node, target) { return true; }
         if !visited.insert(Rc::as_ptr(node)) { return false; }
-        let chain = if walk_prepend { node.prepends.borrow() } else { node.includes.borrow() };
-        for m in chain.iter() {
-            if walks_through(m, target, walk_prepend, visited) { return true; }
+        for pre in node.prepends.borrow().iter() {
+            if walks_through(pre, target, visited) { return true; }
+        }
+        for inc in node.includes.borrow().iter() {
+            if walks_through(inc, target, visited) { return true; }
         }
         false
     }
@@ -985,7 +999,7 @@ pub(crate) fn class_reaches_via_chain(
             current.includes.borrow().clone()
         };
         for m in chain_snapshot.iter() {
-            if walks_through(m, target, walk_prepend, &mut inc_visited) {
+            if walks_through(m, target, &mut inc_visited) {
                 return true;
             }
         }
