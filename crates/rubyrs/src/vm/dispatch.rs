@@ -1978,14 +1978,51 @@ impl Vm {
             && name == "hash" && args.is_empty() {
                 let h: i64 = match &recv {
                     Value::BoundMethod(bid) => {
-                        let (r, n) = self.heap.bound_method(*bid);
-                        let recv_h = method_recv_hash(r);
-                        recv_h.wrapping_mul(0x9E3779B1).wrapping_add(n.0 as i64)
+                        // Mirror the BoundMethod ==/eql? resolution
+                        // chain so hash agrees with equality:
+                        // recv_identity + (snapshot Rc-ptr, falling
+                        // back to live lookup, then to `name`).
+                        // Without this, post-redefine BoundMethods
+                        // that compare unequal under the new == arm
+                        // would still collide on hash — violating
+                        // `a.eql?(b) ⇒ a.hash == b.hash` in the
+                        // opposite direction.
+                        let (r, n, snap) = self.heap.bound_method_full(*bid);
+                        let r = r.clone();
+                        let recv_h = method_recv_hash(&r);
+                        let key = snap.clone().or_else(|| match self.class_of(&r) {
+                            Value::Class(c) => self.lookup_method_uncached(&c, n),
+                            _ => None,
+                        });
+                        let method_h = match key {
+                            Some(m) => std::rc::Rc::as_ptr(&m) as i64,
+                            None => n.0 as i64,
+                        };
+                        recv_h.wrapping_mul(0x9E3779B1).wrapping_add(method_h)
                     }
                     Value::UnboundMethod(uid) => {
-                        let (cls, n) = self.heap.unbound_method(*uid);
-                        let cls_h = std::rc::Rc::as_ptr(&cls) as i64;
-                        cls_h.wrapping_mul(0x9E3779B1).wrapping_add(n.0 as i64)
+                        // Mirror `eql?`'s identity: hash the
+                        // underlying Method's Rc pointer. Prefer
+                        // the capture-time snapshot so hash agrees
+                        // with the other capture-preserving arms
+                        // (bind_call, source_location) — UnboundMethod
+                        // semantics pin to the resolution at capture
+                        // time, not the live class table. Two
+                        // UnboundMethods sharing the same definition
+                        // (e.g. `C.instance_method(:foo)` and
+                        // `D.instance_method(:foo)` for `D < C`'s
+                        // inherited foo) satisfy
+                        // `a.eql?(b) ⇒ a.hash == b.hash`. Falls back
+                        // to a live `lookup_method_uncached`, then to
+                        // the captured-class pointer — eql? takes
+                        // the same fallback chain, so hash stays
+                        // consistent in every branch.
+                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                        let key = match snap.or_else(|| self.lookup_method_uncached(&cls, n)) {
+                            Some(m) => std::rc::Rc::as_ptr(&m) as i64,
+                            None => std::rc::Rc::as_ptr(&cls) as i64,
+                        };
+                        key.wrapping_mul(0x9E3779B1).wrapping_add(n.0 as i64)
                     }
                     _ => unreachable!(),
                 };
@@ -6448,16 +6485,24 @@ impl Vm {
         //    both come out true. Acceptable for now — the common
         //    cases (same-shape containers, same-string lookups)
         //    all match CRuby.
-        //  - Object / BoundMethod / UnboundMethod / CurriedProc /
-        //    Block / BigInt: ObjId identity via ruby_eq's
+        //  - Object / BigInt: ObjId identity via ruby_eq's
         //    per-variant arms (matches CRuby's Kernel#eql?
         //    default, which is identity for user objects).
         //  - Class: Rc::ptr_eq via ruby_eq.
+        //  - BoundMethod / UnboundMethod: gated out below —
+        //    handled by the dedicated Method ==/!=/eql? arm
+        //    further down (ruby_eq has no Method case, so the
+        //    universal path would return false even for two
+        //    equivalent Methods).
+        //  - CurriedProc / Block: no ruby_eq case → falls through
+        //    to the catchall (returns false; CRuby's Proc#eql?
+        //    is identity, which our distinct ObjIds approximate).
         //  - Sym / Bool / Nil: identity == value equality for
         //    immediates.
         // Universal `respond_to?(:eql?)` already returns true via
         // the universal whitelist.
-        if &*name == "eql?" && !matches!(&recv, Value::Rational(_)) {
+        if &*name == "eql?"
+            && !matches!(&recv, Value::Rational(_) | Value::BoundMethod(_) | Value::UnboundMethod(_)) {
             // Arity guard fires regardless of receiver — CRuby
             // raises ArgumentError before doing any per-type
             // dispatch. Primitive_call's per-type arms above only
@@ -6525,22 +6570,76 @@ impl Vm {
         // to the same underlying definition — e.g., a parent's
         // method inherited by a subclass — are equal, matching
         // CRuby's `C.instance_method(:foo) == D.instance_method(:foo)`.
-        if args.len() == 1 && &*name == "=="
+        // Method#== / Method#!= / Method#eql? — same semantics for
+        // all three (CRuby treats `eql?` as an alias of `==` for
+        // Method/UnboundMethod). Without this arm, `eql?` would
+        // reach the universal `ruby_eq` fallback (no Method case →
+        // false), and `!=` would route through the universal `==`
+        // fallback (same false result, negated to true) — both
+        // wrong for two equivalent Methods.
+        if (&*name == "==" || &*name == "!=" || &*name == "eql?")
             && matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_)) {
+                if args.len() != 1 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1)",
+                            args.len()
+                        ),
+                    }));
+                }
                 let other = &args[0];
-                let result = match (&recv, other) {
+                let eq = match (&recv, other) {
                     (Value::BoundMethod(a), Value::BoundMethod(b)) => {
-                        let (ra, na) = self.heap.bound_method(*a);
+                        // Snapshot-first identity, mirroring the
+                        // UnboundMethod arm: same receiver AND the
+                        // underlying Method Rc must agree. After a
+                        // `def`/`remove_method` on the recv's class,
+                        // a fresh `obj.method(:foo)` captures a NEW
+                        // Method Rc — old and new BoundMethods then
+                        // compare unequal, matching CRuby's
+                        // iseq-aware Method#==. Two `.method(:foo)`
+                        // captures with no intervening redefine
+                        // share the same class-table Rc (clone of
+                        // the HashMap entry) → Rc::ptr_eq true. For
+                        // builtin / no-snapshot recvs both sides
+                        // resolve to None and fall back to name —
+                        // `7.method(:+) == 7.method(:+)` stays true.
+                        let (ra, na, sa) = self.heap.bound_method_full(*a);
                         let ra = ra.clone();
-                        let (rb, nb) = self.heap.bound_method(*b);
+                        let (rb, nb, sb) = self.heap.bound_method_full(*b);
                         let rb = rb.clone();
-                        na == nb && method_recv_identity(&ra, &rb)
+                        let sa = sa.clone();
+                        let sb = sb.clone();
+                        if !method_recv_identity(&ra, &rb) {
+                            false
+                        } else {
+                            let ma = sa.or_else(|| match self.class_of(&ra) {
+                                Value::Class(c) => self.lookup_method_uncached(&c, na),
+                                _ => None,
+                            });
+                            let mb = sb.or_else(|| match self.class_of(&rb) {
+                                Value::Class(c) => self.lookup_method_uncached(&c, nb),
+                                _ => None,
+                            });
+                            match (ma, mb) {
+                                (Some(x), Some(y)) => Rc::ptr_eq(&x, &y),
+                                _ => na == nb,
+                            }
+                        }
                     }
                     (Value::UnboundMethod(a), Value::UnboundMethod(b)) => {
-                        let (ca, na) = self.heap.unbound_method(*a);
-                        let (cb, nb) = self.heap.unbound_method(*b);
-                        let ma = self.lookup_method_uncached(&ca, na);
-                        let mb = self.lookup_method_uncached(&cb, nb);
+                        // Snapshot-first identity: prefer the
+                        // capture-time Method Rc — UnboundMethod
+                        // semantics pin to capture-time, matching
+                        // bind_call/source_location/hash, and avoids
+                        // an extra ancestor-chain walk per side.
+                        // Falls through to live lookup, then to
+                        // class-ptr identity, so the eql?/hash chain
+                        // stays in lock-step.
+                        let (ca, na, sa) = self.heap.unbound_method_full(*a);
+                        let (cb, nb, sb) = self.heap.unbound_method_full(*b);
+                        let ma = sa.or_else(|| self.lookup_method_uncached(&ca, na));
+                        let mb = sb.or_else(|| self.lookup_method_uncached(&cb, nb));
                         match (ma, mb) {
                             (Some(x), Some(y)) => Rc::ptr_eq(&x, &y),
                             _ => na == nb && Rc::ptr_eq(&ca, &cb),
@@ -6548,6 +6647,7 @@ impl Vm {
                     }
                     _ => false,
                 };
+                let result = if &*name == "!=" { !eq } else { eq };
                 self.stack.push(Value::Bool(result));
                 return Ok(());
             }

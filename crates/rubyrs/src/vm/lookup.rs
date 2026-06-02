@@ -784,8 +784,12 @@ impl Vm {
                 // primitive arm in vm/string.rs.
                 | "freeze" | "frozen?"
             ),
-            Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "bind_call" | "arity" | "parameters" | "==" | ">>" | "<<" | "curry" | "to_proc" | "owner" | "receiver" | "name" | "hash" | "source_location"),
-            Value::UnboundMethod(_) => matches!(name, "bind" | "bind_call" | "arity" | "parameters" | "==" | "owner" | "name" | "hash" | "source_location"),
+            // `==` / `!=` / `eql?` / `hash` are in the universal
+            // whitelist at the top of this fn — don't list them
+            // again here. (Keeping `==` historically muddied the
+            // story; dropping all four for consistency.)
+            Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "bind_call" | "arity" | "parameters" | ">>" | "<<" | "curry" | "to_proc" | "owner" | "receiver" | "name" | "source_location"),
+            Value::UnboundMethod(_) => matches!(name, "bind" | "bind_call" | "arity" | "parameters" | "owner" | "name" | "source_location"),
             Value::CurriedProc(_) => matches!(name, "call" | "[]" | "()" | "arity"),
         }
     }
