@@ -1185,7 +1185,16 @@ pub(crate) fn string_call(
             Some(Value::Float(parsed))
         }
         (Value::Str(a), "*", [Value::Int(n)]) => {
-            let n = (*n).max(0) as usize;
+            // CRuby raises ArgumentError on negative repeat
+            // count; rubyrs previously used `(*n).max(0) as usize`
+            // and silently returned "". Same pattern fixed for
+            // Array#take/#drop in PR #340 / cycle 14.
+            if *n < 0 {
+                return Err(RubyError::ArgumentError {
+                    msg: "negative argument".to_string(),
+                });
+            }
+            let n = *n as usize;
             check(a.borrow().len().saturating_mul(n))?;
             Some(Value::new_str_bytes(a.borrow().repeat(n)))
         }

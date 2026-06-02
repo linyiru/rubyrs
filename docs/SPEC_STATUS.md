@@ -12,8 +12,8 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 156 |
-| Examples in corpus | 1011 |
+| Files | 157 |
+| Examples in corpus | 1016 |
 | Skipped `it` traces | 155 |
 
 ### Skipped traces by category
@@ -48,7 +48,7 @@ Find blocks unlocked by a future feature with e.g.
 | Module | 3 | 15 | 0 |
 | Range | 2 | 30 | 0 |
 | Rational | 4 | 20 | 0 |
-| String | 23 | 159 | 24 |
+| String | 24 | 164 | 24 |
 | UnboundMethod | 4 | 18 | 0 |
 
 ## Files
@@ -195,6 +195,7 @@ Find blocks unlocked by a future feature with e.g.
 | `string_length_spec.rb` | String#length | `core/string/length_spec.rb` | 1 | 0 |
 | `string_ljust_spec.rb` | String#ljust | `core/string/ljust_spec.rb` | 4 | 1 |
 | `string_lstrip_spec.rb` | String#lstrip | `core/string/lstrip_spec.rb` | 5 | 0 |
+| `string_multiply_spec.rb` | String#* | `core/string/multiply_spec.rb (negative-arg parity)` | 5 | 0 |
 | `string_reverse_spec.rb` | String#reverse | `core/string/reverse_spec.rb` | 7 | 0 |
 | `string_rjust_spec.rb` | String#rjust | `core/string/rjust_spec.rb` | 4 | 1 |
 | `string_rstrip_spec.rb` | String#rstrip | `core/string/rstrip_spec.rb` | 5 | 0 |
