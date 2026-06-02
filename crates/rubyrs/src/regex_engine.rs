@@ -43,7 +43,16 @@ use std::fmt;
 /// opaque token: embedders that pattern-match on `Value::Regex(_)`
 /// should match the outer variant and pass the inner Rc through
 /// without introspecting it. Future engine swaps may change the
-/// variants and methods without notice. Code-review #353 round 1.
+/// variants and methods without notice.
+///
+/// Marked `#[non_exhaustive]` so adding a third backend later
+/// (e.g. an Onigmo-shaped engine for tighter CRuby parity) is
+/// a non-breaking change — exhaustive matches on `CompiledRegex`
+/// from outside this crate are required to include a `_` arm,
+/// so an added variant won't break their compile. (Code-review
+/// #353 round 4 — first round caught the doc story; this
+/// rounds locks it in at the type level.)
+#[non_exhaustive]
 pub enum CompiledRegex {
     /// Linear-time `regex` engine — preferred. Most Ruby
     /// patterns land here.
@@ -120,9 +129,13 @@ impl CompiledRegex {
         }
     }
 
-    /// Engine label for error messages. Used by the
-    /// "operation not supported on fancy-regex pattern" trap
-    /// path so the user sees which engine produced the regex.
+    /// Engine label for diagnostic output. Currently consumed
+    /// only by the `Debug` impl below; trap messages at the
+    /// dispatch sites hard-code `"fancy-regex engine"` for the
+    /// fancy-arm RuntimeError so the cost of stringifying isn't
+    /// paid on the happy path. If a future migration adds a
+    /// third engine or routes traps through a builder, this
+    /// helper is the right place to centralise the label.
     pub(crate) fn engine_name(&self) -> &'static str {
         match self {
             CompiledRegex::Native(_) => "regex",
