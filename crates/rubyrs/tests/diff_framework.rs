@@ -680,3 +680,8 @@ fn json_smoke() {
 fn json_canon() {
     run_fixture("json_canon");
 }
+
+#[test]
+fn as_lite_canon() {
+    run_fixture("as_lite_canon");
+}

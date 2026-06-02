@@ -1,0 +1,11 @@
+{
+  "_doc": "ADR-0026-v2 menu item 3 — pure-Ruby ActiveSupport-lite canon parity. Same app.rb runs `require 'active_support'` on both runtimes. rubyrs resolves to the embedded `src/stdlib_vendor/active_support_lite.rb` (gated behind the `stdlib` Cargo feature); CRuby loads the real active_support gem. Byte-diff of stdout proves the canon matches AS's semantics on the Tier A+B+C subset: blank?/present?/presence family, Array second/third/fourth/in_groups_of, Object#try/#in?, Hash symbolize/stringify (shallow + deep) + deep_merge, String squish/camelize/underscore/dasherize/titleize/humanize/truncate. Tier D (Numeric duration, Time.current) deliberately NOT exercised — see poc/as_lite/GAPS.md §'Tier D — DEFERRED' for the ADR-shaped reasoning.",
+  "name": "as_lite_canon",
+  "script": {
+    "path": "app.rb",
+    "timeout_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["active_support/all"]
+  }
+}

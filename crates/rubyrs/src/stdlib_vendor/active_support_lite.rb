@@ -285,8 +285,17 @@ class String
   # `"ActiveRecord".underscore` → `"active_record"`.
   # Two-pass: insert `_` between consecutive caps + a cap-lower,
   # then between a lower/digit + cap. Matches AS's regex order.
+  #
+  # First-pass group shapes: group 1 = `[A-Z]+` (variable
+  # length, ≥ 1), group 2 = `[A-Z][a-z]` (exactly 2 chars). With
+  # rubyrs's `$1` / `$~`-in-gsub-block gap, we know group 2 is
+  # the LAST 2 chars of `m` and group 1 is the rest — so the
+  # split is `m[0..-3]` + `'_'` + `m[-2..-1]`. The earlier
+  # `m[0..-2]` / `m[-1]` shape was wrong for runs like
+  # "HTTPRequest" where the all-caps prefix is longer than
+  # one char.
   def underscore
-    s = gsub(/([A-Z]+)([A-Z][a-z])/) { |m| m[0..-2] + '_' + m[-1] }
+    s = gsub(/([A-Z]+)([A-Z][a-z])/) { |m| m[0..-3] + '_' + m[-2..-1] }
     s.gsub(/([a-z0-9])([A-Z])/) { |m| m[0] + '_' + m[1] }.downcase
   end
 
