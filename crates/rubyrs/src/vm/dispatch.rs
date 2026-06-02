@@ -337,10 +337,11 @@ impl Vm {
     ) -> Result<Option<Value>, Trap> {
         use crate::bytecode::BinOpKind as K;
         use num_bigint::BigInt;
+        use num_traits::One;
         let to_pair = |v: &Value, heap: &crate::heap::Heap| -> Option<(BigInt, BigInt)> {
             match v {
-                Value::Int(n) => Some((BigInt::from(*n), BigInt::from(1))),
-                Value::BigInt(id) => Some((heap.bigint(*id).clone(), BigInt::from(1))),
+                Value::Int(n) => Some((BigInt::from(*n), BigInt::one())),
+                Value::BigInt(id) => Some((heap.bigint(*id).clone(), BigInt::one())),
                 Value::Rational(id) => {
                     let r = heap.rational(*id);
                     Some((r.num.clone(), r.den.clone()))
@@ -5762,8 +5763,9 @@ impl Vm {
                 #[cfg(feature = "bignum")]
                 Value::BigInt(id) => {
                     use num_bigint::BigInt;
+                    use num_traits::One;
                     let num = self.heap.bigint(*id).clone();
-                    self.make_rational_bigint(num, BigInt::from(1))?
+                    self.make_rational_bigint(num, BigInt::one())?
                 }
                 _ => unreachable!("guarded by recv_is_integer"),
             };

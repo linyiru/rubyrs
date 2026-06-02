@@ -3264,10 +3264,14 @@ fn rational_phase_c4_1_bigint_widening() {
 #[test]
 #[cfg(feature = "bignum")]
 fn rational_phase_c4_2_bigint_to_r_and_kernel() {
-    // Phase C.4.2 — Integer#to_r / #rationalize accept BigInt
-    // receivers and i64::MIN; Kernel#Rational accepts BigInt
-    // args. Pre-C.4.2 each of these raised RangeError ("Rational
-    // components must fit in i64").
+    // Phase C.4.2 surface — `Integer#to_r` / `#rationalize` accept
+    // BigInt receivers and `Kernel#Rational` accepts BigInt args.
+    // Pre-C.4.2 those routes raised RangeError ("Rational
+    // components must fit in i64"). The `i64::MIN` case below
+    // was actually unblocked by C.4.1 (`make_rational(i64, i64)`
+    // widens to BigInt internally before the i64::MIN guard could
+    // fire) but stays pinned here as part of the cohesive
+    // Integer→Rational surface.
     let mut rt = rubyrs::Runtime::new();
     for (script, expected) in [
         // Integer#to_r — BigInt receiver
