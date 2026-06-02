@@ -1833,6 +1833,20 @@ impl Vm {
                 self.stack.push(Value::Class(owner));
                 return Ok(CallableOutcome::Handled);
             }
+        // `m.name` — returns the captured method-name Symbol.
+        // Same shape for BoundMethod and UnboundMethod; aliased
+        // methods report the alias name (CRuby parity — the
+        // captured name is what `.method(:x)` was called with).
+        if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
+            && name == "name" && args.is_empty() {
+                let nid = match &recv {
+                    Value::BoundMethod(bid) => self.heap.bound_method(*bid).1,
+                    Value::UnboundMethod(uid) => self.heap.unbound_method_full(*uid).1,
+                    _ => unreachable!(),
+                };
+                self.stack.push(Value::Sym(nid));
+                return Ok(CallableOutcome::Handled);
+            }
         // `m.arity` / `m.parameters` — Method introspection. Walks
         // the captured class chain to find the user-defined Method;
         // if absent (builtin / primitive_call backed), returns
