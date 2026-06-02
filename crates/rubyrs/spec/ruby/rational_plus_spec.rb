@@ -45,10 +45,12 @@ describe "Rational#+ when given a non-Numeric" do
 end
 
 describe "Rational#+ with BigInt-magnitude operands" do
-  bignum_it "bignum: stays Rational when the product exceeds i64" do
-    # Operands fit i64 individually; intermediate product 10**36
-    # does not. Pre-C.4.1 raised RangeError; widened storage now
-    # carries the BigInt through.
+  bignum_it "bignum: stays Rational when the intermediate sum exceeds i64" do
+    # Operands fit i64 individually; in `try_rational_binop`'s
+    # checked-i64 add, the cross-multiplied terms `10**18 * 7`
+    # and `10**18 * 3` both fit, but their sum `10**19` does not
+    # (i64::MAX ≈ 9.22e18). Pre-C.4.1 raised RangeError; widened
+    # storage now carries the BigInt through.
     assert_eq(Rational(10**18, 3) + Rational(10**18, 7),
               Rational(10 * 10**18, 21))
   end
