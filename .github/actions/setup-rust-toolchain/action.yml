@@ -1,0 +1,96 @@
+name: 'Setup Rust toolchain (rust-toolchain.toml-aware)'
+description: >-
+  Installs the Rust toolchain pinned by the workspace's
+  `rust-toolchain.toml`, with optional `targets:` / `components:`
+  forwarded to `dtolnay/rust-toolchain`. Solves the workspace-wide
+  drift between `rust-toolchain.toml` and CI jobs that previously
+  used `@stable` (bypassing the pin) or `@master` with a hard-
+  coded version (duplicating the pin).
+
+# Hoists what wasm + coverage jobs were already doing (hard-coding
+# `toolchain: "1.95"` to match rust-toolchain.toml) into a single
+# place that READS the pin instead of duplicating it. Bumping
+# rust-toolchain.toml's channel becomes a one-line change for every
+# job that follows the workspace pin.
+#
+# `channel-override:` exists for jobs that intentionally diverge
+# from the workspace pin: miri (needs nightly), fuzz (libfuzzer-sys
+# needs a specific nightly date for sanitizer features). Those
+# remain explicit at their use sites — the override is the
+# deviation signal.
+
+inputs:
+  channel-override:
+    description: >-
+      Override the channel from rust-toolchain.toml. Use only when
+      a job needs a different channel than the workspace pin
+      (miri → `nightly`). Leave empty to use the file's pin.
+    required: false
+    default: ''
+  toolchain-file:
+    description: >-
+      Path (relative to repo root) of the `rust-toolchain.toml`
+      to read the channel from. Defaults to the workspace root's
+      file. Set to `crates/rubyrs/fuzz/rust-toolchain.toml` for the
+      fuzz crate (detached sub-workspace with its own pin).
+      Ignored if `channel-override:` is set.
+    required: false
+    default: 'rust-toolchain.toml'
+  targets:
+    description: >-
+      Comma-separated cross-compile targets to install
+      (e.g. `wasm32-wasip1`). Forwarded to
+      `dtolnay/rust-toolchain` verbatim.
+    required: false
+    default: ''
+  components:
+    description: >-
+      Comma-separated extra rustup components beyond what
+      rust-toolchain.toml declares (e.g. `llvm-tools-preview` for
+      the coverage job's instrumented build). Forwarded to
+      `dtolnay/rust-toolchain` verbatim.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Determine toolchain channel
+      id: channel
+      shell: bash
+      env:
+        OVERRIDE: ${{ inputs.channel-override }}
+        TOOLCHAIN_FILE: ${{ inputs.toolchain-file }}
+      run: |
+        # Override path: caller intentionally diverges from the
+        # file's pin. Used by miri (nightly).
+        if [ -n "$OVERRIDE" ]; then
+          echo "value=$OVERRIDE" >> "$GITHUB_OUTPUT"
+          echo "Using override channel: $OVERRIDE" >&2
+          exit 0
+        fi
+        # Default path: parse the specified toolchain file.
+        # The grep+sed form is more robust than TOML-strict parsing
+        # for a single-key file: accepts any whitespace before/
+        # after `=`, single OR double quotes, and ignores comments.
+        # Fails loud (exit 1) if the channel can't be found.
+        if [ ! -f "$TOOLCHAIN_FILE" ]; then
+          echo "::error::setup-rust-toolchain: $TOOLCHAIN_FILE not found. Did checkout run? Wrong toolchain-file input?" >&2
+          exit 1
+        fi
+        RAW=$(grep -E '^[[:space:]]*channel[[:space:]]*=' "$TOOLCHAIN_FILE" | head -1)
+        CHANNEL=$(printf '%s' "$RAW" | sed -E 's/.*channel[[:space:]]*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/')
+        if [ -z "$CHANNEL" ] || [ "$CHANNEL" = "$RAW" ]; then
+          echo "::error::setup-rust-toolchain: failed to parse channel from $TOOLCHAIN_FILE" >&2
+          cat "$TOOLCHAIN_FILE" >&2
+          exit 1
+        fi
+        echo "value=$CHANNEL" >> "$GITHUB_OUTPUT"
+        echo "Using pin from $TOOLCHAIN_FILE: $CHANNEL" >&2
+
+    - name: Install toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ steps.channel.outputs.value }}
+        targets: ${{ inputs.targets }}
+        components: ${{ inputs.components }}

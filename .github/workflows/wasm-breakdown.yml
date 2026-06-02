@@ -93,13 +93,12 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain (wasm32-wasip1 target)
-        # Same toolchain pin as the existing `wasm` job in
-        # ci.yml — must match `rust-toolchain.toml` so the
+        # Composite reads workspace `rust-toolchain.toml` so the
         # wasm32-wasip1 std lands on the same channel cargo runs
         # under (otherwise: E0463 `can't find crate for core`).
-        uses: dtolnay/rust-toolchain@master
+        # Same shape as the `wasm` job in ci.yml.
+        uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: "1.95"
           targets: wasm32-wasip1
 
       - name: Cache cargo + wasi-sdk

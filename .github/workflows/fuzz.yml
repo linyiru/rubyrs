@@ -61,16 +61,15 @@ jobs:
         # detaches via its own empty `[workspace]` so this nightly
         # install only affects the fuzz invocation.
         #
-        # Install the *same* version `crates/rubyrs/fuzz/rust-toolchain.toml`
-        # pins. Asking for plain `nightly` would silently win over
-        # the file's pin because rustup honours explicit toolchain
-        # selection on the command line ahead of the toolchain
-        # file. To keep the pin honest, the version here MUST
-        # match `crates/rubyrs/fuzz/rust-toolchain.toml`. Bump
-        # them together.
-        uses: dtolnay/rust-toolchain@master
+        # Reads the fuzz crate's own `rust-toolchain.toml` (detached
+        # sub-workspace pinned to a specific nightly date for
+        # libfuzzer-sys's sanitizer features). The `toolchain-file:`
+        # input points the composite at fuzz's pin file instead of
+        # the workspace-root one — bumping the fuzz toolchain is now
+        # a single-line edit to that file.
+        uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: nightly-2026-05-24
+          toolchain-file: crates/rubyrs/fuzz/rust-toolchain.toml
 
       - name: Install cargo-fuzz
         # Cached install — `cargo install` would otherwise rebuild
