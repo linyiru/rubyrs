@@ -4165,7 +4165,35 @@ impl Vm {
                     }
                     self.method_gen = self.method_gen.wrapping_add(1);
                 }
-                self.stack.push(Value::Nil);
+                // CRuby's Module#module_function return value
+                // (verified against MRI 3.x via `ruby -e`):
+                //   - bare form          → nil
+                //   - single Sym/Str arg → the symbol
+                //   - multi args         → array of symbols
+                // Earlier this arm always pushed Nil, which
+                // matches the bare form but silently diverged
+                // for the argument forms — callers using the
+                // result as an expression got Nil instead of
+                // the symbol/array. (Code-review #324
+                // post-empty pass.)
+                // CRuby preserves the original arg types in the
+                // return value (strings stay strings — coercion
+                // to Symbol happens internally for the lookup
+                // only, not for the result). Verified via
+                // `ruby -e 'module M; def w; end; r =
+                // module_function("w", :x); p r; end'` →
+                // `["w", :x]`.
+                let ret = if args.is_empty() {
+                    Value::Nil
+                } else if args.len() == 1 {
+                    args[0].clone()
+                } else {
+                    let id = self
+                        .heap
+                        .alloc(crate::heap::HeapObj::Array(args.to_vec()));
+                    Value::Array(id)
+                };
+                self.stack.push(ret);
                 return Ok(());
             }
             if let Some(vis) = visibility_from_name(&name) {

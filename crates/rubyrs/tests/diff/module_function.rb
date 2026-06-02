@@ -77,3 +77,32 @@ rescue NoMethodError => e
   e.message.include?("module_function") ? "rejected" : "other-NoMethodError"
 end
 puts "main-context=#{err}"
+
+## Shape 6: return value — verified against MRI 3.x:
+##   - bare form          → nil
+##   - single Sym/Str arg → the symbol (NOT a string, even when
+##     called with a string arg — it coerces)
+##   - multi args         → array of symbols
+## Earlier rubyrs always pushed Nil, which is correct for the
+## bare form but silently wrong for the argument forms.
+## `module_function` is itself private, so it must be invoked
+## from inside the module body (implicit-self lets private
+## calls through).
+$bare_ret  = :sentinel
+$sym_ret   = :sentinel
+$str_ret   = :sentinel
+$multi_ret = :sentinel
+module M6
+  def w; 0; end
+  def x; 1; end
+  def y; 2; end
+  def z; 3; end
+  $bare_ret  = module_function
+  $sym_ret   = module_function(:x)
+  $str_ret   = module_function("w")
+  $multi_ret = module_function(:y, :z)
+end
+puts "bare-return=#{$bare_ret.inspect}"
+puts "sym-return=#{$sym_ret.inspect}"
+puts "str-return=#{$str_ret.inspect}"
+puts "multi-return=#{$multi_ret.inspect}"
