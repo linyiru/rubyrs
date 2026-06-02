@@ -170,9 +170,9 @@ impl Vm {
                         // CRuby uses a distinct phrasing for nil
                         // ("from nil to integer") versus other
                         // types ("of <Class> into Integer") —
-                        // mirrors the existing nil-arg path in
-                        // `Vm::trap_no_implicit_into_integer`
-                        // (gc.rs:292).
+                        // mirrors the existing nil-arg path at
+                        // `Vm::arity_error_arg1_int` (gc.rs:292).
+                        // Code-review #342 round 2.
                         let msg = match a {
                             Value::Nil => {
                                 "no implicit conversion from nil to integer".to_string()

@@ -87,6 +87,12 @@ err = begin
   caller(nil)
   "no-raise"
 rescue TypeError => e
-  e.message.include?("nil into Integer") ? "type-nil" : "other-TypeError"
+  # CRuby's nil-arg wording: "no implicit conversion from nil
+  # to integer" (lowercase 'integer', "from ... to" not "of ...
+  # into"). Code-review #342 round 2 caught the original
+  # `"nil into Integer"` substring — it never matched, so the
+  # test was passing only because BOTH interpreters fell into
+  # the `other-TypeError` branch.
+  e.message.include?("from nil to integer") ? "type-nil" : "other-TypeError"
 end
 puts "shape8b=#{err}"
