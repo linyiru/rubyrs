@@ -37,4 +37,13 @@ describe "String#*" do
     assert_eq(klass, "ArgumentError")
     assert_eq(msg, "negative argument")
   end
+
+  it "raises ArgumentError when len * n exceeds isize::MAX (CRuby 'argument too big')" do
+    # Without the checked_mul + isize::MAX guard, `repeat`
+    # panics the host VM on capacity overflow when no
+    # `max_value_bytes` cap is configured.
+    klass, msg = caught_pair { "abc" * (2**62) }
+    assert_eq(klass, "ArgumentError")
+    assert_eq(msg, "argument too big")
+  end
 end
