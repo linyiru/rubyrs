@@ -303,6 +303,34 @@ impl Vm {
                         let nid = self.heap.alloc(HeapObj::Array(elems));
                         Some(Value::Array(nid))
                     }
+                    // Float coerce + catch-all for Range#first /
+                    // Range#last (Int+Int branch). Same pattern as
+                    // Array#first/#last (PR #349) and Hash#first
+                    // above — `first(2.5)` truncates to 2; non-Int
+                    // 1-arg raises TypeError instead of NoMethodError.
+                    ("first" | "last", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.range_collection_call(id, name, &[Value::Int(n)]);
+                    }
+                    // CRuby quirk: Range#first / #last use
+                    // "expected 1" for multi-arg (even though
+                    // 0-arg is also valid), while Array uses
+                    // "expected 0..1". Match CRuby's exact wording
+                    // by handling multi-arg before the helper —
+                    // the helper's catch-all then only fires for
+                    // the 1-non-Int case where the TypeError
+                    // wording is the same across receivers.
+                    ("first" | "last", many) if many.len() > 1 => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 1)",
+                                many.len()
+                            ),
+                        }));
+                    }
+                    ("first" | "last", _) => {
+                        return Err(self.arity_error_arg0_or_1_int(name, args));
+                    }
                     ("max", []) => Some(if excl {
                         // ei - 1 overflows when ei == i64::MIN
                         // (e.g. `(-2**63...-2**63).max`); treat as
