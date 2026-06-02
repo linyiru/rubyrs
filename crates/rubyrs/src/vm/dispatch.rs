@@ -228,18 +228,21 @@ impl Vm {
         #[cfg(feature = "bignum")]
         {
             use num_bigint::BigInt;
-            use num_traits::One;
-            // Build the lossless (num, den) pair.
-            let mant_big = BigInt::from(mantissa);
-            let signed = if sign < 0 { -mant_big } else { mant_big };
-            let (num, den) = if exp >= 0 {
-                (signed << exp as usize, BigInt::one())
-            } else {
-                (signed, BigInt::one() << (-exp) as usize)
+            use num_traits::{One, Zero};
+            // Build the lossless (num, den) pair on demand — the
+            // DefaultUlp branch below doesn't need it.
+            let lossless_pair = |sign: i64, mantissa: u64, exp: i32| -> (BigInt, BigInt) {
+                let mant_big = BigInt::from(mantissa);
+                let signed = if sign < 0 { -mant_big } else { mant_big };
+                if exp >= 0 {
+                    (signed << exp as usize, BigInt::one())
+                } else {
+                    (signed, BigInt::one() << (-exp) as usize)
+                }
             };
-            // Default path: lossless to_r.
             let eps_v = match &mode {
                 FloatToRationalMode::Lossless => {
+                    let (num, den) = lossless_pair(sign, mantissa, exp);
                     return self.make_rational_bigint(num, den);
                 }
                 FloatToRationalMode::DefaultUlp => {
@@ -296,6 +299,7 @@ impl Vm {
             };
             let (common_den, a_num, b_num) = if let Some(eps_f) = eps_f_opt {
                 if eps_f == 0.0 {
+                    let (num, den) = lossless_pair(sign, mantissa, exp);
                     return self.make_rational_bigint(num, den);
                 }
                 let a_f = f - eps_f;
@@ -330,8 +334,10 @@ impl Vm {
                     eps_num = -eps_num;
                 }
                 if eps_num.is_zero() {
+                    let (num, den) = lossless_pair(sign, mantissa, exp);
                     return self.make_rational_bigint(num, den);
                 }
+                let (num, den) = lossless_pair(sign, mantissa, exp);
                 let common_den = &den * &eps_den;
                 let term = &eps_num * &den;
                 let a_num = &num * &eps_den - &term;
@@ -340,7 +346,6 @@ impl Vm {
             };
             // Sign handling: Stern-Brocot below assumes 0 < a <= b.
             // For negative target, flip and negate the result.
-            use num_traits::Zero;
             let negate_result = if a_num.is_zero() {
                 false
             } else if a_num.sign() == num_bigint::Sign::Minus
