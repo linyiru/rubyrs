@@ -24,21 +24,31 @@ targets = [
     { triple = "aarch64-apple-darwin" },
     { triple = "wasm32-wasip1" },
 ]
-# Include `[dev-dependencies]` in the scan. rubund's bridge
-# examples depend on rubyrs via a dev-dep; missing this would
-# leave that surface uncovered.
-all-features = false
+# Scan EVERY feature combination's dep tree. CI builds with
+# non-default feature sets (`stdlib,_http_server,_fiber,
+# _json_native`) — deps that only show up behind those features
+# would escape the scan if we left this at the default `false`.
+# `all-features = true` activates all crate features and unions
+# the resulting dep graph; the scan sees the maximal set so
+# nothing slips through.
+all-features = true
 
 # ============================================================
 # Advisories — CVE / unmaintained / unsound checks against the
 # RustSec advisory database.
 # ============================================================
 [advisories]
-# `deny` for vulnerabilities is the load-bearing gate. Unsound
-# (`unsound`) gets deny too — a known-unsound crate in the
-# dependency tree IS a vulnerability, just one we haven't seen
-# exploited yet. `unmaintained = "warn"` keeps the signal
-# without blocking PRs over stale-but-functional deps.
+# Schema v2 (set explicitly so a future cargo-deny default flip
+# can't silently change interpretation). Under v2 the policy
+# verbs are LOCKED IN BY THE SCHEMA — there are no
+# `vulnerability` / `unsound` / `unmaintained` / `notice`
+# knobs to tune, because:
+#   - vulnerability + unsound: always `deny`
+#   - unmaintained + notice:   always `warn`
+# That's the policy we want (deny known-exploitable / known-
+# unsound, warn on stale-but-functional) so v2 schema delivers
+# it for free. The fields below configure only the v2-tunable
+# axes (`yanked` + the `ignore` allowlist).
 version = 2
 yanked = "deny"
 ignore = [

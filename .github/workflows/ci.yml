@@ -987,8 +987,16 @@ jobs:
         # commit that re-runs `cargo deny check` locally to
         # confirm the new ruleset still passes.
         run: |
-          if ! command -v cargo-deny >/dev/null; then
-            cargo install cargo-deny --locked --version 0.19.8
+          WANTED=0.19.8
+          # Version-check before skipping the install. A bare
+          # `command -v cargo-deny` would let a runner-cached
+          # different version silently take over and the
+          # workflow comment's "pinned at 0.19.8" claim would be
+          # false. Reinstall if the installed version doesn't
+          # match the pin (--force re-uses the existing target/).
+          INSTALLED=$(cargo deny --version 2>/dev/null | awk '{print $2}' || true)
+          if [ "$INSTALLED" != "$WANTED" ]; then
+            cargo install cargo-deny --locked --version "$WANTED" --force
           fi
           cargo deny --version
 
