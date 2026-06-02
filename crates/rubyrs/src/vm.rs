@@ -68,7 +68,7 @@ pub(crate) use vm_ptr::current_vm_ptr;
 #[cfg(feature = "_http_server")]
 pub(crate) use iter::BlockStep;
 pub(crate) use numeric::{floor_div_i64, floor_mod_i64, int_cmp_float_lossless};
-pub(crate) use lookup::{class_is_a, flatten_ancestors, CallCache};
+pub(crate) use lookup::{class_is_a, class_reaches_via_chain, flatten_ancestors, CallCache};
 pub use lookup::IcStats;
 pub(crate) use primitive::primitive_call;
 pub(crate) use sprintf::ruby_sprintf;

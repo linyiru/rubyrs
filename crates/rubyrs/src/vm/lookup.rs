@@ -920,6 +920,98 @@ impl Vm {
     }
 }
 
+/// `class_is_a` variant that walks ONLY one of the include /
+/// prepend chains (and the same chain transitively through each
+/// module's own chain, plus through the superclass chain). Used by
+/// include/prepend idempotency so `include M; prepend M` on the
+/// same target succeeds at both steps — CRuby treats the two
+/// chains as distinct insertion slots and the per-chain
+/// reachability is what gates each side. `walk_prepend=true` walks
+/// the prepend chain; otherwise includes.
+///
+/// Returns true for `child == target` (and for `current == target`
+/// along the superclass walk) — consistency with `class_is_a`.
+pub(crate) fn class_reaches_via_chain(
+    child: &Rc<Class>,
+    target: &Rc<Class>,
+    walk_prepend: bool,
+) -> bool {
+    // Inside `walks_through` we follow BOTH prepend AND include
+    // edges, mirroring `class_is_a` — a module's ancestor graph
+    // is the union of both chains. The outer loop's
+    // `walk_prepend` only selects which top-level chain of
+    // `current` we start scanning from; once we're inside a
+    // module's body we treat it as a full ancestor-graph node
+    // so transitive cross-chain reachability is honored.
+    //
+    // Without this, `prepend Outer` (where Outer includes Inner)
+    // followed by `prepend Inner` would mis-skip CRuby's
+    // idempotency rule and insert Inner again — CRuby treats
+    // Inner as already-reachable through Outer.includes and
+    // makes the second prepend a no-op.
+    fn walks_through(
+        node: &Rc<Class>,
+        target: &Rc<Class>,
+        visited: &mut std::collections::HashSet<*const Class>,
+    ) -> bool {
+        if Rc::ptr_eq(node, target) { return true; }
+        if !visited.insert(Rc::as_ptr(node)) { return false; }
+        for pre in node.prepends.borrow().iter() {
+            if walks_through(pre, target, visited) { return true; }
+        }
+        for inc in node.includes.borrow().iter() {
+            if walks_through(inc, target, visited) { return true; }
+        }
+        false
+    }
+    // Self-equality short-circuit, matching `class_is_a`. Without
+    // this guard the include/prepend idempotency check would let
+    // `module M; include M; end` (or `prepend M`) insert M into
+    // its own chain, creating a self-cycle that the next ancestor
+    // walk would stack-overflow on (despite each walker's visited
+    // set — the first iteration sets up the cycle before visited
+    // sees the node).
+    if Rc::ptr_eq(child, target) { return true; }
+    let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+    let mut current = child.clone();
+    loop {
+        if !sc_visited.insert(Rc::as_ptr(&current)) { return false; }
+        // `current == target` along the superclass walk also
+        // counts as reachable — same consistency rule as
+        // `class_is_a` enforces inside its inner walker.
+        if Rc::ptr_eq(&current, target) { return true; }
+        let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+        // Seed visited with `current` so any cyclic include/prepend
+        // graph (`A includes B; B includes A`) that walks back into
+        // `current` short-circuits instead of re-borrowing
+        // `current.includes` / `current.prepends` while it's still
+        // borrowed by `chain` below — that would trigger a RefCell
+        // borrow panic. `lookup_method_uncached` carries the same
+        // defensiveness comment.
+        inc_visited.insert(Rc::as_ptr(&current));
+        // Clone the chain into a Vec so the RefCell borrow ends
+        // before recursion. Otherwise a cyclic graph that walks
+        // through a Module which itself borrows the chain panics.
+        // The chains are typically small (n=0..4), so the alloc cost
+        // is negligible compared to the safety win.
+        let chain_snapshot: Vec<Rc<Class>> = if walk_prepend {
+            current.prepends.borrow().clone()
+        } else {
+            current.includes.borrow().clone()
+        };
+        for m in chain_snapshot.iter() {
+            if walks_through(m, target, &mut inc_visited) {
+                return true;
+            }
+        }
+        let parent = current.superclass.borrow().clone();
+        match parent {
+            Some(p) => current = p,
+            None => return false,
+        }
+    }
+}
+
 /// `child` is-a `ancestor` if `ancestor` appears anywhere in
 /// `child`'s ancestor chain — that is, the superclass walk *plus*
 /// each class's transitive `prepends` and `includes`. Returns true
