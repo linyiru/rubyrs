@@ -64,9 +64,12 @@ describe "Range#first / #last arity & type guards" do
     assert_eq(msg, "float Inf out of range of integer")
   end
 
-  it "raises RangeError on BigInt arg (parity with Array/Hash first/last)" do
-    # Without the cfg-gated BigInt arm, BigInt falls into
-    # arity_error_arg0_or_1_int and renders as the
+  bignum_it "raises RangeError on BigInt arg (parity with Array/Hash first/last)" do
+    # Gated with `bignum_it`: under `--no-default-features`
+    # (no bignum), `2**70` saturates to `i64::MAX` and the
+    # test would exercise the i64 path instead of the
+    # cfg-gated BigInt arm. Without the BigInt arm, BigInt
+    # falls into arity_error_arg0_or_1_int and renders as the
     # nonsensical "no implicit conversion of Integer into
     # Integer" TypeError because type_name_for_coerce(BigInt)
     # returns "Integer". Matches the BigInt arms already in
