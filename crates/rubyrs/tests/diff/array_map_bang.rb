@@ -58,3 +58,29 @@ puts "shape7-collect!=#{a.respond_to?(:collect!)}"
 ## don't regress back to "advertised but raises NoMethodError".
 ## Code-review #348 round 2.
 puts "shape8-collect=#{[1, 2, 3].collect { |x| x + 100 }.inspect}"
+
+## Shape 9: GC safety pin smoke-test. Heap-backed snapshot
+## elements (here child Arrays) must stay alive through the
+## iteration even if the block does GC-relevant work. Without
+## per-element pins, a stress-GC sweep mid-iteration could
+## reclaim the children while the snapshot Vec still references
+## them, ICE'ing the dispatcher. Code-review #348 round 3 flagged
+## this; here we just hammer on the iteration with allocations
+## inside the block and check the snapshot reaches all elements.
+##
+## (A bigger receiver-mutation scenario was attempted but
+## exposed a pre-existing divergence in `Array#clear`-inside-
+## block-during-`map!` count semantics that's wider than this
+## PR — out of scope here. The fix above is the GC pinning;
+## this fixture exercises that the pins keep the snapshot
+## reachable across many allocating block calls.)
+visited = []
+src = [[10, 20], [30, 40], [50, 60], [70, 80]]
+src.map! do |pair|
+  # Allocate inside the block — gives the heap a reason to GC.
+  100.times { Array.new(4) { |i| i * 2 } }
+  visited << pair.first
+  pair.first
+end
+puts "shape9-visited=#{visited.inspect}"
+puts "shape9-result=#{src.inspect}"

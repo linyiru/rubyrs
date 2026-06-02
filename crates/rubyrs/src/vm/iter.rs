@@ -812,6 +812,36 @@ impl Vm {
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                // GC safety: snapshot elements need their own
+                // pins. The receiver is pinned (so heap-backed
+                // children stay reachable WHILE the receiver
+                // still holds them), but the block can mutate
+                // the receiver — `arr.clear` / `pop` / `shift`
+                // drops the original children from the receiver,
+                // and the snapshot Vec is on the Rust stack so
+                // the GC tracer doesn't see it. The next block
+                // call may run `maybe_gc` and sweep them,
+                // leaving dangling `ObjId`s in the snapshot.
+                // Pin each ObjId-backed element through the
+                // loop. (`Value::Str` / `Value::Class` are
+                // `Rc`-counted and live independently of GC, so
+                // they're skipped to keep the pinned Vec tight.)
+                // Code-review #348 round 3.
+                for v in snapshot.iter() {
+                    if matches!(
+                        v,
+                        Value::Array(_) | Value::Hash(_) | Value::Range(_)
+                            | Value::Block(_)
+                            | Value::BoundMethod(_) | Value::UnboundMethod(_)
+                            | Value::CurriedProc(_) | Value::Object(_)
+                    ) {
+                        g.pin(v.clone());
+                    }
+                    #[cfg(feature = "bignum")]
+                    if matches!(v, Value::BigInt(_)) {
+                        g.pin(v.clone());
+                    }
+                }
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (idx, v) in snapshot.into_iter().enumerate() {
