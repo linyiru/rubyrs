@@ -6104,7 +6104,8 @@ impl Vm {
         //    immediates.
         // Universal `respond_to?(:eql?)` already returns true via
         // the universal whitelist.
-        if &*name == "eql?" && !matches!(&recv, Value::Rational(_)) {
+        if &*name == "eql?"
+            && !matches!(&recv, Value::Rational(_) | Value::BoundMethod(_) | Value::UnboundMethod(_)) {
             // Arity guard fires regardless of receiver — CRuby
             // raises ArgumentError before doing any per-type
             // dispatch. Primitive_call's per-type arms above only
@@ -6172,10 +6173,25 @@ impl Vm {
         // to the same underlying definition — e.g., a parent's
         // method inherited by a subclass — are equal, matching
         // CRuby's `C.instance_method(:foo) == D.instance_method(:foo)`.
-        if args.len() == 1 && &*name == "=="
+        // Method#== / Method#!= / Method#eql? — same semantics for
+        // all three (CRuby treats `eql?` as an alias of `==` for
+        // Method/UnboundMethod). Without this arm, `eql?` would
+        // reach the universal `ruby_eq` fallback (no Method case →
+        // false), and `!=` would route through the universal `==`
+        // fallback (same false result, negated to true) — both
+        // wrong for two equivalent Methods.
+        if (&*name == "==" || &*name == "!=" || &*name == "eql?")
             && matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_)) {
+                if args.len() != 1 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1)",
+                            args.len()
+                        ),
+                    }));
+                }
                 let other = &args[0];
-                let result = match (&recv, other) {
+                let eq = match (&recv, other) {
                     (Value::BoundMethod(a), Value::BoundMethod(b)) => {
                         let (ra, na) = self.heap.bound_method(*a);
                         let ra = ra.clone();
@@ -6195,6 +6211,7 @@ impl Vm {
                     }
                     _ => false,
                 };
+                let result = if &*name == "!=" { !eq } else { eq };
                 self.stack.push(Value::Bool(result));
                 return Ok(());
             }

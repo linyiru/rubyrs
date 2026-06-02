@@ -45,3 +45,36 @@ u_bar        = c1.method(:bar).unbind
 puts u_foo_via_c1 == u_foo_via_c2   # true
 puts u_foo_via_c1 == u_foo_via_d    # true — D inherits :foo from C
 puts u_foo_via_c1 == u_bar          # false
+
+# Method#eql? is an alias of Method#== (CRuby parity). Without
+# the explicit eql? arm, this would reach the universal
+# ruby_eq fallback (no Method case → false) and disagree with
+# `==`.
+puts c1.method(:foo).eql?(c1.method(:foo))     # true
+puts c1.method(:foo).eql?(c2.method(:foo))     # false
+puts c1.method(:foo).eql?(c1.method(:bar))     # false
+puts c1.method(:foo).eql?(42)                  # false
+puts u_foo_via_c1.eql?(u_foo_via_d)            # true
+puts u_foo_via_c1.eql?(u_bar)                  # false
+
+# Method#!= — negation of ==. Without an explicit arm, the
+# universal `!=` fallback (via ruby_eq → false) would return
+# true for two equivalent Methods.
+puts c1.method(:foo) != c1.method(:foo)        # false
+puts c1.method(:foo) != c2.method(:foo)        # true
+puts c1.method(:foo) != c1.method(:bar)        # true
+puts u_foo_via_c1 != u_foo_via_d               # false
+
+# Wrong-arity raises ArgumentError (CRuby parity — not
+# NoMethodError via dispatch fall-through).
+begin
+  c1.method(:foo).eql?(1, 2)
+rescue ArgumentError => e
+  puts e.message
+end
+
+# respond_to? must agree.
+puts c1.method(:foo).respond_to?(:eql?)        # true
+puts c1.method(:foo).respond_to?(:!=)          # true
+puts u_foo_via_c1.respond_to?(:eql?)           # true
+puts u_foo_via_c1.respond_to?(:!=)             # true
