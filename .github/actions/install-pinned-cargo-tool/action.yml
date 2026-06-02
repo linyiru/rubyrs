@@ -1,0 +1,74 @@
+name: 'Install pinned cargo tool'
+description: >-
+  Installs a cargo subcommand pinned to a specific version, with
+  a registry+binary cache and a strict version-equality check so a
+  runner-cached different version can't silently take over.
+
+# Composite action shared by jobs that need a pinned cargo
+# subcommand. Hoisted from PR #339 review #10 (and previously deferred
+# from PR #334). Centralizes the install-pinned-cargo-tool dance so
+# the next gate (cargo-audit, cargo-vet, semver-checks) doesn't fork
+# a third variant.
+#
+# Design contract:
+#   - Caches `~/.cargo/registry` plus the pinned tool binary at
+#     `~/.cargo/bin/<tool>`. NOT `~/.cargo/git` (no git-dep workflow
+#     uses this; per PR #339 cleanup).
+#   - NOT the workspace `target/` — that's per-job (e.g., the
+#     coverage job needs an instrumented build's target/ which is
+#     orthogonal to the tool install; callers cache that themselves).
+#   - Cache key embeds tool name + version + Cargo.lock hash. Bumping
+#     `version:` bust-invalidates the cache and forces a clean install.
+#   - `restore-keys:` prefix matches on tool+version (without Cargo.lock
+#     hash), so a workspace dep bump that didn't change the tool can
+#     still restore the binary and short-circuit the install.
+#   - Install step parses `<tool> --version` via semver-anchored grep
+#     rather than positional awk, so future `--version` format drift
+#     (extra tokens, leading `v`, multi-line output) doesn't silently
+#     break the cache short-circuit.
+#   - `--force` on mismatch only overwrites the binary in
+#     `~/.cargo/bin`; there is NO cached `target/` for the cargo tool
+#     itself, so an install path is a from-scratch compile (~3-5 min).
+#     The cache makes the steady-state cache-hit path zero-cost.
+
+inputs:
+  tool:
+    description: >-
+      Cargo subcommand binary name (e.g. `cargo-deny`, `cargo-llvm-cov`).
+      This is the BINARY name (with hyphens), not the cargo-subcommand
+      invocation form.
+    required: true
+  version:
+    description: 'Pinned version (semver, e.g. `0.19.8`).'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Cache registry + ${{ inputs.tool }}
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/bin/${{ inputs.tool }}
+        key: ${{ runner.os }}-cargo-tool-${{ inputs.tool }}-${{ inputs.version }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-tool-${{ inputs.tool }}-${{ inputs.version }}-
+
+    - name: Install ${{ inputs.tool }} (pinned ${{ inputs.version }})
+      shell: bash
+      env:
+        TOOL: ${{ inputs.tool }}
+        WANTED: ${{ inputs.version }}
+      run: |
+        # Version-check before skipping the install. A bare
+        # `command -v "$TOOL"` would let a runner-cached different
+        # version silently take over. Parse via semver-anchored grep
+        # so a future tool `--version` format change doesn't break
+        # the cache short-circuit (head -1 defends against multi-
+        # match output; 2>/dev/null swallows the missing-binary
+        # error and yields empty INSTALLED, which triggers install).
+        INSTALLED=$("$TOOL" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        if [ "$INSTALLED" != "$WANTED" ]; then
+          cargo install "$TOOL" --locked --version "$WANTED" --force
+        fi
+        "$TOOL" --version

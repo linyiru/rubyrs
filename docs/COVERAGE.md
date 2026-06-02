@@ -32,8 +32,10 @@ python3 scripts/coverage_ratchet.py \
     --baseline crates/rubyrs/coverage_baseline.json
 ```
 
-The pinned version lives in `.github/workflows/ci.yml` and is
-embedded in the coverage job's cache key. Bumping it should be a
+The pinned version lives as the `version:` input to the
+`install-pinned-cargo-tool` composite action's invocation inside
+the coverage job in `.github/workflows/ci.yml`; the same input is
+embedded in the target/ cache key. Bumping it should be a
 deliberate PR: install the new version locally, regenerate
 baselines via `--update`, and commit the JSON diff so reviewers
 can see whether the version change shifted any per-file numbers.
