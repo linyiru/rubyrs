@@ -1,0 +1,11 @@
+{
+  "_doc": "ADR-0027 Phase 4 — `_sqlite` battery parity. Same app.rb runs on rubyrs (via `require 'rubyrs/sqlite'`, gated behind the `_sqlite` Cargo feature) and CRuby (via the `sqlite3` gem). Exercises `SQLite3::Database` open + execute/query + `prepare`→`SQLite3::Statement` + block-form transaction with rollback-on-raise + `SQLite3::ConstraintException` catch. The few documented surface mismatches (rubyrs splits execute/query for non-SELECT vs SELECT; rubyrs uses `execute(sql, *params)` splat while CRuby uses `execute(sql, [params])` array) are papered over by `compat.rb` so the byte-emit is identical. Closes ADR-0027 Phase 4 — `_sqlite` is now the last of menu items 1–4 to gain a framework-parity PR gate.",
+  "name": "sqlite_smoke",
+  "script": {
+    "path": "app.rb",
+    "timeout_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sqlite3"]
+  }
+}

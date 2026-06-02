@@ -709,7 +709,7 @@ No migration needed — `_sqlite` is a new feature. Path forward:
 | 1 | `poc/sqlite/FINDINGS.md` | shipped at `e54fac79` |
 | 2 | This ADR (`docs/adr/0027-battery-sqlite.md`) | **this commit** |
 | 3 | Battery PoC — `src/sqlite.rs` + `preamble/sqlite_database.rb` + `Cargo.toml` deps + `lib.rs` export | pending |
-| 4 | diff_framework S4 hooks (manifest schema + harness extension) + `sqlite_smoke` fixture | pending |
+| 4 | diff_framework S4 hooks (manifest schema + harness extension) + `sqlite_smoke` fixture | **shipped (2026-06)** — `tests/diff_framework/fixtures/sqlite_smoke/{app.rb, compat.rb, manifest.json}` + `#[cfg(feature = "_sqlite")] fn sqlite_smoke()` runner registration + framework-parity CI job gains `_sqlite` to its feature set and `sqlite3` to its gem install. Covers open / execute / query / prepare → Statement / block-form transaction COMMIT + ROLLBACK / ConstraintException catch / clean shutdown |
 | 5a | Sequel-lite registry plumbing — empty `sequel_lite.rb` stub + `stdlib_vendor.rs` register + `is_stdlib_stub_name` whitelist + the test-fixture-shape proof that `require "sequel"` resolves to the stub | **deferred — see note below** |
 | 5b | Sequel-lite DSL body — `Dataset` chainable `where` / `order` / `limit` / `all` / `each` / `insert` / `update` / `delete` (Tier A, ~250 LOC) | **deferred — see note below** |
 | 6 | `sequel_canon` parity fixture | **deferred** (no Dataset to canonise) |

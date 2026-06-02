@@ -685,3 +685,9 @@ fn json_canon() {
 fn as_lite_canon() {
     run_fixture("as_lite_canon");
 }
+
+#[cfg(feature = "_sqlite")]
+#[test]
+fn sqlite_smoke() {
+    run_fixture("sqlite_smoke");
+}

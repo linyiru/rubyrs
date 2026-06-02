@@ -878,10 +878,14 @@ jobs:
     # (Sinatra now, JSON / ActiveSupport-lite / Sequel-lite next)
     # adds a row to this job's matrix, not the Test job's.
     #
-    # Smoke tier: ubuntu only, one Ruby version. Two fixtures so
-    # far: `hello_smoke` (stdlib-only Rack-shape, gates harness
-    # correctness) and `sinatra_hello` (18-route Sinatra matrix,
-    # gates the M27 menu's omakase Sinatra parity claim).
+    # Smoke tier: ubuntu only, one Ruby version. Fixtures gated
+    # here track the omakase menu (ADR 0026 v2): `hello_smoke`
+    # (stdlib-only Rack-shape, gates harness correctness),
+    # `sinatra_hello` (18-route matrix — menu #1), `json_smoke` +
+    # `json_canon` (menu #2), `as_lite_canon` (menu #3), and
+    # `sqlite_smoke` (menu #4 / ADR 0027 Phase 4). Each fixture is
+    # one ship gate, not a regression bench — perf lives in the
+    # standalone bench jobs.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -919,9 +923,19 @@ jobs:
         # diff_cruby gem-oracle below both diff the vendored canon
         # against this exact gem version. Keep the pin in lock-step
         # with the version stated in active_support_lite.rb's header.
+        #
+        # `sqlite3` is the menu-item-4 pin (ADR 0027 Phase 4): the
+        # `sqlite_smoke` diff_framework fixture diffs the rubyrs
+        # `_sqlite` battery (`require "rubyrs/sqlite"`, gated behind
+        # the `_sqlite` Cargo feature) against this CRuby gem's
+        # `SQLite3::Database` / `Statement` / `ConstraintException`
+        # surface. No explicit version pin — both runtimes link a
+        # bundled libsqlite3 (3.47.x family) so the SQL semantics are
+        # identical; only the Ruby-side gem façade matters here.
         run: |
           gem install webrick sinatra
           gem install activesupport -v 8.0.1
+          gem install sqlite3
 
       - name: Cache cargo registry + build
         uses: actions/cache@v5
@@ -962,7 +976,7 @@ jobs:
         # `--features default`.
         run: |
           cargo test --release \
-            --features default,stdlib,_http_server,_fiber,_json_native \
+            --features default,stdlib,_http_server,_fiber,_json_native,_sqlite \
             --test diff_framework \
             -- --nocapture
 
@@ -977,6 +991,6 @@ jobs:
         # `json_roundtrip` diffs the JSON canon against CRuby's stdlib.
         run: |
           cargo test --release \
-            --features default,stdlib,_http_server,_fiber,_json_native \
+            --features default,stdlib,_http_server,_fiber,_json_native,_sqlite \
             --test diff_cruby \
             -- --nocapture
