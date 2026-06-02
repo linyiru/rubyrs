@@ -138,9 +138,14 @@ impl Vm {
     /// same canonical-form normalization (gcd reduce, `den > 0`)
     /// on arbitrary-precision operands. Only available under
     /// `bignum`; Phase C.4.2+ callers (Integer#to_r with BigInt
-    /// receiver, Float#to_r, etc.) use this directly. ZeroDivision
-    /// must be checked by the caller — this entry assumes
-    /// `den != 0`.
+    /// receiver, Float#to_r, etc.) use this directly.
+    ///
+    /// `den == 0` → ZeroDivisionError. The guard is a real
+    /// runtime check (not just `debug_assert`) so release-build
+    /// callers that forget the precheck still surface as a Ruby
+    /// exception rather than silently constructing a malformed
+    /// `Rational(?, 0)` that later panics inside num-bigint's
+    /// division.
     #[cfg(feature = "bignum")]
     pub(crate) fn make_rational_bigint(
         &mut self,
@@ -150,7 +155,11 @@ impl Vm {
         use num_bigint::Sign;
         use num_integer::Integer;
         use num_traits::{One, Zero};
-        debug_assert!(!den.is_zero(), "make_rational_bigint: den == 0");
+        if den.is_zero() {
+            return Err(self.trap(RubyError::ZeroDivisionError {
+                msg: "divided by 0".to_string(),
+            }));
+        }
         if den.sign() == Sign::Minus {
             num = -num;
             den = -den;

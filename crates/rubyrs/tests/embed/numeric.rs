@@ -3290,6 +3290,14 @@ fn rational_phase_c4_2_bigint_to_r_and_kernel() {
         ("puts Rational(2, 2**64).inspect", "(1/9223372036854775808)"),
         // Rational(bn, bn) → canonical (1/1)
         ("puts Rational(2**100, 2**100).inspect", "(1/1)"),
+        // Kernel#Rational unwraps an integer-valued Rational arg
+        // whose num exceeds i64 — pre-C.4.2 the to_i64 path
+        // rejected this with TypeError; the BigInt path now passes
+        // the inner num through to make_rational_bigint.
+        (
+            "puts Rational(Rational(2**64, 1)).inspect",
+            "(18446744073709551616/1)",
+        ),
     ] {
         let buf = SharedBuf::new();
         rt.set_stdout(Box::new(buf.clone()));

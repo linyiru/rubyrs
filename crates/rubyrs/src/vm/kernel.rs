@@ -420,7 +420,7 @@ impl Vm {
                 #[cfg(feature = "bignum")]
                 {
                     use num_bigint::BigInt;
-                    use num_traits::{One, Zero};
+                    use num_traits::One;
                     let to_bigint = |v: &Value, heap: &crate::heap::Heap| -> Result<BigInt, RubyError> {
                         match v {
                             Value::Int(n) => Ok(BigInt::from(*n)),
@@ -452,11 +452,9 @@ impl Vm {
                     } else {
                         BigInt::one()
                     };
-                    if den.is_zero() {
-                        return Some(Err(self.trap(RubyError::ZeroDivisionError {
-                            msg: "divided by 0".to_string(),
-                        })));
-                    }
+                    // ZeroDivisionError on den == 0 is centralized in
+                    // `make_rational_bigint` (runtime-checked, not just
+                    // debug_assert) so callers don't need a parallel guard.
                     Some(self.make_rational_bigint(num, den))
                 }
                 #[cfg(not(feature = "bignum"))]
