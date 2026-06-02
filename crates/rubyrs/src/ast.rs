@@ -146,6 +146,13 @@ pub(crate) enum Expr {
     /// instead. ADR 0018 covers the BigInt placement.
     #[cfg(feature = "bignum")]
     BigIntLit(String),
+    /// Rational literal — `1/2r`, `0.5r`, `1000.0r`. Stored as a
+    /// canonical-form (signed) num / (positive) den decimal-string
+    /// pair so the compiler can intern + cache + emit through the
+    /// same SymId pipeline used by `BigIntLit`. Phase C.4.4 wires
+    /// this to a real `Value::Rational` at load time (replacing the
+    /// pre-C.4.4 lowering to `FloatLit(num / den)`).
+    RationalLit { num: String, den: String },
     InterpolatedStr(Vec<SExpr>),
     /// `/pre #{x} post/` — interpolated regex literal. Lowered
     /// like `InterpolatedStr` (concat all parts into a String via
@@ -726,42 +733,85 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             return sp(node, Expr::IntLit(v));
         }
     }
-    // Rational literal — `1000.0r`, `1/3r`, `0.5r`. CRuby keeps
-    // exact-fraction arithmetic via a real `Rational` class;
-    // the Tier 1 subset has no Rational type and treats every
-    // rational literal as the equivalent `Float` (numerator /
-    // denominator). This loses CRuby's exact-fraction semantics
-    // for irreducible fractions but lets gem helpers that use
-    // rational literals as plain numeric constants
-    // (`Time.at(sec, nsec / 1000.0r)` style scaling factors,
-    // msgpack-ruby `lib/msgpack/time.rb`'s Ruby-2.x divisor)
-    // load and operate to within Float precision. Exact
-    // Rational arithmetic is Tier 2 deferred work — documented
-    // in SUBSET.md.
+    // Rational literal — `1000.0r`, `1/3r`, `0.5r`. Phase C.4.4
+    // wires this to a real `Value::Rational` via the canonical-form
+    // num / den decimal-string pair. CRuby parity for class,
+    // arithmetic, and display (`1000.0r.class == Rational`,
+    // `(1/3r) + (1/6r) == (1/2r)`, etc.). Pre-C.4.4 lowered to
+    // `FloatLit(num / den)` — see the `feat/rational-c4-3-...`
+    // PR series for the BigInt-backed `RationalRepr` machinery
+    // this op relies on at the VM side.
+    //
+    // Under `bignum`, both num and den are arbitrary-precision
+    // BigInt (via `num_bigint::BigInt::from_slice` on Prism's
+    // LSB-first u32 digits, then gcd-reduced + sign-normalized
+    // here so the canonical decimal strings hit the cache cleanly).
+    // Without `bignum`, the literal must fit i64 — `LoadRational`
+    // raises RangeError at load time if the parsed value overflows.
     if let Some(n) = node.as_rational_node() {
-        let to_f64 = |int_value: ruby_prism::Integer<'_>| -> f64 {
-            let (negative, digits) = int_value.to_u32_digits();
-            // Accumulate into f64 directly so the result is
-            // representable even when the magnitude exceeds
-            // i64 (rare for rational literals — Prism keeps the
-            // numerator / denominator small for source-level
-            // literals like `1000.0r`, but the path stays well-
-            // defined for `999999999999999999r/3r`-class
-            // edge cases via f64 saturation to infinity).
-            let mut mag = 0.0_f64;
-            for (i, d) in digits.iter().enumerate() {
-                mag += (*d as f64) * 2f64.powi((i as i32) * 32);
+        #[cfg(feature = "bignum")]
+        {
+            use num_bigint::{BigInt, Sign};
+            use num_integer::Integer;
+            use num_traits::One;
+            let to_bigint = |int_value: ruby_prism::Integer<'_>| -> BigInt {
+                let (negative, digits) = int_value.to_u32_digits();
+                let sign = if negative { Sign::Minus } else { Sign::Plus };
+                BigInt::from_slice(sign, digits)
+            };
+            let mut num = to_bigint(n.numerator());
+            let mut den = to_bigint(n.denominator());
+            // Prism rejects `/0r` at lex time; this guard is
+            // defensive against a future Prism build relaxing
+            // the rule. ZeroDivisionError emerges at load time.
+            if den.sign() != Sign::NoSign {
+                if den.sign() == Sign::Minus {
+                    num = -num;
+                    den = -den;
+                }
+                let g = num.gcd(&den);
+                if !g.is_one() {
+                    num /= &g;
+                    den /= &g;
+                }
             }
-            if negative { -mag } else { mag }
-        };
-        let num = to_f64(n.numerator());
-        let den = to_f64(n.denominator());
-        // Prism guarantees a non-zero denominator for rational
-        // literals (the lexer rejects `/0r`), so the division
-        // is safe — but if a future Prism build relaxes that we
-        // still produce a finite value: `0.0 / 0.0 = NaN` flows
-        // through Float arithmetic without panic.
-        return sp(node, Expr::FloatLit(num / den));
+            return sp(node, Expr::RationalLit {
+                num: num.to_string(),
+                den: den.to_string(),
+            });
+        }
+        #[cfg(not(feature = "bignum"))]
+        {
+            // No-bignum path: convert each Prism integer to a u128
+            // accumulator, then format as a signed decimal. No
+            // gcd-reduction here — VM-side `make_rational` does it
+            // at load time. Components beyond u128 substitute a
+            // `u128::MAX` sentinel so `LoadRational` reliably raises
+            // RangeError (the i64 parse fails on the sentinel value).
+            // The emitted decimal text matches the original literal
+            // for any source-realistic magnitude; only the rare
+            // > u128 case diverges.
+            let signed_str = |int_value: ruby_prism::Integer<'_>| -> String {
+                let (negative, digits) = int_value.to_u32_digits();
+                let mut mag: u128 = 0;
+                for (i, d) in digits.iter().enumerate() {
+                    if i < 4 {
+                        mag |= (*d as u128) << (i * 32);
+                    } else {
+                        // Overflow past u128 — write a sentinel
+                        // that won't fit i64 so LoadRational
+                        // raises RangeError cleanly.
+                        mag = u128::MAX;
+                        break;
+                    }
+                }
+                if negative { format!("-{}", mag) } else { mag.to_string() }
+            };
+            return sp(node, Expr::RationalLit {
+                num: signed_str(n.numerator()),
+                den: signed_str(n.denominator()),
+            });
+        }
     }
     if let Some(n) = node.as_float_node() {
         return sp(node, Expr::FloatLit(n.value()));

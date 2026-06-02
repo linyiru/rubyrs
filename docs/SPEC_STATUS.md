@@ -12,8 +12,8 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 157 |
-| Examples in corpus | 1017 |
+| Files | 159 |
+| Examples in corpus | 1030 |
 | Skipped `it` traces | 155 |
 
 ### Skipped traces by category
@@ -47,7 +47,7 @@ Find blocks unlocked by a future feature with e.g.
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
 | Range | 2 | 30 | 0 |
-| Rational | 4 | 20 | 0 |
+| Rational | 6 | 33 | 0 |
 | String | 24 | 165 | 24 |
 | UnboundMethod | 4 | 18 | 0 |
 
@@ -180,6 +180,8 @@ Find blocks unlocked by a future feature with e.g.
 | `range_each_slice_spec.rb` | Range#each_slice | `core/range/each_slice_spec.rb / each_cons_spec.rb (Enumerable-inherited behaviour)` | 20 | 0 |
 | `rational_denominator_spec.rb` | Rational#denominator | `core/rational/denominator_spec.rb` | 3 | 0 |
 | `rational_equal_value_spec.rb` | Rational#== when given a Rational | `core/rational/equal_value_spec.rb (Rational#==)` | 7 | 0 |
+| `rational_exponent_spec.rb` | Rational#** | `core/rational/exponent_spec.rb` | 7 | 0 |
+| `rational_literal_spec.rb` | Rational literal | `language/literal/numeric_spec.rb` | 6 | 0 |
 | `rational_numerator_spec.rb` | Rational#numerator | `core/rational/numerator_spec.rb` | 3 | 0 |
 | `rational_plus_spec.rb` | Rational#+ when given a Rational | `core/rational/plus_spec.rb` | 7 | 0 |
 | `singleton_method_spec.rb` | def obj.name | `core/basicobject/singleton_method_spec.rb + core/kernel/define_singleton_method_spec.rb` | 7 | 0 |

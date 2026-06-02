@@ -461,6 +461,289 @@ impl Vm {
         }
     }
 
+    /// `Rational#**(exp)` — phase C.4.4 power dispatch.
+    ///
+    /// Integer exp (Int / BigInt) keeps the result exact:
+    ///   `Rational(num, den) ** k` → `Rational(num^k, den^k)` for k>0,
+    ///   the reciprocal for k<0, and `Rational(1, 1)` for k==0.
+    ///   `Rational(0, 1) ** k` with k<0 raises ZeroDivisionError.
+    /// Float / Rational exp demotes the receiver to f64 and uses
+    /// `f64::powf`, matching CRuby's `Rational#**` Float fallback.
+    /// Non-Numeric exp → TypeError.
+    pub(crate) fn rational_pow(&mut self, recv: &Value, exp: &Value) -> Result<Value, Trap> {
+        let r_id = match recv {
+            Value::Rational(id) => *id,
+            _ => unreachable!("rational_pow called on non-Rational receiver"),
+        };
+        // Integer exponent (fast / exact path). BigInt exponents
+        // STAY integer-typed even when they don't fit i64 — they
+        // can't be silently demoted to Float because the
+        // 0**negative → ZeroDivisionError invariant and the BigInt
+        // cap (|k| ≤ 2^16) would be bypassed by `0.0_f64.powf(-big)`
+        // returning Infinity instead of trapping.
+        if let Value::Int(n) = exp {
+            return self.rational_pow_int(r_id, *n);
+        }
+        #[cfg(feature = "bignum")]
+        if let Value::BigInt(id) = exp {
+            // Capture exp metadata into owned scalars / i64 result
+            // up-front so the `&BigInt` borrow doesn't conflict with
+            // the subsequent `&mut self` calls below.
+            use num_bigint::Sign;
+            use num_traits::Zero;
+            let (exp_negative, exp_is_odd, exp_fits_i64) = {
+                let exp_big = self.heap.bigint(*id);
+                (
+                    exp_big.sign() == Sign::Minus,
+                    exp_big.bit(0),
+                    i64::try_from(exp_big).ok(),
+                )
+            };
+            // Zero base + negative exp is always ZeroDivisionError —
+            // surface here so a huge BigInt negative exp doesn't
+            // escape into the cap path.
+            if exp_negative && self.heap.rational(r_id).num.is_zero() {
+                return Err(self.trap(RubyError::ZeroDivisionError {
+                    msg: "divided by 0".to_string(),
+                }));
+            }
+            // Unit bases (0/1, 1/1, -1/1) are exactly representable
+            // for any integer exponent without touching BigInt::pow,
+            // so the 2^16 cap shouldn't gate them. Short-circuit
+            // BEFORE the i64-fit conversion below.
+            if let Some(v) = self.try_unit_base_pow(r_id, exp_is_odd)? {
+                return Ok(v);
+            }
+            // Fits i64 → exact path. Otherwise the magnitude is
+            // necessarily above the |k| ≤ 2^16 cap inside
+            // `rational_pow_int`, so surface the same RangeError
+            // up-front rather than letting it slip into Float.
+            if let Some(k) = exp_fits_i64 {
+                return self.rational_pow_int(r_id, k);
+            }
+            return Err(self.trap(RubyError::RangeError {
+                msg: "Rational#** exponent magnitude exceeds 2^16 cap".to_string(),
+            }));
+        }
+        // Float / Rational exp:
+        //   1. Integer-valued exp (Float.fract() == 0.0 within i64 range;
+        //      Rational with den == 1) routes through the exact integer
+        //      path so `Rational(2,1) ** Rational(3,1)` returns `(8/1)`
+        //      and `Rational(2,1) ** 3.0` returns `(8/1)`, matching CRuby
+        //      (which promotes integer-valued non-Integer exps to the
+        //      integer power algorithm).
+        //   2. Otherwise demote to Float. Pre-demote, guard zero-base +
+        //      negative exp so `Rational(0,1) ** -0.5` raises
+        //      ZeroDivisionError rather than `0.0.powf(-0.5) == Infinity`
+        //      (same invariant the BigInt-exp branch above enforces).
+        if let Some(k) = integer_valued_exp(exp, &self.heap) {
+            return self.rational_pow_int(r_id, k);
+        }
+        let exp_f: Option<f64> = match exp {
+            Value::Float(g) => Some(*g),
+            Value::Rational(eid) => Some(crate::heap::rational_to_f64(self.heap.rational(*eid))),
+            _ => None,
+        };
+        if let Some(g) = exp_f {
+            // Zero base + negative non-integer exp → ZeroDivisionError
+            // (matches CRuby; mirrors the BigInt-exp guard above).
+            #[cfg(feature = "bignum")]
+            let recv_num_is_zero = {
+                use num_traits::Zero;
+                self.heap.rational(r_id).num.is_zero()
+            };
+            #[cfg(not(feature = "bignum"))]
+            let recv_num_is_zero = self.heap.rational(r_id).num == 0;
+            if recv_num_is_zero && g < 0.0 {
+                return Err(self.trap(RubyError::ZeroDivisionError {
+                    msg: "divided by 0".to_string(),
+                }));
+            }
+            let base_f = crate::heap::rational_to_f64(self.heap.rational(r_id));
+            return Ok(Value::Float(base_f.powf(g)));
+        }
+        Err(self.trap(RubyError::TypeError {
+            msg: format!(
+                "{} can't be coerced into Rational",
+                crate::vm::numeric::type_name_for_coerce(exp),
+            ),
+        }))
+    }
+
+    /// Return `Some(unit_pow_result)` when the Rational at `r_id`
+    /// is a unit base (0/1, 1/1, or -1/1) — these are exactly
+    /// representable for any integer exponent without `BigInt::pow`
+    /// or `checked_pow`. Returns `None` for non-unit bases so the
+    /// caller proceeds with the regular pow path. `ak_is_odd` is
+    /// the parity of `|k|` and only matters for the -1/1 case.
+    ///
+    /// Bignum-gated because the no-bignum tier inlines the same
+    /// short-circuit at its single call site (the i64 RationalRepr
+    /// makes the unit-base match trivial without a helper).
+    #[cfg(feature = "bignum")]
+    fn try_unit_base_pow(
+        &mut self,
+        r_id: ObjId,
+        ak_is_odd: bool,
+    ) -> Result<Option<Value>, Trap> {
+        use num_bigint::BigInt;
+        use num_traits::{One, Zero};
+        let (is_zero, is_one, is_neg_one) = {
+            let r = self.heap.rational(r_id);
+            if !r.den.is_one() {
+                return Ok(None);
+            }
+            (
+                r.num.is_zero(),
+                r.num.is_one(),
+                r.num == BigInt::from(-1),
+            )
+        };
+        if is_zero {
+            // k must be > 0 here (caller traps 0**negative upstream).
+            return Ok(Some(self.make_rational(0, 1)?));
+        }
+        if is_one {
+            return Ok(Some(self.make_rational(1, 1)?));
+        }
+        if is_neg_one {
+            let signed = if ak_is_odd { -1 } else { 1 };
+            return Ok(Some(self.make_rational(signed, 1)?));
+        }
+        Ok(None)
+    }
+
+    /// Integer-exponent power for Rational. Splits bignum and
+    /// no-bignum so `BigInt::pow(u32)` is only required on the
+    /// bignum tier — no-bignum uses `i64::checked_pow`.
+    fn rational_pow_int(&mut self, r_id: ObjId, k: i64) -> Result<Value, Trap> {
+        #[cfg(feature = "bignum")]
+        {
+            use num_bigint::BigInt;
+            use num_traits::{One, Zero};
+            if k == 0 {
+                return self.make_rational(1, 1);
+            }
+            // 0 base + negative exp is always ZeroDivisionError —
+            // check BEFORE the cap so `(0/1r) ** -70000` returns
+            // the right error class (the cap would otherwise mask
+            // it as RangeError).
+            if k < 0 && self.heap.rational(r_id).num.is_zero() {
+                return Err(self.trap(RubyError::ZeroDivisionError {
+                    msg: "divided by 0".to_string(),
+                }));
+            }
+            // Unit bases (0/1, 1/1, -1/1) are exactly representable
+            // for any integer exponent without touching BigInt::pow,
+            // so the 2^16 cap shouldn't gate them either. Same fix
+            // structure as the no-bignum path's u32::try_from fence.
+            let ak = k.unsigned_abs();
+            if let Some(v) = self.try_unit_base_pow(r_id, ak % 2 == 1)? {
+                return Ok(v);
+            }
+            // Cap |k| so a pathological non-unit literal can't drive
+            // BigInt pow into multi-GB allocations. 2^16 is well
+            // above anything a sane source uses but small enough that
+            // the worst-case result (limit ≈ 2^(53*65536) bytes) is
+            // still memory-bounded by the host's existing alloc
+            // guard. Matches the spirit of the bignum_primitive pow
+            // cap in vm/bignum.rs.
+            if ak > 65536 {
+                return Err(self.trap(RubyError::RangeError {
+                    msg: "Rational#** exponent magnitude exceeds 2^16 cap".to_string(),
+                }));
+            }
+            let ak_u32 = ak as u32;
+            // Borrow the heap Rational just long enough to compute
+            // new_num / new_den via `BigInt::pow(&self, u32)` (which
+            // only needs `&BigInt`). Avoids cloning r.num / r.den
+            // up-front when the existing `&BigInt` borrows suffice.
+            // Drop the borrow before the subsequent `&mut self` calls.
+            let (new_num, new_den) = {
+                let r = self.heap.rational(r_id);
+                (r.num.pow(ak_u32), r.den.pow(ak_u32))
+            };
+            // The caller-side canonical form was already coprime
+            // and den-positive; integer pow preserves both, but
+            // make_rational_bigint re-normalizes defensively (the
+            // gcd ends up being 1 so the work is cheap).
+            if k > 0 {
+                self.make_rational_bigint(new_num, new_den)
+            } else {
+                // k < 0 → reciprocal. Sign of num flows to the new
+                // numerator; absolute swap goes through
+                // make_rational_bigint's sign-normalization so
+                // `den > 0` stays canonical.
+                if new_num.sign() == num_bigint::Sign::Minus {
+                    // `new_num` consumed by the negation; no further
+                    // use, so move rather than clone.
+                    self.make_rational_bigint(-new_den, -new_num)
+                } else if new_num.is_one() {
+                    self.make_rational_bigint(new_den, BigInt::one())
+                } else {
+                    self.make_rational_bigint(new_den, new_num)
+                }
+            }
+        }
+        #[cfg(not(feature = "bignum"))]
+        {
+            let r = *self.heap.rational(r_id);
+            if k == 0 {
+                return self.make_rational(1, 1);
+            }
+            if r.num == 0 && k < 0 {
+                return Err(self.trap(RubyError::ZeroDivisionError {
+                    msg: "divided by 0".to_string(),
+                }));
+            }
+            let ak = k.unsigned_abs();
+            // Unit bases (0 / ±1) are exactly representable for any
+            // integer exponent without touching `checked_pow` — so
+            // short-circuit BEFORE the u32 conversion fence below.
+            // Otherwise `(1/1r) ** 10**18` would trip the u32::try_from
+            // even though the result is just (1/1). `(0/1r) ** k` with
+            // k > 0 is 0 (k < 0 was already trapped above).
+            if r.den == 1 {
+                match r.num {
+                    0 => return self.make_rational(0, 1),
+                    1 => return self.make_rational(1, 1),
+                    -1 => {
+                        let signed = if ak % 2 == 0 { 1 } else { -1 };
+                        return self.make_rational(signed, 1);
+                    }
+                    _ => {}
+                }
+            }
+            // u32 is `checked_pow`'s exponent type. Anything beyond
+            // overflows for any base other than the unit bases handled
+            // above; real overflow detection is delegated to
+            // `checked_pow` so base-specific stability (e.g.
+            // `(1/2r) ** 60`) succeeds where a naïve `ak > 62` cap
+            // would have rejected it.
+            let ak_u32 = u32::try_from(ak).map_err(|_| {
+                self.trap(RubyError::RangeError {
+                    msg: "Rational#** exponent magnitude exceeds u32 (rebuild with --features bignum)".to_string(),
+                })
+            })?;
+            let new_num = r.num.checked_pow(ak_u32).ok_or_else(|| {
+                self.trap(RubyError::RangeError {
+                    msg: "Rational#** numerator overflows i64 (rebuild with --features bignum)".to_string(),
+                })
+            })?;
+            let new_den = r.den.checked_pow(ak_u32).ok_or_else(|| {
+                self.trap(RubyError::RangeError {
+                    msg: "Rational#** denominator overflows i64 (rebuild with --features bignum)".to_string(),
+                })
+            })?;
+            if k > 0 {
+                self.make_rational(new_num, new_den)
+            } else {
+                // reciprocal — make_rational sign-normalizes.
+                self.make_rational(new_den, new_num)
+            }
+        }
+    }
+
     /// `try_rational_binop` — the `Op::BinOp` arm for Rational
     /// operands. Called between `try_bigint_binop` and
     /// `primitive_call`, so by the time we get here neither side
@@ -6082,6 +6365,71 @@ impl Vm {
             #[cfg(not(feature = "bignum"))]
             { matches!(&recv, Value::Int(_)) }
         };
+        // Phase C.4.4 — `Integer ** Rational` and `Float ** Rational`.
+        // Lives here (not at the Int / Float arms inside numeric.rs /
+        // primitive_call) because those surfaces don't see Rational
+        // args natively. Same shape as the Rational#** dispatch in
+        // `rational_pow`:
+        //   - Integer-valued Rational exp (`den == 1`, num fits i64)
+        //     → delegate to `numeric_call` with an Int arg so the
+        //     existing Int#** / Float#** paths fire (preserves type
+        //     tag: `2 ** Rational(3, 1) == 8` rather than `8.0`).
+        //   - Otherwise demote to Float. Pre-demote, guard
+        //     `recv == 0 && exp < 0` → ZeroDivisionError so
+        //     `0 ** Rational(-1, 2)` matches CRuby rather than
+        //     returning `0.0_f64.powf(-0.5) == Infinity`.
+        if (recv_is_integer || matches!(&recv, Value::Float(_)))
+            && &*name == "**"
+            && args.len() == 1
+            && matches!(&args[0], Value::Rational(_))
+        {
+            if let Some(k) = integer_valued_exp(&args[0], &self.heap) {
+                let delegated = crate::vm::numeric::numeric_call(
+                    &recv, "**", &[Value::Int(k)], None,
+                )
+                .map_err(|e| self.trap(e))?;
+                if let Some(v) = delegated {
+                    self.stack.push(v);
+                    return Ok(());
+                }
+                // numeric_call returning None for `Int/Float ** Int`
+                // would be a primitive coverage gap; fall through to
+                // the Float-demote path so the caller still gets a
+                // sensible answer.
+            }
+            let base_f = match &recv {
+                Value::Int(n) => *n as f64,
+                #[cfg(feature = "bignum")]
+                Value::BigInt(id) => {
+                    crate::vm::bignum::bigint_to_f64_sign_preserving(self.heap.bigint(*id))
+                }
+                Value::Float(g) => *g,
+                _ => unreachable!("guarded above"),
+            };
+            let exp_f = match &args[0] {
+                Value::Rational(id) => crate::heap::rational_to_f64(self.heap.rational(*id)),
+                _ => unreachable!("guarded above"),
+            };
+            // Zero base + negative non-integer exp → ZeroDivisionError
+            // (matches CRuby; mirrors the rational_pow guard above).
+            let recv_is_zero = match &recv {
+                Value::Int(0) => true,
+                Value::Float(g) => *g == 0.0,
+                #[cfg(feature = "bignum")]
+                Value::BigInt(id) => {
+                    use num_traits::Zero;
+                    self.heap.bigint(*id).is_zero()
+                }
+                _ => false,
+            };
+            if recv_is_zero && exp_f < 0.0 {
+                return Err(self.trap(RubyError::ZeroDivisionError {
+                    msg: "divided by 0".to_string(),
+                }));
+            }
+            self.stack.push(Value::Float(base_f.powf(exp_f)));
+            return Ok(());
+        }
         if recv_is_integer && &*name == "divmod" {
             if args.len() != 1 {
                 return Err(self.trap(RubyError::ArgumentError {
@@ -7638,6 +7986,18 @@ impl Vm {
                 // Routing `r.send(:==, x)` through this arm would
                 // be dead code because it's shadowed by the
                 // universal dispatch.
+                // Phase C.4.4 — `Rational#**` lives in this arm
+                // (not via `try_rational_binop` because `**` isn't
+                // in `BinOpKind` — power is method-dispatched, not
+                // BinOp-opcoded). Integer exp uses `BigInt::pow` on
+                // num and den; non-integer exp (Float / Rational)
+                // demotes to Float (CRuby parity — exact-exponent
+                // Rational pow only stays Rational for integer exp).
+                ("**", 1) => {
+                    let v = self.rational_pow(&recv, &args[0])?;
+                    self.stack.push(v);
+                    return Ok(());
+                }
                 ("+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=", 1) => {
                     let kind = crate::bytecode::BinOpKind::from_op_name(&name)
                         .expect("name matched above");
@@ -7700,7 +8060,7 @@ impl Vm {
                     return Ok(());
                 }
                 // Arity guard for the binary operators.
-                ("+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" | "<=>", _) => {
+                ("+" | "-" | "*" | "/" | "**" | "<" | "<=" | ">" | ">=" | "<=>", _) => {
                     return Err(self.trap(RubyError::ArgumentError {
                         msg: format!(
                             "wrong number of arguments (given {}, expected 1)",
@@ -11153,6 +11513,46 @@ fn scramble_ptr(ptr: usize) -> u64 {
     
     
     rs.hash_one(ptr)
+}
+
+/// Return `Some(k)` when `exp` represents an integer value that fits
+/// `i64`, otherwise `None`. Used by `Rational#**` and the
+/// `Int/Float ** Rational` intercept to promote integer-valued Float /
+/// Rational exponents back to the exact integer-power path (CRuby
+/// parity — `2 ** Rational(3, 1)` returns Integer 8, not Float 8.0).
+///
+/// For `Value::Float`, `g.fract() == 0.0` AND `g` is within the i64
+/// representable range. NaN / ±Inf return `None` and let the caller's
+/// Float fallback handle them. For `Value::Rational`, `den == 1` AND
+/// `num` fits i64. Int / BigInt are not Float-fallback inputs and
+/// thus never reach this helper.
+fn integer_valued_exp(exp: &Value, heap: &crate::heap::Heap) -> Option<i64> {
+    match exp {
+        Value::Float(g) => {
+            if !g.is_finite() { return None; }
+            if g.fract() != 0.0 { return None; }
+            // Bracket against i64 limits — `g as i64` saturates on
+            // out-of-range f64 (i64::MAX or i64::MIN), but the caller
+            // wants None there so it falls back to Float pow.
+            if *g < i64::MIN as f64 || *g > i64::MAX as f64 { return None; }
+            Some(*g as i64)
+        }
+        Value::Rational(eid) => {
+            let r = heap.rational(*eid);
+            #[cfg(feature = "bignum")]
+            {
+                use num_traits::One;
+                if !r.den.is_one() { return None; }
+                i64::try_from(&r.num).ok()
+            }
+            #[cfg(not(feature = "bignum"))]
+            {
+                if r.den != 1 { return None; }
+                Some(r.num)
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Convert a finite `f64` to its lossless `(num, den)` Rational pair

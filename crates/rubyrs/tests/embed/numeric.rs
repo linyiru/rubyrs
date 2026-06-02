@@ -3263,6 +3263,131 @@ fn rational_phase_c4_1_bigint_widening() {
 
 #[test]
 #[cfg(feature = "bignum")]
+fn rational_phase_c4_4_literal_and_pow() {
+    // Phase C.4.4 — `1/2r` Rational literal + `Rational#**`.
+    // Literal lowering replaces the pre-C.4.4 lowering-to-FloatLit
+    // hack (see ast.rs); `**` adds the exact-integer-exp path on
+    // top of `Rational#+/-/*/<=>`, with Float fallback for
+    // non-integer exp. Cross-type Int/Float ** Rational also
+    // demotes to Float, matching CRuby's `2 ** Rational(1, 2)`.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        // Literal — class + value.
+        ("puts (1/2r).inspect", "(1/2)"),
+        ("puts (1/2r).class", "Rational"),
+        ("puts (1000.0r).inspect", "(1000/1)"),
+        ("puts (1000.0r).class", "Rational"),
+        ("puts (0.5r).inspect", "(1/2)"),
+        ("puts (-1/2r).inspect", "(-1/2)"),
+        ("puts (3/9r).inspect", "(1/3)"),  // gcd-reduced at parse
+        // Literal arithmetic.
+        ("puts ((1/2r) + (1/3r)).inspect", "(5/6)"),
+        ("puts ((1/2r) * 4).inspect", "(2/1)"),
+        // Rational#** — integer exp, exact path.
+        ("puts ((1/2r) ** 3).inspect", "(1/8)"),
+        ("puts ((1/2r) ** 0).inspect", "(1/1)"),
+        ("puts ((1/2r) ** -2).inspect", "(4/1)"),
+        ("puts ((3/4r) ** 2).inspect", "(9/16)"),
+        ("puts ((-1/2r) ** 3).inspect", "(-1/8)"),
+        ("puts ((-1/2r) ** 2).inspect", "(1/4)"),
+        // Rational#** — non-integer exp falls back to Float.
+        ("puts ((1/2r) ** 0.5).inspect", "0.7071067811865476"),
+        ("puts ((2/1r) ** (1/2r)).inspect", "1.4142135623730951"),
+        // Int ** Rational and Float ** Rational — Float fallback.
+        ("puts (2 ** (1/2r)).inspect", "1.4142135623730951"),
+        ("puts (2.0 ** (1/2r)).inspect", "1.4142135623730951"),
+        // /code-review fix: integer-valued non-Integer exponent
+        // preserves the exact type (CRuby parity). Pre-fix these
+        // returned Float (`8.0`, `8.0`, `(8/1).to_f`).
+        ("puts (2 ** Rational(3, 1)).inspect", "8"),
+        ("puts (2 ** Rational(3, 1)).class", "Integer"),
+        ("puts (Rational(2, 1) ** Rational(3, 1)).inspect", "(8/1)"),
+        ("puts (Rational(2, 1) ** 3.0).inspect", "(8/1)"),
+        ("puts ((1/2r) ** 2.0).inspect", "(1/4)"),
+        // respond_to? on Rational#**.
+        ("puts (1/2r).respond_to?(:**)", "true"),
+        // Unit base + large exponent regressions. Both tiers
+        // short-circuit 0/1, 1/1, -1/1 bases BEFORE their respective
+        // cap checks (Copilot cycles 1+3 for no-bignum, cycle 5 for
+        // bignum) — these cases should NOT trip RangeError.
+        ("puts ((1/1r) ** 1000).inspect", "(1/1)"),
+        ("puts ((-1/1r) ** 1001).inspect", "(-1/1)"),
+        // Bignum: exponent > 2^16 cap doesn't gate unit bases.
+        ("puts ((1/1r) ** 70000).inspect", "(1/1)"),
+        ("puts ((0/1r) ** 70000).inspect", "(0/1)"),
+        ("puts ((-1/1r) ** 70001).inspect", "(-1/1)"),
+        // Bignum: BigInt exponent that doesn't fit i64 still
+        // handles unit bases without tripping the cap RangeError.
+        ("puts ((1/1r) ** (2**100)).inspect", "(1/1)"),
+        ("puts ((0/1r) ** (2**100)).inspect", "(0/1)"),
+        ("puts ((-1/1r) ** (2**100)).inspect", "(1/1)"),
+        ("puts ((-1/1r) ** (2**100 + 1)).inspect", "(-1/1)"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "rational_c44.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // Errors — ZeroDivisionError on 0 ** negative; TypeError on
+    // non-Numeric exp.
+    for (script, expected_class, expected_msg) in [
+        ("(0/1r) ** -1", "ZeroDivisionError", "divided by 0"),
+        ("(0/1r) ** -3", "ZeroDivisionError", "divided by 0"),
+        // /code-review fix: 0 base + negative non-integer exponent
+        // raises ZeroDivisionError (NOT `0.0_f64.powf(-0.5) ==
+        // Infinity` that the pre-fix Float-fallback would silently
+        // return). Covers Rational#** Float/Rational exp path AND
+        // the Int/Float ** Rational intercept.
+        ("Rational(0, 1) ** Rational(-1, 2)", "ZeroDivisionError", "divided by 0"),
+        ("Rational(0, 1) ** -0.5", "ZeroDivisionError", "divided by 0"),
+        ("0 ** Rational(-1, 2)", "ZeroDivisionError", "divided by 0"),
+        ("0.0 ** Rational(-1, 2)", "ZeroDivisionError", "divided by 0"),
+        // 0**negative with huge exponent must raise ZeroDivisionError
+        // (NOT the 2^16 cap RangeError). Copilot cycle 5 caught the
+        // ordering bug — zero check was AFTER the cap.
+        ("(0/1r) ** -70000", "ZeroDivisionError", "divided by 0"),
+        // BigInt exp on zero base — must stay integer-typed and
+        // raise ZeroDivisionError, NOT silently demote to Float
+        // (Float-pow of `0.0_f64.powf(-Infinity)` is `Infinity`).
+        // Copilot caught this on PR #343 cycle 2.
+        ("Rational(0, 1) ** -(2**100)", "ZeroDivisionError", "divided by 0"),
+        // BigInt exp on non-zero base — magnitude above the 2^16
+        // cap surfaces as RangeError, NOT Float saturation to
+        // ±Infinity.
+        (
+            "Rational(2, 1) ** (2**100)",
+            "RangeError",
+            "Rational#** exponent magnitude exceeds 2^16 cap",
+        ),
+        (
+            "Rational(1, 2) ** -(2**100)",
+            "RangeError",
+            "Rational#** exponent magnitude exceeds 2^16 cap",
+        ),
+        (
+            "(1/2r) ** \"x\"",
+            "TypeError",
+            "String can't be coerced into Rational",
+        ),
+        (
+            "(1/2r) ** :sym",
+            "TypeError",
+            "Symbol can't be coerced into Rational",
+        ),
+    ] {
+        let err = rt.eval(script, "rational_c44_err.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "bignum")]
 fn rational_phase_c4_3_float_to_r_and_rationalize() {
     // Phase C.4.3 — Float#to_r (lossless IEEE-754 decomposition),
     // Float#rationalize(eps) (Stern-Brocot mediant search), bare
@@ -3414,6 +3539,48 @@ fn rational_phase_c4_2_bigint_to_r_and_kernel() {
             assert_eq!(class_name, "ZeroDivisionError");
         }
         ref other => panic!("expected ZeroDivisionError, got {:?}", other),
+    }
+}
+
+#[test]
+#[cfg(not(feature = "bignum"))]
+fn rational_phase_c4_4_pow_no_overflow_for_unit_bases() {
+    // Phase C.4.4 — regression for the Copilot-flagged no-bignum
+    // overflow shortcut. Bases of ±1 / 0 stay representable for
+    // any integer exponent; pre-fix the `ak > 62` cap rejected
+    // these with RangeError. Now `checked_pow` decides, and
+    // `1_i64.checked_pow(1000) == Some(1)` so the call succeeds.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        ("puts ((1/1r) ** 1000).inspect", "(1/1)"),
+        ("puts ((-1/1r) ** 1000).inspect", "(1/1)"),
+        ("puts ((-1/1r) ** 1001).inspect", "(-1/1)"),
+        // Unit bases with exponent magnitude > u32::MAX (~4.3e9).
+        // Pre-Copilot-cycle-2 these tripped the `u32::try_from`
+        // conversion fence with RangeError; the fix short-circuits
+        // 0 / ±1 bases before the fence so any integer exponent
+        // works for them.
+        ("puts ((1/1r) ** (10**18)).inspect", "(1/1)"),
+        ("puts ((0/1r) ** (10**18)).inspect", "(0/1)"),
+        ("puts ((-1/1r) ** (10**18)).inspect", "(1/1)"),
+        ("puts ((-1/1r) ** (10**18 + 1)).inspect", "(-1/1)"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "rational_c44_nb.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // Real overflow still surfaces — `(2/1r) ** 100` doesn't fit
+    // i64. Pin the error class so a future cap revert doesn't
+    // silently change this path.
+    let err = rt
+        .eval("(2/1r) ** 100", "rational_c44_nb_err.rb")
+        .unwrap_err();
+    match err.err {
+        rubyrs::RubyError::Uncaught { ref class_name, .. } => {
+            assert_eq!(class_name, "RangeError");
+        }
+        ref other => panic!("expected RangeError, got {:?}", other),
     }
 }
 

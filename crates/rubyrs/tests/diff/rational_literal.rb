@@ -1,24 +1,20 @@
-# Rational literals (`0.5r`, `1/3r`, `1000.0r`) — the Prism
-# `RationalNode` AST shape that previously raised
-# `unsupported node: RationalNode` at parse time, blocking
-# any gem helper that uses rational literals as numeric
-# constants. Tier 1 maps each rational to its Float
-# equivalent (numerator / denominator); exact-fraction
-# arithmetic is Tier 2 deferred.
+# Rational literals (`0.5r`, `1/3r`, `1000.0r`) — Phase C.4.4
+# wires `RationalNode` to a real `Value::Rational` (replacing
+# the pre-C.4.4 lowering-to-Float hack). Both `class` and
+# arithmetic now match CRuby exactly. This fixture stays in
+# place as a regression guard against the old Float-lowering
+# behavior creeping back: each line is byte-stable across
+# CRuby and rubyrs because either (a) an explicit `.to_f`
+# coerces the Rational to Float for display, or (b) a Float
+# operand on the other side of the expression promotes the
+# result to Float (e.g. `1000.0r * 1.0`). Pure Rational ×
+# Rational paths now stay Rational on both sides — the fixture
+# avoids displaying those directly to keep the output stable.
 #
-# Documented divergence from CRuby (intentional, NOT
-# asserted here):
-#   - `1000.0r.class` → Float in rubyrs vs Rational in CRuby
-#   - `1000.0r.inspect` / `.to_s` → "1000.0" in rubyrs vs
-#     "1000/1" in CRuby
-# The fixture exercises numeric value (which agrees to Float
-# precision) while staying off the display / class paths.
-#
-# Real-world payoff: msgpack-ruby `lib/msgpack/time.rb` uses
-# `nsec / 1000.0r` for Ruby-2.x compatibility; pre-fix
-# rubyrs rejected the source entirely at parse, post-fix
-# the file parses cleanly (still trips later on `Time.at(...)`
-# which is Tier 2 work).
+# See `crates/rubyrs/spec/ruby/rational_literal_spec.rb` for the
+# class / numerator / denominator assertions and
+# `crates/rubyrs/tests/embed/numeric.rs::rational_phase_c4_4_literal_and_pow`
+# for the embed surface.
 
 # Numeric value of integer-magnitude rationals.
 puts 1000.0r * 1.0          # 1000.0
