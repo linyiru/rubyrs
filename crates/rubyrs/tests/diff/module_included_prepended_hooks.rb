@@ -96,9 +96,17 @@ class F
 end
 puts F.ancestors[1] == MF1            # true — MF1 ends up at the head
 
-# (8) include + prepend on the same module — both succeed, both
-# hooks fire. Per-chain idempotency means the include slot and
-# the prepend slot are distinct insertions.
+# (8) include + prepend on the same module — both insertions
+# succeed and both hooks fire. Per-chain idempotency means the
+# include slot and the prepend slot are distinct insertions.
+#
+# Known gap pinned only at the hook layer here: CRuby reports
+# `H.ancestors.count(MH) == 2` because of distinct IClass
+# wrappers; rubyrs's lookup walkers dedup by module Rc pointer,
+# so the count comes back as 1. The hook fires twice though,
+# which is what plugin systems (Concern, Sinatra extensions)
+# actually observe. Full ancestor-count parity needs IClass
+# wrapper nodes — separate architectural follow-up.
 module MH
   def self.included(base);  puts "MH.included(#{base.name})";  end
   def self.prepended(base); puts "MH.prepended(#{base.name})"; end
