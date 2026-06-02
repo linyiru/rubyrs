@@ -475,31 +475,45 @@ impl Vm {
             Value::Rational(id) => *id,
             _ => unreachable!("rational_pow called on non-Rational receiver"),
         };
-        // Integer exponent (fast / exact path).
-        let int_exp: Option<i64> = match exp {
-            Value::Int(n) => Some(*n),
-            #[cfg(feature = "bignum")]
-            Value::BigInt(id) => i64::try_from(self.heap.bigint(*id)).ok(),
-            _ => None,
-        };
-        if let Some(k) = int_exp {
-            return self.rational_pow_int(r_id, k);
+        // Integer exponent (fast / exact path). BigInt exponents
+        // STAY integer-typed even when they don't fit i64 — they
+        // can't be silently demoted to Float because the
+        // 0**negative → ZeroDivisionError invariant and the BigInt
+        // cap (|k| ≤ 2^16) would be bypassed by `0.0_f64.powf(-big)`
+        // returning Infinity instead of trapping.
+        if let Value::Int(n) = exp {
+            return self.rational_pow_int(r_id, *n);
+        }
+        #[cfg(feature = "bignum")]
+        if let Value::BigInt(id) = exp {
+            // Zero base + negative exp is the first thing the
+            // integer arm checks; surface it here too so a huge
+            // BigInt negative exp doesn't escape into the cap path.
+            use num_bigint::Sign;
+            use num_traits::Zero;
+            let exp_big = self.heap.bigint(*id);
+            let exp_negative = exp_big.sign() == Sign::Minus;
+            let r = self.heap.rational(r_id);
+            if r.num.is_zero() && exp_negative {
+                return Err(self.trap(RubyError::ZeroDivisionError {
+                    msg: "divided by 0".to_string(),
+                }));
+            }
+            // Fits i64 → exact path. Otherwise the magnitude is
+            // necessarily above the |k| ≤ 2^16 cap inside
+            // `rational_pow_int`, so surface the same RangeError
+            // up-front rather than letting it slip into Float.
+            if let Ok(k) = i64::try_from(exp_big) {
+                return self.rational_pow_int(r_id, k);
+            }
+            return Err(self.trap(RubyError::RangeError {
+                msg: "Rational#** exponent magnitude exceeds 2^16 cap".to_string(),
+            }));
         }
         // Non-integer numeric exp → demote to Float, use Float pow.
         let exp_f: Option<f64> = match exp {
             Value::Float(g) => Some(*g),
             Value::Rational(eid) => Some(crate::heap::rational_to_f64(self.heap.rational(*eid))),
-            #[cfg(feature = "bignum")]
-            Value::BigInt(_) => {
-                // BigInt-too-big-for-i64 exponent: convert to f64
-                // (may saturate to ±Infinity, matching CRuby).
-                Some(crate::vm::bignum::bigint_to_f64_sign_preserving(
-                    self.heap.bigint(match exp {
-                        Value::BigInt(eid) => *eid,
-                        _ => unreachable!(),
-                    }),
-                ))
-            }
             _ => None,
         };
         if let Some(g) = exp_f {
@@ -559,7 +573,9 @@ impl Vm {
                 // make_rational_bigint's sign-normalization so
                 // `den > 0` stays canonical.
                 if new_num.sign() == num_bigint::Sign::Minus {
-                    self.make_rational_bigint(-new_den, -new_num.clone())
+                    // `new_num` consumed by the negation; no further
+                    // use, so move rather than clone.
+                    self.make_rational_bigint(-new_den, -new_num)
                 } else if new_num.is_one() {
                     self.make_rational_bigint(new_den, BigInt::one())
                 } else {

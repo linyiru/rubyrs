@@ -3319,6 +3319,24 @@ fn rational_phase_c4_4_literal_and_pow() {
     for (script, expected_class, expected_msg) in [
         ("(0/1r) ** -1", "ZeroDivisionError", "divided by 0"),
         ("(0/1r) ** -3", "ZeroDivisionError", "divided by 0"),
+        // BigInt exp on zero base — must stay integer-typed and
+        // raise ZeroDivisionError, NOT silently demote to Float
+        // (Float-pow of `0.0_f64.powf(-Infinity)` is `Infinity`).
+        // Copilot caught this on PR #343 cycle 2.
+        ("Rational(0, 1) ** -(2**100)", "ZeroDivisionError", "divided by 0"),
+        // BigInt exp on non-zero base — magnitude above the 2^16
+        // cap surfaces as RangeError, NOT Float saturation to
+        // ±Infinity.
+        (
+            "Rational(2, 1) ** (2**100)",
+            "RangeError",
+            "Rational#** exponent magnitude exceeds 2^16 cap",
+        ),
+        (
+            "Rational(1, 2) ** -(2**100)",
+            "RangeError",
+            "Rational#** exponent magnitude exceeds 2^16 cap",
+        ),
         (
             "(1/2r) ** \"x\"",
             "TypeError",
