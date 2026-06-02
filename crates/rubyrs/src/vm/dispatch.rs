@@ -7323,7 +7323,18 @@ impl Vm {
                     // are already valid UTF-8 borrows through the
                     // closure without allocating). Only materialize
                     // an owned `input` String inside the Some arm.
-                    Value::Str(s) => s.with_str_lossy(|input| match re.captures(input) {
+                    //
+                    // Layer #17: capture extraction not yet
+                    // dual-engine; trap on fancy patterns until
+                    // the migration lands.
+                    Value::Str(s) => {
+                        let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
+                            msg: format!(
+                                "regex op 'Regexp#===' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
+                                re.as_str(),
+                            ),
+                        }))?;
+                        s.with_str_lossy(|input| match native.captures(input) {
                         Some(caps) => {
                             let m0 = caps.get(0).unwrap();
                             let (m_start, m_end) = (m0.start(), m0.end());
@@ -7344,7 +7355,8 @@ impl Vm {
                             self.last_match = None;
                             false
                         }
-                    }),
+                    })
+                    },
                     _ => false,
                 },
                 _ => recv.ruby_eq(arg, &self.heap),
@@ -7362,8 +7374,14 @@ impl Vm {
             let result = match (&recv, &args[0]) {
                 #[cfg(feature = "regex")]
                 (Value::Regex(re), Value::Str(s)) | (Value::Str(s), Value::Regex(re)) => {
+                    let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
+                        msg: format!(
+                            "regex op '=~' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
+                            re.as_str(),
+                        ),
+                    }))?;
                     let bound = s.to_string_lossy();
-                    match re.captures(&bound) {
+                    match native.captures(&bound) {
                         Some(caps) => {
                             let m0 = caps.get(0).unwrap();
                             let (m_start, m_end) = (m0.start(), m0.end());

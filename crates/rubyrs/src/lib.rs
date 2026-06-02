@@ -40,6 +40,8 @@ mod intern;
 #[cfg(feature = "_json_native")]
 mod json_native;
 mod output;
+#[cfg(feature = "regex")]
+mod regex_engine;
 #[cfg(feature = "_sqlite")]
 mod sqlite;
 mod signals;

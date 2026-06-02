@@ -162,8 +162,14 @@ pub enum Value {
     /// the variant disappears; AST translation rejects `/.../`
     /// literals with a clear trap; every dispatch arm matching
     /// `Value::Regex(_)` cfg's out.
+    ///
+    /// The inner `CompiledRegex` is an enum over the linear-
+    /// time `regex` engine (preferred) and the `fancy-regex`
+    /// backtracking engine (fallback for lookaround / backref
+    /// patterns the linear engine rejects). See
+    /// `regex_engine::compile`. (TRY_RUNS pass-13 layer #17.)
     #[cfg(feature = "regex")]
-    Regex(std::rc::Rc<regex::Regex>),
+    Regex(std::rc::Rc<crate::regex_engine::CompiledRegex>),
     /// `Object#method(:foo)` result — a captured (receiver,
     /// method-name) pair. Heap-managed so the GC walks the
     /// inner receiver (it can hold any other Value, including

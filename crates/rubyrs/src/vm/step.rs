@@ -900,7 +900,7 @@ impl Vm {
                 } else {
                     let src = self.interner.resolve(id).clone();
                     let translated = preprocess_regex_pattern(&src);
-                    let compiled = regex::Regex::new(&translated).map_err(|e| {
+                    let compiled = crate::regex_engine::compile(&translated).map_err(|e| {
                         self.trap(RubyError::SyntaxError {
                             msg: format!("invalid regex /{}/: {}", src, e),
                         })
@@ -946,7 +946,7 @@ impl Vm {
                 // materialise an owned String (interner takes one
                 // anyway). Error formatting is also rare and reads
                 // through the same borrow.
-                let regex_rc = s.with_str_lossy::<Result<Rc<regex::Regex>, Trap>>(|pat| {
+                let regex_rc = s.with_str_lossy::<Result<Rc<crate::regex_engine::CompiledRegex>, Trap>>(|pat| {
                     // ResourceCap: respect `Config::max_symbols` the
                     // same way `String#to_sym` does. Dynamic patterns
                     // generated in a hot loop (e.g.
@@ -966,7 +966,7 @@ impl Vm {
                         return Ok(r.clone());
                     }
                     let translated = preprocess_regex_pattern(pat);
-                    let compiled = regex::Regex::new(&translated).map_err(|e| {
+                    let compiled = crate::regex_engine::compile(&translated).map_err(|e| {
                         self.trap(RubyError::SyntaxError {
                             msg: format!("invalid regex /{}/: {}", pat, e),
                         })

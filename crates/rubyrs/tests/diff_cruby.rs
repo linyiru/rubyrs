@@ -264,6 +264,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn closure_in_iter_capture() { run_diff("closure_in_iter_capture"); }
 #[test] fn callable_coerce() { run_diff("callable_coerce"); }
 #[test] fn module_function_bare() { run_diff("module_function_bare"); }
+#[cfg(feature = "regex")]
+#[test] fn regex_lookaround() { run_diff("regex_lookaround"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
 #[test] fn user_sort() { run_diff("user_sort"); }
 #[test] fn hash_enumerable() { run_diff("hash_enumerable"); }
