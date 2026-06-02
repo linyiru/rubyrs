@@ -309,11 +309,25 @@ impl Vm {
                     msg: format!("no implicit conversion of {name} into Integer"),
                 })
             }
-            // Defensive — `[]` arm should already have matched
-            // empty args before this helper is reachable.
-            None => self.trap(RubyError::ArgumentError {
-                msg: "wrong number of arguments (given 0, expected 0..1)".to_string(),
-            }),
+            // Unreachable: callers route through this helper
+            // only when the `[]` arm has already matched empty
+            // args (and the surrounding `[Value::Int(_)]` /
+            // `[Value::Float(_)]` / `[Value::BigInt(_)]` arms
+            // for the 1-arg path). If a future refactor swaps
+            // the arm order, we'd land here with a non-erroring
+            // 0-arg call — the `"wrong number of arguments"`
+            // wording would be actively misleading (0..1 accepts
+            // 0). Use an explicit internal-error trap so the
+            // misroute is obvious during debugging.
+            None => {
+                debug_assert!(
+                    false,
+                    "arity_error_arg0_or_1_int reached with empty args; the `[]` arm should have matched first"
+                );
+                self.trap(RubyError::RuntimeError {
+                    msg: "internal: arity_error_arg0_or_1_int reached with 0 args".to_string(),
+                })
+            }
         }
     }
 
