@@ -423,6 +423,71 @@ impl Vm {
         }
     }
 
+    /// Resolve `Method#super_method`: walk the ancestor chain of
+    /// `cls` in dispatch order (prepend → own → include → super)
+    /// and return the next `(class, method)` pair after passing the
+    /// `defining_class` anchor. Mirrors the chain
+    /// `lookup_method_uncached` walks; the only difference is the
+    /// `past_anchor` toggle that suppresses hits before reaching
+    /// the anchor and re-enables them after. Returns None when the
+    /// anchor isn't on the chain (rare — would mean the method
+    /// snapshot disagrees with the receiver class graph), or when
+    /// the super chain terminates without another definition.
+    pub(crate) fn lookup_super_method_uncached(
+        &self,
+        cls: &Rc<Class>,
+        name_id: SymId,
+        defining_class: &Rc<Class>,
+    ) -> Option<(Rc<Class>, Rc<Method>)> {
+        let anchor = Rc::as_ptr(defining_class);
+        fn walk_module(
+            m: &Rc<Class>,
+            name_id: SymId,
+            anchor: *const Class,
+            past_anchor: &mut bool,
+            visited: &mut std::collections::HashSet<*const Class>,
+        ) -> Option<(Rc<Class>, Rc<Method>)> {
+            if !visited.insert(Rc::as_ptr(m)) {
+                return None;
+            }
+            for pre in m.prepends.borrow().iter() {
+                if let Some(r) = walk_module(pre, name_id, anchor, past_anchor, visited) {
+                    return Some(r);
+                }
+            }
+            if Rc::as_ptr(m) == anchor {
+                *past_anchor = true;
+            } else if *past_anchor {
+                if let Some(found) = m.methods.borrow().get(&name_id).cloned() {
+                    return Some((m.clone(), found));
+                }
+            }
+            for inc in m.includes.borrow().iter() {
+                if let Some(r) = walk_module(inc, name_id, anchor, past_anchor, visited) {
+                    return Some(r);
+                }
+            }
+            None
+        }
+        let mut past_anchor = false;
+        let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+        let mut current = cls.clone();
+        loop {
+            if !sc_visited.insert(Rc::as_ptr(&current)) {
+                return None;
+            }
+            let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+            if let Some(r) = walk_module(&current, name_id, anchor, &mut past_anchor, &mut inc_visited) {
+                return Some(r);
+            }
+            let parent = current.superclass.borrow().clone();
+            match parent {
+                Some(p) => current = p,
+                None => return None,
+            }
+        }
+    }
+
     /// `Object#respond_to?(name)` semantics: does `recv` have a
     /// callable method named `name`? Used directly by the
     /// `respond_to?` dispatch arm; doesn't invoke anything, so

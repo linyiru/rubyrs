@@ -2233,9 +2233,19 @@ impl Vm {
                 let defining_class = cur_method.as_ref()
                     .and_then(|m| m.defining_class.as_ref())
                     .and_then(|w| w.upgrade());
+                // Walk the receiver's (or captured class's) full
+                // ancestor chain — prepend → own → include → super
+                // — past the defining class, returning the next
+                // (class, method) that defines `m_name_id`.
+                // Required for include/prepend cases:
+                //   class A; def foo; end; prepend M_overrides_foo; end
+                //   A.new.method(:foo).super_method → A#foo
+                // and `class B < P; include M_overrides_foo; end`
+                // → P#foo, neither of which would be reachable via
+                // a plain `defining_class.superclass` walk (Modules
+                // have no superclass).
                 let super_resolved = defining_class.and_then(|dc| {
-                    let parent = dc.superclass.borrow().as_ref().cloned();
-                    parent.and_then(|p| self.lookup_method_uncached(&p, m_name_id).map(|m| (p, m)))
+                    self.lookup_super_method_uncached(&cap_class, m_name_id, &dc)
                 });
                 match super_resolved {
                     Some((super_cls, super_method)) => {

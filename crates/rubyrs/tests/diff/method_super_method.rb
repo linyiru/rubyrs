@@ -66,3 +66,46 @@ end
 # (8) respond_to?
 puts C.new.method(:foo).respond_to?(:super_method)
 puts C.instance_method(:foo).respond_to?(:super_method)
+
+# (9) prepend — the prepended Module's method, when captured,
+# has super_method pointing at the class's own definition. Plain
+# `defining_class.superclass` walk doesn't reach it (Modules have
+# no superclass), so this case exercises the full-ancestor walk.
+module MP
+  def hello; "MP+#{super}"; end
+end
+class HP
+  def hello; "HP"; end
+  prepend MP
+end
+m_hp = HP.new.method(:hello)
+puts m_hp.owner.name              # MP
+puts m_hp.call                    # MP+HP
+sup = m_hp.super_method
+puts sup.owner.name               # HP
+puts sup.call                     # HP
+puts sup.super_method.nil?        # true
+
+# (10) include with a superclass that also defines the method —
+# super_method must walk past the included Module to the parent
+# class.
+module MI
+  def greet; "MI+#{super}"; end
+end
+class GP
+  def greet; "GP"; end
+end
+class GA < GP
+  include MI
+end
+m_ga = GA.new.method(:greet)
+puts m_ga.owner.name              # MI (include comes from MI)
+puts m_ga.call                    # MI+GP
+super_ga = m_ga.super_method
+puts super_ga.owner.name          # GP
+puts super_ga.call                # GP
+
+# (11) UnboundMethod parity for prepend.
+u_hp = HP.instance_method(:hello)
+puts u_hp.owner.name              # MP
+puts u_hp.super_method.owner.name # HP
