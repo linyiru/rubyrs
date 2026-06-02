@@ -3311,6 +3311,15 @@ fn rational_phase_c4_3_float_to_r_and_rationalize() {
         ("(1.0/0.0).to_r", "FloatDomainError", "Infinity"),
         ("(-1.0/0.0).to_r", "FloatDomainError", "-Infinity"),
         ("(0.0/0.0).rationalize", "FloatDomainError", "NaN"),
+        // NaN / ±Inf eps — pre-fix these panicked in
+        // `float_decompose(..).expect("finite")` inside
+        // `float_to_rational_pair_signed`. Validate eps up-front
+        // and trap as FloatDomainError matching CRuby.
+        ("0.1.rationalize(0.0/0.0)", "FloatDomainError", "NaN"),
+        ("0.1.rationalize(1.0/0.0)", "FloatDomainError", "Infinity"),
+        ("0.1.rationalize(-1.0/0.0)", "FloatDomainError", "-Infinity"),
+        // f + eps overflowing to ±Inf — same trap path.
+        ("(1.79e308).rationalize(1.79e308)", "FloatDomainError", "Infinity"),
         (
             "0.1.rationalize(nil)",
             "TypeError",

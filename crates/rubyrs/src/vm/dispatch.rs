@@ -271,16 +271,27 @@ impl Vm {
             // CRuby computes the interval endpoints `f - eps` and
             // `f + eps` in f64 arithmetic when eps is a Float, then
             // runs Stern-Brocot on the resulting Float-derived
-            // Rationals. Replicating that path so we match CRuby's
-            // spec expectations (e.g. `3.14.rationalize(0.001) ==
-            // (157/50)` — exact-Rational subtraction would yield a
-            // tighter, "more correct" interval where (135/43)
-            // beats (157/50) by denominator, but spec requires the
-            // f64-arithmetic interval). Non-Float eps stays in
-            // exact arithmetic, matching CRuby's promote-to-
-            // Rational behavior for Integer / Rational eps.
+            // Rationals. Replicating that path so spec/CRuby agree
+            // (e.g. `3.14.rationalize(0.01) == (22/7)`,
+            // `3.14.rationalize(0.001) == (135/43)`). Non-Float
+            // eps stays in exact arithmetic, matching CRuby's
+            // promote-to-Rational behavior for Integer / Rational
+            // eps.
+            //
+            // NaN / ±Inf eps (or overflow in `f ± eps`) → CRuby
+            // raises FloatDomainError; we match. Pre-validate the
+            // eps Float and the interval endpoints so the
+            // `float_decompose(..).expect("finite")` invariant
+            // inside `float_to_rational_pair_signed` holds.
             let eps_f_opt: Option<f64> = match eps_v {
-                Value::Float(g) => Some(g.abs()),
+                Value::Float(g) => {
+                    if !g.is_finite() {
+                        return Err(self.trap(RubyError::FloatDomainError {
+                            msg: crate::vm::numeric::float_domain_label(*g).to_string(),
+                        }));
+                    }
+                    Some(g.abs())
+                }
                 _ => None,
             };
             let (common_den, a_num, b_num) = if let Some(eps_f) = eps_f_opt {
@@ -289,6 +300,16 @@ impl Vm {
                 }
                 let a_f = f - eps_f;
                 let b_f = f + eps_f;
+                if !a_f.is_finite() {
+                    return Err(self.trap(RubyError::FloatDomainError {
+                        msg: crate::vm::numeric::float_domain_label(a_f).to_string(),
+                    }));
+                }
+                if !b_f.is_finite() {
+                    return Err(self.trap(RubyError::FloatDomainError {
+                        msg: crate::vm::numeric::float_domain_label(b_f).to_string(),
+                    }));
+                }
                 // Decompose a_f and b_f to a common denominator.
                 let (a_n, a_d) = float_to_rational_pair_signed(a_f);
                 let (b_n, b_d) = float_to_rational_pair_signed(b_f);
@@ -6202,13 +6223,16 @@ impl Vm {
             return Ok(());
         }
         // Phase C.4.3 — `Float#to_r` and `Float#rationalize`.
-        // Both build the exact-Rational representation via the
-        // IEEE-754 decomposition `f = sign * mantissa * 2^exp`
-        // (no rounding); `rationalize(eps)` then runs the
-        // Stern-Brocot mediant search for the simplest fraction
-        // within ±|eps|. NaN / ±Inf → FloatDomainError.
-        // Bare `rationalize` (nil / no eps) returns the lossless
-        // `to_r` result, matching CRuby's `Float#rationalize`.
+        // `to_r` builds the exact-Rational representation via the
+        // IEEE-754 decomposition `f = sign * mantissa * 2^exp` (no
+        // rounding). `rationalize(eps)` runs the Stern-Brocot
+        // mediant search for the simplest fraction within ±|eps|.
+        // Bare `rationalize` (no eps) runs Stern-Brocot on the
+        // half-ULP interval — returns the simplest Rational that
+        // round-trips back to the same Float, matching CRuby
+        // (`0.1.rationalize == (1/10)`, NOT the lossless to_r).
+        // NaN / ±Inf → FloatDomainError. nil eps rejected with
+        // TypeError; the eps `Value` is validated as Numeric.
         if let Value::Float(f) = &recv {
             if &*name == "to_r" || &*name == "rationalize" {
                 let f = *f;
