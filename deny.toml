@@ -81,6 +81,13 @@ allow = [
     "CC0-1.0",
     "MPL-2.0",
     "0BSD",
+    # CDLA-Permissive-2.0: Linux Foundation's "Community Data License
+    # Agreement — Permissive 2.0". Obligation profile is comparable to
+    # MIT/Apache-2.0 (attribution-only, no copyleft, no patent grab).
+    # Required because webpki-roots 0.26.x and 1.0.x — pulled in via
+    # ureq's TLS stack — both ship under this SPDX. Without it the gate
+    # fails on its very first run.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.93
 
