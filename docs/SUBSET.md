@@ -1016,38 +1016,12 @@ nil.caller_ok         # both: "from helper"
   shapes, this requires knowing the group structure (positions
   of group 1 / group 2 within `m`); the `active_support_lite`
   canon's `String#underscore` shows the pattern.
-- Status: Tier-1 gap, no current consumer beyond the
-  active_support_lite canon required it. Track in the
-  "Small unimplemented features" section below; not tier-
-  assigned because the implementation surface is well-known
+- Status: Tier-1 gap; the implementation surface is well-known
   (set `$~` from the MatchData in the gsub block's per-match
   invocation, mirroring CRuby's `Regexp.last_match` thread-
-  local update).
-
-## Small unimplemented features
-
-Concrete missing-method gaps surfaced during canon authoring
-(M27 D / menu items 2–3). None blocks the menu shipped to
-date — workarounds inline above each canon's source — but
-each would simplify the next canon author's life if
-implemented. Listed here so the next canon spike's GAPS
-phase finds them via grep rather than rediscovering.
-
-- **`Hash#each_with_object(memo) { |(k,v), acc| ... }`** —
-  not on rubyrs's Hash. Canons use
-  `inject(init) { |acc, (k,v)| ...; acc }` instead. Adding
-  it is a 10-line primitive arm in `vm/iter.rs`'s iteration
-  surface.
-- **`Array#each_with_object(memo) { |x, acc| ... }`** — same
-  shape on Array; same `inject`-based workaround.
-- **`$1` / `$~` in `gsub` blocks** — see the dedicated
-  Divergences entry above. Workaround: block arg `|m|` +
-  manual slice.
-
-These are NOT tier-assignment decisions; they're
-straightforward unimplementeds that haven't found a justifying
-consumer yet. The first canon (or user script) to need them
-should land the implementation alongside.
+  local update). No current consumer beyond the
+  active_support_lite canon has needed it strongly enough to
+  motivate landing.
 
 ## Deferred to outer tiers
 

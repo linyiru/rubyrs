@@ -22,16 +22,19 @@
 # infrastructure decision.
 #
 # Implementation notes specific to rubyrs:
-#   - `each_with_object` isn't on rubyrs's Hash/Array yet, so
-#     accumulation uses `inject(init) { |acc, el| ... ; acc }`.
 #   - `$1` / `$~` inside `gsub` blocks doesn't reliably capture
-#     groups, so the regex shapes use the block arg `|m|` (full
-#     match) and post-process explicitly. Slightly more code,
-#     same observable behaviour.
+#     groups (see SUBSET.md), so the regex shapes use the block
+#     arg `|m|` (full match) and post-process explicitly.
+#     Slightly more code, same observable behaviour.
 #   - All sibling-method calls inside reopened-class instance
 #     methods use bare calls (no explicit `self.`); validated by
 #     the `vm/dispatch.rs` primitive-reopen bridge shipped at
-#     commit b8feb3ce.
+#     commits b8feb3ce (no-block form) and cd683556 (block form).
+#     One documented exception: NilClass-reopen-with-bare-call
+#     hits the Nil exclusion in the bridge — see SUBSET.md
+#     §"Bare-call dispatch from inside reopened-NilClass
+#     instance methods" and the explicit overrides on
+#     `NilClass#present?` / `#presence` below.
 
 # ---- Tier A — blank? / present? / presence + Array extras + Object#try/#in? ----
 
@@ -216,28 +219,24 @@ class Hash
   end
 
   def deep_symbolize_keys
-    inject({}) do |acc, (k, v)|
+    each_with_object({}) do |(k, v), acc|
       new_k = k.is_a?(String) ? k.to_sym : k
-      new_v = case v
-              when Hash then v.deep_symbolize_keys
-              when Array then v.map { |x| x.is_a?(Hash) ? x.deep_symbolize_keys : x }
-              else v
-              end
-      acc[new_k] = new_v
-      acc
+      acc[new_k] = case v
+                   when Hash then v.deep_symbolize_keys
+                   when Array then v.map { |x| x.is_a?(Hash) ? x.deep_symbolize_keys : x }
+                   else v
+                   end
     end
   end
 
   def deep_stringify_keys
-    inject({}) do |acc, (k, v)|
+    each_with_object({}) do |(k, v), acc|
       new_k = k.is_a?(Symbol) ? k.to_s : k
-      new_v = case v
-              when Hash then v.deep_stringify_keys
-              when Array then v.map { |x| x.is_a?(Hash) ? x.deep_stringify_keys : x }
-              else v
-              end
-      acc[new_k] = new_v
-      acc
+      acc[new_k] = case v
+                   when Hash then v.deep_stringify_keys
+                   when Array then v.map { |x| x.is_a?(Hash) ? x.deep_stringify_keys : x }
+                   else v
+                   end
     end
   end
 
