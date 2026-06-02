@@ -87,9 +87,10 @@ these red and we didn't notice until the next person's PR inherited
 the failure".
 
 The CI gates (every job in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) must be green;
-the jobs themselves run in parallel — only steps within each job
-have a fire order):
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) AND
+[`.github/workflows/cargo-deny.yml`](.github/workflows/cargo-deny.yml)
+must be green; the jobs themselves run in parallel — only steps
+within each job have a fire order):
 
 - **`cargo clippy --release --all-targets --workspace -- -D warnings`**
   (Test job, both ubuntu + macos). Catches style / pedantic /
@@ -123,6 +124,12 @@ have a fire order):
   peak-RSS for fixed inputs. Regressions surface as a hard fail.
 - **Miri smoke (Stacked + Tree Borrows)** — separate job. Catches
   UB in the cext FFI surface (CURRENT_VM_PTR aliasing, etc.).
+- **Supply-chain (cargo-deny)** — separate workflow file
+  ([`.github/workflows/cargo-deny.yml`](.github/workflows/cargo-deny.yml)).
+  Advisories / licenses / banned crates / source-registry pinning,
+  per `deny.toml`. Path-filtered so docs-only / Ruby-source-only
+  PRs skip it; weekly Sunday cron catches advisory-DB updates
+  against a frozen Cargo.lock.
 
 Also required for a merge:
 
