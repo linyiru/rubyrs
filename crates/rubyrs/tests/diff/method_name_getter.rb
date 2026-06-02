@@ -48,3 +48,16 @@ puts m1.name == m2.name
 # (8) respond_to?
 puts C.new.method(:foo).respond_to?(:name)
 puts C.instance_method(:foo).respond_to?(:name)
+
+# (9) Excess args raise ArgumentError (CRuby parity — not
+# NoMethodError via dispatch fall-through).
+begin
+  C.new.method(:foo).name(1)
+rescue ArgumentError => e
+  puts e.message
+end
+begin
+  C.instance_method(:foo).name(1, 2)
+rescue ArgumentError => e
+  puts e.message
+end
