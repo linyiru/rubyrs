@@ -897,14 +897,22 @@ jobs:
           ruby-version: "3.4"
 
       - name: Install parity-matrix gems
-        # `fixtures/sinatra_hello/` requires the real `sinatra` gem
-        # on the CRuby side; rubyrs runs the same `app.rb` via its
-        # vendored `sinatra_lite.rb`. Webrick is bundled with the
-        # gem (sinatra's default-server fallback in the absence of
-        # puma/thin/falcon), so an explicit `gem install webrick`
-        # isn't needed on Ruby 3.4 — `gem install sinatra` pulls
-        # it in transitively.
-        run: gem install sinatra
+        # Two CRuby fixtures need explicit gems:
+        #   - `fixtures/hello_smoke/compat.rb` does `require
+        #     "webrick"` directly (no Sinatra in scope) — Webrick
+        #     was unbundled from Ruby's stdlib in 3.0+ so the CI
+        #     image's Ruby 3.4 doesn't ship it preinstalled.
+        #   - `fixtures/sinatra_hello/` needs Sinatra plus a
+        #     server fallback. Sinatra 4.x's runtime deps are
+        #     rack / rack-protection / tilt / mustermann /
+        #     ruby2_keywords — webrick is NOT among them.
+        #
+        # An earlier version of this step claimed `gem install
+        # sinatra` pulled in webrick transitively and ran CI red
+        # against `cannot load such file -- webrick (LoadError)`
+        # from hello_smoke (which has no sinatra context).
+        # Install both explicitly to cover both fixtures.
+        run: gem install webrick sinatra
 
       - name: Cache cargo registry + build
         uses: actions/cache@v5
