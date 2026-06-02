@@ -38,9 +38,20 @@ class MatchData
     @whole
   end
   def inspect
-    # Plain concatenation — kept simple to avoid quote/hash
-    # sequences that conflict with the surrounding Rust raw
-    # string delimiter.
-    "<MatchData " + @whole + ">"
+    # CRuby format: `#<MatchData "<whole>" 1:"<cap1>" 2:"<cap2>" ...>`.
+    # When the regex had no groups, the trailing per-group list
+    # is omitted entirely: `#<MatchData "<whole>">`. Non-
+    # participating groups (alternation arms that didn't match)
+    # serialise as `N:nil` rather than `N:""`. String captures
+    # go through `String#inspect` so quotes / escapes match CRuby
+    # byte-for-byte.
+    parts = "#<MatchData " + @whole.inspect
+    i = 0
+    while i < @caps.length
+      cap = @caps[i]
+      parts += " " + (i + 1).to_s + ":" + (cap.nil? ? "nil" : cap.inspect)
+      i += 1
+    end
+    parts + ">"
   end
 end
