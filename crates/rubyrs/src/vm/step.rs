@@ -2527,6 +2527,11 @@ impl Vm {
                 // added in a reopen land on the same class.
                 let table_key = if qual_id.0 == u32::MAX { name_id } else { qual_id };
                 let name_str = self.interner.resolve(table_key).to_string();
+                // First-define vs reopen: CRuby fires the
+                // `inherited` callback only on the first
+                // `class B < A` definition, not on reopens.
+                // Snapshot before the entry()-or_insert.
+                let was_fresh = !self.classes.contains_key(&table_key);
                 let cls = self.classes.entry(table_key).or_insert_with(|| Rc::new(Class {
                     name: name_str,
                     is_module,
@@ -2552,6 +2557,69 @@ impl Vm {
                     }
                 }
                 self.method_gen = self.method_gen.wrapping_add(1); // class structure changed
+                // `Class#inherited` callback — CRuby invokes
+                // `Parent.inherited(Subclass)` after the
+                // Subclass object exists but BEFORE its body
+                // runs. Only fires on the FIRST definition of
+                // a given class, never on reopen. Modules
+                // (`module M; end`) don't inherit, so skip.
+                //
+                // Discovery: sinatra-4 relies on this in
+                // `Sinatra::Base.inherited(subclass)` to call
+                // `subclass.reset!` (which initializes
+                // `@routes = {}` etc). Without firing it,
+                // `class App < Sinatra::Base; get '/' do; end`
+                // raises NoMethodError on the nil `@routes`.
+                // (TRY_RUNS pass-12 layer #14.)
+                //
+                // Lookup uses `lookup_class_singleton_method`,
+                // which walks the parent's singleton_prepends,
+                // own singleton_methods, and then up the
+                // superclass-singleton chain (i.e., picks up
+                // `inherited` defined via `def self.inherited`
+                // on any ancestor of the parent). It does NOT
+                // fall through to `Class`'s instance methods —
+                // so a user monkey-patch like
+                // `class Class; def inherited(sub); end; end`
+                // won't fire here. That's a documented
+                // divergence shared with the broader class-as-
+                // receiver dispatch path (`A.custom_method`
+                // also doesn't pick up Class instance-method
+                // patches today); a proper fix lives at the
+                // dispatch layer, not in this hook. Code-review
+                // #337 round 1.
+                //
+                // CRuby's default `Class#inherited` is a no-op;
+                // when no override resolves we skip the
+                // dispatch entirely (observationally identical
+                // to invoking the no-op default).
+                if was_fresh
+                    && !is_module
+                    && let Some(parent_cls) = &parent
+                    // Fast-path: if `"inherited"` has never been
+                    // interned, no user code has defined or
+                    // referenced an override (the compiler interns
+                    // every method name and call site on first
+                    // sight). Skip the intern() call entirely so
+                    // we don't grow the symbol table — and the
+                    // `Config::max_symbols`-guarded paths stay
+                    // authoritative. Code-review #337 round 2.
+                    && self.interner.contains("inherited") {
+                    let inh_id = self.interner.intern("inherited");
+                    if let Some(m) = self.lookup_class_singleton_method(parent_cls, inh_id) {
+                        let pre_frames = self.frames.len();
+                        self.invoke_method(
+                            m,
+                            Value::Class(parent_cls.clone()),
+                            vec![Value::Class(cls.clone())],
+                        )?;
+                        self.dispatch_until(pre_frames)?;
+                        // Discard the callback's return value
+                        // (the hook is invoked for its side
+                        // effects; CRuby ignores the return).
+                        self.stack.pop();
+                    }
+                }
                 self.class_stack.push(cls.clone());
                 self.class_visibility_stack.push(Visibility::Public);
                 let proto = &self.protos[p_idx as usize];
