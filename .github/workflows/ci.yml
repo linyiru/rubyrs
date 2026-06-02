@@ -1009,7 +1009,12 @@ jobs:
           # different version silently take over and the
           # workflow comment's "pinned at 0.19.8" claim would be
           # false. Reinstall if the installed version doesn't
-          # match the pin (--force re-uses the existing target/).
+          # match the pin. `--force` only overwrites the binary
+          # in `~/.cargo/bin`; there is NO cached `target/` for
+          # cargo-deny, so the install path is a from-scratch
+          # compile (~3-5 min). The cache step above stores the
+          # installed binary itself, which is what makes the
+          # steady-state cache-hit path zero-cost.
           INSTALLED=$(cargo deny --version 2>/dev/null | awk '{print $2}' || true)
           if [ "$INSTALLED" != "$WANTED" ]; then
             cargo install cargo-deny --locked --version "$WANTED" --force
