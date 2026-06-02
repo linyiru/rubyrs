@@ -242,6 +242,31 @@ impl Vm {
         }))
     }
 
+    /// Coerce a Float argument to i64 with CRuby's
+    /// `each_slice(2.5) → 2` truncation semantics. NaN and ±Inf
+    /// raise RangeError with CRuby's exact wording (note: the
+    /// short label "Inf" / "-Inf" / "NaN" — NOT
+    /// `float_domain_label`'s "Infinity" / "NaN" used elsewhere).
+    /// Finite-out-of-range floats (e.g. `1e30`) silently
+    /// saturate via the `as i64` cast; CRuby raises there too
+    /// with `"float <%g> out of range of integer"` but exact
+    /// %g-style formatting isn't worth the parity cost for a
+    /// pathological input.
+    pub(crate) fn float_to_int_arg(&self, f: f64) -> Result<i64, Trap> {
+        if f.is_nan() {
+            return Err(self.trap(RubyError::RangeError {
+                msg: "float NaN out of range of integer".to_string(),
+            }));
+        }
+        if f.is_infinite() {
+            let label = if f > 0.0 { "Inf" } else { "-Inf" };
+            return Err(self.trap(RubyError::RangeError {
+                msg: format!("float {label} out of range of integer"),
+            }));
+        }
+        Ok(f as i64)
+    }
+
     /// Build a Trap matching CRuby's wrong-arity-and-type
     /// surface for "method takes exactly one Integer argument"
     /// dispatch arms (`each_slice(n)` / `each_cons(n)`):

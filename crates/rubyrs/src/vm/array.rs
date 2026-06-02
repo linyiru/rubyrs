@@ -1257,6 +1257,13 @@ impl Vm {
                     // directly. Calling `.to_a` on the result is
                     // a no-op, so the canonical
                     // `arr.each_slice(2).to_a` idiom still works.
+                    // Float coerce — CRuby truncates 2.5 → 2.
+                    // Re-dispatch with the converted Int. Same
+                    // pattern across the 5 sibling no-block arms.
+                    ("each_slice", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.array_collection_call(id, name, &[Value::Int(n)]);
+                    }
                     ("each_slice", [Value::Int(n)]) => {
                         if *n <= 0 {
                             return Err(self.trap(RubyError::ArgumentError {
@@ -1283,6 +1290,10 @@ impl Vm {
                     // iter.rs catch-all).
                     ("each_slice", _) => {
                         return Err(self.arity_error_arg1_int(name, args));
+                    }
+                    ("each_cons", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.array_collection_call(id, name, &[Value::Int(n)]);
                     }
                     ("each_cons", [Value::Int(n)]) => {
                         if *n <= 0 {

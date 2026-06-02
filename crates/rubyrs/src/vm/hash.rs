@@ -443,6 +443,10 @@ impl Vm {
                     // arms (see array.rs:1260) so the canonical
                     // `h.each_slice(2).to_a` idiom still works.
                     // Block forms live in iter.rs.
+                    ("each_slice", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.hash_collection_call(id, name, &[Value::Int(n)]);
+                    }
                     ("each_slice", [Value::Int(n)]) => {
                         if *n <= 0 {
                             return Err(self.trap(crate::error::RubyError::ArgumentError {
@@ -477,6 +481,10 @@ impl Vm {
                     // Wrong-arity / non-Int for Hash#each_slice no-block form.
                     ("each_slice", _) => {
                         return Err(self.arity_error_arg1_int(name, args));
+                    }
+                    ("each_cons", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.hash_collection_call(id, name, &[Value::Int(n)]);
                     }
                     ("each_cons", [Value::Int(n)]) => {
                         if *n <= 0 {

@@ -12,8 +12,8 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 154 |
-| Examples in corpus | 986 |
+| Files | 155 |
+| Examples in corpus | 996 |
 | Skipped `it` traces | 155 |
 
 ### Skipped traces by category
@@ -38,7 +38,7 @@ Find blocks unlocked by a future feature with e.g.
 
 | Class | Files | Examples | Skipped |
 |---|---|---|---|
-| Array | 23 | 134 | 49 |
+| Array | 24 | 144 | 49 |
 | BasicObject | 3 | 15 | 0 |
 | Block | 1 | 8 | 0 |
 | Float | 2 | 11 | 0 |
@@ -81,6 +81,7 @@ Find blocks unlocked by a future feature with e.g.
 | `block_rescue_propagation_spec.rb` | Block exception propagation through iter drivers |  | 8 | 0 |
 | `class_eval_spec.rb` | Module#class_eval | `core/module/class_eval_spec.rb` | 6 | 0 |
 | `collection_arity_arg1_int_spec.rb` | Array#each_slice / #each_cons arity & type guards | `core/array/each_slice_spec.rb (error-class assertions)` | 16 | 0 |
+| `collection_float_coerce_spec.rb` | Array#each_slice / #each_cons Float coercion | `core/array/each_slice_spec.rb (Float coerce semantics)` | 10 | 0 |
 | `define_method_spec.rb` | Module#define_method | `core/module/define_method_spec.rb` | 4 | 0 |
 | `float_rationalize_spec.rb` | Float#rationalize | `core/float/rationalize_spec.rb` | 7 | 0 |
 | `float_to_r_spec.rb` | Float#to_r | `core/float/to_r_spec.rb` | 4 | 0 |
