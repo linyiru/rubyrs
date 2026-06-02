@@ -36,12 +36,22 @@ name: CI
 # wasm-breakdown.yml convention (off Monday-morning CI peak).
 
 on:
+  # IMPORTANT: keep the `push:` and `pull_request:` paths lists in
+  # sync. GitHub Actions doesn't share filters across event types,
+  # so drift would silently gate master pushes on a different set
+  # of files than PRs — a CVE-introducing PR could merge without
+  # cargo-deny firing if the two lists diverge.
+  #
+  # `rust-toolchain.toml` is included because toolchain bumps shift
+  # how cargo resolves transitive-dep versions and recompile
+  # cargo-deny from source on cache-miss installs.
   push:
     branches: [master]
     paths:
       - 'Cargo.lock'
       - '**/Cargo.toml'
       - 'deny.toml'
+      - 'rust-toolchain.toml'
       - '.github/workflows/cargo-deny.yml'
   pull_request:
     branches: [master]
@@ -49,6 +59,7 @@ on:
       - 'Cargo.lock'
       - '**/Cargo.toml'
       - 'deny.toml'
+      - 'rust-toolchain.toml'
       - '.github/workflows/cargo-deny.yml'
   schedule:
     - cron: '0 12 * * 0'
