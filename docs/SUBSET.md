@@ -996,33 +996,6 @@ nil.caller_ok         # both: "from helper"
   pins the toplevel-arity ArgumentError surface this exclusion
   preserves.
 
-### `$1` / `$~` inside `String#gsub` block doesn't capture groups
-
-```ruby
-"active_record".gsub(/_([a-z])/) { $1.upcase }
-# rubyrs: NoMethodError: undefined method `upcase' for NilClass
-# CRuby:  "activeRecord"
-
-"active_record".gsub(/_([a-z])/) { |m| m[1].upcase }
-# both: "activeRecord"
-```
-
-- The `$1` / `$~` magic globals don't populate inside the
-  `gsub` block's body on rubyrs; the block's argument is the
-  full match string instead. Mirrors CRuby's `$~`-in-block
-  semantics observationally for unsupported cases.
-- Workaround: use the block argument `|m|` (the full match)
-  and slice manually via `m[index]`. For numbered-capture
-  shapes, this requires knowing the group structure (positions
-  of group 1 / group 2 within `m`); the `active_support_lite`
-  canon's `String#underscore` shows the pattern.
-- Status: Tier-1 gap; the implementation surface is well-known
-  (set `$~` from the MatchData in the gsub block's per-match
-  invocation, mirroring CRuby's `Regexp.last_match` thread-
-  local update). No current consumer beyond the
-  active_support_lite canon has needed it strongly enough to
-  motivate landing.
-
 ## Deferred to outer tiers
 
 Features whose absence is a tier-assignment decision per

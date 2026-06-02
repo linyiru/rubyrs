@@ -22,10 +22,6 @@
 # infrastructure decision.
 #
 # Implementation notes specific to rubyrs:
-#   - `$1` / `$~` inside `gsub` blocks doesn't reliably capture
-#     groups (see SUBSET.md), so the regex shapes use the block
-#     arg `|m|` (full match) and post-process explicitly.
-#     Slightly more code, same observable behaviour.
 #   - All sibling-method calls inside reopened-class instance
 #     methods use bare calls (no explicit `self.`); validated by
 #     the `vm/dispatch.rs` primitive-reopen bridge shipped at
@@ -268,12 +264,8 @@ class String
 
   # `"active_record".camelize` → `"ActiveRecord"`.
   # `"active_record".camelize(:lower)` → `"activeRecord"`.
-  #
-  # rubyrs note: `gsub(...) { $1 }` doesn't reliably capture into
-  # `$1` from the block — use the block's full-match arg `|m|` and
-  # extract the post-underscore char by index instead.
   def camelize(first_letter = :upper)
-    s = gsub(/_([a-zA-Z])/) { |m| m[1].upcase }
+    s = gsub(/_([a-zA-Z])/) { $1.upcase }
     if first_letter == :lower
       s.length > 0 ? s[0].downcase + s[1..] : s
     else
@@ -284,18 +276,9 @@ class String
   # `"ActiveRecord".underscore` → `"active_record"`.
   # Two-pass: insert `_` between consecutive caps + a cap-lower,
   # then between a lower/digit + cap. Matches AS's regex order.
-  #
-  # First-pass group shapes: group 1 = `[A-Z]+` (variable
-  # length, ≥ 1), group 2 = `[A-Z][a-z]` (exactly 2 chars). With
-  # rubyrs's `$1` / `$~`-in-gsub-block gap, we know group 2 is
-  # the LAST 2 chars of `m` and group 1 is the rest — so the
-  # split is `m[0..-3]` + `'_'` + `m[-2..-1]`. The earlier
-  # `m[0..-2]` / `m[-1]` shape was wrong for runs like
-  # "HTTPRequest" where the all-caps prefix is longer than
-  # one char.
   def underscore
-    s = gsub(/([A-Z]+)([A-Z][a-z])/) { |m| m[0..-3] + '_' + m[-2..-1] }
-    s.gsub(/([a-z0-9])([A-Z])/) { |m| m[0] + '_' + m[1] }.downcase
+    s = gsub(/([A-Z]+)([A-Z][a-z])/) { "#{$1}_#{$2}" }
+    s.gsub(/([a-z0-9])([A-Z])/) { "#{$1}_#{$2}" }.downcase
   end
 
   # `"puma_server".dasherize` → `"puma-server"`. Pure tr — no

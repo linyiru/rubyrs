@@ -396,3 +396,4 @@ fn run_diff(name: &str) {
 #[test] fn json_roundtrip() { run_diff("json_roundtrip"); }
 #[test] fn fixed_arity_fast_path() { run_diff("fixed_arity_fast_path"); }
 #[test] fn reopen_primitive_bare_call() { run_diff("reopen_primitive_bare_call"); }
+#[test] fn gsub_block_captures() { run_diff("gsub_block_captures"); }

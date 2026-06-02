@@ -412,10 +412,14 @@ impl Vm {
         // For each match the block is invoked with the matched
         // substring; its return value is converted to a string and
         // spliced in place of the match. gsub iterates all matches;
-        // sub does only the first. Backref groups in the matched
-        // text are NOT exposed to the block — only the full match —
-        // matching CRuby's "block gets the match string, not the
-        // MatchData" convention for the common case.
+        // sub does only the first. The block arg stays the full
+        // match string — matching CRuby's convention. Capture
+        // groups are exposed via `$1` / `$~` / `$&` etc., backed
+        // by `last_match` which we update per match before each
+        // block invocation. Without that update, `s.gsub(/_(\w)/)
+        // { $1.upcase }` would see `$1 == nil` and the
+        // ActiveSupport-lite canon couldn't write
+        // `String#camelize` the idiomatic way.
         #[cfg(feature = "regex")]
         if let (Value::Str(s), Value::Regex(re), 1) = (recv, args.first().unwrap_or(&Value::Nil), args.len())
             && (name == "gsub" || name == "sub" || name == "gsub!" || name == "sub!") {
@@ -438,10 +442,46 @@ impl Vm {
                 let mut out = String::with_capacity(source.len());
                 let mut last_end = 0usize;
                 let mut any_match = false;
-                for m in re.find_iter(&source) {
+                // CRuby clears `$~` to nil when the gsub call
+                // matches nothing — `"x".gsub(/y/) { ... }; $~`
+                // returns nil even if `$~` was non-nil before
+                // the call. Preserve that surface: if the loop
+                // below records no matches, the post-loop
+                // cleanup at the bottom of the block clears
+                // `last_match`; if at least one match runs, the
+                // per-match update inside the loop leaves
+                // `last_match` set to the FINAL match (also
+                // matches CRuby).
+                let last_match_before = g.vm.last_match.take();
+                // `captures_iter` gives us group info per match
+                // (find_iter doesn't). Slight cost: each iteration
+                // builds a `Captures` rather than a bare `Match`,
+                // but the work is what users expect — `$1` /
+                // `$~` semantics — and it's amortised against the
+                // block dispatch which dominates per-match cost
+                // anyway.
+                for caps in re.captures_iter(&source) {
                     any_match = true;
+                    let m = caps.get(0).expect("ICE: captures.get(0) is always Some on a successful match");
                     out.push_str(&source[last_end..m.start()]);
-                    let r = match g.vm.step_block(block, vec![Value::new_str(m.as_str().to_string())], pre_frames)? {
+                    // Populate `$~` / `$1..$N` for the block body.
+                    // Mirrors the snapshot shape `str_bracket_regex`
+                    // (~line 2179) builds for `s[/pat/, N]`.
+                    let m_start = m.start();
+                    let m_end = m.end();
+                    let whole = m.as_str().to_string();
+                    let mut group_caps: Vec<Option<String>> = Vec::with_capacity(caps.len().saturating_sub(1));
+                    for i in 1..caps.len() {
+                        group_caps.push(caps.get(i).map(|cm| cm.as_str().to_string()));
+                    }
+                    g.vm.last_match = Some(crate::vm::LastMatch {
+                        whole: whole.clone(),
+                        caps: group_caps,
+                        input: source.clone(),
+                        m_start,
+                        m_end,
+                    });
+                    let r = match g.vm.step_block(block, vec![Value::new_str(whole)], pre_frames)? {
                         // Non-local `return` from the block —
                         // `Ok(Some(Value::Nil))` marks the primitive
                         // as matched so the outer dispatch loop
@@ -456,8 +496,18 @@ impl Vm {
                     };
                     let r_str = r.to_display(&g.vm.heap, &g.vm.interner);
                     out.push_str(&r_str);
-                    last_end = m.end();
+                    last_end = m_end;
                     if only_first { break; }
+                }
+                // No-match case: restore the pre-call `$~`
+                // snapshot, BUT then explicitly clear it.
+                // CRuby's behaviour is "set $~ to nil" when the
+                // call matched nothing — the snapshot-restore +
+                // clear shape keeps `last_match` correctly None
+                // whether or not the block was invoked.
+                if !any_match {
+                    let _ = last_match_before;
+                    g.vm.last_match = None;
                 }
                 out.push_str(&source[last_end..]);
                 // Bang siblings return nil when the pattern never
