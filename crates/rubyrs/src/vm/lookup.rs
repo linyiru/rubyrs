@@ -627,13 +627,14 @@ impl Vm {
                 "length" | "size" | "[]" | "[]=" | "empty?" |
                 "include?" | "has_key?" | "key?" | "member?" |
                 "keys" | "values" | "to_h" | "to_a" |
-                "merge" | "delete" | "invert" | "store" | "except" | "slice" | "dup" |
+                "merge" | "merge!" | "update" | "replace" | "delete" | "invert" | "store" | "except" | "slice" | "dup" |
                 "each" | "each_pair" |
                 "select" | "filter" | "reject" | "find" | "detect" |
                 "any?" | "all?" | "none?" |
                 "each_with_index" | "map" | "collect" | "fetch" |
                 "sort" | "sort_by" | "min_by" | "max_by" | "group_by" |
                 "transform_keys" | "transform_values" |
+                "transform_keys!" | "transform_values!" |
                 "compact" | "compact!" | "filter_map" |
                 "default" | "default_proc" | "count" | "each_with_object" |
                 "flat_map" | "collect_concat" | "reduce" | "inject" | "sum" |

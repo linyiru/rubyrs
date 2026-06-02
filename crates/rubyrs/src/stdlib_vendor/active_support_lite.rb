@@ -196,61 +196,47 @@ end
 # ---- Tier C — Hash transforms (symbolize/stringify, deep_*, deep_merge) ----
 
 class Hash
+  # Match AS exactly: symbolize_keys converts every key that responds
+  # to #to_sym (others pass through via `rescue`); stringify_keys runs
+  # ALL keys through #to_s — including non-Symbol/non-String keys such
+  # as Integers. The deep_* variants route through the fully-recursive
+  # deep_transform_keys (defined below), so nested Arrays-of-Arrays are
+  # descended too, not just one level.
   def symbolize_keys
-    out = {}
-    each do |k, v|
-      new_k = k.is_a?(String) ? k.to_sym : k
-      out[new_k] = v
-    end
-    out
+    transform_keys { |key| key.to_sym rescue key }
   end
 
   def stringify_keys
-    out = {}
-    each do |k, v|
-      new_k = k.is_a?(Symbol) ? k.to_s : k
-      out[new_k] = v
-    end
-    out
+    transform_keys(&:to_s)
   end
 
   def deep_symbolize_keys
-    each_with_object({}) do |(k, v), acc|
-      new_k = k.is_a?(String) ? k.to_sym : k
-      acc[new_k] = case v
-                   when Hash then v.deep_symbolize_keys
-                   when Array then v.map { |x| x.is_a?(Hash) ? x.deep_symbolize_keys : x }
-                   else v
-                   end
-    end
+    deep_transform_keys { |key| key.to_sym rescue key }
   end
 
   def deep_stringify_keys
-    each_with_object({}) do |(k, v), acc|
-      new_k = k.is_a?(Symbol) ? k.to_s : k
-      acc[new_k] = case v
-                   when Hash then v.deep_stringify_keys
-                   when Array then v.map { |x| x.is_a?(Hash) ? x.deep_stringify_keys : x }
-                   else v
-                   end
-    end
+    deep_transform_keys(&:to_s)
   end
 
-  # `h1.deep_merge(h2)` — recursive merge: Hash-vs-Hash recurses,
-  # anything else uses h2's value. AS also takes a `&block` for
-  # custom conflict resolution; not modelled here (the common case
-  # is the default block-free form).
-  def deep_merge(other)
-    result = dup
-    other.each do |k, v_other|
-      v_self = result[k]
-      if v_self.is_a?(Hash) && v_other.is_a?(Hash)
-        result[k] = v_self.deep_merge(v_other)
+  # `h1.deep_merge(h2)` / `deep_merge!(h2)` — recursive merge:
+  # Hash-vs-Hash recurses, anything else uses h2's value. An optional
+  # `&block` resolves non-Hash conflicts (key present in both),
+  # matching AS. The bang form mutates self; the non-bang returns a
+  # fresh hash. Both route through the native `Hash#merge!`-with-block.
+  def deep_merge(other, &block)
+    dup.deep_merge!(other, &block)
+  end
+
+  def deep_merge!(other, &block)
+    merge!(other) do |key, this_val, other_val|
+      if this_val.is_a?(Hash) && other_val.is_a?(Hash)
+        this_val.deep_merge(other_val, &block)
+      elsif block
+        block.call(key, this_val, other_val)
       else
-        result[k] = v_other
+        other_val
       end
     end
-    result
   end
 end
 
@@ -314,5 +300,88 @@ class String
     keep = truncate_at - omission.length
     keep = 0 if keep < 0
     self[0, keep] + omission
+  end
+end
+
+# ---- Tier C — deep_dup + in-place key transforms + deep_transform_keys ----
+
+class Object
+  # Modern Ruby can dup immediates, so AS 8's default is simply true.
+  def duplicable?
+    true
+  end
+
+  def deep_dup
+    duplicable? ? dup : self
+  end
+end
+
+class Array
+  # Deep copy: every element deep-duped into a fresh Array.
+  def deep_dup
+    map { |it| it.deep_dup }
+  end
+end
+
+class Hash
+  # Deep copy. String/Symbol keys are kept as-is; any other key is
+  # itself deep-duped (re-keyed). Mirrors AS 8.0.1 exactly — note
+  # there is NO `frozen?` test on String keys.
+  def deep_dup
+    hash = dup
+    each_pair do |key, value|
+      if ::String === key || ::Symbol === key
+        hash[key] = value.deep_dup
+      else
+        hash.delete(key)
+        hash[key.deep_dup] = value.deep_dup
+      end
+    end
+    hash
+  end
+
+  # In-place key transforms — mutate self via Hash#replace, reusing
+  # the non-bang implementations above.
+  def symbolize_keys!
+    replace(symbolize_keys)
+  end
+
+  def stringify_keys!
+    replace(stringify_keys)
+  end
+
+  def deep_symbolize_keys!
+    replace(deep_symbolize_keys)
+  end
+
+  def deep_stringify_keys!
+    replace(deep_stringify_keys)
+  end
+
+  # Recursively transform keys, descending through nested Hashes AND
+  # through Arrays (including arrays of arrays) — matches AS, which is
+  # fully recursive, unlike the shallow array handling in the
+  # symbolize/stringify helpers above.
+  def deep_transform_keys(&block)
+    _deep_transform_keys_in_object(self, &block)
+  end
+
+  def deep_transform_keys!(&block)
+    replace(_deep_transform_keys_in_object(self, &block))
+  end
+
+  private
+
+  def _deep_transform_keys_in_object(object, &block)
+    case object
+    when Hash
+      object.each_with_object({}) do |(key, value), result|
+        result[yield(key)] = _deep_transform_keys_in_object(value, &block)
+      end
+    when Array
+      object.map { |e| _deep_transform_keys_in_object(e, &block) }
+    else
+      object
+    end
   end
 end

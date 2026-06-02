@@ -535,7 +535,7 @@ impl Vm {
         {
             // Under bignum the BigInt path handles every operand
             // shape — Int / BigInt / Rational. Non-numeric → None.
-            return self.rational_binop_bigint(kind, a, b);
+            self.rational_binop_bigint(kind, a, b)
         }
         #[cfg(not(feature = "bignum"))]
         {
@@ -4152,12 +4152,37 @@ impl Vm {
             // be expressed via explicit `self.helper`; the
             // limitation is documented in SUBSET.md as the
             // mirror-image of this fix.
+            // Bare call with a real `nil` receiver. rubyrs overloads
+            // `Value::Nil` as BOTH the toplevel `<main>` self and
+            // actual nil values, so the primitive arm below excludes
+            // Nil to keep `<main>`'s bare calls on the toplevel-method
+            // path (and preserve `def foo(a); foo; end` arity errors).
+            // But a *user-defined* `NilClass` method must still resolve
+            // when self is genuinely nil inside a method body — e.g.
+            // ActiveSupport's `NilClass#blank?`, reached when the
+            // inherited `Object#present?` calls bare `blank?` on a nil
+            // receiver. `defining_class.is_some()` is true only for
+            // real method frames (None for `<main>`, blocks, class
+            // bodies), so this never fires for the toplevel main self.
+            // Look up NilClass's own chain first; if it has no such
+            // method, fall through to the toplevel path unchanged
+            // (toplevel `def foo` lives in `toplevel_methods`, not on
+            // NilClass, so it is untouched). Self-as-nil inside a block
+            // body keeps the documented limitation (SUBSET.md).
+            if matches!(&self_val, Value::Nil)
+                && self.frames.last().is_some_and(|f| f.defining_class.is_some())
+                && let Value::Class(cls) = self.class_of(&self_val)
+                && let Some(m) = self.lookup_method_uncached(&cls, name_id)
+            {
+                self.invoke_method(m, self_val.clone(), args)?;
+                return Ok(());
+            }
             if !matches!(&self_val, Value::Object(_) | Value::Class(_) | Value::Nil) {
-                if let Value::Class(cls) = self.class_of(&self_val) {
-                    if let Some(m) = self.lookup_method_uncached(&cls, name_id) {
-                        self.invoke_method(m, self_val.clone(), args)?;
-                        return Ok(());
-                    }
+                if let Value::Class(cls) = self.class_of(&self_val)
+                    && let Some(m) = self.lookup_method_uncached(&cls, name_id)
+                {
+                    self.invoke_method(m, self_val.clone(), args)?;
+                    return Ok(());
                 }
                 // No Ruby-level method — bridge to receiver form
                 // so primitive dispatch (Int#to_s, Str#length,
@@ -9514,6 +9539,46 @@ impl Vm {
                     return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
                 }
             }
+            // Bare call WITH a block on a real `nil` receiver inside a
+            // method body — block-form parallel of do_call's Nil arm
+            // (~line 3815). ActiveSupport's `NilClass`-targeted methods
+            // reached via an inherited yielding Object method land
+            // here. `defining_class.is_some()` keeps `<main>`'s bare
+            // calls on the toplevel path; see do_call's Nil arm for the
+            // full main-self-is-Nil rationale.
+            if matches!(&self_val, Value::Nil)
+                && self.frames.last().is_some_and(|f| f.defining_class.is_some())
+                && let Value::Class(cls) = self.class_of(&self_val)
+                && let Some(m) = self.lookup_method_uncached(&cls, name_id)
+            {
+                self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
+                return Ok(());
+            }
+            // Bare call WITH a block on a primitive self (Int / Str /
+            // Sym / Float / Array / Hash / Range / Bool) — block-form
+            // parallel of do_call's primitive bare-call bridge (~line
+            // 3815). Without this, every bare `transform_keys { }` /
+            // `map { }` / `each_with_object { }` inside a reopened
+            // primitive method body — e.g. `class Hash; def
+            // symbolize_keys; transform_keys { ... }; end; end` —
+            // raised NoMethodError even though the explicit
+            // `self.transform_keys { }` form dispatches fine. Two-tier:
+            // a user-defined sibling method first, else bridge to the
+            // receiver-form `do_call_block` so the native primitive /
+            // iterator arm fires with the block attached.
+            if !matches!(&self_val, Value::Object(_) | Value::Class(_) | Value::Nil) {
+                if let Value::Class(cls) = self.class_of(&self_val)
+                    && let Some(m) = self.lookup_method_uncached(&cls, name_id)
+                {
+                    self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
+                    return Ok(());
+                }
+                let argc = args.len();
+                self.stack.push(self_val.clone());
+                self.stack.push(Value::Block(block));
+                for a in args { self.stack.push(a); }
+                return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
+            }
             if let Some(m) = self.toplevel_methods.get(&name_id).cloned() {
                 self.invoke_method_with_block(m, self_val, args, Some(block))?;
                 return Ok(());
@@ -9708,6 +9773,26 @@ impl Vm {
                 self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
                 return Ok(());
             }
+        }
+        // User-defined method reopened on a primitive's class —
+        // explicit receiver, WITH a block. The builtin primitive arms
+        // above (primitive_call / sym_primitive / collection_call_block
+        // / numeric) have already had first refusal, so this is a
+        // fallback for NEW methods a script added to a core class, the
+        // block-form parallel of do_call's primitive receiver-form
+        // user-method lookup. Without it `h.deep_transform_keys { ... }`
+        // on a reopened Hash raised NoMethodError even though both the
+        // blockless `h.deep_transform_keys` and the bare-call
+        // `deep_transform_keys { ... }` (from inside another Hash
+        // method) resolved — the asymmetry ActiveSupport's core-ext
+        // surfaced. (Builtin precedence is unchanged: a name that
+        // matches a primitive arm still takes that arm first.)
+        if !matches!(&recv, Value::Object(_) | Value::Class(_))
+            && let Value::Class(cls) = self.class_of(&recv)
+            && let Some(m) = self.lookup_method_uncached(&cls, name_id)
+        {
+            self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
+            return Ok(());
         }
         if self.try_method_missing(&recv, name_id, args, Some(block))? {
             return Ok(());

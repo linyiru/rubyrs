@@ -1214,6 +1214,161 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Hash(result_id)))
             }
+            // `h.transform_keys! { |k| ... }` — in-place key map; same
+            // last-wins collision semantics as `transform_keys`, but
+            // mutates the receiver and returns it. Core Ruby 3.0+.
+            // DIVERGENCE: on `break` the new pairs are built in a
+            // scratch Vec committed only on normal completion, so the
+            // receiver is left fully untouched; CRuby commits the
+            // entries processed before the break. Documented in
+            // SUBSET.md; `break` mid-transform_keys! is rare.
+            (Value::Hash(id), "transform_keys!", []) => {
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut new_pairs: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
+                let mut early = None;
+                for (k, v) in snapshot {
+                    let new_key = match g.vm.step_block(block, vec![k], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    let existing = new_pairs.iter()
+                        .position(|(k2, _)| k2.ruby_eql(&new_key, &g.vm.heap));
+                    if let Some(p) = existing {
+                        new_pairs[p] = (new_key, v);
+                    } else {
+                        new_pairs.push((new_key, v));
+                    }
+                }
+                match early {
+                    Some(r) => Some(r),
+                    None => {
+                        *g.vm.heap.hash_mut(id) = new_pairs;
+                        Some(Value::Hash(id))
+                    }
+                }
+            }
+            // `h.transform_values! { |v| ... }` — in-place value map;
+            // keys unchanged, mutates the receiver and returns it.
+            // Core Ruby 2.6+. DIVERGENCE on `break`: same scratch-Vec
+            // commit-on-normal-completion as transform_keys! above, so
+            // the receiver is left untouched rather than partially
+            // committed. Documented in SUBSET.md.
+            (Value::Hash(id), "transform_values!", []) => {
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut new_vals: Vec<Value> = Vec::with_capacity(snapshot.len());
+                let mut early = None;
+                for (_k, v) in &snapshot {
+                    let new_v = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    new_vals.push(new_v);
+                }
+                match early {
+                    Some(r) => Some(r),
+                    None => {
+                        let new_pairs: Vec<(Value, Value)> = snapshot.into_iter()
+                            .map(|(k, _)| k).zip(new_vals).collect();
+                        *g.vm.heap.hash_mut(id) = new_pairs;
+                        Some(Value::Hash(id))
+                    }
+                }
+            }
+            // `h.merge!(other) { |key, old, new| ... }` /
+            // `h.update(...) { ... }` — in-place merge whose block
+            // resolves key collisions (its result becomes the value).
+            // New keys append in `other`'s order. Mutates and returns
+            // self. Core Ruby. The blockless form is in vm/hash.rs.
+            (Value::Hash(id), "merge!" | "update", [Value::Hash(other)]) => {
+                let id = *id;
+                let other = *other;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Hash(other));
+                g.pin(Value::Block(block));
+                let extra: Vec<(Value, Value)> = g.vm.heap.hash(other).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (k, v) in extra {
+                    let pos = g.vm.heap.hash(id).iter()
+                        .position(|(ek, _)| ek.ruby_eql(&k, &g.vm.heap));
+                    if let Some(p) = pos {
+                        let old = g.vm.heap.hash(id)[p].1.clone();
+                        let resolved = match g.vm.step_block(block, vec![k.clone(), old, v], pre_frames)? {
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                            BlockStep::Break(r) => { early = Some(r); break; }
+                            BlockStep::Value(r) => r,
+                        };
+                        g.vm.heap.hash_mut(id)[p].1 = resolved;
+                    } else {
+                        g.vm.heap.hash_mut(id).push((k, v));
+                    }
+                }
+                match early {
+                    Some(r) => Some(r),
+                    None => Some(Value::Hash(id)),
+                }
+            }
+            // `h.merge(other) { |key, old, new| ... }` — block-form of
+            // `merge`: like the blockless version (vm/hash.rs) but the
+            // block resolves collisions. Returns a NEW hash; self is
+            // untouched. The result inherits the RECEIVER's default
+            // block, matching CRuby and the blockless `merge` arm — so
+            // `Hash.new { ... }.merge(x) { ... }` still auto-vivifies.
+            // Core Ruby.
+            (Value::Hash(id), "merge", [Value::Hash(other)]) => {
+                let id = *id;
+                let other = *other;
+                let default_block = self.heap.hash_default_block(id);
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Hash(other));
+                g.pin(Value::Block(block));
+                if let Some(bid) = default_block {
+                    g.pin(Value::Block(bid));
+                }
+                let mut out: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let extra: Vec<(Value, Value)> = g.vm.heap.hash(other).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (k, v) in extra {
+                    let pos = out.iter().position(|(ek, _)| ek.ruby_eql(&k, &g.vm.heap));
+                    if let Some(p) = pos {
+                        let old = out[p].1.clone();
+                        let resolved = match g.vm.step_block(block, vec![k.clone(), old, v], pre_frames)? {
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                            BlockStep::Break(r) => { early = Some(r); break; }
+                            BlockStep::Value(r) => r,
+                        };
+                        out[p].1 = resolved;
+                    } else {
+                        out.push((k, v));
+                    }
+                }
+                if let Some(r) = early {
+                    Some(r)
+                } else {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)));
+                    if default_block.is_some() {
+                        g.vm.heap.hash_set_default_block(nid, default_block);
+                    }
+                    Some(Value::Hash(nid))
+                }
+            }
             (Value::Hash(id), "fetch", [k]) => {
                 // Block form: `h.fetch(k) { |k| default_expr }`.
                 // Block is invoked only on miss; CRuby ignores the

@@ -633,6 +633,62 @@ h[:k] = 1  # NoMethodError in rubyrs; works in CRuby
 - No test pin (would lock in divergence); this entry is the
   contract.
 
+### Bare-call dispatch on `nil` self inside a block body
+
+```ruby
+class NilClass; def helper; "h"; end; end
+class Object; def run; [1].each { helper }; end; end   # block self == nil
+nil.run   # rubyrs: NoMethodError; CRuby: "h"
+```
+
+- Bare (implicit-self) calls to a user-defined `NilClass` method
+  now resolve correctly from inside a *method* body — e.g.
+  ActiveSupport's `Object#present?` calling `blank?` on a nil
+  receiver (`vm/dispatch.rs`, the Nil arms in `do_call` /
+  `do_call_block`). The fix is gated on `frame.defining_class
+  .is_some()`, which is false for block frames, so the same bare
+  call from inside a *block* whose self is nil still misses.
+- Why the guard: rubyrs uses `Value::Nil` as the toplevel `<main>`
+  self, and a block at the toplevel runs with that same nil self
+  and `defining_class == None` — indistinguishable from a block
+  whose self is a genuine nil receiver without tracking self
+  provenance. The guard keeps `<main>`'s bare calls on the
+  toplevel-method path; the block-self-nil case is the rare
+  residual. Workaround: explicit `self.helper`.
+- The proper fix is the same structural one noted above — give
+  `<main>` its own identity distinct from `Value::Nil`.
+
+### Reopening a primitive to OVERRIDE a built-in method
+
+- Adding a *new* method to a core class (`class Hash; def
+  deep_merge; ...; end`) works in all call forms — bare,
+  explicit-receiver, with or without a block (`vm/dispatch.rs`
+  primitive bare-call / block-form bridges). But *overriding* an
+  existing built-in (`class String; def upcase; "no"; end`) still
+  loses to the built-in: primitive arms (`primitive_call` /
+  `collection_call_block` / numeric) get first refusal, and the
+  user-method lookup is only a fallback. Documented divergence;
+  the structural fix is the same class-of-slot routing noted in
+  the `MyHash < Hash` entry.
+
+### `Hash#transform_keys!` / `transform_values!` on `break` leave the receiver untouched
+
+```ruby
+h = {a: 1, b: 2, c: 3}
+h.transform_keys! { |k| break if k == :b; k.to_s }
+h   # rubyrs: {a:1, b:2, c:3}; CRuby: {b:2, c:3, "a"=>1}
+```
+
+- The bang transforms build the new pairs in a scratch Vec and
+  commit them to the receiver only on normal completion, so a
+  `break` mid-iteration discards the whole transform. CRuby
+  mutates incrementally — entries processed before the `break`
+  are already committed.
+- Why: incremental in-place key rewriting while iterating the
+  same hash is hazardous (the scratch-Vec approach is the safe
+  one); `break` inside a `transform_*!` block is rare. No test
+  pin; this entry is the contract.
+
 ### `freeze` doesn't actually freeze — `frozen?` always false
 
 ```ruby
