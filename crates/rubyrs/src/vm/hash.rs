@@ -380,6 +380,13 @@ impl Vm {
                             msg: "bignum too big to convert into `long'".to_string(),
                         }));
                     }
+                    // Float coerce — CRuby truncates `take(2.5)` to 2.
+                    // Re-dispatch with the converted Int. Mirrors the
+                    // each_slice/each_cons family from PR #338.
+                    ("take" | "drop", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.hash_collection_call(id, name, &[Value::Int(n)]);
+                    }
                     ("take", [Value::Int(n)]) => {
                         if *n < 0 {
                             return Err(self.trap(crate::error::RubyError::ArgumentError {
@@ -736,23 +743,13 @@ impl Vm {
                             msg,
                         }));
                     }
-                    // Wrong-arity arm for take / drop — CRuby
-                    // raises ArgumentError on the no-arg call
-                    // (`h.take` / `h.drop` without an Int). The
-                    // BigInt and Int arms above already match
-                    // the supported shapes; this catches `[]`
-                    // and any non-Int/BigInt arg shape, raising
-                    // a clear "wrong number of arguments" error
-                    // instead of falling through to a
-                    // misleading NoMethodError despite
-                    // respond_to? returning true.
-                    ("take" | "drop", many) => {
-                        return Err(self.trap(crate::error::RubyError::ArgumentError {
-                            msg: format!(
-                                "wrong number of arguments (given {}, expected 1)",
-                                many.len(),
-                            ),
-                        }));
+                    // Wrong-arity / non-Int catch-all for take / drop.
+                    // Routes through `arity_error_arg1_int` so non-Int
+                    // 1-arg surfaces as TypeError (CRuby parity) rather
+                    // than the previous misleading "given 1, expected 1"
+                    // ArgumentError that lumped both shapes together.
+                    ("take" | "drop", _) => {
+                        return Err(self.arity_error_arg1_int(name, args));
                     }
                     // `h.min` / `h.max` (no block) — find min/max
                     // entry via lexicographic compare on the

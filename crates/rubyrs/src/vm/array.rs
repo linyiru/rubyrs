@@ -1228,13 +1228,42 @@ impl Vm {
                         self.heap.array_mut(id).extend(extra);
                         Some(Value::Array(id))
                     }
+                    // BigInt arg — CRuby raises RangeError (the
+                    // value is too large to fit in a C long).
+                    // Mirrors Hash#take/#drop's BigInt arm at
+                    // hash.rs:378. Without this arm, BigInt
+                    // falls through to the take/drop catch-all
+                    // below and renders as "no implicit conversion
+                    // of Integer into Integer" — nonsensical
+                    // because `type_name_for_coerce(BigInt)` is
+                    // "Integer".
+                    #[cfg(feature = "bignum")]
+                    ("take", [Value::BigInt(_)]) | ("drop", [Value::BigInt(_)]) => {
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "bignum too big to convert into `long'".to_string(),
+                        }));
+                    }
+                    // Float coerce — CRuby truncates `take(2.5)` to 2.
+                    // Re-dispatch with the converted Int so the
+                    // existing Int arm owns the rest of the logic.
+                    // Same pattern as each_slice/each_cons family
+                    // (PR #338).
+                    ("take" | "drop", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.array_collection_call(id, name, &[Value::Int(n)]);
+                    }
                     ("take", [Value::Int(n)]) => {
                         // Pin the receiver across maybe_gc: by the
                         // time we get here the receiver Array has
                         // been popped from the operand stack, so its
                         // children (the cloned ObjIds in `out`) have
                         // no GC root and STRESS_GC sweeps them.
-                        let n = (*n).max(0) as usize;
+                        if *n < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "attempt to take negative size".to_string(),
+                            }));
+                        }
+                        let n = *n as usize;
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Array(id));
                         let out: Vec<Value> = g.vm.heap.array(id).iter().take(n).cloned().collect();
@@ -1243,13 +1272,25 @@ impl Vm {
                         Some(Value::Array(nid))
                     }
                     ("drop", [Value::Int(n)]) => {
-                        let n = (*n).max(0) as usize;
+                        if *n < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "attempt to drop negative size".to_string(),
+                            }));
+                        }
+                        let n = *n as usize;
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Array(id));
                         let out: Vec<Value> = g.vm.heap.array(id).iter().skip(n).cloned().collect();
                         g.vm.maybe_gc();
                         let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
+                    }
+                    // Wrong-arity / non-Int for take/drop. Catches
+                    // `arr.take`, `arr.take(2,3)`, `arr.take("2")`,
+                    // `arr.take(nil)`, etc. — was NoMethodError
+                    // pre-fix despite `respond_to?` returning true.
+                    ("take" | "drop", _) => {
+                        return Err(self.arity_error_arg1_int(name, args));
                     }
                     // No-block `each_slice(n)` / `each_cons(n)` —
                     // CRuby returns an Enumerator we don't model;
