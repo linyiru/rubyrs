@@ -536,14 +536,8 @@ impl Vm {
         {
             use num_bigint::BigInt;
             use num_traits::{One, Zero};
-            let r = self.heap.rational(r_id).clone();
             if k == 0 {
                 return self.make_rational(1, 1);
-            }
-            if r.num.is_zero() && k < 0 {
-                return Err(self.trap(RubyError::ZeroDivisionError {
-                    msg: "divided by 0".to_string(),
-                }));
             }
             // Cap |k| so a pathological literal can't drive BigInt
             // pow into multi-GB allocations. 2^16 is well above
@@ -559,8 +553,20 @@ impl Vm {
                 }));
             }
             let ak_u32 = ak as u32;
-            let new_num = r.num.pow(ak_u32);
-            let new_den = r.den.pow(ak_u32);
+            // Borrow the heap Rational just long enough to compute
+            // new_num / new_den via `BigInt::pow(&self, u32)` (which
+            // only needs `&BigInt`). Avoids cloning r.num / r.den
+            // up-front when the existing `&BigInt` borrows suffice.
+            // Drop the borrow before the subsequent `&mut self` calls.
+            let (new_num, new_den) = {
+                let r = self.heap.rational(r_id);
+                if r.num.is_zero() && k < 0 {
+                    return Err(self.trap(RubyError::ZeroDivisionError {
+                        msg: "divided by 0".to_string(),
+                    }));
+                }
+                (r.num.pow(ak_u32), r.den.pow(ak_u32))
+            };
             // The caller-side canonical form was already coprime
             // and den-positive; integer pow preserves both, but
             // make_rational_bigint re-normalizes defensively (the
