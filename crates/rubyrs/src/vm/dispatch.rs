@@ -4946,7 +4946,18 @@ impl Vm {
                     // M1.included fires LAST. Hook fire order also
                     // mirrors this iteration. Single-arg cases are
                     // unaffected. PR #347 documented follow-up.
-                    for a in args.iter().rev() {
+                    //
+                    // Gated to include/prepend: `extend` shares this
+                    // arm but its multi-arg semantics are a separate
+                    // PR's scope. Left-to-right preserves the
+                    // pre-#350 behavior for extend so no untested
+                    // change ships here.
+                    let arg_iter: Box<dyn Iterator<Item = &Value>> = if is_prepend || is_include {
+                        Box::new(args.iter().rev())
+                    } else {
+                        Box::new(args.iter())
+                    };
+                    for a in arg_iter {
                         let src = match a {
                             Value::Class(c) => c.clone(),
                             _ => return Err(self.trap(RubyError::TypeError {
@@ -5896,8 +5907,14 @@ impl Vm {
                 let target_cls = target.clone();
                 let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
                 // Same right-to-left iteration as the no-receiver
-                // arm — see that comment for rationale.
-                for a in args.iter().rev() {
+                // arm — see that comment for rationale, including
+                // the extend-not-affected gate.
+                let arg_iter: Box<dyn Iterator<Item = &Value>> = if is_prepend || is_include {
+                    Box::new(args.iter().rev())
+                } else {
+                    Box::new(args.iter())
+                };
+                for a in arg_iter {
                     let src = match a {
                         Value::Class(c) => c.clone(),
                         _ => return Err(self.trap(RubyError::TypeError {
