@@ -440,11 +440,59 @@ exception-based `halt`/`redirect` workaround for gap #8 actually work.
 
 ---
 
-## Gap #12 — `Kernel#load` not supported  **[severity: LOW]**
+## Gap #12 — `Kernel#load` not supported  **[severity: LOW] — ✅ FIXED**
 
-**Repro:** `load "foo.rb"` → `NoMethodError: undefined method 'load' for
-NilClass`. `require` / `require_relative` work. Minor; `load`'s
-re-execution semantics are rarely needed by app code.
+> **Status: fixed.** `Kernel#load` added to `vm/kernel.rs`'s
+> `builtin_call` next to `require` / `require_relative`. Reuses
+> `ruby_source_candidates` for path resolution (with the `.rb`
+> auto-append candidate filtered out — load takes literal
+> paths) and `compile_and_run_source` for the execute step. The
+> distinguishing semantics from `require` are honoured:
+>
+>   - **No `$LOADED_FEATURES` dedup.** Every call re-executes
+>     the source. We `remove(&canon)` from `loaded_features`
+>     before running and re-insert after only if a prior
+>     `require` had already inserted it — so `require → load →
+>     require` keeps require's no-op contract while letting
+>     load itself always run.
+>   - **No `.rb` auto-extension.** `load "foo"` looks for a
+>     literal `foo`, never `foo.rb`. CRuby has the same rule.
+>   - **Always returns `true` on success.** No first-call /
+>     subsequent-call asymmetry (require returns false on
+>     subsequent calls; load doesn't have that concept).
+>   - **Same sandbox gate.** `check_load_allowed("load", ...)`
+>     uses the identical hook `require` / `require_relative`
+>     route through, so a sandboxed Runtime refuses the call
+>     with a LoadError before touching the FS.
+>   - **User-override precedence.** `def load(path); ...; end`
+>     at top level still wins. `load` is intentionally NOT in
+>     `dispatch.rs::is_builtin_name` so the `toplevel_methods`
+>     fast path resolves user defs ahead of the builtin —
+>     `tests/diff/custom_exception.rb` exercises that shape.
+>     Reflection (`defined?(load)`) reports `"method"` from
+>     the user side when redefined, falling through to the
+>     builtin entry when not.
+>   - **Arity / type errors match CRuby class + message** —
+>     `LoadError: cannot load such file -- <name>`,
+>     `TypeError: no implicit conversion of Integer into String`,
+>     `ArgumentError: wrong number of arguments (given 0,
+>     expected 1..2)`. The `wrap` second arg is accepted for
+>     signature parity but silently ignored (Tier-1 doesn't
+>     model anonymous-module scope swap — documented Tier-1
+>     divergence in the same shape as `eval`'s ignored Binding
+>     2nd arg).
+>
+> Sentinels: `tests/diff/kernel_load.rb` (gem-oracle diff —
+> three back-to-back loads, load/require interleave, error
+> surface for missing path / type / arity) plus
+> `tests/embed/filesystem_sandbox.rs::default_runtime_blocks_load`
+> (sandboxed Runtime LoadError surface).
+>
+> **Repro at the time the gap was recorded:**
+> `load "foo.rb"` → `NoMethodError: undefined method 'load' for
+> NilClass`. **Current behaviour:** load resolves the path,
+> executes the source body, returns `true` (or raises
+> `LoadError` byte-identical to CRuby for missing files).
 
 ---
 

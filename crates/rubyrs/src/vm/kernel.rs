@@ -410,7 +410,7 @@ impl Vm {
                     let name = self.interner.resolve(*sid).clone();
                     let is_builtin = matches!(
                         &*name,
-                        "puts" | "p" | "pp" | "print" | "require" |
+                        "puts" | "p" | "pp" | "print" | "require" | "load" |
                         "sprintf" | "format" | "__time_now_raw" | "sleep" |
                         "exit" | "exit!" | "abort" | "warn" | "at_exit" | "__rubyrs_signal_trap" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
@@ -1559,6 +1559,163 @@ impl Vm {
                 // now catches this trap the same way it would catch
                 // the sandbox cap's LoadError.
                 msg: "require_relative: file I/O not available on wasm32-wasi".into(),
+            }))),
+            // `Kernel#load(filename [, wrap])` — re-executes the
+            // Ruby source at `filename` every call (NO
+            // `loaded_features` dedup; that's `require`'s
+            // distinguishing semantic). The `wrap` second arg
+            // would, in CRuby, run the loaded body inside an
+            // anonymous module so its top-level constants don't
+            // pollute the loader's scope; rubyrs Tier 1 doesn't
+            // model anonymous-module scope swap and silently
+            // ignores the flag — documented Tier-1 divergence in
+            // SUBSET.md, same shape as `eval`'s ignored Binding
+            // 2nd arg.
+            //
+            // Sandbox + scope-allowlist gates are identical to
+            // `require`: a script that's blocked from
+            // `require "foo.rb"` is also blocked from
+            // `load "foo.rb"`. Path-resolution diverges from
+            // `require` in two well-documented ways: (a) no
+            // automatic `.rb` extension — `load "foo"` looks for
+            // a literal `foo`, never `foo.rb`; (b) the as-given
+            // path is the FIRST candidate (matches CRuby's "if
+            // not absolute and not ./../ prefixed, search
+            // $LOAD_PATH"; we share that probe path with require
+            // via `ruby_source_candidates`, then strip the
+            // .rb-only candidate when iterating). Returns `true`
+            // on success (CRuby always returns true; require
+            // returns false on second require, load doesn't have
+            // a second-require concept).
+            #[cfg(not(target_os = "wasi"))]
+            "load" => {
+                // User-override precedence. Unlike `require`, `load`
+                // is genuinely common to shadow at top level — old
+                // YAML-config loaders, test fixtures, and DSL prelude
+                // files all `def load(path)` to repurpose the name.
+                // `load` is intentionally NOT in `dispatch.rs::
+                // is_builtin_name`'s "builtin always wins" set, so
+                // the do_call no-recv fast path consults
+                // `toplevel_methods` FIRST. By the time control
+                // reaches this `builtin_call` arm, the dispatcher
+                // has already proved no user `def load` exists for
+                // this frame. Reflection (`defined?(load)` /
+                // `__defined_method?`) reports "method" via the
+                // companion arm above (`"load"` in the inline
+                // builtin list) which checks toplevel_hit before
+                // falling through to builtin, so the two paths
+                // agree across the user-override / built-in split.
+                match args {
+                [Value::Str(path)] | [Value::Str(path), _] => {
+                    let path_str = path.to_string_lossy().to_string();
+                    if let Err(t) = self.check_load_allowed("load", None) {
+                        return Some(Err(t));
+                    }
+                    // Reuse the require candidate search but drop the
+                    // auto-.rb-extension candidate — `load` doesn't
+                    // perform that transformation. We pass the
+                    // raw `path_str` through and walk candidates;
+                    // if the user wanted `.rb` resolution they
+                    // included it themselves (e.g. `load "boot.rb"`
+                    // is what real apps write). Absolute paths
+                    // shortcut the search exactly as in require.
+                    let candidates = self.ruby_source_candidates(&path_str);
+                    let mut tried: Vec<String> = Vec::with_capacity(candidates.len());
+                    let mut canon: Option<std::path::PathBuf> = None;
+                    for c in &candidates {
+                        // Skip the implicit `.rb`-appended candidate —
+                        // ruby_source_candidates returns both the
+                        // as-given form and a `<stem>.rb` form; load
+                        // wants only the as-given matches. The .rb form
+                        // is distinguishable because it has a `.rb`
+                        // extension while `path_str` didn't.
+                        let original_has_rb = std::path::Path::new(&path_str)
+                            .extension()
+                            .map(|e| e == "rb")
+                            .unwrap_or(false);
+                        let candidate_has_rb = c.extension().map(|e| e == "rb").unwrap_or(false);
+                        if !original_has_rb && candidate_has_rb {
+                            continue;
+                        }
+                        tried.push(c.display().to_string());
+                        let Ok(resolved) = std::fs::canonicalize(c) else { continue };
+                        if self.check_load_allowed("load", Some(&resolved)).is_ok() {
+                            canon = Some(resolved);
+                            break;
+                        }
+                    }
+                    let canon = match canon {
+                        Some(c) => c,
+                        None => {
+                            // `tried` is intentionally NOT in the message:
+                            // CRuby's LoadError surface is just
+                            // `cannot load such file -- <name>` so a
+                            // `rescue LoadError => e; e.message` round-trip
+                            // matches byte-for-byte. The candidate list
+                            // was useful while debugging the
+                            // `ruby_source_candidates` shape but it's
+                            // diagnostic noise in steady state.
+                            let _ = tried;
+                            return Some(Err(self.trap(RubyError::LoadError {
+                                msg: format!("cannot load such file -- {}", path_str),
+                            })));
+                        }
+                    };
+                    // Bypass the `loaded_features` dedup table —
+                    // `load` re-executes unconditionally. We
+                    // intentionally don't insert into
+                    // `loaded_features` either, so a subsequent
+                    // `require` on the same file would still run.
+                    // That's CRuby semantics: `load` and `require`
+                    // have separate cache disciplines.
+                    let source = match std::fs::read_to_string(&canon) {
+                        Ok(s) => s,
+                        Err(e) => return Some(Err(self.trap(RubyError::LoadError {
+                            msg: format!("load: read {} failed: {}", canon.display(), e),
+                        }))),
+                    };
+                    // Drop the prior loaded_features entry (if any)
+                    // so compile_and_run_source — which marks the
+                    // path loaded — doesn't no-op on a re-load. The
+                    // `load` contract is "always run"; the insert
+                    // below temporarily marks for circular-require
+                    // safety during compile, then we remove on
+                    // success so the next call runs again too.
+                    let was_loaded = self.loaded_features.remove(&canon);
+                    let res = self.compile_and_run_source(canon.clone(), source);
+                    // Always rewind the features-set state: on
+                    // success we want subsequent `load` calls to
+                    // re-run; on failure we shouldn't add a fake
+                    // "this was loaded" entry that would silence
+                    // a future require.
+                    self.loaded_features.remove(&canon);
+                    if was_loaded {
+                        // Preserve prior require's bookkeeping so
+                        // a subsequent `require` of the same path
+                        // still no-ops. Without this re-insert,
+                        // load + require interleave would cause
+                        // require to re-execute too.
+                        self.loaded_features.insert(canon);
+                    }
+                    Some(res.map(|_| Value::Bool(true)))
+                }
+                [other] | [other, _] => Some(Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into String",
+                        other.type_name()
+                    ),
+                }))),
+                _ => Some(Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1..2)",
+                        args.len()
+                    ),
+                }))),
+                }
+            }
+            #[cfg(target_os = "wasi")]
+            "load" => Some(Err(self.trap(RubyError::LoadError {
+                msg: "load: file I/O not available on wasm32-wasi".into(),
             }))),
             // `Kernel#eval(string [, _binding, _file, _line])` —
             // parse + compile + run the source string at top

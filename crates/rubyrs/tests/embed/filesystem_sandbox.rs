@@ -128,6 +128,23 @@ fn default_runtime_blocks_require_relative() {
     );
 }
 
+#[test]
+#[cfg(not(target_os = "wasi"))]
+fn default_runtime_blocks_load() {
+    // `Kernel#load` (Sinatra GAPS Gap #12) routes through the
+    // same `check_load_allowed("load", ...)` gate `require` /
+    // `require_relative` use. A default sandboxed Runtime
+    // should refuse the call before touching the FS, with a
+    // LoadError that `rescue LoadError` can catch — same shape
+    // and class as the sister methods so capability detection
+    // and error handling are uniform.
+    assert_blocked(
+        r#"load "lib/foo.rb""#,
+        "LoadError",
+        "load blocked",
+    );
+}
+
 // ---------- Lexical-only paths (NOT gated) ----------
 
 #[test]
