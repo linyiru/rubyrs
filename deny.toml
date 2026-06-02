@@ -6,8 +6,9 @@
 # (bans). Same philosophy: catch supply-chain drift at PR time,
 # not at audit time.
 #
-# Run locally:
-#   cargo install cargo-deny --locked --version <pinned>
+# Run locally (keep the version in lockstep with the pin in
+# `.github/workflows/ci.yml`'s `supply-chain` job):
+#   cargo install cargo-deny --locked --version 0.19.8
 #   cargo deny check
 #
 # See `docs/DEVELOPMENT.md` for the bump-a-rule etiquette.
@@ -100,9 +101,9 @@ exceptions = [
 # without blocking. Tighten to `deny` after the duplicate set
 # has been cleared.
 multiple-versions = "warn"
-# `allow-wildcards = "deny"` would catch `foo = "*"` deps; we
-# don't have any (all workspace deps pin a version), so this
-# defends against future regressions.
+# `wildcards = "deny"` catches `foo = "*"` deps; we don't have
+# any (all workspace deps pin a version), so this defends
+# against future regressions.
 wildcards = "deny"
 # Crates we explicitly never want in the tree (e.g., known
 # unmaintained alternatives to a healthy crate we already use).

@@ -978,6 +978,22 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo registry + cargo-deny
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-deny
+          # The pinned cargo-deny version is embedded in the key so a
+          # version bump (below) bust-invalidates the cache and forces a
+          # fresh install on the next run. Cargo.lock is hashed because
+          # `cargo install` resolves against the registry index, and a
+          # stale registry can fail a from-scratch install on a cache
+          # miss. Mirrors the `coverage` job's cache shape (PR #274).
+          key: ${{ runner.os }}-cargo-deny-0.19.8-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-deny-0.19.8-
+
       - name: Install cargo-deny
         # Pin via `cargo install` rather than the upstream
         # `EmbarkStudios/cargo-deny-action` so the workflow stays
