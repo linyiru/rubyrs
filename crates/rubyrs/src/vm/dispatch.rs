@@ -486,24 +486,39 @@ impl Vm {
         }
         #[cfg(feature = "bignum")]
         if let Value::BigInt(id) = exp {
-            // Zero base + negative exp is the first thing the
-            // integer arm checks; surface it here too so a huge
-            // BigInt negative exp doesn't escape into the cap path.
+            // Capture exp metadata into owned scalars / i64 result
+            // up-front so the `&BigInt` borrow doesn't conflict with
+            // the subsequent `&mut self` calls below.
             use num_bigint::Sign;
             use num_traits::Zero;
-            let exp_big = self.heap.bigint(*id);
-            let exp_negative = exp_big.sign() == Sign::Minus;
-            let r = self.heap.rational(r_id);
-            if r.num.is_zero() && exp_negative {
+            let (exp_negative, exp_is_odd, exp_fits_i64) = {
+                let exp_big = self.heap.bigint(*id);
+                (
+                    exp_big.sign() == Sign::Minus,
+                    exp_big.bit(0),
+                    i64::try_from(exp_big).ok(),
+                )
+            };
+            // Zero base + negative exp is always ZeroDivisionError —
+            // surface here so a huge BigInt negative exp doesn't
+            // escape into the cap path.
+            if exp_negative && self.heap.rational(r_id).num.is_zero() {
                 return Err(self.trap(RubyError::ZeroDivisionError {
                     msg: "divided by 0".to_string(),
                 }));
+            }
+            // Unit bases (0/1, 1/1, -1/1) are exactly representable
+            // for any integer exponent without touching BigInt::pow,
+            // so the 2^16 cap shouldn't gate them. Short-circuit
+            // BEFORE the i64-fit conversion below.
+            if let Some(v) = self.try_unit_base_pow(r_id, exp_is_odd)? {
+                return Ok(v);
             }
             // Fits i64 → exact path. Otherwise the magnitude is
             // necessarily above the |k| ≤ 2^16 cap inside
             // `rational_pow_int`, so surface the same RangeError
             // up-front rather than letting it slip into Float.
-            if let Ok(k) = i64::try_from(exp_big) {
+            if let Some(k) = exp_fits_i64 {
                 return self.rational_pow_int(r_id, k);
             }
             return Err(self.trap(RubyError::RangeError {
@@ -528,6 +543,49 @@ impl Vm {
         }))
     }
 
+    /// Return `Some(unit_pow_result)` when the Rational at `r_id`
+    /// is a unit base (0/1, 1/1, or -1/1) — these are exactly
+    /// representable for any integer exponent without `BigInt::pow`
+    /// or `checked_pow`. Returns `None` for non-unit bases so the
+    /// caller proceeds with the regular pow path. `ak_is_odd` is
+    /// the parity of `|k|` and only matters for the -1/1 case.
+    ///
+    /// Bignum-gated because the no-bignum tier inlines the same
+    /// short-circuit at its single call site (the i64 RationalRepr
+    /// makes the unit-base match trivial without a helper).
+    #[cfg(feature = "bignum")]
+    fn try_unit_base_pow(
+        &mut self,
+        r_id: ObjId,
+        ak_is_odd: bool,
+    ) -> Result<Option<Value>, Trap> {
+        use num_bigint::BigInt;
+        use num_traits::{One, Zero};
+        let (is_zero, is_one, is_neg_one) = {
+            let r = self.heap.rational(r_id);
+            if !r.den.is_one() {
+                return Ok(None);
+            }
+            (
+                r.num.is_zero(),
+                r.num.is_one(),
+                r.num == BigInt::from(-1),
+            )
+        };
+        if is_zero {
+            // k must be > 0 here (caller traps 0**negative upstream).
+            return Ok(Some(self.make_rational(0, 1)?));
+        }
+        if is_one {
+            return Ok(Some(self.make_rational(1, 1)?));
+        }
+        if is_neg_one {
+            let signed = if ak_is_odd { -1 } else { 1 };
+            return Ok(Some(self.make_rational(signed, 1)?));
+        }
+        Ok(None)
+    }
+
     /// Integer-exponent power for Rational. Splits bignum and
     /// no-bignum so `BigInt::pow(u32)` is only required on the
     /// bignum tier — no-bignum uses `i64::checked_pow`.
@@ -539,14 +597,30 @@ impl Vm {
             if k == 0 {
                 return self.make_rational(1, 1);
             }
-            // Cap |k| so a pathological literal can't drive BigInt
-            // pow into multi-GB allocations. 2^16 is well above
-            // anything a sane source uses but small enough that the
-            // worst-case result (limit ≈ 2^(53*65536) bytes) is
-            // still memory-bounded by the host's existing alloc
-            // guard. Matches the spirit of the bignum_primitive
-            // pow cap in vm/bignum.rs.
+            // 0 base + negative exp is always ZeroDivisionError —
+            // check BEFORE the cap so `(0/1r) ** -70000` returns
+            // the right error class (the cap would otherwise mask
+            // it as RangeError).
+            if k < 0 && self.heap.rational(r_id).num.is_zero() {
+                return Err(self.trap(RubyError::ZeroDivisionError {
+                    msg: "divided by 0".to_string(),
+                }));
+            }
+            // Unit bases (0/1, 1/1, -1/1) are exactly representable
+            // for any integer exponent without touching BigInt::pow,
+            // so the 2^16 cap shouldn't gate them either. Same fix
+            // structure as the no-bignum path's u32::try_from fence.
             let ak = k.unsigned_abs();
+            if let Some(v) = self.try_unit_base_pow(r_id, ak % 2 == 1)? {
+                return Ok(v);
+            }
+            // Cap |k| so a pathological non-unit literal can't drive
+            // BigInt pow into multi-GB allocations. 2^16 is well
+            // above anything a sane source uses but small enough that
+            // the worst-case result (limit ≈ 2^(53*65536) bytes) is
+            // still memory-bounded by the host's existing alloc
+            // guard. Matches the spirit of the bignum_primitive pow
+            // cap in vm/bignum.rs.
             if ak > 65536 {
                 return Err(self.trap(RubyError::RangeError {
                     msg: "Rational#** exponent magnitude exceeds 2^16 cap".to_string(),
@@ -560,11 +634,6 @@ impl Vm {
             // Drop the borrow before the subsequent `&mut self` calls.
             let (new_num, new_den) = {
                 let r = self.heap.rational(r_id);
-                if r.num.is_zero() && k < 0 {
-                    return Err(self.trap(RubyError::ZeroDivisionError {
-                        msg: "divided by 0".to_string(),
-                    }));
-                }
                 (r.num.pow(ak_u32), r.den.pow(ak_u32))
             };
             // The caller-side canonical form was already coprime

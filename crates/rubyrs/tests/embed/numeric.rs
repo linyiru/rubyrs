@@ -3298,16 +3298,22 @@ fn rational_phase_c4_4_literal_and_pow() {
         ("puts (2.0 ** (1/2r)).inspect", "1.4142135623730951"),
         // respond_to? on Rational#**.
         ("puts (1/2r).respond_to?(:**)", "true"),
-        // No-bignum cap regression: bases of ±1 / 0 can take
-        // arbitrary integer exponent without overflowing i64.
-        // Pre-Copilot-cycle-1 the no-bignum tier had an `ak > 62`
-        // shortcut that rejected `(1/1r) ** 1000` as RangeError;
-        // the fix delegates overflow detection to `checked_pow`.
-        // Tested under bignum here since the BigInt path always
-        // works; the no-bignum tier gets the dedicated regression
-        // case below.
+        // Unit base + large exponent regressions. Both tiers
+        // short-circuit 0/1, 1/1, -1/1 bases BEFORE their respective
+        // cap checks (Copilot cycles 1+3 for no-bignum, cycle 5 for
+        // bignum) — these cases should NOT trip RangeError.
         ("puts ((1/1r) ** 1000).inspect", "(1/1)"),
         ("puts ((-1/1r) ** 1001).inspect", "(-1/1)"),
+        // Bignum: exponent > 2^16 cap doesn't gate unit bases.
+        ("puts ((1/1r) ** 70000).inspect", "(1/1)"),
+        ("puts ((0/1r) ** 70000).inspect", "(0/1)"),
+        ("puts ((-1/1r) ** 70001).inspect", "(-1/1)"),
+        // Bignum: BigInt exponent that doesn't fit i64 still
+        // handles unit bases without tripping the cap RangeError.
+        ("puts ((1/1r) ** (2**100)).inspect", "(1/1)"),
+        ("puts ((0/1r) ** (2**100)).inspect", "(0/1)"),
+        ("puts ((-1/1r) ** (2**100)).inspect", "(1/1)"),
+        ("puts ((-1/1r) ** (2**100 + 1)).inspect", "(-1/1)"),
     ] {
         let buf = SharedBuf::new();
         rt.set_stdout(Box::new(buf.clone()));
@@ -3319,6 +3325,10 @@ fn rational_phase_c4_4_literal_and_pow() {
     for (script, expected_class, expected_msg) in [
         ("(0/1r) ** -1", "ZeroDivisionError", "divided by 0"),
         ("(0/1r) ** -3", "ZeroDivisionError", "divided by 0"),
+        // 0**negative with huge exponent must raise ZeroDivisionError
+        // (NOT the 2^16 cap RangeError). Copilot cycle 5 caught the
+        // ordering bug — zero check was AFTER the cap.
+        ("(0/1r) ** -70000", "ZeroDivisionError", "divided by 0"),
         // BigInt exp on zero base — must stay integer-typed and
         // raise ZeroDivisionError, NOT silently demote to Float
         // (Float-pow of `0.0_f64.powf(-Infinity)` is `Infinity`).
