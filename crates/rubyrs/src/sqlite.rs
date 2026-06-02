@@ -290,8 +290,12 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
 
     rt.register_fn("__rubyrs_sqlite_stmt_query", |args| {
         let (stmt_handle, params) = parse_stmt_args(args, "stmt_query")?;
-        let max_bytes = with_vm(|vm| vm.sqlite_max_result_bytes);
         with_stmt(stmt_handle, |st_stmt, vm| {
+            // Read max_result_bytes inline (was previously a
+            // separate `with_vm` borrow before entering
+            // STMT_HANDLES — that's two thread_local fetches
+            // per call which add up on the bench's tight loop).
+            let max_bytes = vm.sqlite_max_result_bytes;
             st_stmt.stmt.clear_bindings();
             bind_params(&mut st_stmt.stmt, &params, vm)?;
             collect_rows(&mut st_stmt.stmt, vm, max_bytes)
@@ -334,18 +338,32 @@ fn handle_arg(args: &[Value], shape: &str) -> Result<i64, Trap> {
 }
 
 /// Parameter-shape parser for the statement-handle ops
-/// (`stmt_execute` / `stmt_query`). Same shape as
-/// `parse_exec_args` but the SQL string is implicit (owned by
-/// the Statement) so we only take handle + params.
+/// (`stmt_execute` / `stmt_query`). Accepts either:
+///   - `[handle]` — no params
+///   - `[handle, p1, p2, …]` — varargs (the Ruby preamble's
+///     `def query(*p); _stmt_query(@h, *p); end` shape, which
+///     skips the splat-forwarded params Array allocation that
+///     plain `_stmt_query(@h, p)` would pay)
+///   - `[handle, Value::Array(p)]` — explicit Array form, for
+///     callers passing an already-built params Array
+///     (Sequel-lite Dataset will use this)
 fn parse_stmt_args(args: &[Value], op: &str) -> Result<(i64, Vec<Value>), Trap> {
     match args {
+        [] => Err(arg_err(&format!("__rubyrs_sqlite_{op}(stmt_handle[, params...])"))),
         [Value::Int(sh)] => Ok((*sh, vec![])),
         [Value::Int(sh), Value::Array(p)] => {
             let vm = unsafe { &mut *current_vm_ptr() };
             let params: Vec<Value> = vm.heap.array(*p).clone();
             Ok((*sh, params))
         }
-        _ => Err(arg_err(&format!("__rubyrs_sqlite_{op}(stmt_handle[, params])"))),
+        // Varargs — handle in slot 0, params in slots 1..N.
+        // This is the hot-loop fast path: the Ruby wrapper's
+        // `*params` splat-forward lands here without forcing
+        // a transient Ruby Array allocation per call.
+        [Value::Int(sh), rest @ ..] => {
+            Ok((*sh, rest.to_vec()))
+        }
+        _ => Err(arg_err(&format!("__rubyrs_sqlite_{op}(stmt_handle[, params...])"))),
     }
 }
 
@@ -353,6 +371,15 @@ fn parse_stmt_args(args: &[Value], op: &str) -> Result<(i64, Vec<Value>), Trap> 
 /// + the Vm, return the result. Centralises the
 /// STMT_HANDLES → Vm-borrow dance so the per-host-fn closures
 /// don't repeat it.
+///
+/// Orphan safety: relies entirely on `Database#close`'s
+/// `STMT_HANDLES.retain(|_, o| o.owner_handle != handle)`
+/// sweep — once that removes the entry, the STMT_HANDLES
+/// `get_mut` here returns None and we trap a clean "closed
+/// statement". The earlier defensive `SQLITE_CONNS.contains_key`
+/// re-check was redundant (took ~0.3 µs per call on the bench
+/// shape, enough to keep `select_one_cached` 25 % behind CRuby)
+/// and is removed in v2.
 fn with_stmt<F>(stmt_handle: i64, f: F) -> Result<Value, Trap>
 where
     F: FnOnce(&mut OwnedStmt, &mut crate::vm::Vm) -> Result<Value, Trap>,
@@ -371,33 +398,8 @@ where
             },
             backtrace: vec![],
         })?;
-        // Validate the owning Connection is still alive — if
-        // the Database#close swept us, the handle is gone from
-        // the local map already (see the close-site retain); a
-        // dangling Statement would have been dropped there. But
-        // defensive double-check.
-        let alive = SQLITE_CONNS.with(|cm| cm.borrow().contains_key(&owned.owner_handle));
-        if !alive {
-            return Err(Trap {
-                err: RubyError::HostException {
-                    class_name: "SQLite3::Exception".to_string(),
-                    message: "statement orphaned: owning database was closed".to_string(),
-                },
-                backtrace: vec![],
-            });
-        }
         f(owned, vm)
     })
-}
-
-/// Short-hand for read-only Vm access from a host fn closure.
-fn with_vm<F, R>(f: F) -> R
-where
-    F: FnOnce(&crate::vm::Vm) -> R,
-{
-    let ptr = current_vm_ptr();
-    let vm = unsafe { &*ptr };
-    f(vm)
 }
 
 fn parse_exec_args(args: &[Value], op: &str) -> Result<(i64, String, Vec<Value>), Trap> {

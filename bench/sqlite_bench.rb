@@ -114,21 +114,17 @@ LOOKUP_IDS = (0...ITERS).map { |i| (i * 1009 + 17) % ITERS + 1 }
 # CRuby uses `db.prepare` once outside the loop + `.execute`
 # per iter on the cached statement object. Both shapes hit the
 # "already-prepared, just bind + step" cost.
-if defined?(RUBYRS)
-  i = 0
-  bench("select_one_cached", RUNS, ITERS) do
-    db.query_cached("SELECT name FROM users WHERE id = ?", LOOKUP_IDS[i % ITERS])
-    i += 1
-  end
-else
-  stmt = db.prepare("SELECT name FROM users WHERE id = ?")
-  i = 0
-  bench("select_one_cached", RUNS, ITERS) do
+stmt = db.prepare("SELECT name FROM users WHERE id = ?")
+i = 0
+bench("select_one_cached", RUNS, ITERS) do
+  if defined?(RUBYRS)
+    stmt.query(LOOKUP_IDS[i % ITERS])
+  else
     stmt.execute(LOOKUP_IDS[i % ITERS]).to_a
-    i += 1
   end
-  stmt.close
+  i += 1
 end
+stmt.close
 
 # ---- Workload 3: select_one_uncached ----
 # Fresh prepare per iter. Realistic shape when SQL is
