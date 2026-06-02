@@ -4939,7 +4939,14 @@ impl Vm {
                     let is_include = &*name == "include";
                     let target_cls = target.clone();
                     let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
-                    for a in &args {
+                    // CRuby processes `include M1, M2, ...` args
+                    // RIGHT-to-LEFT — M2 inserts first, then M1.
+                    // Each insert goes to the head of the chain, so
+                    // M1 (last inserted) ends up at the head and
+                    // M1.included fires LAST. Hook fire order also
+                    // mirrors this iteration. Single-arg cases are
+                    // unaffected. PR #347 documented follow-up.
+                    for a in args.iter().rev() {
                         let src = match a {
                             Value::Class(c) => c.clone(),
                             _ => return Err(self.trap(RubyError::TypeError {
@@ -4957,15 +4964,17 @@ impl Vm {
                         // walks prepends BEFORE the class's own
                         // methods, and includes AFTER.
                         //
-                        // Idempotency check is full ancestor-chain,
-                        // not just the direct vec — CRuby treats
-                        // `include M` / `prepend M` as a no-op if
-                        // `M` is anywhere in ancestors (transitive
-                        // includes/prepends too). Without
-                        // `class_is_a`, `include ContainsM` then
-                        // `include M` would move `M` ahead of
-                        // `ContainsM` and reorder lookup.
-                        if !super::class_is_a(&target_cls, &src) {
+                        // Idempotency is PER-CHAIN (include vs
+                        // prepend are distinct insertion slots), not
+                        // full ancestor-chain: `include M; prepend M`
+                        // on the same target must succeed at both
+                        // steps. The check still walks transitively
+                        // within the chain — so `include
+                        // ContainsM; include M` (where ContainsM
+                        // includes M) skips the second include
+                        // because M is reachable via the include
+                        // chain. PR #347 documented follow-up.
+                        if !super::class_reaches_via_chain(&target_cls, &src, is_prepend) {
                             let mut chain = if is_prepend {
                                 target_cls.prepends.borrow_mut()
                             } else {
@@ -5886,7 +5895,9 @@ impl Vm {
                 let is_include = &*name == "include";
                 let target_cls = target.clone();
                 let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
-                for a in &args {
+                // Same right-to-left iteration as the no-receiver
+                // arm — see that comment for rationale.
+                for a in args.iter().rev() {
                     let src = match a {
                         Value::Class(c) => c.clone(),
                         _ => return Err(self.trap(RubyError::TypeError {
@@ -5896,10 +5907,10 @@ impl Vm {
                             ),
                         })),
                     };
-                    // Full ancestor-chain idempotency, same as the
+                    // Per-chain transitive idempotency, same as the
                     // no-receiver arm — see that comment for the
-                    // reorder hazard a shallow vec-check creates.
-                    if !super::class_is_a(&target_cls, &src) {
+                    // include-vs-prepend coexistence rationale.
+                    if !super::class_reaches_via_chain(&target_cls, &src, is_prepend) {
                         let mut chain = if is_prepend {
                             target_cls.prepends.borrow_mut()
                         } else {

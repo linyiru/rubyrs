@@ -924,6 +924,53 @@ impl Vm {
 /// each class's transitive `prepends` and `includes`. Returns true
 /// for `child == ancestor`. Wired into rescue-by-class filter
 /// matching and the `is_a?` / `include?` dispatch arms.
+/// `class_is_a` variant that walks only ONE of the include / prepend
+/// chains (and the same chain transitively through each module's own
+/// chain, plus through the superclass chain). Used by include/prepend
+/// idempotency so `include M; prepend M` succeeds at both steps —
+/// CRuby treats the two chains as distinct insertion slots and the
+/// per-chain reachability is what gates each side.
+///
+/// `walk_prepend=true` walks the prepend chain; otherwise includes.
+pub(crate) fn class_reaches_via_chain(
+    child: &Rc<Class>,
+    target: &Rc<Class>,
+    walk_prepend: bool,
+) -> bool {
+    fn walks_through(
+        node: &Rc<Class>,
+        target: &Rc<Class>,
+        walk_prepend: bool,
+        visited: &mut std::collections::HashSet<*const Class>,
+    ) -> bool {
+        if Rc::ptr_eq(node, target) { return true; }
+        if !visited.insert(Rc::as_ptr(node)) { return false; }
+        let chain = if walk_prepend { node.prepends.borrow() } else { node.includes.borrow() };
+        for m in chain.iter() {
+            if walks_through(m, target, walk_prepend, visited) { return true; }
+        }
+        false
+    }
+    let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+    let mut current = child.clone();
+    loop {
+        if !sc_visited.insert(Rc::as_ptr(&current)) { return false; }
+        let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+        let chain = if walk_prepend { current.prepends.borrow() } else { current.includes.borrow() };
+        for m in chain.iter() {
+            if walks_through(m, target, walk_prepend, &mut inc_visited) {
+                return true;
+            }
+        }
+        drop(chain);
+        let parent = current.superclass.borrow().clone();
+        match parent {
+            Some(p) => current = p,
+            None => return false,
+        }
+    }
+}
+
 pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
     fn walks_through(
         node: &Rc<Class>,

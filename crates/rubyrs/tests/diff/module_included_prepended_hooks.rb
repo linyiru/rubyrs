@@ -82,7 +82,47 @@ class GChild < GParent
 end
 puts GChild.ancestors.include?(MG)                  # true (inherited)
 
-# (7) No hooks defined — silent no-op (CRuby doesn't raise).
+# (7) Multi-arg include — CRuby processes args RIGHT-to-LEFT,
+# so M1 (leftmost) ends up at the head of ancestors and its
+# `included` hook fires LAST.
+module MF1
+  def self.included(base); puts "MF1.included(#{base.name})"; end
+end
+module MF2
+  def self.included(base); puts "MF2.included(#{base.name})"; end
+end
+class F
+  include MF1, MF2
+end
+puts F.ancestors[1] == MF1            # true — MF1 ends up at the head
+
+# (8) include + prepend on the same module — both succeed, both
+# hooks fire. Per-chain idempotency means the include slot and
+# the prepend slot are distinct insertions.
+module MH
+  def self.included(base);  puts "MH.included(#{base.name})";  end
+  def self.prepended(base); puts "MH.prepended(#{base.name})"; end
+end
+class H
+  include MH
+  prepend MH
+end
+puts H.ancestors.first == MH                          # true (prepend slot)
+puts H.ancestors.include?(MH)                         # true
+
+# (9) Transitive include-chain idempotency still works:
+# `include ContainsM; include M` skips the second include
+# because M is reachable via ContainsM's include chain.
+module TI_M; end
+module TI_Contains; include TI_M; end
+class TI_T
+  include TI_Contains
+  include TI_M                                        # no-op
+end
+puts TI_T.ancestors[1] == TI_Contains                 # true
+puts TI_T.ancestors[2] == TI_M                        # true
+
+# (10) No hooks defined — silent no-op (CRuby doesn't raise).
 module MI
   # No included/prepended override.
 end
