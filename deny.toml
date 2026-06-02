@@ -110,10 +110,17 @@ exceptions = [
 # ============================================================
 [bans]
 # Multiple versions of the same crate bloat the binary and slow
-# compile times. Start at `warn` so existing duplicates
-# (transitive deps that haven't all upgraded yet) surface
-# without blocking. Tighten to `deny` after the duplicate set
-# has been cleared.
+# compile times. Held at `warn` (not `deny`) because the workspace's
+# wasmtime / cranelift dep tree pulls in unavoidable duplicates
+# (hashbrown 0.16+0.17, thiserror 1+2, regex-automata, getrandom
+# 0.2+0.4, webpki-roots 0.26+1.0, etc.) that we don't control and
+# upstream is unlikely to unify in the near term. The duplicate
+# list surfaces in `cargo deny check` output so a *new* duplicate
+# is visible in CI logs, but doesn't block the gate.
+#
+# If a path opens to deny mode later, it would need an explicit
+# `skip-tree = [{ name = "wasmtime" }]` carve-out plus a per-entry
+# inventory; that's a separate scope from this gate's introduction.
 multiple-versions = "warn"
 # `wildcards = "deny"` catches `foo = "*"` deps; we don't have
 # any (all workspace deps pin a version), so this defends
