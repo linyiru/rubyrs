@@ -1228,6 +1228,21 @@ impl Vm {
                         self.heap.array_mut(id).extend(extra);
                         Some(Value::Array(id))
                     }
+                    // BigInt arg — CRuby raises RangeError (the
+                    // value is too large to fit in a C long).
+                    // Mirrors Hash#take/#drop's BigInt arm at
+                    // hash.rs:378. Without this arm, BigInt
+                    // falls through to the take/drop catch-all
+                    // below and renders as "no implicit conversion
+                    // of Integer into Integer" — nonsensical
+                    // because `type_name_for_coerce(BigInt)` is
+                    // "Integer".
+                    #[cfg(feature = "bignum")]
+                    ("take", [Value::BigInt(_)]) | ("drop", [Value::BigInt(_)]) => {
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "bignum too big to convert into `long'".to_string(),
+                        }));
+                    }
                     // Float coerce — CRuby truncates `take(2.5)` to 2.
                     // Re-dispatch with the converted Int so the
                     // existing Int arm owns the rest of the logic.

@@ -56,6 +56,18 @@ describe "Array#take / #drop arity & type guards" do
     assert_eq(klass, "RangeError")
     assert_eq(msg, "float NaN out of range of integer")
   end
+
+  it "raises RangeError on BigInt arg (parity with Hash#take/#drop)" do
+    # Without the cfg-gated BigInt arm in array.rs, BigInt
+    # would fall into the take/drop catch-all and render as
+    # "no implicit conversion of Integer into Integer" —
+    # nonsensical because type_name_for_coerce(BigInt) is
+    # "Integer". Hash had the arm at hash.rs:378; Array now
+    # matches.
+    klass, msg = caught_pair { [1].take(2**70) }
+    assert_eq(klass, "RangeError")
+    assert_eq(msg, "bignum too big to convert into `long'")
+  end
 end
 
 describe "Hash#take / #drop arity & type guards" do
