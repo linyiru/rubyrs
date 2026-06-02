@@ -7222,11 +7222,41 @@ impl Vm {
                     }));
                     Value::Object(new_id)
                 }
-                // Range/Block/Method/Regex/BigInt/etc.: no
-                // shallow-copy support yet. Surface a clear
-                // NoMethodError rather than silently returning
-                // self — a future commit can add per-variant
-                // copy logic as use cases land.
+                // Method / UnboundMethod: re-wrap the captured
+                // state into a fresh heap slot. CRuby's
+                // Method#dup / #clone return a distinct object
+                // (`equal?` false) but compare-equal under #==
+                // (same recv, same captured Method snapshot).
+                Value::BoundMethod(bid) => {
+                    let (r, n, snap) = self.heap.bound_method_full(*bid);
+                    let r = r.clone();
+                    let snap = snap.clone();
+                    let mut g = crate::vm::PinGuard::new(self);
+                    g.pin(r.clone());
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let new_id = g.vm.heap.alloc(HeapObj::BoundMethod {
+                        recv: r,
+                        name_id: n,
+                        method: snap,
+                    });
+                    Value::BoundMethod(new_id)
+                }
+                Value::UnboundMethod(uid) => {
+                    let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let new_id = self.heap.alloc(HeapObj::UnboundMethod {
+                        class: cls,
+                        name_id: n,
+                        method: snap,
+                    });
+                    Value::UnboundMethod(new_id)
+                }
+                // Range/Block/Regex/etc.: no shallow-copy support
+                // yet. Surface a clear NoMethodError rather than
+                // silently returning self — a future commit can
+                // add per-variant copy logic as use cases land.
                 _ => {
                     return Err(self.trap(RubyError::NoMethodError {
                         kind: crate::error::NoMethodErrorKind::Missing,
