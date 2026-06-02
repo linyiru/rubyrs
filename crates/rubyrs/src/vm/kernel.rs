@@ -414,58 +414,81 @@ impl Vm {
                         ),
                     })));
                 }
-                // Coerce both args to i64. Phase C.4 will widen to
-                // BigInt num/den; today only the i64 fast path lands.
-                let to_i64 = |v: &Value| -> Result<i64, RubyError> {
-                    match v {
-                        Value::Int(n) => Ok(*n),
-                        Value::Rational(id) => {
-                            // Existing Rational: only accept when it
-                            // happens to be an Integer (den == 1).
-                            // Otherwise this is the lossy
-                            // `Rational(Rational(1, 2))` shape, which
-                            // CRuby allows but is Phase C.2+ territory.
-                            let r = self.heap.rational(*id);
-                            #[cfg(feature = "bignum")]
-                            let (den_is_one, num_i64) = (
-                                r.den == num_bigint::BigInt::from(1),
-                                i64::try_from(&r.num).ok(),
-                            );
-                            #[cfg(not(feature = "bignum"))]
-                            let (den_is_one, num_i64) = (r.den == 1, Some(r.num));
-                            match (den_is_one, num_i64) {
-                                (true, Some(n)) => Ok(n),
-                                _ => Err(RubyError::TypeError {
-                                    msg: format!("can't convert {} into Rational", v.type_name()),
-                                }),
+                // Phase C.4.2: accept Int / BigInt / integer-valued
+                // Rational. Float / String coercion is Phase C.4.3
+                // (Float#to_r needs continued-fraction).
+                #[cfg(feature = "bignum")]
+                {
+                    use num_bigint::BigInt;
+                    use num_traits::One;
+                    let to_bigint = |v: &Value, heap: &crate::heap::Heap| -> Result<BigInt, RubyError> {
+                        match v {
+                            Value::Int(n) => Ok(BigInt::from(*n)),
+                            Value::BigInt(id) => Ok(heap.bigint(*id).clone()),
+                            Value::Rational(id) => {
+                                let r = heap.rational(*id);
+                                if r.den.is_one() {
+                                    Ok(r.num.clone())
+                                } else {
+                                    Err(RubyError::TypeError {
+                                        msg: format!("can't convert {} into Rational", v.type_name()),
+                                    })
+                                }
                             }
+                            _ => Err(RubyError::TypeError {
+                                msg: format!("can't convert {} into Rational", v.type_name()),
+                            }),
                         }
-                        // Float / String coercion comes in Phase C.3
-                        // (Float#to_r needs the continued-fraction
-                        // algorithm; deferred).
-                        _ => Err(RubyError::TypeError {
-                            msg: format!("can't convert {} into Rational", v.type_name()),
-                        }),
-                    }
-                };
-                let num_raw = match to_i64(&args[0]) {
-                    Ok(n) => n,
-                    Err(e) => return Some(Err(self.trap(e))),
-                };
-                let den_raw: i64 = if args.len() == 2 {
-                    match to_i64(&args[1]) {
+                    };
+                    let num = match to_bigint(&args[0], &self.heap) {
                         Ok(n) => n,
                         Err(e) => return Some(Err(self.trap(e))),
-                    }
-                } else { 1 };
-                // Delegate to the shared canonical-form builder
-                // (`Vm::make_rational`) so the normalize / alloc /
-                // ZeroDivisionError / RangeError logic lives in
-                // ONE place. Prior to this refactor `Kernel#Rational`
-                // hand-rolled the same dance, risking drift when
-                // make_rational's invariants tightened (per Phase C.2
-                // /code-review note).
-                Some(self.make_rational(num_raw, den_raw))
+                    };
+                    let den = if args.len() == 2 {
+                        match to_bigint(&args[1], &self.heap) {
+                            Ok(n) => n,
+                            Err(e) => return Some(Err(self.trap(e))),
+                        }
+                    } else {
+                        BigInt::one()
+                    };
+                    // ZeroDivisionError on den == 0 is centralized in
+                    // `make_rational_bigint` (runtime-checked, not just
+                    // debug_assert) so callers don't need a parallel guard.
+                    Some(self.make_rational_bigint(num, den))
+                }
+                #[cfg(not(feature = "bignum"))]
+                {
+                    let to_i64 = |v: &Value, heap: &crate::heap::Heap| -> Result<i64, RubyError> {
+                        match v {
+                            Value::Int(n) => Ok(*n),
+                            Value::Rational(id) => {
+                                let r = heap.rational(*id);
+                                if r.den == 1 {
+                                    Ok(r.num)
+                                } else {
+                                    Err(RubyError::TypeError {
+                                        msg: format!("can't convert {} into Rational", v.type_name()),
+                                    })
+                                }
+                            }
+                            _ => Err(RubyError::TypeError {
+                                msg: format!("can't convert {} into Rational", v.type_name()),
+                            }),
+                        }
+                    };
+                    let num_raw = match to_i64(&args[0], &self.heap) {
+                        Ok(n) => n,
+                        Err(e) => return Some(Err(self.trap(e))),
+                    };
+                    let den_raw: i64 = if args.len() == 2 {
+                        match to_i64(&args[1], &self.heap) {
+                            Ok(n) => n,
+                            Err(e) => return Some(Err(self.trap(e))),
+                        }
+                    } else { 1 };
+                    Some(self.make_rational(num_raw, den_raw))
+                }
             }
             // `Array(x)` — coerce to Array. CRuby rules:
             //   - `nil` → `[]`

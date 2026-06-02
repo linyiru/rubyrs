@@ -138,9 +138,14 @@ impl Vm {
     /// same canonical-form normalization (gcd reduce, `den > 0`)
     /// on arbitrary-precision operands. Only available under
     /// `bignum`; Phase C.4.2+ callers (Integer#to_r with BigInt
-    /// receiver, Float#to_r, etc.) use this directly. ZeroDivision
-    /// must be checked by the caller — this entry assumes
-    /// `den != 0`.
+    /// receiver, Float#to_r, etc.) use this directly.
+    ///
+    /// `den == 0` → ZeroDivisionError. The guard is a real
+    /// runtime check (not just `debug_assert`) so release-build
+    /// callers that forget the precheck still surface as a Ruby
+    /// exception rather than silently constructing a malformed
+    /// `Rational(?, 0)` that later panics inside num-bigint's
+    /// division.
     #[cfg(feature = "bignum")]
     pub(crate) fn make_rational_bigint(
         &mut self,
@@ -149,7 +154,12 @@ impl Vm {
     ) -> Result<Value, Trap> {
         use num_bigint::Sign;
         use num_integer::Integer;
-        debug_assert!(den.sign() != Sign::NoSign, "make_rational_bigint: den == 0");
+        use num_traits::{One, Zero};
+        if den.is_zero() {
+            return Err(self.trap(RubyError::ZeroDivisionError {
+                msg: "divided by 0".to_string(),
+            }));
+        }
         if den.sign() == Sign::Minus {
             num = -num;
             den = -den;
@@ -157,7 +167,7 @@ impl Vm {
         // `Integer::gcd` is always non-negative; canonical form needs
         // gcd(|num|, den) but BigInt's gcd already takes magnitudes.
         let g = num.gcd(&den);
-        if g != num_bigint::BigInt::from(1) {
+        if !g.is_one() {
             num /= &g;
             den /= &g;
         }
@@ -336,10 +346,11 @@ impl Vm {
     ) -> Result<Option<Value>, Trap> {
         use crate::bytecode::BinOpKind as K;
         use num_bigint::BigInt;
+        use num_traits::One;
         let to_pair = |v: &Value, heap: &crate::heap::Heap| -> Option<(BigInt, BigInt)> {
             match v {
-                Value::Int(n) => Some((BigInt::from(*n), BigInt::from(1))),
-                Value::BigInt(id) => Some((heap.bigint(*id).clone(), BigInt::from(1))),
+                Value::Int(n) => Some((BigInt::from(*n), BigInt::one())),
+                Value::BigInt(id) => Some((heap.bigint(*id).clone(), BigInt::one())),
                 Value::Rational(id) => {
                     let r = heap.rational(*id);
                     Some((r.num.clone(), r.den.clone()))
@@ -366,8 +377,8 @@ impl Vm {
                 Ok(Some(self.make_rational_bigint(num, den)?))
             }
             K::Div => {
-                use num_bigint::Sign;
-                if bn.sign() == Sign::NoSign {
+                use num_traits::Zero;
+                if bn.is_zero() {
                     return Err(self.trap(RubyError::ZeroDivisionError {
                         msg: "divided by 0".to_string(),
                     }));
@@ -5752,18 +5763,21 @@ impl Vm {
                     }));
                 }
             }
-            // Coerce receiver to i64 — BigInt num/den is Phase C.4.
-            let num = match &recv {
-                Value::Int(n) => *n,
+            // Phase C.4.2: BigInt receiver routes through the
+            // BigInt make_rational entry; small Int receivers
+            // continue through `make_rational(i64, 1)` which
+            // already widens internally under bignum.
+            let v = match &recv {
+                Value::Int(n) => self.make_rational(*n, 1)?,
                 #[cfg(feature = "bignum")]
-                Value::BigInt(_) => {
-                    return Err(self.trap(RubyError::RangeError {
-                        msg: "Rational components must fit in i64".to_string(),
-                    }));
+                Value::BigInt(id) => {
+                    use num_bigint::BigInt;
+                    use num_traits::One;
+                    let num = self.heap.bigint(*id).clone();
+                    self.make_rational_bigint(num, BigInt::one())?
                 }
                 _ => unreachable!("guarded by recv_is_integer"),
             };
-            let v = self.make_rational(num, 1)?;
             self.stack.push(v);
             return Ok(());
         }

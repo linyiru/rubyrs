@@ -1,10 +1,9 @@
 # Adapted from ruby/spec core/integer/to_r_spec.rb at upstream
 # commit 448cb340 (2026-05). Hand-polished:
 # - `.should ==` → `assert_eq`.
-# - `bignum_value` cases skipped: Phase C.4 widens Rational
-#   num/den to BigInt; today `Integer#to_r` raises RangeError
-#   for BigInt receivers because the canonical-form storage
-#   is i64-only (see vm/dispatch.rs).
+# - `bignum_value` cases gated as `bignum_it` so they only run
+#   on the profile where `RationalRepr` stores BigInt num/den
+#   (Phase C.4.1 widening).
 
 describe "Integer#to_r" do
   it "returns the receiver as a Rational with denominator 1" do
@@ -29,21 +28,19 @@ describe "Integer#to_r" do
     assert_raises("ArgumentError") { 5.to_r(1) }
   end
 
-  # skipped (method-not-implemented): it "returns self as Rational with den 1" do
-  #   bn = 2**64
-  #   assert_eq(bn.to_r, Rational(bn, 1))
-  # end
-  # BigInt receiver. Phase C.4 widens RationalRepr's i64 num/den
-  # to BigInt; today `Integer#to_r` raises RangeError for BigInt
-  # magnitudes.
+  bignum_it "bignum: returns self as Rational with den 1" do
+    bn = 2**64
+    assert_eq(bn.to_r, Rational(bn, 1))
+    assert_eq(bn.to_r.numerator, bn)
+    assert_eq(bn.to_r.denominator, 1)
+  end
 
-  # skipped (method-not-implemented): it "returns Rational(i64::MIN, 1) for the smallest fixnum" do
-  #   assert_eq((-(2**62 + 2**62)).to_r, Rational(-(2**62 + 2**62), 1))
-  # end
-  # i64::MIN edge — Phase C.4 follow-up. `make_rational` rejects
-  # i64::MIN num/den because the canonical-form sign normalization
-  # would call `.abs()` on the magnitude (panics in debug for
-  # `i64::MIN.abs()`). CRuby returns `Rational(-9223372036854775808, 1)`.
-  # Lifts together with the BigInt receiver case above when
-  # RationalRepr widens.
+  bignum_it "bignum: returns Rational(i64::MIN, 1) for the smallest fixnum" do
+    # `-(2**62 + 2**62) == i64::MIN`. Pre-C.4.1 this raised
+    # RangeError because `make_rational` did `.abs()` on i64::MIN
+    # in debug. Phase C.4.1 widens RationalRepr to BigInt, lifting
+    # the limit (paired with the BigInt receiver case above).
+    n = -(2**62 + 2**62)
+    assert_eq(n.to_r, Rational(n, 1))
+  end
 end

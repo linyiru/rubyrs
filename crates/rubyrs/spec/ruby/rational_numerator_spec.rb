@@ -1,8 +1,9 @@
 # Adapted from ruby/spec core/rational/numerator_spec.rb at
 # upstream commit 448cb340 (2026-05). Hand-polished:
 # - `.should ==` → `assert_eq`.
-# - omitted (Phase C.4): BigInt num/den cases. Not included as
-#   skipped-trace blocks; lift together with C.4 widening.
+# - `bignum_value` cases gated as `bignum_it` so they only run
+#   on the profile where `RationalRepr` stores BigInt num/den
+#   (Phase C.4.1 widening).
 
 describe "Rational#numerator" do
   it "returns the numerator" do
@@ -17,5 +18,11 @@ describe "Rational#numerator" do
     # negative-den moves sign to num
     assert_eq(Rational(3, -4).numerator, -3)
     assert_eq(Rational(-3, -4).numerator, 3)
+  end
+
+  bignum_it "bignum: returns the numerator for BigInt-magnitude num" do
+    bn = 2**64
+    assert_eq(Rational(bn, 3).numerator, bn)
+    assert_eq(Rational(-bn, 3).numerator, -bn)
   end
 end
