@@ -192,7 +192,18 @@ impl Vm {
                     // "no implicit conversion of Integer into
                     // Integer" message. Code-review #342
                     // round 7.
-                    if !matches!(a, Value::Int(_) | Value::BigInt(_)) {
+                    //
+                    // The BigInt variant is gated behind the
+                    // `bignum` feature (value.rs:116); in the
+                    // non-bignum build there's no BigInt to
+                    // match against, so the pattern stays
+                    // `Value::Int(_)` only. Code-review #342
+                    // round 8.
+                    #[cfg(feature = "bignum")]
+                    let is_int = matches!(a, Value::Int(_) | Value::BigInt(_));
+                    #[cfg(not(feature = "bignum"))]
+                    let is_int = matches!(a, Value::Int(_));
+                    if !is_int {
                         // CRuby uses a distinct phrasing for nil
                         // ("from nil to integer") versus other
                         // types ("of <Class> into Integer") —
@@ -231,11 +242,19 @@ impl Vm {
                 // separate sweep from the type-check so the result
                 // can be reused by the match below without
                 // re-borrowing `self.heap` inside the pattern arms.
+                //
+                // The BigInt arm is gated behind the `bignum`
+                // feature; `ToPrimitive` is only needed when the
+                // arm exists, so its import is gated too —
+                // otherwise the non-bignum build trips
+                // `unused_imports`. Code-review #342 round 8.
+                #[cfg(feature = "bignum")]
                 use num_traits::ToPrimitive;
                 let mut converted: Vec<i64> = Vec::with_capacity(args.len());
                 for a in args.iter() {
                     let n = match a {
                         Value::Int(n) => *n,
+                        #[cfg(feature = "bignum")]
                         Value::BigInt(id) => {
                             match self.heap.bigint(*id).to_i64() {
                                 Some(n) => n,
