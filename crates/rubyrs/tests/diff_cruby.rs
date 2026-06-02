@@ -181,6 +181,7 @@ fn run_diff(name: &str) {
 #[test] fn module_attr_legacy() { run_diff("module_attr_legacy"); }
 #[test] fn alias_method_inherited_primitive() { run_diff("alias_method_inherited_primitive"); }
 #[test] fn module_function() { run_diff("module_function"); }
+#[test] fn anonymous_rest_param() { run_diff("anonymous_rest_param"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
 #[test] fn user_sort() { run_diff("user_sort"); }
 #[test] fn hash_enumerable() { run_diff("hash_enumerable"); }
