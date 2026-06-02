@@ -878,13 +878,19 @@ jobs:
     # adds a row to this job's matrix, not the Test job's.
     #
     # Smoke tier: ubuntu only, one Ruby version. Fixtures gated
-    # here track the omakase menu (ADR 0026 v2): `hello_smoke`
-    # (stdlib-only Rack-shape, gates harness correctness),
-    # `sinatra_hello` (18-route matrix — menu #1), `json_smoke` +
-    # `json_canon` (menu #2), `as_lite_canon` (menu #3), and
-    # `sqlite_smoke` (menu #4 / ADR 0027 Phase 4). Each fixture is
-    # one ship gate, not a regression bench — perf lives in the
-    # standalone bench jobs.
+    # here track the omakase menu (ADR 0026 v2) PLUS the M27
+    # third-party-plugin claim: `hello_smoke` (stdlib-only Rack
+    # shape, gates harness correctness), `sinatra_hello` (18-route
+    # matrix — menu #1), `sinatra_plugin_smoke` (reopen-Base plugin
+    # authoring shape — menu #1 plugin support, M27 A4),
+    # `sinatra_register_smoke` (register + helpers shape — menu #1
+    # plugin support, alternate authoring contract),
+    # `sinatra_jsonp_smoke` (real `sinatra-jsonp-0.5.0` gem vendored
+    # 1:1 — proves a published gem loads + runs unmodified on both
+    # runtimes), `json_smoke` + `json_canon` (menu #2),
+    # `as_lite_canon` (menu #3), and `sqlite_smoke` (menu #4 / ADR
+    # 0027 Phase 4). Each fixture is one ship gate, not a
+    # regression bench — perf lives in the standalone bench jobs.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -931,10 +937,20 @@ jobs:
         # surface. No explicit version pin — both runtimes link a
         # bundled libsqlite3 (3.47.x family) so the SQL semantics are
         # identical; only the Ruby-side gem façade matters here.
+        #
+        # `multi_json` is the `sinatra_jsonp_smoke` fixture's
+        # parity oracle. The vendored `sinatra-jsonp-0.5.0`
+        # source loads via `require 'multi_json'`; rubyrs
+        # resolves it to a tiny shim (vendor/multi_json.rb)
+        # that wraps JSON.generate, CRuby resolves it to
+        # this gem. Both produce byte-identical output for
+        # the deterministic subset (flat Hash with primitives)
+        # the fixture exercises.
         run: |
           gem install webrick sinatra
           gem install activesupport -v 8.0.1
           gem install sqlite3
+          gem install multi_json
 
       - name: Cache cargo registry + build
         uses: actions/cache@v5

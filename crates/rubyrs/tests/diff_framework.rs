@@ -708,6 +708,11 @@ fn sinatra_register_smoke() {
 }
 
 #[test]
+fn sinatra_jsonp_smoke() {
+    run_fixture("sinatra_jsonp_smoke");
+}
+
+#[test]
 fn json_smoke() {
     run_fixture("json_smoke");
 }

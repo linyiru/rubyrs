@@ -1,0 +1,34 @@
+{
+  "_doc": "ADR 0026 v2 / M27 — real third-party Sinatra gem vendored 1:1 from rubygems. `sinatra-jsonp-0.5.0` (Britt Crawford, MIT) vendored verbatim under `vendor/sinatra/jsonp.rb` — the exact gem source file. Runs unmodified on both runtimes: rubyrs satisfies `require 'multi_json'` via a tiny shim that wraps `JSON.generate` (the canonical _json_native-accelerated path); CRuby satisfies it via the installed `multi_json` gem. Both runtimes `require 'sinatra/jsonp'` through `$LOAD_PATH.unshift File.expand_path('vendor', __dir__)` so the vendored copy loads ahead of any rubygems-resolved gem. Validates: a real published gem's authoring shape (Sinatra.helpers + content_type :symbol + settings.respond_to? + params.delete + alias) loads + runs byte-identical on the vendored micro-Sinatra and on the real Sinatra gem. Closes the loop on M27's third-party-plugins claim with an actual gem rather than a fixture-local approximation.",
+  "name": "sinatra_jsonp_smoke",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 8000,
+    "duration_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sinatra/base", "multi_json"]
+  },
+  "scenarios": [
+    { "name": "root",       "method": "GET", "path": "/" },
+    { "name": "explicit",   "method": "GET", "path": "/data/explicit" },
+    { "name": "auto_cb",    "method": "GET", "path": "/data/auto?callback=fromQuery" },
+    { "name": "bare",       "method": "GET", "path": "/data/bare" },
+    { "name": "sanitised",  "method": "GET", "path": "/data/sanitised" }
+  ],
+  "normalize": [
+    {
+      "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": "rubyrs micro-Sinatra \\(_http_server battery\\)",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": ";charset=utf-8",
+      "replacement": ""
+    }
+  ]
+}

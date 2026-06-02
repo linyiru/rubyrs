@@ -97,9 +97,20 @@ module Sinatra
       # behaviour is fixed, so these just record values for compatibility
       # (e.g. the shared app does `set :environment, :production`).
       def settings_store; @settings_store ||= {}; end
-      def set(key, value = nil); settings_store[key] = value; self; end
-      def enable(*keys);  keys.each { |k| settings_store[k] = true };  self; end
-      def disable(*keys); keys.each { |k| settings_store[k] = false }; self; end
+      # Sinatra's `set :foo, val` doubles as both storage AND a
+      # reflection surface — `settings.foo` returns the value
+      # and `settings.respond_to?(:foo)` reports true. Real
+      # Sinatra implements this by defining singleton methods
+      # on the app class; we mirror that so plugins like
+      # sinatra-jsonp's `settings.respond_to?(:json_pretty) &&
+      # settings.json_pretty` predicate-and-read shape works.
+      def set(key, value = nil)
+        settings_store[key] = value
+        define_singleton_method(key) { settings_store[key] } unless respond_to?(key)
+        self
+      end
+      def enable(*keys);  keys.each { |k| set(k, true) };  self; end
+      def disable(*keys); keys.each { |k| set(k, false) }; self; end
 
       # Custom 404 handler.
       def not_found(&block)
@@ -174,8 +185,36 @@ module Sinatra
       @headers
     end
 
+    # Symbol shorthands per Sinatra docs: `content_type :json`,
+    # `content_type :js`, etc. The minimal map below covers the
+    # mime types that vendored third-party plugins actually
+    # reach for (sinatra-jsonp uses `:js` + `:json`); the
+    # passthrough else-branch keeps String args (`content_type
+    # "text/csv"`) working unchanged. Real Sinatra walks a full
+    # `Rack::Mime::MIME_TYPES` table; we just hardcode the
+    # common subset until a fixture needs more.
+    CONTENT_TYPE_SHORTHANDS = {
+      json: "application/json",
+      # Real Sinatra (via Rack::Mime) maps `:js` to `text/javascript`,
+      # NOT `application/javascript`. RFC 9239 (Apr 2022) explicitly
+      # un-deprecated `text/javascript` as the canonical JS media
+      # type; Rack::Mime tracked that. Pin to `text/javascript` so
+      # the same `content_type :js` lands byte-identical on both
+      # runtimes.
+      js:   "text/javascript",
+      html: "text/html",
+      txt:  "text/plain",
+      xml:  "application/xml",
+      csv:  "text/csv",
+    }.freeze
     def content_type(type)
-      headers["Content-Type"] = type
+      headers["Content-Type"] = if type.is_a?(Symbol)
+        CONTENT_TYPE_SHORTHANDS.fetch(type) do
+          raise ArgumentError, "Unknown media type for #{type.inspect}"
+        end
+      else
+        type.to_s
+      end
     end
 
     def redirect(location, code = 302)
@@ -305,6 +344,18 @@ module Sinatra
       @request ||= Request.new(@env)
     end
 
+    # `settings` returns the application class itself, mirroring
+    # real Sinatra. Combined with `set :key, val` defining a
+    # singleton method on the class, this lets plugin / route
+    # code do `settings.key` (read) and
+    # `settings.respond_to?(:key)` (presence check). Stored values
+    # live on the class's `settings_store` Hash; the singleton-
+    # method-per-key indirection produces the symmetric
+    # respond_to? predicate sinatra-jsonp relies on.
+    def settings
+      self.class
+    end
+
     # Sinatra's streaming helper: `stream { |out| out << chunk }`.
     def stream(&block)
       StreamingBody.new(block)
@@ -388,5 +439,28 @@ module Sinatra
       end
       out
     end
+  end
+
+  # `Sinatra.helpers Module` — module-level convenience that
+  # forwards to `Sinatra::Base.helpers`. Real Sinatra exposes
+  # both (`Sinatra::Base.helpers Mod` is the canonical class-
+  # method form; `Sinatra.helpers Mod` is sugar that registers
+  # the helpers on the default Sinatra::Application). For our
+  # micro-Sinatra the simplest equivalent is to forward to
+  # Sinatra::Base — subclassing apps inherit via the class
+  # chain. Used by `sinatra-jsonp` and a few other gems whose
+  # plugin file ends with `Sinatra.helpers PluginModule` at
+  # module level.
+  def self.helpers(*modules)
+    Sinatra::Base.helpers(*modules)
+  end
+
+  # `Sinatra.register Module` — same forwarding shape as
+  # `Sinatra.helpers` above. Not used by sinatra-jsonp directly
+  # but ships for parity with the gem ecosystem; plugin files
+  # that end with `register PluginModule` at top of `module
+  # Sinatra` are the canonical authoring shape.
+  def self.register(*extensions)
+    Sinatra::Base.register(*extensions)
   end
 end
