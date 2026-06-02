@@ -3296,6 +3296,14 @@ fn rational_phase_c4_4_literal_and_pow() {
         // Int ** Rational and Float ** Rational — Float fallback.
         ("puts (2 ** (1/2r)).inspect", "1.4142135623730951"),
         ("puts (2.0 ** (1/2r)).inspect", "1.4142135623730951"),
+        // /code-review fix: integer-valued non-Integer exponent
+        // preserves the exact type (CRuby parity). Pre-fix these
+        // returned Float (`8.0`, `8.0`, `(8/1).to_f`).
+        ("puts (2 ** Rational(3, 1)).inspect", "8"),
+        ("puts (2 ** Rational(3, 1)).class", "Integer"),
+        ("puts (Rational(2, 1) ** Rational(3, 1)).inspect", "(8/1)"),
+        ("puts (Rational(2, 1) ** 3.0).inspect", "(8/1)"),
+        ("puts ((1/2r) ** 2.0).inspect", "(1/4)"),
         // respond_to? on Rational#**.
         ("puts (1/2r).respond_to?(:**)", "true"),
         // Unit base + large exponent regressions. Both tiers
@@ -3325,6 +3333,15 @@ fn rational_phase_c4_4_literal_and_pow() {
     for (script, expected_class, expected_msg) in [
         ("(0/1r) ** -1", "ZeroDivisionError", "divided by 0"),
         ("(0/1r) ** -3", "ZeroDivisionError", "divided by 0"),
+        // /code-review fix: 0 base + negative non-integer exponent
+        // raises ZeroDivisionError (NOT `0.0_f64.powf(-0.5) ==
+        // Infinity` that the pre-fix Float-fallback would silently
+        // return). Covers Rational#** Float/Rational exp path AND
+        // the Int/Float ** Rational intercept.
+        ("Rational(0, 1) ** Rational(-1, 2)", "ZeroDivisionError", "divided by 0"),
+        ("Rational(0, 1) ** -0.5", "ZeroDivisionError", "divided by 0"),
+        ("0 ** Rational(-1, 2)", "ZeroDivisionError", "divided by 0"),
+        ("0.0 ** Rational(-1, 2)", "ZeroDivisionError", "divided by 0"),
         // 0**negative with huge exponent must raise ZeroDivisionError
         // (NOT the 2^16 cap RangeError). Copilot cycle 5 caught the
         // ordering bug — zero check was AFTER the cap.

@@ -525,13 +525,40 @@ impl Vm {
                 msg: "Rational#** exponent magnitude exceeds 2^16 cap".to_string(),
             }));
         }
-        // Non-integer numeric exp → demote to Float, use Float pow.
+        // Float / Rational exp:
+        //   1. Integer-valued exp (Float.fract() == 0.0 within i64 range;
+        //      Rational with den == 1) routes through the exact integer
+        //      path so `Rational(2,1) ** Rational(3,1)` returns `(8/1)`
+        //      and `Rational(2,1) ** 3.0` returns `(8/1)`, matching CRuby
+        //      (which promotes integer-valued non-Integer exps to the
+        //      integer power algorithm).
+        //   2. Otherwise demote to Float. Pre-demote, guard zero-base +
+        //      negative exp so `Rational(0,1) ** -0.5` raises
+        //      ZeroDivisionError rather than `0.0.powf(-0.5) == Infinity`
+        //      (same invariant the BigInt-exp branch above enforces).
+        if let Some(k) = integer_valued_exp(exp, &self.heap) {
+            return self.rational_pow_int(r_id, k);
+        }
         let exp_f: Option<f64> = match exp {
             Value::Float(g) => Some(*g),
             Value::Rational(eid) => Some(crate::heap::rational_to_f64(self.heap.rational(*eid))),
             _ => None,
         };
         if let Some(g) = exp_f {
+            // Zero base + negative non-integer exp → ZeroDivisionError
+            // (matches CRuby; mirrors the BigInt-exp guard above).
+            #[cfg(feature = "bignum")]
+            let recv_num_is_zero = {
+                use num_traits::Zero;
+                self.heap.rational(r_id).num.is_zero()
+            };
+            #[cfg(not(feature = "bignum"))]
+            let recv_num_is_zero = self.heap.rational(r_id).num == 0;
+            if recv_num_is_zero && g < 0.0 {
+                return Err(self.trap(RubyError::ZeroDivisionError {
+                    msg: "divided by 0".to_string(),
+                }));
+            }
             let base_f = crate::heap::rational_to_f64(self.heap.rational(r_id));
             return Ok(Value::Float(base_f.powf(g)));
         }
@@ -6338,17 +6365,38 @@ impl Vm {
             #[cfg(not(feature = "bignum"))]
             { matches!(&recv, Value::Int(_)) }
         };
-        // Phase C.4.4 — `Integer ** Rational` and `Float ** Rational`
-        // demote to Float per CRuby (`2 ** Rational(1, 2) ==
-        // 1.4142135623730951`). Lives here (not at the Int / Float
-        // arms inside numeric.rs / primitive_call) because those
-        // surfaces don't see Rational args natively. Same shape as
-        // the Rational#** Float-fallback in `rational_pow`.
+        // Phase C.4.4 — `Integer ** Rational` and `Float ** Rational`.
+        // Lives here (not at the Int / Float arms inside numeric.rs /
+        // primitive_call) because those surfaces don't see Rational
+        // args natively. Same shape as the Rational#** dispatch in
+        // `rational_pow`:
+        //   - Integer-valued Rational exp (`den == 1`, num fits i64)
+        //     → delegate to `numeric_call` with an Int arg so the
+        //     existing Int#** / Float#** paths fire (preserves type
+        //     tag: `2 ** Rational(3, 1) == 8` rather than `8.0`).
+        //   - Otherwise demote to Float. Pre-demote, guard
+        //     `recv == 0 && exp < 0` → ZeroDivisionError so
+        //     `0 ** Rational(-1, 2)` matches CRuby rather than
+        //     returning `0.0_f64.powf(-0.5) == Infinity`.
         if (recv_is_integer || matches!(&recv, Value::Float(_)))
             && &*name == "**"
             && args.len() == 1
             && matches!(&args[0], Value::Rational(_))
         {
+            if let Some(k) = integer_valued_exp(&args[0], &self.heap) {
+                let delegated = crate::vm::numeric::numeric_call(
+                    &recv, "**", &[Value::Int(k)], None,
+                )
+                .map_err(|e| self.trap(e))?;
+                if let Some(v) = delegated {
+                    self.stack.push(v);
+                    return Ok(());
+                }
+                // numeric_call returning None for `Int/Float ** Int`
+                // would be a primitive coverage gap; fall through to
+                // the Float-demote path so the caller still gets a
+                // sensible answer.
+            }
             let base_f = match &recv {
                 Value::Int(n) => *n as f64,
                 #[cfg(feature = "bignum")]
@@ -6362,6 +6410,23 @@ impl Vm {
                 Value::Rational(id) => crate::heap::rational_to_f64(self.heap.rational(*id)),
                 _ => unreachable!("guarded above"),
             };
+            // Zero base + negative non-integer exp → ZeroDivisionError
+            // (matches CRuby; mirrors the rational_pow guard above).
+            let recv_is_zero = match &recv {
+                Value::Int(0) => true,
+                Value::Float(g) => *g == 0.0,
+                #[cfg(feature = "bignum")]
+                Value::BigInt(id) => {
+                    use num_traits::Zero;
+                    self.heap.bigint(*id).is_zero()
+                }
+                _ => false,
+            };
+            if recv_is_zero && exp_f < 0.0 {
+                return Err(self.trap(RubyError::ZeroDivisionError {
+                    msg: "divided by 0".to_string(),
+                }));
+            }
             self.stack.push(Value::Float(base_f.powf(exp_f)));
             return Ok(());
         }
@@ -11448,6 +11513,46 @@ fn scramble_ptr(ptr: usize) -> u64 {
     
     
     rs.hash_one(ptr)
+}
+
+/// Return `Some(k)` when `exp` represents an integer value that fits
+/// `i64`, otherwise `None`. Used by `Rational#**` and the
+/// `Int/Float ** Rational` intercept to promote integer-valued Float /
+/// Rational exponents back to the exact integer-power path (CRuby
+/// parity — `2 ** Rational(3, 1)` returns Integer 8, not Float 8.0).
+///
+/// For `Value::Float`, `g.fract() == 0.0` AND `g` is within the i64
+/// representable range. NaN / ±Inf return `None` and let the caller's
+/// Float fallback handle them. For `Value::Rational`, `den == 1` AND
+/// `num` fits i64. Int / BigInt are not Float-fallback inputs and
+/// thus never reach this helper.
+fn integer_valued_exp(exp: &Value, heap: &crate::heap::Heap) -> Option<i64> {
+    match exp {
+        Value::Float(g) => {
+            if !g.is_finite() { return None; }
+            if g.fract() != 0.0 { return None; }
+            // Bracket against i64 limits — `g as i64` saturates on
+            // out-of-range f64 (i64::MAX or i64::MIN), but the caller
+            // wants None there so it falls back to Float pow.
+            if *g < i64::MIN as f64 || *g > i64::MAX as f64 { return None; }
+            Some(*g as i64)
+        }
+        Value::Rational(eid) => {
+            let r = heap.rational(*eid);
+            #[cfg(feature = "bignum")]
+            {
+                use num_traits::One;
+                if !r.den.is_one() { return None; }
+                i64::try_from(&r.num).ok()
+            }
+            #[cfg(not(feature = "bignum"))]
+            {
+                if r.den != 1 { return None; }
+                Some(r.num)
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Convert a finite `f64` to its lossless `(num, den)` Rational pair
