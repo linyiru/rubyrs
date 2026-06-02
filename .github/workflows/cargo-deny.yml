@@ -115,7 +115,6 @@ jobs:
         with:
           path: |
             ~/.cargo/registry
-            ~/.cargo/git
             ~/.cargo/bin/cargo-deny
           # The pinned cargo-deny version is embedded in the key so a
           # version bump (below) bust-invalidates the cache and forces a
