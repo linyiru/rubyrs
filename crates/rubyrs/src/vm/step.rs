@@ -2595,7 +2595,16 @@ impl Vm {
                 // to invoking the no-op default).
                 if was_fresh
                     && !is_module
-                    && let Some(parent_cls) = &parent {
+                    && let Some(parent_cls) = &parent
+                    // Fast-path: if `"inherited"` has never been
+                    // interned, no user code has defined or
+                    // referenced an override (the compiler interns
+                    // every method name and call site on first
+                    // sight). Skip the intern() call entirely so
+                    // we don't grow the symbol table — and the
+                    // `Config::max_symbols`-guarded paths stay
+                    // authoritative. Code-review #337 round 2.
+                    && self.interner.contains("inherited") {
                     let inh_id = self.interner.intern("inherited");
                     if let Some(m) = self.lookup_class_singleton_method(parent_cls, inh_id) {
                         let pre_frames = self.frames.len();
