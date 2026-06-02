@@ -1718,10 +1718,7 @@ impl Vm {
                         // the same fallback chain, so hash stays
                         // consistent in every branch.
                         let (cls, n, snap) = self.heap.unbound_method_full(*uid);
-                        let key = match snap
-                            .clone()
-                            .or_else(|| self.lookup_method_uncached(&cls, n))
-                        {
+                        let key = match snap.or_else(|| self.lookup_method_uncached(&cls, n)) {
                             Some(m) => std::rc::Rc::as_ptr(&m) as i64,
                             None => std::rc::Rc::as_ptr(&cls) as i64,
                         };
@@ -6239,8 +6236,8 @@ impl Vm {
                         // stays in lock-step.
                         let (ca, na, sa) = self.heap.unbound_method_full(*a);
                         let (cb, nb, sb) = self.heap.unbound_method_full(*b);
-                        let ma = sa.clone().or_else(|| self.lookup_method_uncached(&ca, na));
-                        let mb = sb.clone().or_else(|| self.lookup_method_uncached(&cb, nb));
+                        let ma = sa.or_else(|| self.lookup_method_uncached(&ca, na));
+                        let mb = sb.or_else(|| self.lookup_method_uncached(&cb, nb));
                         match (ma, mb) {
                             (Some(x), Some(y)) => Rc::ptr_eq(&x, &y),
                             _ => na == nb && Rc::ptr_eq(&ca, &cb),
