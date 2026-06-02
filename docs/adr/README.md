@@ -76,3 +76,4 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0024 — Bytecode-level iter drivers + block-break propagation through `Op::Yield`](0024-bytecode-iter-and-block-break.md)
 - [0025 — Signal handling + interruptible Vm primitives](0025-signal-handling-interruptible-primitives.md)
 - [0026 — Omakase blessed-gem menu](0026-omakase-blessed-gem-menu.md)
+- [0027 — `_sqlite` battery — single-conn rusqlite wrapper + Sequel-lite DSL](0027-battery-sqlite.md)
