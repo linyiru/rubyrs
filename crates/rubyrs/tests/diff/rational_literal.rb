@@ -3,10 +3,13 @@
 # the pre-C.4.4 lowering-to-Float hack). Both `class` and
 # arithmetic now match CRuby exactly. This fixture stays in
 # place as a regression guard against the old Float-lowering
-# behavior creeping back: every line `.to_f`s the result so
-# the byte-for-byte output is stable across CRuby and rubyrs,
-# but the underlying values are now genuine Rationals with
-# canonical num/den storage.
+# behavior creeping back: each line is byte-stable across
+# CRuby and rubyrs because either (a) an explicit `.to_f`
+# coerces the Rational to Float for display, or (b) a Float
+# operand on the other side of the expression promotes the
+# result to Float (e.g. `1000.0r * 1.0`). Pure Rational ×
+# Rational paths now stay Rational on both sides — the fixture
+# avoids displaying those directly to keep the output stable.
 #
 # See `spec/ruby/rational_literal_spec.rb` for the class /
 # numerator / denominator assertions and `tests/embed/numeric.rs`

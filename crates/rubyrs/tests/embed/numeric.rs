@@ -3298,6 +3298,16 @@ fn rational_phase_c4_4_literal_and_pow() {
         ("puts (2.0 ** (1/2r)).inspect", "1.4142135623730951"),
         // respond_to? on Rational#**.
         ("puts (1/2r).respond_to?(:**)", "true"),
+        // No-bignum cap regression: bases of ±1 / 0 can take
+        // arbitrary integer exponent without overflowing i64.
+        // Pre-Copilot-cycle-1 the no-bignum tier had an `ak > 62`
+        // shortcut that rejected `(1/1r) ** 1000` as RangeError;
+        // the fix delegates overflow detection to `checked_pow`.
+        // Tested under bignum here since the BigInt path always
+        // works; the no-bignum tier gets the dedicated regression
+        // case below.
+        ("puts ((1/1r) ** 1000).inspect", "(1/1)"),
+        ("puts ((-1/1r) ** 1001).inspect", "(-1/1)"),
     ] {
         let buf = SharedBuf::new();
         rt.set_stdout(Box::new(buf.clone()));
@@ -3484,6 +3494,39 @@ fn rational_phase_c4_2_bigint_to_r_and_kernel() {
             assert_eq!(class_name, "ZeroDivisionError");
         }
         ref other => panic!("expected ZeroDivisionError, got {:?}", other),
+    }
+}
+
+#[test]
+#[cfg(not(feature = "bignum"))]
+fn rational_phase_c4_4_pow_no_overflow_for_unit_bases() {
+    // Phase C.4.4 — regression for the Copilot-flagged no-bignum
+    // overflow shortcut. Bases of ±1 / 0 stay representable for
+    // any integer exponent; pre-fix the `ak > 62` cap rejected
+    // these with RangeError. Now `checked_pow` decides, and
+    // `1_i64.checked_pow(1000) == Some(1)` so the call succeeds.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        ("puts ((1/1r) ** 1000).inspect", "(1/1)"),
+        ("puts ((-1/1r) ** 1000).inspect", "(1/1)"),
+        ("puts ((-1/1r) ** 1001).inspect", "(-1/1)"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "rational_c44_nb.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // Real overflow still surfaces — `(2/1r) ** 100` doesn't fit
+    // i64. Pin the error class so a future cap revert doesn't
+    // silently change this path.
+    let err = rt
+        .eval("(2/1r) ** 100", "rational_c44_nb_err.rb")
+        .unwrap_err();
+    match err.err {
+        rubyrs::RubyError::Uncaught { ref class_name, .. } => {
+            assert_eq!(class_name, "RangeError");
+        }
+        ref other => panic!("expected RangeError, got {:?}", other),
     }
 }
 

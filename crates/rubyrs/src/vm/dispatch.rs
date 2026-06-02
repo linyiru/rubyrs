@@ -579,14 +579,19 @@ impl Vm {
                 }));
             }
             let ak = k.unsigned_abs();
-            if ak > 62 {
-                // i64 overflow is guaranteed beyond 2^62 even for
-                // base == 2; surface as RangeError.
-                return Err(self.trap(RubyError::RangeError {
-                    msg: "Rational#** result overflows i64 (rebuild with --features bignum)".to_string(),
-                }));
-            }
-            let ak_u32 = ak as u32;
+            // u32 is `checked_pow`'s exponent type. Anything beyond
+            // overflows for any base except 0 / ±1 — but those
+            // bases can still pow exactly, so the conversion fence
+            // (not the actual overflow check) goes here. Real
+            // overflow detection is delegated to `checked_pow` so
+            // base-specific stability (e.g. `(1/1r) ** 10**18`)
+            // succeeds where a naïve `ak > 62` cap would have
+            // rejected it.
+            let ak_u32 = u32::try_from(ak).map_err(|_| {
+                self.trap(RubyError::RangeError {
+                    msg: "Rational#** exponent magnitude exceeds u32 (rebuild with --features bignum)".to_string(),
+                })
+            })?;
             let new_num = r.num.checked_pow(ak_u32).ok_or_else(|| {
                 self.trap(RubyError::RangeError {
                     msg: "Rational#** numerator overflows i64 (rebuild with --features bignum)".to_string(),
