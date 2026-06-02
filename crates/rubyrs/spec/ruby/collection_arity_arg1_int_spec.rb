@@ -47,6 +47,14 @@ describe "Array#each_slice / #each_cons arity & type guards" do
     assert_eq(klass, "TypeError")
     assert_eq(msg, "no implicit conversion from nil to integer")
   end
+
+  it "renders Proc / Lambda arg as 'Proc' (CRuby class name)" do
+    # type_name_for_coerce falls back to "Object" for closures;
+    # the helper overrides with "Proc" to match CRuby's wording.
+    klass, msg = caught_pair { [1].each_slice(->{}) }
+    assert_eq(klass, "TypeError")
+    assert_eq(msg, "no implicit conversion of Proc into Integer")
+  end
 end
 
 describe "Hash#each_slice / #each_cons arity & type guards" do

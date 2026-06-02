@@ -267,16 +267,24 @@ impl Vm {
             Value::Nil => self.trap(RubyError::TypeError {
                 msg: "no implicit conversion from nil to integer".to_string(),
             }),
-            other => self.trap(RubyError::TypeError {
-                // Use the coercion-aware name so true/false
-                // render as "true"/"false" (not "Boolean"),
-                // matching CRuby and the rest of the VM's
-                // coercion error sites.
-                msg: format!(
-                    "no implicit conversion of {} into Integer",
-                    super::numeric::type_name_for_coerce(other)
-                ),
-            }),
+            other => {
+                // CRuby's coercion error uses class names for
+                // closures and bound methods (`Proc`, `Method`)
+                // but the lowercase `true`/`false` tokens for
+                // Bool. `type_name_for_coerce` gives us the
+                // Bool wording but falls back to `"Object"`
+                // for Block / CurriedProc / BoundMethod —
+                // override those inline so Proc args render
+                // as `Proc` (CRuby parity).
+                let name = match other {
+                    Value::Block(_) | Value::CurriedProc(_) => "Proc",
+                    Value::BoundMethod(_) => "Method",
+                    _ => super::numeric::type_name_for_coerce(other),
+                };
+                self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {name} into Integer"),
+                })
+            },
         }
     }
 
