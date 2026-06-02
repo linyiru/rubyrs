@@ -147,6 +147,22 @@ impl Vm {
             // Tier-1 scope: positional Integer args only. CRuby
             // also accepts `caller(range)`; that lands as a
             // follow-up. (TRY_RUNS pass-12 layer #15.)
+            //
+            // INVARIANT — DELIBERATELY NOT IN `is_builtin_name`:
+            // `caller` lives in `builtin_call` (so it dispatches
+            // as a Kernel builtin when no shadow is present) but
+            // is INTENTIONALLY OMITTED from `Vm::is_builtin_name`
+            // at the top of this file. That gate disables the
+            // toplevel-method fast path for builtin names —
+            // including it would prevent user code
+            // (`def caller; end`) from shadowing the builtin,
+            // which CRuby DOES allow (verified via `ruby -e`)
+            // and which the `tests/fixtures/errors/nomethod.rb`
+            // integration test depends on. If you're sweeping
+            // the three sync-required lists into shape, leave
+            // `caller` out of `is_builtin_name`. Code-review
+            // #342 round 6.
+            //
             // Code-review #342 round 3 corrected the above
             // explanation — earlier wording said "skip an
             // additional n frames" / "Ruby caller of the
