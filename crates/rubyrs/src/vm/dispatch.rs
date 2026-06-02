@@ -4976,8 +4976,8 @@ impl Vm {
                         // walks prepends BEFORE the class's own
                         // methods, and includes AFTER.
                         //
-                        // Idempotency is PER-CHAIN (include vs
-                        // prepend are distinct insertion slots), not
+                        // Idempotency is PER-CHAIN for include /
+                        // prepend (distinct insertion slots), not
                         // full ancestor-chain: `include M; prepend M`
                         // on the same target must succeed at both
                         // steps. The check still walks transitively
@@ -4986,7 +4986,17 @@ impl Vm {
                         // includes M) skips the second include
                         // because M is reachable via the include
                         // chain. PR #347 documented follow-up.
-                        if !super::class_reaches_via_chain(&target_cls, &src, is_prepend) {
+                        //
+                        // `extend` keeps the prior full-ancestor
+                        // \`class_is_a\` check — same scope-gate as
+                        // the arg-order branch above, so this PR
+                        // ships no untested change for extend.
+                        let already_reachable = if is_include || is_prepend {
+                            super::class_reaches_via_chain(&target_cls, &src, is_prepend)
+                        } else {
+                            super::class_is_a(&target_cls, &src)
+                        };
+                        if !already_reachable {
                             let mut chain = if is_prepend {
                                 target_cls.prepends.borrow_mut()
                             } else {
@@ -5926,8 +5936,14 @@ impl Vm {
                     };
                     // Per-chain transitive idempotency, same as the
                     // no-receiver arm — see that comment for the
-                    // include-vs-prepend coexistence rationale.
-                    if !super::class_reaches_via_chain(&target_cls, &src, is_prepend) {
+                    // include-vs-prepend coexistence rationale and
+                    // the extend-keeps-class_is_a gate.
+                    let already_reachable = if is_include || is_prepend {
+                        super::class_reaches_via_chain(&target_cls, &src, is_prepend)
+                    } else {
+                        super::class_is_a(&target_cls, &src)
+                    };
+                    if !already_reachable {
                         let mut chain = if is_prepend {
                             target_cls.prepends.borrow_mut()
                         } else {
