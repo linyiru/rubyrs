@@ -79,6 +79,30 @@ puts c1.method(:foo).respond_to?(:!=)          # true
 puts u_foo_via_c1.respond_to?(:eql?)           # true
 puts u_foo_via_c1.respond_to?(:!=)             # true
 
+# Redefine detection — after `def foo` re-runs on the source
+# class, an OLD BoundMethod captured before the redefine no
+# longer compares equal to a freshly-captured NEW one. CRuby
+# parity (Method#== checks the underlying Method/iseq); rubyrs
+# routes through snapshot-Rc identity. Same rule applies to
+# UnboundMethod via `.unbind` round-trips, so the BoundMethod ↔
+# UnboundMethod boundary stays symmetric.
+class R
+  def foo; "v1"; end
+end
+r = R.new
+old_bm = r.method(:foo)
+old_um = old_bm.unbind
+class R
+  def foo; "v2"; end       # redefine
+end
+new_bm = r.method(:foo)
+new_um = new_bm.unbind
+puts old_bm == new_bm            # false — different Method snapshots
+puts old_bm.eql?(new_bm)         # false
+puts old_um == new_um            # false — same rule via UnboundMethod
+puts new_bm == r.method(:foo)    # true — two captures of v2 share the table Rc
+puts new_bm.hash == r.method(:foo).hash   # true — hash lock-step
+
 # Hash invariant — eql?-equal Methods must share #hash (Ruby's
 # `a.eql?(b) ⇒ a.hash == b.hash`). This is the rule that makes
 # Method usable as a Hash key; we exercise the rule directly
