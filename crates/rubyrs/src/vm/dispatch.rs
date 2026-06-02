@@ -8282,6 +8282,7 @@ impl Vm {
             rescues: vec![],
             loop_rescue_depths: vec![],
             loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            block_writeback: None,
         });
         Ok(true)
     }
@@ -8427,6 +8428,7 @@ impl Vm {
                 // defaults), so all params are "given".
                 n_given_positional: given as u16,
                 rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+                block_writeback: None,
             });
             return Ok(());
         }
@@ -8451,6 +8453,7 @@ impl Vm {
                 rescues: vec![],
                 loop_rescue_depths: vec![],
                 loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+                block_writeback: None,
             });
             return Ok(());
         }
@@ -8732,6 +8735,7 @@ impl Vm {
             // the latter.
             n_given_positional: positional_take as u16,
             rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            block_writeback: None,
         });
         Ok(())
     }
@@ -8849,6 +8853,7 @@ impl Vm {
             is_block: true,
             n_given_positional: 0,
             rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            block_writeback: None,
         });
         Ok(())
     }
@@ -9013,6 +9018,101 @@ impl Vm {
         Ok(id)
     }
 
+    /// Propagate a single-slot write made inside a block frame
+    /// to every enclosing scope's storage that owns this slot
+    /// index. The block-locals model uses a per-invocation fresh
+    /// Vec for each `invoke_block`; outer-scope writes need to
+    /// reach (a) the BlockHandle's `captured` Rc (which is the
+    /// outer block's CURRENT-invocation fresh Vec, still on the
+    /// frame stack) and possibly (b) further outer scopes if
+    /// nested block frames also hold their own writebacks.
+    /// Walking stops as soon as the slot index sits in the
+    /// current target frame's OWN range (`>= param_start` for
+    /// that frame's block proto), because then the target frame
+    /// IS the canonical storage for the slot.
+    ///
+    /// Called from every `Op::StoreLocal` / `Op::IncLocal` /
+    /// `Op::IncLocalNoPush` site whose write hit slot
+    /// `< frame.block_writeback.1` (i.e. an outer-scope write
+    /// from inside a block frame).
+    pub(crate) fn propagate_outer_write(&self, slot: usize, v: &Value) {
+        let frame = self.frames.last().expect("ICE: propagate_outer_write no frame");
+        let mut target = match &frame.block_writeback {
+            Some((p, _)) => p.clone(),
+            None => return,
+        };
+        loop {
+            {
+                let mut t = target.borrow_mut();
+                if slot < t.len() {
+                    t[slot] = v.clone();
+                }
+            }
+            // Is `target` the locals of another block frame still
+            // on the stack? If so AND `slot` is still in THAT
+            // frame's outer scope, walk further; otherwise stop.
+            let outer = self
+                .frames
+                .iter()
+                .rposition(|f| f.is_block && Rc::ptr_eq(&f.locals, &target));
+            match outer {
+                Some(idx) => match &self.frames[idx].block_writeback {
+                    Some((parent, ps)) if slot < *ps as usize => {
+                        target = parent.clone();
+                    }
+                    _ => return,
+                },
+                None => return,
+            }
+        }
+    }
+
+    /// Walk the frame stack to find the topmost non-block frame
+    /// whose `locals` Rc matches the lexical-owner identity rooted
+    /// at the given `seed` Rc. With the per-invocation block-locals
+    /// model (`invoke_block` clones a fresh Vec into the new block
+    /// frame's locals and saves the original `captured` Rc on
+    /// `block_writeback`), a simple `Rc::ptr_eq(&f.locals, &seed)`
+    /// search misses the enclosing method when the seed is a
+    /// block frame's fresh Vec. This helper follows the writeback
+    /// chain — each block frame whose `f.locals` equals the
+    /// current `seed` provides a `block_writeback.0` that points
+    /// one scope outward (toward the method) — until either a
+    /// method-frame match is found, or the chain ends.
+    ///
+    /// Returns the frame index, or `None` if the lexical owner
+    /// isn't on the stack (the block escaped its scope — stored
+    /// as a Proc and invoked from elsewhere).
+    pub(crate) fn find_lexical_owner_frame(
+        &self,
+        seed: &Rc<RefCell<Vec<Value>>>,
+    ) -> Option<usize> {
+        let mut target = seed.clone();
+        loop {
+            if let Some(idx) = self
+                .frames
+                .iter()
+                .rposition(|f| !f.is_block && Rc::ptr_eq(&f.locals, &target))
+            {
+                return Some(idx);
+            }
+            // Not a method frame match — see if the target Rc
+            // corresponds to a still-live block frame whose
+            // writeback points one more scope outward.
+            let outer_idx = self
+                .frames
+                .iter()
+                .rposition(|f| f.is_block && Rc::ptr_eq(&f.locals, &target));
+            match outer_idx {
+                Some(idx) => match &self.frames[idx].block_writeback {
+                    Some((parent, _)) => target = parent.clone(),
+                    None => return None,
+                },
+                None => return None,
+            }
+        }
+    }
+
     pub(crate) fn invoke_block(&mut self, block_id: ObjId, args: Vec<Value>) -> Result<(), Trap> {
         self.check_frames()?;
         // Snapshot what we need out of the block's heap slot before
@@ -9082,8 +9182,38 @@ impl Vm {
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
         let body_local_start = proto.block_body_local_start;
+        // Per-invocation locals isolation (the .each-capture-leak
+        // fix surfaced by sinatra_plugin_smoke):
+        //
+        //   `[:a,:b,:c].map { |s| -> { s } }.map(&:call)`
+        //
+        // used to return `[:c, :c, :c]` because every Lambda's
+        // captured Rc pointed at the SAME outer locals Vec, which
+        // the outer .map overwrote each iteration. Fix: each
+        // invocation gets its own fresh Vec cloned from the
+        // BlockHandle's `captured`. Inner closures created during
+        // this invocation capture the fresh Rc (independent of the
+        // next iteration's), so their slot reads land on this
+        // invocation's values.
+        //
+        // To preserve closure-write-through to outer-method scope
+        // (e.g. `counter = 0; arr.each { counter += 1 }; counter`),
+        // we remember the original `captured` Rc plus this block's
+        // `param_start`. At Op::Return the lower `[0..param_start]`
+        // portion of the fresh Vec — slots owned by the surrounding
+        // method / outer blocks — is copied back into the original
+        // Rc. This keeps the active-invocation outer-write-through
+        // working; only the post-pop write-through (a *detached*
+        // inner closure mutating outer-method vars AFTER its
+        // outer block frame has popped) is a documented Tier-1
+        // divergence — see the Op::Return write-back arm and
+        // SUBSET.md for the trade-off.
+        let fresh_locals: Rc<RefCell<Vec<Value>>> = {
+            let src = captured.borrow();
+            Rc::new(RefCell::new(src.clone()))
+        };
         {
-            let mut locals = captured.borrow_mut();
+            let mut locals = fresh_locals.borrow_mut();
             if locals.len() < needed {
                 while locals.len() < needed { locals.push(Value::Nil); }
             }
@@ -9126,11 +9256,12 @@ impl Vm {
         self.frames.push(Frame {
             proto_idx,
             ip: 0,
-            locals: captured,
+            locals: fresh_locals,
             self_val,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
             is_block: true, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            block_writeback: Some((captured, param_start)),
         });
         Ok(())
     }

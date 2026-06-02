@@ -993,7 +993,28 @@ impl Vm {
             }
             Op::StoreLocal(s) => {
                 let v = self.stack.pop().expect("ICE: StoreLocal stack underflow");
-                self.frames.last().expect("ICE: StoreLocal no frame").locals.borrow_mut()[s as usize] = v;
+                let slot = s as usize;
+                let frame = self.frames.last().expect("ICE: StoreLocal no frame");
+                frame.locals.borrow_mut()[slot] = v.clone();
+                // Per-invocation block-locals model: outer-scope
+                // writes (slot < block.param_start) propagate
+                // through every enclosing fresh-Vec back to the
+                // lexical method's locals. `propagate_outer_write`
+                // walks the writeback chain. Without this,
+                // `counter = 0; arr.each { counter += 1 }`
+                // would update only the block frame's fresh Vec
+                // and the method would still see 0 after the
+                // loop. The propagation is a no-op when frame
+                // has no `block_writeback` (method / class-body
+                // / toplevel frames), or when the slot sits in
+                // the current block's own param/body range.
+                let in_outer_scope = frame
+                    .block_writeback
+                    .as_ref()
+                    .is_some_and(|(_, ps)| slot < *ps as usize);
+                if in_outer_scope {
+                    self.propagate_outer_write(slot, &v);
+                }
             }
             Op::IncLocalNoPush(s) => {
                 let slot = s as usize;
@@ -1016,6 +1037,17 @@ impl Vm {
                     self.do_call(plus_id, 1, false, u16::MAX)?;
                     let v = self.stack.pop().unwrap_or(Value::Nil);
                     self.frames.last().expect("ICE").locals.borrow_mut()[slot] = v;
+                }
+                // Per-invocation block-locals propagation — see
+                // Op::StoreLocal.
+                let frame = self.frames.last().expect("ICE: IncLocalNoPush no frame");
+                let in_outer = frame
+                    .block_writeback
+                    .as_ref()
+                    .is_some_and(|(_, ps)| slot < *ps as usize);
+                if in_outer {
+                    let v = frame.locals.borrow()[slot].clone();
+                    self.propagate_outer_write(slot, &v);
                 }
             }
             Op::IncLocal(s) => {
@@ -1044,6 +1076,17 @@ impl Vm {
                     self.do_call(plus_id, 1, false, u16::MAX)?;
                     let new_val = self.stack.last().expect("ICE: IncLocal slow path no result").clone();
                     self.frames.last().expect("ICE").locals.borrow_mut()[slot] = new_val;
+                }
+                // Per-invocation block-locals propagation — see
+                // Op::StoreLocal.
+                let frame = self.frames.last().expect("ICE: IncLocal no frame");
+                let in_outer = frame
+                    .block_writeback
+                    .as_ref()
+                    .is_some_and(|(_, ps)| slot < *ps as usize);
+                if in_outer {
+                    let v = frame.locals.borrow()[slot].clone();
+                    self.propagate_outer_write(slot, &v);
                 }
             }
             Op::Dup => {
@@ -1549,6 +1592,14 @@ impl Vm {
                 // block) and self before any mutable borrow of
                 // `self`, then allocate the BlockHandle into the
                 // heap. The stack value is a plain `ObjId`.
+                //
+                // Per-iteration closure capture fairness is
+                // enforced at `invoke_block` (not here): each
+                // invocation gets a FRESH locals Vec cloned from
+                // `captured`, with a write-back at frame pop. Inner
+                // closures captured during that invocation thus
+                // hold a Rc to the per-invocation Vec, isolated
+                // from subsequent iterations.
                 let (captured, self_val) = {
                     let f = self.frames.last().expect("ICE: CreateBlock no frame");
                     (f.locals.clone(), f.self_val.clone())
@@ -1627,15 +1678,24 @@ impl Vm {
                 //      leave the signal set, let the outer
                 //      dispatch loop / Fiber driver handle.
                 // Phase A.7: lexical lookup via locals Rc-pointer
-                // identity. The top frame's `locals` is the
-                // captured Rc that the block (or method) is
-                // executing in — find the topmost !is_block
-                // frame sharing the same Rc.
-                let target_locals = self.frames.last()
-                    .expect("ICE: Op::Yield with empty frames").locals.clone();
-                let yielding_idx = self.frames.iter().rposition(|f| {
-                    !f.is_block && std::rc::Rc::ptr_eq(&f.locals, &target_locals)
-                });
+                // identity. With the per-invocation block-locals
+                // fix (each `invoke_block` installs a fresh
+                // locals Vec, retaining the original `captured`
+                // Rc on `block_writeback`), the top frame's
+                // `locals` is no longer the same Rc the lexical
+                // owner uses. `find_lexical_owner_frame` walks
+                // the writeback chain to bridge that — each
+                // block frame's writeback points one scope
+                // outward until a method frame is found.
+                let yielding_idx = {
+                    let seed = self
+                        .frames
+                        .last()
+                        .expect("ICE: Op::Yield with empty frames")
+                        .locals
+                        .clone();
+                    self.find_lexical_owner_frame(&seed)
+                };
                 let yielding_idx = match yielding_idx {
                     Some(idx) => idx,
                     None => return Err(self.trap(RubyError::RuntimeError {
@@ -2680,6 +2740,7 @@ impl Vm {
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
                     is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+                    block_writeback: None,
                 });
             }
             Op::NewArray(n) => {
@@ -3050,6 +3111,23 @@ impl Vm {
             }
             Op::Return => {
                 let f = self.frames.pop().expect("ICE: Return no frame");
+                // Per-invocation block-locals model: writes to
+                // outer-scope slots (slot < block.param_start)
+                // are propagated AT-WRITE-TIME via the
+                // `propagate_outer_write` helper at every
+                // `Op::StoreLocal` / `Op::IncLocalNoPush` site,
+                // rather than via a bulk write-back here. A bulk
+                // copy at Op::Return would CLOBBER outer-slot
+                // mutations performed by OTHER code paths
+                // (`define_method`-installed closures dispatch
+                // through `m.closure.captured`, which IS the
+                // outer Rc, so their writes hit the parent
+                // directly; a stomp-copy here would replace those
+                // with this block frame's stale snapshot). The
+                // block_writeback field remains useful for
+                // `find_lexical_owner_frame` (Op::Yield /
+                // Op::ReturnMethod's lexical-method walk) — that's
+                // its remaining role.
                 let ret = self.stack.pop().unwrap_or(Value::Nil);
                 self.stack.truncate(f.base_sp);
                 if f.is_class_body {
@@ -3074,17 +3152,44 @@ impl Vm {
                 self.method_return = Some(v);
                 // Snapshot the lexical-owner identity. The current
                 // frame is the block where `return` fired; its
-                // `locals` Rc was set from the BlockHandle's
-                // `captured` slot, which points at the locals Vec
-                // of the method that lexically created the block.
-                // The unwind walker uses `Rc::ptr_eq` to find that
-                // method frame — NOT just the nearest method
-                // frame (which could be the yielding caller, e.g.
-                // `Array#each`'s parent in `outer { return }`
-                // shapes). (TRY_RUNS pass-10 layer #4.)
-                let owner_locals = self.frames.last()
-                    .expect("ICE: ReturnMethod with empty frame stack")
-                    .locals.clone();
+                // BlockHandle's `captured` slot points at the
+                // locals Vec of the method that lexically created
+                // the block. The unwind walker uses `Rc::ptr_eq`
+                // to find that method frame — NOT just the nearest
+                // method frame (which could be the yielding
+                // caller, e.g. `Array#each`'s parent in
+                // `outer { return }` shapes). (TRY_RUNS pass-10
+                // layer #4.)
+                //
+                // Since `invoke_block` now installs a FRESH per-
+                // invocation locals Vec on the block frame (with
+                // the original `captured` retained on
+                // `block_writeback`), the top frame's `locals`
+                // Rc is no longer the same Rc the lexical owner
+                // method uses. Walk the writeback chain — handles
+                // arbitrary block nesting (block inside block
+                // inside method) where each enclosing block also
+                // has a fresh per-invocation Vec — and stash the
+                // ULTIMATE owner's Rc. That way the downstream
+                // unwind walker's `Rc::ptr_eq(&f.locals, &rc)`
+                // hits the method frame directly without needing
+                // to repeat the walk.
+                let owner_locals = {
+                    let seed = self.frames.last()
+                        .expect("ICE: ReturnMethod with empty frame stack")
+                        .locals.clone();
+                    match self.find_lexical_owner_frame(&seed) {
+                        Some(idx) => self.frames[idx].locals.clone(),
+                        // Block escaped its scope (e.g. saved as
+                        // a Proc and called after its lexical
+                        // method returned) — leave the seed and
+                        // let the unwind walker's None-branch
+                        // fall back to first-non-block legacy
+                        // behaviour (LocalJumpError surfaced by
+                        // Tier-1's missing model).
+                        None => seed,
+                    }
+                };
                 self.method_return_locals = Some(owner_locals);
             }
         }

@@ -161,6 +161,21 @@ pub(crate) struct Frame {
     /// later exception outside the begin block.
     /// (Code-review #306 round 1.)
     pub(crate) begin_rescue_depths: Vec<BeginBaseline>,
+    /// Set on block frames whose `locals` is a FRESH per-invocation
+    /// Vec cloned from the BlockHandle's `captured` at
+    /// `invoke_block`. Holds the original `captured` Rc + the
+    /// block's `param_start` so that, at Op::Return, the lower
+    /// `[0..param_start]` portion of `locals` (the outer-scope
+    /// slots — method-locals plus any enclosing block's slots) is
+    /// COPIED BACK into the original Rc. This preserves
+    /// closure-write-through to outer scope for the active
+    /// invocation while keeping per-iteration isolation for slots
+    /// that the block itself owns (params + body-locals).
+    /// `None` for method / class-body / toplevel frames, and for
+    /// block frames that don't need writeback (e.g. trivial
+    /// invokes from non-iterating callers — currently unused, but
+    /// the field allows future opt-in).
+    pub(crate) block_writeback: Option<(Rc<RefCell<Vec<Value>>>, u16)>,
 }
 
 /// In-flight structured `break`/`next` walking through an

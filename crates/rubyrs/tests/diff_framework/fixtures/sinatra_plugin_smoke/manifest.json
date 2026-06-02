@@ -1,0 +1,36 @@
+{
+  "_doc": "ADR 0026 v2 / M27 — validates the 'third-party Sinatra plugins unblocked' claim with a fixture-local plugin that exercises the M27 AST family. The plugin reopens Sinatra::Base and uses define_method with block-capture (the M27 A4 batch) to install a family of helper methods; the app then calls each helper through its routes. Same code runs on rubyrs (via the vendored micro-Sinatra shared with sinatra_hello) and CRuby (via the real Sinatra gem). Validates: (a) class reopen on a gem-provided class, (b) define_method inside an iter-block with closure capture, (c) helper methods visible to dispatch-instance route blocks, (d) module + frozen constant access from inside the captured block.",
+  "name": "sinatra_plugin_smoke",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 8000,
+    "duration_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sinatra/base"]
+  },
+  "scenarios": [
+    { "name": "root",            "method": "GET", "path": "/" },
+    { "name": "greet_formal",    "method": "GET", "path": "/greet/formal/Alice" },
+    { "name": "greet_casual",    "method": "GET", "path": "/greet/casual/Bob" },
+    { "name": "greet_friendly",  "method": "GET", "path": "/greet/friendly/Cara" },
+    { "name": "plugin_info",     "method": "GET", "path": "/plugin/info" },
+    { "name": "plugin_version",  "method": "GET", "path": "/plugin/version" }
+  ],
+  "normalize": [
+    {
+      "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": "rubyrs micro-Sinatra \\(_http_server battery\\)",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "_doc": "Sinatra+WEBrick appends ;charset=utf-8 to default Content-Type; rubyrs's _http_server battery emits the bare media type. Both valid per RFC 7231 §3.1.1.5; collapse to bare form.",
+      "pattern": ";charset=utf-8",
+      "replacement": ""
+    }
+  ]
+}
