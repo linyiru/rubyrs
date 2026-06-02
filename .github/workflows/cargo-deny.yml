@@ -45,11 +45,24 @@ on:
   # `rust-toolchain.toml` is included because toolchain bumps shift
   # how cargo resolves transitive-dep versions and recompile
   # cargo-deny from source on cache-miss installs.
+  #
+  # `!crates/rubyrs/fuzz/Cargo.toml` excludes the fuzz crate's
+  # manifest — `**/Cargo.toml` would match it, but fuzz is an
+  # intentionally-detached sub-workspace (empty `[workspace]` block
+  # so it can use nightly while the root pins stable). `cargo deny
+  # check` from the workspace root does NOT traverse into it, so
+  # firing the gate on fuzz-only manifest edits is pure waste with
+  # no coverage gain. The flip side — that the gate also doesn't
+  # catch a CVE landing inside libfuzzer-sys's tree — is an
+  # accepted gap; a dedicated fuzz-scoped `cargo deny check` is a
+  # separate scope (would need its own deny.toml since the fuzz
+  # workspace resolves differently under nightly).
   push:
     branches: [master]
     paths:
       - 'Cargo.lock'
       - '**/Cargo.toml'
+      - '!crates/rubyrs/fuzz/Cargo.toml'
       - 'deny.toml'
       - 'rust-toolchain.toml'
       - '.github/workflows/cargo-deny.yml'
@@ -58,6 +71,7 @@ on:
     paths:
       - 'Cargo.lock'
       - '**/Cargo.toml'
+      - '!crates/rubyrs/fuzz/Cargo.toml'
       - 'deny.toml'
       - 'rust-toolchain.toml'
       - '.github/workflows/cargo-deny.yml'
