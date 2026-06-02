@@ -105,11 +105,15 @@ uses `:memory:` DB so no FS / journal-mode variance enters.
 | Phase 3 baseline (Ruby-host-fn + LRU + heap alloc per row) | 3 of 4 shapes beat CRuby; `select_one_cached` 12 % behind |
 | Phase 3.1 (`SQLite3::Statement` Ruby class + skip-LRU) | 3 of 4 shapes beat CRuby by 20-37 %; `select_one_cached` within noise (~10 % gap) |
 
-Phase 5b (Sequel-lite Dataset over `Statement`) will compound
-the `select_one_cached` parity into a *full sweep* under
-realistic ORM-shape workloads, where the Dataset can hold a
-Statement across `.where(...).all` chains and the Ruby-side
-dispatch amortises away.
+**2026-06-02 — Phase 5b deferred.** Original plan: a Sequel-lite
+Dataset over `Statement` would compound the `select_one_cached`
+parity into a *full sweep* under ORM-shape workloads (the
+Dataset holds a Statement across `.where(...).all` chains, so
+the Ruby-side dispatch amortises away). Deferred because the
+raw battery is already competitive (3 of 4 wins, 1 within
+noise) and a speculative Dataset risks landing a "looks like
+Sequel but isn't" mid-state. Re-opens when a real consumer
+drives the DSL shape — see ADR 0027 §Migration plan.
 
 ## Surface differences exercised
 

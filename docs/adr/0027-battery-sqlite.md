@@ -710,10 +710,48 @@ No migration needed — `_sqlite` is a new feature. Path forward:
 | 2 | This ADR (`docs/adr/0027-battery-sqlite.md`) | **this commit** |
 | 3 | Battery PoC — `src/sqlite.rs` + `preamble/sqlite_database.rb` + `Cargo.toml` deps + `lib.rs` export | pending |
 | 4 | diff_framework S4 hooks (manifest schema + harness extension) + `sqlite_smoke` fixture | pending |
-| 5a | Sequel-lite registry plumbing — empty `sequel_lite.rb` stub + `stdlib_vendor.rs` register + `is_stdlib_stub_name` whitelist + the test-fixture-shape proof that `require "sequel"` resolves to the stub | pending |
-| 5b | Sequel-lite DSL body — `Dataset` chainable `where` / `order` / `limit` / `all` / `each` / `insert` / `update` / `delete` (Tier A, ~250 LOC) | pending |
-| 6 | `sequel_canon` parity fixture | pending |
+| 5a | Sequel-lite registry plumbing — empty `sequel_lite.rb` stub + `stdlib_vendor.rs` register + `is_stdlib_stub_name` whitelist + the test-fixture-shape proof that `require "sequel"` resolves to the stub | **deferred — see note below** |
+| 5b | Sequel-lite DSL body — `Dataset` chainable `where` / `order` / `limit` / `all` / `each` / `insert` / `update` / `delete` (Tier A, ~250 LOC) | **deferred — see note below** |
+| 6 | `sequel_canon` parity fixture | **deferred** (no Dataset to canonise) |
 | 7 (optional) | JOIN + bench | deferred until consumer needs |
+
+### 2026-06-02 — Phases 5–6 deferred at Phase 3.1 close
+
+Menu item 4 is closing at Phase 3.1 (`SQLite3::Statement` Ruby
+class + bench). Rationale:
+
+- The Phase 3.1 SQLite bench has rubyrs ahead of CRuby by 20–37 %
+  on three of four workloads and within ~10 % noise on the
+  fourth (`select_one_cached`). The bench's `bench/sqlite_bench_results.md`
+  ships with the data. The *raw* `_sqlite` battery is already
+  competitive — Sequel-lite was originally framed as the lever
+  to flip `select_one_cached` into a full sweep by amortising
+  Ruby-side dispatch over `Dataset` chains.
+- Sequel-lite is a **subset DSL**, not a Sequel mirror. The
+  small surface (hash-form `where` / scalar ops / order / limit
+  / all+first+each) implies a tiny SQL compiler (~300–500 LOC),
+  but the **test + documentation surface** for "what works,
+  what doesn't, why" is large enough that we don't want to ship
+  it without a real consumer driving the shape. Building it
+  speculatively risks landing a mid-state "looks like Sequel
+  but isn't" that's harder to revise once published.
+- The bench gap is already documented as **acceptable** in
+  `bench/sqlite_bench_results.md` (the within-noise note). No
+  end user is currently asking for the Dataset DSL.
+
+Re-open trigger: a concrete consumer (an example app, a
+benchmark target, or a Tier-3 stdlib that wants ORM-shape
+syntax) lands a request for `Dataset` chainable shape. At that
+point Phase 5a → 5b → 6 resume in order; the deferral is a
+postpone, not a delete. The ADR design (single-conn,
+per-thread `SQLITE_CONNS`, prepared-statement cache, exception
+hierarchy, etc.) carries forward unchanged — only the DSL
+veneer on top is parked.
+
+Menu item 4's "battery designed, not built" line in ADR 0026 v2
+becomes "battery built (`SQLite3::Database` + `SQLite3::Statement`);
+Dataset DSL designed, deferred". The cumulative `_sqlite` surface
+through Phase 3.1 is what the menu item promises in practice.
 
 Each phase = one atomic commit. Total ~5 commits + 1 ADR
 before the parity fixture lights up. ADR 0026 v2's "battery
