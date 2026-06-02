@@ -107,6 +107,33 @@ module Sinatra
       end
       def not_found_handler; @not_found; end
 
+      # `Sinatra::Base.register Module [, ...]` — the canonical
+      # third-party plugin authoring entry point. Each `ext` is a
+      # Module whose `self.registered(app)` hook installs filters /
+      # routes / helpers onto the app. Mirrors the real Sinatra
+      # gem's API surface (sinatra-cors / sinatra-flash /
+      # sinatra-respond_to all use this entry). The arg-iteration
+      # shape (multiple modules in one call) matches real
+      # Sinatra's `register *extensions`.
+      def register(*extensions)
+        extensions.each do |ext|
+          ext.registered(self) if ext.respond_to?(:registered)
+        end
+      end
+
+      # `Sinatra::Base.helpers Module [, ...]` — mixes helper
+      # modules into the app class so the modules' instance
+      # methods become reachable from route blocks (which run
+      # via instance_exec on a per-request dispatch instance).
+      # Module form only; the block form `helpers { def ...; end }`
+      # would require class_eval-with-binding, which is the
+      # Tier-2 `_full_eval` boundary (ADR 0019). Plugin authors
+      # who need the block form can package the helpers as a
+      # Module instead — the more portable shape.
+      def helpers(*modules)
+        modules.each { |m| include m }
+      end
+
       # "/say/*/to/:name" -> [[:lit,"say"],[:splat],[:lit,"to"],[:cap,"name"]]
       def compile(path)
         path.split("/").reject { |seg| seg.empty? }.map do |seg|

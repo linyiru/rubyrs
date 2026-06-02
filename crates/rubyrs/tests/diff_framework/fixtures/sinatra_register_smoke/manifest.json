@@ -1,0 +1,34 @@
+{
+  "_doc": "ADR 0026 v2 / M27 — validates the second major Sinatra plugin authoring pattern. Where sinatra_plugin_smoke covers the reopen-Base shape (older plugins; class Sinatra::Base; def ...; end), this fixture covers the canonical `Sinatra.register Module` + `helpers Module` shape that real gems (sinatra-cors, sinatra-flash, sinatra-respond_to, etc.) use. Plugin file follows the real-gem authoring conventions: a module providing `self.registered(app)` that calls `app.helpers HelpersMod` + `app.before do ...` + adds routes. App uses `register Sinatra::MetaInfo`. The vendored micro-Sinatra gained `Sinatra::Base.register` and `Sinatra::Base.helpers` (shared with sinatra_hello via `../sinatra_hello/vendor/sinatra_lite`); the real Sinatra gem provides the same surface on CRuby. Validates: (a) Module.registered(app) hook is called by register, (b) helpers Module mixes instance methods into route dispatch instances, (c) plugin-installed before-filter runs for every request, (d) plugin-installed routes work alongside app-defined routes, (e) helper methods access @ivars set by the plugin's before-filter.",
+  "name": "sinatra_register_smoke",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 8000,
+    "duration_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sinatra/base"]
+  },
+  "scenarios": [
+    { "name": "root",          "method": "GET", "path": "/" },
+    { "name": "meta_via_route","method": "GET", "path": "/__meta" },
+    { "name": "user_route",    "method": "GET", "path": "/user/alice" },
+    { "name": "marked",        "method": "GET", "path": "/marked" },
+    { "name": "plugin_version","method": "GET", "path": "/plugin/version" }
+  ],
+  "normalize": [
+    {
+      "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": "rubyrs micro-Sinatra \\(_http_server battery\\)",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": ";charset=utf-8",
+      "replacement": ""
+    }
+  ]
+}
