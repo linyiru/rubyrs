@@ -595,14 +595,29 @@ impl Vm {
                 }));
             }
             let ak = k.unsigned_abs();
+            // Unit bases (0 / ±1) are exactly representable for any
+            // integer exponent without touching `checked_pow` — so
+            // short-circuit BEFORE the u32 conversion fence below.
+            // Otherwise `(1/1r) ** 10**18` would trip the u32::try_from
+            // even though the result is just (1/1). `(0/1r) ** k` with
+            // k > 0 is 0 (k < 0 was already trapped above).
+            if r.den == 1 {
+                match r.num {
+                    0 => return self.make_rational(0, 1),
+                    1 => return self.make_rational(1, 1),
+                    -1 => {
+                        let signed = if ak % 2 == 0 { 1 } else { -1 };
+                        return self.make_rational(signed, 1);
+                    }
+                    _ => {}
+                }
+            }
             // u32 is `checked_pow`'s exponent type. Anything beyond
-            // overflows for any base except 0 / ±1 — but those
-            // bases can still pow exactly, so the conversion fence
-            // (not the actual overflow check) goes here. Real
-            // overflow detection is delegated to `checked_pow` so
-            // base-specific stability (e.g. `(1/1r) ** 10**18`)
-            // succeeds where a naïve `ak > 62` cap would have
-            // rejected it.
+            // overflows for any base other than the unit bases handled
+            // above; real overflow detection is delegated to
+            // `checked_pow` so base-specific stability (e.g.
+            // `(1/2r) ** 60`) succeeds where a naïve `ak > 62` cap
+            // would have rejected it.
             let ak_u32 = u32::try_from(ak).map_err(|_| {
                 self.trap(RubyError::RangeError {
                     msg: "Rational#** exponent magnitude exceeds u32 (rebuild with --features bignum)".to_string(),

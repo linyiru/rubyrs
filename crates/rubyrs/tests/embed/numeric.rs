@@ -3528,6 +3528,15 @@ fn rational_phase_c4_4_pow_no_overflow_for_unit_bases() {
         ("puts ((1/1r) ** 1000).inspect", "(1/1)"),
         ("puts ((-1/1r) ** 1000).inspect", "(1/1)"),
         ("puts ((-1/1r) ** 1001).inspect", "(-1/1)"),
+        // Unit bases with exponent magnitude > u32::MAX (~4.3e9).
+        // Pre-Copilot-cycle-2 these tripped the `u32::try_from`
+        // conversion fence with RangeError; the fix short-circuits
+        // 0 / ±1 bases before the fence so any integer exponent
+        // works for them.
+        ("puts ((1/1r) ** (10**18)).inspect", "(1/1)"),
+        ("puts ((0/1r) ** (10**18)).inspect", "(0/1)"),
+        ("puts ((-1/1r) ** (10**18)).inspect", "(1/1)"),
+        ("puts ((-1/1r) ** (10**18 + 1)).inspect", "(-1/1)"),
     ] {
         let buf = SharedBuf::new();
         rt.set_stdout(Box::new(buf.clone()));
