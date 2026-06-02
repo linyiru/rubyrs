@@ -20,7 +20,10 @@ anywhere from `77.0%` upward.
 
 ```sh
 # One-shot install — pin matches the CI version so local + CI
-# measurements use the same tool.
+# measurements use the same tool. When bumping, also update
+# `CARGO_LLVM_COV_VERSION` in `.github/workflows/ci.yml` (the
+# coverage job's source of truth); this line below is a
+# manual-sync copy for copy-pasteability.
 cargo install cargo-llvm-cov --locked --version 0.8.7
 
 # Measure

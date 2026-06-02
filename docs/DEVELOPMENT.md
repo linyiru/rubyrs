@@ -108,8 +108,11 @@ The embedding-API surface is pinned by `crates/rubyrs/tests/embed.rs`.
   on Sundays so an advisory-DB update against a frozen
   `Cargo.lock` doesn't go unnoticed. Run locally with
   `cargo deny check` (after
-  `cargo install cargo-deny --locked --version 0.19.8`). Bumping
-  the cargo-deny pin or adding a license/exception is a
+  `cargo install cargo-deny --locked --version 0.19.8`; the
+  `0.19.8` here is a manual-sync copy of the `version:` input on
+  the `install-pinned-cargo-tool` composite call in
+  `.github/workflows/cargo-deny.yml` — bump both together).
+  Bumping the cargo-deny pin or adding a license/exception is a
   deliberate commit; the new ruleset must pass locally before
   push.
 
