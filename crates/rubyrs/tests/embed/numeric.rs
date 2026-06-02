@@ -3291,6 +3291,16 @@ fn rational_phase_c4_3_float_to_r_and_rationalize() {
         ("puts 3.14.rationalize(0.001).inspect", "(135/43)"),
         ("puts (-3.14).rationalize(0.001).inspect", "(-135/43)"),
         ("puts 0.5.rationalize(0.0).inspect", "(1/2)"),
+        // Collapsed-interval eps: when |eps| is smaller than the
+        // local ULP, `f - eps` and `f + eps` both round back to
+        // `f` in f64 arithmetic, leaving `a == b`. Stern-Brocot
+        // assumes `a < b` strictly and would loop forever; the
+        // early-exit guard returns the lossless representation.
+        // (eps = 1e-20 vs ULP(1.0) ≈ 2.22e-16.)
+        (
+            "puts 1.0.rationalize(1e-20).inspect",
+            "(1/1)",
+        ),
         // Kernel#Rational(Float) — lossless
         ("puts Rational(0.5).inspect", "(1/2)"),
         ("puts Rational(0.1).inspect", "(3602879701896397/36028797018963968)"),

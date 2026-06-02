@@ -314,6 +314,17 @@ impl Vm {
                         msg: crate::vm::numeric::float_domain_label(b_f).to_string(),
                     }));
                 }
+                // Collapsed-interval guard: when eps is smaller than
+                // the local ULP, `f ± eps` rounds back to `f` and the
+                // interval is the single point `f`. Stern-Brocot
+                // assumes `a < b` strictly and would loop forever on
+                // `a == b` (the `c < b` exit test never fires). Bail
+                // to the lossless representation, which is the only
+                // Rational in a single-point interval.
+                if a_f == b_f {
+                    let (num, den) = lossless_pair(sign, mantissa, exp);
+                    return self.make_rational_bigint(num, den);
+                }
                 // Decompose a_f and b_f to a common denominator.
                 let (a_n, a_d) = float_to_rational_pair_signed(a_f);
                 let (b_n, b_d) = float_to_rational_pair_signed(b_f);
@@ -446,7 +457,7 @@ impl Vm {
                 let r = self.heap.rational(*id);
                 Ok((r.num.clone(), r.den.clone()))
             }
-            _ => unreachable!("eps validated by caller as Numeric / nil"),
+            _ => unreachable!("eps validated by caller as Numeric (Int / BigInt / Float / Rational); nil rejected at TypeError gate upstream"),
         }
     }
 
