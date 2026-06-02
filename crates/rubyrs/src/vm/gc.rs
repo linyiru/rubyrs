@@ -268,6 +268,60 @@ impl Vm {
         Ok(f as i64)
     }
 
+    /// Variant of `arity_error_arg1_int` for methods that take
+    /// 0 or 1 Integer argument (`Array#first`, `#last`, `#pop`,
+    /// `#shift`). Same TypeError shape for non-Int 1-arg, but
+    /// the wrong-arity wording is "expected 0..1" (CRuby uses
+    /// the range form for these). Place AFTER the `[]` and
+    /// `[Value::Int(n)]` (and Float/BigInt) arms so this only
+    /// fires for genuinely-wrong shapes.
+    pub(crate) fn arity_error_arg0_or_1_int(&self, _name: &str, args: &[Value]) -> Trap {
+        if args.len() > 1 {
+            return self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    args.len()
+                ),
+            });
+        }
+        // args.len() == 1, but the value wasn't matched by
+        // Int/Float/BigInt arms — coerce-into-Integer TypeError.
+        match args.first() {
+            Some(Value::Nil) => self.trap(RubyError::TypeError {
+                msg: "no implicit conversion from nil to integer".to_string(),
+            }),
+            Some(other) => {
+                let name = match other {
+                    Value::Block(_) | Value::CurriedProc(_) => "Proc",
+                    Value::BoundMethod(_) => "Method",
+                    _ => super::numeric::type_name_for_coerce(other),
+                };
+                self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {name} into Integer"),
+                })
+            }
+            // Unreachable: callers route through this helper
+            // only when the `[]` arm has already matched empty
+            // args (and the surrounding `[Value::Int(_)]` /
+            // `[Value::Float(_)]` / `[Value::BigInt(_)]` arms
+            // for the 1-arg path). If a future refactor swaps
+            // the arm order, we'd land here with a non-erroring
+            // 0-arg call — the `"wrong number of arguments"`
+            // wording would be actively misleading (0..1 accepts
+            // 0). Use an explicit internal-error trap so the
+            // misroute is obvious during debugging.
+            None => {
+                debug_assert!(
+                    false,
+                    "arity_error_arg0_or_1_int reached with empty args; the `[]` arm should have matched first"
+                );
+                self.trap(RubyError::RuntimeError {
+                    msg: "internal: arity_error_arg0_or_1_int reached with 0 args".to_string(),
+                })
+            }
+        }
+    }
+
     /// Build a Trap matching CRuby's wrong-arity-and-type
     /// surface for "method takes exactly one Integer argument"
     /// dispatch arms (`each_slice(n)` / `each_cons(n)`):
