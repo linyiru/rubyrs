@@ -40,6 +40,178 @@ cargo build --release -p rubyrs
 RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 ```
 
+## Results — 2026-06-01 (tenth / eleventh / twelfth pass — sinatra/base.rb LOAD CHAIN FULLY CLEARED)
+
+Three passes condensed because the work landed as a stack of
+small PRs (one layer per PR) over a few days, and the per-pass
+write-up shape would be repetitive. Reading order:
+**pass-10 → pass-11 → pass-12**; each subsection lists the
+layer closed and the new stop point.
+
+### Pass-10 (layer #12 closed — `Module#module_function`)
+
+Probe stop: same line as pass-9 (sinatra/base.rb:1292,
+`class << self` body with `CALLERS_TO_IGNORE = [...]`). Pass-9
+identified this as Cat D (translator-level restriction on
+`class << self` body contents).
+
+Layer #11 closed by PR #209 (`feat(ast): accept ConstantWriteNode
+in class << self body`) — small Cat-D translator fix to
+whitelist constant assignments alongside `def`/`attr_*`/`alias`.
+That alone advanced the probe to **layer #12**: rack-3.1.10/
+lib/rack/utils.rb uses both forms of `Module#module_function`
+(bare visibility-switch and explicit Symbol/String-arg
+retroactive conversion), which rubyrs didn't support.
+
+Layer #12 closed by PR #324 (`feat(vm): Module#module_function`)
++ 7 follow-up commits in the same PR addressing review
+findings: independent singleton `Rc<Method>` copy (NOT shared
+visibility Cell), TypeError using `to_inspect()` not
+`type_name()`, NameError carrying `module`/`class` kind from
+receiver, anonymous-module/class name fallback to `"Module"`/
+`"Class"`, max_symbols cap guard on String coercion,
+`module_function` added to `responds_to?` whitelist, and
+post-merge fix returning args verbatim (`nil` / `:sym` / array)
+not Nil.
+
+### Pass-11 (layer #13 closed — anonymous `def f(*)`)
+
+Probe stop after #324 + accumulated embedder stubs
+(Rack::Utils, URI::RFC2396_Parser, Rack::Session::Cookie,
+middleware `call` methods on Rack::CommonLogger / Head /
+MethodOverride / Lint / ConditionalGet / Static / Builder):
+**sinatra/base.rb:1818**, inside `def compile(path, opts={})`
+calling `Mustermann.new(path, **opts)`. Error surface:
+`ArgumentError: wrong number of arguments (given 2, expected 0)`.
+
+Root cause was the probe's Mustermann stub `def self.new(*)`:
+rubyrs's translator dropped the rest slot when Prism reports
+`RestParameterNode { name: None }` (anonymous rest, Ruby 2.0+
+forwarding form), compiling the method with arity 0. Named
+forms `def f(*x)` were unaffected; anonymous `**` and `&` were
+already handled (the anonymous-block-param `&` pattern in
+ast.rs:2109 served as the template for the fix).
+
+Layer #13 closed by PR #335 (`fix(ast): anonymous rest param`
+`def f(*)` no longer compiles to arity 0`) — one-line fix
+falling back to sentinel `"*"` so the binder still allocates a
+sink slot. CRuby surfaces the same as `:*` in
+`Method#parameters`, so introspection stays byte-identical.
+
+**A pre-existing introspection-ordering bug for `def h(a, *, b)`
+(`:opt` printed where CRuby reports `:rest`, arity -2 vs CRuby
+-3) was uncovered along the way** but left as a separate
+follow-up (the layer-#13 PR was small/focused; that fix lives
+on the post-rest required-param rendering path).
+
+### Pass-12 (layer #14 closed — `Class#inherited` callback)
+
+After #335 the probe **reaches the end of sinatra/base.rb
+cleanly** for the first time (`REACHED-END` line prints, no
+gap surfaced during the file's own load). The next wall
+appears at runtime use, not load time:
+
+```ruby
+class App < Sinatra::Base
+  get '/' do; 'hello'; end
+end
+```
+
+surfaces:
+
+```
+sinatra/base.rb:1781:in `route': undefined method `[]' for nil (NoMethodError)
+  from sinatra/base.rb:1535:in `get'
+  from <main>:N:in `<class:App>'
+```
+
+at `(@routes[verb] ||= []) << signature` — `@routes` is nil on
+App. Root cause: **rubyrs never fired the `Class#inherited`
+callback on subclass creation**. CRuby invokes
+`Parent.inherited(Subclass)` automatically after the subclass
+object exists but before its body runs; Sinatra::Base's
+`inherited(subclass)` calls `subclass.reset!` to initialize
+`@routes = {}` etc. Without the hook, every subclass starts
+with nil ivars.
+
+Layer #14 closed by PR #337 (`feat(vm): Class#inherited
+callback fires on subclass creation`) — hook fires in
+Op::DefClass after class creation, gated on first-define
+(reopens skip, matching CRuby), modules skip, and the dispatch
+goes through `dispatch_until` like the existing Proc.call
+sub-loop pattern. Default-no-override fast-path skips the
+method lookup entirely.
+
+### Pass-12 next wall (layer #15 — open)
+
+After #337 lands, the probe advances to **sinatra/base.rb:1913
+`cleaned_caller`**, which calls `Kernel#caller` (the stack
+trace introspection built-in). Sinatra::Application < Base is
+defined inside base.rb itself, so the just-implemented
+inherited hook fires DURING base.rb's own load, and base.rb's
+own `inherited(subclass)` calls `caller_files.first` which
+needs `caller`. Not implemented in rubyrs.
+
+`Kernel#caller` is a real built-in gap (Cat H) with notable
+scope: it returns an Array of formatted backtrace strings
+(`"file:line:in 'method'"`) by walking `self.frames`. rubyrs
+already has the backtrace machinery wired up for exception
+display (see `gc.rs:293`'s `bt` construction); the Tier-1 form
+just needs to expose that as a Kernel method that returns the
+already-formatted strings. Followup PR scope.
+
+### Stacked-blocker tally to date
+
+```
+layer | closed by  | category  | surface
+------+------------+-----------+----------------------------------------
+  #1  | pre-pass-7 | various   | (see pass-7 entry)
+  ...
+  #8  | PR #196    | Cat D     | bare-call Class bridge whitelist
+  #9  | embedder   | Cat F     | Rack::Utils stubs
+ #10  | embedder   | Cat F     | URI::RFC2396_Parser stub
+ #11  | PR #209    | Cat D     | class<<self ConstantWriteNode
+ #12  | PR #324    | Cat H     | Module#module_function
+ #13  | PR #335    | Cat I     | anonymous def f(*) → arity 0 bug
+ #14  | PR #337    | Cat H     | Class#inherited callback never fired
+ #15  | OPEN       | Cat H     | Kernel#caller (next pass-13 target)
+```
+
+### What three passes' worth of advance tells us
+
+- **The pass-9 estimate ("each pass advances ~4× through the
+  file") held, then accelerated.** Pass-10/11 each added one
+  layer and advanced ~500 lines; pass-12's #13 fix unblocked
+  the entire ~900-line remainder of base.rb's class body.
+  The translator-level restriction (#11) and the anonymous-
+  splat bug (#13) were the structural blockers; once removed,
+  most of base.rb's class<<self DSL surface ran without a new
+  gap.
+- **Cat mix shifted under pressure.** Pass-9's last new gap
+  was Cat D (translator). Pass-10's was Cat H (real built-in).
+  Pass-11's was Cat I (real translator bug — not a missing
+  feature). Pass-12's #14 is Cat H again. The signal: as the
+  load chain gets cleared, the remaining gaps cluster around
+  CRuby-specific runtime hooks (`inherited`, `caller`, likely
+  `included`/`extended` further on) rather than Tier-1 method
+  surface.
+- **Probe scope expanded.** Through pass-9 the question was
+  "does base.rb load?"; pass-12 has to ask "does
+  `class App < Sinatra::Base; get '/' do; end` parse and
+  evaluate?" — the load-chain question is now answered "yes"
+  and the live-fire question becomes the new probe shape.
+
+### Cumulative category histogram (compressed across three passes)
+
+| Category | Count this group | Notes |
+|---|---:|---|
+| Cat D (AST node) | 1 | #11 `class<<self` ConstantWriteNode |
+| Cat F (project shape) | 2 batches | Rack::Utils, URI::RFC2396_Parser, Rack::Session, middleware `call` stubs |
+| Cat H (real built-in / runtime gap) | 2 | #12 `Module#module_function`, #14 `Class#inherited` |
+| Cat I (real bug) | 1 | #13 anonymous `def f(*)` → arity 0 |
+
+---
+
 ## Results — 2026-05-27 evening (ninth pass), rubyrs at `076c7135`
 
 Ninth pass after pass-8's layer #8 closed:
