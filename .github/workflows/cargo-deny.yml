@@ -79,6 +79,17 @@ on:
     - cron: '0 12 * * 0'
   workflow_dispatch:
 
+# Cancel in-flight PR runs when a force-push lands new commits —
+# the old run's result would be discarded anyway, and cargo-deny
+# can spend ~3-5 min on a cache-miss compile-from-source path.
+# Master pushes / scheduled / manual runs are NOT cancelled
+# (group keys by ref, and master pushes use ref=refs/heads/master
+# which differs from PR refs). Mirrors gapscan-pr.yml's
+# `cancel-in-progress: true` pattern.
+concurrency:
+  group: cargo-deny-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
