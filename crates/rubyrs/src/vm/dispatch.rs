@@ -1844,6 +1844,31 @@ impl Vm {
                 self.stack.push(Value::Class(owner));
                 return Ok(CallableOutcome::Handled);
             }
+        // `m.name` — returns the captured method-name Symbol.
+        // Same shape for BoundMethod and UnboundMethod; aliased
+        // methods report the alias name (CRuby parity — the
+        // captured name is what `.method(:x)` was called with).
+        // Arity-check inside the arm rather than via the guard so
+        // excess-arg calls raise ArgumentError (CRuby parity)
+        // instead of falling through to NoMethodError.
+        if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
+            && name == "name" {
+                if !args.is_empty() {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0)",
+                            args.len()
+                        ),
+                    }));
+                }
+                let nid = match &recv {
+                    Value::BoundMethod(bid) => self.heap.bound_method(*bid).1,
+                    Value::UnboundMethod(uid) => self.heap.unbound_method(*uid).1,
+                    _ => unreachable!(),
+                };
+                self.stack.push(Value::Sym(nid));
+                return Ok(CallableOutcome::Handled);
+            }
         // `m.arity` / `m.parameters` — Method introspection. Walks
         // the captured class chain to find the user-defined Method;
         // if absent (builtin / primitive_call backed), returns
