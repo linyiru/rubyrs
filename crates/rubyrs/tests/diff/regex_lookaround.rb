@@ -10,13 +10,20 @@
 ## previously raised "regex parse error: look-around ... not
 ## supported" at compile time. (Layer #17.)
 ##
-## This PR lands ONLY the compile fallback. Match-time
-## operations (is_match, replace, find_iter, captures, etc.)
-## haven't been migrated to the dual-engine dispatcher yet;
-## using them on a fancy-engine pattern raises a clear
-## RuntimeError naming the unsupported operation. Subsequent
-## PRs migrate each operation incrementally as gem layers
-## demand it.
+## This PR lands the compile fallback PLUS dual-engine impls
+## for the simple-shape ops (is_match, replace, replace_all —
+## used by String#match?/Regexp#match? and string-form
+## sub/gsub). Capture-bearing ops (captures, captures_iter,
+## find_iter, captures_len — used by =~, Regexp#===,
+## String#match, String#scan, String#[]/slice, block-form
+## sub/gsub) are NOT dual-engine yet because the two engines
+## return distinct `Captures` types with different lifetimes;
+## those call sites raise RuntimeError on fancy-engine
+## patterns (rubyrs doesn't model NotImplementedError as a
+## RubyError variant yet — RuntimeError with a "not yet
+## supported" message is the closest fit). Follow-up PRs
+## migrate each capture-bearing op to a normalized
+## owned-captures shape as gem layers demand it.
 
 ## Shape 1: lookahead `(?=...)` — the motivating sinatra
 ## pattern. Must compile and round-trip through `#source`.

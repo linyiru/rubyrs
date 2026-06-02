@@ -11,16 +11,20 @@
 //! (sinatra/base.rb:1913) splits on `/:(?=\d|in )/`, which the
 //! linear engine can't compile. (Layer #17.)
 //!
-//! API design: this PR lands the COMPILE fallback only. Existing
-//! match-time call sites (`is_match`, `captures`, `replace`,
-//! `find_iter`, etc.) keep using the linear `regex::Regex`
-//! directly via `as_native()`; the fancy arm of each call site
-//! raises a clear NotImplementedError naming the unsupported
-//! operation. That keeps the diff to a manageable size while
-//! unblocking the surface that motivated the change (regex
-//! compilation no longer fails on lookaround patterns).
-//! Migrating each operation to the dual-engine dispatcher is
-//! incremental follow-up work tracked layer-by-layer.
+//! API design: this PR lands the COMPILE fallback plus
+//! dual-engine impls for the simple-shape ops (`is_match`,
+//! `replace`, `replace_all` — see below). The capture-bearing
+//! ops (`captures`, `captures_iter`, `find_iter`, `captures_len`)
+//! are NOT dual-engine yet because `regex::Captures` and
+//! `fancy_regex::Captures` are distinct types with different
+//! lifetimes; call sites that need them consult `as_native()`
+//! and raise `RubyError::RuntimeError` on the fancy arm
+//! (rubyrs doesn't model `NotImplementedError` as its own
+//! `RubyError` variant — `RuntimeError` with a clear "not yet
+//! supported" message is the closest fit until that's added).
+//! Migrating each capture-bearing operation to a unified
+//! owned-captures shape is incremental follow-up work tracked
+//! layer-by-layer.
 
 #![cfg(feature = "regex")]
 
@@ -29,10 +33,14 @@ use std::fmt;
 /// Compiled regex. Variant chosen at construction time based on
 /// whether the linear engine accepted the pattern.
 ///
-/// Public because `Value::Regex(Rc<CompiledRegex>)` is exposed
-/// through the embedder-visible `Value` enum, but the variants
-/// and helper methods stay `pub(crate)` — host code doesn't
-/// need to introspect the engine.
+/// The enum itself is `pub` because `Value::Regex(Rc<CompiledRegex>)`
+/// is reachable from the embedder-visible `Value` type — leaving
+/// it `pub(crate)` would trip `private_interfaces`. Rust doesn't
+/// allow per-variant visibility, so embedders technically see
+/// the variants too, but the inherent methods (`as_str`,
+/// `is_match`, etc.) are the intended API surface. Treat the
+/// variants as opaque; future engine swaps may change them
+/// without notice. Code-review #353 round 1.
 pub enum CompiledRegex {
     /// Linear-time `regex` engine — preferred. Most Ruby
     /// patterns land here.
@@ -97,10 +105,11 @@ impl CompiledRegex {
     /// Borrow the underlying linear-time regex. Returns `None`
     /// for fancy-regex patterns — those call sites must either
     /// add dual-engine handling or raise a Trap. The current
-    /// migration strategy: existing call sites use this
-    /// accessor and surface a NotImplementedError on the fancy
-    /// arm; new operations are written to dispatch through the
-    /// enum from the start.
+    /// migration strategy: capture-bearing call sites use this
+    /// accessor and surface `RubyError::RuntimeError` on the
+    /// fancy arm (rubyrs doesn't model `NotImplementedError`
+    /// as a `RubyError` variant). New operations are written
+    /// to dispatch through the enum from the start.
     pub(crate) fn as_native(&self) -> Option<&regex::Regex> {
         match self {
             CompiledRegex::Native(r) => Some(r),
@@ -118,10 +127,27 @@ impl CompiledRegex {
         }
     }
 
-    /// True iff the haystack contains a match. Both engines
-    /// support this directly; fancy-regex's `is_match` is
-    /// fallible (recursion limit) — collapse the error to
-    /// `false` so this stays a plain `bool`.
+    /// True iff the haystack contains a match.
+    ///
+    /// **fancy-regex error suppression — documented limitation.**
+    /// `fancy_regex::Regex::is_match` returns `Result<bool>`
+    /// because the backtracker can fail at runtime (recursion
+    /// limit on pathological inputs). This wrapper collapses
+    /// the error to `false` so call sites stay a plain `bool`:
+    /// the dispatchers that need this method
+    /// (`String#match?`, `Regexp#match?`) operate inside
+    /// `with_str_lossy` closures returning bool, and
+    /// propagating Result through that closure-shape is
+    /// non-trivial without lifting the closure's signature.
+    ///
+    /// The trade-off: a recursion-limit hit on a fancy-regex
+    /// pattern silently reports "no match" rather than raising
+    /// `RegexpError`. Only fires on adversarial patterns
+    /// (deeply nested backrefs); a follow-up can swap the
+    /// wrapper to Result and lift the closure shape if a real
+    /// call site needs strict error semantics. Code-review
+    /// #353 round 1 flagged this; documenting the trade-off
+    /// is the adopted resolution.
     pub(crate) fn is_match(&self, haystack: &str) -> bool {
         match self {
             CompiledRegex::Native(r) => r.is_match(haystack),

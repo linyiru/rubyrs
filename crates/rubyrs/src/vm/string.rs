@@ -2203,11 +2203,15 @@ impl Vm {
         // Tier-1 partial: capture-group extraction (`String#[]`
         // / `String#slice`) hasn't been migrated to the
         // dual-engine dispatcher yet. Patterns that landed on
-        // the fancy-regex engine (lookaround / backref) surface
-        // a clear NotImplementedError instead of silently
-        // returning nil. Code-review #N follow-ups can swap
-        // this to a normalized owned-captures struct that both
-        // engines populate. (TRY_RUNS pass-13 layer #17.)
+        // the fancy-regex engine (lookaround / backref) raise
+        // `RubyError::RuntimeError` instead of silently
+        // returning nil. (rubyrs doesn't model
+        // `NotImplementedError` as its own `RubyError`
+        // variant yet — `RuntimeError` with a clear "not yet
+        // supported" message is the closest fit.) Follow-up
+        // PRs can swap this to a normalized owned-captures
+        // struct that both engines populate. (TRY_RUNS
+        // pass-13 layer #17.)
         let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
             msg: format!(
                 "regex op 'String#[]/slice' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
