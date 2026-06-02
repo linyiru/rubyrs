@@ -158,6 +158,28 @@ _fiber = []
 # request bodies, …) where bytecode-level dispatch overhead
 # would otherwise dominate.
 _json_native = ["dep:serde_json", "dep:serde"]
+# `_sqlite` enables the SQLite battery per ADR 0027.
+# Pulls in `rusqlite` (bundled libsqlite3 — ~2 MB compiled, no
+# system libsqlite3 needed) + `lru` (per-connection prepared-
+# statement cache). Ruby-facing `SQLite3::Database` + the
+# 25-class exception hierarchy live in
+# `src/preamble/sqlite_database.rb`; host fns in
+# `crates/rubyrs/src/sqlite.rs`. Per ADR 0019 v3 Rule 3
+# batteries are individually opt-in; per ADR 0019 Rule 8 the
+# Ruby-side load form is `require "rubyrs/sqlite"` to avoid
+# shadowing the MRI `sqlite3` gem.
+_sqlite = ["dep:rusqlite", "dep:lru"]
+# `cli-defaults` — Bun-class fresh-install bundle per ADR 0019
+# v3 line 313. Discharges the "`cargo install rubyrs` Just Works"
+# promise the menu was sized around. `_sqlite` + `_http_server`
+# are the load-bearing batteries; `stdlib` brings the pure-Ruby
+# canon (json/active_support_lite/…). Total ≤ 40 MB stripped
+# per ADR 0019 v3's binary budget.
+cli-defaults = ["stdlib", "_sqlite", "_http_server"]
+# `everything` — kitchen sink for embedders who want every
+# available battery pre-wired. ADR 0019 v3 line 314's "Bun-
+# class CLI / Edge runtime" target. ≤ 150 MB stripped.
+everything = ["cli-defaults", "_json_native", "_fiber"]
 # `_http_server` enables the inbound HTTP server battery per
 # ADR 0022 v4. Pulls in hyper + tokio (current-thread runtime)
 # + http-body-util + bytes for the wire-protocol side; the
@@ -204,6 +226,13 @@ socket2 = { version = "0.5", features = ["all"], optional = true }
 # so the default Tier-1 binary stays serde_json-free.
 serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true, features = ["preserve_order"] }
+# `_sqlite` battery deps. rusqlite + bundled SQLite C source
+# (~2 MB compiled). ADR 0027 §1 pins to 0.39 for supply-chain
+# determinism (`= 0.39` not `^0.39`). `lru` backs the per-
+# connection prepared-statement cache (ADR 0027 §4); `0.12` is
+# the latest API generation matching std HashMap shape.
+rusqlite = { version = "=0.39", features = ["bundled"], optional = true }
+lru = { version = "0.12", optional = true }
 # Stage 7d: libc::fork + waitpid for pre-fork supervisor.
 # Unix-only inside the host fn (cfg(target_family = "unix")).
 # libc is preferred over nix here — minimal API surface

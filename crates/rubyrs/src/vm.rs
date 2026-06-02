@@ -794,6 +794,17 @@ pub(crate) struct Vm {
     /// lexical resolve + `starts_with` without further syscalls.
     /// `None` (default) means no narrowing on top of the bool.
     pub(crate) allowed_paths: Option<Vec<std::path::PathBuf>>,
+    /// Mirror of `Config::sqlite_allow_paths` — per-battery
+    /// sandbox per ADR 0027 §7. Checked by
+    /// `sqlite::check_path_allowed` at `Database.new` time.
+    #[cfg(feature = "_sqlite")]
+    pub(crate) sqlite_allow_paths: Option<Vec<std::path::PathBuf>>,
+    /// Mirror of `Config::sqlite_max_result_bytes` per ADR 0027
+    /// §7b. Heap-cap on `query` result-set materialisation; the
+    /// battery accumulates row bytes and traps
+    /// `SQLite3::TooBigException` when the running total exceeds.
+    #[cfg(feature = "_sqlite")]
+    pub(crate) sqlite_max_result_bytes: Option<usize>,
     /// Per-eval working counter; `Some(0)` means exhausted, `None`
     /// means unlimited. Re-anchored at each `Runtime::eval` entry
     /// from `Runtime::fuel_budget` (which `apply_config` writes
@@ -1155,6 +1166,10 @@ impl Vm {
             // No path narrowing by default — `allow_filesystem_io: false`
             // already covers the secure-by-default sandbox.
             allowed_paths: None,
+            #[cfg(feature = "_sqlite")]
+            sqlite_allow_paths: None,
+            #[cfg(feature = "_sqlite")]
+            sqlite_max_result_bytes: None,
             fuel: None,
             max_frames: None,
             deadline_at: None,

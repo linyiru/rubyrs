@@ -307,6 +307,10 @@ fn main() {
         // the shell can. Embed users wanting scope (rubund for
         // gemspec evaluation, etc.) supply Some(prefixes).
         allowed_paths: None,
+        #[cfg(feature = "_sqlite")]
+        sqlite_allow_paths: None,
+        #[cfg(feature = "_sqlite")]
+        sqlite_max_result_bytes: None,
         // CLI binary: no seeded `$LOAD_PATH` — scripts opt in
         // explicitly via `$LOAD_PATH.unshift(...)`, matching
         // CRuby's `ruby script.rb` shape (CRuby's gem env
@@ -347,6 +351,11 @@ fn main() {
     // the reference behaviour for non-accelerator builds.
     #[cfg(feature = "_json_native")]
     rubyrs::register_json_native_host_fns(&mut rt);
+    // `_sqlite` battery: when built in, expose the
+    // SQLite3::Database + 25-class exception hierarchy + 9
+    // host fns per ADR 0027 §"Capability host-fns consumed".
+    #[cfg(feature = "_sqlite")]
+    rubyrs::register_sqlite_host_fns(&mut rt);
     let result = rt.eval_file(path);
     trace.at("eval_done");
     match result {

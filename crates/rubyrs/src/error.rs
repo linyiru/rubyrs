@@ -157,6 +157,28 @@ pub enum RubyError {
     /// the host couldn't recover from. See
     /// [docs/SECURITY.md § known attack surface](../docs/SECURITY.md).
     Uncaught { class_name: String, message: String },
+    /// Host-fn-synthesised exception of a non-builtin class.
+    ///
+    /// Distinct from [`Uncaught`] because the two have opposite
+    /// post-trap semantics: `Uncaught` means "rescue walk
+    /// already happened and missed — bubble to the host";
+    /// `HostException` means "I'm a host fn raising a class
+    /// whose name I can spell — run the rescue walk against
+    /// it." Both carry `(class_name, message)` so the host
+    /// pattern-match shape is symmetric.
+    ///
+    /// Used by the `_sqlite` battery (ADR 0027 §6) to surface
+    /// the 25-class `SQLite3::*Exception` hierarchy as
+    /// rescue-able from Ruby. `trap_to_exception` resolves
+    /// `class_name` via the Vm's `classes` table (which keys
+    /// nested module classes by qualified sym, e.g.
+    /// `SQLite3::ConstraintException`); if the class exists,
+    /// the trap materialises into an Instance the normal
+    /// rescue walk catches. If the class doesn't exist, the
+    /// trap falls through to a generic Exception via
+    /// `trap_to_exception`'s `None`-return path — same shape
+    /// as a typo'd Ruby-raise.
+    HostException { class_name: String, message: String },
     /// Synthetic "unwind has already happened" signal.
     ///
     /// Raised by [`Vm::dispatch_until`] when a block invoked via
@@ -271,7 +293,8 @@ impl RubyError {
     /// instead.
     pub fn is(&self, class_name: &str) -> bool {
         match self {
-            RubyError::Uncaught { class_name: cn, .. } => cn == class_name,
+            RubyError::Uncaught { class_name: cn, .. }
+            | RubyError::HostException { class_name: cn, .. } => cn == class_name,
             other => other.class_name() == class_name,
         }
     }
@@ -305,7 +328,8 @@ impl RubyError {
     /// table directly via the embedding API.
     pub fn is_a(&self, class_name: &str) -> bool {
         let start = match self {
-            RubyError::Uncaught { class_name: cn, .. } => cn.as_str(),
+            RubyError::Uncaught { class_name: cn, .. }
+            | RubyError::HostException { class_name: cn, .. } => cn.as_str(),
             other => other.class_name(),
         };
         let mut cur = start;
@@ -347,6 +371,20 @@ impl RubyError {
             // Hosts that want the Ruby-level class name should pattern-
             // match on `Uncaught { class_name, .. }` directly.
             RubyError::Uncaught { .. } => "Uncaught",
+            // HostException carries the actual class name in its
+            // inner field — and unlike Uncaught, callers that
+            // read `.class_name()` (in particular,
+            // `trap_to_exception`) want the inner name so the
+            // Vm's class table can resolve it. The return type
+            // is `&'static str` though, so we can't borrow `cn`
+            // here. The two production callers
+            // (`trap_to_exception` + `dispatch::recv_desc_for_error`)
+            // both pattern-match `HostException` directly to get
+            // the inner field where they need the heap-bound
+            // String. For the synthetic-discriminant case
+            // (debug / error messages), "HostException" stays
+            // consistent with `Uncaught`'s shape.
+            RubyError::HostException { .. } => "HostException",
             // Synthetic — should never escape dispatch_until.
             // If a host ever sees this, it's an internal bug.
             RubyError::AlreadyCaught => "AlreadyCaught",
@@ -370,7 +408,8 @@ impl RubyError {
             | RubyError::IOError { msg }
             | RubyError::LoadError { msg }
             | RubyError::Interrupt { msg } => msg.clone(),
-            RubyError::Uncaught { message, .. } => message.clone(),
+            RubyError::Uncaught { message, .. }
+            | RubyError::HostException { message, .. } => message.clone(),
             RubyError::AlreadyCaught => String::new(),
             RubyError::NoMethodError { kind, method, recv_type } => {
                 // CRuby uses three shapes for NoMethodError:

@@ -40,6 +40,8 @@ mod intern;
 #[cfg(feature = "_json_native")]
 mod json_native;
 mod output;
+#[cfg(feature = "_sqlite")]
+mod sqlite;
 mod signals;
 #[cfg(feature = "stdlib")]
 mod stdlib_vendor;
@@ -67,6 +69,11 @@ pub use vm::fiber::register_host_fns as register_fiber_host_fns;
 /// hot paths through serde_json. See [`json_native::register_host_fns`].
 #[cfg(feature = "_json_native")]
 pub use json_native::register_host_fns as register_json_native_host_fns;
+/// Register `_sqlite` host fns + the `SQLite3::Database`
+/// preamble. Mirrors the other battery `register_*_host_fns`
+/// shape. See `sqlite::register_host_fns`.
+#[cfg(feature = "_sqlite")]
+pub use sqlite::register_host_fns as register_sqlite_host_fns;
 
 use std::io::Write;
 use std::path::Path;
@@ -443,6 +450,37 @@ pub struct Config {
     /// for the gem-root tree.
     pub allowed_paths: Option<Vec<std::path::PathBuf>>,
 
+    /// Allowed-prefixes list for the `_sqlite` battery's
+    /// `SQLite3::Database.new(path)` opens. Per ADR 0027 §7.
+    /// When `Some(prefixes)`, only paths that lexically-resolve
+    /// under one of the prefixes succeed; out-of-scope opens
+    /// trap `SQLite3::CantOpenException` with a "sandbox blocked"
+    /// message. When `None`, no SQLite-specific sandbox — only
+    /// the broader `allow_filesystem_io = false` gate applies.
+    ///
+    /// `:memory:` and the URI in-memory forms
+    /// (`file::memory:?cache=shared`, `file:foo?mode=memory`)
+    /// are allowed unconditionally regardless of the prefix list —
+    /// they don't touch the filesystem. ADR 0027 §7 documents the
+    /// rationale (same shape as `_http_server`'s unconditional
+    /// loopback bind).
+    #[cfg(feature = "_sqlite")]
+    pub sqlite_allow_paths: Option<Vec<std::path::PathBuf>>,
+
+    /// Heap-cap on `SQLite3::Database#query` result-set bytes
+    /// per ADR 0027 §7b (class-`f` deviation per ADR 0019). When
+    /// `Some(n)`, an oversized result raises
+    /// `SQLite3::TooBigException` BEFORE materialising the Array.
+    /// `None` (default) matches the CRuby `sqlite3` gem —
+    /// unbounded.
+    ///
+    /// Embedders running untrusted scripts should set this — a
+    /// runaway `SELECT * FROM big_table` would otherwise blow
+    /// past the broader heap budget without a battery-level
+    /// guard.
+    #[cfg(feature = "_sqlite")]
+    pub sqlite_max_result_bytes: Option<usize>,
+
     /// Seed `$LOAD_PATH` with these paths at Runtime construction.
     /// The provided vector becomes the initial `$LOAD_PATH` in
     /// the SAME order — `paths[0]` lands at `$LOAD_PATH[0]`,
@@ -545,6 +583,10 @@ impl Default for Config {
             // want scoped FS access (rubund evaluating gemspecs in a
             // gem root, for instance) opt in by setting Some(prefixes).
             allowed_paths: None,
+            #[cfg(feature = "_sqlite")]
+            sqlite_allow_paths: None,
+            #[cfg(feature = "_sqlite")]
+            sqlite_max_result_bytes: None,
             // No seeded `$LOAD_PATH` by default — `require` only
             // resolves against the caller-source dir + its parent
             // until a script does `$LOAD_PATH.unshift(...)`.
@@ -1425,6 +1467,24 @@ impl Runtime {
                 }))
                 .collect()
         });
+        // SQLite battery config: per-battery sandbox prefixes
+        // (ADR 0027 §7) + heap-cap on query results (§7b).
+        #[cfg(feature = "_sqlite")]
+        {
+            self.vm.sqlite_allow_paths = cfg.sqlite_allow_paths.map(|prefixes| {
+                prefixes
+                    .into_iter()
+                    .map(|p| std::fs::canonicalize(&p).unwrap_or_else(|e| {
+                        panic!(
+                            "Config::sqlite_allow_paths prefix {:?} cannot be canonicalized ({}). \
+                             Prefixes must be absolute paths that exist on disk.",
+                            p, e,
+                        )
+                    }))
+                    .collect()
+            });
+            self.vm.sqlite_max_result_bytes = cfg.sqlite_max_result_bytes;
+        }
     }
 
     /// Rewind the Runtime to its post-preamble state — every class,

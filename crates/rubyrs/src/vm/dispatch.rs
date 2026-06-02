@@ -963,6 +963,8 @@ impl Vm {
                     all(feature = "cext", not(target_os = "wasi")),
                     feature = "_http_server",
                     feature = "_fiber",
+                    feature = "_json_native",
+                    feature = "_sqlite",
                 ))]
                 {
                     let vm_ptr: *mut Vm = self;
@@ -972,6 +974,8 @@ impl Vm {
                     all(feature = "cext", not(target_os = "wasi")),
                     feature = "_http_server",
                     feature = "_fiber",
+                    feature = "_json_native",
+                    feature = "_sqlite",
                 )))]
                 { host(args) }
             }

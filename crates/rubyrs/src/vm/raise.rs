@@ -100,7 +100,17 @@ impl Vm {
             | RubyError::SyntaxError { .. } => return None,
             _ => {}
         }
-        let class_name = trap.err.class_name();
+        // `self.classes` is keyed by QUALIFIED sym for nested
+        // classes (vm/step.rs:~2634 — `module M; class Sig` is
+        // stored under interned "M::Sig"). `HostException` is
+        // the variant host fns use to raise a class by name —
+        // pull the inner `class_name` field directly so the
+        // lookup gets "SQLite3::ConstraintException" instead of
+        // the discriminant string "HostException".
+        let class_name: &str = match &trap.err {
+            RubyError::HostException { class_name: cn, .. } => cn.as_str(),
+            other => other.class_name(),
+        };
         let cls_id = self.interner.intern(class_name);
         let cls = self.classes.get(&cls_id).cloned()?;
         let message = trap.err.message();
