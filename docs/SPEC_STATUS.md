@@ -12,8 +12,8 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 154 |
-| Examples in corpus | 986 |
+| Files | 155 |
+| Examples in corpus | 996 |
 | Skipped `it` traces | 155 |
 
 ### Skipped traces by category

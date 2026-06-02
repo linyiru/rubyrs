@@ -242,16 +242,6 @@ impl Vm {
         }))
     }
 
-    /// Build a Trap matching CRuby's wrong-arity-and-type
-    /// surface for "method takes exactly one Integer argument"
-    /// dispatch arms (`each_slice(n)` / `each_cons(n)`):
-    ///   - args.len() != 1     → ArgumentError "wrong number of arguments (given N, expected 1)"
-    ///   - args[0] is Nil      → TypeError "no implicit conversion from nil to integer"
-    ///   - args[0] is non-Int  → TypeError "no implicit conversion of X into Integer"
-    ///
-    /// Used as `return Err(self.arity_error_arg1_int(name, args))`
-    /// in catch-all arms placed after the matching `[Value::Int(n)]`
-    /// arm so the success path is unchanged.
     /// Coerce a Float argument to i64 with CRuby's
     /// `each_slice(2.5) → 2` truncation semantics. NaN and ±Inf
     /// raise RangeError with CRuby's exact wording (note: the
@@ -277,6 +267,16 @@ impl Vm {
         Ok(f as i64)
     }
 
+    /// Build a Trap matching CRuby's wrong-arity-and-type
+    /// surface for "method takes exactly one Integer argument"
+    /// dispatch arms (`each_slice(n)` / `each_cons(n)`):
+    ///   - args.len() != 1     → ArgumentError "wrong number of arguments (given N, expected 1)"
+    ///   - args[0] is Nil      → TypeError "no implicit conversion from nil to integer"
+    ///   - args[0] is non-Int  → TypeError "no implicit conversion of X into Integer"
+    ///
+    /// Used as `return Err(self.arity_error_arg1_int(name, args))`
+    /// in catch-all arms placed after the matching `[Value::Int(n)]`
+    /// arm so the success path is unchanged.
     pub(crate) fn arity_error_arg1_int(&self, _name: &str, args: &[Value]) -> Trap {
         if args.len() != 1 {
             return self.trap(RubyError::ArgumentError {
