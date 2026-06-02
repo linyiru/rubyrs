@@ -150,12 +150,26 @@ pub enum Value {
     /// callback DSLs). Now the BlockHandle lives in a heap slot
     /// and is mark-swept like Array/Hash/Range.
     Block(ObjId),
-    /// `/pattern/` literal. The compiled `regex::Regex` is shared
-    /// via Rc — Regex is immutable so there's no aliasing risk.
-    /// Rust's regex crate uses a different dialect from Onigmo
-    /// (CRuby's engine); the gaps (possessive quantifiers,
-    /// `\k<name>` backrefs, look-around in some forms) are
-    /// documented in SUBSET.md.
+    /// `/pattern/` literal. The compiled `CompiledRegex` is
+    /// shared via Rc — both inner engines are immutable so
+    /// there's no aliasing risk.
+    ///
+    /// `CompiledRegex` wraps either `regex::Regex` (linear-
+    /// time, the preferred backend — used for the vast
+    /// majority of Ruby patterns) or `fancy_regex::Regex`
+    /// (backtracking NFA, used as a fallback when the linear
+    /// engine rejects the pattern as a syntax error — typically
+    /// Ruby's lookaround `(?=...)` / `(?!...)` constructs).
+    /// fancy-regex itself delegates simple subpatterns to the
+    /// linear engine, so the cold path is mostly still linear;
+    /// only the fancy-only features run through the
+    /// backtracker. ReDoS hardening is preserved for native-
+    /// path patterns; fancy patterns carry the standard
+    /// backtracking risk. (TRY_RUNS pass-13 layer #17.)
+    ///
+    /// Remaining dialect gaps vs Onigmo (CRuby's engine) —
+    /// possessive quantifiers, some `\k<name>` backref forms —
+    /// are documented in SUBSET.md.
     ///
     /// Cfg-gated on the `regex` feature (per ADR 0017 Rule 3
     /// regex is a Tier-2 feature). With `--no-default-features`
