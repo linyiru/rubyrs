@@ -793,9 +793,10 @@ impl Vm {
             // mapped; the remaining elements keep their pre-call
             // values; the call's return is the break expression.
             // Implemented by writing back each result via
-            // `array_mut.[i]` rather than rebuilding a fresh
-            // Vec (so a break mid-iteration leaves the tail
-            // untouched). The snapshot insulates the iteration
+            // `arr[idx]` (where `arr` is `heap.array_mut(*id)`)
+            // rather than rebuilding a fresh Vec, so a break
+            // mid-iteration leaves the tail untouched. The
+            // snapshot insulates the iteration
             // from any concurrent in-block writes to the same
             // Array (CRuby's behaviour is to iterate over the
             // values present at call time).
