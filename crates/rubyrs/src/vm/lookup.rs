@@ -562,6 +562,7 @@ impl Vm {
                 "eql?" | "hash" |
                 "floor" | "ceil" | "round" | "truncate" |
                 "-@" | "+@" |
+                "to_r" | "rationalize" |
                 "coerce" |
                 "dup" | "clone"
             ),

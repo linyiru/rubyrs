@@ -3022,10 +3022,10 @@ fn rational_phase_c1_construction_and_readers() {
     for (script, expected_class, expected_msg) in [
         // Denominator zero → ZeroDivisionError.
         ("Rational(1, 0)", "ZeroDivisionError", "divided by 0"),
-        // Non-Integer arg → TypeError.
+        // Non-Numeric arg → TypeError. (Float is accepted as of
+        // Phase C.4.3 — see rational_phase_c4_3_float_to_r below.)
         ("Rational(\"x\")",    "TypeError",    "can't convert String into Rational"),
         ("Rational(1, nil)",   "TypeError",    "can't convert NilClass into Rational"),
-        ("Rational(1.5)",      "TypeError",    "can't convert Float into Rational"),
         // Arity.
         ("Rational()",         "ArgumentError","wrong number of arguments (given 0, expected 1..2)"),
         ("Rational(1, 2, 3)",  "ArgumentError","wrong number of arguments (given 3, expected 1..2)"),
@@ -3258,6 +3258,88 @@ fn rational_phase_c4_1_bigint_widening() {
         rt.set_stdout(Box::new(buf.clone()));
         rt.eval(script, "rational_c41.rb").expect("eval");
         assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+}
+
+#[test]
+#[cfg(feature = "bignum")]
+fn rational_phase_c4_3_float_to_r_and_rationalize() {
+    // Phase C.4.3 — Float#to_r (lossless IEEE-754 decomposition),
+    // Float#rationalize(eps) (Stern-Brocot mediant search), bare
+    // Float#rationalize (half-ULP default eps), and
+    // Kernel#Rational(Float). NaN / ±Inf surface as
+    // FloatDomainError. Outputs match CRuby (verified against MRI
+    // 3.x at PR development time).
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        // to_r — lossless
+        ("puts 0.5.to_r.inspect", "(1/2)"),
+        ("puts 0.25.to_r.inspect", "(1/4)"),
+        ("puts (-0.5).to_r.inspect", "(-1/2)"),
+        ("puts 0.0.to_r.inspect", "(0/1)"),
+        ("puts (-0.0).to_r.inspect", "(0/1)"),
+        ("puts 3.0.to_r.inspect", "(3/1)"),
+        ("puts 0.1.to_r.inspect", "(3602879701896397/36028797018963968)"),
+        // bare rationalize — half-ULP default eps
+        ("puts 0.5.rationalize.inspect", "(1/2)"),
+        ("puts 0.1.rationalize.inspect", "(1/10)"),
+        ("puts 3.14.rationalize.inspect", "(157/50)"),
+        ("puts (-0.1).rationalize.inspect", "(-1/10)"),
+        ("puts 0.0.rationalize.inspect", "(0/1)"),
+        // rationalize(eps) — Stern-Brocot
+        ("puts 3.14.rationalize(0.01).inspect", "(22/7)"),
+        ("puts 3.14.rationalize(0.001).inspect", "(135/43)"),
+        ("puts (-3.14).rationalize(0.001).inspect", "(-135/43)"),
+        ("puts 0.5.rationalize(0.0).inspect", "(1/2)"),
+        // Kernel#Rational(Float) — lossless
+        ("puts Rational(0.5).inspect", "(1/2)"),
+        ("puts Rational(0.1).inspect", "(3602879701896397/36028797018963968)"),
+        // respond_to?
+        ("puts 0.5.respond_to?(:to_r)", "true"),
+        ("puts 0.5.respond_to?(:rationalize)", "true"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "rational_c43.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // Errors — NaN / Inf → FloatDomainError; non-Numeric eps →
+    // TypeError; nil eps → TypeError (CRuby raises NoMethodError
+    // via `nil.abs`; we surface the cleaner shape).
+    for (script, expected_class, expected_msg) in [
+        ("(0.0/0.0).to_r", "FloatDomainError", "NaN"),
+        ("(1.0/0.0).to_r", "FloatDomainError", "Infinity"),
+        ("(-1.0/0.0).to_r", "FloatDomainError", "-Infinity"),
+        ("(0.0/0.0).rationalize", "FloatDomainError", "NaN"),
+        (
+            "0.1.rationalize(nil)",
+            "TypeError",
+            "nil can't be coerced into Float",
+        ),
+        (
+            "0.1.rationalize(:sym)",
+            "TypeError",
+            "Symbol can't be coerced into Float",
+        ),
+        (
+            "0.1.to_r(99)",
+            "ArgumentError",
+            "wrong number of arguments (given 1, expected 0)",
+        ),
+        (
+            "0.1.rationalize(1, 2)",
+            "ArgumentError",
+            "wrong number of arguments (given 2, expected 0..1)",
+        ),
+    ] {
+        let err = rt.eval(script, "rational_c43_err.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
+        }
     }
 }
 

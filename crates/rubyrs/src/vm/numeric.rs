@@ -1670,6 +1670,35 @@ pub(crate) fn class_name_for_error(v: &Value) -> &'static str {
 // inspect that just defers to to_s; if it grows we'll promote
 // it to a method.
 
+/// IEEE-754 decomposition of a finite `f64` into integer
+/// `(sign, mantissa, exponent)` such that `f == sign * mantissa
+/// * 2^exponent` exactly, where mantissa fits a u64 (≤ 53 bits)
+/// and exponent is in `-1074..=971`. Returns `None` for NaN /
+/// ±Inf; `(0, 0, 0)` for ±0.0.
+///
+/// The mantissa is the *significand* including the implicit
+/// leading 1 for normals; for subnormals the mantissa is just
+/// the 52-bit fraction and exponent is fixed at -1074. Used by
+/// `Float#to_r` / `Float#rationalize` (Phase C.4.3) to build
+/// the exact-Rational representation of a Float without any
+/// rounding — equivalent to CRuby's internal `flo_to_r`.
+pub(crate) fn float_decompose(f: f64) -> Option<(i64, u64, i32)> {
+    if !f.is_finite() { return None; }
+    if f == 0.0 { return Some((0, 0, 0)); }
+    let bits = f.to_bits();
+    let sign: i64 = if (bits >> 63) & 1 == 1 { -1 } else { 1 };
+    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
+    let raw_mant = bits & 0x000F_FFFF_FFFF_FFFF;
+    let (mantissa, exponent) = if raw_exp == 0 {
+        // Subnormal: f = sign * raw_mant * 2^-1074
+        (raw_mant, -1074i32)
+    } else {
+        // Normal: f = sign * (raw_mant | 2^52) * 2^(raw_exp - 1023 - 52)
+        (raw_mant | (1u64 << 52), raw_exp - 1023 - 52)
+    };
+    Some((sign, mantissa, exponent))
+}
+
 // ---------------------------------------------------------------
 // Stateful counterparts: the helpers above are pure (no Vm), but
 // the reduce-style accumulators in `Array#sum`/`Range#sum`/
