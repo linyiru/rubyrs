@@ -1015,7 +1015,14 @@ jobs:
           # compile (~3-5 min). The cache step above stores the
           # installed binary itself, which is what makes the
           # steady-state cache-hit path zero-cost.
-          INSTALLED=$(cargo deny --version 2>/dev/null | awk '{print $2}' || true)
+          # Parse via semver-anchored grep rather than positional awk
+          # so a future cargo-deny `--version` format change (extra
+          # tokens, leading `v`, multi-line output) doesn't silently
+          # break the cache short-circuit. `grep -oE` returns the
+          # first semver match, `head -1` defends against multi-match
+          # output. Missing binary → `2>/dev/null` swallows the error
+          # and the pipe yields empty, so INSTALLED='' triggers install.
+          INSTALLED=$(cargo deny --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
           if [ "$INSTALLED" != "$WANTED" ]; then
             cargo install cargo-deny --locked --version "$WANTED" --force
           fi
