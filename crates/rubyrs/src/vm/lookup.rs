@@ -951,10 +951,22 @@ pub(crate) fn class_reaches_via_chain(
         }
         false
     }
+    // Self-equality short-circuit, matching `class_is_a`. Without
+    // this guard the include/prepend idempotency check would let
+    // `module M; include M; end` (or `prepend M`) insert M into
+    // its own chain, creating a self-cycle that the next ancestor
+    // walk would stack-overflow on (despite each walker's visited
+    // set — the first iteration sets up the cycle before visited
+    // sees the node).
+    if Rc::ptr_eq(child, target) { return true; }
     let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
     let mut current = child.clone();
     loop {
         if !sc_visited.insert(Rc::as_ptr(&current)) { return false; }
+        // `current == target` along the superclass walk also
+        // counts as reachable — same consistency rule as
+        // `class_is_a` enforces inside its inner walker.
+        if Rc::ptr_eq(&current, target) { return true; }
         let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
         let chain = if walk_prepend { current.prepends.borrow() } else { current.includes.borrow() };
         for m in chain.iter() {
