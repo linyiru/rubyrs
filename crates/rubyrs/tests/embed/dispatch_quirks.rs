@@ -17,7 +17,7 @@
 //!     must not create reference cycles that leak the
 //!     enclosing object.
 
-use rubyrs::{Config, Runtime};
+use rubyrs::{Config, Runtime, Value};
 
 use super::rt_with_buf;
 
@@ -260,6 +260,36 @@ fn define_method_closes_over_outer_scope() {
         puts c.bump
     "#, "t.rb").unwrap();
     assert_eq!(buf.snapshot(), "1\n2\n3\n");
+}
+
+#[test]
+fn respond_to_agrees_with_defined_for_host_fns() {
+    // Sinatra GAPS Gap #5 — the two reflection paths
+    // (`defined?(:fn_name)` and `respond_to?(:fn_name)`) used to
+    // disagree for fns registered via `Runtime::register_fn`.
+    // `defined?` checks `vm.host_fns` directly and reports
+    // "method"; `responds_to` walked the per-class whitelist
+    // tables only and missed the global host-fn table. This pins
+    // the alignment so the capability-detection idiom
+    //   `if respond_to?(:__rubyrs_some_battery_fn)`
+    // stays equivalent to the `defined?` form across runtime
+    // refactors.
+    let (mut rt, buf) = rt_with_buf();
+    rt.register_fn("__test_host_fn", |_args| Ok(Value::Nil));
+    rt.eval(r#"
+        puts defined?(__test_host_fn).inspect
+        puts respond_to?(:__test_host_fn).inspect
+        puts respond_to?("__test_host_fn").inspect
+        puts respond_to?(:__never_registered_anywhere).inspect
+    "#, "respond_to_host.rb").unwrap();
+    // Symbol *and* String forms should both work — CRuby
+    // accepts both per Module#instance_method docs. Negative
+    // case sanity-pins that the universal "every name responds"
+    // accidental bug doesn't creep in.
+    assert_eq!(
+        buf.snapshot(),
+        "\"method\"\ntrue\ntrue\nfalse\n",
+    );
 }
 
 #[test]

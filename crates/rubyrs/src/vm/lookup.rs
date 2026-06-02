@@ -503,6 +503,22 @@ impl Vm {
     /// `respond_to?` itself, `==` / `!=`) are matched first
     /// regardless of receiver.
     pub(crate) fn responds_to(&self, recv: &Value, name_id: SymId) -> bool {
+        // Host fns (`register_fn(...)` — battery / cext / embed-host
+        // wiring) are reachable as bareword calls from any frame. The
+        // matching `__defined_method?` arm in `vm/kernel.rs` already
+        // treats them as "method" hits; `respond_to?` is the
+        // companion reflection surface and has to agree. Without
+        // this, the canonical capability-detection idiom
+        //   `respond_to?(:__rubyrs_some_battery_fn)`
+        // silently reports false even though
+        //   `defined?(__rubyrs_some_battery_fn)`
+        // already reports "method". Sinatra GAPS Gap #5 — recorded
+        // there as the reflection-paths-disagree class of bug.
+        // Receiver-agnostic on purpose: host fns aren't bound to a
+        // class, dispatch on them ignores receiver shape.
+        if self.host_fns.contains_key(&name_id) {
+            return true;
+        }
         let name: &str = self.interner.resolve(name_id);
         // Universal — every receiver responds to these.
         // `send` / `__send__` go here because the `do_call`

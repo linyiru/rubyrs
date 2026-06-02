@@ -192,21 +192,32 @@ adapt when it must" are both achievable; today only the former is.
 
 ---
 
-## Gap #5 — `respond_to?(:host_fn)` is `false` even though `defined?(host_fn) == "method"`  **[severity: LOW]**
+## Gap #5 — `respond_to?(:host_fn)` is `false` even though `defined?(host_fn) == "method"`  **[severity: LOW] — ✅ FIXED**
 
-**Repro:**
-```ruby
-defined?(__rubyrs_http_serve_with_app)      # => "method"
-respond_to?(:__rubyrs_http_serve_with_app)  # => false
-```
-
-**Preliminary analysis.** Host fns registered via `register_fn` are
-callable and visible to `defined?`, but `respond_to?` returns `false`,
-i.e. they aren't enrolled in the method table `respond_to?` consults.
-This is an internal inconsistency: the two reflection paths disagree.
-Low impact for app code, but it means capability detection via
-`respond_to?` (a common, more correct idiom than `defined?`) silently
-fails for batteries.
+> **Status: fixed.** `responds_to` in `vm/lookup.rs` now consults
+> `self.host_fns` ahead of the per-class whitelist tables — the
+> same global host-fn table `__defined_method?` already walks. The
+> two reflection paths agree, so the canonical capability-detection
+> idiom `if respond_to?(:__rubyrs_some_battery_fn)` works the way
+> batteries (`_http_server`, `_sqlite`, `_json_native`, ...) expect.
+> Receiver-agnostic on purpose: host fns aren't bound to a class,
+> so `respond_to?` from any frame's `self` returns true uniformly,
+> matching dispatch's bareword-resolves-anywhere shape.
+>
+> Sentinel: `tests/embed/dispatch_quirks.rs::respond_to_agrees_with_defined_for_host_fns`
+> registers a fixture host fn via `Runtime::register_fn`, then
+> diffs `defined?(:fn)` vs `respond_to?(:fn)` / `respond_to?("fn")`
+> in-script. Negative case (an unregistered name) is included so a
+> future "always-true" accidental regression surfaces.
+>
+> **Repro at the time the gap was recorded:**
+> ```ruby
+> defined?(__rubyrs_http_serve_with_app)      # => "method"
+> respond_to?(:__rubyrs_http_serve_with_app)  # => false   ← reflection asymmetry
+> ```
+> **Current behaviour:** both paths report the registered fn
+> uniformly; Symbol-form and String-form `respond_to?` argument
+> shapes both resolve.
 
 ---
 
