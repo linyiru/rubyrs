@@ -1258,7 +1258,12 @@ impl Vm {
                         // been popped from the operand stack, so its
                         // children (the cloned ObjIds in `out`) have
                         // no GC root and STRESS_GC sweeps them.
-                        let n = (*n).max(0) as usize;
+                        if *n < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "attempt to take negative size".to_string(),
+                            }));
+                        }
+                        let n = *n as usize;
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Array(id));
                         let out: Vec<Value> = g.vm.heap.array(id).iter().take(n).cloned().collect();
@@ -1267,7 +1272,12 @@ impl Vm {
                         Some(Value::Array(nid))
                     }
                     ("drop", [Value::Int(n)]) => {
-                        let n = (*n).max(0) as usize;
+                        if *n < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "attempt to drop negative size".to_string(),
+                            }));
+                        }
+                        let n = *n as usize;
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Array(id));
                         let out: Vec<Value> = g.vm.heap.array(id).iter().skip(n).cloned().collect();

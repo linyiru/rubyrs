@@ -57,6 +57,28 @@ describe "Array#take / #drop arity & type guards" do
     assert_eq(msg, "float NaN out of range of integer")
   end
 
+  it "raises ArgumentError on negative Int arg (take)" do
+    # Pre-fix used `(*n).max(0) as usize` which silently
+    # swallowed negatives and returned []. Hash#take got it
+    # right; Array#take was a pre-existing divergence that
+    # this PR's Float arm propagated (Float -2.5 → Int -2).
+    klass, msg = caught_pair { [1, 2, 3].take(-1) }
+    assert_eq(klass, "ArgumentError")
+    assert_eq(msg, "attempt to take negative size")
+  end
+
+  it "raises ArgumentError on negative Int arg (drop)" do
+    klass, msg = caught_pair { [1, 2, 3].drop(-1) }
+    assert_eq(klass, "ArgumentError")
+    assert_eq(msg, "attempt to drop negative size")
+  end
+
+  it "raises ArgumentError on negative Float arg (truncates to negative Int)" do
+    klass, msg = caught_pair { [1, 2, 3, 4].take(-2.5) }
+    assert_eq(klass, "ArgumentError")
+    assert_eq(msg, "attempt to take negative size")
+  end
+
   it "raises RangeError on BigInt arg (parity with Hash#take/#drop)" do
     # Without the cfg-gated BigInt arm in array.rs, BigInt
     # would fall into the take/drop catch-all and render as
