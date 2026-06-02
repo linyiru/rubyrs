@@ -21,9 +21,11 @@ def normalize(line)
   line.sub(/'(?:[A-Z][\w:]*#)?/, "'")
 end
 
-## Shape 1: bare `caller` — array, deepest call first, skips
-## the calling method itself? No — skips `caller`'s own frame
-## only, so the deepest entry is the calling method's caller.
+## Shape 1: bare `caller` — array with the most-recent caller
+## at index 0, older frames later (top of stack first). Skips
+## the calling method's own frame (the one containing the
+## `caller` call), so the head entry is `caller`'s caller's
+## caller.
 def s1_inner; caller; end
 def s1_outer; s1_inner; end
 result = s1_outer

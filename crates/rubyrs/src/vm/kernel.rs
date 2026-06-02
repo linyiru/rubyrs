@@ -120,14 +120,24 @@ impl Vm {
             // involved — we don't model aliases, so both resolve
             // to the same name.
             // `Kernel#caller` — backtrace as Array<String>. CRuby
-            // shape:
-            //   caller        → array of formatted frames, skip
-            //                   the current `caller` call site
-            //                   (1 implicit frame)
-            //   caller(n)     → skip an additional `n` frames
-            //                   (so `caller(1)` is "caller of
-            //                   the calling method")
-            //   caller(n, l)  → up to `l` frames starting at n
+            // shape: `caller(start=1, length=nil)`.
+            //   - `caller` ≡ `caller(1)` — both skip the frame
+            //     containing the `caller` call (the calling
+            //     method's own frame).
+            //   - `caller(0)` — INCLUDES the calling method's
+            //     frame at the head of the array (start is
+            //     absolute, not "additional skip").
+            //   - `caller(n)` — `n` is the absolute start
+            //     index; frames before index `n` are dropped.
+            //     `n` here is NOT relative to the default;
+            //     `caller(2)` skips two frames (one more than
+            //     `caller(1)`).
+            //   - `caller(n, l)` — at most `l` entries
+            //     starting at index `n`.
+            //   - `start > depth` → returns `nil` (not an
+            //     empty array).
+            // Output order is most-recent first (immediate
+            // caller at index 0, older frames later).
             // Each entry: "filename:line:in 'method'" — single
             // quotes (CRuby 3.x). Sinatra-4's `cleaned_caller`
             // (sinatra/base.rb:1913) parses this format with
@@ -137,20 +147,11 @@ impl Vm {
             // Tier-1 scope: positional Integer args only. CRuby
             // also accepts `caller(range)`; that lands as a
             // follow-up. (TRY_RUNS pass-12 layer #15.)
+            // Code-review #342 round 3 corrected the above
+            // explanation — earlier wording said "skip an
+            // additional n frames" / "Ruby caller of the
+            // `caller` call site", both of which read backwards.
             "caller" => {
-                // CRuby `caller(start=1, length=nil)`:
-                //   - `caller` and `caller(1)` are equivalent
-                //     (default start=1 skips one frame, namely
-                //     the Ruby caller of the `caller` call site
-                //     — `caller` itself is a builtin, no own
-                //     Ruby frame).
-                //   - `caller(0)` includes the calling method's
-                //     own frame at the head of the array.
-                //   - `caller(n)` skips n frames.
-                //   - `caller(n, len)` returns at most `len`
-                //     entries.
-                //   - When start exceeds the call depth, CRuby
-                //     returns `nil` (not an empty array).
                 // CRuby distinguishes arity errors from coercion
                 // errors here: wrong NUMBER of args → ArgumentError,
                 // wrong TYPE → TypeError("no implicit conversion of
