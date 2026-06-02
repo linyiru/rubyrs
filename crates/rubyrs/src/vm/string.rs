@@ -1194,7 +1194,11 @@ pub(crate) fn string_call(
                     msg: "negative argument".to_string(),
                 });
             }
-            let n = *n as usize;
+            // wasm32 saturation guard — sibling pattern from
+            // PR #316/#323/#330's each_slice/each_cons family.
+            // On 32-bit `usize`, `*n as usize` would truncate
+            // large positive i64s; `try_from` saturates instead.
+            let n = usize::try_from(*n).unwrap_or(usize::MAX);
             check(a.borrow().len().saturating_mul(n))?;
             Some(Value::new_str_bytes(a.borrow().repeat(n)))
         }
