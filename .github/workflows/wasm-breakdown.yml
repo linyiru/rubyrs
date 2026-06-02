@@ -26,8 +26,9 @@ on:
   # caused by GHA runner image updates (new binaryen / wasmtime
   # default behavior, kernel changes affecting spawn cost),
   # upstream tool releases the harness downloads (wasmer install
-  # script changes), and Rust toolchain drift on the pinned 1.95
-  # channel. Sunday 12:00 UTC keeps the run off Monday-morning
+  # script changes), and Rust toolchain drift on the workspace's
+  # pinned stable channel. Sunday 12:00 UTC keeps the run off
+  # Monday-morning
   # CI peak; the workflow is non-gating so a failure on weekend
   # just sends a notification rather than blocking work.
   schedule:

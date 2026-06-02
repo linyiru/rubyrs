@@ -8,10 +8,10 @@ description: >-
   coded version (duplicating the pin).
 
 # Hoists what wasm + coverage jobs were already doing (hard-coding
-# `toolchain: "1.95"` to match rust-toolchain.toml) into a single
-# place that READS the pin instead of duplicating it. Bumping
-# rust-toolchain.toml's channel becomes a one-line change for every
-# job that follows the workspace pin.
+# `toolchain:` inline to match rust-toolchain.toml) into a single
+# place that READS the pin instead of duplicating its value.
+# Bumping rust-toolchain.toml's channel becomes a one-line change
+# for every job that follows the workspace pin.
 #
 # `channel-override:` exists for jobs that intentionally diverge
 # from the workspace pin: miri (needs nightly), fuzz (libfuzzer-sys
@@ -78,8 +78,14 @@ runs:
           echo "::error::setup-rust-toolchain: $TOOLCHAIN_FILE not found. Did checkout run? Wrong toolchain-file input?" >&2
           exit 1
         fi
+        # Match either `channel = "..."` or `channel = '...'`.
+        # Double-quoted sed expression keeps the regex readable —
+        # the single-quoted equivalent would need the `'\''` idiom
+        # which is technically correct but gnarly. `\1` survives
+        # bash double-quote expansion unchanged (it's not on the
+        # short list of escape chars bash interprets inside `"`).
         RAW=$(grep -E '^[[:space:]]*channel[[:space:]]*=' "$TOOLCHAIN_FILE" | head -1)
-        CHANNEL=$(printf '%s' "$RAW" | sed -E 's/.*channel[[:space:]]*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/')
+        CHANNEL=$(printf '%s' "$RAW" | sed -E "s/.*channel[[:space:]]*=[[:space:]]*[\"']([^\"']+)[\"'].*/\1/")
         if [ -z "$CHANNEL" ] || [ "$CHANNEL" = "$RAW" ]; then
           echo "::error::setup-rust-toolchain: failed to parse channel from $TOOLCHAIN_FILE" >&2
           cat "$TOOLCHAIN_FILE" >&2

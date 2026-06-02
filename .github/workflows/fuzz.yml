@@ -57,7 +57,7 @@ jobs:
       - name: Install pinned nightly toolchain
         # libfuzzer-sys needs nightly's `-Z sanitizer=address` and
         # the unstable `#[no_main]` rules cargo-fuzz wires in. The
-        # parent workspace pins stable 1.95; the fuzz sub-crate
+        # parent workspace pins a stable channel; the fuzz sub-crate
         # detaches via its own empty `[workspace]` so this nightly
         # install only affects the fuzz invocation.
         #
