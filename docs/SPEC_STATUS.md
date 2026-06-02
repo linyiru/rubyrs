@@ -38,7 +38,7 @@ Find blocks unlocked by a future feature with e.g.
 
 | Class | Files | Examples | Skipped |
 |---|---|---|---|
-| Array | 25 | 159 | 49 |
+| Array | 26 | 171 | 49 |
 | BasicObject | 3 | 15 | 0 |
 | Block | 1 | 8 | 0 |
 | Float | 2 | 11 | 0 |
@@ -70,6 +70,7 @@ Find blocks unlocked by a future feature with e.g.
 | `array_length_spec.rb` | Array#length | `core/array/length_spec.rb + shared/length.rb` | 1 | 1 |
 | `array_map_spec.rb` | Array#map | `core/array/map_spec.rb + shared/collect.rb` | 3 | 3 |
 | `array_none_spec.rb` | Array#none? | `core/array/none_spec.rb` | 3 | 3 |
+| `array_pop_shift_first_last_arity_spec.rb` | Array#pop arity & type guards | `core/array/pop_spec.rb / shift_spec.rb / first_spec.rb / last_spec.rb (arity + Float coerce)` | 12 | 0 |
 | `array_pop_spec.rb` | Array#pop | `core/array/pop_spec.rb` | 8 | 7 |
 | `array_reject_spec.rb` | Array#reject | `core/array/reject_spec.rb` | 2 | 4 |
 | `array_reverse_spec.rb` | Array#reverse | `core/array/reverse_spec.rb` | 2 | 4 |

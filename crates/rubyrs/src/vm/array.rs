@@ -130,10 +130,21 @@ impl Vm {
                             msg: "bignum too big to convert into `long'".to_string(),
                         }));
                     }
-                    ("shift", many) => {
-                        return Err(self.trap(RubyError::ArgumentError {
-                            msg: format!("wrong number of arguments (given {}, expected 0..1)", many.len()),
-                        }));
+                    // Float coerce — CRuby truncates `shift(2.5)`
+                    // to 2 (Integer cast). Re-dispatch with the
+                    // converted Int. Same pattern as the
+                    // take/drop / each_slice family.
+                    ("shift", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.array_collection_call(id, name, &[Value::Int(n)]);
+                    }
+                    // Wrong-arity / non-Int catch-all. Routed
+                    // through `arity_error_arg0_or_1_int` so
+                    // non-Int 1-arg surfaces as TypeError (CRuby
+                    // parity) rather than the misleading
+                    // "wrong number of arguments" message.
+                    ("shift", _) => {
+                        return Err(self.arity_error_arg0_or_1_int(name, args));
                     }
                     // `Array#pop` — remove and return the last
                     // element; `nil` if empty. In-place mutation.
@@ -176,10 +187,13 @@ impl Vm {
                             msg: "bignum too big to convert into `long'".to_string(),
                         }));
                     }
-                    ("pop", many) => {
-                        return Err(self.trap(RubyError::ArgumentError {
-                            msg: format!("wrong number of arguments (given {}, expected 0..1)", many.len()),
-                        }));
+                    // Float coerce — same as shift above.
+                    ("pop", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.array_collection_call(id, name, &[Value::Int(n)]);
+                    }
+                    ("pop", _) => {
+                        return Err(self.arity_error_arg0_or_1_int(name, args));
                     }
                     // `Array#delete(obj)` — value-based delete.
                     // Removes EVERY element equal to `obj` (using
@@ -583,6 +597,17 @@ impl Vm {
                             msg: "bignum too big to convert into `long'".to_string(),
                         }));
                     }
+                    // Float coerce — same pattern as pop/shift.
+                    ("first", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.array_collection_call(id, name, &[Value::Int(n)]);
+                    }
+                    // Wrong-arity / non-Int catch-all for first.
+                    // Previously fell through to NoMethodError
+                    // despite respond_to? returning true.
+                    ("first", _) => {
+                        return Err(self.arity_error_arg0_or_1_int(name, args));
+                    }
                     ("dig", keys) if !keys.is_empty() => {
                         let mut cur = Value::Array(id);
                         for key in keys {
@@ -623,6 +648,14 @@ impl Vm {
                         return Err(self.trap(RubyError::RangeError {
                             msg: "bignum too big to convert into `long'".to_string(),
                         }));
+                    }
+                    // Float coerce + catch-all — same pattern as first.
+                    ("last", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.array_collection_call(id, name, &[Value::Int(n)]);
+                    }
+                    ("last", _) => {
+                        return Err(self.arity_error_arg0_or_1_int(name, args));
                     }
                     ("empty?", []) => Some(Value::Bool(self.heap.array(id).is_empty())),
                     ("include?", [needle]) | ("member?", [needle]) => {

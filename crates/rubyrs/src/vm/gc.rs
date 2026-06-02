@@ -277,6 +277,46 @@ impl Vm {
     /// Used as `return Err(self.arity_error_arg1_int(name, args))`
     /// in catch-all arms placed after the matching `[Value::Int(n)]`
     /// arm so the success path is unchanged.
+    /// Variant of `arity_error_arg1_int` for methods that take
+    /// 0 or 1 Integer argument (`Array#first`, `#last`, `#pop`,
+    /// `#shift`). Same TypeError shape for non-Int 1-arg, but
+    /// the wrong-arity wording is "expected 0..1" (CRuby uses
+    /// the range form for these). Place AFTER the `[]` and
+    /// `[Value::Int(n)]` (and Float/BigInt) arms so this only
+    /// fires for genuinely-wrong shapes.
+    pub(crate) fn arity_error_arg0_or_1_int(&self, _name: &str, args: &[Value]) -> Trap {
+        if args.len() > 1 {
+            return self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    args.len()
+                ),
+            });
+        }
+        // args.len() == 1, but the value wasn't matched by
+        // Int/Float/BigInt arms — coerce-into-Integer TypeError.
+        match args.first() {
+            Some(Value::Nil) => self.trap(RubyError::TypeError {
+                msg: "no implicit conversion from nil to integer".to_string(),
+            }),
+            Some(other) => {
+                let name = match other {
+                    Value::Block(_) | Value::CurriedProc(_) => "Proc",
+                    Value::BoundMethod(_) => "Method",
+                    _ => super::numeric::type_name_for_coerce(other),
+                };
+                self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {name} into Integer"),
+                })
+            }
+            // Defensive — `[]` arm should already have matched
+            // empty args before this helper is reachable.
+            None => self.trap(RubyError::ArgumentError {
+                msg: "wrong number of arguments (given 0, expected 0..1)".to_string(),
+            }),
+        }
+    }
+
     pub(crate) fn arity_error_arg1_int(&self, _name: &str, args: &[Value]) -> Trap {
         if args.len() != 1 {
             return self.trap(RubyError::ArgumentError {
