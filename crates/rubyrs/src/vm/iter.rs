@@ -762,7 +762,7 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Array(*id)))
             }
-            (Value::Array(id), "map", []) => {
+            (Value::Array(id), "map", []) | (Value::Array(id), "collect", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
@@ -782,6 +782,87 @@ impl Vm {
                     g.vm.heap.array_mut(result_id).push(r);
                 }
                 Some(early.unwrap_or(Value::Array(result_id)))
+            }
+            // `Array#map!` / `Array#collect!` — in-place variant.
+            // Mutates the receiver, returns self. Block-form only
+            // in Tier-1; CRuby's no-block form returns an
+            // Enumerator (`#<Enumerator: arr:map!>`), which the
+            // rubyrs subset doesn't model.
+            //
+            // Break semantics: the elements already mapped stay
+            // mapped; the remaining elements keep their pre-call
+            // values; the call's return is the break expression.
+            // Implemented by writing back each result via
+            // `arr[idx]` (where `arr` is `heap.array_mut(*id)`)
+            // rather than rebuilding a fresh Vec, so a break
+            // mid-iteration leaves the tail untouched. The
+            // snapshot insulates the iteration
+            // from any concurrent in-block writes to the same
+            // Array (CRuby's behaviour is to iterate over the
+            // values present at call time).
+            //
+            // Frozen-receiver check intentionally omitted: rubyrs
+            // doesn't yet model Array#freeze (verified: `.freeze.
+            // frozen?` returns false), so we can't raise the
+            // FrozenError CRuby would here. Documented divergence
+            // shared with every other in-place Array primitive.
+            // (TRY_RUNS pass-13 layer #16 — sinatra-4 hits this
+            // via rack's middleware chain.)
+            (Value::Array(id), "map!", []) | (Value::Array(id), "collect!", []) => {
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                // GC safety: snapshot elements need their own
+                // pins. The receiver is pinned (so heap-backed
+                // children stay reachable WHILE the receiver
+                // still holds them), but the block can mutate
+                // the receiver — `arr.clear` / `pop` / `shift`
+                // drops the original children from the receiver,
+                // and the snapshot Vec is on the Rust stack so
+                // the GC tracer doesn't see it. The next block
+                // call may run `maybe_gc` and sweep them,
+                // leaving dangling `ObjId`s in the snapshot.
+                // Pin each ObjId-backed element through the
+                // loop. (`Value::Str` / `Value::Class` are
+                // `Rc`-counted and live independently of GC, so
+                // they're skipped to keep the pinned Vec tight.)
+                // Code-review #348 round 3.
+                for v in snapshot.iter() {
+                    if matches!(
+                        v,
+                        Value::Array(_) | Value::Hash(_) | Value::Range(_)
+                            | Value::Block(_)
+                            | Value::BoundMethod(_) | Value::UnboundMethod(_)
+                            | Value::CurriedProc(_) | Value::Object(_)
+                            | Value::Rational(_)
+                    ) {
+                        g.pin(v.clone());
+                    }
+                    #[cfg(feature = "bignum")]
+                    if matches!(v, Value::BigInt(_)) {
+                        g.pin(v.clone());
+                    }
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (idx, v) in snapshot.into_iter().enumerate() {
+                    let r = match g.vm.step_block(block, vec![v], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    // In-place write at the iteration index. The
+                    // receiver array might have shrunk if the
+                    // block mutated it (rare but legal); guard
+                    // against the index falling off the end so
+                    // we don't panic in that case.
+                    let arr = g.vm.heap.array_mut(*id);
+                    if idx < arr.len() {
+                        arr[idx] = r;
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(*id)))
             }
             // `flat_map { ... }` = map then flatten(1). Same
             // driver as map, but each block result that's an
