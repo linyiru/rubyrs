@@ -12,8 +12,8 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 155 |
-| Examples in corpus | 996 |
+| Files | 156 |
+| Examples in corpus | 1007 |
 | Skipped `it` traces | 155 |
 
 ### Skipped traces by category
@@ -38,7 +38,7 @@ Find blocks unlocked by a future feature with e.g.
 
 | Class | Files | Examples | Skipped |
 |---|---|---|---|
-| Array | 24 | 144 | 49 |
+| Array | 25 | 155 | 49 |
 | BasicObject | 3 | 15 | 0 |
 | Block | 1 | 8 | 0 |
 | Float | 2 | 11 | 0 |
@@ -206,6 +206,7 @@ Find blocks unlocked by a future feature with e.g.
 | `string_swapcase_spec.rb` | String#swapcase | `core/string/swapcase_spec.rb` | 9 | 1 |
 | `string_tr_spec.rb` | String#tr | `core/string/tr_spec.rb` | 14 | 0 |
 | `string_upcase_spec.rb` | String#upcase | `core/string/upcase_spec.rb` | 7 | 1 |
+| `take_drop_arity_float_spec.rb` | Array#take / #drop arity & type guards | `core/array/take_spec.rb / drop_spec.rb (arity + Float coerce)` | 11 | 0 |
 | `unbound_method_arity_spec.rb` | UnboundMethod#arity | `core/unboundmethod/arity_spec.rb` | 4 | 0 |
 | `unbound_method_bind_call_spec.rb` | UnboundMethod#bind_call | `core/unboundmethod/bind_call_spec.rb` | 4 | 0 |
 | `unbound_method_bind_spec.rb` | UnboundMethod#bind | `core/unboundmethod/bind_spec.rb` | 4 | 0 |

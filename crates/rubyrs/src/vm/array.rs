@@ -1228,6 +1228,15 @@ impl Vm {
                         self.heap.array_mut(id).extend(extra);
                         Some(Value::Array(id))
                     }
+                    // Float coerce — CRuby truncates `take(2.5)` to 2.
+                    // Re-dispatch with the converted Int so the
+                    // existing Int arm owns the rest of the logic.
+                    // Same pattern as each_slice/each_cons family
+                    // (PR #338).
+                    ("take" | "drop", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.array_collection_call(id, name, &[Value::Int(n)]);
+                    }
                     ("take", [Value::Int(n)]) => {
                         // Pin the receiver across maybe_gc: by the
                         // time we get here the receiver Array has
@@ -1250,6 +1259,13 @@ impl Vm {
                         g.vm.maybe_gc();
                         let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
+                    }
+                    // Wrong-arity / non-Int for take/drop. Catches
+                    // `arr.take`, `arr.take(2,3)`, `arr.take("2")`,
+                    // `arr.take(nil)`, etc. — was NoMethodError
+                    // pre-fix despite `respond_to?` returning true.
+                    ("take" | "drop", _) => {
+                        return Err(self.arity_error_arg1_int(name, args));
                     }
                     // No-block `each_slice(n)` / `each_cons(n)` —
                     // CRuby returns an Enumerator we don't model;
