@@ -1781,6 +1781,10 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Range(id)))
             }
+            // Wrong-arity / non-Int for Range#each_slice block form.
+            (Value::Range(_), "each_slice", _) => {
+                return Err(self.arity_error_arg1_int(name, args));
+            }
             // `(b..e).each_cons(n) { |window| ... }` — sliding
             // window of n consecutive Ints; return receiver.
             // Maintains an n-element ring buffer (cheap on Int-
@@ -1875,6 +1879,10 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Range(id)))
             }
+            // Wrong-arity / non-Int for Range#each_cons block form.
+            (Value::Range(_), "each_cons", _) => {
+                return Err(self.arity_error_arg1_int(name, args));
+            }
             // `(b..e).chunk_while { |a, b| pred(a, b) }` —
             // partition the Range into runs of consecutive Ints
             // where the block returns truthy for the adjacent
@@ -1963,6 +1971,15 @@ impl Vm {
                     g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
                 }
                 Some(Value::Array(result_id))
+            }
+            // Wrong-arity for Range#chunk_while (takes 0 args).
+            (Value::Range(_), "chunk_while", many) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        many.len()
+                    ),
+                }));
             }
             (Value::Array(id), "each_with_index", []) => {
                 let mut g = PinGuard::new(self);
@@ -2206,6 +2223,13 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Array(id)))
             }
+            // Catch-all for wrong-arity / non-Int arg in Array#each_slice
+            // block form. Previously fell through to NoMethodError, which
+            // contradicts `respond_to?(:each_slice) == true` and CRuby's
+            // ArgumentError / TypeError surface. See `arity_error_arg1_int`.
+            (Value::Array(_), "each_slice", _) => {
+                return Err(self.arity_error_arg1_int(name, args));
+            }
             // `arr.each_cons(n) { |window| ... }` — sliding window
             // of n consecutive elements; return the receiver. No
             // yields when receiver has fewer than n elements.
@@ -2248,6 +2272,10 @@ impl Vm {
                     }
                 }
                 Some(early.unwrap_or(Value::Array(id)))
+            }
+            // Wrong-arity / non-Int for Array#each_cons block form.
+            (Value::Array(_), "each_cons", _) => {
+                return Err(self.arity_error_arg1_int(name, args));
             }
             // `arr.chunk_while { |a, b| pred(a, b) }` — partition
             // into runs of consecutive elements where the block
@@ -2319,6 +2347,15 @@ impl Vm {
                     g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
                 }
                 Some(Value::Array(result_id))
+            }
+            // Wrong-arity for Array#chunk_while (takes 0 args).
+            (Value::Array(_), "chunk_while", many) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        many.len()
+                    ),
+                }));
             }
             // `arr.min_by(n) { |x| key(x) }` / `arr.max_by(n) { ... }`
             // — top-n form. Returns an Array of `n` extremes
@@ -3411,6 +3448,10 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Hash(id)))
             }
+            // Wrong-arity / non-Int for Hash#each_slice block form.
+            (Value::Hash(_), "each_slice", _) => {
+                return Err(self.arity_error_arg1_int(name, args));
+            }
             // `h.each_cons(n) { |window| ... }` — sliding window
             // of n consecutive `[k, v]` pair Arrays. No yields
             // when receiver has fewer than n pairs. Returns
@@ -3474,6 +3515,10 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Hash(id)))
             }
+            // Wrong-arity / non-Int for Hash#each_cons block form.
+            (Value::Hash(_), "each_cons", _) => {
+                return Err(self.arity_error_arg1_int(name, args));
+            }
             // `h.chunk_while { |a, b| pred(a, b) }` — partition
             // entries into runs where the block (called with two
             // adjacent `[k, v]` pair Arrays) returns truthy.
@@ -3535,6 +3580,15 @@ impl Vm {
                     g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
                 }
                 Some(Value::Array(result_id))
+            }
+            // Wrong-arity for Hash#chunk_while (takes 0 args).
+            (Value::Hash(_), "chunk_while", many) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        many.len()
+                    ),
+                }));
             }
             // `h.find_index { |pair| ... }` — returns the Int
             // index of the first entry whose block result is

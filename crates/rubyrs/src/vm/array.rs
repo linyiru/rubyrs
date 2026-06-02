@@ -1263,7 +1263,7 @@ impl Vm {
                                 msg: format!("invalid slice size: {}", n),
                             }));
                         }
-                        let n = *n as usize;
+                        let n = usize::try_from(*n).unwrap_or(usize::MAX);
                         let src: Vec<Value> = self.heap.array(id).clone();
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Array(id));
@@ -1278,13 +1278,19 @@ impl Vm {
                         let oid = g.vm.heap.alloc(HeapObj::Array(chunks));
                         Some(Value::Array(oid))
                     }
+                    // Wrong-arity / non-Int for Array#each_slice
+                    // no-block form (block-form gap mirrored by
+                    // iter.rs catch-all).
+                    ("each_slice", _) => {
+                        return Err(self.arity_error_arg1_int(name, args));
+                    }
                     ("each_cons", [Value::Int(n)]) => {
                         if *n <= 0 {
                             return Err(self.trap(RubyError::ArgumentError {
                                 msg: format!("invalid size: {}", n),
                             }));
                         }
-                        let n = *n as usize;
+                        let n = usize::try_from(*n).unwrap_or(usize::MAX);
                         let src: Vec<Value> = self.heap.array(id).clone();
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Array(id));
@@ -1300,6 +1306,28 @@ impl Vm {
                         g.vm.maybe_gc();
                         let oid = g.vm.heap.alloc(HeapObj::Array(windows));
                         Some(Value::Array(oid))
+                    }
+                    // Wrong-arity / non-Int for Array#each_cons no-block form.
+                    ("each_cons", _) => {
+                        return Err(self.arity_error_arg1_int(name, args));
+                    }
+                    // `arr.chunk_while(arg)` without a block —
+                    // CRuby returns an Enumerator on the
+                    // no-block call but still raises
+                    // ArgumentError when extra args are
+                    // passed. rubyrs has no Enumerator stub
+                    // for chunk_while; arity validation is the
+                    // only thing left to do here. With block,
+                    // dispatch goes through iter.rs where the
+                    // block-form catch-all already handles
+                    // wrong-arity.
+                    ("chunk_while", many) if !many.is_empty() => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 0)",
+                                many.len()
+                            ),
+                        }));
                     }
                     // `zip` — pairs each element of `self` with the
                     // same-index element of each Array argument.
