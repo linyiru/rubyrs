@@ -24,8 +24,9 @@ end
 ## Shape 1: bare `caller` — array with the most-recent caller
 ## at index 0, older frames later (top of stack first). Skips
 ## the calling method's own frame (the one containing the
-## `caller` call), so the head entry is `caller`'s caller's
-## caller.
+## `caller` call), so the head entry is the method that
+## invoked the current method (here `s1_outer`, which called
+## `s1_inner` where `caller` was invoked).
 def s1_inner; caller; end
 def s1_outer; s1_inner; end
 result = s1_outer
@@ -56,7 +57,9 @@ puts "shape4-head=#{normalize(result.first)}"
 def s5; caller(99); end
 puts "shape5=#{s5.inspect}"
 
-## Shape 6: negative arg raises ArgumentError.
+## Shape 6: negative arg raises ArgumentError — both the
+## start position and the length share the same "negative
+## level" guard, so cover both paths.
 err = begin
   caller(-1)
   "no-raise"
@@ -64,6 +67,14 @@ rescue ArgumentError => e
   e.message.include?("negative level") ? "negative-level" : "other-ArgError"
 end
 puts "shape6=#{err}"
+
+err = begin
+  caller(0, -1)
+  "no-raise"
+rescue ArgumentError => e
+  e.message.include?("negative") ? "negative-length" : "other-ArgError"
+end
+puts "shape6b=#{err}"
 
 ## Shape 7: too many args raises ArgumentError.
 err = begin
