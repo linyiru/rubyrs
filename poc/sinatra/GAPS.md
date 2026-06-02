@@ -224,14 +224,38 @@ opt-in `ENV` capability (allowlisted, per the ADR 0019 Rule-4 pattern).
 
 ---
 
-## Gap #7 — `__dir__` is undefined (`__FILE__` works)  **[severity: LOW]**
+## Gap #7 — `__dir__` is undefined (`__FILE__` works)  **[severity: LOW] — ✅ FIXED**
 
-**Repro:** `defined?(__dir__)` → `nil` on rubyrs; CRuby returns the dir.
-
-**Preliminary analysis.** `__FILE__` and `require_relative` both work, so
-the information is available; `__dir__` (sugar for
-`File.dirname(File.realpath(__FILE__))`) just isn't wired. Trivial to
-add. Workaround: `File.dirname(__FILE__)`.
+> **Status: fixed.** `__dir__` has a dedicated arm in
+> `vm/dispatch.rs::do_call` that recognises the bare-call shape
+> AND the explicit-`self` receiver shape (the one private-method
+> exception CRuby allows for `Kernel#__dir__`), pulls the current
+> frame's proto filename, and returns the dirname. Sandbox-aware:
+> when `Config::allow_filesystem_io` is on AND no
+> `Config::allowed_paths` allowlist is set, the path is
+> canonicalised through `std::fs::canonicalize` to match CRuby's
+> documented `File.dirname(File.realpath(__FILE__))` semantics; in
+> the default Tier-1 sandbox the FS-touching canonicalize is
+> skipped and the lexical `Path::parent` is returned (with `""`
+> collapsing to `"."` so the common `$LOAD_PATH.unshift __dir__`
+> idiom keeps working under embed-mode filenames like `"test.rb"`
+> that have no parent component). `defined?(__dir__)` reports
+> `"method"` via a small `ast.rs` reflection arm — the
+> `do_call`-arm built-ins don't live in the method table that the
+> default `__defined_method?` host fn consults, so this arm
+> bridges the reflection gap.
+>
+> Sentinels: `tests/diff/kernel_dir.rb` (gem-oracle diff against
+> CRuby) plus `tests/embed/tier1_capability.rs::dunder_dir_*`
+> (explicit-self + third-party-receiver shape) plus
+> `tests/embed/filesystem_sandbox.rs::dunder_dir_*` (the
+> canonicalize / lexical-parent split).
+>
+> **Repro at the time the gap was recorded:** `defined?(__dir__)`
+> → `nil`. **Current behaviour:** `defined?(__dir__)` →
+> `"method"`; `__dir__` returns the dirname matching CRuby's
+> output byte-for-byte on absolute-path script invocations and
+> the documented sandbox-trimmed shape on embed-mode invocations.
 
 ---
 

@@ -1775,6 +1775,24 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 args: vec![sp(node, Expr::SymbolLit(joined))], kwargs_trailing: false });
         }
         if let Some(cn) = inner.as_call_node() {
+            // `defined?(__dir__)` — bareword shape (no receiver /
+            // args / block) short-circuits to `"method"` to match
+            // CRuby. The value path is handled by `do_call`'s
+            // dedicated `__dir__` arm in `vm/dispatch.rs`, which
+            // pulls the dir from the current frame's proto filename
+            // (sandbox-aware: canonicalize only when
+            // `allow_filesystem_io` is on and no allowlist is set).
+            // The `__defined_method?` host fn falls back to nil for
+            // built-in dispatch-arm shortcuts because they don't
+            // live in the method table, so this arm bridges the
+            // reflection gap.
+            if cn.receiver().is_none()
+                && cn.arguments().is_none()
+                && cn.block().is_none()
+                && cid_to_string(cn.name()) == "__dir__"
+            {
+                return s("method");
+            }
             // No-receiver, no-args call → runtime method check on
             // self / toplevel / builtin. With a receiver, CRuby
             // would dispatch on the receiver's class; we can't
