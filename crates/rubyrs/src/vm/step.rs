@@ -875,13 +875,15 @@ impl Vm {
                 {
                     use std::str::FromStr;
                     let parse_i64 = |id: crate::SymId| -> Result<i64, Trap> {
+                        // Don't echo the interned component string back —
+                        // ast.rs no-bignum lowering substitutes a u128::MAX
+                        // sentinel for literals exceeding u128 (rare but
+                        // possible), so the stored text may not match the
+                        // user's source. Keep the error message generic.
                         let src = self.interner.resolve(id).clone();
                         i64::from_str(&src).map_err(|_| {
                             self.trap(RubyError::RangeError {
-                                msg: format!(
-                                    "Rational literal component {:?} exceeds i64 (rebuild with --features bignum)",
-                                    src,
-                                ),
+                                msg: "Rational literal component exceeds i64 (rebuild with --features bignum)".to_string(),
                             })
                         })
                     };

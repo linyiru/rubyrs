@@ -781,10 +781,15 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         }
         #[cfg(not(feature = "bignum"))]
         {
-            // No-bignum path: emit the strings verbatim (without
-            // gcd-reduction — VM-side `make_rational` does it).
-            // Strings that don't fit i64 will surface as
-            // RangeError at LoadRational time.
+            // No-bignum path: convert each Prism integer to a u128
+            // accumulator, then format as a signed decimal. No
+            // gcd-reduction here — VM-side `make_rational` does it
+            // at load time. Components beyond u128 substitute a
+            // `u128::MAX` sentinel so `LoadRational` reliably raises
+            // RangeError (the i64 parse fails on the sentinel value).
+            // The emitted decimal text matches the original literal
+            // for any source-realistic magnitude; only the rare
+            // > u128 case diverges.
             let signed_str = |int_value: ruby_prism::Integer<'_>| -> String {
                 let (negative, digits) = int_value.to_u32_digits();
                 let mut mag: u128 = 0;
