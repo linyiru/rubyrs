@@ -76,6 +76,20 @@ rescue ArgumentError => e
 end
 puts "shape6b=#{err}"
 
+## Shape 9: BigInt args — accepted as Integer. Values that fit
+## in i64 work normally; values that overflow raise RangeError
+## ("bignum too big to convert into 'long'"). CRuby parity.
+def s9; caller(2**61); end   # fits in i64, beyond depth → nil
+puts "shape9-fits=#{s9.inspect}"
+
+err = begin
+  caller(2**100)
+  "no-raise"
+rescue RangeError => e
+  e.message.include?("bignum too big") ? "range-bignum" : "other-RangeError"
+end
+puts "shape9-overflow=#{err}"
+
 ## Shape 7: too many args raises ArgumentError.
 err = begin
   caller(1, 2, 3)

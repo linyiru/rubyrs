@@ -183,7 +183,16 @@ impl Vm {
                     })));
                 }
                 for a in args.iter() {
-                    if !matches!(a, Value::Int(_)) {
+                    // `Value::BigInt` IS an Integer in rubyrs's
+                    // bignum build (just one that doesn't fit
+                    // in i64). Accept it here — converting to
+                    // an in-range value (or raising RangeError
+                    // on overflow) happens below. Without this,
+                    // `caller(2**100)` would produce the absurd
+                    // "no implicit conversion of Integer into
+                    // Integer" message. Code-review #342
+                    // round 7.
+                    if !matches!(a, Value::Int(_) | Value::BigInt(_)) {
                         // CRuby uses a distinct phrasing for nil
                         // ("from nil to integer") versus other
                         // types ("of <Class> into Integer") —
@@ -214,6 +223,33 @@ impl Vm {
                         return Some(Err(self.trap(RubyError::TypeError { msg })));
                     }
                 }
+                // BigInt → i64 coercion: CRuby raises RangeError
+                // ("bignum too big to convert into 'long'") when
+                // the value doesn't fit, NOT TypeError or "negative
+                // level". Convert each arg up front; on overflow,
+                // raise RangeError with CRuby's wording. Done in a
+                // separate sweep from the type-check so the result
+                // can be reused by the match below without
+                // re-borrowing `self.heap` inside the pattern arms.
+                use num_traits::ToPrimitive;
+                let mut converted: Vec<i64> = Vec::with_capacity(args.len());
+                for a in args.iter() {
+                    let n = match a {
+                        Value::Int(n) => *n,
+                        Value::BigInt(id) => {
+                            match self.heap.bigint(*id).to_i64() {
+                                Some(n) => n,
+                                None => {
+                                    return Some(Err(self.trap(RubyError::RangeError {
+                                        msg: "bignum too big to convert into 'long'".to_string(),
+                                    })));
+                                }
+                            }
+                        }
+                        _ => unreachable!("type-checked above"),
+                    };
+                    converted.push(n);
+                }
                 // Saturating i64 → usize: on 32-bit targets (the
                 // repo builds `wasm32-wasip1` in CI) `as usize`
                 // would truncate large positives, so a huge
@@ -227,14 +263,13 @@ impl Vm {
                 let to_usize_sat = |n: i64| -> usize {
                     usize::try_from(n).unwrap_or(usize::MAX)
                 };
-                let (skip, limit) = match args {
+                let (skip, limit) = match converted.as_slice() {
                     [] => (1usize, usize::MAX),
-                    [Value::Int(n)] if *n >= 0 => (to_usize_sat(*n), usize::MAX),
-                    [Value::Int(n), Value::Int(l)] if *n >= 0 && *l >= 0 => {
+                    [n] if *n >= 0 => (to_usize_sat(*n), usize::MAX),
+                    [n, l] if *n >= 0 && *l >= 0 => {
                         (to_usize_sat(*n), to_usize_sat(*l))
                     }
-                    // Both args are Int (type-checked above) but at
-                    // least one is negative.
+                    // At least one arg is negative.
                     _ => {
                         return Some(Err(self.trap(RubyError::ArgumentError {
                             msg: "negative level".to_string(),
