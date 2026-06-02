@@ -1702,20 +1702,26 @@ impl Vm {
                     }
                     Value::UnboundMethod(uid) => {
                         // Mirror `eql?`'s identity: hash the
-                        // underlying Method's Rc pointer when the
-                        // capture-class chain resolves one, so two
+                        // underlying Method's Rc pointer. Prefer
+                        // the capture-time snapshot so hash agrees
+                        // with the other capture-preserving arms
+                        // (bind_call, source_location) — UnboundMethod
+                        // semantics pin to the resolution at capture
+                        // time, not the live class table. Two
                         // UnboundMethods sharing the same definition
                         // (e.g. `C.instance_method(:foo)` and
                         // `D.instance_method(:foo)` for `D < C`'s
                         // inherited foo) satisfy
-                        // `a.eql?(b) ⇒ a.hash == b.hash`. When the
-                        // method isn't resolvable (rare — captured
-                        // class no longer defines it), fall back to
-                        // the captured-class pointer; in that branch
-                        // `eql?` also falls back to class-ptr
-                        // identity, so hash stays consistent.
-                        let (cls, n) = self.heap.unbound_method(*uid);
-                        let key = match self.lookup_method_uncached(&cls, n) {
+                        // `a.eql?(b) ⇒ a.hash == b.hash`. Falls back
+                        // to a live `lookup_method_uncached`, then to
+                        // the captured-class pointer — eql? takes
+                        // the same fallback chain, so hash stays
+                        // consistent in every branch.
+                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                        let key = match snap
+                            .clone()
+                            .or_else(|| self.lookup_method_uncached(&cls, n))
+                        {
                             Some(m) => std::rc::Rc::as_ptr(&m) as i64,
                             None => std::rc::Rc::as_ptr(&cls) as i64,
                         };
@@ -6223,10 +6229,18 @@ impl Vm {
                         na == nb && method_recv_identity(&ra, &rb)
                     }
                     (Value::UnboundMethod(a), Value::UnboundMethod(b)) => {
-                        let (ca, na) = self.heap.unbound_method(*a);
-                        let (cb, nb) = self.heap.unbound_method(*b);
-                        let ma = self.lookup_method_uncached(&ca, na);
-                        let mb = self.lookup_method_uncached(&cb, nb);
+                        // Snapshot-first identity: prefer the
+                        // capture-time Method Rc — UnboundMethod
+                        // semantics pin to capture-time, matching
+                        // bind_call/source_location/hash, and avoids
+                        // an extra ancestor-chain walk per side.
+                        // Falls through to live lookup, then to
+                        // class-ptr identity, so the eql?/hash chain
+                        // stays in lock-step.
+                        let (ca, na, sa) = self.heap.unbound_method_full(*a);
+                        let (cb, nb, sb) = self.heap.unbound_method_full(*b);
+                        let ma = sa.clone().or_else(|| self.lookup_method_uncached(&ca, na));
+                        let mb = sb.clone().or_else(|| self.lookup_method_uncached(&cb, nb));
                         match (ma, mb) {
                             (Some(x), Some(y)) => Rc::ptr_eq(&x, &y),
                             _ => na == nb && Rc::ptr_eq(&ca, &cb),
