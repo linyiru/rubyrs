@@ -44,12 +44,14 @@ mod output;
 // is reachable from the embedder-visible `Value` enum; an
 // unnameable type in a public field would trip Rust's
 // `private_interfaces` lint (hard fail under CI's `-D warnings`).
-// The variants of `CompiledRegex` are technically public too
-// (Rust doesn't permit per-variant visibility on a public
-// enum — E0449), but they're intended to be treated as
-// implementation detail. Embedders should interact through
-// the inherent methods (`as_str`, `is_match`, etc.); future
-// engine swaps may change the variants without notice.
+// The enum itself is the only `pub` item — its variants are
+// technically public too (Rust doesn't permit per-variant
+// visibility on a `pub enum` — E0449) and the inherent methods
+// are deliberately `pub(crate)`. Embedders should treat
+// `Value::Regex(_)` as fully opaque: pattern-match on the
+// outer variant if needed, but the inner `CompiledRegex` is
+// implementation detail. A future engine swap or method
+// addition stays a non-breaking change.
 #[cfg(feature = "regex")]
 pub mod regex_engine;
 #[cfg(feature = "_sqlite")]

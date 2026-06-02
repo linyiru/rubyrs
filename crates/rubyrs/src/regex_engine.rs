@@ -35,12 +35,15 @@ use std::fmt;
 ///
 /// The enum itself is `pub` because `Value::Regex(Rc<CompiledRegex>)`
 /// is reachable from the embedder-visible `Value` type — leaving
-/// it `pub(crate)` would trip `private_interfaces`. Rust doesn't
-/// allow per-variant visibility, so embedders technically see
-/// the variants too, but the inherent methods (`as_str`,
-/// `is_match`, etc.) are the intended API surface. Treat the
-/// variants as opaque; future engine swaps may change them
-/// without notice. Code-review #353 round 1.
+/// it `pub(crate)` would trip `private_interfaces`. The variants
+/// are technically public too (Rust doesn't allow per-variant
+/// visibility on a `pub enum`) and the inherent methods are
+/// deliberately `pub(crate)` — they're for in-crate dispatch,
+/// not the embedder API. Treat `CompiledRegex` as a fully
+/// opaque token: embedders that pattern-match on `Value::Regex(_)`
+/// should match the outer variant and pass the inner Rc through
+/// without introspecting it. Future engine swaps may change the
+/// variants and methods without notice. Code-review #353 round 1.
 pub enum CompiledRegex {
     /// Linear-time `regex` engine — preferred. Most Ruby
     /// patterns land here.
