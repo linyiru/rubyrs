@@ -461,6 +461,151 @@ impl Vm {
         }
     }
 
+    /// `Rational#**(exp)` — phase C.4.4 power dispatch.
+    ///
+    /// Integer exp (Int / BigInt) keeps the result exact:
+    ///   `Rational(num, den) ** k` → `Rational(num^k, den^k)` for k>0,
+    ///   the reciprocal for k<0, and `Rational(1, 1)` for k==0.
+    ///   `Rational(0, 1) ** k` with k<0 raises ZeroDivisionError.
+    /// Float / Rational exp demotes the receiver to f64 and uses
+    /// `f64::powf`, matching CRuby's `Rational#**` Float fallback.
+    /// Non-Numeric exp → TypeError.
+    pub(crate) fn rational_pow(&mut self, recv: &Value, exp: &Value) -> Result<Value, Trap> {
+        let r_id = match recv {
+            Value::Rational(id) => *id,
+            _ => unreachable!("rational_pow called on non-Rational receiver"),
+        };
+        // Integer exponent (fast / exact path).
+        let int_exp: Option<i64> = match exp {
+            Value::Int(n) => Some(*n),
+            #[cfg(feature = "bignum")]
+            Value::BigInt(id) => i64::try_from(self.heap.bigint(*id)).ok(),
+            _ => None,
+        };
+        if let Some(k) = int_exp {
+            return self.rational_pow_int(r_id, k);
+        }
+        // Non-integer numeric exp → demote to Float, use Float pow.
+        let exp_f: Option<f64> = match exp {
+            Value::Float(g) => Some(*g),
+            Value::Rational(eid) => Some(crate::heap::rational_to_f64(self.heap.rational(*eid))),
+            #[cfg(feature = "bignum")]
+            Value::BigInt(_) => {
+                // BigInt-too-big-for-i64 exponent: convert to f64
+                // (may saturate to ±Infinity, matching CRuby).
+                Some(crate::vm::bignum::bigint_to_f64_sign_preserving(
+                    self.heap.bigint(match exp {
+                        Value::BigInt(eid) => *eid,
+                        _ => unreachable!(),
+                    }),
+                ))
+            }
+            _ => None,
+        };
+        if let Some(g) = exp_f {
+            let base_f = crate::heap::rational_to_f64(self.heap.rational(r_id));
+            return Ok(Value::Float(base_f.powf(g)));
+        }
+        Err(self.trap(RubyError::TypeError {
+            msg: format!(
+                "{} can't be coerced into Rational",
+                crate::vm::numeric::type_name_for_coerce(exp),
+            ),
+        }))
+    }
+
+    /// Integer-exponent power for Rational. Splits bignum and
+    /// no-bignum so `BigInt::pow(u32)` is only required on the
+    /// bignum tier — no-bignum uses `i64::checked_pow`.
+    fn rational_pow_int(&mut self, r_id: ObjId, k: i64) -> Result<Value, Trap> {
+        #[cfg(feature = "bignum")]
+        {
+            use num_bigint::BigInt;
+            use num_traits::{One, Zero};
+            let r = self.heap.rational(r_id).clone();
+            if k == 0 {
+                return self.make_rational(1, 1);
+            }
+            if r.num.is_zero() && k < 0 {
+                return Err(self.trap(RubyError::ZeroDivisionError {
+                    msg: "divided by 0".to_string(),
+                }));
+            }
+            // Cap |k| so a pathological literal can't drive BigInt
+            // pow into multi-GB allocations. 2^16 is well above
+            // anything a sane source uses but small enough that the
+            // worst-case result (limit ≈ 2^(53*65536) bytes) is
+            // still memory-bounded by the host's existing alloc
+            // guard. Matches the spirit of the bignum_primitive
+            // pow cap in vm/bignum.rs.
+            let ak = k.unsigned_abs();
+            if ak > 65536 {
+                return Err(self.trap(RubyError::RangeError {
+                    msg: "Rational#** exponent magnitude exceeds 2^16 cap".to_string(),
+                }));
+            }
+            let ak_u32 = ak as u32;
+            let new_num = r.num.pow(ak_u32);
+            let new_den = r.den.pow(ak_u32);
+            // The caller-side canonical form was already coprime
+            // and den-positive; integer pow preserves both, but
+            // make_rational_bigint re-normalizes defensively (the
+            // gcd ends up being 1 so the work is cheap).
+            if k > 0 {
+                self.make_rational_bigint(new_num, new_den)
+            } else {
+                // k < 0 → reciprocal. Sign of num flows to the new
+                // numerator; absolute swap goes through
+                // make_rational_bigint's sign-normalization so
+                // `den > 0` stays canonical.
+                if new_num.sign() == num_bigint::Sign::Minus {
+                    self.make_rational_bigint(-new_den, -new_num.clone())
+                } else if new_num.is_one() {
+                    self.make_rational_bigint(new_den, BigInt::one())
+                } else {
+                    self.make_rational_bigint(new_den, new_num)
+                }
+            }
+        }
+        #[cfg(not(feature = "bignum"))]
+        {
+            let r = *self.heap.rational(r_id);
+            if k == 0 {
+                return self.make_rational(1, 1);
+            }
+            if r.num == 0 && k < 0 {
+                return Err(self.trap(RubyError::ZeroDivisionError {
+                    msg: "divided by 0".to_string(),
+                }));
+            }
+            let ak = k.unsigned_abs();
+            if ak > 62 {
+                // i64 overflow is guaranteed beyond 2^62 even for
+                // base == 2; surface as RangeError.
+                return Err(self.trap(RubyError::RangeError {
+                    msg: "Rational#** result overflows i64 (rebuild with --features bignum)".to_string(),
+                }));
+            }
+            let ak_u32 = ak as u32;
+            let new_num = r.num.checked_pow(ak_u32).ok_or_else(|| {
+                self.trap(RubyError::RangeError {
+                    msg: "Rational#** numerator overflows i64 (rebuild with --features bignum)".to_string(),
+                })
+            })?;
+            let new_den = r.den.checked_pow(ak_u32).ok_or_else(|| {
+                self.trap(RubyError::RangeError {
+                    msg: "Rational#** denominator overflows i64 (rebuild with --features bignum)".to_string(),
+                })
+            })?;
+            if k > 0 {
+                self.make_rational(new_num, new_den)
+            } else {
+                // reciprocal — make_rational sign-normalizes.
+                self.make_rational(new_den, new_num)
+            }
+        }
+    }
+
     /// `try_rational_binop` — the `Op::BinOp` arm for Rational
     /// operands. Called between `try_bigint_binop` and
     /// `primitive_call`, so by the time we get here neither side
@@ -6082,6 +6227,33 @@ impl Vm {
             #[cfg(not(feature = "bignum"))]
             { matches!(&recv, Value::Int(_)) }
         };
+        // Phase C.4.4 — `Integer ** Rational` and `Float ** Rational`
+        // demote to Float per CRuby (`2 ** Rational(1, 2) ==
+        // 1.4142135623730951`). Lives here (not at the Int / Float
+        // arms inside numeric.rs / primitive_call) because those
+        // surfaces don't see Rational args natively. Same shape as
+        // the Rational#** Float-fallback in `rational_pow`.
+        if (recv_is_integer || matches!(&recv, Value::Float(_)))
+            && &*name == "**"
+            && args.len() == 1
+            && matches!(&args[0], Value::Rational(_))
+        {
+            let base_f = match &recv {
+                Value::Int(n) => *n as f64,
+                #[cfg(feature = "bignum")]
+                Value::BigInt(id) => {
+                    crate::vm::bignum::bigint_to_f64_sign_preserving(self.heap.bigint(*id))
+                }
+                Value::Float(g) => *g,
+                _ => unreachable!("guarded above"),
+            };
+            let exp_f = match &args[0] {
+                Value::Rational(id) => crate::heap::rational_to_f64(self.heap.rational(*id)),
+                _ => unreachable!("guarded above"),
+            };
+            self.stack.push(Value::Float(base_f.powf(exp_f)));
+            return Ok(());
+        }
         if recv_is_integer && &*name == "divmod" {
             if args.len() != 1 {
                 return Err(self.trap(RubyError::ArgumentError {
@@ -7638,6 +7810,18 @@ impl Vm {
                 // Routing `r.send(:==, x)` through this arm would
                 // be dead code because it's shadowed by the
                 // universal dispatch.
+                // Phase C.4.4 — `Rational#**` lives in this arm
+                // (not via `try_rational_binop` because `**` isn't
+                // in `BinOpKind` — power is method-dispatched, not
+                // BinOp-opcoded). Integer exp uses `BigInt::pow` on
+                // num and den; non-integer exp (Float / Rational)
+                // demotes to Float (CRuby parity — exact-exponent
+                // Rational pow only stays Rational for integer exp).
+                ("**", 1) => {
+                    let v = self.rational_pow(&recv, &args[0])?;
+                    self.stack.push(v);
+                    return Ok(());
+                }
                 ("+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=", 1) => {
                     let kind = crate::bytecode::BinOpKind::from_op_name(&name)
                         .expect("name matched above");
@@ -7700,7 +7884,7 @@ impl Vm {
                     return Ok(());
                 }
                 // Arity guard for the binary operators.
-                ("+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" | "<=>", _) => {
+                ("+" | "-" | "*" | "/" | "**" | "<" | "<=" | ">" | ">=" | "<=>", _) => {
                     return Err(self.trap(RubyError::ArgumentError {
                         msg: format!(
                             "wrong number of arguments (given {}, expected 1)",

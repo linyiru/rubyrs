@@ -3263,6 +3263,76 @@ fn rational_phase_c4_1_bigint_widening() {
 
 #[test]
 #[cfg(feature = "bignum")]
+fn rational_phase_c4_4_literal_and_pow() {
+    // Phase C.4.4 — `1/2r` Rational literal + `Rational#**`.
+    // Literal lowering replaces the pre-C.4.4 lowering-to-FloatLit
+    // hack (see ast.rs); `**` adds the exact-integer-exp path on
+    // top of `Rational#+/-/*/<=>`, with Float fallback for
+    // non-integer exp. Cross-type Int/Float ** Rational also
+    // demotes to Float, matching CRuby's `2 ** Rational(1, 2)`.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        // Literal — class + value.
+        ("puts (1/2r).inspect", "(1/2)"),
+        ("puts (1/2r).class", "Rational"),
+        ("puts (1000.0r).inspect", "(1000/1)"),
+        ("puts (1000.0r).class", "Rational"),
+        ("puts (0.5r).inspect", "(1/2)"),
+        ("puts (-1/2r).inspect", "(-1/2)"),
+        ("puts (3/9r).inspect", "(1/3)"),  // gcd-reduced at parse
+        // Literal arithmetic.
+        ("puts ((1/2r) + (1/3r)).inspect", "(5/6)"),
+        ("puts ((1/2r) * 4).inspect", "(2/1)"),
+        // Rational#** — integer exp, exact path.
+        ("puts ((1/2r) ** 3).inspect", "(1/8)"),
+        ("puts ((1/2r) ** 0).inspect", "(1/1)"),
+        ("puts ((1/2r) ** -2).inspect", "(4/1)"),
+        ("puts ((3/4r) ** 2).inspect", "(9/16)"),
+        ("puts ((-1/2r) ** 3).inspect", "(-1/8)"),
+        ("puts ((-1/2r) ** 2).inspect", "(1/4)"),
+        // Rational#** — non-integer exp falls back to Float.
+        ("puts ((1/2r) ** 0.5).inspect", "0.7071067811865476"),
+        ("puts ((2/1r) ** (1/2r)).inspect", "1.4142135623730951"),
+        // Int ** Rational and Float ** Rational — Float fallback.
+        ("puts (2 ** (1/2r)).inspect", "1.4142135623730951"),
+        ("puts (2.0 ** (1/2r)).inspect", "1.4142135623730951"),
+        // respond_to? on Rational#**.
+        ("puts (1/2r).respond_to?(:**)", "true"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "rational_c44.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // Errors — ZeroDivisionError on 0 ** negative; TypeError on
+    // non-Numeric exp.
+    for (script, expected_class, expected_msg) in [
+        ("(0/1r) ** -1", "ZeroDivisionError", "divided by 0"),
+        ("(0/1r) ** -3", "ZeroDivisionError", "divided by 0"),
+        (
+            "(1/2r) ** \"x\"",
+            "TypeError",
+            "String can't be coerced into Rational",
+        ),
+        (
+            "(1/2r) ** :sym",
+            "TypeError",
+            "Symbol can't be coerced into Rational",
+        ),
+    ] {
+        let err = rt.eval(script, "rational_c44_err.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "bignum")]
 fn rational_phase_c4_3_float_to_r_and_rationalize() {
     // Phase C.4.3 — Float#to_r (lossless IEEE-754 decomposition),
     // Float#rationalize(eps) (Stern-Brocot mediant search), bare

@@ -49,6 +49,15 @@ pub(crate) enum Op {
     /// saturated `IntLit` instead.
     #[cfg(feature = "bignum")]
     LoadBigInt(SymId),
+    /// Materializes a `Value::Rational` from interned canonical-form
+    /// `num` / `den` decimal strings (Phase C.4.4). Under bignum
+    /// both strings parse into `BigInt` and route through
+    /// `make_rational_bigint`; under no-bignum into i64 (RangeError
+    /// on overflow) and route through `make_rational(i64, i64)`.
+    /// The ast lowering already gcd-reduces and sign-normalizes
+    /// `num` (signed) / `den` (positive) so the per-(num_id, den_id)
+    /// cache hits the canonical form directly.
+    LoadRational(SymId, SymId),
     /// Pop a Value::Str, compile it as a Regex pattern, push
     /// Value::Regex. Emitted by `Expr::InterpolatedRegex` after
     /// the same `to_s + +` build sequence used by InterpolatedStr.

@@ -749,7 +749,7 @@ impl Vm {
                 "numerator" | "denominator" |
                 "to_s" | "inspect" | "to_r" |
                 "to_i" | "to_f" |
-                "+" | "-" | "*" | "/" |
+                "+" | "-" | "*" | "/" | "**" |
                 "<" | "<=" | ">" | ">=" | "<=>" |
                 "coerce"
             ),

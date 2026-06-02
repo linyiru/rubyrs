@@ -1113,6 +1113,11 @@ pub(crate) fn compile_expr(
         Expr::RegexLit(src) => { let id = interner.intern(src); b.emit(Op::LoadRegex(id)); }
         #[cfg(feature = "bignum")]
         Expr::BigIntLit(decimal) => { let id = interner.intern(decimal); b.emit(Op::LoadBigInt(id)); }
+        Expr::RationalLit { num, den } => {
+            let num_id = interner.intern(num);
+            let den_id = interner.intern(den);
+            b.emit(Op::LoadRational(num_id, den_id));
+        }
         Expr::SymbolLit(s) => { let id = interner.intern(s); b.emit(Op::LoadSymbol(id)); }
         Expr::InterpolatedStr(parts) => {
             if parts.is_empty() {

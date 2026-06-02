@@ -843,6 +843,54 @@ impl Vm {
                 let v = self.bigint_to_value(big)?;
                 self.stack.push(v);
             }
+            Op::LoadRational(num_id, den_id) => {
+                #[cfg(feature = "bignum")]
+                {
+                    use std::str::FromStr;
+                    // Reuse `bigint_lit_cache` — Rational literals
+                    // share the same parsed-BigInt surface as
+                    // `LoadBigInt`. Each load allocates a fresh
+                    // heap `RationalRepr` so ObjId identity stays
+                    // per-Value; only the parse work is amortised.
+                    let mut parse_or_cached = |id: crate::SymId| -> Result<num_bigint::BigInt, Trap> {
+                        if let Some(b) = self.bigint_lit_cache.get(&id) {
+                            return Ok((**b).clone());
+                        }
+                        let src = self.interner.resolve(id).clone();
+                        let parsed = num_bigint::BigInt::from_str(&src).map_err(|e| {
+                            self.trap(RubyError::SyntaxError {
+                                msg: format!("invalid rational component {:?}: {}", src, e),
+                            })
+                        })?;
+                        let rc = Rc::new(parsed);
+                        self.bigint_lit_cache.insert(id, rc.clone());
+                        Ok((*rc).clone())
+                    };
+                    let num = parse_or_cached(num_id)?;
+                    let den = parse_or_cached(den_id)?;
+                    let v = self.make_rational_bigint(num, den)?;
+                    self.stack.push(v);
+                }
+                #[cfg(not(feature = "bignum"))]
+                {
+                    use std::str::FromStr;
+                    let parse_i64 = |id: crate::SymId| -> Result<i64, Trap> {
+                        let src = self.interner.resolve(id).clone();
+                        i64::from_str(&src).map_err(|_| {
+                            self.trap(RubyError::RangeError {
+                                msg: format!(
+                                    "Rational literal component {:?} exceeds i64 (rebuild with --features bignum)",
+                                    src,
+                                ),
+                            })
+                        })
+                    };
+                    let num = parse_i64(num_id)?;
+                    let den = parse_i64(den_id)?;
+                    let v = self.make_rational(num, den)?;
+                    self.stack.push(v);
+                }
+            }
             #[cfg(feature = "regex")]
             Op::LoadRegex(id) => {
                 let regex_rc = if let Some(r) = self.regex_cache.get(&id) {
