@@ -3222,15 +3222,39 @@ impl Vm {
                 // for every Symbol/String arg — Rails-style code
                 // observes the call regardless of whether the
                 // method dispatch table actually changes.
+                //
+                // Per-arg validation mirrors `remove_method`:
+                //   - Symbol: use sid directly.
+                //   - String: route through with_str_lossy + the
+                //     `Config::max_symbols` cap (untrusted code
+                //     calling `undef_method("dyn_#{i}")` in a loop
+                //     must not grow the interner past the cap).
+                //   - Anything else: raise TypeError (CRuby parity
+                //     and consistency with remove_method).
                 for arg in args {
-                    let sid_opt: Option<crate::intern::SymId> = match arg {
-                        Value::Sym(sid) => Some(*sid),
-                        Value::Str(s) => s.with_str_lossy(|raw| Some(self.interner.intern(raw))),
-                        _ => None,
+                    let sid: SymId = match arg {
+                        Value::Sym(sid) => *sid,
+                        Value::Str(s) => match s.with_str_lossy(|raw| -> Result<SymId, Trap> {
+                            if let Some(max) = self.max_symbols
+                                && !self.interner.contains(raw)
+                                && self.interner.len() >= max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("interner exhausted: {} symbols", max),
+                                }));
+                            }
+                            Ok(self.interner.intern(raw))
+                        }) {
+                            Ok(sid) => sid,
+                            Err(trap) => return Err(trap),
+                        },
+                        other => {
+                            let inspected = other.to_inspect(&self.heap, &self.interner);
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: format!("{} is not a symbol nor a string", inspected),
+                            }));
+                        }
                     };
-                    if let Some(sid) = sid_opt {
-                        self.fire_method_lifecycle_hook(&cls, "method_undefined", sid)?;
-                    }
+                    self.fire_method_lifecycle_hook(&cls, "method_undefined", sid)?;
                 }
                 self.stack.push(Value::Class(cls));
                 Ok(true)
