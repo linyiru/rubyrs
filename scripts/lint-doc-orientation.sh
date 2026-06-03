@@ -19,8 +19,12 @@
 # OTHER. Flag both sites for review.
 #
 # False positives are possible (legitimate cross-references in
-# docs). Annotate with `// allow: doc-orientation` on the line
-# above the `pub fn` declaration to suppress.
+# docs). Suppress with `// allow: doc-orientation` in either:
+#   1. As a trailing comment on the `pub fn` declaration line,
+#      e.g. `pub(crate) fn X(...) { // allow: doc-orientation`.
+#   2. On the line directly above the `///` doc block (so the
+#      `///` stays adjacent to the fn — putting it between
+#      breaks the doc attachment we are trying to verify).
 #
 # Run from repo root. Scans crates/rubyrs/src/.
 #
@@ -75,16 +79,17 @@ for path in sorted(glob.glob(f'{root}/**/*.rs', recursive=True)):
         if not doc_lines:
             continue
         doc_text = ''.join(doc_lines)
-        # Allow-list opt-out: `// allow: doc-orientation` on the
-        # line just above the fn (i.e. after the doc block).
-        for ann_line in lines[i:i+1]:
-            if allow_re.search(ann_line):
-                doc_text = ''  # skip
-                break
-        # Also accept the annotation directly above the doc block.
+        # Allow-list opt-out — two suppression sites:
+        #   (a) trailing `// allow: doc-orientation` on the
+        #       `pub fn` declaration line itself; or
+        #   (b) `// allow: doc-orientation` on the line directly
+        #       above the `///` doc block.
+        # Putting it BETWEEN the doc and the fn would break the
+        # rustdoc attachment we are trying to verify, so we do
+        # NOT accept that placement.
+        if allow_re.search(lines[i]):
+            continue
         if j >= 0 and allow_re.search(lines[j]):
-            doc_text = ''
-        if not doc_text:
             continue
         # Look for `self.OTHER(` references where OTHER is a fn
         # defined in this file and OTHER != fn_name.
