@@ -975,7 +975,17 @@ jobs:
         # the deterministic subset (flat Hash with primitives)
         # the fixture exercises.
         run: |
-          gem install webrick sinatra
+          # `puma` + `rackup` are required by Sinatra 4.2.x's
+          # default server stack ("Sinatra could not start, the
+          # required gems weren't found! Add them to your bundle
+          # with: bundle add rackup puma"). Earlier Sinatra
+          # versions defaulted to WEBrick alone; 4.2 made the
+          # rackup + puma pair the default server. Without these
+          # the four Sinatra-shape fixtures (sinatra_hello /
+          # sinatra_plugin_smoke / sinatra_register_smoke /
+          # sinatra_jsonp_smoke) all fail their boot probe with
+          # the gems-missing error before serving any request.
+          gem install webrick sinatra puma rackup
           gem install activesupport -v 8.0.1
           gem install sqlite3
           gem install multi_json
