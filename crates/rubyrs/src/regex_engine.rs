@@ -193,6 +193,97 @@ impl CompiledRegex {
             CompiledRegex::Fancy(r) => r.replace_all(haystack, replacement),
         }
     }
+
+    /// Collect match positions + per-group spans, eagerly, in
+    /// engine-agnostic owned form. Used by
+    /// `String#split(regex[, limit])` so the split walker can
+    /// operate independently of which engine produced the
+    /// matches (`regex::Captures` and `fancy_regex::Captures`
+    /// are distinct lifetime-bound types).
+    ///
+    /// `max_matches` bounds the collection: `Some(n)` stops
+    /// after the n-th match (callers pass `Some(limit-1)` for
+    /// `split(re, limit)` with positive limit so the engine
+    /// walk short-circuits — `"a,b,c,...,z".split(/,/, 2)`
+    /// finds exactly one match and bails). `None` collects all.
+    /// Pre-existing call sites that want all matches pass
+    /// `None`. Code-review #357 round 1.
+    ///
+    /// fancy-regex's `captures_iter` yields `Result<Captures>`;
+    /// we stop iteration on the first error (same swallow
+    /// rationale as `is_match`'s wrapper — adversarial
+    /// recursion-limit hits would otherwise need to plumb
+    /// Result through every split call site). For the
+    /// lookahead-only patterns that motivated layer #17
+    /// (sinatra's `cleaned_caller`) this never fires.
+    pub(crate) fn split_matches(
+        &self,
+        haystack: &str,
+        max_matches: Option<usize>,
+    ) -> Vec<SplitMatch> {
+        // Sanity cap on the preallocation. `max_matches` can
+        // arrive as `usize::MAX` when an oversized Ruby
+        // \`limit\` saturates the \`try_from\` conversion at
+        // the call site; `Vec::with_capacity(usize::MAX)`
+        // would OOM/panic before any matching occurs. 64 is
+        // a generous hint for the common case (most splits
+        // produce single-digit matches); we'll grow naturally
+        // for legitimately large match counts. Code-review
+        // #357 round 2.
+        const CAP_HINT_MAX: usize = 64;
+        let cap = max_matches.unwrap_or(0).min(CAP_HINT_MAX);
+        let mut out: Vec<SplitMatch> = Vec::with_capacity(cap);
+        // Bound the iterator with `.take(bound)` so the engine
+        // stops searching for the next match BEFORE we'd
+        // reject it — the previous loop pulled one extra match
+        // per call (engine work + ObjectIds + allocation) only
+        // to discard it. \`usize::MAX\` is effectively
+        // unbounded for the \`None\` case. Code-review #357
+        // round 6.
+        let bound = max_matches.unwrap_or(usize::MAX);
+        match self {
+            CompiledRegex::Native(r) => {
+                for caps in r.captures_iter(haystack).take(bound) {
+                    if let Some(m0) = caps.get(0) {
+                        let range = (m0.start(), m0.end());
+                        let groups: Vec<Option<(usize, usize)>> = (1..caps.len())
+                            .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
+                            .collect();
+                        out.push(SplitMatch { range, groups });
+                    }
+                }
+            }
+            CompiledRegex::Fancy(r) => {
+                for caps_res in r.captures_iter(haystack).take(bound) {
+                    let caps = match caps_res {
+                        Ok(c) => c,
+                        Err(_) => break,
+                    };
+                    if let Some(m0) = caps.get(0) {
+                        let range = (m0.start(), m0.end());
+                        let groups: Vec<Option<(usize, usize)>> = (1..caps.len())
+                            .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
+                            .collect();
+                        out.push(SplitMatch { range, groups });
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// One match for `String#split(regex)`: the full match span
+/// plus per-capture-group spans. Spans are byte offsets into
+/// the haystack. Owned (Vec of tuples) so the dispatch logic
+/// doesn't carry the engine-specific `Captures` lifetime.
+/// `groups[i]` is the byte span of group i+1 (1-indexed in
+/// Ruby semantics); `None` for groups that didn't participate
+/// in this match (e.g. an unmatched `|` arm).
+#[derive(Debug, Clone)]
+pub(crate) struct SplitMatch {
+    pub(crate) range: (usize, usize),
+    pub(crate) groups: Vec<Option<(usize, usize)>>,
 }
 
 /// Hand-rolled because `regex::Regex` and `fancy_regex::Regex`

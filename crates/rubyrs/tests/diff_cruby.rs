@@ -268,6 +268,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn array_assign_slice() { run_diff("array_assign_slice"); }
 #[cfg(feature = "regex")]
 #[test] fn regex_lookaround() { run_diff("regex_lookaround"); }
+#[cfg(feature = "regex")]
+#[test] fn string_split_regex() { run_diff("string_split_regex"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
 #[test] fn user_sort() { run_diff("user_sort"); }
 #[test] fn hash_enumerable() { run_diff("hash_enumerable"); }
