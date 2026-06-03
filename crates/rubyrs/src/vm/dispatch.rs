@@ -3367,23 +3367,23 @@ impl Vm {
                         }));
                     }
                     any_removed = true;
+                    // Bump `method_gen` BEFORE firing the hook so
+                    // any inline-cache-backed dispatch inside the
+                    // user-defined `method_removed` body sees the
+                    // mutation. Without the pre-fire bump, the hook
+                    // could still observe (and re-invoke) the just-
+                    // removed method through a stale cached entry.
+                    // The bump also covers the hook-raise path: an
+                    // exception propagates with caches already
+                    // invalidated, so any rescue downstream is
+                    // safe.
+                    //
                     // `method_removed(name)` fires per successful
                     // removal — CRuby invokes it once for each
-                    // Symbol the user passed, in arg order. If the
-                    // user-defined hook itself raises, the method
-                    // table has already been mutated so we MUST
-                    // bump `method_gen` before propagating —
-                    // otherwise inline caches keep returning the
-                    // stale entry after the exception is rescued.
-                    if let Err(trap) = self.fire_method_lifecycle_hook(&cls, "method_removed", sid) {
-                        self.method_gen = self.method_gen.wrapping_add(1);
-                        return Err(trap);
-                    }
+                    // Symbol the user passed, in arg order.
+                    self.method_gen = self.method_gen.wrapping_add(1);
+                    self.fire_method_lifecycle_hook(&cls, "method_removed", sid)?;
                 }
-                // Bump `method_gen` once even for variadic calls —
-                // inline caches see a single coarse generation
-                // bump rather than per-method invalidation.
-                self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Class(cls));
                 Ok(true)
             }
