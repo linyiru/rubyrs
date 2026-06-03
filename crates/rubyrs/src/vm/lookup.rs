@@ -1636,7 +1636,20 @@ impl Vm {
                         | "singleton_method_removed" | "method_undefined"
                         | "singleton_method_undefined",
                 );
-                if is_no_super && is_lifecycle_hook {
+                // Restrict the no-op to Class/Module singleton-hook
+                // contexts only. If `self` is anything else (e.g. an
+                // ordinary user object whose author happened to name
+                // an instance method `included`), preserve CRuby
+                // semantics and propagate the NoMethodError. Modules
+                // are also represented by `Value::Class` (with an
+                // `is_module` flag), so a single arm covers both.
+                // Code-review #363 round 2.
+                let on_class_or_module = self
+                    .frames
+                    .last()
+                    .map(|f| matches!(f.self_val, Value::Class(_)))
+                    .unwrap_or(false);
+                if is_no_super && is_lifecycle_hook && on_class_or_module {
                     self.stack.push(Value::Nil);
                     Ok(())
                 } else {

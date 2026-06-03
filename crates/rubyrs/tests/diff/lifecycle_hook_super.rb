@@ -33,11 +33,15 @@ class A2
 end
 class B2 < A2; end
 
-## Shape 3: multi-level inherited chain — each class in the
-## chain has its own `inherited` override that calls super,
-## walking up through TopA → MidA → LowA → C → no-op default.
+## Shape 3: multi-level inherited chain — `Leaf < LowA < MidA
+## < TopA`, with `LowA`, `MidA`, `TopA` each overriding
+## `inherited` and calling super. When `class Leaf < LowA` is
+## defined Ruby fires `inherited` starting at the direct
+## superclass (`LowA`) and each level's `super` walks one step
+## upward (LowA → MidA → TopA → Class no-op default).
 ## Code-review #363 round 1 caught the original Shape 3 only
-## exercising a single class without an actual chain.
+## exercising a single class without an actual chain; round 2
+## tightened the comment to describe the walk direction.
 $shape3_log = []
 class TopA
   def self.inherited(sub)
@@ -121,3 +125,23 @@ rescue NoMethodError => e
   e.message.include?("super: no superclass method") ? "no-method-trapped" : "other"
 end
 puts "shape6=#{err}"
+
+## Shape 7: regression — an ordinary user object whose author
+## happened to name an instance method one of the lifecycle
+## names (`included`, `inherited`, etc.) must STILL get
+## NoMethodError when its `super` call walks off the chain.
+## The intercept is scoped to Class/Module receivers; for a
+## plain object the no-op default doesn't apply.
+## Code-review #363 round 2.
+err = begin
+  class P7
+    def included(arg)  # instance method, NOT Module#included
+      super
+    end
+  end
+  P7.new.included(:dummy)
+  "no-raise"
+rescue NoMethodError => e
+  e.message.include?("super: no superclass method") ? "no-method-trapped" : "other"
+end
+puts "shape7=#{err}"
