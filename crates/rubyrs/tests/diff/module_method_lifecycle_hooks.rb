@@ -52,7 +52,7 @@ class E
 end
 puts "E done"
 
-# (6) Hook receiver is the class itself — `self == C` inside.
+# (6) Hook receiver is the class itself — `self == F` inside.
 class F
   def self.method_added(name)
     puts "self == F: #{self == F}"

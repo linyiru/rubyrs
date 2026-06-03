@@ -2191,8 +2191,7 @@ impl Vm {
                                 let synth = self.synth_primitive_forwarder(forwarder_cls, old_id);
                                 cls.install_method(new_id, synth);
                                 self.method_gen = self.method_gen.wrapping_add(1);
-                                let cls_clone = cls.clone();
-                                self.fire_method_lifecycle_hook(&cls_clone, "method_added", new_id)?;
+                                self.fire_method_lifecycle_hook(cls, "method_added", new_id)?;
                                 self.stack.push(Value::Nil);
                                 return Ok(true);
                             }

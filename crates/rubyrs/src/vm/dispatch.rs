@@ -3315,15 +3315,17 @@ impl Vm {
                 // probes are benign feature-detects;
                 // `remove_method` is a mutation).
                 //
-                // `any_removed` lets each error-return path bump
-                // `method_gen` so a half-completed variadic call
-                // doesn't leave inline caches stale on the
-                // already-removed methods.
-                let mut any_removed = false;
+                // No \`any_removed\` tracking needed: each
+                // successful removal bumps `method_gen` before
+                // firing its hook (see the pre-fire bump below),
+                // so a half-completed variadic call has already
+                // invalidated inline caches for everything it
+                // removed by the time any later arg's
+                // type/missing-method error path runs.
                 for arg in args {
                     let sid: SymId = match arg {
                         Value::Sym(sid) => *sid,
-                        Value::Str(s) => match s.with_str_lossy(|raw| -> Result<SymId, Trap> {
+                        Value::Str(s) => s.with_str_lossy(|raw| -> Result<SymId, Trap> {
                             if let Some(max) = self.max_symbols
                                 && !self.interner.contains(raw)
                                 && self.interner.len() >= max {
@@ -3332,20 +3334,9 @@ impl Vm {
                                 }));
                             }
                             Ok(self.interner.intern(raw))
-                        }) {
-                            Ok(sid) => sid,
-                            Err(trap) => {
-                                if any_removed {
-                                    self.method_gen = self.method_gen.wrapping_add(1);
-                                }
-                                return Err(trap);
-                            }
-                        },
+                        })?,
                         other => {
                             let inspected = other.to_inspect(&self.heap, &self.interner);
-                            if any_removed {
-                                self.method_gen = self.method_gen.wrapping_add(1);
-                            }
                             return Err(self.trap(RubyError::TypeError {
                                 msg: format!("{} is not a symbol nor a string", inspected),
                             }));
@@ -3356,9 +3347,6 @@ impl Vm {
                     // mutation in one hash lookup + one
                     // `borrow_mut()`.
                     if cls.methods.borrow_mut().remove(&sid).is_none() {
-                        if any_removed {
-                            self.method_gen = self.method_gen.wrapping_add(1);
-                        }
                         // Resolve name only on the rare missing
                         // path. Free for the common case.
                         let name_for_msg = self.interner.resolve(sid).to_string();
@@ -3366,7 +3354,6 @@ impl Vm {
                             msg: format!("method '{}' not defined in {}", name_for_msg, cls.name),
                         }));
                     }
-                    any_removed = true;
                     // Bump `method_gen` BEFORE firing the hook so
                     // any inline-cache-backed dispatch inside the
                     // user-defined `method_removed` body sees the
