@@ -1961,6 +1961,7 @@ impl Vm {
                             visibility: std::cell::Cell::new(Visibility::Public),
                             closure: m.closure.clone(),
                             builtin: m.builtin.clone(),
+                            original_name: m.original_name,
                         });
                         cls.singleton_methods.borrow_mut().insert(name_id, singleton_copy);
                     }

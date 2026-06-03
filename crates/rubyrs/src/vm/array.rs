@@ -620,6 +620,156 @@ impl Vm {
                         a[idx] = v.clone();
                         Some(v.clone())
                     }
+                    // `a[start, length] = value` — splice assignment.
+                    // CRuby semantics (verified via `ruby -e`):
+                    //   - `value` Array: contents replace the slice
+                    //   - `value` non-Array: wraps as single-element
+                    //     replacement
+                    //   - Negative `start` wraps from end; if still
+                    //     too negative → IndexError ("index N too
+                    //     small for array; minimum: -L")
+                    //   - Negative `length` → IndexError
+                    //     ("negative length (N)") — note this is
+                    //     IndexError, NOT the nil-return of the read
+                    //     form
+                    //   - `start > len`: pad with Nil between current
+                    //     len and start, then insert
+                    //   - `length` clamps at `len - start`
+                    //   - Returns the assigned `value` as-is (Ruby
+                    //     `a[1, 2] = [9, 8]` expression value is the
+                    //     [9, 8] Array, not the array's contents)
+                    ("[]=", [Value::Int(start), Value::Int(length), v]) => {
+                        let len = self.heap.array(id).len() as i64;
+                        let s = if *start < 0 { len + *start } else { *start };
+                        let l = *length;
+                        if s < 0 {
+                            return Err(self.trap(RubyError::IndexError {
+                                msg: format!(
+                                    "index {} too small for array; minimum: -{}",
+                                    start, len,
+                                ),
+                            }));
+                        }
+                        if l < 0 {
+                            return Err(self.trap(RubyError::IndexError {
+                                msg: format!("negative length ({})", l),
+                            }));
+                        }
+                        // Snapshot the replacement values BEFORE
+                        // mutably borrowing the receiver Array.
+                        // Wrap non-Array values in a single-element
+                        // Vec — CRuby's "[]= with non-Array value
+                        // means replace with this single element".
+                        let new_vals: Vec<Value> = match v {
+                            Value::Array(vid) if *vid != id => {
+                                self.heap.array(*vid).clone()
+                            }
+                            Value::Array(_) => {
+                                // Aliasing: assigning a slice OF the
+                                // same Array. Clone the snapshot to
+                                // break the borrow before the splice.
+                                self.heap.array(id).clone()
+                            }
+                            other => vec![other.clone()],
+                        };
+                        let s_u = s as usize;
+                        let end_idx = ((s + l) as usize).min(self.heap.array(id).len());
+                        // Same cap check as the 1-arg form. The
+                        // post-splice length is start + new_vals.len()
+                        // + (current_len - end_idx).
+                        let cur_len = self.heap.array(id).len();
+                        let tail_len = cur_len.saturating_sub(end_idx);
+                        let needed_len = s_u
+                            .saturating_add(new_vals.len())
+                            .saturating_add(tail_len);
+                        if let Some(max) = self.max_value_bytes
+                            && needed_len.saturating_mul(std::mem::size_of::<Value>()) > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("Array []= would exceed {max} bytes"),
+                                }));
+                            }
+                        let a = self.heap.array_mut(id);
+                        // Pad with Nil if start is past current end.
+                        while a.len() < s_u { a.push(Value::Nil); }
+                        let splice_end = end_idx.max(s_u).min(a.len());
+                        a.splice(s_u..splice_end, new_vals);
+                        Some(v.clone())
+                    }
+                    // `a[range] = value` — Range-form splice assignment.
+                    // Same semantics as the two-arg form, with
+                    // begin/end resolved from the Range (nil bounds,
+                    // exclusive flag, negative wrapping all match
+                    // the read-side `a[range]` arm above).
+                    //
+                    // CRuby quirk: `a[begin..end] = v` where begin > end
+                    // (after wrap) is INSERT-at-begin without removing,
+                    // not a no-op. E.g. `a = [1,2,3,4,5]; a[1..0] = [9, 9]`
+                    // gives `[1, 9, 9, 2, 3, 4, 5]` (length 0 splice at
+                    // idx 1). Our normalisation produces `length = 0`
+                    // for that shape, which the two-arg semantics
+                    // already handle correctly.
+                    ("[]=", [Value::Range(rid), v]) => {
+                        let r = self.heap.range(*rid);
+                        let r_begin = r.begin.clone();
+                        let r_end = r.end.clone();
+                        let r_exclusive = r.exclusive;
+                        let len = self.heap.array(id).len() as i64;
+                        let begin = match r_begin {
+                            Value::Nil => 0,
+                            Value::Int(b) => if b < 0 { len + b } else { b },
+                            other => return Err(self.trap(RubyError::TypeError {
+                                msg: format!("no implicit conversion of {} into Integer", other.type_name()),
+                            })),
+                        };
+                        let end_idx = match r_end {
+                            Value::Nil => len - 1,
+                            Value::Int(e) => {
+                                let resolved = if e < 0 { len + e } else { e };
+                                if r_exclusive { resolved - 1 } else { resolved }
+                            }
+                            other => return Err(self.trap(RubyError::TypeError {
+                                msg: format!("no implicit conversion of {} into Integer", other.type_name()),
+                            })),
+                        };
+                        if begin < 0 {
+                            return Err(self.trap(RubyError::RangeError {
+                                msg: format!("{}..{} out of range", begin, end_idx),
+                            }));
+                        }
+                        // Derive the equivalent two-arg `length`:
+                        // - If end_idx < begin: zero-length insert at
+                        //   begin (CRuby's `a[1..0] = ...` insert
+                        //   semantics).
+                        // - Otherwise: `end_idx - begin + 1` covers
+                        //   the inclusive range; over-len gets clamped
+                        //   by the splice arm below.
+                        let length = if end_idx < begin { 0 } else { end_idx - begin + 1 };
+                        let new_vals: Vec<Value> = match v {
+                            Value::Array(vid) if *vid != id => {
+                                self.heap.array(*vid).clone()
+                            }
+                            Value::Array(_) => self.heap.array(id).clone(),
+                            other => vec![other.clone()],
+                        };
+                        let s_u = begin as usize;
+                        let cur_len = self.heap.array(id).len();
+                        let end_clamp = ((begin + length) as usize).min(cur_len);
+                        let tail_len = cur_len.saturating_sub(end_clamp);
+                        let needed_len = s_u
+                            .saturating_add(new_vals.len())
+                            .saturating_add(tail_len);
+                        if let Some(max) = self.max_value_bytes
+                            && needed_len.saturating_mul(std::mem::size_of::<Value>()) > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("Array []= would exceed {max} bytes"),
+                                }));
+                            }
+                        let a = self.heap.array_mut(id);
+                        while a.len() < s_u { a.push(Value::Nil); }
+                        let splice_end = end_clamp.max(s_u).min(a.len());
+                        a.splice(s_u..splice_end, new_vals);
+                        Some(v.clone())
+                    }
                     ("first", []) => Some(self.heap.array(id).first().cloned().unwrap_or(Value::Nil)),
                     // `arr.first(n)` / `arr.last(n)` — CRuby returns a
                     // new Array of up to `n` elements (capped at the
