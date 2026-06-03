@@ -913,15 +913,20 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         return sp(node, Expr::ConstRead(cid_to_string(n.name())));
     }
     if let Some(n) = node.as_constant_path_node() {
-        // Spike scope: a `Foo::Bar::Baz` ConstantPath translates to
-        // a single ConstRead with the joined name. No real
-        // module nesting; C extensions and `class` definitions that
-        // wire up "BCrypt::Engine"-style classes must register them
-        // under the joined name for this lookup to find them.
-        // Real module scope resolution lands when we add the
-        // `module` keyword to the language.
+        // A `Foo::Bar::Baz` ConstantPath translates to a single
+        // ConstRead with the joined name. Real module scope
+        // resolution lives in `build_const_chain` at compile time:
+        // for relative paths, it cref-walks the first segment; for
+        // absolute paths (`::Foo::Bar`), we keep a leading `::`
+        // marker so the compiler can skip the cref walk and look up
+        // exactly the joined name at top level (CRuby semantics).
         if let Some(joined) = flatten_constant_path(node) {
-            return sp(node, Expr::ConstRead(joined));
+            let name = if is_constant_path_absolute(node) {
+                format!("::{}", joined)
+            } else {
+                joined
+            };
+            return sp(node, Expr::ConstRead(name));
         }
         // Dynamic path (rare): trailing-name fallback, matches the
         // existing rescue-clause behaviour at line ~378.
@@ -1301,9 +1306,15 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         //
         // Strict read — matches the bare `FOO += 1` arm above:
         // CRuby raises NameError before the operator runs on an
-        // undefined constant.
+        // undefined constant. The read's name carries the `::`
+        // marker when the path is absolute so the compiler's
+        // ConstRead fast path emits a flat top-level LoadConst
+        // (no cref-walk); the write side keeps the bare joined
+        // name + `abs` flag because ConstWrite handles the
+        // class_path-alias decision separately.
         let mut make = |name: String, abs: bool| {
-            let read = sp(node, Expr::ConstRead(name.clone()));
+            let read_name = if abs { format!("::{}", name) } else { name.clone() };
+            let read = sp(node, Expr::ConstRead(read_name));
             let rhs = sp(node, Expr::Call {
                 receiver: Some(Box::new(read)),
                 name: op.clone(),
@@ -1320,10 +1331,14 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_constant_path_or_write_node() {
         let target = n.target();
         let absolute = is_constant_path_absolute(&target.as_node());
-        // See ConstantPathOperatorWriteNode arm for the `abs`
-        // override rationale on the dynamic-head fallback.
+        // See ConstantPathOperatorWriteNode arm above for the
+        // read-name vs write-name split rationale (read carries
+        // the `::` marker for absolute paths so `||=` short-
+        // circuits on the TOP-LEVEL value, not on a same-named
+        // inner shadow).
         let mut make = |name: String, abs: bool| {
-            let read = sp(node, Expr::ConstReadOrNil(name.clone()));
+            let read_name = if abs { format!("::{}", name) } else { name.clone() };
+            let read = sp(node, Expr::ConstReadOrNil(read_name));
             let write = sp(node, Expr::ConstWrite(name, abs, Box::new(tr(ctx, &n.value()))));
             sp(node, Expr::Or(Box::new(read), Box::new(write)))
         };
@@ -1337,11 +1352,13 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_constant_path_and_write_node() {
         let target = n.target();
         let absolute = is_constant_path_absolute(&target.as_node());
-        // Strict read — matches the bare `FOO &&= ...` arm above:
-        // CRuby has no lazy-init shortcut for `&&=`; undefined
-        // constants raise NameError on the read.
+        // Same read/write split as the OperatorWrite arm: read's
+        // name carries the `::` marker for absolute paths so
+        // `&&=` short-circuits on the top-level constant rather
+        // than on a cref-walked inner shadow.
         let mut make = |name: String, abs: bool| {
-            let read = sp(node, Expr::ConstRead(name.clone()));
+            let read_name = if abs { format!("::{}", name) } else { name.clone() };
+            let read = sp(node, Expr::ConstRead(read_name));
             let write = sp(node, Expr::ConstWrite(name, abs, Box::new(tr(ctx, &n.value()))));
             sp(node, Expr::And(Box::new(read), Box::new(write)))
         };
@@ -2406,22 +2423,32 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // `interner.intern("M::MP")` slot that `LoadConst("M::MP")`
         // later reads.
         //
-        // KNOWN GAP: `flatten_constant_path` (and its `None =>
-        // Some(name)` arm) loses leading-`::` (absolute-path)
-        // information across ALL callers, not just this one.
-        // Effect on superclass: in a nested scope, `class C <
-        // ::Bar` flattens to `"Bar"`, and the cref-walking
-        // `LoadConstChain` built for bare-name lookups in
-        // `compiler.rs` resolves it as `Wrapper::Bar` first,
-        // instead of forcing top-level `Bar` per CRuby semantics.
-        // Pre-existing gap shared with const reads / rescue classes
-        // / etc. — not introduced by this PR; deferred until a
-        // caller surfaces a real failure on it.
+        // Absolute-path handling: callers that need to preserve
+        // leading `::` (this site + the ConstantPathNode →
+        // ConstRead lowering at line ~915) consult
+        // `is_constant_path_absolute` and prefix the flattened
+        // name with `::` so the compiler emits a flat LoadConst
+        // and skips cref-walk. `flatten_constant_path` itself
+        // still drops the marker — that's intentional, since
+        // most other consumers want the bare joined name. Each
+        // caller decides whether absolute info matters.
         let superclass = n.superclass().and_then(|s| {
             if let Some(cr) = s.as_constant_read_node() {
                 Some(cid_to_string(cr.name()))
             } else if s.as_constant_path_node().is_some() {
-                flatten_constant_path(&s)
+                // Mirror the ConstantPathNode → Expr::ConstRead
+                // marker convention: prefix absolute paths with
+                // `::` so the compiler emits flat LoadConst and
+                // skips cref-walk. Without this, `class C < ::Foo`
+                // inside `module Wrapper` would walk a chain that
+                // includes `Wrapper::Foo` and incorrectly prefer
+                // the inner namespace over top-level `Foo`.
+                let joined = flatten_constant_path(&s)?;
+                if is_constant_path_absolute(&s) {
+                    Some(format!("::{}", joined))
+                } else {
+                    Some(joined)
+                }
             } else {
                 None
             }

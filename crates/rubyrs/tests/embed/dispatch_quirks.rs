@@ -121,7 +121,7 @@ fn alias_method_raises_name_error_when_source_missing() {
     // ("undefined method ...") when alias_method's source name
     // doesn't resolve. Previously we raised NoMethodError with a
     // misleading `recv_type: "Class"`.
-    let mut rt = Runtime::new();
+    let (mut rt, _buf) = rt_with_buf();
     let err = rt.eval(r#"
         class Foo
           alias_method :a, :nonexistent
@@ -218,7 +218,7 @@ fn method_missing_inherited_through_superclass() {
 
 #[test]
 fn missing_without_method_missing_still_raises() {
-    let mut rt = Runtime::new();
+    let (mut rt, _buf) = rt_with_buf();
     let err = rt.eval(r#"
         class Empty; end
         Empty.new.missing_method
@@ -294,7 +294,7 @@ fn respond_to_agrees_with_defined_for_host_fns() {
 
 #[test]
 fn define_method_validates_arity() {
-    let mut rt = Runtime::new();
+    let (mut rt, _buf) = rt_with_buf();
     let err = rt.eval(r#"
         class Foo
           define_method(:two) { |a, b| a + b }
@@ -304,3 +304,154 @@ fn define_method_validates_arity() {
     assert!(err.err.is("ArgumentError"), "expected ArgumentError, got {:?}", err.err);
 }
 
+
+#[test]
+fn const_path_chained_lookup_from_nested_module() {
+    // Regression for the const-resolution gap that blocked `require
+    // 'rack/utils'` (rack 3.1.10). `QueryParser::Inner` inside
+    // `module Rack::Utils` should cref-walk the head `QueryParser`
+    // → `Rack::QueryParser`, then look up `Inner` inside it.
+    // Pre-fix `build_const_chain` returned None whenever `bare`
+    // contained `::`, so the compiler emitted a flat `LoadConst`
+    // that ignored cref-walking and missed the registered joined
+    // name. Fix: split at the first `::`, cref-walk the head, then
+    // append the tail to every chain entry.
+    let (mut rt, buf) = rt_with_buf();
+    rt.eval(r#"
+        module Foo
+          class QueryParser
+            class Inner < TypeError
+            end
+          end
+          module Utils
+            InnerAlias = QueryParser::Inner
+          end
+        end
+        puts Foo::Utils::InnerAlias
+        puts Foo::Utils::InnerAlias.ancestors.first(2).inspect
+    "#, "const_chain.rb").expect("eval");
+    let out = buf.snapshot();
+    let trimmed = out.trim();
+    assert_eq!(
+        trimmed,
+        "Foo::QueryParser::Inner\n[Foo::QueryParser::Inner, TypeError]",
+        "got: {:?}",
+        trimmed,
+    );
+}
+
+#[test]
+fn absolute_const_path_skips_cref_walk() {
+    // Copilot review on PR #355: with the chained-const-path fix
+    // for relative paths (`QueryParser::Inner`), absolute paths
+    // (`::Foo::Bar`) must NOT cref-walk — they should look up
+    // exactly the top-level joined name. Pre-fix `::Outer` inside
+    // `module Wrapper` would match `Wrapper::Outer` first before
+    // falling through to top-level `Outer`. CRuby semantics:
+    // leading `::` forces top-level resolution.
+    let (mut rt, buf) = rt_with_buf();
+    rt.eval(r#"
+        class Outer
+        end
+        module Wrapper
+          class Outer
+            class Inner
+            end
+          end
+          TopOuter = ::Outer
+          WrapperOuter = Outer
+        end
+        puts Wrapper::TopOuter
+        puts Wrapper::WrapperOuter
+    "#, "abs_const.rb").expect("eval");
+    assert_eq!(
+        buf.snapshot().trim(),
+        "Outer\nWrapper::Outer",
+        "got: {:?}",
+        buf.snapshot(),
+    );
+}
+
+#[test]
+fn absolute_superclass_skips_cref_walk() {
+    // Copilot review cycle 3 on PR #355: the compiler now
+    // short-circuits `class Sub < ::Foo` on the leading `::`,
+    // but earlier the AST lowering for superclass constant paths
+    // dropped the absolute marker — meaning the fast path was
+    // unreachable. ast.rs now mirrors the ConstantPathNode →
+    // Expr::ConstRead convention (prefix with `::` for absolute).
+    //
+    // Regression case: `class Child < ::Outer` inside `module
+    // Wrapper` that ALSO defines `Outer`. CRuby: Child inherits
+    // from top-level `Outer` (not `Wrapper::Outer`). Pre-fix
+    // rubyrs walked the cref chain and matched `Wrapper::Outer`
+    // first.
+    let (mut rt, buf) = rt_with_buf();
+    rt.eval(r#"
+        class Outer
+        end
+        module Wrapper
+          class Outer
+          end
+          class Child < ::Outer
+          end
+        end
+        puts Wrapper::Child.superclass
+    "#, "abs_super.rb").expect("eval");
+    assert_eq!(
+        buf.snapshot().trim(),
+        "Outer",
+        "got: {:?}",
+        buf.snapshot(),
+    );
+}
+
+#[test]
+fn absolute_const_op_writes_skip_cref_walk() {
+    // /code-review on PR #355 caught a remaining gap: the three
+    // ConstantPath*WriteNode op-write arms (`+=`, `||=`, `&&=`) on
+    // an absolute path (`::Foo::Bar`) computed the `absolute` flag
+    // and threaded it into the ConstWrite but DROPPED it on the
+    // READ side. Inside a nested module shadowing the same name,
+    // `::Outer ||= x` would short-circuit on the inner shadow
+    // (cref-walked), never writing top-level.
+    //
+    // Fix: each op-write make-closure now formats `::{name}` for
+    // the read when absolute, letting the compiler's ConstRead
+    // strip-prefix fast path emit a flat top-level LoadConst.
+    //
+    // The probe uses distinct inner names (Inner1/2/3) so the
+    // independent pre-existing dual-write StoreConst-aliasing
+    // behavior (compiler.rs:1113) doesn't obscure the assertion.
+    let (mut rt, buf) = rt_with_buf();
+    rt.eval(r#"
+        # ||= — top-level undefined, must write top-level
+        module W1
+          Inner1 = "inner1"
+          ::Foo ||= "default"
+        end
+        puts Foo.inspect
+
+        # &&= — top-level defined, read top + write top
+        ::Bar = 100
+        module W2
+          Inner2 = 200
+          ::Bar &&= 999
+        end
+        puts Bar.inspect
+
+        # += — top-level defined, read top + write top
+        ::Baz = 10
+        module W3
+          Inner3 = 20
+          ::Baz += 1
+        end
+        puts Baz.inspect
+    "#, "abs_op_writes.rb").expect("eval");
+    assert_eq!(
+        buf.snapshot().trim(),
+        "\"default\"\n999\n11",
+        "got: {:?}",
+        buf.snapshot(),
+    );
+}

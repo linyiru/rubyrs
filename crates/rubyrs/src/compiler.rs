@@ -466,7 +466,12 @@ fn compile_class_arm(
     // the SURROUNDING lexical scope (not the child class's
     // scope).
     if let Some(parent) = superclass {
-        if let Some(chain) = build_const_chain(&b.class_path, parent, interner) {
+        // Absolute parent paths (`class Sub < ::Foo::Bar`) skip
+        // cref-walking — same shape as the ConstRead emit arms.
+        if let Some(absolute) = parent.strip_prefix("::") {
+            let id = interner.intern(absolute);
+            b.emit(Op::LoadConst(id));
+        } else if let Some(chain) = build_const_chain(&b.class_path, parent, interner) {
             let idx = b.const_chains.len() as u32;
             b.const_chains.push(chain);
             b.emit(Op::LoadConstChain(idx));
@@ -969,16 +974,60 @@ fn build_const_chain(
     bare: &str,
     interner: &mut crate::intern::Interner,
 ) -> Option<Vec<crate::intern::SymId>> {
-    if class_path.is_empty() || bare.contains("::") {
+    // Absolute paths (`::Foo::Bar`) must be filtered by the caller
+    // before reaching this function and emitted as a flat
+    // `Op::LoadConst` so they skip cref entirely (CRuby semantics).
+    // All three call sites do that — keep this debug_assert as the
+    // contract anchor in case a future caller forgets.
+    debug_assert!(
+        !bare.starts_with("::"),
+        "build_const_chain: caller must strip leading `::` and emit a flat const load directly (LoadConst / LoadConstOrNil)",
+    );
+    if class_path.is_empty() {
         return None;
     }
+    // Multi-segment `bare` (e.g. `QueryParser::Inner` from inside
+    // `Foo::Utils`): cref-walk only the FIRST segment, then append
+    // the rest verbatim to every chain entry. CRuby semantics:
+    //   `QueryParser::Inner` inside `Foo::Utils` resolves
+    //   `QueryParser` via cref (finds `Foo::QueryParser`), then
+    //   looks up `Inner` inside it. Since `vm.classes` is keyed by
+    //   joined-name, we approximate by trying each cref-prefixed
+    //   joined name (`Foo::Utils::QueryParser::Inner`,
+    //   `Foo::QueryParser::Inner`, `QueryParser::Inner`) in order.
+    // Pre-fix the `bare.contains("::")` guard returned None and the
+    // caller emitted a flat LoadConst that never matched the
+    // registered joined name — `Foo::QueryParser::Inner` was missed.
+    let (head, tail) = match bare.split_once("::") {
+        Some((h, t)) => (h, Some(t)),
+        None => (bare, None),
+    };
+    // Build each chain entry into a single `String` buffer to avoid
+    // the intermediate `head_qualified` alloc per cref level.
+    let join = |prefix: &str| -> String {
+        let cap = prefix.len()
+            + (if prefix.is_empty() { 0 } else { 2 })
+            + head.len()
+            + tail.map_or(0, |t| 2 + t.len());
+        let mut s = String::with_capacity(cap);
+        if !prefix.is_empty() {
+            s.push_str(prefix);
+            s.push_str("::");
+        }
+        s.push_str(head);
+        if let Some(t) = tail {
+            s.push_str("::");
+            s.push_str(t);
+        }
+        s
+    };
     let mut chain: Vec<crate::intern::SymId> =
         Vec::with_capacity(class_path.len() + 1);
     for i in (0..class_path.len()).rev() {
         let prefix = class_path[..=i].join("::");
-        chain.push(interner.intern(&format!("{}::{}", prefix, bare)));
+        chain.push(interner.intern(&join(&prefix)));
     }
-    chain.push(interner.intern(bare));
+    chain.push(interner.intern(&join("")));
     Some(chain)
 }
 
@@ -1240,12 +1289,19 @@ pub(crate) fn compile_expr(
             b.emit(Op::StoreCvar(id));
         }
         Expr::ConstRead(name) => {
+            // Absolute paths (`::Foo::Bar`, marked with a leading
+            // `::`) skip cref entirely — emit a flat LoadConst with
+            // the stripped name so we avoid the const_chains entry
+            // and the runtime Vec clone that LoadConstChain pays.
+            if let Some(absolute) = name.strip_prefix("::") {
+                let id = interner.intern(absolute);
+                b.emit(Op::LoadConst(id));
             // Inside a non-empty class/module scope, emit a cref-
             // walking lookup so `Bar` inside `module Foo; ... end`
             // resolves to `Foo::Bar` first and falls back through
             // outer scopes to the bare top-level name. Top-level
             // reads stay on the plain `LoadConst` path.
-            if let Some(chain) = build_const_chain(&b.class_path, name, interner) {
+            } else if let Some(chain) = build_const_chain(&b.class_path, name, interner) {
                 let idx = b.const_chains.len() as u32;
                 b.const_chains.push(chain);
                 b.emit(Op::LoadConstChain(idx));
@@ -1255,7 +1311,11 @@ pub(crate) fn compile_expr(
             }
         }
         Expr::ConstReadOrNil(name) => {
-            if let Some(chain) = build_const_chain(&b.class_path, name, interner) {
+            // Same absolute-path fast path as ConstRead above.
+            if let Some(absolute) = name.strip_prefix("::") {
+                let id = interner.intern(absolute);
+                b.emit(Op::LoadConstOrNil(id));
+            } else if let Some(chain) = build_const_chain(&b.class_path, name, interner) {
                 let idx = b.const_chains.len() as u32;
                 b.const_chains.push(chain);
                 b.emit(Op::LoadConstChainOrNil(idx));
