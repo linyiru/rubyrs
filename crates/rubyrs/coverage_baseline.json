@@ -9,7 +9,8 @@
     "crates/rubyrs/src/stdlib_vendor.rs": "behind the `stdlib` Cargo feature; default CI build excludes",
     "crates/rubyrs/src/vm/cext_wasi.rs": "cfg(target_os = \"wasi\") gated; only compiled on wasm32-wasip1, not on the Linux coverage runner",
     "crates/rubyrs/src/vm/fiber.rs": "behind the `_fiber` Cargo feature; the default CI coverage run uses default features (matches the http_server / stdlib pattern above)",
-    "crates/rubyrs/src/json_native.rs": "behind the `_json_native` Cargo feature (serde_json accelerator for the pure JSON canon, ADR 0019 Rule 6); default CI build excludes"
+    "crates/rubyrs/src/json_native.rs": "behind the `_json_native` Cargo feature (serde_json accelerator for the pure JSON canon, ADR 0019 Rule 6); default CI build excludes",
+    "crates/rubyrs/src/sqlite.rs": "behind the `_sqlite` Cargo feature (rusqlite + bundled libsqlite3 + SQLite3::Database/Statement surface, ADR 0027); default CI build excludes (same shape as http_server / stdlib / fiber / json_native above)"
   },
   "files": {
     "crates/rubund/src/main.rs": 0,
@@ -35,6 +36,7 @@
     "crates/rubyrs/src/lib.rs": 96,
     "crates/rubyrs/src/main.rs": 63,
     "crates/rubyrs/src/output.rs": 83,
+    "crates/rubyrs/src/regex_engine.rs": 65,
     "crates/rubyrs/src/signals.rs": 97,
     "crates/rubyrs/src/value.rs": 100,
     "crates/rubyrs/src/vm.rs": 91,
