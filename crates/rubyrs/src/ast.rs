@@ -2411,17 +2411,15 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // `interner.intern("M::MP")` slot that `LoadConst("M::MP")`
         // later reads.
         //
-        // KNOWN GAP: `flatten_constant_path` (and its `None =>
-        // Some(name)` arm) loses leading-`::` (absolute-path)
-        // information across ALL callers, not just this one.
-        // Effect on superclass: in a nested scope, `class C <
-        // ::Bar` flattens to `"Bar"`, and the cref-walking
-        // `LoadConstChain` built for bare-name lookups in
-        // `compiler.rs` resolves it as `Wrapper::Bar` first,
-        // instead of forcing top-level `Bar` per CRuby semantics.
-        // Pre-existing gap shared with const reads / rescue classes
-        // / etc. — not introduced by this PR; deferred until a
-        // caller surfaces a real failure on it.
+        // Absolute-path handling: callers that need to preserve
+        // leading `::` (this site + the ConstantPathNode →
+        // ConstRead lowering at line ~915) consult
+        // `is_constant_path_absolute` and prefix the flattened
+        // name with `::` so the compiler emits a flat LoadConst
+        // and skips cref-walk. `flatten_constant_path` itself
+        // still drops the marker — that's intentional, since
+        // most other consumers want the bare joined name. Each
+        // caller decides whether absolute info matters.
         let superclass = n.superclass().and_then(|s| {
             if let Some(cr) = s.as_constant_read_node() {
                 Some(cid_to_string(cr.name()))
