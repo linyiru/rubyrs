@@ -12,12 +12,13 @@
 #
 #     pub(crate) fn X(...) { ... }   <- undocumented
 #
-# RULE: for each `pub(crate) fn NAME` with a `///` doc block
-# directly above, if that doc text contains `self.OTHER(`
-# where `OTHER` is ANOTHER `pub(crate) fn` defined in the same
-# file (and OTHER != NAME), the doc was probably meant for
-# OTHER. Flag the doc-bearing (suspected mis-attached) site —
-# the report names OTHER so the fix site is obvious from grep.
+# RULE: for each `pub fn` / `pub(crate) fn NAME` with a `///`
+# doc block directly above, if that doc text contains
+# `self.OTHER(` where `OTHER` is ANOTHER `pub` (or
+# `pub(crate)`) fn defined in the same file (and OTHER !=
+# NAME), the doc was probably meant for OTHER. Flag the
+# doc-bearing (suspected mis-attached) site — the report names
+# OTHER so the fix site is obvious from grep.
 #
 # False positives are possible (legitimate cross-references in
 # docs). Suppress with `// allow: doc-orientation` in either:
@@ -64,15 +65,48 @@ for path in sorted(glob.glob(f'{root}/**/*.rs', recursive=True)):
         m = fn_re.match(line)
         if m:
             same_file_fns.add(m.group(1))
+    # Pre-pass: classify each line as 'attr' / 'doc' / 'blank' /
+    # 'other'. Multi-line attributes such as
+    #     #[cfg(any(
+    #         foo,
+    #         bar
+    #     ))]
+    # are folded into a single 'attr' span by tracking square
+    # bracket depth — without this, backward-scan would stop at
+    # the inner lines and miss the doc block above the attr,
+    # creating false negatives for exactly the kind of
+    # mis-attached doc this lint exists to catch.
+    klass = [None] * len(lines)
+    in_attr = False
+    attr_depth = 0
+    for idx, line in enumerate(lines):
+        s = line.strip()
+        if in_attr:
+            attr_depth += s.count('[') - s.count(']')
+            klass[idx] = 'attr'
+            if attr_depth <= 0:
+                in_attr = False
+        elif attr_re.match(line):
+            attr_depth = s.count('[') - s.count(']')
+            klass[idx] = 'attr'
+            if attr_depth > 0:
+                in_attr = True
+        elif doc_re.match(line):
+            klass[idx] = 'doc'
+        elif s == '':
+            klass[idx] = 'blank'
+        else:
+            klass[idx] = 'other'
     # Second pass — for each `pub fn NAME`, check doc text above.
     for i, line in enumerate(lines):
         m = fn_re.match(line)
         if not m:
             continue
         fn_name = m.group(1)
-        # Walk backward, skipping blanks and #[..] attributes.
+        # Walk backward, skipping blanks and attribute spans
+        # (single-line or multi-line, handled by the pre-pass).
         j = i - 1
-        while j >= 0 and (lines[j].strip() == '' or attr_re.match(lines[j])):
+        while j >= 0 and klass[j] in ('blank', 'attr'):
             j -= 1
         # Collect contiguous `///` lines (the doc block).
         doc_lines = []
