@@ -3369,8 +3369,16 @@ impl Vm {
                     any_removed = true;
                     // `method_removed(name)` fires per successful
                     // removal — CRuby invokes it once for each
-                    // Symbol the user passed, in arg order.
-                    self.fire_method_lifecycle_hook(&cls, "method_removed", sid)?;
+                    // Symbol the user passed, in arg order. If the
+                    // user-defined hook itself raises, the method
+                    // table has already been mutated so we MUST
+                    // bump `method_gen` before propagating —
+                    // otherwise inline caches keep returning the
+                    // stale entry after the exception is rescued.
+                    if let Err(trap) = self.fire_method_lifecycle_hook(&cls, "method_removed", sid) {
+                        self.method_gen = self.method_gen.wrapping_add(1);
+                        return Err(trap);
+                    }
                 }
                 // Bump `method_gen` once even for variadic calls —
                 // inline caches see a single coarse generation
