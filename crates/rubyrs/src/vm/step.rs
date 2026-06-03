@@ -1962,7 +1962,6 @@ impl Vm {
                             closure: m.closure.clone(),
                             original_name: m.original_name,
                             builtin: m.builtin.clone(),
-                            original_name: m.original_name,
                         });
                         cls.singleton_methods.borrow_mut().insert(name_id, singleton_copy);
                     }
@@ -1971,6 +1970,16 @@ impl Vm {
                 // Conservatively invalidate the inline cache — any previous
                 // cache entry could in theory be made stale by this definition.
                 self.method_gen = self.method_gen.wrapping_add(1);
+                // `Module#method_added(name)` — fires after the
+                // install lands. CRuby semantics: Rails / RSpec /
+                // many DSLs use this to auto-wrap freshly-defined
+                // methods. Toplevel defs are skipped today —
+                // CRuby fires `Object.method_added` there, but the
+                // hook needs a Class receiver and toplevel installs
+                // into `toplevel_methods` instead.
+                if let Some(cls) = self.class_stack.last().cloned() {
+                    self.fire_method_lifecycle_hook(&cls, "method_added", name_id)?;
+                }
                 self.stack.push(Value::Nil);
             }
             Op::DefSingletonMethod(name_id, p_idx) => {
@@ -2182,6 +2191,8 @@ impl Vm {
                                 let synth = self.synth_primitive_forwarder(forwarder_cls, old_id);
                                 cls.install_method(new_id, synth);
                                 self.method_gen = self.method_gen.wrapping_add(1);
+                                let cls_clone = cls.clone();
+                                self.fire_method_lifecycle_hook(&cls_clone, "method_added", new_id)?;
                                 self.stack.push(Value::Nil);
                                 return Ok(true);
                             }
@@ -2215,6 +2226,12 @@ impl Vm {
                     self.toplevel_methods.insert(new_id, m);
                 }
                 self.method_gen = self.method_gen.wrapping_add(1);
+                // `method_added(new_id)` fires for the alias install
+                // too — CRuby invokes the hook regardless of whether
+                // the install came from `def` or `alias`.
+                if let Some(cls) = self.class_stack.last().cloned() {
+                    self.fire_method_lifecycle_hook(&cls, "method_added", new_id)?;
+                }
                 self.stack.push(Value::Nil);
             }
             Op::AliasSingletonMethod(new_id, old_id) => {

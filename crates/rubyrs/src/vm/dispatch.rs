@@ -3216,8 +3216,22 @@ impl Vm {
                 self.stack.push(Value::Bool(answer));
                 Ok(true)
             }
-            ("undef_method", _) => {
-                // Tier 1 no-op. See docs/SUBSET.md.
+            ("undef_method", args) => {
+                // Removal itself is a Tier 1 no-op (see docs/SUBSET.md),
+                // but the `method_undefined(name)` hook still fires
+                // for every Symbol/String arg — Rails-style code
+                // observes the call regardless of whether the
+                // method dispatch table actually changes.
+                for arg in args {
+                    let sid_opt: Option<crate::intern::SymId> = match arg {
+                        Value::Sym(sid) => Some(*sid),
+                        Value::Str(s) => s.with_str_lossy(|raw| Some(self.interner.intern(raw))),
+                        _ => None,
+                    };
+                    if let Some(sid) = sid_opt {
+                        self.fire_method_lifecycle_hook(&cls, "method_undefined", sid)?;
+                    }
+                }
                 self.stack.push(Value::Class(cls));
                 Ok(true)
             }
@@ -3329,6 +3343,10 @@ impl Vm {
                         }));
                     }
                     any_removed = true;
+                    // `method_removed(name)` fires per successful
+                    // removal — CRuby invokes it once for each
+                    // Symbol the user passed, in arg order.
+                    self.fire_method_lifecycle_hook(&cls, "method_removed", sid)?;
                 }
                 // Bump `method_gen` once even for variadic calls —
                 // inline caches see a single coarse generation
@@ -8376,6 +8394,51 @@ impl Vm {
                 self.dispatch_until(pre_frames)?;
                 self.stack.pop();
             }
+        }
+        Ok(())
+    }
+
+    /// Fire one of the `Module#method_added` / `method_removed` /
+    /// `method_undefined` lifecycle hooks on `cls`. CRuby calls
+    /// these whenever an instance method is installed, removed, or
+    /// undefined on a class/module — Rails / RSpec / many DSLs use
+    /// `method_added` to auto-wrap freshly-defined methods (e.g.
+    /// validation chains, instrumentation).
+    ///
+    /// Contract:
+    ///   - hook receiver is `cls` (the class/module being modified)
+    ///   - hook is called with `Value::Sym(method_name_id)` as its
+    ///     single argument
+    ///   - return value is discarded (hook runs for side effects)
+    ///   - fast-path: if the hook name has never been interned no
+    ///     override can exist, so we skip the lookup entirely
+    ///     (mirrors the `Class.inherited` / `fire_inclusion_hooks`
+    ///     fast-path)
+    ///   - lookup uses `lookup_class_singleton_method` so a
+    ///     `def self.method_added(name)` defined on `cls` or any
+    ///     of its singleton ancestors fires; a generic
+    ///     `class Module; def method_added(...); end; end`
+    ///     monkey-patch won't reach here — same divergence as the
+    ///     `inherited` hook.
+    pub(crate) fn fire_method_lifecycle_hook(
+        &mut self,
+        cls: &std::rc::Rc<crate::value::Class>,
+        hook_name: &str,
+        method_name_id: crate::intern::SymId,
+    ) -> Result<(), Trap> {
+        if !self.interner.contains(hook_name) {
+            return Ok(());
+        }
+        let hook_id = self.interner.intern(hook_name);
+        if let Some(m) = self.lookup_class_singleton_method(cls, hook_id) {
+            let pre_frames = self.frames.len();
+            self.invoke_method(
+                m,
+                Value::Class(cls.clone()),
+                vec![Value::Sym(method_name_id)],
+            )?;
+            self.dispatch_until(pre_frames)?;
+            self.stack.pop();
         }
         Ok(())
     }
