@@ -488,6 +488,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // CI; skips locally when the gem isn't present.
 #[cfg(feature = "stdlib")]
 #[test] fn activesupport_core_ext() { run_diff_gem("activesupport_core_ext", "active_support/all"); }
+#[test] fn activesupport_duration() { run_diff_gem("activesupport_duration", "active_support/all"); }
 #[test] fn fixed_arity_fast_path() { run_diff("fixed_arity_fast_path"); }
 #[test] fn reopen_primitive_bare_call() { run_diff("reopen_primitive_bare_call"); }
 #[test] fn gsub_block_captures() { run_diff("gsub_block_captures"); }

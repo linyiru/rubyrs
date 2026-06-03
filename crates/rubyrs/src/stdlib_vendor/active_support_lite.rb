@@ -385,3 +385,235 @@ class Hash
     end
   end
 end
+
+# ---- Tier D-narrow — Numeric Duration helpers + Time arithmetic ----
+#
+# Pure-Ruby `ActiveSupport::Duration` covering seconds-precision
+# units only: `:seconds`, `:minutes`, `:hours`, `:days`, `:weeks`
+# (plus `:fortnights` as a 2-week alias). `:months` and `:years`
+# are deliberately out of scope — calendar-aware advance requires
+# `Time#advance` which would need either tzinfo or a hand-rolled
+# Gregorian step. The narrow slot covers the Sinatra / Rack /
+# session-expiry common shapes (cookie max-age, cache TTL, rate-
+# limit window) without taking on the calendar-math burden.
+#
+# Documented Tier-1 divergences vs. real ActiveSupport:
+#
+#   * `1.month`, `1.year` (and their plural / Numeric#month
+#     forms) NOT implemented — raises NoMethodError. Workaround
+#     is `30.days` / `365.days` for any consumer that previously
+#     reached for the calendar form. Real apps that need
+#     calendar-correct month/year advance should reach for menu
+#     item 4 SQLite columns (a real date/time column type) instead
+#     of `Numeric#year` arithmetic.
+#   * `Duration#advance(...)` / `Time#advance(...)` NOT
+#     implemented for the same reason.
+#   * `Time.current` / `Time.zone` NOT implemented — ADR 0017
+#     row 131 explicitly defers TZ-aware "now" to a separate
+#     capability injection layer.
+#
+# What IS in scope (this commit):
+#   - `Numeric#seconds` / `#second` (+ plural/singular alias) and
+#     analogous for minutes / hours / days / weeks / fortnights
+#   - `Duration` arithmetic: + - * with Duration / Numeric, and
+#     Duration + Time / Time + Duration / Time - Duration
+#   - `Duration#ago(now = Time.now)` / `#until` alias
+#   - `Duration#since(now = Time.now)` / `#from_now` alias
+#   - `Duration#inspect` byte-identical to AS for the supported
+#     units (singular when value == 1, "and" join for two parts,
+#     Oxford comma for three+, includes zero parts as "0 seconds")
+#   - `Duration#to_i` / `#to_f` total seconds (signed integer)
+#
+# Parts-preserving semantics: `1.week + 1.day` inspects as
+# `"1 week and 1 day"` (NOT `"8 days"`) — matches AS's behaviour
+# where Duration carries the original unit hash, not a collapsed
+# total. `8.days.inspect` stays `"8 days"`. `to_i` collapses for
+# both.
+module ActiveSupport
+  class Duration
+    # Conversion table — every unit reduces to integer seconds.
+    # Order matters for `inspect` display: walk from coarse to
+    # fine so e.g. `1.week + 1.day` emits "1 week and 1 day".
+    PARTS_IN_SECONDS = {
+      weeks:   604800,
+      days:    86400,
+      hours:   3600,
+      minutes: 60,
+      seconds: 1,
+    }.freeze
+    PARTS_ORDER = PARTS_IN_SECONDS.keys.freeze
+
+    attr_reader :parts
+
+    def initialize(parts)
+      # Defensive copy so mutating the caller's hash post-
+      # construction doesn't leak into the Duration's state.
+      @parts = parts.dup
+    end
+
+    # Total seconds (signed integer). Matches AS's
+    # `Duration#to_i` — sum each part * its seconds-conversion.
+    def to_i
+      @parts.sum(0) { |k, v| (PARTS_IN_SECONDS[k] || 0) * v }
+    end
+    alias_method :value, :to_i
+    alias_method :in_seconds, :to_i
+
+    def to_f
+      to_i.to_f
+    end
+
+    # Arithmetic. Plus / minus combine parts hash; multiply
+    # scales every part. The Numeric branch on + / - treats
+    # the Numeric as seconds (matches AS).
+    def +(other)
+      case other
+      when Duration
+        merged = @parts.dup
+        other.parts.each { |k, v| merged[k] = (merged[k] || 0) + v }
+        Duration.new(merged)
+      when Time
+        other + to_i
+      when Numeric
+        merged = @parts.dup
+        merged[:seconds] = (merged[:seconds] || 0) + other
+        Duration.new(merged)
+      else
+        raise TypeError, "no implicit conversion of #{other.class} into Duration"
+      end
+    end
+
+    def -(other)
+      case other
+      when Duration
+        merged = @parts.dup
+        other.parts.each { |k, v| merged[k] = (merged[k] || 0) - v }
+        Duration.new(merged)
+      when Numeric
+        merged = @parts.dup
+        merged[:seconds] = (merged[:seconds] || 0) - other
+        Duration.new(merged)
+      else
+        raise TypeError, "no implicit conversion of #{other.class} into Duration"
+      end
+    end
+
+    def *(other)
+      raise TypeError, "no implicit conversion of #{other.class} into Numeric" unless other.is_a?(Numeric)
+      scaled = @parts.transform_values { |v| v * other }
+      Duration.new(scaled)
+    end
+
+    def -@
+      Duration.new(@parts.transform_values { |v| -v })
+    end
+
+    def ==(other)
+      case other
+      when Duration then to_i == other.to_i
+      when Numeric  then to_i == other
+      else false
+      end
+    end
+
+    # "Now" helpers. Pass-in argument lets tests pin against a
+    # fixed Time so the byte-diff doesn't race the wall clock.
+    def ago(now = Time.now)
+      now - to_i
+    end
+    alias_method :until, :ago
+
+    def since(now = Time.now)
+      now + to_i
+    end
+    alias_method :from_now, :since
+    alias_method :after, :since
+    alias_method :before, :ago
+
+    # Inspect — AS canonical formatting. Walk parts in coarse-
+    # to-fine order, emit non-zero parts with proper plural-
+    # ization (singular only when value == 1, plural for 0 and
+    # negative). Joining: single part returns as-is; two parts
+    # joined by " and "; three+ uses Oxford-comma form
+    # "a, b, and c". An all-zero parts hash renders as
+    # "0 seconds" (matches AS — a Duration must inspect to
+    # something even when empty).
+    def inspect
+      pieces = PARTS_ORDER.flat_map do |unit|
+        v = @parts[unit]
+        if v && v != 0
+          name = (v == 1) ? unit.to_s.chomp("s") : unit.to_s
+          ["#{v} #{name}"]
+        else
+          []
+        end
+      end
+      return "0 seconds" if pieces.empty?
+      case pieces.size
+      when 1
+        pieces.first
+      when 2
+        "#{pieces.first} and #{pieces.last}"
+      else
+        # Oxford-comma form: "a, b, c, and d". `first(n - 1)`
+        # / `last` avoid `pieces[0..-2]` because rubyrs's
+        # Array#[] doesn't yet accept the Range / two-arg
+        # forms (documented gap).
+        head = pieces.first(pieces.size - 1)
+        "#{head.join(', ')}, and #{pieces.last}"
+      end
+    end
+
+    def to_s
+      to_i.to_s
+    end
+  end
+end
+
+class Numeric
+  def seconds;    ActiveSupport::Duration.new(seconds: self);          end
+  alias_method :second, :seconds
+  def minutes;    ActiveSupport::Duration.new(minutes: self);          end
+  alias_method :minute, :minutes
+  def hours;      ActiveSupport::Duration.new(hours: self);            end
+  alias_method :hour, :hours
+  def days;       ActiveSupport::Duration.new(days: self);             end
+  alias_method :day, :days
+  def weeks;      ActiveSupport::Duration.new(weeks: self);            end
+  alias_method :week, :weeks
+  # `1.fortnight` canonicalises to `weeks: 2` so the inspect
+  # output matches AS (`2.fortnights` → `"4 weeks"`).
+  def fortnights; ActiveSupport::Duration.new(weeks: self * 2);         end
+  alias_method :fortnight, :fortnights
+end
+
+class Time
+  # Reopen `Time#+` / `Time#-` so they recognise
+  # ActiveSupport::Duration. The original arithmetic for
+  # Integer/Float/Time receivers lives in
+  # `src/preamble/time.rb`; we alias it under a sentinel name
+  # so the new + / - can fall through after extracting the
+  # Duration's total seconds. Idempotent: re-loading this file
+  # finds the alias already in place and short-circuits the
+  # second alias_method call to avoid recursive self-rebind.
+  unless method_defined?(:_as_lite_duration_orig_plus)
+    alias_method :_as_lite_duration_orig_plus, :+
+    alias_method :_as_lite_duration_orig_minus, :-
+
+    def +(other)
+      if other.is_a?(ActiveSupport::Duration)
+        _as_lite_duration_orig_plus(other.to_i)
+      else
+        _as_lite_duration_orig_plus(other)
+      end
+    end
+
+    def -(other)
+      if other.is_a?(ActiveSupport::Duration)
+        _as_lite_duration_orig_minus(other.to_i)
+      else
+        _as_lite_duration_orig_minus(other)
+      end
+    end
+  end
+end

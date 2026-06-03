@@ -60,31 +60,54 @@ ActiveSupport in 2.5 / 3.0). The remaining shapes are pure Ruby:
 
 **Estimated**: ~40 LOC. Zero VM gaps.
 
-## Tier D — DEFERRED (Duration / TimeZone infrastructure)
+## Tier D — split: D-narrow ✅ shipped, D-wide deferred
 
-These needed their own ADR before the canon attempt. Each one
-chains through a real `Time` arithmetic / TZ DB / `Duration`
-value type that ActiveSupport invented; matching the surface
-without matching the implementation has nontrivial parity risks.
+The original spike folded Duration helpers + TZ-aware "now"
+into one tier. Once Tier A / B / C shipped and a real consumer
+need surfaced for the Duration shape (cookie max-age, cache
+TTLs, rate-limit windows on Sinatra apps — all use
+`Numeric#seconds`-family arithmetic without needing calendar
+correctness), the tier split into two parts:
 
-| Method | What it depends on |
-|---|---|
-| `3.minutes` / `1.day` / `2.hours` (Numeric duration helpers) | `ActiveSupport::Duration` value type |
-| `2.hours.ago` / `1.day.from_now` | `Duration + Time` arithmetic |
+### Tier D-narrow ✅ shipped (2026-06)
+
+Pure-Ruby `ActiveSupport::Duration` covering seconds-precision
+units (no tzinfo, no calendar advance). Implementation lives in
+`src/stdlib_vendor/active_support_lite.rb`'s "Tier D-narrow"
+block (~150 LOC). Sentinel:
+`tests/diff/activesupport_duration.rb` — byte-diffs against
+ActiveSupport 8.0.x via `run_diff_gem`.
+
+| Surface | Status |
+|---------|--------|
+| `Numeric#second(s)` / `#minute(s)` / `#hour(s)` / `#day(s)` / `#week(s)` / `#fortnight(s)` | ✅ |
+| `Duration` arithmetic — `+` / `-` / `*` / `-@` (with Duration / Numeric) | ✅ |
+| `Duration + Time` / `Time + Duration` / `Time - Duration` | ✅ |
+| `Duration#ago(now = Time.now)` / `#until` alias | ✅ |
+| `Duration#since(now = Time.now)` / `#from_now` / `#after` / `#before` aliases | ✅ |
+| `Duration#inspect` — parts-preserving, singular when v == 1, "and" join, Oxford comma for 3+ | ✅ |
+| `Duration#to_i` / `#to_f` / `#value` / `#in_seconds` | ✅ |
+
+Parts-preservation semantics: `1.week + 1.day` inspects as
+`"1 week and 1 day"`, NOT `"8 days"`. `8.days` stays `"8 days"`.
+`to_i` collapses to 691200 for either. Matches AS exactly.
+
+### Tier D-wide — still DEFERRED
+
+| Surface | What it depends on |
+|---------|-------------------|
+| `1.month` / `2.years` (calendar-aware) | `Time#advance(years: y, months: m, ...)` — Gregorian step OR tzinfo |
 | `Time.current` | TZ-aware "now" — depends on `Time.zone` |
 | `Time.zone` | tzinfo DB + thread-local current zone |
+| `Duration#advance(...)` | Calendar math, shares the same dependency |
 
-**Decision**: defer entirely to a follow-up ADR (provisional 0028
-or thereabouts). The Rack/Sinatra/JSON menu items work without
-them; the apps that need timezone math should reach for menu
-item 4 (SQLite-backed data layer) where dates are an explicit
-column type, not a `Numeric#days` afterthought.
-
-If a Tier-A canon ships first and we later want a narrow Duration
-slot just for the most-used `Numeric#minutes / #hours / #days +
-Time` shapes, the `Duration` value type can live in pure Ruby
-(no tzinfo) at the cost of dropping TZ-aware arithmetic — that's
-a Tier-D-narrow sub-decision when the use-case appears.
+**Decision**: stays deferred. The Rack/Sinatra/JSON/SQLite menu
+items work without them; apps that need calendar-correct
+month/year advance should reach for menu item 4 SQLite columns
+(real date/time column types) instead of
+`Numeric#year` arithmetic. ADR 0017 row 131 explicitly defers
+TZ-aware "now" to a separate capability injection layer. Both
+remain Tier-D-wide candidates pending consumer demand.
 
 ## What does NOT need fixing
 
