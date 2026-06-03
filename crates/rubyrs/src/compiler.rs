@@ -969,6 +969,16 @@ fn build_const_chain(
     bare: &str,
     interner: &mut crate::intern::Interner,
 ) -> Option<Vec<crate::intern::SymId>> {
+    // Absolute paths carry a leading `::` marker from `ast.rs`'s
+    // ConstantPath lowering. CRuby semantics: an absolute path
+    // (`::Foo::Bar`) skips cref-walking and looks up the joined
+    // name at top level only. Without this guard, `::Foo::Bar`
+    // inside `module Wrapper` would walk a chain that includes
+    // `Wrapper::Foo::Bar` and could match the inner namespace
+    // before falling through to the intended top-level `Foo::Bar`.
+    if let Some(absolute_bare) = bare.strip_prefix("::") {
+        return Some(vec![interner.intern(absolute_bare)]);
+    }
     if class_path.is_empty() {
         return None;
     }

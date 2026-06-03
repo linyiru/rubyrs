@@ -121,7 +121,7 @@ fn alias_method_raises_name_error_when_source_missing() {
     // ("undefined method ...") when alias_method's source name
     // doesn't resolve. Previously we raised NoMethodError with a
     // misleading `recv_type: "Class"`.
-    let (mut rt, buf) = rt_with_buf();
+    let (mut rt, _buf) = rt_with_buf();
     let err = rt.eval(r#"
         class Foo
           alias_method :a, :nonexistent
@@ -218,7 +218,7 @@ fn method_missing_inherited_through_superclass() {
 
 #[test]
 fn missing_without_method_missing_still_raises() {
-    let (mut rt, buf) = rt_with_buf();
+    let (mut rt, _buf) = rt_with_buf();
     let err = rt.eval(r#"
         class Empty; end
         Empty.new.missing_method
@@ -294,7 +294,7 @@ fn respond_to_agrees_with_defined_for_host_fns() {
 
 #[test]
 fn define_method_validates_arity() {
-    let (mut rt, buf) = rt_with_buf();
+    let (mut rt, _buf) = rt_with_buf();
     let err = rt.eval(r#"
         class Foo
           define_method(:two) { |a, b| a + b }
@@ -337,5 +337,37 @@ fn const_path_chained_lookup_from_nested_module() {
         "Foo::QueryParser::Inner\n[Foo::QueryParser::Inner, TypeError]",
         "got: {:?}",
         trimmed,
+    );
+}
+
+#[test]
+fn absolute_const_path_skips_cref_walk() {
+    // Copilot review on PR #355: with the chained-const-path fix
+    // for relative paths (`QueryParser::Inner`), absolute paths
+    // (`::Foo::Bar`) must NOT cref-walk — they should look up
+    // exactly the top-level joined name. Pre-fix `::Outer` inside
+    // `module Wrapper` would match `Wrapper::Outer` first before
+    // falling through to top-level `Outer`. CRuby semantics:
+    // leading `::` forces top-level resolution.
+    let (mut rt, buf) = rt_with_buf();
+    rt.eval(r#"
+        class Outer
+        end
+        module Wrapper
+          class Outer
+            class Inner
+            end
+          end
+          TopOuter = ::Outer
+          WrapperOuter = Outer
+        end
+        puts Wrapper::TopOuter
+        puts Wrapper::WrapperOuter
+    "#, "abs_const.rb").expect("eval");
+    assert_eq!(
+        buf.snapshot().trim(),
+        "Outer\nWrapper::Outer",
+        "got: {:?}",
+        buf.snapshot(),
     );
 }

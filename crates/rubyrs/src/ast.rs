@@ -913,15 +913,20 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         return sp(node, Expr::ConstRead(cid_to_string(n.name())));
     }
     if let Some(n) = node.as_constant_path_node() {
-        // Spike scope: a `Foo::Bar::Baz` ConstantPath translates to
-        // a single ConstRead with the joined name. No real
-        // module nesting; C extensions and `class` definitions that
-        // wire up "BCrypt::Engine"-style classes must register them
-        // under the joined name for this lookup to find them.
-        // Real module scope resolution lands when we add the
-        // `module` keyword to the language.
+        // A `Foo::Bar::Baz` ConstantPath translates to a single
+        // ConstRead with the joined name. Real module scope
+        // resolution lives in `build_const_chain` at compile time:
+        // for relative paths, it cref-walks the first segment; for
+        // absolute paths (`::Foo::Bar`), we keep a leading `::`
+        // marker so the compiler can skip the cref walk and look up
+        // exactly the joined name at top level (CRuby semantics).
         if let Some(joined) = flatten_constant_path(node) {
-            return sp(node, Expr::ConstRead(joined));
+            let name = if is_constant_path_absolute(node) {
+                format!("::{}", joined)
+            } else {
+                joined
+            };
+            return sp(node, Expr::ConstRead(name));
         }
         // Dynamic path (rare): trailing-name fallback, matches the
         // existing rescue-clause behaviour at line ~378.
