@@ -480,13 +480,29 @@ impl Vm {
                 }
                 let name_sym = match &args[0] {
                     Value::Sym(s) => *s,
-                    Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                    Value::Str(s) => {
+                        // Same `Config::max_symbols` cap as
+                        // `String#to_sym` / `parse_send_target` —
+                        // without it, untrusted code could grow the
+                        // interner unbounded via repeated
+                        // `autoload("dyn_#{i}", "x")` calls.
+                        let name = s.to_string_lossy();
+                        if let Some(max) = self.max_symbols
+                            && !self.interner.contains(&name)
+                            && self.interner.len() >= max
+                        {
+                            return Some(Err(self.trap(RubyError::ResourceExhausted {
+                                msg: format!("interner exhausted: {} symbols", max),
+                            })));
+                        }
+                        self.interner.intern(&name)
+                    }
                     other => return Some(Err(self.trap(RubyError::TypeError {
                         msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
                     }))),
                 };
                 let path_str = match &args[1] {
-                    Value::Str(s) => s.to_string_lossy().to_string(),
+                    Value::Str(s) => s.to_string_lossy(),
                     other => return Some(Err(self.trap(RubyError::TypeError {
                         msg: format!("no implicit conversion of {} into String", other.type_name()),
                     }))),
@@ -516,7 +532,22 @@ impl Vm {
                 }
                 let name_sym = match &args[0] {
                     Value::Sym(s) => *s,
-                    Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                    Value::Str(s) => {
+                        // `Config::max_symbols` cap — same rationale
+                        // as the `autoload` arm above. Untrusted
+                        // code could otherwise grow the interner via
+                        // repeated `autoload?("dyn_#{i}")` probes.
+                        let name = s.to_string_lossy();
+                        if let Some(max) = self.max_symbols
+                            && !self.interner.contains(&name)
+                            && self.interner.len() >= max
+                        {
+                            return Some(Err(self.trap(RubyError::ResourceExhausted {
+                                msg: format!("interner exhausted: {} symbols", max),
+                            })));
+                        }
+                        self.interner.intern(&name)
+                    }
                     other => return Some(Err(self.trap(RubyError::TypeError {
                         msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
                     }))),
@@ -524,7 +555,7 @@ impl Vm {
                 #[cfg(not(target_os = "wasi"))]
                 {
                     if let Some(path) = self.autoloads_toplevel.get(&name_sym) {
-                        return Some(Ok(Value::new_str(path)));
+                        return Some(Ok(Value::new_str(path.clone())));
                     }
                 }
                 #[cfg(target_os = "wasi")]

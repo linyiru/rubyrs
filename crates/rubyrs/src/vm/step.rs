@@ -1262,7 +1262,10 @@ impl Vm {
                     // is taken.
                     #[cfg(not(target_os = "wasi"))]
                     if let Some(path) = self.autoloads_toplevel.remove(&name_id) {
-                        let path_val = Value::new_str(&path);
+                        // Move `path` into the Ruby String — `path`
+                        // is already an owned `String` we removed
+                        // from the registry, no need to clone.
+                        let path_val = Value::new_str(path);
                         match self.builtin_call("require", &[path_val]) {
                             Some(Ok(_)) => {
                                 if let Some(c) = self.classes.get(&name_id).cloned() {
