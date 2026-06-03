@@ -1861,14 +1861,31 @@ impl Vm {
                     // their CRuby positions between the surrounding
                     // chunks.
                     //
-                    // Limit semantics mirror the String-sep forms:
+                    // Limit semantics:
                     //   absent / 0  : drop trailing empties
-                    //   N > 0       : at most N fields, last holds
-                    //                 the unsplit remainder
+                    //   N > 0       : limit bounds the number of
+                    //                 CHUNKS / matches processed
+                    //                 (so we emit at most N-1
+                    //                 matches before the unsplit
+                    //                 remainder), NOT the final
+                    //                 array length. Captured
+                    //                 groups from processed
+                    //                 matches are still emitted
+                    //                 between chunks, so the
+                    //                 result can have more than
+                    //                 N elements (CRuby docs:
+                    //                 "captured groups will be
+                    //                 returned as well, but are
+                    //                 not counted towards the
+                    //                 limit"). For non-capturing
+                    //                 patterns this collapses to
+                    //                 "at most N fields".
                     //   N < 0       : split fully, keep trailing
                     //                 empties (and the post-tail
                     //                 empty if the last match ended
                     //                 at end-of-string)
+                    // Code-review #357 round 4 — clarified the
+                    // capture-group + limit interaction.
                     //
                     // Discovered by TRY_RUNS pass-14 — sinatra-4's
                     // `cleaned_caller` (sinatra/base.rb:1913) does
@@ -2465,12 +2482,22 @@ pub(crate) fn str_succ(s: &str) -> String {
 ///     parenthesised groups" rule).
 ///   - After all matches, the post-tail chunk is pushed.
 ///
-/// Limit handling (mirrors the String-sep `split` arms above):
+/// Limit handling:
 ///   - `limit == 0`: drop trailing empty fields (including
 ///     the post-tail empty if the last match ended at EOS).
-///   - `limit > 0`: emit at most `limit` total fields; the
-///     last field holds the unsplit remainder verbatim (no
-///     captures from the truncating match).
+///   - `limit > 0`: `limit` bounds the number of CHUNKS /
+///     matches processed (we emit at most `limit - 1` matches
+///     before the unsplit remainder), NOT the final array
+///     length. Captured groups from processed matches are
+///     still emitted between the surrounding chunks, so the
+///     result can have MORE than `limit` elements when the
+///     pattern has captures (per CRuby docs: "captured groups
+///     will be returned as well, but are not counted towards
+///     the limit"). For non-capturing patterns this collapses
+///     to "at most `limit` fields". No captures are emitted
+///     from the truncating match itself — the remainder is
+///     pushed verbatim. Code-review #357 round 4 clarified
+///     this contract.
 ///   - `limit < 0`: emit all fields, keep trailing empties.
 ///
 /// Zero-width matches (e.g. lookaround patterns like the
