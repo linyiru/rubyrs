@@ -2426,7 +2426,19 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             if let Some(cr) = s.as_constant_read_node() {
                 Some(cid_to_string(cr.name()))
             } else if s.as_constant_path_node().is_some() {
-                flatten_constant_path(&s)
+                // Mirror the ConstantPathNode → Expr::ConstRead
+                // marker convention: prefix absolute paths with
+                // `::` so the compiler emits flat LoadConst and
+                // skips cref-walk. Without this, `class C < ::Foo`
+                // inside `module Wrapper` would walk a chain that
+                // includes `Wrapper::Foo` and incorrectly prefer
+                // the inner namespace over top-level `Foo`.
+                let joined = flatten_constant_path(&s)?;
+                if is_constant_path_absolute(&s) {
+                    Some(format!("::{}", joined))
+                } else {
+                    Some(joined)
+                }
             } else {
                 None
             }

@@ -371,3 +371,37 @@ fn absolute_const_path_skips_cref_walk() {
         buf.snapshot(),
     );
 }
+
+#[test]
+fn absolute_superclass_skips_cref_walk() {
+    // Copilot review cycle 3 on PR #355: the compiler now
+    // short-circuits `class Sub < ::Foo` on the leading `::`,
+    // but earlier the AST lowering for superclass constant paths
+    // dropped the absolute marker — meaning the fast path was
+    // unreachable. ast.rs now mirrors the ConstantPathNode →
+    // Expr::ConstRead convention (prefix with `::` for absolute).
+    //
+    // Regression case: `class Child < ::Outer` inside `module
+    // Wrapper` that ALSO defines `Outer`. CRuby: Child inherits
+    // from top-level `Outer` (not `Wrapper::Outer`). Pre-fix
+    // rubyrs walked the cref chain and matched `Wrapper::Outer`
+    // first.
+    let (mut rt, buf) = rt_with_buf();
+    rt.eval(r#"
+        class Outer
+        end
+        module Wrapper
+          class Outer
+          end
+          class Child < ::Outer
+          end
+        end
+        puts Wrapper::Child.superclass
+    "#, "abs_super.rb").expect("eval");
+    assert_eq!(
+        buf.snapshot().trim(),
+        "Outer",
+        "got: {:?}",
+        buf.snapshot(),
+    );
+}

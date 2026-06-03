@@ -981,7 +981,7 @@ fn build_const_chain(
     // contract anchor in case a future caller forgets.
     debug_assert!(
         !bare.starts_with("::"),
-        "build_const_chain: caller must strip leading `::` and emit LoadConst directly",
+        "build_const_chain: caller must strip leading `::` and emit a flat const load directly (LoadConst / LoadConstOrNil)",
     );
     if class_path.is_empty() {
         return None;
