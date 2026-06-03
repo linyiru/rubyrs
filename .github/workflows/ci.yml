@@ -411,7 +411,16 @@ jobs:
           # Bumped 47 → 48 when PR #318 merged master: the M27 batch
           # (#call-responder Rack app + define_method block capture)
           # added one ICE-class assert on the dispatch path.
-          check crates/rubyrs/src/vm/dispatch.rs     48
+          # Bumped 48 → 53 (+5) by this session's vm work — closure-
+          # scope fix (d397eaa2) added ICE asserts in
+          # `find_lexical_owner_frame` + `propagate_outer_write` +
+          # the new invoke_block fresh-clone path, Array#[]
+          # two-arg + Range arms (ef67f649) added ICE asserts on
+          # range-bound resolution, Array#[]= splice-assign arms
+          # (c09e704f) added cap-check / borrow-snapshot
+          # `.expect("ICE: ...")` invariants. All ICE-class; not
+          # user-reachable.
+          check crates/rubyrs/src/vm/dispatch.rs     53
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /
@@ -441,7 +450,15 @@ jobs:
           # `dispatch_until_inner` in-scope unwind arms (non-local
           # return + AlreadyCaught) and the `Op::Raise` bare-`raise`
           # `$!` re-raise added ICE-class frame/state asserts.
-          check crates/rubyrs/src/vm/step.rs         81
+          # Bumped 81 → 83 (+2) by this session's vm work — the
+          # closure-scope fix (d397eaa2) added one ICE-class
+          # `.expect("ICE: ReturnMethod with empty frame stack")`
+          # in the lexical-owner walk at Op::ReturnMethod, and
+          # module_function bare-form auto-mirror (72b1db76) added
+          # one ICE-class `.expect("ICE: ...")` in the
+          # singleton-copy Method install path. Both ICE-class
+          # invariants; not user-reachable.
+          check crates/rubyrs/src/vm/step.rs         83
           # Bumped 10 → 14 (+4) by PR #178 (step-block iter
           # refactor extracting Select/Reject accumulator logic).
           # Each accumulator path adds one `acc_id.unwrap()` —
@@ -451,7 +468,11 @@ jobs:
           # Bumped 14 → 15 (+1) — one ICE-class invariant added by
           # a recent block-iter helper (acc_id `is_some`-then-unwrap
           # pattern, same as the existing 14 sites).
-          check crates/rubyrs/src/vm/iter.rs         15
+          # Bumped 15 → 16 (+1) by the closure-scope fix (d397eaa2):
+          # `step_block` gains one `frames.last().expect("ICE: ...")`
+          # in the per-invocation-locals path. ICE-class invariant
+          # on frame stack; not user-reachable.
+          check crates/rubyrs/src/vm/iter.rs         16
           check crates/rubyrs/src/vm/cext.rs          6
           # Bumped 3 → 10 by PR #78 (break/next through ensure).
           # The proper unwinder needs frame/rescue-stack invariant
@@ -595,7 +616,14 @@ jobs:
           # Bumped 14 → 15 by PR #315: the `preamble/throw_catch.rb`
           # load (Kernel#catch/#throw) adds its own
           # `.expect("ICE: failed to load throw/catch preamble")`.
-          check crates/rubyrs/src/lib.rs       15
+          # Bumped 15 → 16 by this session's module_function bare-form
+          # auto-mirror (72b1db76): the new
+          # `module_function_active_stack` is cleared in `Runtime::
+          # reset` / `Runtime::soft_reset` alongside the existing
+          # `class_visibility_stack` clear sites. The single new
+          # `.expect("ICE: ...")` lives in the analogous frame-state
+          # invariant pattern as the surrounding stack-clear lines.
+          check crates/rubyrs/src/lib.rs       16
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
           # never went down, just up here. See docs/PANIC_AUDIT.md.
