@@ -1980,6 +1980,7 @@ impl Vm {
                             closure: m.closure.clone(),
                             original_name: m.original_name,
                             builtin: m.builtin.clone(),
+                            original_name: m.original_name,
                         });
                         cls.singleton_methods.borrow_mut().insert(name_id, singleton_copy);
                     }
