@@ -10095,6 +10095,10 @@ impl Vm {
                 });
                 target_cls.install_method(name_sym, m);
                 self.method_gen = self.method_gen.wrapping_add(1);
+                // `method_added(name_sym)` fires for the runtime
+                // block-form `cls.define_method(:foo) { ... }` too —
+                // CRuby invokes the hook regardless of install path.
+                self.fire_method_lifecycle_hook(&target_cls, "method_added", name_sym)?;
                 self.stack.push(Value::Sym(name_sym));
                 return Ok(());
             }
@@ -11043,6 +11047,15 @@ impl Vm {
         let m = self.build_method_from_value(src, &anchor, visibility, name_sym)?;
         target_cls.install_method(name_sym, m);
         self.method_gen = self.method_gen.wrapping_add(1);
+        // `Module#method_added(name)` fires for `define_method`
+        // installs too — CRuby invokes the hook regardless of
+        // whether the install came from `def`, `alias_method`, or
+        // `define_method`. \`.map_err(|t| t.err)\` flattens the
+        // Trap back into a bare RubyError because this helper's
+        // signature returns RubyError; the trap rewraps at the
+        // call sites' `.map_err(|e| self.trap(e))` boundary.
+        self.fire_method_lifecycle_hook(target_cls, "method_added", name_sym)
+            .map_err(|t| t.err)?;
         Ok(name_sym)
     }
 

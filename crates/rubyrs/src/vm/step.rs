@@ -2527,6 +2527,13 @@ impl Vm {
                 if let Some(cls) = self.class_stack.last() { cls.install_method(name_id, m); }
                 else { self.toplevel_methods.insert(name_id, m); }
                 self.method_gen = self.method_gen.wrapping_add(1);
+                // `method_added(name_id)` fires for the compile-
+                // time `define_method(:literal) { … }` intercept too
+                // — CRuby invokes the hook regardless of which
+                // install path landed the method.
+                if let Some(cls) = self.class_stack.last().cloned() {
+                    self.fire_method_lifecycle_hook(&cls, "method_added", name_id)?;
+                }
                 // `Op::DefMethodBlock` is emitted ONLY for the
                 // compile-time `define_method(:literal_symbol) { … }`
                 // intercept (compiler.rs:209); it is NOT the parsed

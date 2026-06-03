@@ -83,3 +83,12 @@ class H
   def baz; end
   undef_method "baz"
 end
+
+# (9) define_method fires method_added too — CRuby parity. Both
+# the block-form and 2-arg form route through different install
+# paths in rubyrs but both end up firing the hook.
+class I
+  def self.method_added(name); puts "I.method_added(#{name})"; end
+end
+I.define_method(:via_block) { "block-form" }
+I.define_method(:via_snapshot, I.instance_method(:via_block))
