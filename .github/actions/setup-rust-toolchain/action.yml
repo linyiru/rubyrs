@@ -25,6 +25,10 @@ inputs:
       Override the channel from rust-toolchain.toml. Use only when
       a job needs a different channel than the workspace pin
       (miri → `nightly`). Leave empty to use the file's pin.
+      IMPORTANT: when set, the toolchain file's `components` are
+      ALSO ignored (components are channel-tied — the override
+      channel doesn't share components context with the file).
+      Only `inputs.components` flows through.
     required: false
     default: ''
   toolchain-file:
@@ -103,15 +107,30 @@ runs:
         # `dtolnay/rust-toolchain` installs with `--profile minimal`
         # and does NOT itself read rust-toolchain.toml, so any
         # components declared in the file are silently dropped
-        # unless we forward them explicitly. Parse the array form
-        # (`components = ["a", "b"]`) and convert to the comma-
-        # separated string dtolnay's `components:` input expects.
+        # unless we forward them explicitly. Parse the single-line
+        # array form (`components = ["a", "b"]`) and convert to the
+        # comma-separated string dtolnay's `components:` input
+        # expects.
         # Missing components line → empty (the toml omits it, or
         # the file declares only the channel — fuzz's case).
+        # Parse-failure detection: if the sed substitution didn't
+        # match (multiline array, non-bracketed value, etc.), the
+        # raw line would pass through with `=` / `[` / `]` still
+        # present after tr-stripping. Fail loud with a targeted
+        # message rather than passing junk to dtolnay (which would
+        # fail later with a less actionable "unknown component"
+        # error). Only the single-line array form is supported by
+        # this composite — TOML allows multiline arrays but no
+        # current toolchain file in this repo uses that shape.
         FILE_COMPONENTS=""
         RAW_COMP=$(grep -E '^[[:space:]]*components[[:space:]]*=' "$TOOLCHAIN_FILE" | head -1)
         if [ -n "$RAW_COMP" ]; then
           FILE_COMPONENTS=$(printf '%s' "$RAW_COMP" | sed -E "s/.*=[[:space:]]*\[([^]]*)\].*/\1/" | tr -d '"' | tr -d "'" | tr -d ' ')
+          if [[ "$FILE_COMPONENTS" == *=* || "$FILE_COMPONENTS" == *\[* || "$FILE_COMPONENTS" == *\]* ]]; then
+            echo "::error::setup-rust-toolchain: failed to parse components from $TOOLCHAIN_FILE. Only the single-line array form (components = [\"a\", \"b\"]) is supported." >&2
+            cat "$TOOLCHAIN_FILE" >&2
+            exit 1
+          fi
         fi
 
         # --- merge file + input components ---
