@@ -264,6 +264,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn closure_in_iter_capture() { run_diff("closure_in_iter_capture"); }
 #[test] fn callable_coerce() { run_diff("callable_coerce"); }
 #[test] fn module_function_bare() { run_diff("module_function_bare"); }
+#[test] fn array_subscript_slice() { run_diff("array_subscript_slice"); }
 #[cfg(feature = "regex")]
 #[test] fn regex_lookaround() { run_diff("regex_lookaround"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
@@ -489,6 +490,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // CI; skips locally when the gem isn't present.
 #[cfg(feature = "stdlib")]
 #[test] fn activesupport_core_ext() { run_diff_gem("activesupport_core_ext", "active_support/all"); }
+#[cfg(feature = "stdlib")]
 #[test] fn activesupport_duration() { run_diff_gem("activesupport_duration", "active_support/all"); }
 #[test] fn fixed_arity_fast_path() { run_diff("fixed_arity_fast_path"); }
 #[test] fn reopen_primitive_bare_call() { run_diff("reopen_primitive_bare_call"); }

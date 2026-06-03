@@ -555,10 +555,11 @@ module ActiveSupport
       when 2
         "#{pieces.first} and #{pieces.last}"
       else
-        # Oxford-comma form: "a, b, c, and d". `first(n - 1)`
-        # / `last` avoid `pieces[0..-2]` because rubyrs's
-        # Array#[] doesn't yet accept the Range / two-arg
-        # forms (documented gap).
+        # Oxford-comma form: "a, b, c, and d". `pieces[0..-2]`
+        # would also work now that Array#[] supports Range +
+        # two-arg slicing; `first(n - 1)` + `last` is left in
+        # place because it doesn't allocate a Range object and
+        # this method runs in any inspect path.
         head = pieces.first(pieces.size - 1)
         "#{head.join(', ')}, and #{pieces.last}"
       end

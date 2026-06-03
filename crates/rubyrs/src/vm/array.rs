@@ -448,6 +448,105 @@ impl Vm {
                         let idx = if *i < 0 { a.len() as i64 + *i } else { *i };
                         Some(a.get(idx as usize).cloned().unwrap_or(Value::Nil))
                     }
+                    // `a[start, length]` two-arg slice form. CRuby
+                    // semantics (verified via `ruby -e`):
+                    //   - negative `start` wraps from end; if still
+                    //     negative after wrap → nil
+                    //   - `start == len` returns `[]` (NOT nil — the
+                    //     "boundary-zero-length-tail" rule)
+                    //   - `start > len` → nil
+                    //   - `length < 0` → nil
+                    //   - `length` clamps at `len - start`
+                    //   - returns a FRESH Array (CRuby's slice
+                    //     contract — mutating the result doesn't
+                    //     affect the original)
+                    //
+                    // Discovered as a missing surface during the
+                    // AS-lite Tier D-narrow Duration#inspect work
+                    // (commit f53bc4ee) — Oxford-comma formatting
+                    // wanted `pieces[0..-2]` / `pieces[0, n - 1]`.
+                    ("[]", [Value::Int(start), Value::Int(length)]) => {
+                        let a = self.heap.array(id);
+                        let len = a.len() as i64;
+                        let s = if *start < 0 { len + *start } else { *start };
+                        let l = *length;
+                        if s < 0 || s > len || l < 0 {
+                            Some(Value::Nil)
+                        } else {
+                            let end_idx = (s + l).min(len) as usize;
+                            let slice: Vec<Value> = a[s as usize..end_idx].to_vec();
+                            self.maybe_gc();
+                            self.check_alloc()?;
+                            let nid = self.heap.alloc(HeapObj::Array(slice));
+                            Some(Value::Array(nid))
+                        }
+                    }
+                    // `a[range]` Range-slice form. Handles full
+                    // CRuby surface:
+                    //   - Inclusive (`a..b`) AND exclusive (`a...b`)
+                    //     bounds
+                    //   - Beginless (`a[..3]`, begin == Nil) treats
+                    //     begin as 0
+                    //   - Endless (`a[2..]`, end == Nil) treats end
+                    //     as `len - 1`
+                    //   - Negative indices wrap from end
+                    //   - Empty result when begin == len → []
+                    //     (matching boundary rule from two-arg form)
+                    //   - nil result when begin > len OR begin < 0
+                    //     after wrap
+                    //   - End past len is clamped to `len - 1`
+                    ("[]", [Value::Range(rid)]) => {
+                        let r = self.heap.range(*rid);
+                        // Snapshot range bounds + exclusive flag
+                        // before re-borrowing the receiver Array.
+                        let r_begin = r.begin.clone();
+                        let r_end = r.end.clone();
+                        let r_exclusive = r.exclusive;
+                        let a = self.heap.array(id);
+                        let len = a.len() as i64;
+                        let begin = match r_begin {
+                            Value::Nil => 0,
+                            Value::Int(b) => if b < 0 { len + b } else { b },
+                            other => return Err(self.trap(RubyError::TypeError {
+                                msg: format!("no implicit conversion of {} into Integer", other.type_name()),
+                            })),
+                        };
+                        // For endless ranges (`a[2..]` / `a[2...]`)
+                        // the exclusive flag is a no-op — CRuby
+                        // treats both as "from begin through the
+                        // last element". Only apply the
+                        // exclusive-end shift when end is an
+                        // explicit Integer.
+                        let end_idx = match r_end {
+                            Value::Nil => len - 1,
+                            Value::Int(e) => {
+                                let resolved = if e < 0 { len + e } else { e };
+                                if r_exclusive { resolved - 1 } else { resolved }
+                            }
+                            other => return Err(self.trap(RubyError::TypeError {
+                                msg: format!("no implicit conversion of {} into Integer", other.type_name()),
+                            })),
+                        };
+                        if begin < 0 || begin > len {
+                            Some(Value::Nil)
+                        } else if begin == len {
+                            self.maybe_gc();
+                            self.check_alloc()?;
+                            let nid = self.heap.alloc(HeapObj::Array(Vec::new()));
+                            Some(Value::Array(nid))
+                        } else {
+                            let last = end_idx.min(len - 1);
+                            let slice: Vec<Value> = if last < begin {
+                                Vec::new()
+                            } else {
+                                a[begin as usize..=last as usize].to_vec()
+                            };
+                            self.maybe_gc();
+                            self.check_alloc()?;
+                            let nid = self.heap.alloc(HeapObj::Array(slice));
+                            Some(Value::Array(nid))
+                        }
+                    }
                     // Internal helpers for multi-write splat
                     // destructuring (`a, *r, b = arr`).
                     //
