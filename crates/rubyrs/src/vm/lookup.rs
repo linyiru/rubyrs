@@ -1631,10 +1631,10 @@ impl Vm {
                 let resolved = self.interner.resolve(name_id);
                 let is_lifecycle_hook = matches!(
                     &**resolved,
-                    "inherited" | "included" | "extended" | "method_added"
-                        | "singleton_method_added" | "method_removed"
-                        | "singleton_method_removed" | "method_undefined"
-                        | "singleton_method_undefined",
+                    "inherited" | "included" | "prepended" | "extended"
+                        | "method_added" | "singleton_method_added"
+                        | "method_removed" | "singleton_method_removed"
+                        | "method_undefined" | "singleton_method_undefined",
                 );
                 // Restrict the no-op to Class/Module singleton-hook
                 // contexts only. If `self` is anything else (e.g. an

@@ -78,6 +78,25 @@ class C4
 end
 puts "shape4=#{$shape4_log.inspect}"
 
+## Shape 4p: `prepended` hook on Module — fires the same code
+## path as `included` (vm/dispatch.rs's fire_inclusion_hooks
+## with hook_name="prepended") with the same Class/Module
+## receiver, so its `super` must also reach the Module no-op
+## default. /code-review caught the omission — Layer #20's
+## first cut whitelisted 9 hook names but missed `prepended`,
+## reintroducing exactly the bug shape this PR was meant to
+## close, just on the prepend side.
+module M4p
+  def self.prepended(klass)
+    $shape4p_log = "prepended:#{klass}"
+    super
+  end
+end
+class C4p
+  prepend M4p
+end
+puts "shape4p=#{$shape4p_log.inspect}"
+
 ## Shape 5: skipped — would have tested `extended` hook via
 ## `Object#extend(M)`, but rubyrs doesn't fire the
 ## `Module#extended` callback yet (orthogonal Layer #14-style
