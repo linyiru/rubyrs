@@ -1960,6 +1960,7 @@ impl Vm {
                             defining_class: Some(Rc::downgrade(cls)),
                             visibility: std::cell::Cell::new(Visibility::Public),
                             closure: m.closure.clone(),
+                            original_name: m.original_name,
                             builtin: m.builtin.clone(),
                         });
                         cls.singleton_methods.borrow_mut().insert(name_id, singleton_copy);

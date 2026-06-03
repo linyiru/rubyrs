@@ -5059,16 +5059,19 @@ impl Vm {
                         // (idempotent re-include). The hook isn't
                         // gated on chain change; it's documented as
                         // "called whenever a module is included in
-                        // another module". `extend` shares the same
-                        // arm but its hook is `Module.extended`
-                        // (different signature, separate follow-up).
-                        if is_prepend || is_include {
-                            fire_hooks.push(src);
-                        }
+                        // another module". For `extend` the hook is
+                        // `Module.extended(target)`.
+                        fire_hooks.push(src);
                     }
                     self.method_gen = self.method_gen.wrapping_add(1);
-                    let hook_name = if is_prepend { "prepended" } else { "included" };
-                    self.fire_inclusion_hooks(&fire_hooks, &target_cls, hook_name)?;
+                    let hook_name = if is_prepend {
+                        "prepended"
+                    } else if is_include {
+                        "included"
+                    } else {
+                        "extended"
+                    };
+                    self.fire_inclusion_hooks(&fire_hooks, &Value::Class(target_cls), hook_name)?;
                     self.stack.push(self_val.clone());
                     return Ok(());
                 }
@@ -5960,12 +5963,21 @@ impl Vm {
                     }
                 }
                 let sc = self.heap.ensure_singleton_class(*id);
+                let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
                 for src in modules {
                     if !super::class_is_a(&sc, &src) {
-                        sc.includes.borrow_mut().insert(0, src);
+                        sc.includes.borrow_mut().insert(0, src.clone());
                     }
+                    // `Module.extended(obj)` fires on every extend
+                    // call (CRuby parity — same shape as included /
+                    // prepended). Hook arg is the receiver Object,
+                    // not a Class, since `obj.extend(M)` extends an
+                    // instance.
+                    fire_hooks.push(src);
                 }
                 self.method_gen = self.method_gen.wrapping_add(1);
+                let target_v = recv.clone();
+                self.fire_inclusion_hooks(&fire_hooks, &target_v, "extended")?;
                 self.stack.push(recv.clone());
                 return Ok(());
             }
@@ -6017,14 +6029,18 @@ impl Vm {
                         drop(chain);
                     }
                     // Hook fires on every call — see no-recv arm
-                    // for rationale.
-                    if is_prepend || is_include {
-                        fire_hooks.push(src);
-                    }
+                    // for rationale. Extend's hook is `extended`.
+                    fire_hooks.push(src);
                 }
                 self.method_gen = self.method_gen.wrapping_add(1);
-                let hook_name = if is_prepend { "prepended" } else { "included" };
-                self.fire_inclusion_hooks(&fire_hooks, &target_cls, hook_name)?;
+                let hook_name = if is_prepend {
+                    "prepended"
+                } else if is_include {
+                    "included"
+                } else {
+                    "extended"
+                };
+                self.fire_inclusion_hooks(&fire_hooks, &Value::Class(target_cls), hook_name)?;
                 self.stack.push(recv.clone());
                 return Ok(());
             }
@@ -8332,7 +8348,7 @@ impl Vm {
     pub(crate) fn fire_inclusion_hooks(
         &mut self,
         sources: &[std::rc::Rc<crate::value::Class>],
-        target: &std::rc::Rc<crate::value::Class>,
+        target: &Value,
         hook_name: &str,
     ) -> Result<(), Trap> {
         if sources.is_empty() || !self.interner.contains(hook_name) {
@@ -8345,7 +8361,7 @@ impl Vm {
                 self.invoke_method(
                     m,
                     Value::Class(src.clone()),
-                    vec![Value::Class(target.clone())],
+                    vec![target.clone()],
                 )?;
                 self.dispatch_until(pre_frames)?;
                 self.stack.pop();
