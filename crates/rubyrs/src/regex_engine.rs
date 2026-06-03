@@ -233,17 +233,17 @@ impl CompiledRegex {
         const CAP_HINT_MAX: usize = 64;
         let cap = max_matches.unwrap_or(0).min(CAP_HINT_MAX);
         let mut out: Vec<SplitMatch> = Vec::with_capacity(cap);
-        // Limit check goes BEFORE pushing so \`Some(0)\` stops
-        // before collecting any matches (matches the
-        // documented contract "stop after the n-th match"
-        // for n=0 = "no matches"). Code-review #357 round 2.
+        // Bound the iterator with `.take(bound)` so the engine
+        // stops searching for the next match BEFORE we'd
+        // reject it — the previous loop pulled one extra match
+        // per call (engine work + ObjectIds + allocation) only
+        // to discard it. \`usize::MAX\` is effectively
+        // unbounded for the \`None\` case. Code-review #357
+        // round 6.
+        let bound = max_matches.unwrap_or(usize::MAX);
         match self {
             CompiledRegex::Native(r) => {
-                for caps in r.captures_iter(haystack) {
-                    if let Some(n) = max_matches
-                        && out.len() >= n {
-                            break;
-                        }
+                for caps in r.captures_iter(haystack).take(bound) {
                     if let Some(m0) = caps.get(0) {
                         let range = (m0.start(), m0.end());
                         let groups: Vec<Option<(usize, usize)>> = (1..caps.len())
@@ -254,11 +254,7 @@ impl CompiledRegex {
                 }
             }
             CompiledRegex::Fancy(r) => {
-                for caps_res in r.captures_iter(haystack) {
-                    if let Some(n) = max_matches
-                        && out.len() >= n {
-                            break;
-                        }
+                for caps_res in r.captures_iter(haystack).take(bound) {
                     let caps = match caps_res {
                         Ok(c) => c,
                         Err(_) => break,
