@@ -2448,16 +2448,6 @@ pub(crate) fn str_succ(s: &str) -> String {
     }
 }
 
-/// Translate Ruby's `\0` / `\1` / … backref syntax in a
-/// String#gsub replacement template into the `regex` crate's
-/// `$0` / `$1` / … convention. Doubled backslash (`\\`) escapes
-/// a literal backslash. `\&` is the entire match (CRuby alias
-/// for `\0`); `\'` (post-match) / `\`` (pre-match) are NOT
-/// supported in our subset — they'd need MatchData state we
-/// don't currently carry.
-///
-/// Also escapes any literal `$` in the template so the regex
-/// crate doesn't interpret it as its own backref form.
 #[cfg(feature = "regex")]
 /// `String#split(regex[, limit])` shared core. Walks the
 /// `CompiledRegex::split_matches` output and emits a
@@ -2582,6 +2572,16 @@ fn regex_split_into_values(
     out
 }
 
+/// Translate Ruby's `\0` / `\1` / … backref syntax in a
+/// String#gsub replacement template into the `regex` crate's
+/// `$0` / `$1` / … convention. Doubled backslash (`\\`) escapes
+/// a literal backslash. `\&` is the entire match (CRuby alias
+/// for `\0`); `\'` (post-match) / `\`` (pre-match) are NOT
+/// supported in our subset — they'd need MatchData state we
+/// don't currently carry.
+///
+/// Also escapes any literal `$` in the template so the regex
+/// crate doesn't interpret it as its own backref form.
 #[cfg(feature = "regex")]
 pub(crate) fn ruby_backref_to_dollar(template: &str) -> String {
     let mut out = String::with_capacity(template.len());

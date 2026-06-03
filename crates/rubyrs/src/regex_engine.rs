@@ -221,26 +221,44 @@ impl CompiledRegex {
         haystack: &str,
         max_matches: Option<usize>,
     ) -> Vec<SplitMatch> {
-        let cap = max_matches.unwrap_or(0);
+        // Sanity cap on the preallocation. `max_matches` can
+        // arrive as `usize::MAX` when an oversized Ruby
+        // \`limit\` saturates the \`try_from\` conversion at
+        // the call site; `Vec::with_capacity(usize::MAX)`
+        // would OOM/panic before any matching occurs. 64 is
+        // a generous hint for the common case (most splits
+        // produce single-digit matches); we'll grow naturally
+        // for legitimately large match counts. Code-review
+        // #357 round 2.
+        const CAP_HINT_MAX: usize = 64;
+        let cap = max_matches.unwrap_or(0).min(CAP_HINT_MAX);
         let mut out: Vec<SplitMatch> = Vec::with_capacity(cap);
+        // Limit check goes BEFORE pushing so \`Some(0)\` stops
+        // before collecting any matches (matches the
+        // documented contract "stop after the n-th match"
+        // for n=0 = "no matches"). Code-review #357 round 2.
         match self {
             CompiledRegex::Native(r) => {
                 for caps in r.captures_iter(haystack) {
+                    if let Some(n) = max_matches
+                        && out.len() >= n {
+                            break;
+                        }
                     if let Some(m0) = caps.get(0) {
                         let range = (m0.start(), m0.end());
                         let groups: Vec<Option<(usize, usize)>> = (1..caps.len())
                             .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
                             .collect();
                         out.push(SplitMatch { range, groups });
-                        if let Some(n) = max_matches
-                            && out.len() >= n {
-                                break;
-                            }
                     }
                 }
             }
             CompiledRegex::Fancy(r) => {
                 for caps_res in r.captures_iter(haystack) {
+                    if let Some(n) = max_matches
+                        && out.len() >= n {
+                            break;
+                        }
                     let caps = match caps_res {
                         Ok(c) => c,
                         Err(_) => break,
@@ -251,10 +269,6 @@ impl CompiledRegex {
                             .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
                             .collect();
                         out.push(SplitMatch { range, groups });
-                        if let Some(n) = max_matches
-                            && out.len() >= n {
-                                break;
-                            }
                     }
                 }
             }
