@@ -8324,27 +8324,35 @@ impl Vm {
         self.invoke_method_with_block(m, self_val, args, None)
     }
 
-    /// Fire `Module.included(target)` / `Module.prepended(target)`
-    /// for each `src` module passed to `include` / `prepend` on
-    /// `target`. CRuby's contract:
-    ///   - hook receiver is the included/prepended module (`src`),
-    ///     not the target
-    ///   - hook is called with `target` as its single argument
+    /// Fire `Module.included(target)` / `Module.prepended(target)` /
+    /// `Module.extended(target)` for each `src` module passed to the
+    /// corresponding `include` / `prepend` / `extend` call. CRuby's
+    /// contract:
+    ///   - hook receiver is the module being mixed in (`src`), not
+    ///     the target
+    ///   - hook is called with `target` as its single argument; the
+    ///     target is a `Value::Class` for `include` / `prepend` /
+    ///     `Class.extend` and a `Value::Object` for `Object#extend`,
+    ///     so the parameter is the open `Value` enum rather than a
+    ///     `Class`-specific shape
     ///   - return value is discarded (hook runs for side effects)
-    ///   - hook fires on EVERY `include`/`prepend` call, including
-    ///     idempotent re-includes where the chain mutation is a
-    ///     no-op; callers populate `sources` accordingly (do not
-    ///     gate on `class_is_a`)
+    ///   - hook fires on EVERY `include`/`prepend`/`extend` call,
+    ///     including idempotent re-mixes where the chain mutation
+    ///     is a no-op; callers populate `sources` accordingly (do
+    ///     not gate on `class_is_a`)
+    ///   - `hook_name` is the Symbol the caller wants to invoke —
+    ///     `"included"`, `"prepended"`, or `"extended"` — chosen at
+    ///     the dispatch arm based on which keyword the user wrote
     ///
     /// Fast-path: if the hook name has never been interned no user
     /// code can have defined an override, so we skip the lookup
     /// entirely (mirroring the `Class.inherited` fast-path in
     /// step.rs). Lookup uses `lookup_class_singleton_method` so a
-    /// `def self.included(base)` (or `def self.prepended(base)`)
-    /// defined on `src` or any of its singleton ancestors fires;
-    /// a generic `class Module; def included(base); end; end`
-    /// monkey-patch won't reach here — same divergence as the
-    /// `inherited` hook.
+    /// `def self.included(base)` (or `def self.prepended(base)` /
+    /// `def self.extended(base)`) defined on `src` or any of its
+    /// singleton ancestors fires; a generic
+    /// `class Module; def included(base); end; end` monkey-patch
+    /// won't reach here — same divergence as the `inherited` hook.
     pub(crate) fn fire_inclusion_hooks(
         &mut self,
         sources: &[std::rc::Rc<crate::value::Class>],
