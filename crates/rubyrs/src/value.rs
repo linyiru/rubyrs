@@ -471,6 +471,14 @@ pub struct Method {
     /// `invoke_method_with_block` to re-enter `do_call` with the
     /// primitive name so the inline dispatch fires.
     pub(crate) builtin: Option<std::rc::Rc<BuiltinMeta>>,
+    /// Captured at `def name ... end` time (or builtin synthesis).
+    /// Survives `alias_method :new, :old` because alias install
+    /// shares the same `Rc<Method>` — the alias's `name_id` lives
+    /// on the class table; this field keeps the original def name
+    /// so `Method#original_name` can return it. `None` for the few
+    /// construction sites where the original name isn't available
+    /// (callers fall back to the captured BoundMethod name_id).
+    pub(crate) original_name: Option<crate::intern::SymId>,
 }
 
 /// Metadata for a synthesised builtin Method installed on

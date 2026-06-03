@@ -2475,6 +2475,54 @@ impl Vm {
                 self.stack.push(Value::Sym(nid));
                 return Ok(CallableOutcome::Handled);
             }
+        // `m.original_name` — returns the Method's pre-alias name.
+        // For a method defined as `def foo` and captured as
+        // `.method(:foo)`, equal to `name`. For an alias
+        // (`alias_method :bar, :foo`), the captured BoundMethod
+        // reports `name == :bar` but `original_name == :foo` (CRuby
+        // parity — the original-def Symbol is preserved through the
+        // shared Rc<Method>). Falls back to the captured name when
+        // the underlying Method has no recorded original name
+        // (rare — only for synthesised Methods that predate this
+        // wiring).
+        if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
+            && name == "original_name" {
+                if !args.is_empty() {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0)",
+                            args.len()
+                        ),
+                    }));
+                }
+                let (cap_class, captured_name, snapshot) = match &recv {
+                    Value::BoundMethod(bid) => {
+                        let (r, n, snap) = self.heap.bound_method_full(*bid);
+                        let r = r.clone();
+                        let snap = snap.clone();
+                        let cls = match self.class_of(&r) {
+                            Value::Class(c) => c,
+                            _ => return Err(self.trap(RubyError::TypeError {
+                                msg: "Method receiver has no resolvable class".into(),
+                            })),
+                        };
+                        (cls, n, snap)
+                    }
+                    Value::UnboundMethod(uid) => {
+                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                        (cls, n, snap)
+                    }
+                    _ => unreachable!(),
+                };
+                let resolved = snapshot
+                    .or_else(|| self.lookup_method_uncached(&cap_class, captured_name));
+                let orig = resolved
+                    .as_ref()
+                    .and_then(|m| m.original_name)
+                    .unwrap_or(captured_name);
+                self.stack.push(Value::Sym(orig));
+                return Ok(CallableOutcome::Handled);
+            }
         // `m.super_method` — returns the Method/UnboundMethod that
         // `super` would dispatch to, or nil if no super definition
         // exists. CRuby parity: walks past the captured Method's
@@ -5158,6 +5206,7 @@ impl Vm {
                             defining_class: Some(std::rc::Rc::downgrade(cls)),
                             visibility: Cell::new(Visibility::Public),
                             closure: m.closure.clone(),
+                            original_name: m.original_name,
                             builtin: m.builtin.clone(),
                         });
                         cls.singleton_methods.borrow_mut().insert(sid, singleton_copy);
@@ -9767,6 +9816,7 @@ impl Vm {
                         visibility: std::cell::Cell::new(crate::value::Visibility::Public),
                         closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
                         builtin: None,
+                        original_name: Some(name_sym),
                     });
                     sc.methods.borrow_mut().insert(name_sym, m);
                 }
@@ -9779,6 +9829,7 @@ impl Vm {
                         visibility: std::cell::Cell::new(crate::value::Visibility::Public),
                         closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
                         builtin: None,
+                        original_name: Some(name_sym),
                     });
                     c.singleton_methods.borrow_mut().insert(name_sym, m);
                 }
@@ -9927,6 +9978,7 @@ impl Vm {
                     visibility: std::cell::Cell::new(vis),
                     closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
                     builtin: None,
+                    original_name: Some(name_sym),
                 });
                 target_cls.install_method(name_sym, m);
                 self.method_gen = self.method_gen.wrapping_add(1);
@@ -10831,6 +10883,7 @@ impl Vm {
         src: &Value,
         defining_class: &std::rc::Rc<crate::value::Class>,
         visibility: crate::value::Visibility,
+        name_id: crate::intern::SymId,
     ) -> Result<std::rc::Rc<crate::value::Method>, RubyError> {
         let source = self.method_source_from(src, defining_class)?;
         let m = match source {
@@ -10843,6 +10896,7 @@ impl Vm {
                     visibility: std::cell::Cell::new(visibility),
                     closure: Some(closure),
                     builtin: None,
+                    original_name: Some(name_id),
                 })
             }
             MethodSource::Snapshot(snap) => {
@@ -10853,6 +10907,7 @@ impl Vm {
                     defining_class: Some(std::rc::Rc::downgrade(defining_class)),
                     visibility: std::cell::Cell::new(visibility),
                     closure: snap.closure.clone(),
+                    original_name: snap.original_name,
                     builtin: snap.builtin.clone(),
                 })
             }
@@ -10872,7 +10927,7 @@ impl Vm {
         visibility: crate::value::Visibility,
     ) -> Result<crate::intern::SymId, RubyError> {
         let anchor = target_cls.effective_install_class();
-        let m = self.build_method_from_value(src, &anchor, visibility)?;
+        let m = self.build_method_from_value(src, &anchor, visibility, name_sym)?;
         target_cls.install_method(name_sym, m);
         self.method_gen = self.method_gen.wrapping_add(1);
         Ok(name_sym)
@@ -10893,6 +10948,7 @@ impl Vm {
             src,
             cls,
             crate::value::Visibility::Public,
+            name_sym,
         )?;
         cls.singleton_methods.borrow_mut().insert(name_sym, m);
         self.method_gen = self.method_gen.wrapping_add(1);
@@ -11171,6 +11227,7 @@ impl Vm {
             visibility: std::cell::Cell::new(crate::value::Visibility::Public),
             closure: None,
             builtin: None,
+            original_name: Some(orig_id),
         })
     }
 }
