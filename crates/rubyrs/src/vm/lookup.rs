@@ -1612,14 +1612,21 @@ impl Vm {
         match self.super_lookup(name_id) {
             Ok((m, self_val)) => self.invoke_method(m, self_val, args),
             Err(trap) => {
-                // Only intercept the "no superclass method"
-                // failure (not other Trap variants like
-                // "super called outside of method") AND only
-                // for the known lifecycle-hook names. Anything
-                // else propagates as before.
-                let is_no_method = matches!(
+                // Only intercept the specific "super: no
+                // superclass method `<name>'" shape — NOT the
+                // sibling "super called outside of method"
+                // case (which also raises NoMethodError but
+                // for a fundamentally broken call site that
+                // shouldn't silently succeed). super_lookup
+                // formats the "no superclass" message with a
+                // fixed prefix, so we discriminate on the
+                // method field's prefix. Anything else
+                // propagates as before. Code-review #363
+                // round 1.
+                let is_no_super = matches!(
                     &trap.err,
-                    crate::error::RubyError::NoMethodError { .. },
+                    crate::error::RubyError::NoMethodError { method, .. }
+                        if method.starts_with("super: no superclass method"),
                 );
                 let resolved = self.interner.resolve(name_id);
                 let is_lifecycle_hook = matches!(
@@ -1629,7 +1636,7 @@ impl Vm {
                         | "singleton_method_removed" | "method_undefined"
                         | "singleton_method_undefined",
                 );
-                if is_no_method && is_lifecycle_hook {
+                if is_no_super && is_lifecycle_hook {
                     self.stack.push(Value::Nil);
                     Ok(())
                 } else {

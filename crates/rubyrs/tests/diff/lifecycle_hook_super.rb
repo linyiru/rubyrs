@@ -33,13 +33,33 @@ class A2
 end
 class B2 < A2; end
 
-## Shape 3: super-chain. A3 → A2 → A1 → ... none has a real
-## inherited override, all use the no-op terminator.
-class A3
-  def self.inherited(sub); super; end
+## Shape 3: multi-level inherited chain — each class in the
+## chain has its own `inherited` override that calls super,
+## walking up through TopA → MidA → LowA → C → no-op default.
+## Code-review #363 round 1 caught the original Shape 3 only
+## exercising a single class without an actual chain.
+$shape3_log = []
+class TopA
+  def self.inherited(sub)
+    $shape3_log << "TopA.inherited(#{sub})"
+    super
+  end
 end
-class B3 < A3; end
-puts "shape3-class=#{B3.superclass.inspect}"
+class MidA < TopA
+  def self.inherited(sub)
+    $shape3_log << "MidA.inherited(#{sub})"
+    super
+  end
+end
+class LowA < MidA
+  def self.inherited(sub)
+    $shape3_log << "LowA.inherited(#{sub})"
+    super
+  end
+end
+class Leaf < LowA; end
+puts "shape3-chain=#{$shape3_log.inspect}"
+puts "shape3-leaf-ancestors=#{Leaf.ancestors.take(4).inspect}"
 
 ## Shape 4: included hook on Module — same pattern. Bare
 ## super hits the Module#included default no-op.
@@ -61,6 +81,29 @@ puts "shape4=#{$shape4_log.inspect}"
 ## here DOES list `extended` in the whitelist, so once the
 ## firing path lands the super-call from inside an `extended`
 ## override will work automatically.
+
+## Shape 6a: regression — `super` called outside of any
+## method body (toplevel / class-body) must STILL raise even
+## when the surrounding context's method name would have been
+## a lifecycle hook. The intercept discriminates on the
+## error-message shape (\"no superclass method\" vs \"called
+## outside of method\"), so this sibling NoMethodError variant
+## propagates as a hard error. Code-review #363 round 1
+## caught the over-broad match.
+err = begin
+  # Use eval to invoke super from toplevel — no method frame
+  # means no defining_class, so super_lookup hits the
+  # "called outside of method" path. (Skipping `binding` arg
+  # because rubyrs doesn't model Kernel#binding yet — eval
+  # uses the toplevel context by default.)
+  eval("super")
+  "no-raise"
+rescue NoMethodError => e
+  e.message.include?("super called outside of method") ? "outside-method-trapped" : "other"
+rescue => e
+  "other:#{e.class}"
+end
+puts "shape6a=#{err}"
 
 ## Shape 6: regression — `super` for a NON-lifecycle method
 ## name that genuinely has no parent must STILL raise
