@@ -79,7 +79,7 @@ bignum = ["dep:num-bigint", "dep:num-integer", "dep:num-traits"]
 # Per ADR 0017's Rule 3, regex belongs in Tier 2 (this feature).
 # The default keeps it on so today's CLI / embedder behaviour
 # stays identical to pre-PoC.
-regex = ["dep:regex"]
+regex = ["dep:regex", "dep:fancy-regex"]
 # Tier 3 stdlib vendor bridge (per ADR 0017 row 125). With this
 # feature off, the lenient stdlib stub path (`is_stdlib_stub_name`)
 # stays a pure "feature-absent surface": `require 'pathname'`
@@ -204,6 +204,17 @@ _http_server = [
 [dependencies]
 ruby-prism.workspace = true
 regex = { version = "1", optional = true }
+# `fancy-regex` is the lookaround / backreference fallback engine.
+# rubyrs uses `regex` as the primary engine (linear time,
+# ReDoS-immune by construction); fancy-regex is only consulted
+# when `regex::Regex::new` fails on syntax the linear engine
+# rejects (typically `(?=...)` lookahead). Internally fancy-
+# regex itself delegates simple subpatterns back to `regex` —
+# so the cold path is still mostly the same engine, only with
+# a backtracking NFA stitched in for the unsupported features.
+# Bundled into the `regex` feature so embedders don't need to
+# think about a second knob; the dep is gated on `regex` too.
+fancy-regex = { version = "0.18", optional = true }
 # Optional via the `bignum` feature. With bignum off, num_bigint is not
 # pulled in. ADR 0018 Phase 1 will switch this to `default-features =
 # false` when rubyrs-core extracts (num-bigint's `std` is opt-out).

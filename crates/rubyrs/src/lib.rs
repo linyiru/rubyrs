@@ -40,6 +40,20 @@ mod intern;
 #[cfg(feature = "_json_native")]
 mod json_native;
 mod output;
+// `regex_engine` is public because `Value::Regex(Rc<CompiledRegex>)`
+// is reachable from the embedder-visible `Value` enum; an
+// unnameable type in a public field would trip Rust's
+// `private_interfaces` lint (hard fail under CI's `-D warnings`).
+// The enum itself is the only `pub` item — its variants are
+// technically public too (Rust doesn't permit per-variant
+// visibility on a `pub enum` — E0449) and the inherent methods
+// are deliberately `pub(crate)`. Embedders should treat
+// `Value::Regex(_)` as fully opaque: pattern-match on the
+// outer variant if needed, but the inner `CompiledRegex` is
+// implementation detail. A future engine swap or method
+// addition stays a non-breaking change.
+#[cfg(feature = "regex")]
+pub mod regex_engine;
 #[cfg(feature = "_sqlite")]
 mod sqlite;
 mod signals;

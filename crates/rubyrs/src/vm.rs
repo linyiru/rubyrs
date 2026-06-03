@@ -651,7 +651,7 @@ pub(crate) struct Vm {
     /// the `regex` feature (ADR 0017 Rule 3) — disappears with
     /// `--no-default-features`.
     #[cfg(feature = "regex")]
-    pub(crate) regex_cache: HashMap<SymId, Rc<regex::Regex>>,
+    pub(crate) regex_cache: HashMap<SymId, Rc<crate::regex_engine::CompiledRegex>>,
     /// Parsed-BigInt cache for `Op::LoadBigInt`. Keyed by the
     /// interned decimal-string SymId; first load decodes via
     /// `BigInt::from_str`, subsequent loads return the cached

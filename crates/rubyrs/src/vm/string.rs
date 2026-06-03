@@ -1611,8 +1611,14 @@ impl Vm {
                 #[cfg(feature = "regex")]
                 if name == "match" && args.len() == 1 {
                     if let Value::Regex(re) = &args[0] {
+                        let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
+                            msg: format!(
+                                "regex op 'String#match' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
+                                re.as_str(),
+                            ),
+                        }))?;
                         let bound = s.to_string_lossy();
-                        let captures = re.captures(&bound);
+                        let captures = native.captures(&bound);
                         match captures {
                             None => {
                                 // CRuby parity: a failed `match`
@@ -2020,12 +2026,20 @@ impl Vm {
                     // the element.
                     #[cfg(feature = "regex")]
                     ("scan", [Value::Regex(re)]) => {
+                        // Layer #17: scan (no-block form) not
+                        // yet dual-engine; trap on fancy.
+                        let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
+                            msg: format!(
+                                "regex op 'String#scan' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
+                                re.as_str(),
+                            ),
+                        }))?;
                         // regex crate is &str-only; lossy view at
                         // iteration entry (binary input degrades to
                         // lossy UTF-8 here — regex itself only
                         // matches UTF-8 anyway).
                         let s_owned = s.to_string_lossy();
-                        let has_groups = re.captures_len() > 1;
+                        let has_groups = native.captures_len() > 1;
                         // GC rooting: under STRESS_GC=1 each per-match
                         // sub-Array alloc'd in the has_groups branch
                         // is unreachable until the wrapping result
@@ -2040,7 +2054,7 @@ impl Vm {
                         let mut g = PinGuard::new(self);
                         let mut out: Vec<Value> = Vec::new();
                         if has_groups {
-                            for caps in re.captures_iter(&s_owned) {
+                            for caps in native.captures_iter(&s_owned) {
                                 let mut group_vec: Vec<Value> = Vec::with_capacity(caps.len() - 1);
                                 for i in 1..caps.len() {
                                     let g_val = caps.get(i)
@@ -2056,7 +2070,7 @@ impl Vm {
                                 out.push(v);
                             }
                         } else {
-                            for m in re.find_iter(&s_owned) {
+                            for m in native.find_iter(&s_owned) {
                                 out.push(Value::new_str(m.as_str()));
                             }
                         }
@@ -2183,11 +2197,29 @@ impl Vm {
     fn str_bracket_regex(
         &mut self,
         s: &std::rc::Rc<RStr>,
-        re: &std::rc::Rc<regex::Regex>,
+        re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
         n: i64,
     ) -> Result<Value, Trap> {
+        // Tier-1 partial: capture-group extraction (`String#[]`
+        // / `String#slice`) hasn't been migrated to the
+        // dual-engine dispatcher yet. Patterns that landed on
+        // the fancy-regex engine (lookaround / backref) raise
+        // `RubyError::RuntimeError` instead of silently
+        // returning nil. (rubyrs doesn't model
+        // `NotImplementedError` as its own `RubyError`
+        // variant yet — `RuntimeError` with a clear "not yet
+        // supported" message is the closest fit.) Follow-up
+        // PRs can swap this to a normalized owned-captures
+        // struct that both engines populate. (TRY_RUNS
+        // pass-13 layer #17.)
+        let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
+            msg: format!(
+                "regex op 'String#[]/slice' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
+                re.as_str(),
+            ),
+        }))?;
         let bound = s.to_string_lossy();
-        let captures = re.captures(&bound);
+        let captures = native.captures(&bound);
         let caps = match captures {
             None => {
                 self.last_match = None;

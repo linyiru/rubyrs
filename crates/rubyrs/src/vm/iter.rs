@@ -452,6 +452,26 @@ impl Vm {
                 // per-match update inside the loop leaves
                 // `last_match` set to the FINAL match (also
                 // matches CRuby).
+                // Layer #17: dual-engine fallback. Block-form
+                // `gsub`/`sub` with regex receiver iterates via
+                // `captures_iter`; we haven't migrated this
+                // path to the unified dispatcher yet, so trap
+                // clearly on fancy-engine patterns until a
+                // follow-up wires it through. Native patterns
+                // (the overwhelming majority) take the existing
+                // fast path unchanged.
+                //
+                // Check BEFORE \`last_match.take()\` so a trap
+                // here doesn't have the side effect of wiping
+                // \`$~\` — the operation never ran, so the
+                // caller's prior \`$~\` should survive untouched.
+                // Code-review #353 round 5.
+                let native = re.as_native().ok_or_else(|| g.vm.trap(crate::error::RubyError::RuntimeError {
+                    msg: format!(
+                        "regex op 'String#sub/gsub block-form' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
+                        re.as_str(),
+                    ),
+                }))?;
                 let last_match_before = g.vm.last_match.take();
                 // `captures_iter` gives us group info per match
                 // (find_iter doesn't). Slight cost: each iteration
@@ -460,7 +480,7 @@ impl Vm {
                 // `$~` semantics — and it's amortised against the
                 // block dispatch which dominates per-match cost
                 // anyway.
-                for caps in re.captures_iter(&source) {
+                for caps in native.captures_iter(&source) {
                     any_match = true;
                     let m = caps.get(0).expect("ICE: captures.get(0) is always Some on a successful match");
                     out.push_str(&source[last_end..m.start()]);
@@ -581,7 +601,18 @@ impl Vm {
             match &args[0] {
                 #[cfg(feature = "regex")]
                 Value::Regex(re) => {
-                    let has_groups = re.captures_len() > 1;
+                    // Layer #17: scan with regex receiver
+                    // hasn't been migrated to the dual-engine
+                    // dispatcher yet. Native patterns take the
+                    // existing fast path; fancy patterns trap
+                    // clearly until the follow-up wires it.
+                    let native = re.as_native().ok_or_else(|| g.vm.trap(crate::error::RubyError::RuntimeError {
+                        msg: format!(
+                            "regex op 'String#scan' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
+                            re.as_str(),
+                        ),
+                    }))?;
+                    let has_groups = native.captures_len() > 1;
                     // The pre-migration code did `pop(); if break_signaled
                     // { early = pop(); }` — TWO pops, with the second one
                     // happening AFTER the first had already discarded the
@@ -592,7 +623,7 @@ impl Vm {
                     // pops exactly once and classifies, fixing the
                     // double-pop bug as a side effect.
                     if has_groups {
-                        for caps in re.captures_iter(&source_str) {
+                        for caps in native.captures_iter(&source_str) {
                             let mut group_vec: Vec<Value> = Vec::with_capacity(caps.len() - 1);
                             for i in 1..caps.len() {
                                 let v = caps.get(i)
@@ -642,7 +673,7 @@ impl Vm {
                             }
                         }
                     } else {
-                        for m in re.find_iter(&source_str) {
+                        for m in native.find_iter(&source_str) {
                             match g.vm.step_block(block, vec![Value::new_str(m.as_str())], pre_frames)? {
                                 BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                                 BlockStep::Break(r) => { early = Some(r); break; }
