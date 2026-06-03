@@ -422,7 +422,8 @@ impl Vm {
                         "exit" | "exit!" | "abort" | "warn" | "at_exit" | "__rubyrs_signal_trap" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
                         "eval" | "caller" |
-                        "__defined_ivar?" | "__defined_method?" | "__defined_const?"
+                        "__defined_ivar?" | "__defined_method?" | "__defined_const?" |
+                        "autoload" | "autoload?"
                     );
                     let host_hit = self.host_fns.contains_key(sid);
                     let self_val = self.frames.last()
@@ -464,15 +465,33 @@ impl Vm {
             // still a no-op stub in dispatch.rs; Phase 2 wires it
             // up to a per-Class registry.
             //
+            // Dispatch precedence guard: builtins fire BEFORE the
+            // class-body no-recv bridge in `do_call`, so a bare
+            // `autoload :X, "p"` inside `class Foo; ... end` would
+            // otherwise hit this toplevel handler and incorrectly
+            // register on the toplevel scope instead of Foo. We
+            // detect that by inspecting the current frame's `self`
+            // — if it's a `Value::Class(_)` we're inside a class /
+            // module body and defer (`return None`) so the
+            // dispatcher continues to the class-arm at
+            // `try_dispatch_class_intrinsics` (still a no-op stub
+            // for Phase 1, by design).
+            //
             // Arity: exactly 2. First arg coerces to Symbol (accept
             // Symbol + String); second arg must be a String. Type
-            // mismatches raise the CRuby-shape TypeError.
+            // mismatches raise the CRuby-shape TypeError. Invalid
+            // constant names (lowercase, leading digit, etc.) raise
+            // `NameError: wrong constant name <name>` matching
+            // CRuby's autoload validation.
             //
             // Under wasm32-wasi the registry is cfg-gated out (no
             // `require` to fire), so the call validates and returns
             // nil — equivalent to the pre-Phase-1 stub behavior on
             // that target.
             "autoload" => {
+                if let Some(Value::Class(_)) = self.frames.last().map(|f| f.self_val.clone()) {
+                    return None;
+                }
                 if args.len() != 2 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
                         msg: format!("wrong number of arguments (given {}, expected 2)", args.len()),
@@ -501,6 +520,15 @@ impl Vm {
                         msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
                     }))),
                 };
+                // Validate constant-name shape (uppercase start +
+                // alnum/underscore body). CRuby raises NameError on
+                // `autoload(:foo, "x")`.
+                let name_str = self.interner.resolve(name_sym).clone();
+                if !crate::vm::dispatch::is_valid_const_name(&name_str) {
+                    return Some(Err(self.trap(RubyError::NameError {
+                        msg: format!("wrong constant name {}", name_str),
+                    })));
+                }
                 let path_str = match &args[1] {
                     Value::Str(s) => s.to_string_lossy(),
                     other => return Some(Err(self.trap(RubyError::TypeError {
@@ -524,7 +552,16 @@ impl Vm {
             // (toplevel scope has no inheritance chain to walk —
             // CRuby's `Object.autoload?(:Foo, false)` would also
             // see a toplevel `autoload :Foo, ...` directly).
+            //
+            // Same dispatch-precedence guard + const-name validation
+            // as the `autoload` arm above — bare `autoload?` inside
+            // `class Foo; ... end` defers to the class-arm via
+            // `return None`, and invalid constant names raise
+            // `NameError: wrong constant name <name>`.
             "autoload?" => {
+                if let Some(Value::Class(_)) = self.frames.last().map(|f| f.self_val.clone()) {
+                    return None;
+                }
                 if args.is_empty() || args.len() > 2 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
                         msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
@@ -552,6 +589,12 @@ impl Vm {
                         msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
                     }))),
                 };
+                let name_str = self.interner.resolve(name_sym).clone();
+                if !crate::vm::dispatch::is_valid_const_name(&name_str) {
+                    return Some(Err(self.trap(RubyError::NameError {
+                        msg: format!("wrong constant name {}", name_str),
+                    })));
+                }
                 #[cfg(not(target_os = "wasi"))]
                 {
                     if let Some(path) = self.autoloads_toplevel.get(&name_sym) {
