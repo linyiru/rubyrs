@@ -16,7 +16,8 @@
 # directly above, if that doc text contains `self.OTHER(`
 # where `OTHER` is ANOTHER `pub(crate) fn` defined in the same
 # file (and OTHER != NAME), the doc was probably meant for
-# OTHER. Flag both sites for review.
+# OTHER. Flag the doc-bearing (suspected mis-attached) site —
+# the report names OTHER so the fix site is obvious from grep.
 #
 # False positives are possible (legitimate cross-references in
 # docs). Suppress with `// allow: doc-orientation` in either:
@@ -31,6 +32,8 @@
 # Exit codes:
 #   0  — no suspects (or all annotated as allowed).
 #   1  — at least one suspect; lines printed to stderr.
+#   2  — ROOT directory does not exist (usage error: wrong cwd
+#        or invalid `ROOT=` override).
 
 set -euo pipefail
 
@@ -46,7 +49,7 @@ import os, re, sys, glob
 
 root = sys.argv[1]
 doc_re = re.compile(r'^\s*///')
-fn_re = re.compile(r'^\s*pub(?:\(crate\))?\s*fn\s+(\w+)')
+fn_re = re.compile(r'^\s*pub(?:\(crate\))?\s*(?:async\s+|const\s+|unsafe\s+)*fn\s+(\w+)')
 attr_re = re.compile(r'^\s*#\[')
 allow_re = re.compile(r'allow:\s*doc-orientation')
 
@@ -104,11 +107,11 @@ for path in sorted(glob.glob(f'{root}/**/*.rs', recursive=True)):
 if suspects:
     for path, line, name, callee in suspects:
         print(
-            f"{path}:{line}: rustdoc-orientation: `pub fn {name}` has a `///` "
+            f"{path}:{line}: rustdoc-orientation: `fn {name}` has a `///` "
             f"doc block mentioning `self.{callee}(...)`, but `{callee}` is a "
             f"different fn defined in the same file. The doc may have been "
             f"orphaned by an inserted helper (PR #338 cycle 1 / PR #349 pattern). "
-            f"Move the doc to immediately precede `pub fn {callee}`, or annotate "
+            f"Move the doc to immediately precede `fn {callee}`, or annotate "
             f"with `// allow: doc-orientation`.",
             file=sys.stderr,
         )
