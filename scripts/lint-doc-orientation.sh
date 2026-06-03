@@ -57,7 +57,7 @@ allow_re = re.compile(r'allow:\s*doc-orientation')
 suspects = []
 
 for path in sorted(glob.glob(f'{root}/**/*.rs', recursive=True)):
-    with open(path) as f:
+    with open(path, encoding='utf-8') as f:
         lines = f.readlines()
     # First pass — collect every `pub fn NAME` declared here.
     same_file_fns = set()
