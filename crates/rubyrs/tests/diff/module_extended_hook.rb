@@ -64,7 +64,31 @@ end
 of = Object.new
 of.extend(MF)                                  # no output, no raise
 
-# (7) respond_to? on extended target reflects the extend.
+# (7) Multi-arg `extend` — CRuby walks args RIGHT-to-LEFT, so
+# M2 ends up at the eigenclass chain head and its hook fires
+# FIRST, followed by M1. Both Object#extend and class-body
+# extend share this order.
+module MX1
+  def self.extended(base); puts "MX1.extended(#{base.class.name})"; end
+end
+module MX2
+  def self.extended(base); puts "MX2.extended(#{base.class.name})"; end
+end
+om = Object.new
+om.extend(MX1, MX2)
+
+# Class-body extend multi-arg — same right-to-left iteration.
+module MY1
+  def self.extended(base); puts "MY1.extended(#{base.name})"; end
+end
+module MY2
+  def self.extended(base); puts "MY2.extended(#{base.name})"; end
+end
+class FooMulti
+  extend MY1, MY2
+end
+
+# (8) respond_to? on extended target reflects the extend.
 module MG
   def greeting; "hi from MG"; end
 end
