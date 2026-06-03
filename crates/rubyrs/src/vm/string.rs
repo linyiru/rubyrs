@@ -1895,16 +1895,24 @@ impl Vm {
                     // (TRY_RUNS pass-14 layer #18.)
                     #[cfg(feature = "regex")]
                     ("split", [Value::Regex(re)]) => {
-                        let src = s.to_string_lossy();
-                        let elems = regex_split_into_values(re, &src, 0);
+                        // `with_str_lossy` borrows through the
+                        // RStr's content cell without owning a
+                        // copy when the bytes are valid UTF-8 —
+                        // matches the existing fast-path pattern
+                        // used by `include?`/`match?` etc.
+                        // Code-review #357 round 5.
+                        let elems = s.with_str_lossy(|src| {
+                            regex_split_into_values(re, src, 0)
+                        });
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Array(elems));
                         Some(Value::Array(id))
                     }
                     #[cfg(feature = "regex")]
                     ("split", [Value::Regex(re), Value::Int(limit)]) => {
-                        let src = s.to_string_lossy();
-                        let elems = regex_split_into_values(re, &src, *limit);
+                        let elems = s.with_str_lossy(|src| {
+                            regex_split_into_values(re, src, *limit)
+                        });
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Array(elems));
                         Some(Value::Array(id))
