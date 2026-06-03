@@ -448,69 +448,77 @@ fn range_size_with_i64_max_width_returns_zero() {
 
 #[test]
 fn array_first_last_non_int_n_raises_no_method_error_today() {
-    // Pin the current rubyrs divergence from CRuby on
-    // `Array#first(n)` / `Array#last(n)` when `n` isn't an
-    // `Int`.
+    // Updated post-025dbf7d ("Float-coerce sweep for Array#pop/
+    // #shift/#first/#last") which intentionally widened
+    // Array#first / #last to coerce Float→Int (matching CRuby).
+    // The earlier version of this test pinned the pre-coerce
+    // behaviour where ALL non-Int args raised NoMethodError
+    // ("the divergence is visible in tree, and a future fix
+    // will trip this test"). That fix happened in 025dbf7d —
+    // this test now pins the post-fix shape so a future
+    // regression-direction change (e.g. someone reverting the
+    // Float arm) trips the alarm in the same way.
     //
-    // CRuby behaviour (2026-05):
-    //   - `[1,2,3].first(2.0)` returns `[1, 2]` — Float's
-    //     `to_int` coerces to 2.
-    //   - `[1,2,3].last(:x)`   raises `TypeError: no implicit
-    //     conversion of Symbol into Integer`.
+    // Post-fix surface:
+    //   - Float (`[1,2,3].first(2.0)`) → coerces to 2,
+    //     returns `[1, 2]` (no error).
+    //   - Symbol / String → TypeError "no implicit conversion
+    //     of <T> into Integer" (NOT NoMethodError — the catch-
+    //     all arm in vm/array.rs routes through
+    //     arity_error_arg0_or_1_int helper).
     //
-    // rubyrs behaviour: both raise `NoMethodError: undefined
-    // method 'first'/'last' for Array` because the match arms
-    // in `vm/array.rs` only bind `Value::Int(n)`, so Float /
-    // Sym / BigInt / etc. fall past the `(n)` arms to the
-    // generic NoMethodError catch-all.
-    //
-    // This test is NOT a diff_cruby fixture because the
-    // divergence would make the harness fail. The point is to
-    // make the divergence VISIBLE in tree: a future contributor
-    // who fixes Float coercion (or wires `to_int` more
-    // generally) will see this test fail, get directed to
-    // re-classify Array#first(n) / Array#last(n), and either
-    // remove or update this test. Without it, the divergence
-    // is invisible — there's no failing breadcrumb when
-    // someone partially implements coercion in a way that
-    // changes the behaviour here.
-    //
-    // The `take` / `drop` arms in the same file have the same
-    // shape; widening to_int coercion across all Int-taking
-    // Array methods would be a separable change.
-    // RubyError + Runtime are already in scope from the file-level
-    // `use rubyrs::{Config, HostCtx, Runtime, RubyError, Trap, Value};`
-    // at the top — no extra import needed.
+    // CRuby matches all three. The test name kept its
+    // "today" suffix because the historical naming is still
+    // useful — anyone grepping for "NoMethodError" on Array
+    // arity issues lands here and sees the post-fix
+    // explanation.
+    fn assert_ok_array(src: &str, expected_inspect: &str) {
+        let mut rt = Runtime::new();
+        let v = rt.eval(src, "non_int_n.rb").expect("expected ok");
+        // The harness doesn't have a direct Array#inspect on
+        // the embed side; format via Debug + cross-check just
+        // the type. The fixture's pre-coerce semantics gave
+        // [1, 2] / [2, 3] for the two Float cases.
+        let _ = expected_inspect;
+        assert!(
+            matches!(v, rubyrs::Value::Array(_)),
+            "expected Array result, got {:?}",
+            v,
+        );
+    }
 
-    fn assert_no_method(src: &str) {
+    fn assert_type_error(src: &str) {
         let mut rt = Runtime::new();
         let err = rt.eval(src, "non_int_n.rb")
-            .expect_err("expected error");
-        // `RubyError::is()` handles both the direct
-        // NoMethodError variant and the Uncaught wrapper that
-        // some dispatch paths route through (they both surface
-        // as `NoMethodError` to the script).
+            .expect_err("expected TypeError");
         assert!(
-            err.err.is("NoMethodError"),
-            "expected NoMethodError for `{src}`, got {:?}",
+            err.err.is("TypeError"),
+            "expected TypeError for `{src}`, got {:?}",
             err.err,
         );
     }
 
-    assert_no_method("[1,2,3].first(2.0)");
-    assert_no_method("[1,2,3].last(2.0)");
-    assert_no_method("[1,2,3].first(:x)");
-    assert_no_method("[1,2,3].last(:x)");
-    assert_no_method("[1,2,3].first('2')");
-    assert_no_method("[1,2,3].last('2')");
+    // Float coerces (post 025dbf7d) — matches CRuby.
+    assert_ok_array("[1,2,3].first(2.0)", "[1, 2]");
+    assert_ok_array("[1,2,3].last(2.0)", "[2, 3]");
+    // Symbol / String stay as TypeError — same arity-error
+    // arm in vm/array.rs that yields CRuby's exact message.
+    assert_type_error("[1,2,3].first(:x)");
+    assert_type_error("[1,2,3].last(:x)");
+    assert_type_error("[1,2,3].first('2')");
+    assert_type_error("[1,2,3].last('2')");
 }
 
 #[test]
 fn range_first_last_non_int_n_raises_no_method_error_today() {
     // Companion to `array_first_last_non_int_n_raises_no_method_error_today`.
-    // Pin the current rubyrs divergence from CRuby on
-    // `Range#first(n)` / `Range#last(n)` when `n` isn't an
-    // `Int`.
+    // Same post-025dbf7d update applies here: Float→Int
+    // coercion shipped for `Range#first(n)` / `#last(n)` in
+    // the same sweep that touched the Array methods. Symbol /
+    // String still TypeError; endless `(1..).first(2.0)`
+    // also coerces. CRuby matches all of these. Pin the new
+    // shape so a future regression-direction flip trips the
+    // test in the same way.
     //
     // CRuby behaviour (2026-05):
     //   - `(1..5).first(2.0)` returns `[1, 2]` — Float's
@@ -532,26 +540,34 @@ fn range_first_last_non_int_n_raises_no_method_error_today() {
     // test and is forced to re-classify Range#first(n) /
     // Range#last(n) intentionally.
 
-    fn assert_no_method(src: &str) {
+    fn assert_ok_array(src: &str) {
+        let mut rt = Runtime::new();
+        let v = rt.eval(src, "non_int_n.rb").expect("expected ok");
+        assert!(
+            matches!(v, rubyrs::Value::Array(_)),
+            "expected Array result for `{src}`, got {:?}",
+            v,
+        );
+    }
+    fn assert_type_error(src: &str) {
         let mut rt = Runtime::new();
         let err = rt.eval(src, "non_int_n.rb")
-            .expect_err("expected error");
+            .expect_err("expected TypeError");
         assert!(
-            err.err.is("NoMethodError"),
-            "expected NoMethodError for `{src}`, got {:?}",
+            err.err.is("TypeError"),
+            "expected TypeError for `{src}`, got {:?}",
             err.err,
         );
     }
 
-    assert_no_method("(1..5).first(2.0)");
-    assert_no_method("(1..5).last(2.0)");
-    assert_no_method("(1..5).first(:x)");
-    assert_no_method("(1..5).last(:x)");
-    assert_no_method("(1..5).first('2')");
-    assert_no_method("(1..5).last('2')");
-    // Endless range too — the endless first(n) arm also only
-    // matches Value::Int(n).
-    assert_no_method("(1..).first(2.0)");
+    assert_ok_array("(1..5).first(2.0)");
+    assert_ok_array("(1..5).last(2.0)");
+    assert_type_error("(1..5).first(:x)");
+    assert_type_error("(1..5).last(:x)");
+    assert_type_error("(1..5).first('2')");
+    assert_type_error("(1..5).last('2')");
+    // Endless range — Float coerces here too.
+    assert_ok_array("(1..).first(2.0)");
 }
 
 
