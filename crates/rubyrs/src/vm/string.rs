@@ -2582,6 +2582,7 @@ fn regex_split_into_values(
     out
 }
 
+#[cfg(feature = "regex")]
 pub(crate) fn ruby_backref_to_dollar(template: &str) -> String {
     let mut out = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
