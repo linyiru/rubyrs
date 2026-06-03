@@ -80,6 +80,57 @@ impl Vm {
                     match (name, args) {
                         ("begin", []) | ("first", []) | ("min", []) => return Ok(Some(b.clone())),
                         ("end", []) | ("last", []) | ("max", []) => return Ok(Some(e.clone())),
+                        // CRuby quirk: beginless `(..e).first(...)`
+                        // raises the same RangeError regardless of
+                        // arg shape — beginless precedence ALWAYS
+                        // wins over arity/type checks. Add this
+                        // guard BEFORE the per-shape arms below so
+                        // (..5).first("x"), .first(1, 2),
+                        // .first(2.5), .first(NaN), .first(big) all
+                        // raise the beginless RangeError instead of
+                        // TypeError / ArgumentError / RangeError
+                        // ("Inf out of range"). Note: the 0-arg
+                        // `("first", [])` arm above still returns
+                        // `b.clone()` (= Nil) for beginless — that's
+                        // a separate pre-existing divergence from
+                        // CRuby and out of scope here.
+                        ("first", many) if !many.is_empty() && matches!(&b, Value::Nil) => {
+                            let _ = many;
+                            return Err(self.trap(RubyError::RangeError {
+                                msg: "cannot get the first element of beginless range".into(),
+                            }));
+                        }
+                        // BigInt arg — CRuby raises RangeError
+                        // even on endless `(1..)`. Mirrors the
+                        // Int+Int branch's BigInt arm.
+                        #[cfg(feature = "bignum")]
+                        ("first", [Value::BigInt(_)]) => {
+                            return Err(self.trap(RubyError::RangeError {
+                                msg: "bignum too big to convert into `long'".to_string(),
+                            }));
+                        }
+                        // Float coerce — same pattern as the
+                        // Int+Int branch (PR #351). Self-recurse
+                        // with the converted Int so the existing
+                        // Int arm below owns the rest of the
+                        // logic (negative-n guard / endless walk;
+                        // beginless was already short-circuited
+                        // above).
+                        ("first", [Value::Float(f)]) => {
+                            let n = self.float_to_int_arg(*f)?;
+                            return self.range_collection_call(id, name, &[Value::Int(n)]);
+                        }
+                        // Multi-arg for partial-range `first` —
+                        // same CRuby "expected 1" wording as the
+                        // Int+Int branch.
+                        ("first", many) if many.len() > 1 => {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: format!(
+                                    "wrong number of arguments (given {}, expected 1)",
+                                    many.len()
+                                ),
+                            }));
+                        }
                         ("first", [Value::Int(n)]) => {
                             // Three reachable cases in this partial-
                             // range branch:
@@ -149,6 +200,16 @@ impl Vm {
                             // the pre-#146 behaviour for the same
                             // inputs.
                             return Ok(None);
+                        }
+                        // Non-Int 1-arg catch-all for partial-range
+                        // `first`. Without this, endless `(1..).first("x")`
+                        // fell to NoMethodError despite `respond_to?`
+                        // returning true — same lockstep violation
+                        // PR #351 fixed for the Int+Int branch.
+                        // Placed AFTER the Int arm so the Int success
+                        // path is unchanged.
+                        ("first", _) => {
+                            return Err(self.arity_error_arg0_or_1_int(name, args));
                         }
                         ("cover?", [Value::Int(v)]) => {
                             let lo_ok = match begin_int { Some(lo) => *v >= lo, None => true };
@@ -302,6 +363,49 @@ impl Vm {
                         self.maybe_gc();
                         let nid = self.heap.alloc(HeapObj::Array(elems));
                         Some(Value::Array(nid))
+                    }
+                    // BigInt arg — CRuby raises RangeError (the
+                    // value is too large to fit in a C long).
+                    // Mirrors Array#first/#last's BigInt arms and
+                    // Hash#first BigInt arm. Without this arm,
+                    // BigInt falls into the catch-all and routes
+                    // through `arity_error_arg0_or_1_int`, which
+                    // renders BigInt's `type_name_for_coerce`
+                    // ("Integer") as the nonsensical
+                    // "Integer into Integer" TypeError.
+                    #[cfg(feature = "bignum")]
+                    ("first", [Value::BigInt(_)]) | ("last", [Value::BigInt(_)]) => {
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "bignum too big to convert into `long'".to_string(),
+                        }));
+                    }
+                    // Float coerce + catch-all for Range#first /
+                    // Range#last (Int+Int branch). Same pattern as
+                    // Array#first/#last (PR #349) and Hash#first
+                    // above — `first(2.5)` truncates to 2; non-Int
+                    // 1-arg raises TypeError instead of NoMethodError.
+                    ("first" | "last", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.range_collection_call(id, name, &[Value::Int(n)]);
+                    }
+                    // CRuby quirk: Range#first / #last use
+                    // "expected 1" for multi-arg (even though
+                    // 0-arg is also valid), while Array uses
+                    // "expected 0..1". Match CRuby's exact wording
+                    // by handling multi-arg before the helper —
+                    // the helper's catch-all then only fires for
+                    // the 1-non-Int case where the TypeError
+                    // wording is the same across receivers.
+                    ("first" | "last", many) if many.len() > 1 => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 1)",
+                                many.len()
+                            ),
+                        }));
+                    }
+                    ("first" | "last", _) => {
+                        return Err(self.arity_error_arg0_or_1_int(name, args));
                     }
                     ("max", []) => Some(if excl {
                         // ei - 1 overflows when ei == i64::MIN

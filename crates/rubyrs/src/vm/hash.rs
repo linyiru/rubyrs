@@ -369,6 +369,21 @@ impl Vm {
                         let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
                         Some(Value::Array(aid))
                     }
+                    // Float coerce — CRuby truncates `first(2.5)` to
+                    // 2. Self-recurse with the converted Int.
+                    // Same pattern as Array#first / #last / #pop /
+                    // #shift (PR #349).
+                    ("first", [Value::Float(f)]) => {
+                        let n = self.float_to_int_arg(*f)?;
+                        return self.hash_collection_call(id, name, &[Value::Int(n)]);
+                    }
+                    // Wrong-arity / non-Int catch-all. Was
+                    // NoMethodError pre-fix — same lockstep
+                    // contract violation pattern as the
+                    // take/drop sweep in PR #340.
+                    ("first", _) => {
+                        return Err(self.arity_error_arg0_or_1_int(name, args));
+                    }
                     // `h.take(n)` — returns the first n entries as
                     // Array<[k, v]>. Behaves like `first(n)`: caps
                     // at hash size, rejects negative n with
