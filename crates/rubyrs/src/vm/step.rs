@@ -1544,6 +1544,21 @@ impl Vm {
                 // then dispatch with that dynamic argc. Receiver
                 // (when present) sits below the array on the
                 // stack — same layout `do_call` expects.
+                //
+                // GC rooting: between the args-Array pop and the
+                // re-push of its elements, the Array (and
+                // transitively every heap-shaped element) has NO
+                // stack root. STRESS_GC under `invoke_block`'s
+                // rest-array assembly could sweep an element like
+                // `Value::Hash(hid)` mid-flight, surfacing later
+                // as `ICE: heap slot is not a Hash` when the
+                // dispatched method dereferences the dangling
+                // ObjId. Pin the Array — the GC mark walk traverses
+                // its elements, so pinning the Array transitively
+                // roots every element through the pop→push window.
+                // Repro fixture: `tests/diff/callable_coerce.rb`
+                // under STRESS_GC=1 (`.method(:call).to_proc.call(
+                // {"VIA" => "x"})` with a Hash arg).
                 let no_recv = matches!(op, Op::ApplyCallNoRecv(_, _));
                 let arr_val = self.stack.pop().expect("ICE: ApplyCall without arg array");
                 let arr_id = match arr_val {
@@ -1552,9 +1567,12 @@ impl Vm {
                         msg: format!("no implicit conversion of {} into Array (splat arg)", other.type_name()),
                     })),
                 };
-                let elems: Vec<Value> = self.heap.array(arr_id).clone();
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(Value::Array(arr_id));
+                let elems: Vec<Value> = g.vm.heap.array(arr_id).clone();
                 let argc = elems.len();
-                for v in elems { self.stack.push(v); }
+                for v in elems { g.vm.stack.push(v); }
+                drop(g);
                 self.do_call(name_id, argc, no_recv, cache_id)?;
             }
             Op::CallBlock(name_id, argc, cache_id) => {

@@ -9324,6 +9324,25 @@ impl Vm {
             // overflow now lives in rest_args.
             let mut g = crate::vm::PinGuard::new(self);
             g.pin(Value::Block(block_id));
+            // Every heap-shaped element of `rest_args` ALSO needs
+            // a pin across `maybe_gc` — `rest_args` is a Rust-
+            // local Vec with no GC root, so an element like
+            // `Value::Hash(hid)` would otherwise be swept and
+            // the eventual `HeapObj::Array(rest_args)` alloc
+            // would store dangling ObjIds. Reproduced under
+            // STRESS_GC=1 by `callable_coerce.rb`'s
+            // `app.method(:call).to_proc.call({"VIA" => "x"})`
+            // — the Hash arg gets unrooted between args-collect
+            // and rest-array alloc, surfacing later as
+            // `ICE: heap slot is not a Hash` at heap.rs:479
+            // when the `<callable-forwarder>` proto loads the
+            // dangling slot. Same shape as the previously-
+            // documented compose-forwarder case (proc_curry_
+            // compose.rb) but with Hash args, which the earlier
+            // fix didn't cover.
+            for a in &rest_args {
+                g.pin(a.clone());
+            }
             g.vm.maybe_gc();
             g.vm.check_alloc()?;
             let id = g.vm.heap.alloc(HeapObj::Array(rest_args));
@@ -9435,6 +9454,19 @@ impl Vm {
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let block_val = self.stack.pop().expect("ICE: stack underflow before block");
+        // GC rooting around the `&callable` coerce. After draining
+        // args into a Rust Vec and popping block_val, both are
+        // unrooted Rust locals — `coerce_callable_to_block`'s
+        // `maybe_gc` would otherwise sweep any heap-shaped arg
+        // (Hash / Array / Object). STRESS_GC repro:
+        // `callable_coerce.rb`'s
+        // `deliver({"X" => "ok"}, &app.method(:call))` shape
+        // (block_val is a BoundMethod, args contains a Hash).
+        // PinGuard's mutable-borrow lifetime can't span the full
+        // function (the borrow checker won't let other &mut self
+        // sites use `self` while the guard is alive), so we pin
+        // only inside the BoundMethod / CurriedProc arms — the
+        // exact window where coerce_callable_to_block fires.
         let block = match block_val {
             Value::Block(id) => id,
             // `&method_object` forwarding (K8): coerce the
@@ -9442,14 +9474,22 @@ impl Vm {
             // Synthesises a vararg-lambda whose captured locals
             // hold the BoundMethod; when invoked, it does
             // `m.call(*args)`. See `coerce_callable_to_block`.
-            Value::BoundMethod(bm_id) => self.coerce_callable_to_block(Value::BoundMethod(bm_id))?,
+            Value::BoundMethod(bm_id) => {
+                let mut g = crate::vm::PinGuard::new(self);
+                for a in &args { g.pin(a.clone()); }
+                g.vm.coerce_callable_to_block(Value::BoundMethod(bm_id))?
+            }
             // `&curried_proc` — a curried proc is still a Proc in
             // CRuby, so `&` on it forwards as a block. Same shape
             // as the BoundMethod arm: the synthesised forwarder
             // does `cp.call(*args)`, and `CurriedProc#call`
             // (dispatch.rs:1159) handles arity-completion / partial
             // application from there.
-            Value::CurriedProc(cp_id) => self.coerce_callable_to_block(Value::CurriedProc(cp_id))?,
+            Value::CurriedProc(cp_id) => {
+                let mut g = crate::vm::PinGuard::new(self);
+                for a in &args { g.pin(a.clone()); }
+                g.vm.coerce_callable_to_block(Value::CurriedProc(cp_id))?
+            }
             // `foo(&nil)` in CRuby is equivalent to `foo` without
             // a block. Common shape: `def render(&block);
             // evaluate(&block); end` invoked without a block ⇒
