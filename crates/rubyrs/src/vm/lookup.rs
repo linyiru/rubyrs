@@ -1542,9 +1542,8 @@ impl Vm {
             return match m {
                 Some(m) => Ok((m, self_val)),
                 None => Err(self.trap(crate::error::RubyError::NoMethodError {
-                    kind: crate::error::NoMethodErrorKind::Missing,
-                    method: format!("super: no superclass method `{}'",
-                        self.interner.resolve(name_id)),
+                    kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
+                    method: self.interner.resolve(name_id).to_string(),
                     recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
                 })),
             };
@@ -1555,9 +1554,8 @@ impl Vm {
                 Value::Class(c) => c,
                 _ => {
                     return Err(self.trap(crate::error::RubyError::NoMethodError {
-                        kind: crate::error::NoMethodErrorKind::Missing,
-                        method: format!("super: no superclass method `{}'",
-                            self.interner.resolve(name_id)),
+                        kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
+                        method: self.interner.resolve(name_id).to_string(),
                         recv_type: std::borrow::Cow::Borrowed(other.type_name()),
                     }));
                 }
@@ -1574,9 +1572,8 @@ impl Vm {
         match m {
             Some(m) => Ok((m, self_val)),
             None => Err(self.trap(crate::error::RubyError::NoMethodError {
-                kind: crate::error::NoMethodErrorKind::Missing,
-                method: format!("super: no superclass method `{}'",
-                    self.interner.resolve(name_id)),
+                kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
+                method: self.interner.resolve(name_id).to_string(),
                 recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
             })),
         }
@@ -1612,21 +1609,24 @@ impl Vm {
         match self.super_lookup(name_id) {
             Ok((m, self_val)) => self.invoke_method(m, self_val, args),
             Err(trap) => {
-                // Only intercept the specific "super: no
-                // superclass method `<name>'" shape — NOT the
+                // Only intercept the specific "no superclass
+                // method on the ancestor chain" shape — NOT the
                 // sibling "super called outside of method"
-                // case (which also raises NoMethodError but
-                // for a fundamentally broken call site that
-                // shouldn't silently succeed). super_lookup
-                // formats the "no superclass" message with a
-                // fixed prefix, so we discriminate on the
-                // method field's prefix. Anything else
-                // propagates as before. Code-review #363
-                // round 1.
+                // case (which also raises NoMethodError but for
+                // a fundamentally broken call site that shouldn't
+                // silently succeed). super_lookup tags its
+                // ancestor-chain miss with the typed
+                // `SuperNoSuperclass` kind so the discrimination
+                // is compile-checked rather than coupled to the
+                // formatted message string. (Code-review #363
+                // round 1 introduced the gate; round 3 swapped
+                // the brittle prefix match for the typed tag.)
                 let is_no_super = matches!(
                     &trap.err,
-                    crate::error::RubyError::NoMethodError { method, .. }
-                        if method.starts_with("super: no superclass method"),
+                    crate::error::RubyError::NoMethodError {
+                        kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
+                        ..
+                    },
                 );
                 let resolved = self.interner.resolve(name_id);
                 let is_lifecycle_hook = matches!(

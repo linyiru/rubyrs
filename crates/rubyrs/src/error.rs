@@ -75,6 +75,13 @@ pub enum NoMethodErrorKind {
     Missing,
     Private,
     Protected,
+    /// `super` walked the ancestor chain past `defining_class`
+    /// and didn't find a parent implementation. Distinct from
+    /// `Missing` (caller called an undefined method by name) so
+    /// `super_call_with_lifecycle_noop` can intercept this
+    /// specific shape via the variant tag rather than coupling
+    /// to the formatted message text. (Code-review #363 round 3.)
+    SuperNoSuperclass,
 }
 
 #[derive(Debug)]
@@ -431,6 +438,9 @@ impl RubyError {
                     }
                     NoMethodErrorKind::Protected => {
                         format!("protected method '{}' called for {}", method, recv_type)
+                    }
+                    NoMethodErrorKind::SuperNoSuperclass => {
+                        format!("super: no superclass method `{}' for {}", method, recv_type)
                     }
                 }
             }
