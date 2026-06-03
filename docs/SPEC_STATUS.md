@@ -13,7 +13,7 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 161 |
-| Examples in corpus | 1052 |
+| Examples in corpus | 1056 |
 | Skipped `it` traces | 155 |
 
 ### Skipped traces by category
@@ -42,7 +42,7 @@ Find blocks unlocked by a future feature with e.g.
 | BasicObject | 3 | 15 | 0 |
 | Block | 1 | 8 | 0 |
 | Float | 2 | 11 | 0 |
-| Hash | 41 | 203 | 51 |
+| Hash | 41 | 207 | 51 |
 | Integer | 37 | 322 | 30 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
@@ -112,7 +112,7 @@ Find blocks unlocked by a future feature with e.g.
 | `hash_nan_key_spec.rb` | Hash with Float::NAN keys |  | 4 | 0 |
 | `hash_one_spec.rb` | Hash#one? | `core/hash/one_spec.rb` | 6 | 0 |
 | `hash_partition_spec.rb` | Hash#partition | `core/hash/partition_spec.rb` | 6 | 0 |
-| `hash_range_first_last_arity_spec.rb` | Hash#first arity & type guards | `core/hash/first_spec.rb / core/range/first_spec.rb / last_spec.rb (arity + Float coerce)` | 10 | 0 |
+| `hash_range_first_last_arity_spec.rb` | Hash#first arity & type guards | `core/hash/first_spec.rb / core/range/first_spec.rb / last_spec.rb (arity + Float coerce)` | 14 | 0 |
 | `hash_select_spec.rb` | Hash#select | `core/hash/select_spec.rb + shared/select.rb` | 2 | 2 |
 | `hash_size_spec.rb` | Hash#size | `core/hash/size_spec.rb` | 3 | 0 |
 | `hash_slice_spec.rb` | Hash#slice | `core/hash/slice_spec.rb` | 3 | 1 |

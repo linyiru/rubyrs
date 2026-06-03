@@ -80,6 +80,31 @@ describe "Range#first / #last arity & type guards" do
     assert_eq(msg, "bignum too big to convert into `long'")
   end
 
+  it "endless Range#first: TypeError on String arg (partial-range branch)" do
+    # Endless `(1..)` routes through range.rs's partial-range
+    # branch (b is Int, e is Nil). Pre-fix that branch had only
+    # the Int arm — non-Int 1-arg fell to NoMethodError despite
+    # `respond_to?` returning true. PR #351 cycle-3 extended the
+    # sweep to the partial branch.
+    klass, msg = caught_pair { (1..).first("x") }
+    assert_eq(klass, "TypeError")
+    assert_eq(msg, "no implicit conversion of String into Integer")
+  end
+
+  it "endless Range#first: truncates Float arg" do
+    assert_eq((1..).first(2.5), [1, 2])
+  end
+
+  it "beginless Range#first: RangeError trumps arg type (CRuby precedence)" do
+    # CRuby quirk: any (..e).first(arg) raises RangeError
+    # "cannot get the first element of beginless range",
+    # regardless of arg shape — beginless precedence ALWAYS
+    # wins over arity/type. Match that.
+    klass, msg = caught_pair { (..5).first("x") }
+    assert_eq(klass, "RangeError")
+    assert_eq(msg, "cannot get the first element of beginless range")
+  end
+
   it "raises ArgumentError on multi-arg (Range uses 'expected 1', not '0..1' — CRuby quirk)" do
     # CRuby Range#first / #last use "expected 1" for multi-arg
     # while Array uses "expected 0..1". Match CRuby's exact
