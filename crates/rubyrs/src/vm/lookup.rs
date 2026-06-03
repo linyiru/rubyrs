@@ -1581,6 +1581,63 @@ impl Vm {
             })),
         }
     }
+
+    /// `super` dispatch wrapper for Op::Super / Op::ApplySuper
+    /// that intercepts the "no superclass method" failure for
+    /// CRuby's lifecycle hooks (`inherited`, `included`,
+    /// `extended`) and substitutes a no-op (push Nil).
+    ///
+    /// Why this exists: CRuby ships real no-op
+    /// implementations of these hooks on `Class` / `Module`,
+    /// so an overriding hook body can call `super` without
+    /// worrying about whether anything's above it. rubyrs's
+    /// hook-firing path (step.rs Op::DefClass) dispatches
+    /// directly via `lookup_class_singleton_method` rather
+    /// than installing real methods on Class/Module, so the
+    /// super chain walks past Sinatra::Base → Object →
+    /// BasicObject without finding `inherited` — even though
+    /// CRuby's would resolve to a no-op terminator.
+    ///
+    /// Discovered: TRY_RUNS pass-15 — sinatra-4's
+    /// `Sinatra::Base.inherited(subclass)` calls \`super\` to
+    /// invoke the (no-op) default. Without this intercept the
+    /// inherited hook firing during base.rb's own load (when
+    /// `Sinatra::Application < Sinatra::Base` is defined)
+    /// raises NoMethodError. (Layer #20.)
+    pub(crate) fn super_call_with_lifecycle_noop(
+        &mut self,
+        name_id: SymId,
+        args: Vec<Value>,
+    ) -> Result<(), crate::error::Trap> {
+        match self.super_lookup(name_id) {
+            Ok((m, self_val)) => self.invoke_method(m, self_val, args),
+            Err(trap) => {
+                // Only intercept the "no superclass method"
+                // failure (not other Trap variants like
+                // "super called outside of method") AND only
+                // for the known lifecycle-hook names. Anything
+                // else propagates as before.
+                let is_no_method = matches!(
+                    &trap.err,
+                    crate::error::RubyError::NoMethodError { .. },
+                );
+                let resolved = self.interner.resolve(name_id);
+                let is_lifecycle_hook = matches!(
+                    &**resolved,
+                    "inherited" | "included" | "extended" | "method_added"
+                        | "singleton_method_added" | "method_removed"
+                        | "singleton_method_removed" | "method_undefined"
+                        | "singleton_method_undefined",
+                );
+                if is_no_method && is_lifecycle_hook {
+                    self.stack.push(Value::Nil);
+                    Ok(())
+                } else {
+                    Err(trap)
+                }
+            }
+        }
+    }
 }
 
 /// `Symbol#to_s` / `to_sym` need the Interner to resolve the underlying name,
