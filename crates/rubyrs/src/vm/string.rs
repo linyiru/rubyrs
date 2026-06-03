@@ -2544,10 +2544,23 @@ fn regex_split_into_values(
     // the engine walk so e.g. `huge.split(/,/, 2)` finds one
     // match and bails. `None` collects all (negative or zero
     // limit). Code-review #357 round 1.
-    let matches: Vec<SplitMatch> = re.split_matches(
-        src,
-        if limit_pos { Some(max_chunks_before_tail) } else { None },
-    );
+    //
+    // +1 compensation for the at-0 zero-width skip below: the
+    // walker discards a leading zero-width match at byte 0
+    // (CRuby convention — `"abc".split(//)` is `["a","b","c"]`
+    // not `["", "a", "b", "c"]`). If we passed the exact bound
+    // here, `"abc".split(//, 2)` would collect only the (0,0)
+    // match, skip it, and emit nothing — falling through to the
+    // truncating tail and producing `["abc"]` instead of the
+    // CRuby-correct `["a", "bc"]`. The +1 ensures we collect
+    // enough matches to survive at most one skip. Code-review
+    // #357 post-review-pass.
+    let collection_bound = if limit_pos {
+        Some(max_chunks_before_tail.saturating_add(1))
+    } else {
+        None
+    };
+    let matches: Vec<SplitMatch> = re.split_matches(src, collection_bound);
     let mut out: Vec<Value> = Vec::new();
     let mut last_end: usize = 0;
     let mut chunks_emitted: usize = 0;

@@ -66,3 +66,16 @@ puts "shape11c=#{"a1b2c".split(/(\d)/, 99).inspect}"
 ## pushes its (matched_chunk, group_1, group_2, ...) tuple in
 ## order, none of them counting toward the limit.
 puts "shape12=#{"abc-123_def-456".split(/(-)(\d+)/, 2).inspect}"
+
+## Shape 13: positive-limit + zero-width-at-0 pattern. Caught
+## post-review by /code-review — earlier the bounded collection
+## passed exactly `limit-1` matches to `split_matches`, so the
+## walker's at-0 zero-width skip discarded the only collected
+## match and the result fell through to the truncating tail
+## (`"abc".split(//, 2)` produced `["abc"]` instead of CRuby's
+## `["a", "bc"]`). Fixed by +1 compensation when computing the
+## bound. These shapes pin the corner cases.
+puts "shape13a=#{"abc".split(//, 1).inspect}"
+puts "shape13b=#{"abc".split(//, 2).inspect}"
+puts "shape13c=#{"abc".split(//, 3).inspect}"
+puts "shape13d=#{"abc".split(/(?=\w)/, 2).inspect}"
