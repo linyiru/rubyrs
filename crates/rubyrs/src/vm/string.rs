@@ -1684,6 +1684,35 @@ impl Vm {
                 {
                     return Ok(Some(self.str_bracket_regex(&s, re, *n)?));
                 }
+                // Float→Int coerce on the 1-arg index form. CRuby's
+                // `String#[]` treats Float via `to_int` (truncates
+                // toward zero); rubyrs's match arm only bound
+                // Value::Int(_) so `"hello"[2.5]` previously
+                // NoMethodError'd. Re-dispatch with the truncated
+                // Int so the existing arms handle the rest.
+                if (name == "[]" || name == "slice") && args.len() == 1
+                    && let Value::Float(f) = &args[0]
+                {
+                    let coerced = vec![Value::Int(*f as i64)];
+                    return self.string_collection_call(s.clone(), name, &coerced);
+                }
+                if (name == "[]" || name == "slice") && args.len() == 2 {
+                    // Float coerce on either or both positions —
+                    // matches CRuby `"hello"[1, 2.5]` / `"hello"[0.5, 3]`.
+                    let coerce_pos = |v: &Value| match v {
+                        Value::Float(f) => Some(Value::Int(*f as i64)),
+                        _ => None,
+                    };
+                    let a0 = coerce_pos(&args[0]);
+                    let a1 = coerce_pos(&args[1]);
+                    if a0.is_some() || a1.is_some() {
+                        let coerced = vec![
+                            a0.unwrap_or_else(|| args[0].clone()),
+                            a1.unwrap_or_else(|| args[1].clone()),
+                        ];
+                        return self.string_collection_call(s.clone(), name, &coerced);
+                    }
+                }
                 if (name == "[]" || name == "slice") && args.len() == 1 {
                     let chars: Vec<char> = s.to_string_lossy().chars().collect();
                     let len = chars.len() as i64;
@@ -1766,6 +1795,77 @@ impl Vm {
                 // lossy UTF-8 (documented tradeoff — CRuby's
                 // char-index semantics aren't defined for binary
                 // content; use setbyte for byte-level writes).
+                // Float→Int coerce on `[]=` index forms — same
+                // pattern as the read path above. CRuby treats Float
+                // indices via to_int; without this rubyrs raised
+                // NoMethodError for `s[2.5] = "x"` / `s[0, 2.5] = "x"`.
+                if name == "[]=" && args.len() == 2
+                    && let Value::Float(f) = &args[0]
+                {
+                    let coerced = vec![Value::Int(*f as i64), args[1].clone()];
+                    return self.string_collection_call(s.clone(), name, &coerced);
+                }
+                if name == "[]=" && args.len() == 3 {
+                    let coerce_pos = |v: &Value| match v {
+                        Value::Float(f) => Some(Value::Int(*f as i64)),
+                        _ => None,
+                    };
+                    let a0 = coerce_pos(&args[0]);
+                    let a1 = coerce_pos(&args[1]);
+                    if a0.is_some() || a1.is_some() {
+                        let coerced = vec![
+                            a0.unwrap_or_else(|| args[0].clone()),
+                            a1.unwrap_or_else(|| args[1].clone()),
+                            args[2].clone(),
+                        ];
+                        return self.string_collection_call(s.clone(), name, &coerced);
+                    }
+                }
+                // `s[range] = repl` — Range LHS for []=. CRuby resolves
+                // the Range into (start, length) and splices like the
+                // 3-arg form. begin/end Nil → 0 / len-1. Exclusive
+                // bound drops one (for explicit-end ranges only;
+                // endless ranges ignore the exclusive flag — matches
+                // CRuby + the Array#[]= Range arm landed earlier this
+                // session). begin > len OR begin < 0 (after wrap)
+                // raises RangeError "<begin>..<end> out of range".
+                if name == "[]=" && args.len() == 2
+                    && let (Value::Range(rid), Value::Str(repl)) = (&args[0], &args[1])
+                {
+                    check_unfrozen(self)?;
+                    let r = self.heap.range(*rid);
+                    let r_begin = r.begin.clone();
+                    let r_end = r.end.clone();
+                    let r_exclusive = r.exclusive;
+                    let chars: Vec<char> = s.to_string_lossy().chars().collect();
+                    let len = chars.len() as i64;
+                    let begin = match r_begin {
+                        Value::Nil => 0,
+                        Value::Int(b) => if b < 0 { len + b } else { b },
+                        _ => return Ok(None),
+                    };
+                    let end_idx = match r_end {
+                        Value::Nil => len - 1,
+                        Value::Int(e) => {
+                            let resolved = if e < 0 { len + e } else { e };
+                            if r_exclusive { resolved - 1 } else { resolved }
+                        }
+                        _ => return Ok(None),
+                    };
+                    if begin < 0 || begin > len {
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: format!("{}..{} out of range", begin, end_idx),
+                        }));
+                    }
+                    let length = if end_idx < begin { 0 } else { end_idx - begin + 1 };
+                    let start = begin as usize;
+                    let take = (length as usize).min(chars.len() - start);
+                    let mut buf: String = chars[..start].iter().collect();
+                    buf.push_str(&repl.to_string_lossy());
+                    buf.extend(chars[start + take..].iter());
+                    *s.borrow_mut() = buf.into_bytes();
+                    return Ok(Some(args[1].clone()));
+                }
                 if name == "[]=" && args.len() == 2 {
                     check_unfrozen(self)?;
                     if let (Value::Int(i), Value::Str(repl)) = (&args[0], &args[1]) {

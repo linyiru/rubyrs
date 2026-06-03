@@ -266,6 +266,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn module_function_bare() { run_diff("module_function_bare"); }
 #[test] fn array_subscript_slice() { run_diff("array_subscript_slice"); }
 #[test] fn array_assign_slice() { run_diff("array_assign_slice"); }
+#[test] fn string_subscript_slice() { run_diff("string_subscript_slice"); }
+#[test] fn string_assign_slice() { run_diff("string_assign_slice"); }
 #[cfg(feature = "regex")]
 #[test] fn regex_lookaround() { run_diff("regex_lookaround"); }
 #[cfg(feature = "regex")]
