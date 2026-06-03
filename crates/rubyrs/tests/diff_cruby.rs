@@ -374,6 +374,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn method_dup_clone() { run_diff("method_dup_clone"); }
 #[test] fn method_original_name() { run_diff("method_original_name"); }
 #[test] fn module_included_prepended_hooks() { run_diff("module_included_prepended_hooks"); }
+#[test] fn module_extended_hook() { run_diff("module_extended_hook"); }
 #[test] fn integer_digits_bits() { run_diff("integer_digits_bits"); }
 #[test] fn string_squeeze() { run_diff("string_squeeze"); }
 #[test] fn string_scan() { run_diff("string_scan"); }

@@ -4993,15 +4993,15 @@ impl Vm {
                     // mirrors this iteration. Single-arg cases are
                     // unaffected. PR #347 documented follow-up.
                     //
-                    // Gated to include/prepend: `extend` shares this
-                    // arm but its multi-arg semantics are a separate
-                    // PR's scope. Left-to-right preserves the prior
-                    // behavior for extend so no untested change
-                    // ships here. Branch on the index inside the
+                    // All three keywords iterate args right-to-left
+                    // to match CRuby: `extend M1, M2` (and the same
+                    // for include / prepend) processes M2 first so
+                    // M1 ends up at the chain head and its hook
+                    // fires LAST. Branch on the index inside the
                     // loop instead of allocating a boxed iterator —
-                    // include/prepend is hot enough that a heap
-                    // alloc per call is wasteful.
-                    let reverse_args = is_prepend || is_include;
+                    // include/prepend/extend is hot enough that a
+                    // heap alloc per call is wasteful.
+                    let reverse_args = is_prepend || is_include || (&*name == "extend");
                     let n_args = args.len();
                     for idx in 0..n_args {
                         let a = if reverse_args { &args[n_args - 1 - idx] } else { &args[idx] };
@@ -5057,16 +5057,19 @@ impl Vm {
                         // (idempotent re-include). The hook isn't
                         // gated on chain change; it's documented as
                         // "called whenever a module is included in
-                        // another module". `extend` shares the same
-                        // arm but its hook is `Module.extended`
-                        // (different signature, separate follow-up).
-                        if is_prepend || is_include {
-                            fire_hooks.push(src);
-                        }
+                        // another module". For `extend` the hook is
+                        // `Module.extended(target)`.
+                        fire_hooks.push(src);
                     }
                     self.method_gen = self.method_gen.wrapping_add(1);
-                    let hook_name = if is_prepend { "prepended" } else { "included" };
-                    self.fire_inclusion_hooks(&fire_hooks, &target_cls, hook_name)?;
+                    let hook_name = if is_prepend {
+                        "prepended"
+                    } else if is_include {
+                        "included"
+                    } else {
+                        "extended"
+                    };
+                    self.fire_inclusion_hooks(&fire_hooks, &Value::Class(target_cls), hook_name)?;
                     self.stack.push(self_val.clone());
                     return Ok(());
                 }
@@ -5942,8 +5945,13 @@ impl Vm {
             }
         if let Value::Object(id) = &recv
             && &*name == "extend" && !args.is_empty() {
+                // CRuby walks `obj.extend(M1, M2)` args RIGHT-to-LEFT
+                // — M2 inserts into the eigenclass first, M1 last and
+                // ends up at the head; hook fire order mirrors the
+                // insertion order (M2.extended then M1.extended).
+                // Single-arg cases are unaffected.
                 let mut modules: Vec<std::rc::Rc<crate::value::Class>> = Vec::with_capacity(args.len());
-                for a in &args {
+                for a in args.iter().rev() {
                     match a {
                         Value::Class(c) if c.is_module => modules.push(c.clone()),
                         Value::Class(_) => return Err(self.trap(RubyError::TypeError {
@@ -5958,12 +5966,21 @@ impl Vm {
                     }
                 }
                 let sc = self.heap.ensure_singleton_class(*id);
+                let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
                 for src in modules {
                     if !super::class_is_a(&sc, &src) {
-                        sc.includes.borrow_mut().insert(0, src);
+                        sc.includes.borrow_mut().insert(0, src.clone());
                     }
+                    // `Module.extended(obj)` fires on every extend
+                    // call (CRuby parity — same shape as included /
+                    // prepended). Hook arg is the receiver Object,
+                    // not a Class, since `obj.extend(M)` extends an
+                    // instance.
+                    fire_hooks.push(src);
                 }
                 self.method_gen = self.method_gen.wrapping_add(1);
+                let target_v = recv.clone();
+                self.fire_inclusion_hooks(&fire_hooks, &target_v, "extended")?;
                 self.stack.push(recv.clone());
                 return Ok(());
             }
@@ -5980,10 +5997,9 @@ impl Vm {
                 let target_cls = target.clone();
                 let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
                 // Same right-to-left iteration as the no-receiver
-                // arm — see that comment for rationale, including
-                // the extend-not-affected gate and the index-based
-                // iteration that avoids a boxed-iterator alloc.
-                let reverse_args = is_prepend || is_include;
+                // arm — see that comment for rationale. All three
+                // keywords (include / prepend / extend) reverse.
+                let reverse_args = is_prepend || is_include || (&*name == "extend");
                 let n_args = args.len();
                 for idx in 0..n_args {
                     let a = if reverse_args { &args[n_args - 1 - idx] } else { &args[idx] };
@@ -6015,14 +6031,18 @@ impl Vm {
                         drop(chain);
                     }
                     // Hook fires on every call — see no-recv arm
-                    // for rationale.
-                    if is_prepend || is_include {
-                        fire_hooks.push(src);
-                    }
+                    // for rationale. Extend's hook is `extended`.
+                    fire_hooks.push(src);
                 }
                 self.method_gen = self.method_gen.wrapping_add(1);
-                let hook_name = if is_prepend { "prepended" } else { "included" };
-                self.fire_inclusion_hooks(&fire_hooks, &target_cls, hook_name)?;
+                let hook_name = if is_prepend {
+                    "prepended"
+                } else if is_include {
+                    "included"
+                } else {
+                    "extended"
+                };
+                self.fire_inclusion_hooks(&fire_hooks, &Value::Class(target_cls), hook_name)?;
                 self.stack.push(recv.clone());
                 return Ok(());
             }
@@ -8306,31 +8326,39 @@ impl Vm {
         self.invoke_method_with_block(m, self_val, args, None)
     }
 
-    /// Fire `Module.included(target)` / `Module.prepended(target)`
-    /// for each `src` module passed to `include` / `prepend` on
-    /// `target`. CRuby's contract:
-    ///   - hook receiver is the included/prepended module (`src`),
-    ///     not the target
-    ///   - hook is called with `target` as its single argument
+    /// Fire `Module.included(target)` / `Module.prepended(target)` /
+    /// `Module.extended(target)` for each `src` module passed to the
+    /// corresponding `include` / `prepend` / `extend` call. CRuby's
+    /// contract:
+    ///   - hook receiver is the module being mixed in (`src`), not
+    ///     the target
+    ///   - hook is called with `target` as its single argument; the
+    ///     target is a `Value::Class` for `include` / `prepend` /
+    ///     `Class.extend` and a `Value::Object` for `Object#extend`,
+    ///     so the parameter is the open `Value` enum rather than a
+    ///     `Class`-specific shape
     ///   - return value is discarded (hook runs for side effects)
-    ///   - hook fires on EVERY `include`/`prepend` call, including
-    ///     idempotent re-includes where the chain mutation is a
-    ///     no-op; callers populate `sources` accordingly (do not
-    ///     gate on `class_is_a`)
+    ///   - hook fires on EVERY `include`/`prepend`/`extend` call,
+    ///     including idempotent re-mixes where the chain mutation
+    ///     is a no-op; callers populate `sources` accordingly (do
+    ///     not gate on `class_is_a`)
+    ///   - `hook_name` is the Symbol the caller wants to invoke —
+    ///     `"included"`, `"prepended"`, or `"extended"` — chosen at
+    ///     the dispatch arm based on which keyword the user wrote
     ///
     /// Fast-path: if the hook name has never been interned no user
     /// code can have defined an override, so we skip the lookup
     /// entirely (mirroring the `Class.inherited` fast-path in
     /// step.rs). Lookup uses `lookup_class_singleton_method` so a
-    /// `def self.included(base)` (or `def self.prepended(base)`)
-    /// defined on `src` or any of its singleton ancestors fires;
-    /// a generic `class Module; def included(base); end; end`
-    /// monkey-patch won't reach here — same divergence as the
-    /// `inherited` hook.
+    /// `def self.included(base)` (or `def self.prepended(base)` /
+    /// `def self.extended(base)`) defined on `src` or any of its
+    /// singleton ancestors fires; a generic
+    /// `class Module; def included(base); end; end` monkey-patch
+    /// won't reach here — same divergence as the `inherited` hook.
     pub(crate) fn fire_inclusion_hooks(
         &mut self,
         sources: &[std::rc::Rc<crate::value::Class>],
-        target: &std::rc::Rc<crate::value::Class>,
+        target: &Value,
         hook_name: &str,
     ) -> Result<(), Trap> {
         if sources.is_empty() || !self.interner.contains(hook_name) {
@@ -8343,7 +8371,7 @@ impl Vm {
                 self.invoke_method(
                     m,
                     Value::Class(src.clone()),
-                    vec![Value::Class(target.clone())],
+                    vec![target.clone()],
                 )?;
                 self.dispatch_until(pre_frames)?;
                 self.stack.pop();
