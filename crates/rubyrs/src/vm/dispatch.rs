@@ -3216,8 +3216,46 @@ impl Vm {
                 self.stack.push(Value::Bool(answer));
                 Ok(true)
             }
-            ("undef_method", _) => {
-                // Tier 1 no-op. See docs/SUBSET.md.
+            ("undef_method", args) => {
+                // Removal itself is a Tier 1 no-op (see docs/SUBSET.md),
+                // but the `method_undefined(name)` hook still fires
+                // for every Symbol/String arg — Rails-style code
+                // observes the call regardless of whether the
+                // method dispatch table actually changes.
+                //
+                // Per-arg validation mirrors `remove_method`:
+                //   - Symbol: use sid directly.
+                //   - String: route through with_str_lossy + the
+                //     `Config::max_symbols` cap (untrusted code
+                //     calling `undef_method("dyn_#{i}")` in a loop
+                //     must not grow the interner past the cap).
+                //   - Anything else: raise TypeError (CRuby parity
+                //     and consistency with remove_method).
+                for arg in args {
+                    let sid: SymId = match arg {
+                        Value::Sym(sid) => *sid,
+                        Value::Str(s) => match s.with_str_lossy(|raw| -> Result<SymId, Trap> {
+                            if let Some(max) = self.max_symbols
+                                && !self.interner.contains(raw)
+                                && self.interner.len() >= max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("interner exhausted: {} symbols", max),
+                                }));
+                            }
+                            Ok(self.interner.intern(raw))
+                        }) {
+                            Ok(sid) => sid,
+                            Err(trap) => return Err(trap),
+                        },
+                        other => {
+                            let inspected = other.to_inspect(&self.heap, &self.interner);
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: format!("{} is not a symbol nor a string", inspected),
+                            }));
+                        }
+                    };
+                    self.fire_method_lifecycle_hook(&cls, "method_undefined", sid)?;
+                }
                 self.stack.push(Value::Class(cls));
                 Ok(true)
             }
@@ -3277,15 +3315,17 @@ impl Vm {
                 // probes are benign feature-detects;
                 // `remove_method` is a mutation).
                 //
-                // `any_removed` lets each error-return path bump
-                // `method_gen` so a half-completed variadic call
-                // doesn't leave inline caches stale on the
-                // already-removed methods.
-                let mut any_removed = false;
+                // No \`any_removed\` tracking needed: each
+                // successful removal bumps `method_gen` before
+                // firing its hook (see the pre-fire bump below),
+                // so a half-completed variadic call has already
+                // invalidated inline caches for everything it
+                // removed by the time any later arg's
+                // type/missing-method error path runs.
                 for arg in args {
                     let sid: SymId = match arg {
                         Value::Sym(sid) => *sid,
-                        Value::Str(s) => match s.with_str_lossy(|raw| -> Result<SymId, Trap> {
+                        Value::Str(s) => s.with_str_lossy(|raw| -> Result<SymId, Trap> {
                             if let Some(max) = self.max_symbols
                                 && !self.interner.contains(raw)
                                 && self.interner.len() >= max {
@@ -3294,20 +3334,9 @@ impl Vm {
                                 }));
                             }
                             Ok(self.interner.intern(raw))
-                        }) {
-                            Ok(sid) => sid,
-                            Err(trap) => {
-                                if any_removed {
-                                    self.method_gen = self.method_gen.wrapping_add(1);
-                                }
-                                return Err(trap);
-                            }
-                        },
+                        })?,
                         other => {
                             let inspected = other.to_inspect(&self.heap, &self.interner);
-                            if any_removed {
-                                self.method_gen = self.method_gen.wrapping_add(1);
-                            }
                             return Err(self.trap(RubyError::TypeError {
                                 msg: format!("{} is not a symbol nor a string", inspected),
                             }));
@@ -3318,9 +3347,6 @@ impl Vm {
                     // mutation in one hash lookup + one
                     // `borrow_mut()`.
                     if cls.methods.borrow_mut().remove(&sid).is_none() {
-                        if any_removed {
-                            self.method_gen = self.method_gen.wrapping_add(1);
-                        }
                         // Resolve name only on the rare missing
                         // path. Free for the common case.
                         let name_for_msg = self.interner.resolve(sid).to_string();
@@ -3328,12 +3354,23 @@ impl Vm {
                             msg: format!("method '{}' not defined in {}", name_for_msg, cls.name),
                         }));
                     }
-                    any_removed = true;
+                    // Bump `method_gen` BEFORE firing the hook so
+                    // any inline-cache-backed dispatch inside the
+                    // user-defined `method_removed` body sees the
+                    // mutation. Without the pre-fire bump, the hook
+                    // could still observe (and re-invoke) the just-
+                    // removed method through a stale cached entry.
+                    // The bump also covers the hook-raise path: an
+                    // exception propagates with caches already
+                    // invalidated, so any rescue downstream is
+                    // safe.
+                    //
+                    // `method_removed(name)` fires per successful
+                    // removal — CRuby invokes it once for each
+                    // Symbol the user passed, in arg order.
+                    self.method_gen = self.method_gen.wrapping_add(1);
+                    self.fire_method_lifecycle_hook(&cls, "method_removed", sid)?;
                 }
-                // Bump `method_gen` once even for variadic calls —
-                // inline caches see a single coarse generation
-                // bump rather than per-method invalidation.
-                self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Class(cls));
                 Ok(true)
             }
@@ -8380,6 +8417,51 @@ impl Vm {
         Ok(())
     }
 
+    /// Fire one of the `Module#method_added` / `method_removed` /
+    /// `method_undefined` lifecycle hooks on `cls`. CRuby calls
+    /// these whenever an instance method is installed, removed, or
+    /// undefined on a class/module — Rails / RSpec / many DSLs use
+    /// `method_added` to auto-wrap freshly-defined methods (e.g.
+    /// validation chains, instrumentation).
+    ///
+    /// Contract:
+    ///   - hook receiver is `cls` (the class/module being modified)
+    ///   - hook is called with `Value::Sym(method_name_id)` as its
+    ///     single argument
+    ///   - return value is discarded (hook runs for side effects)
+    ///   - fast-path: if the hook name has never been interned no
+    ///     override can exist, so we skip the lookup entirely
+    ///     (mirrors the `Class.inherited` / `fire_inclusion_hooks`
+    ///     fast-path)
+    ///   - lookup uses `lookup_class_singleton_method` so a
+    ///     `def self.method_added(name)` defined on `cls` or any
+    ///     of its singleton ancestors fires; a generic
+    ///     `class Module; def method_added(...); end; end`
+    ///     monkey-patch won't reach here — same divergence as the
+    ///     `inherited` hook.
+    pub(crate) fn fire_method_lifecycle_hook(
+        &mut self,
+        cls: &std::rc::Rc<crate::value::Class>,
+        hook_name: &str,
+        method_name_id: crate::intern::SymId,
+    ) -> Result<(), Trap> {
+        if !self.interner.contains(hook_name) {
+            return Ok(());
+        }
+        let hook_id = self.interner.intern(hook_name);
+        if let Some(m) = self.lookup_class_singleton_method(cls, hook_id) {
+            let pre_frames = self.frames.len();
+            self.invoke_method(
+                m,
+                Value::Class(cls.clone()),
+                vec![Value::Sym(method_name_id)],
+            )?;
+            self.dispatch_until(pre_frames)?;
+            self.stack.pop();
+        }
+        Ok(())
+    }
+
     fn try_invoke_fixed_method_from_stack(
         &mut self,
         m: Rc<Method>,
@@ -10048,6 +10130,10 @@ impl Vm {
                 });
                 target_cls.install_method(name_sym, m);
                 self.method_gen = self.method_gen.wrapping_add(1);
+                // `method_added(name_sym)` fires for the runtime
+                // block-form `cls.define_method(:foo) { ... }` too —
+                // CRuby invokes the hook regardless of install path.
+                self.fire_method_lifecycle_hook(&target_cls, "method_added", name_sym)?;
                 self.stack.push(Value::Sym(name_sym));
                 return Ok(());
             }
@@ -10996,6 +11082,15 @@ impl Vm {
         let m = self.build_method_from_value(src, &anchor, visibility, name_sym)?;
         target_cls.install_method(name_sym, m);
         self.method_gen = self.method_gen.wrapping_add(1);
+        // `Module#method_added(name)` fires for `define_method`
+        // installs too — CRuby invokes the hook regardless of
+        // whether the install came from `def`, `alias_method`, or
+        // `define_method`. \`.map_err(|t| t.err)\` flattens the
+        // Trap back into a bare RubyError because this helper's
+        // signature returns RubyError; the trap rewraps at the
+        // call sites' `.map_err(|e| self.trap(e))` boundary.
+        self.fire_method_lifecycle_hook(target_cls, "method_added", name_sym)
+            .map_err(|t| t.err)?;
         Ok(name_sym)
     }
 
