@@ -405,3 +405,53 @@ fn absolute_superclass_skips_cref_walk() {
         buf.snapshot(),
     );
 }
+
+#[test]
+fn absolute_const_op_writes_skip_cref_walk() {
+    // /code-review on PR #355 caught a remaining gap: the three
+    // ConstantPath*WriteNode op-write arms (`+=`, `||=`, `&&=`) on
+    // an absolute path (`::Foo::Bar`) computed the `absolute` flag
+    // and threaded it into the ConstWrite but DROPPED it on the
+    // READ side. Inside a nested module shadowing the same name,
+    // `::Outer ||= x` would short-circuit on the inner shadow
+    // (cref-walked), never writing top-level.
+    //
+    // Fix: each op-write make-closure now formats `::{name}` for
+    // the read when absolute, letting the compiler's ConstRead
+    // strip-prefix fast path emit a flat top-level LoadConst.
+    //
+    // The probe uses distinct inner names (Inner1/2/3) so the
+    // independent pre-existing dual-write StoreConst-aliasing
+    // behavior (compiler.rs:1113) doesn't obscure the assertion.
+    let (mut rt, buf) = rt_with_buf();
+    rt.eval(r#"
+        # ||= — top-level undefined, must write top-level
+        module W1
+          Inner1 = "inner1"
+          ::Foo ||= "default"
+        end
+        puts Foo.inspect
+
+        # &&= — top-level defined, read top + write top
+        ::Bar = 100
+        module W2
+          Inner2 = 200
+          ::Bar &&= 999
+        end
+        puts Bar.inspect
+
+        # += — top-level defined, read top + write top
+        ::Baz = 10
+        module W3
+          Inner3 = 20
+          ::Baz += 1
+        end
+        puts Baz.inspect
+    "#, "abs_op_writes.rb").expect("eval");
+    assert_eq!(
+        buf.snapshot().trim(),
+        "\"default\"\n999\n11",
+        "got: {:?}",
+        buf.snapshot(),
+    );
+}

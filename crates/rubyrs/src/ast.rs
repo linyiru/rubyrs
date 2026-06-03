@@ -1306,9 +1306,15 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         //
         // Strict read — matches the bare `FOO += 1` arm above:
         // CRuby raises NameError before the operator runs on an
-        // undefined constant.
+        // undefined constant. The read's name carries the `::`
+        // marker when the path is absolute so the compiler's
+        // ConstRead fast path emits a flat top-level LoadConst
+        // (no cref-walk); the write side keeps the bare joined
+        // name + `abs` flag because ConstWrite handles the
+        // class_path-alias decision separately.
         let mut make = |name: String, abs: bool| {
-            let read = sp(node, Expr::ConstRead(name.clone()));
+            let read_name = if abs { format!("::{}", name) } else { name.clone() };
+            let read = sp(node, Expr::ConstRead(read_name));
             let rhs = sp(node, Expr::Call {
                 receiver: Some(Box::new(read)),
                 name: op.clone(),
@@ -1325,10 +1331,14 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_constant_path_or_write_node() {
         let target = n.target();
         let absolute = is_constant_path_absolute(&target.as_node());
-        // See ConstantPathOperatorWriteNode arm for the `abs`
-        // override rationale on the dynamic-head fallback.
+        // See ConstantPathOperatorWriteNode arm above for the
+        // read-name vs write-name split rationale (read carries
+        // the `::` marker for absolute paths so `||=` short-
+        // circuits on the TOP-LEVEL value, not on a same-named
+        // inner shadow).
         let mut make = |name: String, abs: bool| {
-            let read = sp(node, Expr::ConstReadOrNil(name.clone()));
+            let read_name = if abs { format!("::{}", name) } else { name.clone() };
+            let read = sp(node, Expr::ConstReadOrNil(read_name));
             let write = sp(node, Expr::ConstWrite(name, abs, Box::new(tr(ctx, &n.value()))));
             sp(node, Expr::Or(Box::new(read), Box::new(write)))
         };
@@ -1342,11 +1352,13 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_constant_path_and_write_node() {
         let target = n.target();
         let absolute = is_constant_path_absolute(&target.as_node());
-        // Strict read — matches the bare `FOO &&= ...` arm above:
-        // CRuby has no lazy-init shortcut for `&&=`; undefined
-        // constants raise NameError on the read.
+        // Same read/write split as the OperatorWrite arm: read's
+        // name carries the `::` marker for absolute paths so
+        // `&&=` short-circuits on the top-level constant rather
+        // than on a cref-walked inner shadow.
         let mut make = |name: String, abs: bool| {
-            let read = sp(node, Expr::ConstRead(name.clone()));
+            let read_name = if abs { format!("::{}", name) } else { name.clone() };
+            let read = sp(node, Expr::ConstRead(read_name));
             let write = sp(node, Expr::ConstWrite(name, abs, Box::new(tr(ctx, &n.value()))));
             sp(node, Expr::And(Box::new(read), Box::new(write)))
         };
