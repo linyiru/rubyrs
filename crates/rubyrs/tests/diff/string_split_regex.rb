@@ -49,3 +49,20 @@ puts "shape9=#{"a,b,,".split(/,/, 0).inspect}"
 ## Shape 10: split that produces no matches returns the
 ## original string as a single-element array.
 puts "shape10=#{"hello".split(/X/).inspect}"
+
+## Shape 11: positive limit interacting with capture groups.
+## Per CRuby docs: "captured groups will be returned as well,
+## but are not counted towards the limit". So `split(/(\d)/, 2)`
+## takes the first split (limit-1 = 1 chunk before remainder),
+## emits the capture group for that match, then jams the
+## remainder verbatim into the final slot. Result has 3
+## elements even though limit was 2. Code-review #357 round 3
+## flagged this path as worth pinning.
+puts "shape11a=#{"a1b2c".split(/(\d)/, 2).inspect}"
+puts "shape11b=#{"a1b2c".split(/(\d)/, 3).inspect}"
+puts "shape11c=#{"a1b2c".split(/(\d)/, 99).inspect}"
+
+## Shape 12: same with multiple capture groups — each match
+## pushes its (matched_chunk, group_1, group_2, ...) tuple in
+## order, none of them counting toward the limit.
+puts "shape12=#{"abc-123_def-456".split(/(-)(\d+)/, 2).inspect}"
