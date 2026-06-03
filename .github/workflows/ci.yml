@@ -49,6 +49,18 @@ jobs:
         # `// allow: gc-rooting — <reason>` annotation.
         run: bash scripts/lint-gc-rooting.sh
 
+      - name: Rustdoc orientation lint
+        # Catches the "docblock orphaned by inserted helper"
+        # regression that bit PR #338 cycle 1 and PR #349
+        # post-cycle review. When a new `pub fn Y` is added
+        # between an existing `///` doc and its `pub fn X`,
+        # rustdoc silently re-attaches the doc to Y, leaving
+        # X undocumented. Heuristic: if `pub fn Y`'s doc
+        # mentions `self.X(...)` where X is a different fn
+        # in the same file, flag it. Annotate with
+        # `// allow: doc-orientation` to suppress.
+        run: bash scripts/lint-doc-orientation.sh
+
       - name: Clippy (workspace, -D warnings)
         # Catches the style / pedantic lints that `cargo build`
         # won't notice. The workspace is at zero warnings as of
