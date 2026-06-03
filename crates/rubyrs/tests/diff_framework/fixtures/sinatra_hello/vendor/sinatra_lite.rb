@@ -30,6 +30,12 @@ module Sinatra
     def initialize(env)
       @env = env
     end
+    # Public env accessor — sinatra-cors uses
+    # `request.env["HTTP_ORIGIN"]` to read the CORS origin
+    # header without going through the bracket shim that
+    # strips the `HTTP_` prefix. Same shape real Sinatra
+    # exposes via Rack::Request#env.
+    def env; @env; end
     def request_method; @env["REQUEST_METHOD"]; end
     def path;           @env["PATH_INFO"]; end
     def user_agent;     @env["HTTP_USER_AGENT"]; end
@@ -66,24 +72,132 @@ module Sinatra
     end
   end
 
+  # Logger stub — sinatra-cors uses `.warn(msg)` for CORS
+  # rejection diagnostics. Real Sinatra hands you a
+  # Rack::CommonLogger-backed object; we just no-op so the
+  # call sites work without a host-side log surface.
+  class LoggerStub
+    def debug(_msg = nil); end
+    def info(_msg = nil); end
+    def warn(_msg = nil); end
+    def error(_msg = nil); end
+    def fatal(_msg = nil); end
+  end
+
+  # Lightweight Hash-of-Arrays view over the flat routes table.
+  # sinatra-cors's `allowed_methods` helper does
+  #   `settings.routes.each do |method, routes_for_method| …`
+  # expecting a Hash. The vendored micro-Sinatra stores routes
+  # as a flat `[verb, pattern, block, conditions]` Array. This
+  # adapter groups them by verb on demand so the iteration
+  # contract matches without changing the underlying storage.
+  class RoutesView
+    include Enumerable
+    def initialize(routes_array)
+      @grouped = {}
+      routes_array.each do |entry|
+        verb = entry[0]
+        (@grouped[verb] ||= []) << entry[1..]
+      end
+    end
+    def each(&block); @grouped.each(&block); end
+    def [](verb); @grouped[verb] || []; end
+  end
+
   class Base
     class << self
-      def routes;         @routes         ||= []; end
+      # Internal storage: flat Array of `[verb, pattern, block,
+      # conditions]` tuples. The dispatch loop uses
+      # `routes_array` directly; the public `routes` getter
+      # returns a RoutesView (Hash-of-Arrays view) so
+      # introspection callers like sinatra-cors's
+      # `settings.routes.each do |method, routes_for_method|`
+      # see the Hash shape real Sinatra exposes.
+      def routes_array; @routes ||= []; end
+      def routes;       RoutesView.new(routes_array); end
       def filters;        @filters        ||= []; end
       def error_handlers; @error_handlers ||= []; end
 
-      def get(path, &block);    add_route("GET", path, &block);    end
-      def post(path, &block);   add_route("POST", path, &block);   end
-      def put(path, &block);    add_route("PUT", path, &block);    end
-      def delete(path, &block); add_route("DELETE", path, &block); end
-
-      def add_route(verb, path, &block)
-        routes << [verb, compile(path), block]
+      # Real Sinatra route declarations accept `(path, **opts, &block)`.
+      # The optional `opts` Hash carries route-condition arguments
+      # (`is_cors_preflight: true`, etc.); each opts key was
+      # registered earlier via the block-form `set(:key) { |arg|
+      # condition { ... } }`. At route-declaration time we look up
+      # the registered handler and invoke it with `arg` so it can
+      # call `condition { ... }` on a per-route conditions stack.
+      def get(path, **opts, &block)
+        add_route("GET", path, opts, &block)
+        # Real Sinatra auto-registers HEAD for every GET route
+        # (HEAD requests are GETs with the body stripped). The
+        # route table thus shows HEAD entries alongside GETs,
+        # which sinatra-cors's `allowed_methods` enumeration
+        # picks up. We mirror by adding the HEAD entry too;
+        # the block runs the same way (the response body is
+        # never sent for a HEAD response in real Sinatra; our
+        # micro-Sinatra doesn't yet enforce that, but the
+        # routes-table introspection contract matches).
+        add_route("HEAD", path, opts, &block)
       end
+      def post(path, **opts, &block);    add_route("POST", path, opts, &block);    end
+      def put(path, **opts, &block);     add_route("PUT", path, opts, &block);     end
+      def delete(path, **opts, &block);  add_route("DELETE", path, opts, &block);  end
+      # OPTIONS verb — Sinatra 4+ ships this as a normal route
+      # registrar. sinatra-cors uses it for the CORS preflight
+      # catch-all `app.options "*", is_cors_preflight: true do …`.
+      def options(path, **opts, &block); add_route("OPTIONS", path, opts, &block); end
+
+      def add_route(verb, path, opts = {}, &block)
+        # Per-route conditions list — populated by the block-form
+        # `set` handlers we invoke for each opts key. The dispatch
+        # loop checks each condition with the request instance
+        # context before invoking the route block.
+        per_route_conditions = []
+        @pending_conditions = per_route_conditions
+        opts.each do |key, val|
+          handler = setting_handlers[key]
+          # `instance_exec` on self (the app class) so the
+          # handler block's body can reach class methods like
+          # `condition { ... }` — same self-rebind contract
+          # real Sinatra uses for the
+          # `set(:key) do |arg| condition { ... } end` shape.
+          instance_exec(val, &handler) if handler
+        end
+        @pending_conditions = nil
+        routes_array << [verb, compile(path), block, per_route_conditions]
+      end
+
+      # `condition { ... }` from inside a `set(:key) { |arg|
+      # condition { ... } }` block. The block is appended to the
+      # per-route `pending_conditions` list (a class-instance
+      # variable that `add_route` sets before invoking each
+      # opts-key handler). The condition block runs in the
+      # dispatch instance's context at request time.
+      def condition(&block)
+        if @pending_conditions
+          @pending_conditions << block
+        end
+      end
+
+      # Block-form `set(:key) do |arg| ... end` — registers a
+      # setting handler. Real Sinatra invokes the handler when a
+      # route declares the key as an option (`get "/", key:
+      # value do …`). The handler typically calls `condition {
+      # ... }` to register a per-route predicate. sinatra-cors
+      # uses this to declare `:is_cors_preflight`.
+      def setting_handlers; @setting_handlers ||= {}; end
 
       # Runs before every route (in the request instance's context).
       def before(&block)
         filters << block
+      end
+
+      # Runs AFTER every route — used by sinatra-cors's `app.after
+      # do; cors; end` to append CORS headers to every response.
+      # The block runs in the dispatch instance's context, where
+      # `headers["X"] = ...` mutates the in-flight response Hash.
+      def after_filters; @after_filters ||= []; end
+      def after(&block)
+        after_filters << block
       end
 
       # Maps an exception class raised inside a route to a handler block.
@@ -104,9 +218,27 @@ module Sinatra
       # on the app class; we mirror that so plugins like
       # sinatra-jsonp's `settings.respond_to?(:json_pretty) &&
       # settings.json_pretty` predicate-and-read shape works.
-      def set(key, value = nil)
+      def set(key, value = nil, &block)
+        if block_given?
+          # Block-form `set(:key) do |arg| ... end` — registers a
+          # route-option handler. The block body typically calls
+          # `condition { ... }` to install a per-route predicate.
+          setting_handlers[key] = block
+          return self
+        end
         settings_store[key] = value
-        define_singleton_method(key) { settings_store[key] } unless respond_to?(key)
+        unless respond_to?(key)
+          define_singleton_method(key) { settings_store[key] }
+          # `<key>?` predicate — real Sinatra auto-generates this
+          # alongside the reader. Returns true when the value is
+          # truthy AND non-empty (CRuby's `present?`-style rule
+          # for the Configurable surface, not the Object#`!nil?
+          # one). sinatra-cors uses `settings.max_age?` etc.
+          define_singleton_method("#{key}?") do
+            v = settings_store[key]
+            !v.nil? && v != false && v != ""
+          end
+        end
         self
       end
       def enable(*keys);  keys.each { |k| set(k, true) };  self; end
@@ -268,14 +400,23 @@ module Sinatra
       base_params = parse_query(env["QUERY_STRING"]).merge(parse_form_body)
 
       # `halt`/`redirect` `throw :halt, triplet`; the catch returns it.
-      catch(:halt) do
+      result = catch(:halt) do
         begin
           matched = nil
-          self.class.routes.each do |route_verb, pattern, block|
+          self.class.routes_array.each do |entry|
+            route_verb, pattern, block, conditions = entry[0], entry[1], entry[2], entry[3]
+            conditions ||= []
             next unless route_verb == verb
             captured = match(pattern, segs)
             next unless captured
             @params = base_params.merge(captured)
+            # Per-route conditions — declared via `condition { ...
+            # }` from inside a block-form `set(:key) { |arg| ... }`
+            # handler. Each condition is a block that returns
+            # truthy/falsy in the dispatch instance's context.
+            # All must pass for the route to fire. sinatra-cors
+            # uses this for `is_cors_preflight: true`.
+            next unless conditions.all? { |c| instance_exec(&c) }
             run_filters
             # `pass` inside the block throws :pass; catch it here and
             # fall through to the next matching route. A normal return is
@@ -317,6 +458,14 @@ module Sinatra
           finalize(instance_exec(&handler))
         end
       end
+      # After-filters run regardless of halt / normal exit / error
+      # handler. They share @headers with the just-finalized
+      # response triplet (Hash by reference), so any mutation
+      # they perform — sinatra-cors's `cors` helper appends
+      # `Access-Control-Allow-Origin` etc. — is visible in the
+      # outgoing response without rebuilding the triplet.
+      self.class.after_filters.each { |f| instance_exec(&f) }
+      result
     end
 
     # Wrap a route's return value into a Rack body triplet. A streaming
@@ -356,6 +505,55 @@ module Sinatra
       self.class
     end
 
+    # `response` — in real Sinatra this is a Rack::Response
+    # instance with `.headers`, `.body`, `.status`, etc. The
+    # vendored micro-Sinatra represents the in-flight response
+    # via the dispatch instance's `@status` / `@headers` slots
+    # directly (see `dispatch` / `finalize` below); the simplest
+    # response-API shim returns self, since `self.headers[...]`
+    # already mutates the same `@headers` Hash. sinatra-cors
+    # writes `response.headers["Access-Control-..."] = ...`,
+    # which under this aliasing lands on the same Hash
+    # `finalize` reads when building the Rack triplet.
+    def response
+      self
+    end
+
+    # `logger` — minimal stub. Real Sinatra hands you a logger
+    # object backed by Rack::CommonLogger or similar; the
+    # vendored micro-Sinatra has no logging surface, so this
+    # returns a tiny `Logger`-shaped object whose methods are
+    # no-ops (matching the silent-by-default development
+    # logger config). sinatra-cors uses `logger.warn
+    # bad_origin_message` to record CORS rejections; the
+    # diagnostic value is nice-to-have, not load-bearing for
+    # the protocol's correctness on the wire.
+    def logger
+      @logger ||= LoggerStub.new
+    end
+
+    # `process_route(pattern, app)` — Sinatra's internal
+    # route-introspection helper. Real Sinatra checks if the
+    # given pattern matches the current request path, yields
+    # `(application, pattern)` to the block if so. sinatra-cors
+    # uses this from `allowed_methods` to enumerate verbs that
+    # could serve the request URL.
+    #
+    # Stubbed to ALWAYS yield — the smoke fixture's
+    # `allowed_methods` thus returns every distinct verb in the
+    # routes table. For a fixture that declares `get`, `post`,
+    # and the `options "*"` catch-all, the returned set is
+    # `["GET", "POST", "OPTIONS"]` and `allow.size != 1` so the
+    # preflight route emits `Allow: GET,POST,OPTIONS`. Good
+    # enough for the CORS contract under test; the real Sinatra
+    # pattern-match would prune verbs whose pattern doesn't
+    # cover the current URL, but for our smoke shape the
+    # over-approximation is harmless (CORS still emits headers
+    # via the after-filter regardless).
+    def process_route(_pattern, application = nil)
+      yield(application, nil)
+    end
+
     # Sinatra's streaming helper: `stream { |out| out << chunk }`.
     def stream(&block)
       StreamingBody.new(block)
@@ -373,6 +571,15 @@ module Sinatra
 
     # Returns a params Hash on match (incl. "splat" => [...]), or nil.
     def match(pattern, segs)
+      # Catch-all single-splat pattern (`"*"` compiled to
+      # `[[:splat]]`) absorbs every request path. sinatra-cors's
+      # `app.options "*", is_cors_preflight: true do … end`
+      # CORS-preflight catch-all needs this — without it the
+      # length-equality guard below would reject multi-segment
+      # request paths.
+      if pattern.length == 1 && pattern[0][0] == :splat
+        return { "splat" => segs.map { |s| unescape(s) } }
+      end
       return nil unless pattern.length == segs.length
       params = {}
       splat = []

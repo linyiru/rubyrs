@@ -95,3 +95,14 @@ class Float < Numeric
 end
 class Rational < Numeric
 end
+
+## `Regexp` class shell — `/pattern/` literals are values of
+## class Regexp; the constant needs to be reachable as a
+## script-visible name so `x.is_a?(Regexp)` (sinatra-cors and
+## a wider gem ecosystem use this) and `Regexp` as a typecase
+## arm resolve. The instance surface (match, source, etc.)
+## lives in the Rust-side `Value::Regex` arms; the class
+## shell here is the *constant* needed for `is_a?` and
+## `case/when Regexp` shapes.
+class Regexp < Object
+end

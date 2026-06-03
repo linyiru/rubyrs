@@ -1,0 +1,68 @@
+{
+  "_doc": "ADR 0026 v2 / M27 — real `sinatra-cors-1.2.0` gem vendored 1:1 under `vendor/sinatra/cors.rb`. Exercises the full CORS contract: allowed-origin filtering, allow-methods + allow-headers config, and the canonical `register Sinatra::Cors` install path. Same source on both runtimes (rubyrs vendored micro-Sinatra plus the gem source, CRuby installed Sinatra gem plus the same vendored cors.rb). The `keep_headers` manifest field (added in 32a4ea04) admits the CORS response headers into the diff transcript so the protocol effect is byte-diffable. The micro-Sinatra surface absorbed in this commit (after-filter, OPTIONS verb, route conditions via block-form `set`, `<key>?` predicates, `response`/`logger`/`process_route`/`routes_array`-vs-RoutesView) is shared with sinatra_hello + sinatra_plugin_smoke + sinatra_register_smoke + sinatra_jsonp_smoke so the upgrade benefits every Sinatra-shape fixture going forward.",
+  "name": "sinatra_cors_smoke",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 8000,
+    "duration_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sinatra/base", "sinatra/cors"]
+  },
+  "keep_headers": [
+    "Access-Control-Allow-Origin",
+    "Access-Control-Allow-Methods",
+    "Access-Control-Allow-Headers",
+    "Access-Control-Allow-Credentials",
+    "Access-Control-Expose-Headers",
+    "Access-Control-Max-Age",
+    "Allow"
+  ],
+  "scenarios": [
+    { "name": "root_no_origin",      "method": "GET",  "path": "/" },
+    { "name": "data_no_origin",      "method": "GET",  "path": "/data" },
+    {
+      "name": "data_allowed_origin",
+      "method": "GET", "path": "/data",
+      "headers": { "Origin": "http://example.com" }
+    },
+    {
+      "name": "data_rejected_origin",
+      "method": "GET", "path": "/data",
+      "headers": { "Origin": "http://evil.example" }
+    },
+    {
+      "name": "preflight_allowed",
+      "method": "OPTIONS", "path": "/data",
+      "headers": {
+        "Origin": "http://example.com",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type"
+      }
+    },
+    {
+      "name": "preflight_bad_method",
+      "method": "OPTIONS", "path": "/data",
+      "headers": {
+        "Origin": "http://example.com",
+        "Access-Control-Request-Method": "DELETE",
+        "Access-Control-Request-Headers": "content-type"
+      }
+    }
+  ],
+  "normalize": [
+    {
+      "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": "rubyrs micro-Sinatra \\(_http_server battery\\)",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": ";charset=utf-8",
+      "replacement": ""
+    }
+  ]
+}

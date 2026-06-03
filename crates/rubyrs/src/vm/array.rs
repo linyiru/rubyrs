@@ -1504,6 +1504,50 @@ impl Vm {
                         let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
                     }
+                    // Array#& — set intersection. CRuby: returns
+                    // elements from `self` that ALSO appear in
+                    // `other`, deduplicated, in the receiver's
+                    // order. Used by sinatra-cors's
+                    // `method_is_allowed?` to intersect the
+                    // configured allow-methods with the route
+                    // table's actual verbs.
+                    ("&", [Value::Array(other)]) => {
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        g.pin(Value::Array(*other));
+                        let src = g.vm.heap.array(id).clone();
+                        let keep = g.vm.heap.array(*other).clone();
+                        let mut out: Vec<Value> = Vec::new();
+                        for v in src {
+                            if keep.iter().any(|x| x.ruby_eq(&v, &g.vm.heap))
+                                && !out.iter().any(|y| y.ruby_eq(&v, &g.vm.heap))
+                            {
+                                out.push(v);
+                            }
+                        }
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
+                    // Array#| — set union. CRuby: receiver's
+                    // elements first (dedup'd) then `other`'s new
+                    // elements. Companion to `&` / `-` set ops.
+                    ("|", [Value::Array(other)]) => {
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        g.pin(Value::Array(*other));
+                        let src = g.vm.heap.array(id).clone();
+                        let add = g.vm.heap.array(*other).clone();
+                        let mut out: Vec<Value> = Vec::new();
+                        for v in src.iter().chain(add.iter()) {
+                            if !out.iter().any(|y| y.ruby_eq(v, &g.vm.heap)) {
+                                out.push(v.clone());
+                            }
+                        }
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
                     ("concat", [Value::Array(other)]) => {
                         // In-place: extend self with other's elements, return self.
                         let extra: Vec<Value> = self.heap.array(*other).clone();

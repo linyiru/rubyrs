@@ -927,7 +927,11 @@ jobs:
     # plugin support, alternate authoring contract),
     # `sinatra_jsonp_smoke` (real `sinatra-jsonp-0.5.0` gem vendored
     # 1:1 — proves a published gem loads + runs unmodified on both
-    # runtimes), `json_smoke` + `json_canon` (menu #2),
+    # runtimes), `sinatra_cors_smoke` (real `sinatra-cors-1.2.0`
+    # gem vendored 1:1 — exercises register/helpers + block-form
+    # `set` + condition + after-filter + OPTIONS + `keep_headers`
+    # hook; the deepest Sinatra-plugin authoring surface yet),
+    # `json_smoke` + `json_canon` (menu #2),
     # `as_lite_canon` (menu #3), and `sqlite_smoke` (menu #4 / ADR
     # 0027 Phase 4). Each fixture is one ship gate, not a
     # regression bench — perf lives in the standalone bench jobs.
@@ -1001,6 +1005,15 @@ jobs:
           gem install activesupport -v 8.0.1
           gem install sqlite3
           gem install multi_json
+          # `sinatra-cors` is the parity oracle for the
+          # `sinatra_cors_smoke` fixture — real gem source vendored
+          # 1:1 under `vendor/sinatra/cors.rb`. Both runtimes load
+          # the SAME file via $LOAD_PATH.unshift, so on CRuby the
+          # vendored copy resolves before the installed gem. The
+          # gem install IS still required because the
+          # gem-availability probe (`ruby -e "require 'sinatra/cors'"`)
+          # runs without the vendored shim's $LOAD_PATH munge.
+          gem install sinatra-cors
 
       - name: Cache cargo registry + build
         uses: actions/cache@v5
