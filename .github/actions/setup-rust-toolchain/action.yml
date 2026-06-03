@@ -55,48 +55,83 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Determine toolchain channel
-      id: channel
+    - name: Resolve channel + components from toolchain file
+      id: resolve
       shell: bash
       env:
         OVERRIDE: ${{ inputs.channel-override }}
         TOOLCHAIN_FILE: ${{ inputs.toolchain-file }}
+        INPUT_COMPONENTS: ${{ inputs.components }}
       run: |
         # Override path: caller intentionally diverges from the
-        # file's pin. Used by miri (nightly).
+        # file's pin. Used by miri (nightly). When overriding, we
+        # also IGNORE the file's components — components are tied
+        # to a channel, and the override means the file's channel
+        # context doesn't apply.
         if [ -n "$OVERRIDE" ]; then
-          echo "value=$OVERRIDE" >> "$GITHUB_OUTPUT"
-          echo "Using override channel: $OVERRIDE" >&2
+          echo "channel=$OVERRIDE" >> "$GITHUB_OUTPUT"
+          echo "components=$INPUT_COMPONENTS" >> "$GITHUB_OUTPUT"
+          echo "Using override channel: $OVERRIDE; components: $INPUT_COMPONENTS" >&2
           exit 0
         fi
         # Default path: parse the specified toolchain file.
         # The grep+sed form is more robust than TOML-strict parsing
-        # for a single-key file: accepts any whitespace before/
+        # for a few well-known keys: accepts any whitespace before/
         # after `=`, single OR double quotes, and ignores comments.
         # Fails loud (exit 1) if the channel can't be found.
         if [ ! -f "$TOOLCHAIN_FILE" ]; then
           echo "::error::setup-rust-toolchain: $TOOLCHAIN_FILE not found. Did checkout run? Wrong toolchain-file input?" >&2
           exit 1
         fi
+
+        # --- channel ---
         # Match either `channel = "..."` or `channel = '...'`.
         # Double-quoted sed expression keeps the regex readable —
         # the single-quoted equivalent would need the `'\''` idiom
         # which is technically correct but gnarly. `\1` survives
         # bash double-quote expansion unchanged (it's not on the
         # short list of escape chars bash interprets inside `"`).
-        RAW=$(grep -E '^[[:space:]]*channel[[:space:]]*=' "$TOOLCHAIN_FILE" | head -1)
-        CHANNEL=$(printf '%s' "$RAW" | sed -E "s/.*channel[[:space:]]*=[[:space:]]*[\"']([^\"']+)[\"'].*/\1/")
-        if [ -z "$CHANNEL" ] || [ "$CHANNEL" = "$RAW" ]; then
+        RAW_CHAN=$(grep -E '^[[:space:]]*channel[[:space:]]*=' "$TOOLCHAIN_FILE" | head -1)
+        CHANNEL=$(printf '%s' "$RAW_CHAN" | sed -E "s/.*channel[[:space:]]*=[[:space:]]*[\"']([^\"']+)[\"'].*/\1/")
+        if [ -z "$CHANNEL" ] || [ "$CHANNEL" = "$RAW_CHAN" ]; then
           echo "::error::setup-rust-toolchain: failed to parse channel from $TOOLCHAIN_FILE" >&2
           cat "$TOOLCHAIN_FILE" >&2
           exit 1
         fi
-        echo "value=$CHANNEL" >> "$GITHUB_OUTPUT"
-        echo "Using pin from $TOOLCHAIN_FILE: $CHANNEL" >&2
+
+        # --- components (file) ---
+        # `dtolnay/rust-toolchain` installs with `--profile minimal`
+        # and does NOT itself read rust-toolchain.toml, so any
+        # components declared in the file are silently dropped
+        # unless we forward them explicitly. Parse the array form
+        # (`components = ["a", "b"]`) and convert to the comma-
+        # separated string dtolnay's `components:` input expects.
+        # Missing components line → empty (the toml omits it, or
+        # the file declares only the channel — fuzz's case).
+        FILE_COMPONENTS=""
+        RAW_COMP=$(grep -E '^[[:space:]]*components[[:space:]]*=' "$TOOLCHAIN_FILE" | head -1)
+        if [ -n "$RAW_COMP" ]; then
+          FILE_COMPONENTS=$(printf '%s' "$RAW_COMP" | sed -E "s/.*=[[:space:]]*\[([^]]*)\].*/\1/" | tr -d '"' | tr -d "'" | tr -d ' ')
+        fi
+
+        # --- merge file + input components ---
+        # File's components first (the toml's declaration is the
+        # baseline), then the caller's `inputs.components` appended
+        # (caller adds task-specific extras like `llvm-tools-preview`
+        # for coverage). Both empty → empty.
+        if [ -n "$FILE_COMPONENTS" ] && [ -n "$INPUT_COMPONENTS" ]; then
+          MERGED="$FILE_COMPONENTS,$INPUT_COMPONENTS"
+        else
+          MERGED="${FILE_COMPONENTS}${INPUT_COMPONENTS}"
+        fi
+
+        echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+        echo "components=$MERGED" >> "$GITHUB_OUTPUT"
+        echo "Using pin from $TOOLCHAIN_FILE: channel=$CHANNEL; components=$MERGED (file: [$FILE_COMPONENTS], input: [$INPUT_COMPONENTS])" >&2
 
     - name: Install toolchain
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: ${{ steps.channel.outputs.value }}
+        toolchain: ${{ steps.resolve.outputs.channel }}
         targets: ${{ inputs.targets }}
-        components: ${{ inputs.components }}
+        components: ${{ steps.resolve.outputs.components }}
