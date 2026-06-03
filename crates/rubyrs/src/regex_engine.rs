@@ -193,6 +193,66 @@ impl CompiledRegex {
             CompiledRegex::Fancy(r) => r.replace_all(haystack, replacement),
         }
     }
+
+    /// Collect all match positions + per-group spans, eagerly,
+    /// in engine-agnostic owned form. Used by
+    /// `String#split(regex[, limit])` so the split walker can
+    /// operate independently of which engine produced the
+    /// matches (`regex::Captures` and `fancy_regex::Captures`
+    /// are distinct lifetime-bound types).
+    ///
+    /// fancy-regex's `captures_iter` yields `Result<Captures>`;
+    /// we stop iteration on the first error (same swallow
+    /// rationale as `is_match`'s wrapper — adversarial
+    /// recursion-limit hits would otherwise need to plumb
+    /// Result through every split call site). For the
+    /// lookahead-only patterns that motivated layer #17
+    /// (sinatra's `cleaned_caller`) this never fires.
+    pub(crate) fn split_matches(&self, haystack: &str) -> Vec<SplitMatch> {
+        let mut out: Vec<SplitMatch> = Vec::new();
+        match self {
+            CompiledRegex::Native(r) => {
+                for caps in r.captures_iter(haystack) {
+                    if let Some(m0) = caps.get(0) {
+                        let range = (m0.start(), m0.end());
+                        let groups: Vec<Option<(usize, usize)>> = (1..caps.len())
+                            .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
+                            .collect();
+                        out.push(SplitMatch { range, groups });
+                    }
+                }
+            }
+            CompiledRegex::Fancy(r) => {
+                for caps_res in r.captures_iter(haystack) {
+                    let caps = match caps_res {
+                        Ok(c) => c,
+                        Err(_) => break,
+                    };
+                    if let Some(m0) = caps.get(0) {
+                        let range = (m0.start(), m0.end());
+                        let groups: Vec<Option<(usize, usize)>> = (1..caps.len())
+                            .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
+                            .collect();
+                        out.push(SplitMatch { range, groups });
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// One match for `String#split(regex)`: the full match span
+/// plus per-capture-group spans. Spans are byte offsets into
+/// the haystack. Owned (Vec of tuples) so the dispatch logic
+/// doesn't carry the engine-specific `Captures` lifetime.
+/// `groups[i]` is the byte span of group i+1 (1-indexed in
+/// Ruby semantics); `None` for groups that didn't participate
+/// in this match (e.g. an unmatched `|` arm).
+#[derive(Debug, Clone)]
+pub(crate) struct SplitMatch {
+    pub(crate) range: (usize, usize),
+    pub(crate) groups: Vec<Option<(usize, usize)>>,
 }
 
 /// Hand-rolled because `regex::Regex` and `fancy_regex::Regex`

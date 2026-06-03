@@ -1853,6 +1853,45 @@ impl Vm {
                         let id = self.heap.alloc(HeapObj::Array(elems));
                         Some(Value::Array(id))
                     }
+                    // `split(regex)` / `split(regex, limit)` —
+                    // dual-engine via `CompiledRegex::split_matches`.
+                    // Walks the eager match list and emits the
+                    // pre-match chunk between consecutive matches,
+                    // with capture groups (if any) inserted in
+                    // their CRuby positions between the surrounding
+                    // chunks.
+                    //
+                    // Limit semantics mirror the String-sep forms:
+                    //   absent / 0  : drop trailing empties
+                    //   N > 0       : at most N fields, last holds
+                    //                 the unsplit remainder
+                    //   N < 0       : split fully, keep trailing
+                    //                 empties (and the post-tail
+                    //                 empty if the last match ended
+                    //                 at end-of-string)
+                    //
+                    // Discovered by TRY_RUNS pass-14 — sinatra-4's
+                    // `cleaned_caller` (sinatra/base.rb:1913) does
+                    // `line.split(/:(?=\d|in )/, 3)`. Layer #17
+                    // unlocked the lookahead pattern's compilation;
+                    // this arm makes the split actually run.
+                    // (TRY_RUNS pass-14 layer #18.)
+                    #[cfg(feature = "regex")]
+                    ("split", [Value::Regex(re)]) => {
+                        let src = s.to_string_lossy();
+                        let elems = regex_split_into_values(re, &src, 0);
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(id))
+                    }
+                    #[cfg(feature = "regex")]
+                    ("split", [Value::Regex(re), Value::Int(limit)]) => {
+                        let src = s.to_string_lossy();
+                        let elems = regex_split_into_values(re, &src, *limit);
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(id))
+                    }
                     ("split", [Value::Str(sep), Value::Int(limit)]) => {
                         // `split(sep, limit)` — CRuby semantics:
                         //   limit > 0  : at most `limit` fields; the last
@@ -2420,6 +2459,109 @@ pub(crate) fn str_succ(s: &str) -> String {
 /// Also escapes any literal `$` in the template so the regex
 /// crate doesn't interpret it as its own backref form.
 #[cfg(feature = "regex")]
+/// `String#split(regex[, limit])` shared core. Walks the
+/// `CompiledRegex::split_matches` output and emits
+/// `Vec<Value::Str>` matching CRuby's `split` semantics:
+///
+///   - Each pre-match chunk is pushed as its own element.
+///   - For each match, any captured groups are pushed after
+///     the chunk preceding the match (CRuby's "split keeps
+///     parenthesised groups" rule). `nil` Values stand in for
+///     groups that didn't participate.
+///   - After all matches, the post-tail chunk is pushed.
+///
+/// Limit handling (mirrors the String-sep `split` arms above):
+///   - `limit == 0`: drop trailing empty fields (including
+///     the post-tail empty if the last match ended at EOS).
+///   - `limit > 0`: emit at most `limit` total fields; the
+///     last field holds the unsplit remainder verbatim (no
+///     captures from the truncating match).
+///   - `limit < 0`: emit all fields, keep trailing empties.
+///
+/// Zero-width matches (e.g. lookaround patterns like the
+/// sinatra `/:(?=\d|in )/`) are accepted: the chunk between
+/// `last_end` and `m.start()` is pushed even when `m.start()
+/// == m.end()`. Without that handling, a zero-width match
+/// against a non-empty haystack would emit no elements and
+/// the sinatra split would lose data.
+///
+/// (TRY_RUNS pass-14 layer #18.)
+#[cfg(feature = "regex")]
+fn regex_split_into_values(
+    re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
+    src: &str,
+    limit: i64,
+) -> Vec<Value> {
+    use crate::regex_engine::SplitMatch;
+    // CRuby parity: empty source returns `[]` regardless of
+    // limit. (`"".split(/,/)` => `[]`.)
+    if src.is_empty() {
+        return Vec::new();
+    }
+    let matches: Vec<SplitMatch> = re.split_matches(src);
+    let mut out: Vec<Value> = Vec::new();
+    let mut last_end: usize = 0;
+    let limit_pos = limit > 0;
+    // Number of pre-match chunks we're allowed to emit before
+    // the truncating field. Only relevant when `limit_pos`.
+    let max_chunks_before_tail = if limit_pos { limit as usize - 1 } else { usize::MAX };
+    let mut chunks_emitted: usize = 0;
+
+    for m in matches.iter() {
+        if limit_pos && chunks_emitted >= max_chunks_before_tail {
+            break;
+        }
+        let (s_start, s_end) = m.range;
+        // CRuby parity: a zero-width match at byte 0 is
+        // skipped (it would otherwise emit an empty leading
+        // chunk that confuses lookahead patterns). Subsequent
+        // zero-width matches are kept — they're how
+        // `/:(?=\d|in )/` produces the expected fragments.
+        if s_start == s_end && s_start == last_end && s_start == 0 {
+            continue;
+        }
+        out.push(Value::new_str(src[last_end..s_start].to_string()));
+        chunks_emitted += 1;
+        // CRuby's "groups included" rule: each captured group
+        // is pushed between the surrounding chunks. None for
+        // unmatched groups.
+        for g in m.groups.iter() {
+            match g {
+                Some((gs, ge)) => out.push(Value::new_str(src[*gs..*ge].to_string())),
+                None => out.push(Value::Nil),
+            }
+        }
+        // Advance past the match. For zero-width matches
+        // (s_end == s_start) we DON'T force a char step here:
+        // the underlying engines' `captures_iter` /
+        // `find_iter` already advance their internal cursor
+        // past a zero-width hit, so subsequent matches won't
+        // re-fire at the same position. Forcing a step here
+        // would over-advance and consume one character between
+        // chunks — e.g. `"$10 $20".split(/(?<=\$)/)` would
+        // drop the "1" because the zero-width match after the
+        // first "$" would skip it. CRuby's behaviour: the
+        // chunk between consecutive zero-width matches is the
+        // literal slice src[m1.end..m2.start].
+        last_end = s_end;
+    }
+    // Tail.
+    if limit_pos && chunks_emitted >= max_chunks_before_tail {
+        // Truncating field: unsplit remainder verbatim.
+        out.push(Value::new_str(src[last_end..].to_string()));
+    } else {
+        out.push(Value::new_str(src[last_end..].to_string()));
+        // Drop trailing empties when limit is 0 (the default
+        // / explicit-0 case).
+        if !limit_pos && limit == 0 {
+            while matches!(out.last(), Some(Value::Str(s)) if s.with_str_lossy(|x| x.is_empty())) {
+                out.pop();
+            }
+        }
+    }
+    out
+}
+
 pub(crate) fn ruby_backref_to_dollar(template: &str) -> String {
     let mut out = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
