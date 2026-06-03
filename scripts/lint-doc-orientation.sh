@@ -46,11 +46,11 @@ if [[ ! -d "$ROOT" ]]; then
 fi
 
 python3 - "$ROOT" <<'PY'
-import os, re, sys, glob
+import re, sys, glob
 
 root = sys.argv[1]
 doc_re = re.compile(r'^\s*///')
-fn_re = re.compile(r'^\s*pub(?:\(crate\))?\s*(?:async\s+|const\s+|unsafe\s+)*fn\s+(\w+)')
+fn_re = re.compile(r'^\s*pub(?:\(crate\))?\s*(?:async\s+|const\s+|unsafe\s+|extern\s+(?:"[^"]*"\s+)?)*fn\s+(\w+)')
 attr_re = re.compile(r'^\s*#\[')
 allow_re = re.compile(r'allow:\s*doc-orientation')
 
