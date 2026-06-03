@@ -457,10 +457,10 @@ impl Vm {
             }
             if Rc::as_ptr(m) == anchor {
                 *past_anchor = true;
-            } else if *past_anchor {
-                if let Some(found) = m.methods.borrow().get(&name_id).cloned() {
-                    return Some((m.clone(), found));
-                }
+            } else if *past_anchor
+                && let Some(found) = m.methods.borrow().get(&name_id).cloned()
+            {
+                return Some((m.clone(), found));
             }
             for inc in m.includes.borrow().iter() {
                 if let Some(r) = walk_module(inc, name_id, anchor, past_anchor, visited) {

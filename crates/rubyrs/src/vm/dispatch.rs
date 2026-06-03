@@ -364,10 +364,8 @@ impl Vm {
             {
                 // Interval straddles zero — return 0 (the simplest).
                 return self.make_rational(0, 1);
-            } else if a_num.sign() == num_bigint::Sign::Minus {
-                true
             } else {
-                false
+                a_num.sign() == num_bigint::Sign::Minus
             };
             let (a_num, b_num) = if negate_result {
                 (-b_num, -a_num)
@@ -6890,9 +6888,10 @@ impl Vm {
         // (`0.1.rationalize == (1/10)`, NOT the lossless to_r).
         // NaN / ±Inf → FloatDomainError. nil eps rejected with
         // TypeError; the eps `Value` is validated as Numeric.
-        if let Value::Float(f) = &recv {
-            if &*name == "to_r" || &*name == "rationalize" {
-                let f = *f;
+        if let Value::Float(f) = &recv
+            && (&*name == "to_r" || &*name == "rationalize")
+        {
+            let f = *f;
                 let max_arity: usize = if &*name == "rationalize" { 1 } else { 0 };
                 if args.len() > max_arity {
                     let expected = if max_arity == 0 {
@@ -6948,7 +6947,6 @@ impl Vm {
                 let v = self.float_to_rational_value(f, mode)?;
                 self.stack.push(v);
                 return Ok(());
-            }
         }
         if let Value::Int(_) = &recv && &*name == "digits" && args.len() > 1 {
             return Err(self.trap(RubyError::ArgumentError {
@@ -10331,11 +10329,11 @@ impl Vm {
             // Nil exclusion stays load-bearing for the toplevel
             // ArgumentError surface, same reasoning as do_call.
             if !matches!(&self_val, Value::Object(_) | Value::Class(_) | Value::Nil) {
-                if let Value::Class(cls) = self.class_of(&self_val) {
-                    if let Some(m) = self.lookup_method_uncached(&cls, name_id) {
-                        self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
-                        return Ok(());
-                    }
+                if let Value::Class(cls) = self.class_of(&self_val)
+                    && let Some(m) = self.lookup_method_uncached(&cls, name_id)
+                {
+                    self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
+                    return Ok(());
                 }
                 let argc = args.len();
                 self.stack.push(self_val.clone());

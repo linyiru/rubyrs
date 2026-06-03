@@ -643,10 +643,11 @@ impl Vm {
                 // ±Inf surface as FloatDomainError. 2-arg Float
                 // forms (`Rational(1.5, 0.5)`) still fall through
                 // to TypeError until generic Numeric coercion lands.
-                if args.len() == 1 {
-                    if let Value::Float(f) = &args[0] {
-                        let f = *f;
-                        if !f.is_finite() {
+                if args.len() == 1
+                    && let Value::Float(f) = &args[0]
+                {
+                    let f = *f;
+                    if !f.is_finite() {
                             return Some(Err(self.trap(RubyError::FloatDomainError {
                                 msg: crate::vm::numeric::float_domain_label(f).to_string(),
                             })));
@@ -655,7 +656,6 @@ impl Vm {
                             f,
                             crate::vm::dispatch::FloatToRationalMode::Lossless,
                         ));
-                    }
                 }
                 // Phase C.4.2: accept Int / BigInt / integer-valued
                 // Rational.
