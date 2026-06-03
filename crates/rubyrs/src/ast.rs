@@ -521,6 +521,14 @@ pub(crate) enum MultiWriteTarget {
     /// the positional `Global` variant; pre-fix `*$g = …` still
     /// hit the legacy "unsupported splat target" error path.
     SplatGlobal(String),
+    /// `obj.attr = …` — method-call setter target. Surfaced by
+    /// `obj.x, obj.y = a, b` shapes (sinatra-param uses this
+    /// for `exception.param, exception.options = name, options`
+    /// when re-raising InvalidParameterError). The compiler
+    /// emits the receiver expression + `Op::Swap` to land
+    /// `[..., recv, val]` on the stack, then dispatches the
+    /// `name=` setter with arity 1 and pops the return.
+    Call { receiver: Box<SExpr>, name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -1391,6 +1399,15 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 targets.push(MultiWriteTarget::Ivar(cid_to_string(ivt.name())));
             } else if let Some(gvt) = tgt.as_global_variable_target_node() {
                 targets.push(MultiWriteTarget::Global(cid_to_string(gvt.name())));
+            } else if let Some(call_tgt) = tgt.as_call_target_node() {
+                // `obj.attr = …` setter target. Prism's
+                // CallTargetNode carries the receiver + name
+                // (without the trailing `=`); the compiler
+                // appends `=` and dispatches as a 1-arg
+                // method call.
+                let receiver = Box::new(tr(ctx, &call_tgt.receiver()));
+                let name = cid_to_string(call_tgt.name());
+                targets.push(MultiWriteTarget::Call { receiver, name });
             } else {
                 ctx.errors.push(
                     format!("unsupported multi-write target: {:?}", tgt)

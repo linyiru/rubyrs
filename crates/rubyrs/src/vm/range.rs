@@ -27,6 +27,31 @@ impl Vm {
                 // NoMethodError for partial ranges.
                 let begin_int = if let Value::Int(a) = &b { Some(*a) } else { None };
                 let end_int = if let Value::Int(c) = &e { Some(*c) } else { None };
+                // Float-bounded or mixed Int/Float numeric Range
+                // `include?` / `member?` / `cover?` — sinatra-param's
+                // `validate!(param, in: 0.0..10.0)` calls
+                // `range.include?(param)` where the range bounds
+                // and param can be Int OR Float. Coerce both
+                // sides to f64 for comparison; this matches
+                // CRuby's `Range#include?` semantics on numeric
+                // bounds.
+                let to_f = |v: &Value| -> Option<f64> {
+                    match v {
+                        Value::Int(n) => Some(*n as f64),
+                        Value::Float(f) => Some(*f),
+                        _ => None,
+                    }
+                };
+                if matches!(name, "include?" | "member?" | "cover?")
+                    && args.len() == 1
+                    && (matches!(&b, Value::Float(_)) || matches!(&e, Value::Float(_)))
+                {
+                    if let (Some(bf), Some(ef), Some(arg)) = (to_f(&b), to_f(&e), to_f(&args[0])) {
+                        let lo_ok = arg >= bf;
+                        let hi_ok = if excl { arg < ef } else { arg <= ef };
+                        return Ok(Some(Value::Bool(lo_ok && hi_ok)));
+                    }
+                }
                 if begin_int.is_none() || end_int.is_none() {
                     // String-endpoint Range support: `('a'..'z').to_a`,
                     // `.size`, `.include?("c")`, etc. driven by

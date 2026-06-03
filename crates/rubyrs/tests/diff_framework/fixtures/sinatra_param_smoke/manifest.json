@@ -1,0 +1,50 @@
+{
+  "_doc": "ADR 0026 v2 / M27 — real `sinatra-param-1.6.0` gem vendored 1:1 under `vendor/sinatra/param.rb`. Different shape from sinatra_cors_smoke (which was class-side configuration): this gem provides a per-route DSL inside route blocks (`param :name, Type, options`), exercising INSTANCE-side helper extension + parameter coercion + validation + `halt 400` on miss. Same micro-Sinatra surface as the existing fixtures + `Boolean = :boolean` sentinel constant + `params[name] = value` mutation. Date/Time/DateTime coercion intentionally out of scope (would need Date stdlib).",
+  "name": "sinatra_param_smoke",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 8000,
+    "duration_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sinatra/base", "sinatra/param"]
+  },
+  "scenarios": [
+    { "name": "root",                   "method": "GET", "path": "/" },
+    { "name": "users_valid",            "method": "GET", "path": "/users?limit=10" },
+    { "name": "users_missing_required", "method": "GET", "path": "/users" },
+    { "name": "users_below_min",        "method": "GET", "path": "/users?limit=0" },
+    { "name": "users_above_max",        "method": "GET", "path": "/users?limit=500" },
+    { "name": "users_not_integer",      "method": "GET", "path": "/users?limit=abc" },
+    { "name": "search_valid",           "method": "GET", "path": "/search?q=foo" },
+    { "name": "search_too_short",       "method": "GET", "path": "/search?q=x" },
+    { "name": "search_missing",         "method": "GET", "path": "/search" },
+    { "name": "score_default",          "method": "GET", "path": "/score" },
+    { "name": "score_in_range",         "method": "GET", "path": "/score?weight=3.5" },
+    { "name": "score_out_of_range",     "method": "GET", "path": "/score?weight=100" },
+    { "name": "flag_true",              "method": "GET", "path": "/flag?on=true" },
+    { "name": "flag_yes",               "method": "GET", "path": "/flag?on=yes" },
+    { "name": "flag_false",             "method": "GET", "path": "/flag?on=0" },
+    { "name": "flag_invalid",           "method": "GET", "path": "/flag?on=maybe" },
+    { "name": "list_default_delim",     "method": "GET", "path": "/list?tags=a;b;c" },
+    { "name": "auth_token",             "method": "GET", "path": "/auth?token=abc" },
+    { "name": "auth_session",           "method": "GET", "path": "/auth?session=xyz" },
+    { "name": "auth_both",              "method": "GET", "path": "/auth?token=abc&session=xyz" },
+    { "name": "auth_neither",           "method": "GET", "path": "/auth" }
+  ],
+  "normalize": [
+    {
+      "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": "rubyrs micro-Sinatra \\(_http_server battery\\)",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": ";charset=utf-8",
+      "replacement": ""
+    }
+  ]
+}

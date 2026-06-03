@@ -679,6 +679,16 @@ pub(crate) fn string_call(
         (Value::Str(a), "match?", [Value::Regex(re)]) => {
             Some(Value::Bool(a.with_str_lossy(|s| re.is_match(s))))
         }
+        // String#match with a String needle — substring scan. CRuby
+        // returns a MatchData (or nil); we have no MatchData type, so
+        // we surface the matched substring (truthy) or nil. Good enough
+        // for the common `if foo.match(bar)` predicate idiom — which is
+        // exactly how sinatra-param exercises it on Content-Type.
+        (Value::Str(a), "match", [Value::Str(b)]) => {
+            Some(a.with_str_lossy(|sa| b.with_str_lossy(|sb| {
+                if sa.contains(sb) { Value::Str(b.clone()) } else { Value::Nil }
+            })))
+        }
         // `index(substr)` / `rindex(substr)` — return the byte
         // offset where the substring first / last appears, or
         // nil if it's absent. CRuby reports a *character* index

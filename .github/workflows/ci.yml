@@ -931,6 +931,9 @@ jobs:
     # gem vendored 1:1 — exercises register/helpers + block-form
     # `set` + condition + after-filter + OPTIONS + `keep_headers`
     # hook; the deepest Sinatra-plugin authoring surface yet),
+    # `sinatra_param_smoke` (real `sinatra-param-1.6.0` gem vendored
+    # 1:1 — exercises helpers shape + param coercion across Integer/
+    # Float/Boolean/Array + min/max/in/format validators + any_of),
     # `json_smoke` + `json_canon` (menu #2),
     # `as_lite_canon` (menu #3), and `sqlite_smoke` (menu #4 / ADR
     # 0027 Phase 4). Each fixture is one ship gate, not a
@@ -1014,6 +1017,13 @@ jobs:
           # gem-availability probe (`ruby -e "require 'sinatra/cors'"`)
           # runs without the vendored shim's $LOAD_PATH munge.
           gem install sinatra-cors
+          # `sinatra-param` is the parity oracle for the
+          # `sinatra_param_smoke` fixture — real `sinatra-param-1.6.0`
+          # gem source vendored 1:1 under `vendor/sinatra/param.rb`.
+          # Same pattern as sinatra-cors: both runtimes resolve the
+          # vendored copy first; gem install is needed so the
+          # availability probe (`require 'sinatra/param'`) passes.
+          gem install sinatra-param
 
       - name: Cache cargo registry + build
         uses: actions/cache@v5

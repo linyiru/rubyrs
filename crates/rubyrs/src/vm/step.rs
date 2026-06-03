@@ -1094,6 +1094,10 @@ impl Vm {
                 self.stack.push(v);
             }
             Op::Pop => { self.stack.pop(); }
+            Op::Swap => {
+                let n = self.stack.len();
+                self.stack.swap(n - 1, n - 2);
+            }
             Op::LoadIvar(name_id) => {
                 // `@foo` reads route to whichever table `self`
                 // carries: instance ivars for `Value::Object`,

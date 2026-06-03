@@ -339,14 +339,34 @@ module Sinatra
       xml:  "application/xml",
       csv:  "text/csv",
     }.freeze
-    def content_type(type)
-      headers["Content-Type"] = if type.is_a?(Symbol)
-        CONTENT_TYPE_SHORTHANDS.fetch(type) do
-          raise ArgumentError, "Unknown media type for #{type.inspect}"
-        end
+    # Sinatra's `content_type` is dual-purpose: zero-arg form
+    # returns the currently-set response Content-Type (or nil
+    # if unset); one-arg form sets it. The no-arg query shape
+    # is used by sinatra-param's `if content_type and
+    # content_type.match(mime_type(:json))` to decide between
+    # plain-text vs JSON error encoding.
+    def content_type(type = nil)
+      if type.nil?
+        headers["Content-Type"]
       else
-        type.to_s
+        headers["Content-Type"] = if type.is_a?(Symbol)
+          CONTENT_TYPE_SHORTHANDS.fetch(type) do
+            raise ArgumentError, "Unknown media type for #{type.inspect}"
+          end
+        else
+          type.to_s
+        end
       end
+    end
+
+    # `mime_type(:symbol)` — look up the canonical media type
+    # for a registered symbol. Real Sinatra ships a much larger
+    # Rack::Mime-backed table; sinatra-param only consults
+    # `mime_type(:json)` to decide error encoding, so we expose
+    # the same minimal table `content_type` uses. Returns nil
+    # for unknown symbols — same shape Rack::Mime emits.
+    def mime_type(sym)
+      self.class::CONTENT_TYPE_SHORTHANDS[sym]
     end
 
     def redirect(location, code = 302)

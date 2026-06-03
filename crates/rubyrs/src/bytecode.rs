@@ -88,6 +88,13 @@ pub(crate) enum Op {
     IncLocalNoPush(u16),
     Dup,
     Pop,
+    /// Swap the top two values on the operand stack. Used by
+    /// multi-write with method-call setters
+    /// (`obj.foo, obj.bar = a, b`): we need `[..., recv, val]`
+    /// to dispatch `recv.foo=(val)` but the natural eval order
+    /// produces `[..., val, recv]`. One Op::Swap fixes it
+    /// without needing a temp local.
+    Swap,
     LoadIvar(SymId),
     StoreIvar(SymId),
     /// `@@name` read. Resolves the surrounding class at runtime

@@ -546,7 +546,11 @@ fn compile_multiwrite_arm(
         t, MWT::SplatLocal(_) | MWT::SplatIvar(_) | MWT::SplatGlobal(_)
     ));
 
-    let emit_store = |b: &mut ProtoBuilder, interner: &mut Interner, t: &MWT| {
+    let emit_store = |b: &mut ProtoBuilder,
+                      protos: &mut Vec<Proto>,
+                      interner: &mut Interner,
+                      cc: &mut u32,
+                      t: &MWT| {
         match t {
             MWT::Local(name) => {
                 let slot = b.local_slot(name);
@@ -575,6 +579,34 @@ fn compile_multiwrite_arm(
                 let id = interner.intern(name);
                 b.emit(Op::StoreGlobal(id));
             }
+            MWT::Call { receiver, name } => {
+                // Stack: [..., val]. Evaluate receiver, swap so
+                // dispatch sees [..., recv, val], call setter,
+                // pop return value. Note: receiver is
+                // evaluated AFTER the RHS in source order — a
+                // documented Tier-1 divergence from CRuby's
+                // "evaluate receivers first" rule. Acceptable
+                // for the rare cases where receiver evaluation
+                // has visible side effects across the
+                // assignment boundary; the common shape
+                // (`obj.x, obj.y = a, b` with `obj` a plain
+                // local) sees no observable difference.
+                compile_expr(b, receiver, protos, interner, cc);
+                b.emit(Op::Swap);
+                // Prism's CallTargetNode.name() returns the
+                // FULL setter symbol (with trailing `=`).
+                // Belt-and-suspenders: tolerate either form so
+                // a future Prism upgrade that flips the
+                // convention doesn't silently produce `x==`.
+                let setter_name = if name.ends_with('=') {
+                    name.clone()
+                } else {
+                    format!("{name}=")
+                };
+                let id = interner.intern(&setter_name);
+                emit_method_call(b, id, 1, /*has_recv=*/true, false, false, cc);
+                b.emit(Op::Pop);
+            }
         }
     };
 
@@ -584,7 +616,7 @@ fn compile_multiwrite_arm(
                 b.emit(Op::Dup);
                 b.emit(Op::LoadConstInt(i as i64));
                 emit_method_call(b, bracket_id, 1, true, false, false, cc);
-                emit_store(b, interner, target);
+                emit_store(b, protos, interner, cc, target);
             }
         }
         Some(s) => {
@@ -594,20 +626,20 @@ fn compile_multiwrite_arm(
                 b.emit(Op::Dup);
                 b.emit(Op::LoadConstInt(i as i64));
                 emit_method_call(b, bracket_id, 1, true, false, false, cc);
-                emit_store(b, interner, target);
+                emit_store(b, protos, interner, cc, target);
             }
             b.emit(Op::Dup);
             b.emit(Op::LoadConstInt(s as i64));
             b.emit(Op::LoadConstInt(post as i64));
             emit_method_call(b, splat_id, 2, true, false, false, cc);
-            emit_store(b, interner, &targets[s]);
+            emit_store(b, protos, interner, cc, &targets[s]);
             for j in 0..post {
                 b.emit(Op::Dup);
                 b.emit(Op::LoadConstInt(j as i64));
                 b.emit(Op::LoadConstInt(s as i64));
                 b.emit(Op::LoadConstInt(post as i64));
                 emit_method_call(b, post_id, 3, true, false, false, cc);
-                emit_store(b, interner, &targets[s + 1 + j]);
+                emit_store(b, protos, interner, cc, &targets[s + 1 + j]);
             }
         }
     }
