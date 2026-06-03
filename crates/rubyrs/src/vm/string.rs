@@ -2460,14 +2460,19 @@ pub(crate) fn str_succ(s: &str) -> String {
 /// crate doesn't interpret it as its own backref form.
 #[cfg(feature = "regex")]
 /// `String#split(regex[, limit])` shared core. Walks the
-/// `CompiledRegex::split_matches` output and emits
-/// `Vec<Value::Str>` matching CRuby's `split` semantics:
+/// `CompiledRegex::split_matches` output and emits a
+/// `Vec<Value>` matching CRuby's `split` semantics. Each
+/// element is either a `Value::Str` (chunk between matches or
+/// participating capture group) or a `Value::Nil` (capture
+/// group that didn't participate in the match — e.g. an `|`
+/// alternative arm that wasn't taken). Code-review #357 round 1
+/// corrected the doc — the previous claim of `Vec<Value::Str>`
+/// missed the `Nil` capture-group case.
 ///
 ///   - Each pre-match chunk is pushed as its own element.
 ///   - For each match, any captured groups are pushed after
 ///     the chunk preceding the match (CRuby's "split keeps
-///     parenthesised groups" rule). `nil` Values stand in for
-///     groups that didn't participate.
+///     parenthesised groups" rule).
 ///   - After all matches, the post-tail chunk is pushed.
 ///
 /// Limit handling (mirrors the String-sep `split` arms above):
@@ -2479,11 +2484,9 @@ pub(crate) fn str_succ(s: &str) -> String {
 ///   - `limit < 0`: emit all fields, keep trailing empties.
 ///
 /// Zero-width matches (e.g. lookaround patterns like the
-/// sinatra `/:(?=\d|in )/`) are accepted: the chunk between
-/// `last_end` and `m.start()` is pushed even when `m.start()
-/// == m.end()`. Without that handling, a zero-width match
-/// against a non-empty haystack would emit no elements and
-/// the sinatra split would lose data.
+/// sinatra `/:(?=\d|in )/`) are accepted; the underlying
+/// engines' iter cursors handle zero-width loop avoidance
+/// internally, so we don't force an extra char step here.
 ///
 /// (TRY_RUNS pass-14 layer #18.)
 #[cfg(feature = "regex")]
@@ -2498,13 +2501,30 @@ fn regex_split_into_values(
     if src.is_empty() {
         return Vec::new();
     }
-    let matches: Vec<SplitMatch> = re.split_matches(src);
+    let limit_pos = limit > 0;
+    // Saturating i64 → usize for the per-chunk cap. `limit as
+    // usize` would wrap on 32-bit targets (wasm32-wasip1) when
+    // `limit` exceeds u32::MAX, producing surprise early
+    // truncation. Clamp to usize::MAX instead — semantically
+    // "effectively unlimited", which is what oversized
+    // positive limits should mean. Code-review #357 round 1.
+    let max_chunks_before_tail = if limit_pos {
+        usize::try_from(limit - 1).unwrap_or(usize::MAX)
+    } else {
+        usize::MAX
+    };
+    // Bounded eager collection: when `limit_pos`, we only need
+    // `max_chunks_before_tail` matches (the truncating tail
+    // consumes the rest verbatim). `Some(n)` short-circuits
+    // the engine walk so e.g. `huge.split(/,/, 2)` finds one
+    // match and bails. `None` collects all (negative or zero
+    // limit). Code-review #357 round 1.
+    let matches: Vec<SplitMatch> = re.split_matches(
+        src,
+        if limit_pos { Some(max_chunks_before_tail) } else { None },
+    );
     let mut out: Vec<Value> = Vec::new();
     let mut last_end: usize = 0;
-    let limit_pos = limit > 0;
-    // Number of pre-match chunks we're allowed to emit before
-    // the truncating field. Only relevant when `limit_pos`.
-    let max_chunks_before_tail = if limit_pos { limit as usize - 1 } else { usize::MAX };
     let mut chunks_emitted: usize = 0;
 
     for m in matches.iter() {

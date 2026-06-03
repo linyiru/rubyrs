@@ -194,12 +194,20 @@ impl CompiledRegex {
         }
     }
 
-    /// Collect all match positions + per-group spans, eagerly,
-    /// in engine-agnostic owned form. Used by
+    /// Collect match positions + per-group spans, eagerly, in
+    /// engine-agnostic owned form. Used by
     /// `String#split(regex[, limit])` so the split walker can
     /// operate independently of which engine produced the
     /// matches (`regex::Captures` and `fancy_regex::Captures`
     /// are distinct lifetime-bound types).
+    ///
+    /// `max_matches` bounds the collection: `Some(n)` stops
+    /// after the n-th match (callers pass `Some(limit-1)` for
+    /// `split(re, limit)` with positive limit so the engine
+    /// walk short-circuits — `"a,b,c,...,z".split(/,/, 2)`
+    /// finds exactly one match and bails). `None` collects all.
+    /// Pre-existing call sites that want all matches pass
+    /// `None`. Code-review #357 round 1.
     ///
     /// fancy-regex's `captures_iter` yields `Result<Captures>`;
     /// we stop iteration on the first error (same swallow
@@ -208,8 +216,13 @@ impl CompiledRegex {
     /// Result through every split call site). For the
     /// lookahead-only patterns that motivated layer #17
     /// (sinatra's `cleaned_caller`) this never fires.
-    pub(crate) fn split_matches(&self, haystack: &str) -> Vec<SplitMatch> {
-        let mut out: Vec<SplitMatch> = Vec::new();
+    pub(crate) fn split_matches(
+        &self,
+        haystack: &str,
+        max_matches: Option<usize>,
+    ) -> Vec<SplitMatch> {
+        let cap = max_matches.unwrap_or(0);
+        let mut out: Vec<SplitMatch> = Vec::with_capacity(cap);
         match self {
             CompiledRegex::Native(r) => {
                 for caps in r.captures_iter(haystack) {
@@ -219,6 +232,10 @@ impl CompiledRegex {
                             .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
                             .collect();
                         out.push(SplitMatch { range, groups });
+                        if let Some(n) = max_matches
+                            && out.len() >= n {
+                                break;
+                            }
                     }
                 }
             }
@@ -234,6 +251,10 @@ impl CompiledRegex {
                             .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
                             .collect();
                         out.push(SplitMatch { range, groups });
+                        if let Some(n) = max_matches
+                            && out.len() >= n {
+                                break;
+                            }
                     }
                 }
             }
