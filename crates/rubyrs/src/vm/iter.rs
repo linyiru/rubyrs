@@ -4638,4 +4638,161 @@ mod tests {
         "#);
         assert_eq!(out, "got 2\n");
     }
+
+    // ---------- Per-invocation closure-locals contract ----------
+    //
+    // Companion to `tests/diff/closure_in_iter_capture.rb` (gem-
+    // oracle byte-diff). These module-local tests pin the same
+    // contract that `step_block` + `invoke_block`'s fresh-clone
+    // path enforce, the `find_lexical_owner_frame` + writeback-
+    // chain walker fixes from `923adc51` / `d397eaa2`. A
+    // regression in any of:
+    //
+    //   * invoke_block fresh-clone path (per-iter isolation)
+    //   * `propagate_outer_write` chain walk (counter / nested
+    //     write-through to outer-method locals)
+    //   * Op::Yield's `find_lexical_owner_frame` seed (yield from
+    //     nested block must find the enclosing method even though
+    //     the block frame's `locals` is no longer Rc-shared with
+    //     the method)
+    //   * Op::ReturnMethod's owner-locals stash (non-local return
+    //     from nested block must locate the lexical owner)
+    //
+    // surfaces in iter.rs's coverage gate too — the original
+    // coverage drop from `923adc51` (93% → 88%) traced to these
+    // exact branches.
+
+    #[test]
+    fn per_iter_lambda_capture_returns_distinct_values() {
+        // The headline shape — `.map { |s| -> { s } }` must
+        // return one lambda per iteration with the per-iter
+        // value, NOT the last iteration leaking to every lambda.
+        // Pre-`923adc51` this returned `[:c, :c, :c]`.
+        let out = capture(r#"
+            ls = [:a, :b, :c].map { |s| -> { s } }
+            p ls.map(&:call)
+        "#);
+        assert_eq!(out, "[:a, :b, :c]\n");
+    }
+
+    #[test]
+    fn counter_aggregation_through_each_writes_back_to_outer() {
+        // The `propagate_outer_write` contract — block-frame
+        // StoreLocal/IncLocal/IncLocalNoPush on a slot in the
+        // surrounding method's scope must reach the method's
+        // locals so the post-loop read sees the accumulated
+        // value, NOT the pre-loop snapshot.
+        let out = capture(r#"
+            counter = 0
+            [1, 2, 3].each { |x| counter += x }
+            puts counter
+        "#);
+        assert_eq!(out, "6\n");
+    }
+
+    #[test]
+    fn nested_block_writes_propagate_to_method_locals() {
+        // `propagate_outer_write`'s chain walk past intermediate
+        // block frames. Inner block writes `result = :found`;
+        // the value must reach the surrounding method's `result`
+        // slot through the outer block frame's writeback Rc, not
+        // stop at the outer block's fresh per-invocation Vec.
+        let out = capture(r#"
+            def nested_writer
+              result = nil
+              [1].each do
+                [1].each do
+                  result = :found
+                end
+              end
+              result
+            end
+            p nested_writer
+        "#);
+        assert_eq!(out, ":found\n");
+    }
+
+    #[test]
+    fn yield_from_nested_block_resolves_enclosing_method() {
+        // `Op::Yield`'s `find_lexical_owner_frame` walk. The
+        // method's `block_arg` is reachable from inside `.times`
+        // (nested block) even though the block frame's `locals`
+        // is no longer Rc-shared with the method (fresh-clone
+        // path). Pre-fix this raised
+        // `no block given (yield)`.
+        let out = capture(r#"
+            class Body
+              def each
+                10.times { |i| yield i if i < 3 }
+              end
+            end
+            collected = []
+            Body.new.each { |v| collected << v }
+            p collected
+        "#);
+        assert_eq!(out, "[0, 1, 2]\n");
+    }
+
+    #[test]
+    fn nonlocal_return_from_nested_block_finds_enclosing_method() {
+        // `Op::ReturnMethod`'s owner-locals walk. Non-local
+        // return through nested-blocks must locate the method
+        // whose lexical scope created the OUTERMOST block,
+        // not just any non-block frame on the stack.
+        let out = capture(r#"
+            def find_in_nested
+              [1, 2].each do
+                [10, 20, 30].each do |v|
+                  return "got #{v}" if v == 20
+                end
+              end
+              "not found"
+            end
+            puts find_in_nested
+        "#);
+        assert_eq!(out, "got 20\n");
+    }
+
+    #[test]
+    fn define_method_block_capture_per_iter_distinct() {
+        // M27 A4 contract — `define_method` inside an iterator
+        // block must capture each iteration's loop variable
+        // independently. Reused as the surface real Sinatra
+        // plugins reach for (sinatra_plugin_smoke validates the
+        // same shape).
+        let out = capture(r#"
+            class Greeter
+              [:formal, :casual, :friendly].each do |style|
+                define_method("greet_#{style}") do |name|
+                  "[#{style}] #{name}"
+                end
+              end
+            end
+            g = Greeter.new
+            puts g.greet_formal("Alice")
+            puts g.greet_casual("Bob")
+            puts g.greet_friendly("Cara")
+        "#);
+        assert_eq!(
+            out,
+            "[formal] Alice\n[casual] Bob\n[friendly] Cara\n",
+        );
+    }
+
+    #[test]
+    fn block_local_var_captured_per_iter() {
+        // Block-local var first-assigned inside the body (not a
+        // block parameter, not from outer scope). Each `.times`
+        // iteration creates a fresh `local`; the lambda captured
+        // that iter must hold ITS local, not the last iteration's.
+        let out = capture(r#"
+            collected = []
+            3.times do |i|
+              local = i * 10
+              collected << -> { local }
+            end
+            p collected.map(&:call)
+        "#);
+        assert_eq!(out, "[0, 10, 20]\n");
+    }
 }
