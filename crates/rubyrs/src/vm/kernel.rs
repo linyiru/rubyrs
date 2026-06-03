@@ -62,6 +62,13 @@ impl Vm {
                 | "__defined_method?"
                 | "__defined_const?"
                 | "eval"
+                // `autoload(:Foo, "path")` / `autoload?(:Foo)`
+                // top-level forms — Phase 1 of issue #224. The
+                // class-recv forms (`Foo.autoload :Bar, ...`)
+                // are still no-op stubs in dispatch.rs; Phase 2
+                // wires those up to a per-Class registry.
+                | "autoload"
+                | "autoload?"
         )
     }
 
@@ -447,6 +454,81 @@ impl Vm {
                         || self.constants.contains_key(sid);
                     return Some(Ok(if hit { Value::new_str("constant") } else { Value::Nil }));
                 }
+                Some(Ok(Value::Nil))
+            }
+            // `autoload(:Foo, "path")` — Phase 1 of issue #224.
+            // Toplevel-only: registers a pending lazy-load on the
+            // VM-level registry. First reference to `Foo` via
+            // `Op::LoadConst` pops the entry and calls `require`.
+            // Class-recv form (`Mod.autoload :Foo, "path"`) is
+            // still a no-op stub in dispatch.rs; Phase 2 wires it
+            // up to a per-Class registry.
+            //
+            // Arity: exactly 2. First arg coerces to Symbol (accept
+            // Symbol + String); second arg must be a String. Type
+            // mismatches raise the CRuby-shape TypeError.
+            //
+            // Under wasm32-wasi the registry is cfg-gated out (no
+            // `require` to fire), so the call validates and returns
+            // nil — equivalent to the pre-Phase-1 stub behavior on
+            // that target.
+            "autoload" => {
+                if args.len() != 2 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 2)", args.len()),
+                    })));
+                }
+                let name_sym = match &args[0] {
+                    Value::Sym(s) => *s,
+                    Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                    other => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                    }))),
+                };
+                let path_str = match &args[1] {
+                    Value::Str(s) => s.to_string_lossy().to_string(),
+                    other => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: format!("no implicit conversion of {} into String", other.type_name()),
+                    }))),
+                };
+                #[cfg(not(target_os = "wasi"))]
+                {
+                    self.autoloads_toplevel.insert(name_sym, path_str);
+                }
+                #[cfg(target_os = "wasi")]
+                {
+                    let _ = (name_sym, path_str);
+                }
+                Some(Ok(Value::Nil))
+            }
+            // `autoload?(:Foo, inherit=true)` — Phase 1 introspection.
+            // Returns the registered path String if `:Foo` has a
+            // pending toplevel autoload, else nil. The `inherit`
+            // arg is accepted for arity parity but not consulted
+            // (toplevel scope has no inheritance chain to walk —
+            // CRuby's `Object.autoload?(:Foo, false)` would also
+            // see a toplevel `autoload :Foo, ...` directly).
+            "autoload?" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                    })));
+                }
+                let name_sym = match &args[0] {
+                    Value::Sym(s) => *s,
+                    Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                    other => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                    }))),
+                };
+                #[cfg(not(target_os = "wasi"))]
+                {
+                    if let Some(path) = self.autoloads_toplevel.get(&name_sym) {
+                        return Some(Ok(Value::new_str(path)));
+                    }
+                }
+                #[cfg(target_os = "wasi")]
+                { let _ = name_sym; }
                 Some(Ok(Value::Nil))
             }
             "p" | "pp" => {
