@@ -1978,7 +1978,6 @@ impl Vm {
                             defining_class: Some(Rc::downgrade(cls)),
                             visibility: std::cell::Cell::new(Visibility::Public),
                             closure: m.closure.clone(),
-                            original_name: m.original_name,
                             builtin: m.builtin.clone(),
                             original_name: m.original_name,
                         });
