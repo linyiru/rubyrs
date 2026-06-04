@@ -21,15 +21,15 @@ module Sinatra
               return
             end
 
-            response.headers["Access-Control-Allow-Headers"] = request_headers if request_headers
-            response.headers["Access-Control-Allow-Methods"] = request_method
-            response.headers["Access-Control-Max-Age"] = settings.max_age if settings.max_age?
+            response.headers["access-control-allow-headers"] = request_headers if request_headers
+            response.headers["access-control-allow-methods"] = request_method
+            response.headers["access-control-max-age"] = settings.max_age if settings.max_age?
           else
-            response.headers["Access-Control-Expose-Headers"] = settings.expose_headers if settings.expose_headers?
+            response.headers["access-control-expose-headers"] = settings.expose_headers if settings.expose_headers?
           end
 
-          response.headers["Access-Control-Allow-Origin"] = request.env["HTTP_ORIGIN"]
-          response.headers["Access-Control-Allow-Credentials"] = settings.allow_credentials.to_s if settings.allow_credentials?
+          response.headers["access-control-allow-origin"] = request.env["HTTP_ORIGIN"]
+          response.headers["access-control-allow-credentials"] = settings.allow_credentials.to_s if settings.allow_credentials?
         end
       end
 
@@ -44,7 +44,7 @@ module Sinatra
       def method_is_allowed?
         allow_methods =
           settings.allow_methods.upcase.split(/\s*,\s*/) &
-          response.headers["Allow"].upcase.split(/\s*,\s*/)
+          response.headers["allow"].upcase.split(/\s*,\s*/)
         allow_methods.include? request.env["HTTP_ACCESS_CONTROL_REQUEST_METHOD"].upcase
       end
 
@@ -133,7 +133,7 @@ sinatra setting."
 
         pass if allow.size == 1
 
-        response.headers["Allow"] = allow.join ","
+        response.headers["allow"] = allow.join ","
       end
 
       app.after do

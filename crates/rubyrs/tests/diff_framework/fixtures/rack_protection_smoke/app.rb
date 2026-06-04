@@ -17,6 +17,7 @@ class RackProtectionSmokeApp < Sinatra::Base
   use Rack::Protection::IPSpoofing
   use Rack::Protection::StrictTransport
   use Rack::Protection::HttpOrigin, permitted_origins: ["http://allowed.example.com"]
+  use Rack::Protection::JsonCsrf
   use Rack::Protection::ContentSecurityPolicy,
       default_src: "'self'",
       script_src: "'self' 'unsafe-inline'",
@@ -37,6 +38,15 @@ class RackProtectionSmokeApp < Sinatra::Base
   # that divergence, not the middleware behaviour we're testing.
   post "/" do
     "post: #{SERVER_BACKEND}"
+  end
+
+  # JSON endpoint to exercise JsonCsrf. The middleware checks
+  # if the response content-type is `application/json`; if so
+  # AND there's no Origin AND the Referer host doesn't match
+  # the request host, it denies. With matching Referer → 200.
+  get "/json" do
+    content_type :json
+    %({"ok":true})
   end
 
   # Path-traversal cleanup — the middleware unescapes %2e (.) and

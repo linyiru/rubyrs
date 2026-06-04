@@ -134,7 +134,7 @@ module Rack
           cookie_parts << "domain=#{@options[:domain]}" if @options[:domain]
           cookie_parts << "HttpOnly" if @options[:httponly]
           cookie_parts << "secure" if @options[:secure]
-          headers["Set-Cookie"] = cookie_parts.join("; ")
+          headers["set-cookie"] = cookie_parts.join("; ")
         end
         [status, headers, body]
       end
@@ -603,7 +603,7 @@ module Sinatra
     end
 
     def headers(hash = nil)
-      @headers ||= { "Content-Type" => "text/html" }
+      @headers ||= { "content-type" => "text/html" }
       @headers.merge!(hash) if hash
       @headers
     end
@@ -641,9 +641,9 @@ module Sinatra
     # plain-text vs JSON error encoding.
     def content_type(type = nil)
       if type.nil?
-        headers["Content-Type"]
+        headers["content-type"]
       else
-        headers["Content-Type"] = if type.is_a?(Symbol)
+        headers["content-type"] = if type.is_a?(Symbol)
           CONTENT_TYPE_SHORTHANDS.fetch(type) do
             raise ArgumentError, "Unknown media type for #{type.inspect}"
           end
@@ -670,7 +670,7 @@ module Sinatra
         host = @env["HTTP_HOST"] || "#{@env['SERVER_NAME']}:#{@env['SERVER_PORT']}"
         location = "http://#{host}#{location}"
       end
-      headers["Location"] = location
+      headers["location"] = location
       halt(code, "")
     end
 
@@ -706,7 +706,7 @@ module Sinatra
     def dispatch(env)
       @env     = env
       @status  = 200
-      @headers = { "Content-Type" => "text/html" }
+      @headers = { "content-type" => "text/html" }
       verb     = env["REQUEST_METHOD"]
       segs     = (env["PATH_INFO"] || "/").split("/").reject { |s| s.empty? }
       # Real Sinatra merges query-string AND form-body params (and path
@@ -754,7 +754,7 @@ module Sinatra
               @status = 404
               finalize(instance_exec(&nf))
             else
-              [404, { "Content-Type" => "text/plain" }, ["Not Found\n"]]
+              [404, { "content-type" => "text/plain" }, ["Not Found\n"]]
             end
           end
         rescue UncaughtThrowError
