@@ -20,7 +20,7 @@
 # only uses `.eos?`, `.scan(regex)`, and `.[](n)`. Tilt's
 # `ERBTemplate#prepare` calls `ERB.new(...).src`, which is the
 # compiler entry point. Without this vendor the tilt-render
-# chain stalls at `cannot find C ext: strscan`.
+# chain stalls at `LoadError: cannot load such file -- strscan`.
 #
 # Divergence vs CRuby's strscan: many less-used methods
 # (`check`, `skip`, `match?`, `unscan`, `scan_until`,
