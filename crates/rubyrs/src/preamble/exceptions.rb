@@ -248,3 +248,92 @@ class SystemExit < Exception
     @status == 0
   end
 end
+
+## `EncodingError` — String/encoding mismatches. CRuby raises
+## this (and its subclasses below) from string-to-encoding
+## conversion paths. We don't raise it from VM internals
+## today; pre-installed so `rescue EncodingError` resolves at
+## parse time AND user code can `raise EncodingError, msg`
+## explicitly. Gem code that does
+## `rescue Encoding::CompatibilityError` (mail, addressable,
+## etc.) gets through without a NameError.
+class EncodingError < StandardError
+end
+
+## `Encoding::*` — four subclasses CRuby exposes for
+## encoding-aware operations. Pre-installed empty for the same
+## "user code may rescue these even though rubyrs doesn't
+## raise them today" reason.
+module Encoding
+  class CompatibilityError < EncodingError
+  end
+  class ConverterNotFoundError < EncodingError
+  end
+  class InvalidByteSequenceError < EncodingError
+  end
+  class UndefinedConversionError < EncodingError
+  end
+end
+
+## `Math::DomainError` — raised by Math methods on out-of-domain
+## input (`Math.sqrt(-1)`, `Math.log(0)`, etc.). Sits under
+## StandardError so a bare `rescue` catches it, matching CRuby.
+## Pre-installed so `rescue Math::DomainError` resolves at parse
+## time. We don't raise from Math primitives today (they return
+## NaN / Infinity), but the class needs to exist for user code
+## that explicitly catches.
+module Math
+  class DomainError < StandardError
+  end
+end
+
+## `SystemCallError` + `Errno::*` — OS-error hierarchy. CRuby's
+## actual table has ~140 platform-specific Errno classes; we
+## pre-install the most common ones gems reach for in
+## `rescue Errno::ENOENT` etc. patterns. Each class's `#errno`
+## attribute would normally return the underlying integer error
+## code; rubyrs doesn't raise these from VM code today (no
+## file-I/O syscall surface), so the attribute is left nil — the
+## class structure is what gem code consumes.
+class SystemCallError < StandardError
+end
+module Errno
+  ## File / directory not found.
+  class ENOENT < SystemCallError; end
+  ## Permission denied.
+  class EACCES < SystemCallError; end
+  ## File / directory already exists.
+  class EEXIST < SystemCallError; end
+  ## Not a directory.
+  class ENOTDIR < SystemCallError; end
+  ## Is a directory (when a file was expected).
+  class EISDIR < SystemCallError; end
+  ## Invalid argument to a syscall.
+  class EINVAL < SystemCallError; end
+  ## No space left on device.
+  class ENOSPC < SystemCallError; end
+  ## Broken pipe.
+  class EPIPE < SystemCallError; end
+  ## Connection refused.
+  class ECONNREFUSED < SystemCallError; end
+  ## Connection reset by peer.
+  class ECONNRESET < SystemCallError; end
+end
+
+## `SecurityError` — raised by CRuby when SAFE-level checks
+## reject an operation. SAFE is deprecated in 3.x but the
+## class still exists; pre-installed so `rescue SecurityError`
+## resolves at parse time. Intentionally `< Exception`, NOT
+## `< StandardError`: a bare `rescue` clause shouldn't swallow
+## a security-policy violation.
+class SecurityError < Exception
+end
+
+## `NoMemoryError` — raised by CRuby when a heap alloc fails.
+## Sits `< Exception` (NOT under StandardError) so allocation
+## failures can't be swallowed by bare `rescue`. rubyrs's
+## ResourceExhausted covers a similar concept for the
+## embedder-configurable heap cap; NoMemoryError is here for
+## CRuby-shape rescue parity.
+class NoMemoryError < Exception
+end

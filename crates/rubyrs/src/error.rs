@@ -291,6 +291,43 @@ const BUILTIN_EXCEPTION_PARENT: &[(&str, &str)] = &[
     // as ResourceExhausted: bare `rescue` must not swallow
     // a user's `exit` call.
     ("SystemExit", "Exception"),
+    // Encoding-error family. CRuby raises EncodingError +
+    // subclasses from string-to-encoding conversion paths; we
+    // pre-install the hierarchy so user code can `rescue
+    // Encoding::CompatibilityError` even though rubyrs doesn't
+    // raise from VM internals today. The Ruby-side class
+    // definitions live in `preamble/exceptions.rb`.
+    ("EncodingError", "StandardError"),
+    ("Encoding::CompatibilityError", "EncodingError"),
+    ("Encoding::ConverterNotFoundError", "EncodingError"),
+    ("Encoding::InvalidByteSequenceError", "EncodingError"),
+    ("Encoding::UndefinedConversionError", "EncodingError"),
+    // Math::DomainError — for `Math.sqrt(-1)` shapes. Stays
+    // `< StandardError` so bare `rescue` catches it, matching
+    // CRuby.
+    ("Math::DomainError", "StandardError"),
+    // SystemCallError + the most-common Errno::* subclasses.
+    // Full CRuby table has ~140 platform-specific entries; we
+    // pin the subset gems actually reach for in `rescue
+    // Errno::ENOENT` etc. patterns. Each one is a leaf — they
+    // don't subclass each other in CRuby.
+    ("SystemCallError", "StandardError"),
+    ("Errno::ENOENT", "SystemCallError"),
+    ("Errno::EACCES", "SystemCallError"),
+    ("Errno::EEXIST", "SystemCallError"),
+    ("Errno::ENOTDIR", "SystemCallError"),
+    ("Errno::EISDIR", "SystemCallError"),
+    ("Errno::EINVAL", "SystemCallError"),
+    ("Errno::ENOSPC", "SystemCallError"),
+    ("Errno::EPIPE", "SystemCallError"),
+    ("Errno::ECONNREFUSED", "SystemCallError"),
+    ("Errno::ECONNRESET", "SystemCallError"),
+    // SecurityError + NoMemoryError — sit `< Exception`, NOT
+    // `< StandardError`. Same rationale as ResourceExhausted /
+    // SystemStackError / SystemExit: bare `rescue` shouldn't
+    // swallow security-policy violations or alloc failures.
+    ("SecurityError", "Exception"),
+    ("NoMemoryError", "Exception"),
 ];
 
 impl RubyError {
