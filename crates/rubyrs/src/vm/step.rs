@@ -2982,7 +2982,13 @@ impl Vm {
                 let filter = {
                     let proto_idx = self.frames.last().expect("ICE: PushRescue no frame").proto_idx;
                     let lex = self.protos[proto_idx].lexical_scope.clone();
-                    let bare_name = self.interner.resolve(filter_sym).to_string();
+                    // Clone the `Rc<str>` instead of materializing a
+                    // fresh `String` — the interner returns
+                    // `&Rc<str>` so the clone is a refcount bump,
+                    // and the absolute-path fast path / empty-lex
+                    // case can short-circuit without paying for any
+                    // string allocation.
+                    let bare_name: std::rc::Rc<str> = self.interner.resolve(filter_sym).clone();
                     // Absolute paths (`rescue ::Foo::Bar`) carry a
                     // leading `::` marker from the AST lowering.
                     // CRuby semantics: skip the lex-walk and look up
@@ -2998,8 +3004,8 @@ impl Vm {
                         let mut found = None;
                         if !lex.is_empty() {
                             for scope_sym in &lex {
-                                let scope_name = self.interner.resolve(*scope_sym).to_string();
-                                let qualified = format!("{scope_name}::{bare_name}");
+                                let scope_name = self.interner.resolve(*scope_sym).clone();
+                                let qualified = format!("{}::{}", scope_name, bare_name);
                                 let qsym = self.interner.intern(&qualified);
                                 if let Some(c) = self.classes.get(&qsym).cloned() {
                                     found = Some(c);
