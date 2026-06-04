@@ -343,6 +343,68 @@ module Errno
   class ECONNREFUSED < SystemCallError; end
   ## Connection reset by peer.
   class ECONNRESET < SystemCallError; end
+  ## Resource temporarily unavailable — non-blocking IO that
+  ## would otherwise block. async / nio4r / net-* retry loops
+  ## pattern-match on this to decide whether to retry.
+  class EAGAIN < SystemCallError; end
+  ## Operation would block — on Linux + Darwin (the platforms
+  ## CRuby and rubyrs target), EWOULDBLOCK shares the same
+  ## errno integer as EAGAIN, so CRuby aliases the constant to
+  ## the same class object. `Errno::EWOULDBLOCK == Errno::EAGAIN`
+  ## holds and `rescue Errno::EWOULDBLOCK` catches what was
+  ## raised as `Errno::EAGAIN`. Mirror exactly so gems
+  ## (eventmachine, em-http-request) that write either name
+  ## get the same class.
+  EWOULDBLOCK = EAGAIN
+  ## Operation timed out. net-http / faraday / rest-client all
+  ## wrap underlying socket timeouts and re-raise either this
+  ## or a higher-level Timeout::Error.
+  class ETIMEDOUT < SystemCallError; end
+  ## Interrupted system call — a syscall returned EINTR
+  ## because a signal handler fired mid-syscall. Signal-handler
+  ## test setups (puma worker, sidekiq) loop on EINTR retries.
+  class EINTR < SystemCallError; end
+  ## Bad file descriptor — typically a close-after-close or
+  ## use-after-close bug. Hard-to-reproduce concurrency bugs
+  ## surface here.
+  class EBADF < SystemCallError; end
+  ## Input/output error — failed read/write at the device
+  ## level. Disk-full / hardware-failure surface, distinct from
+  ## ENOSPC (logical-quota) and ENOENT (path).
+  class EIO < SystemCallError; end
+  ## Address already in use — server tried to bind a port the
+  ## OS reports as taken. puma / rack / sinatra startup
+  ## diagnostics rescue this to print a friendly "port already
+  ## in use" message instead of a backtrace.
+  class EADDRINUSE < SystemCallError; end
+  ## Cannot assign requested address — the bind address isn't
+  ## valid on this host (typo, missing interface, IPv6 vs IPv4
+  ## mismatch).
+  class EADDRNOTAVAIL < SystemCallError; end
+  ## No route to host — DNS resolved but routing failed.
+  ## net-http surfaces this as a "host unreachable" hint.
+  class EHOSTUNREACH < SystemCallError; end
+  ## Network unreachable — broader network-layer failure than
+  ## EHOSTUNREACH. Sibling under SystemCallError.
+  class ENETUNREACH < SystemCallError; end
+  ## Operation now in progress — non-blocking connect() returns
+  ## this when the TCP handshake hasn't completed yet. async-
+  ## style IO loops drive this through a select/poll cycle.
+  class EINPROGRESS < SystemCallError; end
+  ## Transport endpoint not connected — read/write after socket
+  ## close. eventmachine / async-io use this in their state-
+  ## machine assertions.
+  class ENOTCONN < SystemCallError; end
+  ## Too many open files (per-process limit). Worker pools
+  ## hitting `ulimit -n` surface this.
+  class EMFILE < SystemCallError; end
+  ## Too many open files in system (system-wide limit). Rarer
+  ## than EMFILE but real on container hosts.
+  class ENFILE < SystemCallError; end
+  ## Cannot allocate memory — syscall-level alloc failure
+  ## distinct from rubyrs's ResourceExhausted (which is the
+  ## VM-level cap on heap object count, not a host malloc fail).
+  class ENOMEM < SystemCallError; end
 end
 
 ## `SecurityError` — raised by CRuby when SAFE-level checks

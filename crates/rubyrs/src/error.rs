@@ -322,6 +322,25 @@ const BUILTIN_EXCEPTION_PARENT: &[(&str, &str)] = &[
     ("Errno::EPIPE", "SystemCallError"),
     ("Errno::ECONNREFUSED", "SystemCallError"),
     ("Errno::ECONNRESET", "SystemCallError"),
+    ("Errno::EAGAIN", "SystemCallError"),
+    // Errno::EWOULDBLOCK is NOT a distinct class — it's a
+    // constant aliased to Errno::EAGAIN (preamble) since both
+    // share the same errno integer on Linux + Darwin, matching
+    // CRuby. Hierarchy table doesn't list it; class lookup
+    // resolves through the constant aliasing.
+    ("Errno::ETIMEDOUT", "SystemCallError"),
+    ("Errno::EINTR", "SystemCallError"),
+    ("Errno::EBADF", "SystemCallError"),
+    ("Errno::EIO", "SystemCallError"),
+    ("Errno::EADDRINUSE", "SystemCallError"),
+    ("Errno::EADDRNOTAVAIL", "SystemCallError"),
+    ("Errno::EHOSTUNREACH", "SystemCallError"),
+    ("Errno::ENETUNREACH", "SystemCallError"),
+    ("Errno::EINPROGRESS", "SystemCallError"),
+    ("Errno::ENOTCONN", "SystemCallError"),
+    ("Errno::EMFILE", "SystemCallError"),
+    ("Errno::ENFILE", "SystemCallError"),
+    ("Errno::ENOMEM", "SystemCallError"),
     // SecurityError + NoMemoryError — sit `< Exception`, NOT
     // `< StandardError`. Same rationale as ResourceExhausted /
     // SystemStackError / SystemExit: bare `rescue` shouldn't
