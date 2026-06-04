@@ -8549,10 +8549,13 @@ impl Vm {
     ///     singleton chain — `def self.singleton_method_added(name)`
     ///     installs into C's singleton_methods. Use
     ///     `lookup_class_singleton_method`.
-    ///   - Value::Object(obj): the hook is a regular instance
-    ///     method of obj's class — `def singleton_method_added(n)`
-    ///     on the class fires for every instance. Use
-    ///     `lookup_method_uncached(class_of(obj), …)`.
+    ///   - Value::Object(obj): resolve through `Heap::class_of(obj)`,
+    ///     which is the object's eigenclass when one exists and the
+    ///     real class otherwise. So the hook fires both for a
+    ///     per-object override (`class << obj; def
+    ///     singleton_method_added(n); end`) and for a
+    ///     `def singleton_method_added(n)` on the real class (which
+    ///     covers every instance). Use `lookup_method_uncached`.
     ///   - Other receiver types: no hook (primitives don't carry
     ///     singleton classes in the subset we model).
     pub(crate) fn fire_singleton_method_lifecycle_hook(
