@@ -91,25 +91,31 @@ fn tilt_default_mapping_preserves_identity_across_requires() {
     // defined?(Tilt)` guard in tilt_shim.rb is what keeps the
     // instance stable.
     //
-    // Also exercises the Tilt module identity check: a second
-    // require shouldn't redefine `Tilt::EmptyMapping` either —
-    // otherwise `default_mapping.is_a?(EmptyMapping)` would
-    // split across the two class objects.
+    // Also exercises the mapping's CLASS identity: a second
+    // require shouldn't redefine the EmptyMapping class either —
+    // otherwise `default_mapping.is_a?(...)` would split across
+    // the two class objects. Use `.class` on the instance
+    // instead of reaching into `Tilt::EmptyMapping` directly:
+    // the shim declares EmptyMapping as `private_constant`, and
+    // while rubyrs's current `private_constant` is a no-op stub,
+    // a future implementation that honours it would make a
+    // direct `Tilt::EmptyMapping` access raise NameError and
+    // mask the contract this test is actually trying to lock.
     let out = run(
 r#"
 require "tilt"
 first_mapping = Tilt.default_mapping
-first_empty = Tilt::EmptyMapping
+first_mapping_class = first_mapping.class
 
 require "tilt"  # second require should be a no-op
 puts "mapping-eq: #{first_mapping.equal?(Tilt.default_mapping)}"
-puts "empty-class-eq: #{first_empty.equal?(Tilt::EmptyMapping)}"
+puts "mapping-class-eq: #{first_mapping_class.equal?(Tilt.default_mapping.class)}"
 "#,
         "tilt_shim_idempotency_driver.rb",
     );
     assert_eq!(
         out,
-        "mapping-eq: true\nempty-class-eq: true\n",
+        "mapping-eq: true\nmapping-class-eq: true\n",
         "Tilt shim re-evaluated on second require — caches of \
          `Tilt.default_mapping` would silently diverge.\nstdout:\n{}",
         out,
