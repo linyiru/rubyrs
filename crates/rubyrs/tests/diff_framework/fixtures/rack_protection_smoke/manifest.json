@@ -14,7 +14,8 @@
     "X-Frame-Options",
     "X-XSS-Protection",
     "X-Content-Type-Options",
-    "Referrer-Policy"
+    "Referrer-Policy",
+    "Strict-Transport-Security"
   ],
   "scenarios": [
     { "name": "root_headers",       "method": "GET", "path": "/" },
