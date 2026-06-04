@@ -83,6 +83,99 @@ module Rack
       "#{lead}#{segs.join("/")}#{trail}"
     end
   end
+
+  # `Rack::Session::Cookie` — minimal cookie-backed session
+  # middleware. Used by sinatra-flash and any other gem that
+  # depends on `env["rack.session"]`. Real Rack ships a much
+  # richer impl (HMAC signing, Marshal-based binary coder,
+  # secure expiry, etc.); for the parity-fixture subset we use
+  # a JSON coder and skip signing entirely, which is the same
+  # shape the CRuby oracle picks when given an explicit
+  # `coder: ` option. The fixture passes that option on both
+  # runtimes so the on-the-wire cookie payload is byte-
+  # identical.
+  module Session
+    class Cookie
+      DEFAULT_OPTIONS = {
+        key: "rack.session",
+        path: "/",
+        domain: nil,
+        expire_after: nil,
+        secure: false,
+        httponly: true,
+      }.freeze
+
+      def initialize(app, options = {})
+        @app = app
+        @options = DEFAULT_OPTIONS.merge(options)
+        # `coder:` lets callers swap the serialiser. Defaults to
+        # the JSON coder below — deterministic, parser-portable,
+        # and round-trips the same payload across both runtimes
+        # without HMAC nonces.
+        @coder = options[:coder] || JsonCoder
+      end
+
+      def call(env)
+        session = load_session(env)
+        env["rack.session"] = session
+        env["rack.session.options"] = @options
+        status, headers, body = @app.call(env)
+        # Only emit Set-Cookie when the session has at least one
+        # key — keeps the diff transcript byte-identical for
+        # stateless scenarios. Sinatra-flash + similar gems
+        # depend on the Set-Cookie reflecting the session on
+        # mutation; reading a key without writing leaves the
+        # session unchanged and we re-emit Set-Cookie to refresh
+        # the round-trip.
+        if !session.empty? || env["HTTP_COOKIE"]&.include?("#{@options[:key]}=")
+          serialised = @coder.encode(session.to_hash)
+          cookie_parts = ["#{@options[:key]}=#{serialised}"]
+          cookie_parts << "path=#{@options[:path]}" if @options[:path]
+          cookie_parts << "domain=#{@options[:domain]}" if @options[:domain]
+          cookie_parts << "HttpOnly" if @options[:httponly]
+          cookie_parts << "secure" if @options[:secure]
+          headers["Set-Cookie"] = cookie_parts.join("; ")
+        end
+        [status, headers, body]
+      end
+
+      private
+
+      def load_session(env)
+        session = {}
+        cookie_header = env["HTTP_COOKIE"]
+        return session if cookie_header.nil? || cookie_header.empty?
+        cookie_header.split(";").each do |pair|
+          k, v = pair.strip.split("=", 2)
+          next unless k == @options[:key] && v
+          data = @coder.decode(v)
+          if data.is_a?(Hash)
+            data.each { |dk, dv| session[dk] = dv }
+          end
+          break
+        end
+        session
+      end
+    end
+
+    # JSON-backed (de)serialiser. Round-trips a Hash through
+    # JSON.generate / JSON.parse. Deterministic for a given Hash
+    # (matches CRuby JSON's insertion-order serialisation), so
+    # both runtimes emit the same Set-Cookie payload.
+    module JsonCoder
+      def self.encode(data)
+        require "json"
+        JSON.generate(data)
+      end
+
+      def self.decode(str)
+        require "json"
+        JSON.parse(str)
+      rescue StandardError
+        nil
+      end
+    end
+  end
 end
 
 module Sinatra
@@ -712,6 +805,17 @@ module Sinatra
     # env["sinatra.error"]; we also keep it here for helpers).
     def request
       @request ||= Request.new(@env)
+    end
+
+    # `session` — the Hash-shaped session installed by the
+    # session middleware (e.g. `Rack::Session::Cookie`). Returns
+    # an empty Hash if no session middleware is in the chain,
+    # matching the contract every session-aware gem assumes.
+    # sinatra-flash reads / writes `session[:flash]` through
+    # this helper; the actual storage layer is whatever
+    # middleware set `env["rack.session"]`.
+    def session
+      @env["rack.session"] ||= {}
     end
 
     # `settings` returns the application class itself, mirroring
