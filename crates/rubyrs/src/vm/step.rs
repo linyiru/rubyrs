@@ -1239,6 +1239,55 @@ impl Vm {
                     // way (PR #234 / pass-9.7c layer #20).
                     Value::Hash(self.env_hash_or_init()?)
                 } else {
+                    // Phase 1 of issue #224 — autoload trigger.
+                    // Before raising the "uninitialized constant"
+                    // NameError, check if `name_id` is registered as
+                    // a pending toplevel autoload. If so:
+                    //   1. Pop the entry FIRST (CRuby semantics —
+                    //      prevents re-entry into the same autoload
+                    //      while the require is mid-flight; also
+                    //      means a require that fails to define the
+                    //      constant gets a real NameError on retry
+                    //      rather than an infinite require loop).
+                    //   2. Call `require` via builtin_call so we go
+                    //      through the same path resolution + scope
+                    //      gate + LoaderError handling that
+                    //      user-level `require` uses. LoadError
+                    //      naturally propagates as a Trap.
+                    //   3. Re-attempt the classes + constants lookup
+                    //      AFTER require completes. If the loaded
+                    //      file defined the constant, we resolve and
+                    //      push; otherwise fall through to the
+                    //      original NameError.
+                    //
+                    // Wasi-gated: the registry doesn't exist on
+                    // wasm32-wasi (no require), so this whole block
+                    // compiles out and the original NameError path
+                    // is taken.
+                    #[cfg(not(target_os = "wasi"))]
+                    if let Some(path) = self.autoloads_toplevel.remove(&name_id) {
+                        // Move `path` into the Ruby String — `path`
+                        // is already an owned `String` we removed
+                        // from the registry, no need to clone.
+                        let path_val = Value::new_str(path);
+                        match self.builtin_call("require", &[path_val]) {
+                            Some(Ok(_)) => {
+                                if let Some(c) = self.classes.get(&name_id).cloned() {
+                                    self.stack.push(Value::Class(c));
+                                    return Ok(true);
+                                }
+                                if let Some(v) = self.constants.get(&name_id).cloned() {
+                                    self.stack.push(v);
+                                    return Ok(true);
+                                }
+                                // require succeeded but the file
+                                // didn't define `name_id` — fall
+                                // through to the NameError below.
+                            }
+                            Some(Err(t)) => return Err(t),
+                            None => {} // unreachable: "require" is a known builtin
+                        }
+                    }
                     // CRuby raises `NameError: uninitialized constant
                     // <name>` for missing constants — silent-nil here
                     // masks real user errors AND lets downstream code

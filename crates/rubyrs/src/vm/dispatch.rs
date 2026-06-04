@@ -11475,7 +11475,7 @@ impl Vm {
 /// CRuby-shape `NameError("wrong constant name <name>")`
 /// distinct from `"uninitialized constant"` (which is for
 /// valid-but-absent names). (Copilot review #277 round 3.)
-fn is_valid_const_name(name: &str) -> bool {
+pub(crate) fn is_valid_const_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_uppercase() => {}

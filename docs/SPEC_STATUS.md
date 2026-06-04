@@ -12,8 +12,8 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 161 |
-| Examples in corpus | 1056 |
+| Files | 162 |
+| Examples in corpus | 1076 |
 | Skipped `it` traces | 155 |
 
 ### Skipped traces by category
@@ -39,6 +39,7 @@ Find blocks unlocked by a future feature with e.g.
 | Class | Files | Examples | Skipped |
 |---|---|---|---|
 | Array | 26 | 171 | 49 |
+| Autoload | 1 | 20 | 0 |
 | BasicObject | 3 | 15 | 0 |
 | Block | 1 | 8 | 0 |
 | Float | 2 | 11 | 0 |
@@ -79,6 +80,7 @@ Find blocks unlocked by a future feature with e.g.
 | `array_size_spec.rb` | Array#size | `core/array/size_spec.rb + shared/length.rb` | 1 | 1 |
 | `array_take_spec.rb` | Array#take | `core/array/take_spec.rb` | 5 | 0 |
 | `array_uniq_spec.rb` | Array#uniq | `core/array/uniq_spec.rb` | 13 | 0 |
+| `autoload_phase1_spec.rb` | toplevel autoload(:Sym, path) registration |  | 20 | 0 |
 | `block_rescue_propagation_spec.rb` | Block exception propagation through iter drivers |  | 8 | 0 |
 | `class_eval_spec.rb` | Module#class_eval | `core/module/class_eval_spec.rb` | 6 | 0 |
 | `collection_arity_arg1_int_spec.rb` | Array#each_slice / #each_cons arity & type guards | `core/array/each_slice_spec.rb (error-class assertions)` | 16 | 0 |

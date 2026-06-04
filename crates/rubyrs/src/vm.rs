@@ -574,6 +574,21 @@ pub(crate) struct Vm {
     /// wasi so the field would be dead code.
     #[cfg(not(target_os = "wasi"))]
     pub(crate) loaded_stdlib_stubs: std::collections::HashSet<String>,
+    /// Top-level pending autoload registry — `autoload :Foo, "path"`
+    /// at toplevel records `(Foo, "path")` here. First reference to
+    /// `Foo` via `Op::LoadConst` pops the entry and calls `require`;
+    /// `autoload?(:Foo)` reads it without firing.
+    ///
+    /// Wasi-gated like `loaded_features`: the trigger needs
+    /// `require`, which traps on wasm32-wasi (no file I/O).
+    ///
+    /// Phase 1 scope (issue #224): toplevel-only. Per-class autoloads
+    /// (`Mod.autoload :Foo, "p"`) remain no-op stubs at the existing
+    /// `Value::Class(_)` dispatch arms; Phase 2 will add a per-Class
+    /// `autoloads` field and the LoadConstChain / resolve_const_path
+    /// trigger points.
+    #[cfg(not(target_os = "wasi"))]
+    pub(crate) autoloads_toplevel: HashMap<SymId, String>,
     /// Per-call-site inline-cache counter. Each compiled `Op::Call`
     /// gets a unique u16 slot id; the Vm side allocates
     /// `call_caches[id]` lazily. Lives on the Vm so kernel
@@ -1129,6 +1144,8 @@ impl Vm {
             loaded_features: std::collections::HashSet::new(),
             #[cfg(not(target_os = "wasi"))]
             loaded_stdlib_stubs: std::collections::HashSet::new(),
+            #[cfg(not(target_os = "wasi"))]
+            autoloads_toplevel: HashMap::new(),
             cache_counter: 0,
             globals: HashMap::new(),
             toplevel_methods: HashMap::new(),
