@@ -1485,17 +1485,25 @@ pub(crate) fn compile_expr(
             let name_id = interner.intern(&mname);
             b.emit(Op::Super(name_id, argc));
         }
-        Expr::SuperApply(args_expr) => {
+        Expr::SuperApply { args: args_expr, block_arg } => {
             // `super(*args)` — assemble the args Array and let
             // `Op::ApplySuper` pop + drain it. Mirror of the
             // `Expr::Apply` shape used by regular splat-call
             // dispatch. Method-name resolution is the same as
-            // direct-form `Expr::Super`.
+            // direct-form `Expr::Super`. When `block_arg` is
+            // present, push block first so the VM sees
+            // `[block, array]` and routes through
+            // `Op::ApplySuperBlock` (block-aware super dispatch).
             let mname = b.method_name.clone()
                 .unwrap_or_else(|| "<super-outside-method>".to_string());
             let name_id = interner.intern(&mname);
+            if let Some(ba) = block_arg { compile_expr(b, ba, protos, interner, cc); }
             compile_expr(b, args_expr, protos, interner, cc);
-            b.emit(Op::ApplySuper(name_id));
+            if block_arg.is_some() {
+                b.emit(Op::ApplySuperBlock(name_id));
+            } else {
+                b.emit(Op::ApplySuper(name_id));
+            }
         }
         Expr::Class { name, superclass, body, is_module } => {
             compile_class_arm(b, name, superclass, body, *is_module, protos, interner, cc);

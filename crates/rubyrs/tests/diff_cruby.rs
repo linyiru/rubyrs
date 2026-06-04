@@ -295,6 +295,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn splat_block_forwarding() { run_diff("splat_block_forwarding"); }
 #[test] fn safe_navigation() { run_diff("safe_navigation"); }
 #[test] fn class_extend() { run_diff("class_extend"); }
+#[test] fn super_splat_block() { run_diff("super_splat_block"); }
 #[test] fn lambdas() { run_diff("lambdas"); }
 #[test] fn string_mutation() { run_diff("string_mutation"); }
 #[test] fn defined() { run_diff("defined"); }

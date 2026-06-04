@@ -463,11 +463,16 @@ pub(crate) enum Expr {
     /// super argument list. The inner SExpr evaluates to an
     /// Array containing the fully-assembled call args (the
     /// same shape `Expr::Apply` uses for regular splat-call
-    /// dispatch). Compiles to `Op::ApplySuper(name_id)`.
+    /// dispatch). Compiles to `Op::ApplySuper(name_id)`,
+    /// or `Op::ApplySuperBlock(name_id)` when `block_arg` is
+    /// present (`super(*args, &block)` — sinatra-contrib's
+    /// MultiRoute uses this shape across every HTTP verb
+    /// method to forward both args + block to the inherited
+    /// Sinatra::Base entry point).
     /// Rack `lib/rack/headers.rb`'s `super(*a.map!{...})`
     /// shape surfaces this; previously raised
     /// `unsupported node: SplatNode` at AST translation.
-    SuperApply(Box<SExpr>),
+    SuperApply { args: Box<SExpr>, block_arg: Option<Box<SExpr>> },
     /// `a || b` — short-circuit: returns `a` if truthy, else `b`.
     Or(Box<SExpr>, Box<SExpr>),
     /// `a && b` — short-circuit: returns `b` if `a` truthy, else `a`.
@@ -2058,6 +2063,22 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let arg_nodes: Vec<ruby_prism::Node<'_>> = n.arguments()
             .map(|args| args.arguments().iter().collect())
             .unwrap_or_default();
+        // Detect explicit `&block` on the super call. Same shape
+        // as the CallNode block-arg detection — anonymous `&` and
+        // `&:sym` shapes are skipped (their richer expansions
+        // would need their own Apply variants; no vendored gem
+        // we ship hits those for super yet).
+        let super_block_arg: Option<Box<SExpr>> = n.block().and_then(|bnode| {
+            bnode.as_block_argument_node()
+                .and_then(|ba| ba.expression())
+                .and_then(|expr| {
+                    if expr.as_symbol_node().is_some() {
+                        None
+                    } else {
+                        Some(Box::new(tr(ctx, &expr)))
+                    }
+                })
+        });
         // Detect splat anywhere in the arg list. When present,
         // assemble the args into a single Array via the same
         // chunking strategy regular Call-with-splat uses
@@ -2092,7 +2113,20 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 receiver: Some(Box::new(lhs)),
                 name: "+".into(),
                 args: vec![rhs], kwargs_trailing: false }));
-            return sp(node, Expr::SuperApply(Box::new(acc)));
+            return sp(node, Expr::SuperApply { args: Box::new(acc), block_arg: super_block_arg });
+        }
+        // Non-splat with `&block` still routes through SuperApply
+        // — wrap args in an ArrayLit so the splat-shaped opcode
+        // (ApplySuperBlock) sees a uniform `[block, array]` stack
+        // layout. The cost is one extra Array build, but it avoids
+        // a fourth Op::Super variant just to carry a block slot.
+        if super_block_arg.is_some() {
+            let args_arr: Vec<SExpr> = arg_nodes.iter().map(|n| tr(ctx, n)).collect();
+            let array = sp(node, Expr::ArrayLit(args_arr));
+            return sp(node, Expr::SuperApply {
+                args: Box::new(array),
+                block_arg: super_block_arg,
+            });
         }
         let args: Vec<SExpr> = arg_nodes.iter().map(|n| tr(ctx, n)).collect();
         return sp(node, Expr::Super(Some(args)));

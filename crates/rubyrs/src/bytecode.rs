@@ -223,6 +223,14 @@ pub(crate) enum Op {
     /// the defining-class's superclass per CRuby's "module
     /// of definition" rule. Same name_id resolves the method.
     ApplySuper(SymId),
+    /// `super(*args, &block)` — splat-super with explicit block.
+    /// Stack: `[block, array]`. Pops both, expands the array's
+    /// elements as positional args, and runs the same super-
+    /// lookup path as `Op::ApplySuper`. The block installs on
+    /// the dispatched frame so `def foo(*a, &b); super(*a, &b);
+    /// end` forwards both channels through the inheritance chain
+    /// (sinatra-contrib/MultiRoute uses this on every HTTP verb).
+    ApplySuperBlock(SymId),
     DefMethod(SymId, u32),         // name, proto_idx
     /// `def self.foo` inside a class body — installs `foo` on
     /// the surrounding class's `singleton_methods` table (not

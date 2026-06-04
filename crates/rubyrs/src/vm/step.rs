@@ -1675,6 +1675,42 @@ impl Vm {
                 };
                 self.super_call_with_lifecycle_noop(name_id, args)?;
             }
+            Op::ApplySuperBlock(name_id) => {
+                // Stack: `[block, array]` (block pushed first, array
+                // on top). Same super-lookup path as Op::ApplySuper,
+                // but the popped block forwards through
+                // `invoke_method_with_block` so the dispatched
+                // frame sees an explicit block in the same slot it
+                // would for `do ... end`. Used by
+                // `def foo(*a, &b); super(*a, &b); end` forwarders
+                // — sinatra-contrib/MultiRoute's per-verb methods.
+                let args_val = self.stack.pop().expect("ICE: ApplySuperBlock without args slot");
+                let args: Vec<Value> = match args_val {
+                    Value::Array(aid) => self.heap.array(aid).clone(),
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("ApplySuperBlock expected Array args, got {}", other.type_name()),
+                    })),
+                };
+                let block_val = self.stack.pop().expect("ICE: ApplySuperBlock without block slot");
+                // `&nil` is the legitimate "no block" shape; map it
+                // to a None block slot. Anything else must be a
+                // Block — we don't coerce `&method`/`&curried_proc`
+                // here yet (CallBlock has a richer arm). When
+                // sinatra-contrib forwards a real block this is
+                // always Value::Block.
+                let block_id = match block_val {
+                    Value::Block(id) => Some(id),
+                    Value::Nil => None,
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "wrong argument type {} (expected Proc)",
+                            other.type_name()
+                        ),
+                    })),
+                };
+                let (m, self_val) = self.super_lookup(name_id)?;
+                self.invoke_method_with_block(m, self_val, args, block_id)?;
+            }
             Op::Super(name_id, argc) => {
                 let split = self.stack.len() - argc as usize;
                 let args: Vec<Value> = self.stack.drain(split..).collect();
