@@ -19,6 +19,22 @@ class RackProtectionSmokeApp < Sinatra::Base
   use Rack::Protection::HttpOrigin, permitted_origins: ["http://allowed.example.com"]
   use Rack::Protection::JsonCsrf
   use Rack::Protection::RemoteReferrer
+  # Sinatra 4.x auto-registers HostAuthorization with
+  # development-mode permitted_hosts (["localhost", ".localhost",
+  # ".test", IPAddr ranges]) BEFORE any user-`use` of the same
+  # middleware. sinatra_lite does not auto-register. Adding our
+  # own `use Rack::Protection::HostAuthorization` here exercises
+  # the middleware load path (initialization, super forwarding
+  # through `def initialize(*); super; ...; end`) on both
+  # runtimes — the smoke value of the fixture. We deliberately
+  # don't add forwarded-host denial scenarios because CRuby's
+  # auto-stacked HostAuthorization layer would deny under our
+  # narrower permitted_hosts set, producing diff noise that
+  # tests Sinatra's auto-config rather than the middleware
+  # itself. Permitted hosts here mirror Sinatra's development
+  # auto-defaults so we never trip the auto layer.
+  use Rack::Protection::HostAuthorization,
+      permitted_hosts: ["localhost"]
   use Rack::Protection::ContentSecurityPolicy,
       default_src: "'self'",
       script_src: "'self' 'unsafe-inline'",

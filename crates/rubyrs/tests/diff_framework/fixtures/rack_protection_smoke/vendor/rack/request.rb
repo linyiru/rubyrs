@@ -76,5 +76,26 @@ module Rack
     def xhr?
       @env["HTTP_X_REQUESTED_WITH"] == "XMLHttpRequest"
     end
+
+    # `host_authority` returns the raw Host header value (with
+    # port suffix intact, no protocol). HostAuthorization checks
+    # both this and `forwarded_authority` against its
+    # permitted-hosts list. Real Rack 3 builds this from
+    # SERVER_NAME + SERVER_PORT when HTTP_HOST is absent; the
+    # fixture always has HTTP_HOST so the simple read suffices.
+    def host_authority
+      @env["HTTP_HOST"].to_s
+    end
+
+    # `forwarded_authority` returns the trusted-proxy-supplied
+    # host, used for DNS-rebinding defence behind reverse
+    # proxies. Real Rack 3 parses RFC 7239 `Forwarded:` first,
+    # falling back to `X-Forwarded-Host`. The fixture only
+    # exercises `X-Forwarded-Host` (the older, more common
+    # header); a future scenario that needs `Forwarded:`
+    # parsing can extend this method.
+    def forwarded_authority
+      @env["HTTP_X_FORWARDED_HOST"].to_s
+    end
   end
 end
