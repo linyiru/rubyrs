@@ -161,7 +161,29 @@ comment naming the gap):
 
 Covered: `/.../` literal, single-character classes (`/[aeiou]/`),
 the empty regex `//` (matches between every character),
-anchors `\A` (string start) and `\z` (string end).
+anchors `\A` (string start) and `\z` (string end). Interpolation
+(`/^#{var}$/`) compiles at runtime via `Op::CompileRegex`.
+
+Class methods: `Regexp.compile(str)` / `Regexp.new(str)` build a
+Regexp from a String pattern (same code path as the literal,
+including the Onigmo→Rust `\G` preprocess). `Regexp.escape(str)` /
+`Regexp.quote(str)` produce a metachar-escaped String. ASCII
+metachars (`. * + ? | ( ) [ ] { } \ ^ $`) match CRuby byte-for-byte;
+the only documented divergence is whitespace — Rust's
+`regex::escape` doesn't backslash spaces or tabs, CRuby does.
+The escape→interpolate→compile pipeline used by gems for
+turning untrusted strings into safe patterns still works
+identically as long as the input avoids whitespace.
+
+`String#match` (regex OR String argument) returns a full
+**MatchData** instance with `[N]` (positional), `[:name]` /
+`["name"]` (named groups), `captures`, `named_captures`, `to_a`,
+`size` / `length`, `to_s`, `inspect`, `pre_match`, `post_match`,
+`string`, `regexp`. Unknown named-capture references raise
+`IndexError` matching CRuby's `"undefined group name reference:
+<name>"` message. Non-participating named groups (alternation
+arms that didn't match) appear in `named_captures` with a nil
+value, distinct from missing-name lookups.
 
 Divergence from CRuby on the `^` anchor: rubyrs's regex engine
 fires `^` only at the string start, not at every line start in
@@ -502,6 +524,20 @@ they're handled as universal arms in `primitive_call` /
   [ADR 0008](adr/0008-resource-caps-for-untrusted-scripts.md) for
   the embedding API and per-runtime resource caps (`fuel`,
   `max_heap_objects`, `max_frames`).
+- **Default stack-depth ceiling of 10,000 frames** (matches CRuby
+  parity) before raising `SystemStackError`. The check runs in
+  `Vm::check_frames` at every method/block invocation entry,
+  always on (no opt-in). Embedders sandboxing untrusted scripts
+  set `max_frames` to a smaller value, which trips with
+  `ResourceExhausted` (outside the StandardError subtree, can't
+  be swallowed by bare `rescue`). `SystemStackError` itself lives
+  under `Exception` (NOT StandardError), so bare `rescue` clauses
+  can't silently swallow runaway recursion either — same
+  placement and rationale as CRuby's `SystemExit` / `Interrupt`.
+  Before this default ceiling, infinite recursion allocated
+  frames unboundedly and OOM-killed the host process (observed
+  at >90 GB resident in one terminal session); the cap turns it
+  into a normal, rescue-able Ruby exception.
 
 ## Divergences from CRuby
 
@@ -731,16 +767,24 @@ rescue Exception => e         # explicit Exception filter
 end
 ```
 
-- The resource trap (fuel / heap-cap / frame-cap) propagates as
-  a host-level `Trap` directly out of `Runtime::eval`. It does
-  not go through `unwind_with_exception`, so no `rescue` clause
-  — bare or class-filtered, even `rescue Exception` — can
+- The resource trap (fuel / heap-cap / frame-cap **when set via
+  the embedder-configurable `max_frames`**) propagates as a
+  host-level `Trap` directly out of `Runtime::eval`. It does not
+  go through `unwind_with_exception`, so no `rescue` clause —
+  bare or class-filtered, even `rescue Exception` — can
   intercept it.
 - See [ADR 0008](adr/0008-resource-caps-for-untrusted-scripts.md).
   The earlier promise in that ADR that `rescue Exception` could
   catch the trap was aspirational; it's been retracted.
+- The **default 10,000-frame ceiling**
+  (`SystemStackError`, always on) is the parity sibling and IS
+  rescue-able — see the Runtime bullet above for placement
+  and rationale. The split: `ResourceExhausted` is the
+  uncatchable embedder cap, `SystemStackError` is the
+  CRuby-parity ceiling that scripts handle normally.
 - Tests: `resource_exhausted_cannot_be_swallowed_by_bare_rescue`
-  and `resource_exhausted_is_uncatchable_even_with_rescue_exception`.
+  and `resource_exhausted_is_uncatchable_even_with_rescue_exception`;
+  `diff/system_stack_error.rb` covers the SystemStackError parity.
 
 ### `deprecate_constant` is accepted but silent
 
@@ -836,6 +880,18 @@ Foo.shout   # => "HI"
   shell reflectively, so this is documented divergence rather than a
   bug. A future PR can mirror writes into the shell's tables (or
   proxy the reflection methods) without breaking the redirect.
+- **`Klass.extend(M)` dispatch works; metaclass ancestors don't
+  reflect `M`.** When a Module is extended into a Class via
+  `Klass.extend(M)`, `M`'s instance methods become class-level
+  methods of `Klass` (CRuby-correct) and `super` from inside one
+  of them resolves through `M` to the superclass's class-method
+  table (also correct). The divergence is reflective only:
+  `Klass.singleton_class.ancestors` does NOT include `M` in the
+  rendered list (real CRuby would render it between
+  `#<Class:Klass>` and `#<Class:Object>`). Dispatch consults the
+  `singleton_includes` chain at lookup time, so the methods
+  resolve regardless. Same shape as the "shell tables are empty"
+  divergence above — reflection lags dispatch.
 - `Object#singleton_class` for non-Class receivers is not implemented
   in this arm and will raise NoMethodError.
 - `Runtime::reset()` drops the cached shell so any session-time
