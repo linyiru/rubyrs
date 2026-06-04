@@ -1673,14 +1673,12 @@ impl Vm {
                         msg: format!("ApplySuper expected Array args, got {}", other.type_name()),
                     })),
                 };
-                let (m, self_val) = self.super_lookup(name_id)?;
-                self.invoke_method(m, self_val, args)?;
+                self.super_call_with_lifecycle_noop(name_id, args)?;
             }
             Op::Super(name_id, argc) => {
                 let split = self.stack.len() - argc as usize;
                 let args: Vec<Value> = self.stack.drain(split..).collect();
-                let (m, self_val) = self.super_lookup(name_id)?;
-                self.invoke_method(m, self_val, args)?;
+                self.super_call_with_lifecycle_noop(name_id, args)?;
             }
             Op::CreateBlock(p_idx, param_start, n_params, rest_slot_raw) => {
                 // Snapshot the surrounding frame's captured locals

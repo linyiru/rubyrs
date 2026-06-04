@@ -1542,9 +1542,8 @@ impl Vm {
             return match m {
                 Some(m) => Ok((m, self_val)),
                 None => Err(self.trap(crate::error::RubyError::NoMethodError {
-                    kind: crate::error::NoMethodErrorKind::Missing,
-                    method: format!("super: no superclass method `{}'",
-                        self.interner.resolve(name_id)),
+                    kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
+                    method: self.interner.resolve(name_id).to_string(),
                     recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
                 })),
             };
@@ -1555,9 +1554,8 @@ impl Vm {
                 Value::Class(c) => c,
                 _ => {
                     return Err(self.trap(crate::error::RubyError::NoMethodError {
-                        kind: crate::error::NoMethodErrorKind::Missing,
-                        method: format!("super: no superclass method `{}'",
-                            self.interner.resolve(name_id)),
+                        kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
+                        method: self.interner.resolve(name_id).to_string(),
                         recv_type: std::borrow::Cow::Borrowed(other.type_name()),
                     }));
                 }
@@ -1574,11 +1572,90 @@ impl Vm {
         match m {
             Some(m) => Ok((m, self_val)),
             None => Err(self.trap(crate::error::RubyError::NoMethodError {
-                kind: crate::error::NoMethodErrorKind::Missing,
-                method: format!("super: no superclass method `{}'",
-                    self.interner.resolve(name_id)),
+                kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
+                method: self.interner.resolve(name_id).to_string(),
                 recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
             })),
+        }
+    }
+
+    /// `super` dispatch wrapper for Op::Super / Op::ApplySuper
+    /// that intercepts the "no superclass method" failure for
+    /// CRuby's lifecycle hooks (`inherited`, `included`,
+    /// `extended`) and substitutes a no-op (push Nil).
+    ///
+    /// Why this exists: CRuby ships real no-op
+    /// implementations of these hooks on `Class` / `Module`,
+    /// so an overriding hook body can call `super` without
+    /// worrying about whether anything's above it. rubyrs's
+    /// hook-firing path (step.rs Op::DefClass) dispatches
+    /// directly via `lookup_class_singleton_method` rather
+    /// than installing real methods on Class/Module, so the
+    /// super chain walks past Sinatra::Base → Object →
+    /// BasicObject without finding `inherited` — even though
+    /// CRuby's would resolve to a no-op terminator.
+    ///
+    /// Discovered: TRY_RUNS pass-15 — sinatra-4's
+    /// `Sinatra::Base.inherited(subclass)` calls \`super\` to
+    /// invoke the (no-op) default. Without this intercept the
+    /// inherited hook firing during base.rb's own load (when
+    /// `Sinatra::Application < Sinatra::Base` is defined)
+    /// raises NoMethodError. (Layer #20.)
+    pub(crate) fn super_call_with_lifecycle_noop(
+        &mut self,
+        name_id: SymId,
+        args: Vec<Value>,
+    ) -> Result<(), crate::error::Trap> {
+        match self.super_lookup(name_id) {
+            Ok((m, self_val)) => self.invoke_method(m, self_val, args),
+            Err(trap) => {
+                // Only intercept the specific "no superclass
+                // method on the ancestor chain" shape — NOT the
+                // sibling "super called outside of method"
+                // case (which also raises NoMethodError but for
+                // a fundamentally broken call site that shouldn't
+                // silently succeed). super_lookup tags its
+                // ancestor-chain miss with the typed
+                // `SuperNoSuperclass` kind so the discrimination
+                // is compile-checked rather than coupled to the
+                // formatted message string. (Code-review #363
+                // round 1 introduced the gate; round 3 swapped
+                // the brittle prefix match for the typed tag.)
+                let is_no_super = matches!(
+                    &trap.err,
+                    crate::error::RubyError::NoMethodError {
+                        kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
+                        ..
+                    },
+                );
+                let resolved = self.interner.resolve(name_id);
+                let is_lifecycle_hook = matches!(
+                    &**resolved,
+                    "inherited" | "included" | "prepended" | "extended"
+                        | "method_added" | "singleton_method_added"
+                        | "method_removed" | "singleton_method_removed"
+                        | "method_undefined" | "singleton_method_undefined",
+                );
+                // Restrict the no-op to Class/Module singleton-hook
+                // contexts only. If `self` is anything else (e.g. an
+                // ordinary user object whose author happened to name
+                // an instance method `included`), preserve CRuby
+                // semantics and propagate the NoMethodError. Modules
+                // are also represented by `Value::Class` (with an
+                // `is_module` flag), so a single arm covers both.
+                // Code-review #363 round 2.
+                let on_class_or_module = self
+                    .frames
+                    .last()
+                    .map(|f| matches!(f.self_val, Value::Class(_)))
+                    .unwrap_or(false);
+                if is_no_super && is_lifecycle_hook && on_class_or_module {
+                    self.stack.push(Value::Nil);
+                    Ok(())
+                } else {
+                    Err(trap)
+                }
+            }
         }
     }
 }
