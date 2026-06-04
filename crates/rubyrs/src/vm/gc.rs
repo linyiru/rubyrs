@@ -114,7 +114,19 @@ impl Vm {
     ///    matches CRuby's contract that any recursion that goes
     ///    too deep raises a normal, rescue-able Ruby exception.
     ///
-    /// 2. **Embedder-configurable cap** (`max_frames`, default
+    /// 2. **Always-on Rust-stack-safety cap**
+    ///    (`DEFAULT_MAX_DISPATCH_DEPTH`). Re-entrant Rust calls into
+    ///    `dispatch_until` (driven by `then` / `tap` / `yield_self` /
+    ///    `yield` / native iter drivers) consume Rust stack linearly
+    ///    in Ruby recursion depth. The Ruby-frame cap above doesn't
+    ///    protect against this: a script like
+    ///    `def f(x); x.then { |y| f(y) }; end; f(1)` blows the host's
+    ///    Rust stack at ~5–6k recursion levels — well below the
+    ///    10k Ruby-frame cap — and aborts the process. Mirror the
+    ///    Ruby-frame cap shape: trip with `SystemStackError`,
+    ///    catchable, with the same "stack level too deep" message.
+    ///
+    /// 3. **Embedder-configurable cap** (`max_frames`, default
     ///    `None`). Trips with `ResourceExhausted` — intentionally
     ///    `< Exception` not `< StandardError` so untrusted scripts
     ///    cannot swallow their own fuel/heap/frame trap with a
@@ -130,6 +142,22 @@ impl Vm {
         // below before this one fires).
         const DEFAULT_MAX_CALL_DEPTH: usize = 10_000;
         if self.frames.len() >= DEFAULT_MAX_CALL_DEPTH {
+            return Err(self.trap(RubyError::SystemStackError {
+                msg: "stack level too deep".to_string(),
+            }));
+        }
+        // Each re-entrant `dispatch_until` push (`then`, `tap`,
+        // `yield_self`, `yield`, `Proc#call`, native iter drivers)
+        // costs ~10 KB of Rust stack. Empirically, ~750 pushes
+        // overflows the default 8 MB Rust stack on release builds.
+        // Cap at 500 to leave ~33% headroom on 8 MB and to keep
+        // operable on tighter 2 MB worker-thread stacks (10 KB ×
+        // 500 = 5 MB worst-case, with the rest of the budget for
+        // host code above the embed and Vm overhead). Trips
+        // before the 10k Ruby-frame cap on block-recursion shapes
+        // that the frame cap can't catch.
+        const DEFAULT_MAX_DISPATCH_DEPTH: usize = 500;
+        if self.dispatch_until_depths.len() >= DEFAULT_MAX_DISPATCH_DEPTH {
             return Err(self.trap(RubyError::SystemStackError {
                 msg: "stack level too deep".to_string(),
             }));
