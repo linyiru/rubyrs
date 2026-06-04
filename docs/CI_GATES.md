@@ -56,9 +56,11 @@ into reproducible failures). Also: clippy at zero warnings, two
 structural greps (GC rooting lint, rustdoc orientation lint), and
 a belt-and-suspenders cext-bundle build verification step.
 
-- **Local**: `cargo test --release` (matches CI). Add
-  `STRESS_GC=1` before pushing if your PR touches `heap.alloc` /
-  `maybe_gc` call sites.
+- **Local**: `RUSTFLAGS="-D warnings" cargo test --release`
+  (CI sets `RUSTFLAGS=-D warnings` globally, so a bare
+  `cargo test --release` can pass locally while CI fails on a
+  warning-as-error). Add `STRESS_GC=1` before pushing if your PR
+  touches `heap.alloc` / `maybe_gc` call sites.
 - **Bump policy**: clippy lint hits → fix or
   `#[allow(clippy::xxx)]` with a rationale comment.
 - **See also**: [`CONTRIBUTING.md`](../CONTRIBUTING.md#what-gets-merged)
@@ -115,10 +117,9 @@ Same shape as perf-budget but for the `_json_native` feature's
 serde_json accelerator. Per-iteration walltime budgets prevent
 the JSON path from regressing against CRuby's stdlib.
 
-- **Local**: `bash perf/json_check.sh` (or equivalent — see the
-  workflow file's invocation).
-- **Source of truth**:
-  `perf/json_per_iter_baselines.tsv` (or similar).
+- **Local**: `bash bench/json_bench_check.sh` (the exact command
+  CI's `json-perf-budget` job runs).
+- **Source of truth**: `bench/json_bench_baselines.tsv`.
 - **Bump policy**: same as perf-budget.
 
 ### Miri smoke — `ci.yml` job `miri`
@@ -320,9 +321,12 @@ Established conventions:
 1. Find the gate in the table above. Note the local-run command.
 2. Run it locally. If it reproduces, the CI failure is
    real-and-yours.
-3. If it doesn't reproduce, check the cache: bump
-   `Cargo.lock` (a noop touch is enough) or invalidate the cache
-   entry in the GitHub Actions UI.
+3. If it doesn't reproduce, check the cache. The cache keys use
+   `hashFiles('Cargo.lock')`, which hashes file *contents*, not
+   mtime — a noop `touch` won't change the key, so the stale
+   cache still hits. Force a miss by actually changing
+   `Cargo.lock` (e.g. `cargo update -p <crate>`) or by deleting
+   the cache entry in the GitHub Actions UI.
 4. If still doesn't reproduce, the runner image may have
    drifted (especially for `test` / `coverage` which depend on
    preinstalled toolchains). Check whether GHA's ubuntu-latest
