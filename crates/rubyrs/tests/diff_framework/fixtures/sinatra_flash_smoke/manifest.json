@@ -1,0 +1,36 @@
+{
+  "_doc": "Real `sinatra-flash-0.3.0` vendored 1:1 under `vendor/sinatra/`. Sixth sinatra-contrib-family fixture (this gem is technically standalone, not in sinatra-contrib). Unblocked by three recent VM fixes: `Class.new` block-form (commit 21bb6c1d) + `class < <expr>` arbitrary parent expression (same commit) lets `class FlashHash < DelegateClass(Hash)` even construct, and Hash iter pair-yield (commit 6a8f1203) lets `styled_flash`'s `flash.collect { |message| ... }` see message as a pair Array instead of just a key. Exercises FlashHash's @now/@next dance and the styled_flash helper in single-request routes; cross-request session round-trip is verified separately at the Rack::Session::Cookie shim level.",
+  "name": "sinatra_flash_smoke",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 8000,
+    "duration_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sinatra/base", "sinatra/flash"]
+  },
+  "scenarios": [
+    { "name": "root",              "method": "GET", "path": "/" },
+    { "name": "sweep_cycle",       "method": "GET", "path": "/api/sweep_cycle" },
+    { "name": "keep_one",          "method": "GET", "path": "/api/keep_one" },
+    { "name": "discard",           "method": "GET", "path": "/api/discard" },
+    { "name": "styled_empty",      "method": "GET", "path": "/api/styled_empty" },
+    { "name": "styled_messages",   "method": "GET", "path": "/api/styled_messages" },
+    { "name": "styled_keyed",      "method": "GET", "path": "/api/styled_keyed" }
+  ],
+  "normalize": [
+    {
+      "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": "rubyrs micro-Sinatra \\(_http_server battery\\)",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": ";charset=utf-8",
+      "replacement": ""
+    }
+  ]
+}

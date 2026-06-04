@@ -971,6 +971,14 @@ jobs:
     # method_missing on Module/Class receivers; surfaced and
     # fixed a real rubyrs gap where try_method_missing skipped
     # Class/Module receivers entirely),
+    # `sinatra_flash_smoke` (real `sinatra-flash-0.3.0` vendored
+    # 1:1 — exercises FlashHash's @now/@next dance and the
+    # styled_flash HTML helper; required Class.new block-form,
+    # `class < <expr>`, AND Hash iter pair-yield VM fixes to
+    # work end-to-end. Ships a minimal `delegate.rb` shim because
+    # rubyrs's primitive-class `instance_methods(false)` returns
+    # empty, so CRuby DelegateClass's reflection-driven path
+    # can't enumerate Hash's method list),
     # `json_smoke` + `json_canon` (menu #2),
     # `as_lite_canon` (menu #3), and `sqlite_smoke` (menu #4 / ADR
     # 0027 Phase 4). Each fixture is one ship gate, not a
@@ -1076,6 +1084,13 @@ jobs:
           # resolves first on both runtimes; gem install satisfies
           # the availability probe (`require 'sinatra/multi_route'`).
           gem install sinatra-contrib
+          # `sinatra-flash` (standalone gem, not part of
+          # sinatra-contrib) — parity oracle for the
+          # `sinatra_flash_smoke` fixture. Vendored 1:1 under
+          # `vendor/sinatra/flash.rb` + three companion files; gem
+          # install satisfies the `require 'sinatra/flash'`
+          # availability probe.
+          gem install sinatra-flash
 
       - name: Cache cargo registry + build
         uses: actions/cache@v5
