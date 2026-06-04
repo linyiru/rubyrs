@@ -747,6 +747,11 @@ fn link_header_smoke() {
     run_fixture("link_header_smoke");
 }
 
+#[test]
+fn sinatra_extension_smoke() {
+    run_fixture("sinatra_extension_smoke");
+}
+
 
 #[test]
 fn json_smoke() {

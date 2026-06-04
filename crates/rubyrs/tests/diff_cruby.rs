@@ -300,6 +300,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn super_in_block() { run_diff("super_in_block"); }
 #[test] fn hash_to_hash() { run_diff("hash_to_hash"); }
 #[test] fn system_stack_error() { run_diff("system_stack_error"); }
+#[test] fn method_missing_on_class() { run_diff("method_missing_on_class"); }
 #[test] fn lambdas() { run_diff("lambdas"); }
 #[test] fn string_mutation() { run_diff("string_mutation"); }
 #[test] fn defined() { run_diff("defined"); }

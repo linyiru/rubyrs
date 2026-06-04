@@ -965,6 +965,12 @@ jobs:
     # sinatra_lite, :css mime entry, and Hash#to_hash duck-type
     # probe; keep_headers admits the Link header into the diff
     # transcript),
+    # `sinatra_extension_smoke` (real
+    # `sinatra-contrib-4.2.1/lib/sinatra/extension.rb` vendored
+    # 1:1 — exercises the method-recorder + replay pattern via
+    # method_missing on Module/Class receivers; surfaced and
+    # fixed a real rubyrs gap where try_method_missing skipped
+    # Class/Module receivers entirely),
     # `json_smoke` + `json_canon` (menu #2),
     # `as_lite_canon` (menu #3), and `sqlite_smoke` (menu #4 / ADR
     # 0027 Phase 4). Each fixture is one ship gate, not a

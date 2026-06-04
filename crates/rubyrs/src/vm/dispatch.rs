@@ -1162,12 +1162,28 @@ impl Vm {
         args: Vec<Value>,
         block: Option<ObjId>,
     ) -> Result<bool, Trap> {
-        let cls = match recv {
-            Value::Object(id) => self.heap.class_of(*id),
-            _ => return Ok(false),
-        };
         let mm_id = self.interner.intern("method_missing");
-        let m = match self.lookup_method_uncached(&cls, mm_id) {
+        // Class / Module receivers consult the singleton-method
+        // chain — same lookup `Klass.foo` itself uses — so a
+        // `method_missing` defined in a module extended into the
+        // class (`extend M` / `Module.new { extend M }`, which
+        // sinatra-contrib/Extension does to record DSL calls)
+        // is reachable. Pre-fix this returned `Ok(false)` for
+        // every non-Object receiver, swallowing valid Class/
+        // Module method_missing handlers — surfaced as
+        // "undefined method `X' for Class" instead of the
+        // user's recorder firing.
+        let m = match recv {
+            Value::Object(id) => {
+                let cls = self.heap.class_of(*id);
+                self.lookup_method_uncached(&cls, mm_id)
+            }
+            Value::Class(cls) => {
+                self.lookup_class_singleton_method(cls, mm_id)
+            }
+            _ => None,
+        };
+        let m = match m {
             Some(m) => m,
             None => return Ok(false),
         };

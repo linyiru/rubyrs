@@ -1,0 +1,34 @@
+{
+  "_doc": "Real `sinatra-contrib-4.2.1/lib/sinatra/extension.rb` vendored 1:1 under `vendor/sinatra/extension.rb`. Fifth sinatra-contrib fixture; exercises the method-recorder + replay pattern (`extend Sinatra::Extension` captures every Sinatra::Base method call via method_missing for later replay via the `registered(base)` hook). Surfaced and fixed a real rubyrs gap: `try_method_missing` only triggered for Value::Object receivers, swallowing method_missing handlers on Class/Module receivers like the Extension module's recorder. Both the bareword module form (`module Ext; extend Sinatra::Extension; ...; end`) and the block-form `new` (`Ext = Sinatra::Extension.new do ...; end`) are exercised.",
+  "name": "sinatra_extension_smoke",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 8000,
+    "duration_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sinatra/base", "sinatra/extension"]
+  },
+  "scenarios": [
+    { "name": "root",              "method": "GET", "path": "/" },
+    { "name": "greet_ada",         "method": "GET", "path": "/greet/Ada" },
+    { "name": "greet_bob",         "method": "GET", "path": "/greet/Bob" },
+    { "name": "extension_marker", "method": "GET", "path": "/extension_marker" },
+    { "name": "stats_uptime",      "method": "GET", "path": "/stats/uptime" }
+  ],
+  "normalize": [
+    {
+      "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": "rubyrs micro-Sinatra \\(_http_server battery\\)",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": ";charset=utf-8",
+      "replacement": ""
+    }
+  ]
+}
