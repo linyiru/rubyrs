@@ -16,13 +16,17 @@
 # `find_template` from crashing with `NoMethodError` on the
 # (rare) call path where Sinatra's auto-extension iteration
 # happens to fire without an actual template rendering attempt.
-# Real template rendering (engine lookups via `Tilt[name]`)
-# remains unimplemented — calls get the expected
-# `NoMethodError` / `nil` surface so the failure mode is "no
-# template engine wired" rather than a silent successful render
-# of nothing. Per ADR 0017 that's the correct
-# "feature-absent" signal; if a user wants real templating they
-# should opt in to a full Tilt vendor (deferred).
+# Real template rendering (engine lookups via `Tilt[name]`,
+# `Tilt.register`, `Tilt.new`, etc.) remains unimplemented — the
+# shim deliberately defines NO such methods, so calls raise
+# `NoMethodError` and that is the load-bearing "feature absent"
+# contract scripts / tests pattern-match on. The earlier wording
+# implied a `nil`-return fallback was also acceptable; that's
+# not what the shim does and a downstream caller assuming `nil`
+# would silently render-nothing instead of erroring out. Per ADR
+# 0017 `NoMethodError` is the correct signal; if a user wants
+# real templating they should opt in to a full Tilt vendor
+# (deferred).
 #
 # Loaded unconditionally by the `require "tilt"` lenient-stub
 # path (kernel.rs → `always_on_stub_extras`), not gated behind
@@ -57,6 +61,17 @@ module Tilt
   end
   private_constant :EmptyMapping
 
+  # Note: ideally `.freeze` here so user code grabbing
+  # `Tilt.default_mapping` and trying to mutate it (real Tilt
+  # plugins expect to register engines on the live mapping)
+  # would hit `FrozenError` instead of silently mutating the
+  # shim's singleton. rubyrs's `Object#freeze` for user-class
+  # instances is not yet implemented though — call would raise
+  # `NoMethodError` and abort the require. Track-back item for
+  # a future PR; for now the shim's observable immutability
+  # rests on `EXTENSIONS` (the only piece an `extensions_for`
+  # call could leak) being frozen and `EmptyMapping` exposing no
+  # state-mutating methods.
   @default_mapping = EmptyMapping.new
 
   def self.default_mapping
