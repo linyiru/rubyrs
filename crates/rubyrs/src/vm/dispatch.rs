@@ -3234,19 +3234,17 @@ impl Vm {
                 for arg in args {
                     let sid: SymId = match arg {
                         Value::Sym(sid) => *sid,
-                        Value::Str(s) => match s.with_str_lossy(|raw| -> Result<SymId, Trap> {
+                        Value::Str(s) => s.with_str_lossy(|raw| -> Result<SymId, Trap> {
                             if let Some(max) = self.max_symbols
                                 && !self.interner.contains(raw)
-                                && self.interner.len() >= max {
+                                && self.interner.len() >= max
+                            {
                                 return Err(self.trap(RubyError::ResourceExhausted {
                                     msg: format!("interner exhausted: {} symbols", max),
                                 }));
                             }
                             Ok(self.interner.intern(raw))
-                        }) {
-                            Ok(sid) => sid,
-                            Err(trap) => return Err(trap),
-                        },
+                        })?,
                         other => {
                             let inspected = other.to_inspect(&self.heap, &self.interner);
                             return Err(self.trap(RubyError::TypeError {
