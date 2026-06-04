@@ -8524,12 +8524,16 @@ impl Vm {
         Ok(())
     }
 
-    /// Fire `BasicObject#singleton_method_added(name)` (and the
-    /// `_removed`/`_undefined` siblings) on `receiver` whenever a
-    /// singleton-method install/remove/undef hits the receiver's
-    /// eigenclass. CRuby parity: this is the singleton-method twin
-    /// of `Module#method_added`. Rails / RSpec / many DSLs hook
-    /// `singleton_method_added` to auto-wrap class methods.
+    /// Fire a singleton-method lifecycle hook named `hook_name` on
+    /// `receiver` whenever its eigenclass is modified. CRuby parity:
+    /// this is the singleton-method twin of `Module#method_added`.
+    /// Rails / RSpec / many DSLs hook `singleton_method_added` to
+    /// auto-wrap class methods.
+    ///
+    /// Currently only the `singleton_method_added` install path is
+    /// wired (see callers). The helper is name-generic so the
+    /// `_removed`/`_undefined` siblings can ride the same lookup rule
+    /// once the remove/undef paths are added — follow-up work.
     ///
     /// Contract:
     ///   - hook receiver is `receiver` (the object/class whose
