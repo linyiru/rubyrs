@@ -22,13 +22,28 @@
 //!
 //! This module makes the convention explicit: a single constant
 //! defines the marker, and two helpers (`tag_absolute` /
-//! `strip_absolute`) own the encode/decode contract. All current
-//! call sites route through them so future maintenance happens in
-//! one place.
+//! `strip_absolute`) own the encode/decode contract for that
+//! AST→compiler→VM channel.
 //!
-//! Scope: the helpers operate on `String` / `&str` only — they
-//! don't change the carrier types or remove the marker from
-//! interned `SymId`s. A deeper structural refactor (e.g., changing
+//! Scope clarification: the helpers cover the *internal marker*
+//! convention only — the leading `::` that the AST lowering
+//! attaches to a joined constant-path name before interning it.
+//! Producers in `ast.rs` and consumers in `compiler.rs` / `vm/step.rs`
+//! (`PushRescue`) all route through this module.
+//!
+//! Out of scope, even though they also inspect a literal `::`
+//! prefix: places that parse a Ruby surface-syntax string at
+//! runtime, e.g. `Vm::resolve_const_path` powering
+//! `Module#const_get("::Foo::Bar")` / `Module#const_defined?`.
+//! That path's `::` comes from the user-visible Ruby string, not
+//! from this module's internal tagging convention — sharing a
+//! helper would conflate two different concerns. They are kept
+//! deliberately separate; if a future change broadens the marker
+//! semantics, audit both surfaces independently.
+//!
+//! The helpers operate on `String` / `&str` only — they don't
+//! change the carrier types or remove the marker from interned
+//! `SymId`s. A deeper structural refactor (e.g., changing
 //! `Expr::ConstRead(String)` to a struct variant with an explicit
 //! `absolute: bool` field, and threading the bit through the
 //! bytecode) would remove the marker from the interner entirely
