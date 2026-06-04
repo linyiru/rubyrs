@@ -147,12 +147,15 @@ impl Vm {
 /// `NoneM` is named with a trailing M because `None` collides with
 /// `Option::None` in match arms.
 #[derive(Copy, Clone, Debug)]
-pub(crate) enum IterMode { Select, Reject, Find, Any, All, NoneM }
+pub(crate) enum IterMode { Select, Reject, Find, Any, All, NoneM, One }
 
 impl IterMode {
     fn bool_init(self) -> bool {
         // For `all?` we start at true and flip to false on first
         // falsy; for `none?` likewise. `any?` starts false.
+        // `One` uses a separate counter — `bool_init` is unused
+        // for that mode (the `match mode` arm below tallies and
+        // sets bool_acc at the end).
         match self {
             IterMode::Any => false,
             IterMode::All | IterMode::NoneM => true,
@@ -186,6 +189,11 @@ impl Vm {
         let mut early: Option<Value> = None;
         let mut find_val = Value::Nil;
         let mut bool_acc = mode.bool_init();
+        // `IterMode::One` short-circuits to false on the SECOND
+        // truthy match; otherwise the result is `count == 1` after
+        // the full walk. Tracked separately so the loop break-on-
+        // second-match optimisation matches CRuby's stop point.
+        let mut one_count: usize = 0;
         for v in snapshot {
             let r = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
                 BlockStep::MethodReturn => break,
@@ -200,6 +208,10 @@ impl Vm {
                 IterMode::Any => if truthy { bool_acc = true; break; }
                 IterMode::All => if !truthy { bool_acc = false; break; }
                 IterMode::NoneM => if truthy { bool_acc = false; break; }
+                IterMode::One => if truthy {
+                    one_count += 1;
+                    if one_count > 1 { break; }
+                }
             }
         }
         // PinGuard drops at function exit, including the `?` paths above.
@@ -208,6 +220,7 @@ impl Vm {
             IterMode::Select | IterMode::Reject => Value::Array(acc_id.unwrap()),
             IterMode::Find => find_val,
             IterMode::Any | IterMode::All | IterMode::NoneM => Value::Bool(bool_acc),
+            IterMode::One => Value::Bool(one_count == 1),
         })
     }
 
@@ -278,6 +291,12 @@ impl Vm {
                 IterMode::Any => if truthy { bool_acc = true; break; }
                 IterMode::All => if !truthy { bool_acc = false; break; }
                 IterMode::NoneM => if truthy { bool_acc = false; break; }
+                // Hash#one? routes through its own dedicated arm
+                // (vm/iter.rs:3635) because it pre-allocates a
+                // pair Array for the block; `iter_hash_filter`
+                // isn't called with `IterMode::One` today. Arm
+                // present only for exhaustiveness.
+                IterMode::One => unreachable!("Hash#one? has its own implementation, not iter_hash_filter"),
             }
         }
         if let Some(e) = early { return Ok(e); }
@@ -285,6 +304,7 @@ impl Vm {
             IterMode::Select | IterMode::Reject => Value::Hash(acc_id.unwrap()),
             IterMode::Find => find_val,
             IterMode::Any | IterMode::All | IterMode::NoneM => Value::Bool(bool_acc),
+            IterMode::One => unreachable!("Hash#one? handled in its own arm"),
         })
     }
 
@@ -313,6 +333,7 @@ impl Vm {
         let mut early: Option<Value> = None;
         let mut find_val = Value::Nil;
         let mut bool_acc = mode.bool_init();
+        let mut one_count: usize = 0;
         let end_inc = if excl { ei - 1 } else { ei };
         let mut i = bi;
         while i <= end_inc {
@@ -329,6 +350,10 @@ impl Vm {
                 IterMode::Any => if truthy { bool_acc = true; break; }
                 IterMode::All => if !truthy { bool_acc = false; break; }
                 IterMode::NoneM => if truthy { bool_acc = false; break; }
+                IterMode::One => if truthy {
+                    one_count += 1;
+                    if one_count > 1 { break; }
+                }
             }
             i += 1;
         }
@@ -337,6 +362,7 @@ impl Vm {
             IterMode::Select | IterMode::Reject => Value::Array(acc_id.unwrap()),
             IterMode::Find => find_val,
             IterMode::Any | IterMode::All | IterMode::NoneM => Value::Bool(bool_acc),
+            IterMode::One => Value::Bool(one_count == 1),
         }))
     }
 
@@ -3336,6 +3362,7 @@ impl Vm {
             (Value::Array(id), "any?", []) => Some(self.iter_array_filter(*id, IterMode::Any, block)?),
             (Value::Array(id), "all?", []) => Some(self.iter_array_filter(*id, IterMode::All, block)?),
             (Value::Array(id), "none?", []) => Some(self.iter_array_filter(*id, IterMode::NoneM, block)?),
+            (Value::Array(id), "one?", []) => Some(self.iter_array_filter(*id, IterMode::One, block)?),
             // `a.find_index { |x| ... }` / `a.index { |x| ... }`
             // — Int index of the first element whose block result
             // is truthy, or nil. Positional-arg form lives in
@@ -4445,6 +4472,7 @@ impl Vm {
             (Value::Range(id), "any?", []) => self.iter_range_filter(*id, IterMode::Any, block)?,
             (Value::Range(id), "all?", []) => self.iter_range_filter(*id, IterMode::All, block)?,
             (Value::Range(id), "none?", []) => self.iter_range_filter(*id, IterMode::NoneM, block)?,
+            (Value::Range(id), "one?", []) => self.iter_range_filter(*id, IterMode::One, block)?,
 
             (Value::Range(id), "map", []) => {
                 let (bi, ei, excl) = {

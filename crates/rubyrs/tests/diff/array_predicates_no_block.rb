@@ -34,10 +34,16 @@ p [1, 2].one?       # two matches
 p [nil, 1, false].one?
 p [nil, false].one?  # zero matches
 
-# Block-form still works alongside (sanity check —
-# `iter_array_filter` handles the block path). `one?` with a
-# block isn't implemented yet (no-block lands in array.rs;
-# block form would need a new IterMode in iter_array_filter).
+# Block-form coverage. `one?` block-form now also lands —
+# `iter_array_filter` gained an IterMode::One arm that
+# short-circuits on the SECOND truthy match. Range#one? gets
+# the same treatment via iter_range_filter.
 p [1, 2, 3].any? { |x| x > 2 }
 p [1, 2, 3].all? { |x| x > 0 }
 p [1, 2, 3].none? { |x| x > 5 }
+p [1, 2, 3].one? { |x| x == 2 }       # exactly one match
+p [1, 2, 3].one? { |x| x > 0 }        # three matches → false
+p [].one? { |x| true }                # zero matches → false
+p [1, 2, 3].one? { |x| x > 5 }        # zero matches → false
+p (1..5).one? { |x| x == 3 }          # Range#one? — exactly one
+p (1..5).one? { |x| x > 2 }           # multiple → false
