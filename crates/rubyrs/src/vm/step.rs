@@ -1585,6 +1585,31 @@ impl Vm {
             Op::CallNoRecvBlock(name_id, argc, cache_id) => {
                 self.do_call_block(name_id, argc as usize, true, cache_id)?;
             }
+            Op::ApplyCallBlock(name_id, cache_id) | Op::ApplyCallNoRecvBlock(name_id, cache_id) => {
+                // Splat-call with explicit `&block`. Stack layout
+                // (bottom→top): `[recv?, block, array]`. Pop the
+                // args Array, expand its elements as positional
+                // args (re-establishing the `do_call_block` layout
+                // `[recv?, block, arg1, ..., argN]`), then dispatch.
+                // GC rooting: same hazard as `Op::ApplyCall` — the
+                // Array (and its heap-shaped elements) has no stack
+                // root between pop and re-push. Pin via PinGuard.
+                let no_recv = matches!(op, Op::ApplyCallNoRecvBlock(_, _));
+                let arr_val = self.stack.pop().expect("ICE: ApplyCallBlock without arg array");
+                let arr_id = match arr_val {
+                    Value::Array(id) => id,
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("no implicit conversion of {} into Array (splat arg)", other.type_name()),
+                    })),
+                };
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(Value::Array(arr_id));
+                let elems: Vec<Value> = g.vm.heap.array(arr_id).clone();
+                let argc = elems.len();
+                for v in elems { g.vm.stack.push(v); }
+                drop(g);
+                self.do_call_block(name_id, argc, no_recv, cache_id)?;
+            }
             Op::ApplySuper(name_id) => {
                 // Pop assembled args Array and drain elements
                 // into a Vec<Value>. From here the super-

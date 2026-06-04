@@ -240,6 +240,12 @@ pub(crate) fn string_call(
         (Value::Str(a), "==", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() == *b.borrow())),
         (Value::Str(a), "!=", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() != *b.borrow())),
         (Value::Str(a), "to_s", []) => Some(Value::Str(a.clone())),
+        // `String#to_str` — explicit-conversion alias. CRuby uses
+        // `to_str` for "I really am a String"-style implicit coercion
+        // checks (`respond_to?(:to_str)` is the duck-type probe lots
+        // of gems use to distinguish String from Symbol / Regexp).
+        // For our subset it's identical to `to_s` on a real String.
+        (Value::Str(a), "to_str", []) => Some(Value::Str(a.clone())),
         // PR #53 review #1: `length`/`size` return UTF-8 character
         // count (lossy on invalid UTF-8 — non-UTF-8 bytes count as
         // one U+FFFD char each). Matches CRuby's "length on a

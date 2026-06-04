@@ -407,12 +407,18 @@ pub(crate) enum Expr {
     /// `foo(*arr)` — single-splat call. The compiler emits an
     /// `Op::ApplyCall` / `Op::ApplyCallNoRecv` that takes one
     /// Array on top of the stack and uses its elements as
-    /// positional args. Mixed forms like `foo(a, *b, c)` are
-    /// not yet supported.
+    /// positional args. The optional `block_arg` carries the
+    /// `&block` slot when both splat and block are present
+    /// (`foo(*args, &block)` — exercised by Sinatra::Base.use's
+    /// middleware `klass.new(inner_app, *args, &block)` chain).
+    /// Mixed positional forms like `foo(a, *b, c)` collapse to
+    /// a `+`-chain Array build BEFORE reaching this node, so
+    /// the splat is always the only positional channel.
     Apply {
         receiver: Option<Box<SExpr>>,
         name: String,
         splat: Box<SExpr>,
+        block_arg: Option<Box<SExpr>>,
     },
     /// `->(params) { body }` — lambda literal. Compiles to the
     /// same `CreateBlock` opcode as a regular `{ |x| ... }` block,
@@ -1484,6 +1490,28 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             .arguments()
             .map(|a| a.arguments().iter().collect::<Vec<_>>())
             .unwrap_or_default();
+        // Detect a `&block_arg` co-existing with a splat. The
+        // BlockArgumentNode-with-expression case (i.e. `&proc`,
+        // not the anonymous `&` or `&:symbol` shapes) needs to be
+        // routed through `Apply.block_arg` because the regular
+        // CallWithBlockArg path doesn't expand splats. The
+        // anonymous and symbol-to-proc shapes still go via the
+        // legacy path below — they don't combine with splats in
+        // any gem we've vendored, and giving them their own arm
+        // would duplicate the synthesis code without benefit.
+        let early_block_arg: Option<Box<SExpr>> = n.block().and_then(|bnode| {
+            bnode.as_block_argument_node().and_then(|ba| ba.expression()).and_then(|expr| {
+                // Skip the symbol-to-proc shape (`&:method`); the
+                // existing CallWithBlock arm has a richer
+                // expansion (synthesises a one-arg block body) we
+                // don't want to bypass.
+                if expr.as_symbol_node().is_some() {
+                    None
+                } else {
+                    Some(Box::new(tr(ctx, &expr)))
+                }
+            })
+        });
         if arg_nodes.len() == 1
             && let Some(sn) = arg_nodes[0].as_splat_node()
                 && let Some(splat_expr) = sn.expression() {
@@ -1491,6 +1519,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         receiver,
                         name,
                         splat: Box::new(tr(ctx, &splat_expr)),
+                        block_arg: early_block_arg,
                     });
                 }
         // Detect any splat anywhere in the args; if present and
@@ -1537,6 +1566,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 receiver,
                 name,
                 splat: Box::new(acc),
+                block_arg: early_block_arg,
             });
         }
         // KeywordHashNode at the tail of an argument list — Prism

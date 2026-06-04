@@ -661,7 +661,7 @@ impl Vm {
                 "center" | "ljust" | "rjust" |
                 "include?" | "start_with?" | "end_with?" |
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |
-                "to_s" | "inspect" |
+                "to_s" | "to_str" | "inspect" |
                 "sub" | "sub!" | "gsub" | "gsub!" |
                 "tr" | "squeeze" |
                 "encode" | "force_encoding" | "valid_encoding?" | "encoding" | "b" |

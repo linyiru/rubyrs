@@ -1712,20 +1712,26 @@ pub(crate) fn compile_expr(
                 }
             }
         }
-        Expr::Apply { receiver, name, splat } => {
+        Expr::Apply { receiver, name, splat, block_arg } => {
             // `foo(*arr)` — compile receiver (if any) then the
             // splat expression. The VM op `ApplyCall(NoRecv)`
             // pops the Array and uses its elements as args.
+            // When `block_arg` is present (`foo(*arr, &blk)`),
+            // emit the block-aware variant: stack becomes
+            // `[recv?, block, array]` and the VM expands+dispatches
+            // through the block path.
             let has_recv = receiver.is_some();
             if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
+            if let Some(ba) = block_arg { compile_expr(b, ba, protos, interner, cc); }
             compile_expr(b, splat, protos, interner, cc);
             let name_id = interner.intern(name);
             let cid = *cc as u16; *cc += 1;
-            if has_recv {
-                b.emit(Op::ApplyCall(name_id, cid));
-            } else {
-                b.emit(Op::ApplyCallNoRecv(name_id, cid));
-            }
+            match (has_recv, block_arg.is_some()) {
+                (true,  false) => b.emit(Op::ApplyCall(name_id, cid)),
+                (false, false) => b.emit(Op::ApplyCallNoRecv(name_id, cid)),
+                (true,  true)  => b.emit(Op::ApplyCallBlock(name_id, cid)),
+                (false, true)  => b.emit(Op::ApplyCallNoRecvBlock(name_id, cid)),
+            };
         }
         Expr::Lambda { params, body } => {
             // `->(p) { body }` — compile the body as a block proto

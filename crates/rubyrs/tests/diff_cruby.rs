@@ -291,6 +291,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn unless_basics() { run_diff("unless_basics"); }
 #[test] fn regex_minimal() { run_diff("regex_minimal"); }
 #[test] fn regex_class_methods() { run_diff("regex_class_methods"); }
+#[test] fn splat_block_forwarding() { run_diff("splat_block_forwarding"); }
 #[test] fn lambdas() { run_diff("lambdas"); }
 #[test] fn string_mutation() { run_diff("string_mutation"); }
 #[test] fn defined() { run_diff("defined"); }

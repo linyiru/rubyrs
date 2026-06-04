@@ -199,6 +199,15 @@ pub(crate) enum Op {
     /// contain a SplatNode at the only position.
     ApplyCall(SymId, u16),
     ApplyCallNoRecv(SymId, u16),
+    /// `foo(*args, &block)` — splat + explicit block-arg. Stack
+    /// layout (bottom→top): `[recv?, block, array]`. Pops the
+    /// args Array and expands its elements as positional args,
+    /// then dispatches via the block-aware path so the popped
+    /// block value installs as the called method's block. Used
+    /// by middleware-chain build loops like
+    /// `klass.new(inner_app, *args, &block)`.
+    ApplyCallBlock(SymId, u16),
+    ApplyCallNoRecvBlock(SymId, u16),
     /// `super(args...)`. Receiver stays `self` (popped from the
     /// current frame, not the operand stack). Method name and
     /// argc are baked in at compile time. Lookup starts at the

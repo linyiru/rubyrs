@@ -9678,13 +9678,24 @@ impl Vm {
             Some(self.stack.pop().expect("ICE: stack underflow before block receiver"))
         };
 
-        // Bare `instance_exec { ... }` inside an instance method —
-        // `recv` is None, so the receiver-form arm below won't see
-        // it. Dispatch on `self` from the current frame, mirroring
-        // `self.instance_exec(&block)`. Same override-precedence
-        // probe as the receiver-form arm so a user-defined
-        // `instance_exec` still wins.
-        if no_recv && &*name == "instance_exec" {
+        // Bare `instance_exec { ... }` / `instance_eval { ... }`
+        // inside an instance method — `recv` is None, so the
+        // receiver-form arm below won't see it. Dispatch on `self`
+        // from the current frame, mirroring
+        // `self.instance_exec(&block)` / `self.instance_eval(&block)`.
+        // Same override-precedence probe as the receiver-form arm
+        // so a user-defined method still wins.
+        //
+        // The two share the same shape because at the dispatch
+        // level instance_eval and instance_exec are
+        // indistinguishable for the no-args / block-only form
+        // (the difference — instance_exec passes call args as
+        // block args, instance_eval doesn't — only matters when
+        // args are present, and we have no args here by virtue of
+        // the no_recv block path). rack-cors hits this via
+        // `instance_eval(&block)` inside its initialize when the
+        // user passes a configuration block.
+        if no_recv && matches!(&*name, "instance_exec" | "instance_eval") {
             let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
             let user_override = match &self_val {
                 Value::Object(id) => {
