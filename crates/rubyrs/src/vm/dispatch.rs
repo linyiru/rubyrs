@@ -10974,22 +10974,42 @@ impl Vm {
                         msg: "can't create instance of singleton class".into(),
                     }));
                 }
-                // Pin args during the alloc window — see the matching
-                // comment in `do_call`'s new-branch for the rationale.
-                // Route through `Vm::alloc_default_instance` so the
-                // block-call `new` path can't drift from the
-                // no-block `new` arm or `Class#allocate` (PR #181
-                // review round 2).
-                let obj = {
-                    let mut g = PinGuard::new(self);
-                    for a in &args { g.pin(a.clone()); }
-                    g.vm.alloc_default_instance(cls)?
-                };
-                let init_id = self.interner.intern("initialize");
-                if let Some(m) = self.lookup_method_uncached(cls, init_id) {
-                    self.invoke_method_with_block(m, obj.clone(), args, Some(block))?;
+                // Pin args + obj + block across the WHOLE alloc +
+                // invoke window. Pre-fix the PinGuard was scoped to
+                // just the `alloc_default_instance` call, leaving
+                // `obj` AND `block` as bare Rust locals before
+                // `invoke_method_with_block` ran — its rest-arg
+                // alloc / arity-binding can trigger maybe_gc with
+                // the new Frame not yet on the stack, sweeping the
+                // block ObjId before its Frame.block_arg slot got
+                // rooted. STRESS_GC repro:
+                // `class Foo; def initialize(&blk); blk.call; end;
+                // end; Foo.new { 42 }` ICE'd at "heap slot is not a
+                // Block" in the block_given? → blk.call window.
+                // Pin everything heap-shaped (args entries, the
+                // fresh obj, the block) for the duration of the
+                // invoke; the guard releases on `Ok(())` return
+                // BELOW where the new Frame is already pushed +
+                // GC-rooted via Frame.block_arg + Frame.self_val.
+                let mut g = PinGuard::new(self);
+                for a in &args { g.pin(a.clone()); }
+                g.pin(Value::Block(block));
+                let obj = g.vm.alloc_default_instance(cls)?;
+                g.pin(obj.clone());
+                let init_id = g.vm.interner.intern("initialize");
+                let ruby_init = g.vm.lookup_method_uncached(cls, init_id);
+                if let Some(m) = ruby_init {
+                    g.vm.invoke_method_with_block(m, obj.clone(), args, Some(block))?;
+                    // Drop the guard before mutating the new
+                    // frame's swap_return — by this point the
+                    // new Frame is on `g.vm.frames` and rooting
+                    // both obj (as self_val) and block (as
+                    // block_arg) on its own, so the pin
+                    // tracking is no longer load-bearing.
+                    drop(g);
                     self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
                 } else {
+                    drop(g);
                     self.stack.push(obj);
                 }
                 return Ok(());
