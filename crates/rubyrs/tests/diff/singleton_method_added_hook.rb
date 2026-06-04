@@ -1,6 +1,9 @@
-# BasicObject#singleton_method_added(name) — fires after every
-# singleton-method install on the receiver. CRuby parity: this is
-# the singleton-method twin of Module#method_added (PR #362).
+# BasicObject#singleton_method_added(name) — fires from the dedicated
+# singleton-method install paths exercised below (`def self.foo` /
+# `def obj.foo`, their block forms, and define_singleton_method).
+# Other singleton-table mutations (alias_method / module_function) are
+# deferred follow-up and intentionally not covered here. CRuby parity:
+# this is the singleton-method twin of Module#method_added (PR #362).
 # Rails / RSpec / many DSLs use it to auto-wrap class methods.
 
 # (1) `def self.foo` on a class fires C.singleton_method_added(:foo).
