@@ -13,9 +13,13 @@ the picture or how to add a new gate.
 
 ## Overview
 
-9 gates split across 5 workflow files. Two composite actions
-factor common install logic so a toolchain or cargo-tool bump is
-a one-line edit.
+9 gates, all of them in just two workflow files — `ci.yml`
+(8 jobs) and `cargo-deny.yml` (1). The diagram below also shows
+three more workflows (`gapscan-pr.yml`, `fuzz.yml`,
+`wasm-breakdown.yml`) so the whole CI surface is in one picture,
+but those are advisory or scheduled and explicitly **not** merge
+gates. Two composite actions factor common install logic so a
+toolchain or cargo-tool bump is a one-line edit.
 
 ```
                       .github/actions/
