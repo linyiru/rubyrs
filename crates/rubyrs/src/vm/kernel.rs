@@ -1655,8 +1655,22 @@ impl Vm {
                         // script with many `require`s pinpoints which
                         // one tripped — matches the master non-wasi
                         // branch's diagnostic shape.
+                        //
+                        // Class is `LoadError` (not `RuntimeError`) for
+                        // the same reason the native cext-on / cext-off
+                        // arms above raise LoadError: a portable Ruby
+                        // script using the canonical optional-require
+                        // pattern
+                        //
+                        //     begin; require 'foo'; rescue LoadError; end
+                        //
+                        // must catch the miss on every target rubyrs
+                        // builds for. The wasi-specific diagnostic
+                        // message survives — the *class* is the
+                        // load-bearing contract for `rescue`, not the
+                        // text.
                         let path = path.to_string_lossy();
-                        Some(Err(self.trap(RubyError::RuntimeError {
+                        Some(Err(self.trap(RubyError::LoadError {
                             msg: format!(
                                 "require: file I/O not available on \
                                  wasm32-wasi (attempted to load {})",
