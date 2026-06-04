@@ -45,12 +45,11 @@ impl Vm {
                 if matches!(name, "include?" | "member?" | "cover?")
                     && args.len() == 1
                     && (matches!(&b, Value::Float(_)) || matches!(&e, Value::Float(_)))
+                    && let (Some(bf), Some(ef), Some(arg)) = (to_f(&b), to_f(&e), to_f(&args[0]))
                 {
-                    if let (Some(bf), Some(ef), Some(arg)) = (to_f(&b), to_f(&e), to_f(&args[0])) {
-                        let lo_ok = arg >= bf;
-                        let hi_ok = if excl { arg < ef } else { arg <= ef };
-                        return Ok(Some(Value::Bool(lo_ok && hi_ok)));
-                    }
+                    let lo_ok = arg >= bf;
+                    let hi_ok = if excl { arg < ef } else { arg <= ef };
+                    return Ok(Some(Value::Bool(lo_ok && hi_ok)));
                 }
                 if begin_int.is_none() || end_int.is_none() {
                     // String-endpoint Range support: `('a'..'z').to_a`,

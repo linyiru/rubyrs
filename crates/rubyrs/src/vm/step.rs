@@ -2152,6 +2152,19 @@ impl Vm {
                     self.toplevel_methods.insert(name_id, m);
                 }
                 self.method_gen = self.method_gen.wrapping_add(1);
+                // `singleton_method_added(name)` fires on the
+                // surrounding class — `def self.foo` inside
+                // `class C` invokes `C.singleton_method_added(:foo)`
+                // if the user defined the hook. Toplevel
+                // `def self.foo` is skipped (no Class receiver to
+                // anchor the hook against).
+                if let Some(cls) = self.class_stack.last().cloned() {
+                    self.fire_singleton_method_lifecycle_hook(
+                        Value::Class(cls),
+                        "singleton_method_added",
+                        name_id,
+                    )?;
+                }
                 self.stack.push(Value::Nil);
             }
             Op::DefObjectSingletonMethod(name_id, p_idx) => {
@@ -2200,6 +2213,15 @@ impl Vm {
                 });
                 sc.methods.borrow_mut().insert(name_id, m);
                 self.method_gen = self.method_gen.wrapping_add(1);
+                // `obj.singleton_method_added(:name)` fires after
+                // `def obj.foo` lands. Hook lookup walks
+                // `class_of(obj)` (the receiver's class), matching
+                // CRuby's instance-method-on-class definition.
+                self.fire_singleton_method_lifecycle_hook(
+                    Value::Object(obj_id),
+                    "singleton_method_added",
+                    name_id,
+                )?;
                 self.stack.push(Value::Nil);
             }
             Op::AliasMethod(new_id, old_id) => {
@@ -2706,9 +2728,9 @@ impl Vm {
                 // `C.define_singleton_method(:foo) { ... }`
                 // previously rejected Class; aligning both paths
                 // now.
-                match recv {
+                let hook_recv: Value = match &recv {
                     Value::Object(obj_id) => {
-                        let sc = self.heap.ensure_singleton_class(obj_id);
+                        let sc = self.heap.ensure_singleton_class(*obj_id);
                         let m = Rc::new(Method {
                             params,
                             proto_idx,
@@ -2720,19 +2742,21 @@ impl Vm {
                             original_name: Some(name_id),
                         });
                         sc.methods.borrow_mut().insert(name_id, m);
+                        Value::Object(*obj_id)
                     }
                     Value::Class(cls) => {
                         let m = Rc::new(Method {
                             params,
                             proto_idx,
                             fixed_arity: None,
-                            defining_class: Some(Rc::downgrade(&cls)),
+                            defining_class: Some(Rc::downgrade(cls)),
                             visibility: std::cell::Cell::new(Visibility::Public),
                             closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
                             builtin: None,
                             original_name: Some(name_id),
                         });
                         cls.singleton_methods.borrow_mut().insert(name_id, m);
+                        Value::Class(cls.clone())
                     }
                     other => {
                         return Err(self.trap(RubyError::TypeError {
@@ -2742,8 +2766,17 @@ impl Vm {
                             ),
                         }));
                     }
-                }
+                };
                 self.method_gen = self.method_gen.wrapping_add(1);
+                // `singleton_method_added(name)` fires on the
+                // explicit receiver — Object recv fires the hook
+                // looked up on its class; Class recv fires the
+                // hook looked up on its singleton chain.
+                self.fire_singleton_method_lifecycle_hook(
+                    hook_recv,
+                    "singleton_method_added",
+                    name_id,
+                )?;
                 // CRuby: `define_singleton_method(:foo) { … }`
                 // evaluates to `:foo`. Mirrors the same alignment
                 // applied to `Op::DefMethodBlock` above; both
