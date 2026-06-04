@@ -334,23 +334,66 @@ module Sinatra
       # settings.json_pretty` predicate-and-read shape works.
       def set(key, value = nil, &block)
         if block_given?
-          # Block-form `set(:key) do |arg| ... end` — registers a
-          # route-option handler. The block body typically calls
-          # `condition { ... }` to install a per-route predicate.
-          setting_handlers[key] = block
-          return self
+          # Real Sinatra distinguishes block-form `set` by block
+          # arity:
+          #   * `set(:key) { value }` (arity 0) — block computes
+          #     the value. CRuby installs it as a singleton-class
+          #     method so each `settings.key` invocation re-runs
+          #     the block. We evaluate eagerly at set-time and
+          #     store the result; that's adequate for the
+          #     idiomatic shape (`set :json_encoder do
+          #     ::MultiJson end`) where the value doesn't change
+          #     after declaration.
+          #   * `set(:key) { |arg| ... }` (arity >= 1) — block is
+          #     a route-option handler invoked when a route
+          #     declares the key as an option (the standard
+          #     sinatra-cors `set(:is_cors_preflight) { |arg|
+          #     condition { ... } }` shape). Stored unevaluated;
+          #     `add_route` runs it with the opts value.
+          if block.arity == 0
+            value = block.call
+          else
+            setting_handlers[key] = block
+            return self
+          end
         end
         settings_store[key] = value
         unless respond_to?(key)
-          define_singleton_method(key) { settings_store[key] }
+          # Reader walks the superclass chain so settings declared
+          # on `Sinatra::Base` (real-gem idiom for plugin
+          # registration: `Base.set :json_encoder do ::MultiJson
+          # end`) reach every subclass. The walker stops at the
+          # first class whose `settings_store` actually contains
+          # `key` — preserves the "subclass overrides parent"
+          # contract real Sinatra honours.
+          define_singleton_method(key) do
+            cls = self
+            while cls
+              store = cls.settings_store
+              return store[key] if store.key?(key)
+              cls = cls.superclass
+            end
+            nil
+          end
           # `<key>?` predicate — real Sinatra auto-generates this
           # alongside the reader. Returns true when the value is
           # truthy AND non-empty (CRuby's `present?`-style rule
           # for the Configurable surface, not the Object#`!nil?
           # one). sinatra-cors uses `settings.max_age?` etc.
+          # Walks the inheritance chain the same way the reader
+          # does so a `set :foo, true` on Base reads `true` on
+          # every subclass's `.foo?` too.
           define_singleton_method("#{key}?") do
-            v = settings_store[key]
-            !v.nil? && v != false && v != ""
+            cls = self
+            while cls
+              store = cls.settings_store
+              if store.key?(key)
+                v = store[key]
+                return (!v.nil? && v != false && v != "")
+              end
+              cls = cls.superclass
+            end
+            false
           end
         end
         self

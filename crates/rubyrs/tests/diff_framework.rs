@@ -738,6 +738,11 @@ fn required_params_smoke() {
 }
 
 #[test]
+fn sinatra_json_smoke() {
+    run_fixture("sinatra_json_smoke");
+}
+
+#[test]
 fn json_smoke() {
     run_fixture("json_smoke");
 }

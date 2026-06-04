@@ -1,0 +1,39 @@
+{
+  "_doc": "Real `sinatra-contrib-4.2.1/lib/sinatra/json.rb` vendored 1:1 under `vendor/sinatra/json.rb`. Third sinatra-contrib fixture; first to exercise the `application/json` content-type path end-to-end. Routes through the standard multi_json shim (shared with sinatra_jsonp_smoke) which delegates to rubyrs's built-in JSON canon on the rubyrs side and the real multi_json gem on CRuby. Tests cover flat/nested/array/primitive shapes, per-call content_type override, and the block-form `set :json_encoder do; ::MultiJson; end` arity-0 deferred-value path (sinatra_lite's `set` now distinguishes arity 0 from arity >= 1).",
+  "name": "sinatra_json_smoke",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 8000,
+    "duration_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sinatra/base", "sinatra/json"]
+  },
+  "scenarios": [
+    { "name": "root",             "method": "GET", "path": "/" },
+    { "name": "flat",             "method": "GET", "path": "/flat" },
+    { "name": "array",            "method": "GET", "path": "/array" },
+    { "name": "nested",           "method": "GET", "path": "/nested" },
+    { "name": "custom_type",      "method": "GET", "path": "/custom_type" },
+    { "name": "empty_hash",       "method": "GET", "path": "/empty_hash" },
+    { "name": "empty_array",      "method": "GET", "path": "/empty_array" },
+    { "name": "primitive_string", "method": "GET", "path": "/primitive_string" },
+    { "name": "primitive_int",    "method": "GET", "path": "/primitive_int" },
+    { "name": "primitive_null",   "method": "GET", "path": "/primitive_null" }
+  ],
+  "normalize": [
+    {
+      "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": "rubyrs micro-Sinatra \\(_http_server battery\\)",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": ";charset=utf-8",
+      "replacement": ""
+    }
+  ]
+}

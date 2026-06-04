@@ -947,6 +947,17 @@ jobs:
     # (`helpers Sinatra::RequiredParams`), `halt 400` from a helper
     # invoked inside a route, Hash#key? + recursion across simple/
     # Array key shapes, and `&.` safe-navigation on params),
+    # `sinatra_json_smoke` (real
+    # `sinatra-contrib-4.2.1/lib/sinatra/json.rb` vendored 1:1 —
+    # first content-type=application/json fixture; exercises the
+    # `json obj` helper across flat/nested/array/primitive shapes,
+    # per-call `:content_type` override, and the
+    # `Base.set :json_encoder do ::MultiJson end` arity-0
+    # deferred-value path. sinatra_lite's `set` now distinguishes
+    # block arity (0 → eager value-eval, ≥1 → route-option
+    # handler) and settings readers walk the superclass chain so
+    # plugin-installed settings on Sinatra::Base reach every
+    # subclass),
     # `json_smoke` + `json_canon` (menu #2),
     # `as_lite_canon` (menu #3), and `sqlite_smoke` (menu #4 / ADR
     # 0027 Phase 4). Each fixture is one ship gate, not a
