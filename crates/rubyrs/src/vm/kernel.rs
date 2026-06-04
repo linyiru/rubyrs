@@ -1483,9 +1483,12 @@ impl Vm {
                         // out-of-scope absolute path would route to the cext
                         // fallback when find_ruby_source_candidate skipped
                         // the existence probe (closing the stat side-channel),
-                        // and the cext fallback's "cannot find C ext" trap is
-                        // RuntimeError — wrong class for `rescue LoadError`,
-                        // and a more revealing message than the scope reject.
+                        // and the cext fallback's generic
+                        // `LoadError: cannot load such file -- <path>` would
+                        // overwrite the more revealing scope-gate diagnostic.
+                        // (Pre-LoadError this comment described the wrong
+                        // exception class — both branches now raise LoadError;
+                        // the pre-emption is about message clarity, not class.)
                         let scope_violation: Option<std::path::PathBuf> = if self
                             .allow_filesystem_io
                             && let Some(prefixes) = self.allowed_paths.as_ref()
@@ -1632,12 +1635,16 @@ impl Vm {
                             { Some(self.cext_require(&path_str)) }
                             #[cfg(not(feature = "cext"))]
                             {
-                                Some(Err(self.trap(RubyError::RuntimeError {
-                                    msg: format!(
-                                        "require: no .rb at {} and built without \
-                                         `cext` feature for native extension fallback",
-                                        path_str
-                                    ),
+                                // Match the cext-on branch's surface
+                                // contract: a require-time miss is
+                                // `LoadError: cannot load such file --
+                                // <name>` regardless of whether the cext
+                                // fallback is compiled in. Build-flag
+                                // detail belongs in `--features` docs,
+                                // not in a user-visible exception that
+                                // `rescue LoadError` should catch.
+                                Some(Err(self.trap(RubyError::LoadError {
+                                    msg: format!("cannot load such file -- {}", path_str),
                                 })))
                             }
                         }
@@ -1648,8 +1655,22 @@ impl Vm {
                         // script with many `require`s pinpoints which
                         // one tripped — matches the master non-wasi
                         // branch's diagnostic shape.
+                        //
+                        // Class is `LoadError` (not `RuntimeError`) for
+                        // the same reason the native cext-on / cext-off
+                        // arms above raise LoadError: a portable Ruby
+                        // script using the canonical optional-require
+                        // pattern
+                        //
+                        //     begin; require 'foo'; rescue LoadError; end
+                        //
+                        // must catch the miss on every target rubyrs
+                        // builds for. The wasi-specific diagnostic
+                        // message survives — the *class* is the
+                        // load-bearing contract for `rescue`, not the
+                        // text.
                         let path = path.to_string_lossy();
-                        Some(Err(self.trap(RubyError::RuntimeError {
+                        Some(Err(self.trap(RubyError::LoadError {
                             msg: format!(
                                 "require: file I/O not available on \
                                  wasm32-wasi (attempted to load {})",

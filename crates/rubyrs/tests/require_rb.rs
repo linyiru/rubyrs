@@ -140,7 +140,7 @@ fn require_satisfied_by_pre_registered_module_no_ops() {
     // of the require path. The require should treat that as
     // already-loaded — Bool(true) on first observation,
     // Bool(false) thereafter — and NOT fall through to
-    // cext_require (which would error with "cannot find C ext").
+    // cext_require (which raises `LoadError: cannot load such file`).
     //
     // Exercises three angles in one driver:
     //   1. snake_to_camel match (`module Rack` satisfies
@@ -171,8 +171,8 @@ r4 = require "ipaddr"
 begin
   require "definitely_not_a_real_module_xyz_abc_999"
   reject = "loaded-unexpectedly"
-rescue RuntimeError => e
-  reject = "errored: #{e.class}"
+rescue LoadError => e
+  reject = "errored: #{e.class}: #{e.message}"
 end
 
 puts "rack-first=#{r1}"
@@ -200,7 +200,7 @@ rack-first=true
 rack-second=false
 rack-subpath=true
 ipaddr-canonical=true
-errored: RuntimeError
+errored: LoadError: cannot load such file -- definitely_not_a_real_module_xyz_abc_999
 ";
     assert_eq!(
         stdout, expected,
@@ -288,7 +288,7 @@ module Rack; end
 begin
   require "_rack"
   puts "leaked-true"
-rescue RuntimeError => e
+rescue LoadError => e
   puts "rejected: #{e.class}"
 end
 "#
@@ -307,7 +307,7 @@ end
         stdout, stderr
     );
     assert_eq!(
-        stdout.trim(), "rejected: RuntimeError",
+        stdout.trim(), "rejected: LoadError",
         "leading-underscore guard mismatch.\nfull stdout:\n{}\nstderr:\n{}",
         stdout, stderr,
     );
@@ -353,7 +353,7 @@ module RackFoo; end
   begin
     r = require p
     actual = (r == true || r == false) ? :accept : :other
-  rescue RuntimeError
+  rescue LoadError
     actual = :reject
   end
   puts "name=#{p} expected=#{expected} actual=#{actual}"
@@ -409,7 +409,7 @@ module Rack; end
   begin
     require p
     puts "leaked: #{p}"
-  rescue RuntimeError => e
+  rescue LoadError => e
     puts "rejected: #{p}"
   end
 end
@@ -464,7 +464,7 @@ fn require_does_not_match_core_preamble_classes() {
   begin
     require p
     puts "leaked: #{p}"
-  rescue RuntimeError => e
+  rescue LoadError => e
     puts "rejected: #{p}"
   end
 end
@@ -499,19 +499,154 @@ rejected: exception
 }
 
 #[test]
-fn require_missing_rb_falls_back_to_cext_or_errors() {
-    // Path with no .rb sibling and no cext sibling should
-    // error out cleanly (RuntimeError-shape via the cext
-    // path's "cannot find C ext" message).
+fn require_missing_file_raises_loaderror_with_cruby_message() {
+    // Contract: a require-time miss raises `LoadError` with the
+    // exact CRuby phrasing `cannot load such file -- <path>`.
+    // Sinatra, rack-protection, and many other gems gate optional
+    // deps with `begin; require "foo"; rescue LoadError; end` —
+    // the prior `RuntimeError: cannot find C ext: foo` shape
+    // slipped past that rescue and aborted the parent require.
+    //
+    // Also pins the message text: scripts that pattern-match on
+    // `e.message` (the CRuby idiom) should round-trip byte-for-
+    // byte against the canonical phrasing.
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let driver_path = tmp.join("require_rb_missing_driver.rb");
+    // Derive the "guaranteed missing" path under the test's own
+    // tmp dir instead of a hard-coded `/tmp/...` — the latter is
+    // a global OS path that could in principle exist on a dev
+    // machine and mask the miss case. Computing it here also
+    // keeps the message-pin exact: the same string flows into the
+    // Ruby driver and into the expected assertion.
+    //
+    // Use an extension-less base name so neither the `.rb` probe
+    // (`find_ruby_source_candidate`) nor the cext auto-extension
+    // probe (`cext.rs`'s `.dylib`/`.bundle`/`.so`/`.dll` walk) can
+    // accidentally collide with a real file left behind from a
+    // prior local run. Then assert that *all* probed variants are
+    // absent up front — a stale `.rb` sibling under tmp would
+    // otherwise let the require silently succeed and the test
+    // would stop exercising the LoadError path it claims to pin.
+    let missing_path = tmp.join("definitely_missing_for_loaderror_test");
+    let missing_str = missing_path.to_str().expect("tmp path is utf-8");
+    for ext in &["", ".rb", ".so", ".dylib", ".bundle", ".dll"] {
+        let probe = if ext.is_empty() {
+            missing_path.clone()
+        } else {
+            missing_path.with_extension(&ext[1..])
+        };
+        assert!(
+            !probe.exists(),
+            "test pre-condition: probed variant {:?} must not exist \
+             (left over from a prior run?)",
+            probe,
+        );
+    }
+    fs::write(&driver_path, format!(
+r#"
+begin
+  require {missing_str:?}
+  puts "unexpectedly loaded"
+rescue LoadError => e
+  puts "caught: #{{e.class}}: #{{e.message}}"
+end
+"#))
+        .unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stdout:\n{}", stdout);
+    assert_eq!(
+        stdout.trim(),
+        format!("caught: LoadError: cannot load such file -- {}", missing_str),
+    );
+}
+
+#[test]
+fn require_optional_dep_rescued_by_loaderror_lets_parent_continue() {
+    // Sinatra's `sinatra/base.rb` uses the canonical optional-
+    // require pattern:
+    //
+    //     begin
+    //       require 'rackup'        # may or may not be installed
+    //     rescue LoadError
+    //     end
+    //     require 'tilt'            # MUST still run after rackup miss
+    //
+    // The whole pattern depends on the rescue actually catching
+    // the miss. This test stages the same shape: an optional
+    // require for a non-existent file, immediately followed by
+    // another statement that must observe the miss as rescued.
+    // Regression guard against re-classifying require failures
+    // to `RuntimeError`/`StandardError` for any reason — that
+    // would silently re-break Sinatra, rack-protection, etc.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_optional_loaderror_driver.rb");
+    fs::write(&driver_path,
+        r#"
+caught = nil
+begin
+  require "definitely_not_installed_optional_dep_for_test"
+  after_require = "loaded-unexpectedly"
+rescue LoadError
+  caught = :rescued
+  after_require = "skipped-via-rescue"
+end
+# Must reach here — pattern only works if LoadError fired.
+puts "after_block=#{after_require}"
+puts "caught=#{caught}"
+"#
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rubyrs exited non-zero — optional-require pattern broken.\
+         \nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    assert_eq!(
+        stdout,
+        "after_block=skipped-via-rescue\ncaught=rescued\n",
+        "optional-require pattern: rescue LoadError did not fire.\n\
+         stdout:\n{}",
+        stdout,
+    );
+}
+
+#[test]
+#[cfg(all(not(feature = "cext"), not(target_os = "wasi")))]
+fn require_missing_file_raises_loaderror_when_built_without_cext_feature() {
+    // Compile-gated coverage for the `#[cfg(not(feature = "cext"))]`
+    // branch of the require dispatch in `vm/kernel.rs`. The default
+    // CI matrix runs with `cext` ON, so without this gated test the
+    // no-cext fallback's exception class is unverified — a future
+    // edit that re-introduced `RuntimeError` there would slip past
+    // the default suite. Mirrors the `cannot load such file --` shape
+    // the cext-on branch establishes so `rescue LoadError` reads the
+    // same way regardless of build flags. Gated additionally on
+    // `not(target_os = "wasi")` because the wasi target takes a
+    // separate `cfg` arm (`require: file I/O not available on
+    // wasm32-wasi`) that this test does not assert.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_rb_no_cext_loaderror_driver.rb");
     fs::write(&driver_path,
         r#"
 begin
-  require "/tmp/this_path_does_not_exist_98765"
-  puts "unexpectedly loaded"
-rescue RuntimeError => e
-  puts "caught: #{e.class}"
+  require "definitely_not_installed_no_cext_dep_for_test"
+  puts "leaked"
+rescue LoadError => e
+  puts "caught: #{e.class}: #{e.message}"
 end
 "#
     ).unwrap();
@@ -523,5 +658,9 @@ end
         .expect("failed to spawn rubyrs");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "stdout:\n{}", stdout);
-    assert_eq!(stdout.trim(), "caught: RuntimeError");
+    assert_eq!(
+        stdout.trim(),
+        "caught: LoadError: cannot load such file -- \
+         definitely_not_installed_no_cext_dep_for_test"
+    );
 }
