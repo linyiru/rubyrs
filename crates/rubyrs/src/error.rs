@@ -134,7 +134,22 @@ pub enum RubyError {
     FloatDomainError { msg: String },
     /// Resource limits exceeded (fuel, heap, stack depth). Used by P1-D
     /// when a Runtime was configured with caps for untrusted scripts.
+    /// Intentionally `< Exception` (NOT `StandardError`) so bare
+    /// `rescue` clauses can't swallow embedder caps.
     ResourceExhausted { msg: String },
+    /// Call stack reached the default depth limit. CRuby's
+    /// `SystemStackError`, raised when a method recursion goes too
+    /// deep (default ~10000 frames). Unlike `ResourceExhausted`,
+    /// this is ALWAYS on (no opt-in) and IS catchable via
+    /// `rescue SystemStackError` — matches CRuby's contract that
+    /// a runaway recursion produces a normal Ruby exception
+    /// rather than a host process abort. The check sits in
+    /// `check_frames`, so every method/block invocation entry
+    /// point hits it. Sits under `Exception`, NOT `StandardError`
+    /// — same placement as in CRuby, so a bare `rescue` clause
+    /// (which catches the StandardError subtree only) doesn't
+    /// swallow stack-blowups silently.
+    SystemStackError { msg: String },
     /// Filesystem I/O blocked by the
     /// `Config::allow_filesystem_io: false` sandbox cap. Raised by
     /// `Vm::check_filesystem_io_allowed` from every File.* class
@@ -252,6 +267,13 @@ const BUILTIN_EXCEPTION_PARENT: &[(&str, &str)] = &[
     // ADR 0008: hosts must not be able to swallow their own
     // resource trap via a bare `rescue` clause.
     ("ResourceExhausted", "Exception"),
+    // CRuby placement: `SystemStackError < Exception`, NOT
+    // `< StandardError`. A bare `rescue` clause must NOT catch
+    // stack-blowups silently — same security posture as
+    // ResourceExhausted / SignalException / SystemExit. Scripts
+    // that want to handle it must write `rescue SystemStackError`
+    // (or `rescue Exception`) explicitly.
+    ("SystemStackError", "Exception"),
     ("IOError", "StandardError"),
     ("LoadError", "ScriptError"),
     // Signal-driven exception hierarchy. Pre-installed for ADR
@@ -370,6 +392,7 @@ impl RubyError {
             RubyError::RangeError { .. } => "RangeError",
             RubyError::FloatDomainError { .. } => "FloatDomainError",
             RubyError::ResourceExhausted { .. } => "ResourceExhausted",
+            RubyError::SystemStackError { .. } => "SystemStackError",
             RubyError::IOError { .. } => "IOError",
             RubyError::LoadError { .. } => "LoadError",
             RubyError::Interrupt { .. } => "Interrupt",
@@ -412,6 +435,7 @@ impl RubyError {
             | RubyError::RangeError { msg }
             | RubyError::FloatDomainError { msg }
             | RubyError::ResourceExhausted { msg }
+            | RubyError::SystemStackError { msg }
             | RubyError::IOError { msg }
             | RubyError::LoadError { msg }
             | RubyError::Interrupt { msg } => msg.clone(),

@@ -131,6 +131,20 @@ end
 class ResourceExhausted < Exception
 end
 
+## CRuby's `SystemStackError`, raised when method recursion
+## exceeds the default depth limit (~10000 frames). Caught by
+## the explicit `rescue SystemStackError` or `rescue Exception`
+## forms; intentionally placed `< Exception` (NOT `<
+## StandardError`) so a bare `rescue` clause cannot silently
+## swallow a runaway recursion — same rationale as
+## ResourceExhausted / SignalException. Without this class
+## installed, the runtime's depth-limit trap surfaces as a
+## generic Exception and `rescue SystemStackError` becomes a
+## NameError at parse time, breaking parity with every
+## CRuby program that handles stack-blowups explicitly.
+class SystemStackError < Exception
+end
+
 ## CRuby's signal-driven exception hierarchy. Pre-installed here
 ## (without the underlying signal infrastructure that's tracked by
 ## ADR 0025) so embedders + scripts can `raise Interrupt`, write

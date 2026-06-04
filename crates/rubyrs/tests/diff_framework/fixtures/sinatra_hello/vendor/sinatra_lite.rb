@@ -912,4 +912,5 @@ module Sinatra
   def self.register(*extensions)
     Sinatra::Base.register(*extensions)
   end
+
 end

@@ -98,8 +98,42 @@ impl Vm {
     }
 
     /// Check the frame stack can accept another frame.
+    ///
+    /// Two layers, in priority order:
+    ///
+    /// 1. **Always-on CRuby-parity cap** (`DEFAULT_MAX_CALL_DEPTH`).
+    ///    Trips with `SystemStackError` (catchable via `rescue
+    ///    SystemStackError` or `rescue Exception` — same placement
+    ///    as CRuby, outside the StandardError subtree). Without
+    ///    this, infinite recursion (e.g. the alias_method-into-
+    ///    feedback-loop shape sinatra-contrib/WebDAV's `safe?`
+    ///    redefine creates on double-`register`) allocates frames
+    ///    unboundedly until the OS OOM-kills the host — observed
+    ///    at >90 GB of resident memory before the kill in one
+    ///    Ghostty session. Catching it as `SystemStackError` instead
+    ///    matches CRuby's contract that any recursion that goes
+    ///    too deep raises a normal, rescue-able Ruby exception.
+    ///
+    /// 2. **Embedder-configurable cap** (`max_frames`, default
+    ///    `None`). Trips with `ResourceExhausted` — intentionally
+    ///    `< Exception` not `< StandardError` so untrusted scripts
+    ///    cannot swallow their own fuel/heap/frame trap with a
+    ///    bare `rescue`. Embedders set this lower than
+    ///    `DEFAULT_MAX_CALL_DEPTH` when sandboxing untrusted code.
     #[inline]
     pub(crate) fn check_frames(&self) -> Result<(), Trap> {
+        // CRuby's default is ~10000 frames before SystemStackError;
+        // we mirror it exactly. Embedders that want a different
+        // ceiling for trusted code can lift this constant; for
+        // untrusted code they should configure `max_frames` to a
+        // smaller value (which trips the ResourceExhausted branch
+        // below before this one fires).
+        const DEFAULT_MAX_CALL_DEPTH: usize = 10_000;
+        if self.frames.len() >= DEFAULT_MAX_CALL_DEPTH {
+            return Err(self.trap(RubyError::SystemStackError {
+                msg: "stack level too deep".to_string(),
+            }));
+        }
         if let Some(max) = self.max_frames
             && self.frames.len() >= max {
                 return Err(self.trap(RubyError::ResourceExhausted {
