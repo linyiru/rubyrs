@@ -3102,6 +3102,7 @@ impl Vm {
                             includes: std::cell::RefCell::new(Vec::new()),
                             prepends: std::cell::RefCell::new(Vec::new()),
                             singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                            singleton_includes: std::cell::RefCell::new(Vec::new()),
                             singleton_view: std::cell::RefCell::new(None),
                             singleton_target: std::cell::RefCell::new(Some(std::rc::Rc::downgrade(&cls))),
                             class_vars: std::cell::RefCell::new(HashMap::new()),
@@ -3726,6 +3727,7 @@ impl Vm {
             includes: std::cell::RefCell::new(Vec::new()),
             prepends: std::cell::RefCell::new(Vec::new()),
             singleton_prepends: std::cell::RefCell::new(Vec::new()),
+            singleton_includes: std::cell::RefCell::new(Vec::new()),
             singleton_view: std::cell::RefCell::new(None),
             singleton_target: std::cell::RefCell::new(None),
             class_vars: std::cell::RefCell::new(HashMap::new()),
@@ -5134,18 +5136,22 @@ impl Vm {
                         // because M is reachable via the include
                         // chain. PR #347 documented follow-up.
                         //
-                        // `extend` keeps the prior full-ancestor
-                        // \`class_is_a\` check — same scope-gate as
-                        // the arg-order branch above, so this PR
-                        // ships no untested change for extend.
-                        let already_reachable = if is_include || is_prepend {
-                            super::class_reaches_via_chain(&target_cls, &src, is_prepend)
+                        // `Klass.extend(M)` (and bareword `extend M`
+                        // inside a class body, which this no-recv
+                        // arm handles) — see the explicit-receiver
+                        // arm below for the singleton_includes
+                        // rationale. Same fix; just a second site.
+                        let is_extend = !is_include && !is_prepend;
+                        let already_reachable = if is_extend {
+                            target_cls.singleton_includes.borrow().iter().any(|m| std::rc::Rc::ptr_eq(m, &src))
                         } else {
-                            super::class_is_a(&target_cls, &src)
+                            super::class_reaches_via_chain(&target_cls, &src, is_prepend)
                         };
                         if !already_reachable {
                             let mut chain = if is_prepend {
                                 target_cls.prepends.borrow_mut()
+                            } else if is_extend {
+                                target_cls.singleton_includes.borrow_mut()
                             } else {
                                 target_cls.includes.borrow_mut()
                             };
@@ -6117,19 +6123,46 @@ impl Vm {
                     // no-receiver arm — see that comment for the
                     // include-vs-prepend coexistence rationale and
                     // the extend-keeps-class_is_a gate.
-                    let already_reachable = if is_include || is_prepend {
-                        super::class_reaches_via_chain(&target_cls, &src, is_prepend)
+                    //
+                    // `Klass.extend(M)` is CRuby-equivalent to
+                    // `class << Klass; include M; end`: M's instance
+                    // methods become class-level methods, NOT
+                    // instance methods of Klass. So extend writes to
+                    // `singleton_includes` (a separate chain walked
+                    // by `lookup_class_singleton_method`), while
+                    // include/prepend still write to the class's own
+                    // includes/prepends chain (which lookup uses for
+                    // instance method dispatch). Pre-fix, extend was
+                    // pushing into `includes` here — instances of
+                    // Klass picked up M's methods, but `Klass.foo`
+                    // did NOT (the singleton-lookup walk doesn't
+                    // consult the instance-method chain). Surfaced
+                    // by sinatra-contrib/MultiRoute's `register
+                    // MultiRoute` shape, where the gem expects
+                    // `Klass.get` to resolve to MultiRoute's override.
+                    let is_extend = !is_include && !is_prepend;
+                    let already_reachable = if is_extend {
+                        target_cls.singleton_includes.borrow().iter().any(|m| Rc::ptr_eq(m, &src))
                     } else {
-                        super::class_is_a(&target_cls, &src)
+                        super::class_reaches_via_chain(&target_cls, &src, is_prepend)
                     };
                     if !already_reachable {
                         let mut chain = if is_prepend {
                             target_cls.prepends.borrow_mut()
+                        } else if is_extend {
+                            target_cls.singleton_includes.borrow_mut()
                         } else {
                             target_cls.includes.borrow_mut()
                         };
                         chain.insert(0, src.clone());
                         drop(chain);
+                    }
+                    if is_extend {
+                        // Force a method-cache generation bump so any
+                        // call site that previously NoMethodError'd
+                        // on this class re-resolves and finds the
+                        // newly-extended module's methods.
+                        self.method_gen = self.method_gen.wrapping_add(1);
                     }
                     // Hook fires on every call — see no-recv arm
                     // for rationale. Extend's hook is `extended`.
@@ -9880,6 +9913,7 @@ impl Vm {
                 includes: std::cell::RefCell::new(Vec::new()),
                 prepends: std::cell::RefCell::new(Vec::new()),
                 singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                singleton_includes: std::cell::RefCell::new(Vec::new()),
                 singleton_view: std::cell::RefCell::new(None),
                 singleton_target: std::cell::RefCell::new(None),
                 class_vars: std::cell::RefCell::new(HashMap::new()),

@@ -308,6 +308,28 @@ pub struct Class {
     /// to install an "after-freeze" guard layer in front of the
     /// class's own `register` / `lazy_map`.
     pub(crate) singleton_prepends: RefCell<Vec<Rc<Class>>>,
+    /// Modules extended into THIS Class's singleton class —
+    /// `Klass.extend Mod`. CRuby treats this as
+    /// `class << Klass; include Mod; end`: Mod's instance
+    /// methods become class-level methods of Klass. The
+    /// dispatch arm walks this chain in
+    /// `lookup_class_singleton_method` after the class's own
+    /// `singleton_methods` and before the superclass step,
+    /// matching CRuby's metaclass ancestor walk
+    /// (Klass.singleton_class → extended modules → superclass.
+    /// singleton_class). Reverse-include order
+    /// (last-extended first) mirrors `includes` / `prepends`.
+    ///
+    /// Motivating case: sinatra-contrib's MultiRoute,
+    /// Sinatra::Cors, etc. — `register Sinatra::MultiRoute`
+    /// extends the app class with the MultiRoute module so
+    /// `MyApp.get(*paths, &block)` resolves to MultiRoute's
+    /// override (which calls `super` to reach Sinatra::Base's
+    /// `get`). Before this field existed, `Klass.extend(M)`
+    /// silently pushed M into `Klass.includes` instead,
+    /// inverting the dispatch (instance methods got M's
+    /// surface; class methods didn't).
+    pub(crate) singleton_includes: RefCell<Vec<Rc<Class>>>,
     /// Lazy eigenclass shell returned by `Class#singleton_class`.
     /// `None` until the first call; subsequent calls return the
     /// same `Rc` so identity comparisons (`A.singleton_class.equal?(A.singleton_class)`)

@@ -1576,6 +1576,7 @@ impl Vm {
                                         includes: std::cell::RefCell::new(Vec::new()),
                                         prepends: std::cell::RefCell::new(Vec::new()),
                                         singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                                        singleton_includes: std::cell::RefCell::new(Vec::new()),
                                         singleton_view: std::cell::RefCell::new(None),
                                         singleton_target: std::cell::RefCell::new(None),
                                         class_vars: std::cell::RefCell::new(std::collections::HashMap::new()),

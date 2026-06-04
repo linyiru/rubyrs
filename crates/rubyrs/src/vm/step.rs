@@ -2811,6 +2811,7 @@ impl Vm {
                     includes: RefCell::new(Vec::new()),
                     prepends: RefCell::new(Vec::new()),
                     singleton_prepends: RefCell::new(Vec::new()),
+                    singleton_includes: RefCell::new(Vec::new()),
                     singleton_view: RefCell::new(None),
                     singleton_target: RefCell::new(None),
                     class_vars: RefCell::new(HashMap::new()),

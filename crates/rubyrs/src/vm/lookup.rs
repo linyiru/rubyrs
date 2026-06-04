@@ -345,6 +345,16 @@ impl Vm {
             if let Some(m) = current.singleton_methods.borrow().get(&name_id).cloned() {
                 return Some(m);
             }
+            // Walk modules extended into this class's singleton —
+            // `Klass.extend Mod`. M's instance methods sit between
+            // Klass's own singleton_methods and the superclass step,
+            // matching CRuby's metaclass ancestor walk
+            // (Klass.singleton_class → Mod → superclass.singleton_class).
+            for inc in current.singleton_includes.borrow().iter() {
+                if let Some(found) = walk_module(inc, name_id, &mut inc_visited) {
+                    return Some(found);
+                }
+            }
             let parent = current.superclass.borrow().clone();
             match parent {
                 Some(p) => current = p,
@@ -1522,6 +1532,19 @@ impl Vm {
                     flatten_prepended_module(pre, &mut chain, &mut inc_visited);
                 }
                 chain.push((cur.clone(), false));
+                // Modules extended into this class's singleton sit
+                // BETWEEN the class itself and its superclass in the
+                // metaclass ancestor walk — same position as where
+                // `lookup_class_singleton_method` consults
+                // singleton_includes. Without this, `super` from
+                // within an extended module's method skips straight
+                // to the superclass and either misses the inherited
+                // class method or finds an unrelated method,
+                // breaking the `def get(...); super; end` shape
+                // sinatra-contrib/MultiRoute uses.
+                for inc in cur.singleton_includes.borrow().iter() {
+                    flatten_prepended_module(inc, &mut chain, &mut inc_visited);
+                }
                 let parent = cur.superclass.borrow().clone();
                 match parent {
                     Some(p) => cur = p,
@@ -1752,6 +1775,7 @@ mod tests {
             includes: RefCell::new(Vec::new()),
             prepends: RefCell::new(Vec::new()),
             singleton_prepends: RefCell::new(Vec::new()),
+            singleton_includes: RefCell::new(Vec::new()),
             singleton_view: RefCell::new(None),
             singleton_target: RefCell::new(None),
             superclass: RefCell::new(superclass),
