@@ -32,6 +32,7 @@ extern crate alloc;
 mod ast;
 mod bytecode;
 mod compiler;
+mod const_marker;
 mod error;
 mod heap;
 #[cfg(feature = "_http_server")]

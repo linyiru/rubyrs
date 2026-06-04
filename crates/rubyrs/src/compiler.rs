@@ -468,7 +468,7 @@ fn compile_class_arm(
     if let Some(parent) = superclass {
         // Absolute parent paths (`class Sub < ::Foo::Bar`) skip
         // cref-walking — same shape as the ConstRead emit arms.
-        if let Some(absolute) = parent.strip_prefix("::") {
+        if let Some(absolute) = crate::const_marker::strip_absolute(parent) {
             let id = interner.intern(absolute);
             b.emit(Op::LoadConst(id));
         } else if let Some(chain) = build_const_chain(&b.class_path, parent, interner) {
@@ -1012,8 +1012,8 @@ fn build_const_chain(
     // All three call sites do that — keep this debug_assert as the
     // contract anchor in case a future caller forgets.
     debug_assert!(
-        !bare.starts_with("::"),
-        "build_const_chain: caller must strip leading `::` and emit a flat const load directly (LoadConst / LoadConstOrNil)",
+        crate::const_marker::strip_absolute(bare).is_none(),
+        "build_const_chain: caller must strip the absolute-path marker and emit a flat const load directly (LoadConst / LoadConstOrNil)",
     );
     if class_path.is_empty() {
         return None;
@@ -1325,7 +1325,7 @@ pub(crate) fn compile_expr(
             // `::`) skip cref entirely — emit a flat LoadConst with
             // the stripped name so we avoid the const_chains entry
             // and the runtime Vec clone that LoadConstChain pays.
-            if let Some(absolute) = name.strip_prefix("::") {
+            if let Some(absolute) = crate::const_marker::strip_absolute(name) {
                 let id = interner.intern(absolute);
                 b.emit(Op::LoadConst(id));
             // Inside a non-empty class/module scope, emit a cref-
@@ -1344,7 +1344,7 @@ pub(crate) fn compile_expr(
         }
         Expr::ConstReadOrNil(name) => {
             // Same absolute-path fast path as ConstRead above.
-            if let Some(absolute) = name.strip_prefix("::") {
+            if let Some(absolute) = crate::const_marker::strip_absolute(name) {
                 let id = interner.intern(absolute);
                 b.emit(Op::LoadConstOrNil(id));
             } else if let Some(chain) = build_const_chain(&b.class_path, name, interner) {

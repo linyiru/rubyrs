@@ -3028,7 +3028,7 @@ impl Vm {
                     // leading `::` marker from the AST lowering.
                     // CRuby semantics: skip the lex-walk and look up
                     // the joined name at top level only.
-                    if let Some(absolute_bare) = bare_name.strip_prefix("::") {
+                    if let Some(absolute_bare) = crate::const_marker::strip_absolute(&bare_name) {
                         let abs_sym = self.interner.intern(absolute_bare);
                         self.classes.get(&abs_sym).cloned()
                             .or_else(|| match self.constants.get(&abs_sym) {
