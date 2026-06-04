@@ -461,6 +461,59 @@ fn frame_cap_traps_deep_recursion() {
 }
 
 #[test]
+fn dispatch_depth_cap_traps_block_recursion() {
+    // `max_dispatch_depth` is the embedder knob layered on top
+    // of the always-on `DEFAULT_MAX_DISPATCH_DEPTH = 500` cap
+    // for re-entrant `dispatch_until` recursion (block-call paths
+    // — `Object#then` / `#tap` / `Proc#call` / `yield`). The
+    // always-on cap trips `SystemStackError`; this knob trips
+    // `ResourceExhausted` earlier so untrusted scripts can't
+    // swallow the trap with bare `rescue` (which filters on
+    // StandardError; ResourceExhausted sits `< Exception`).
+    //
+    // 20 is well under 500, so the embedder cap is what fires.
+    let mut rt = Runtime::with_config(Config {
+        max_dispatch_depth: Some(20),
+        ..Default::default()
+    });
+    let err = rt.eval(
+        r#"
+        def f(x); x.then { |y| f(y) }; end
+        f(1)
+        "#,
+        "block_recursion.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(&err.err, RubyError::ResourceExhausted { msg } if msg.contains("dispatch recursion too deep")),
+        "expected ResourceExhausted(dispatch recursion too deep), got {:?}", err.err
+    );
+}
+
+#[test]
+fn dispatch_depth_cap_unset_falls_back_to_always_on_cap() {
+    // Without `max_dispatch_depth: Some(_)`, the same shape that
+    // overflows the host's Rust stack absent any guard now trips
+    // the always-on `SystemStackError` cap inside `check_frames`
+    // (default 500 — see vm/gc.rs). That trap IS catchable via
+    // `rescue SystemStackError` from script; this test verifies
+    // both that the cap fires AND that we get the right class.
+    let mut rt = Runtime::with_config(Config { ..Default::default() });
+    rt.eval(
+        r#"
+        def f(x); x.then { |y| f(y) }; end
+        caught = nil
+        begin
+          f(1)
+        rescue SystemStackError => e
+          caught = e.class.to_s
+        end
+        raise "no trap" unless caught == "SystemStackError"
+        "#,
+        "block_recursion_default.rb",
+    ).unwrap();
+}
+
+#[test]
 #[cfg(feature = "regex")]
 fn interpolated_regex_respects_max_symbols_cap() {
     // PR #99 review coverage: dynamic patterns intern into the

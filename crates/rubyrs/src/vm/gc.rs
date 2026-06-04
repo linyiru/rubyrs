@@ -148,15 +148,20 @@ impl Vm {
         }
         // Each re-entrant `dispatch_until` push (`then`, `tap`,
         // `yield_self`, `yield`, `Proc#call`, native iter drivers)
-        // costs ~10 KB of Rust stack. Empirically, ~750 pushes
-        // overflows the default 8 MB Rust stack on release builds.
-        // Cap at 500 to leave ~33% headroom on 8 MB and to keep
-        // operable on tighter 2 MB worker-thread stacks (10 KB ×
-        // 500 = 5 MB worst-case, with the rest of the budget for
-        // host code above the embed and Vm overhead). Trips
-        // before the 10k Ruby-frame cap on block-recursion shapes
-        // that the frame cap can't catch.
-        const DEFAULT_MAX_DISPATCH_DEPTH: usize = 500;
+        // costs ~10 KB of Rust stack. Empirical bisection:
+        //   - 8 MB main-thread stack: ~750 pushes overflows
+        //   - 2 MB worker / test-thread stack: ~250 pushes overflows
+        // Cap at 150 to leave ~33% headroom on the worst-supported
+        // platform (2 MB worker stacks default on Linux, used by
+        // cargo's test threads). Generous on 8 MB main-thread setups,
+        // but 150 nested block-recursion levels is far beyond normal
+        // app code — this trap is a safety net for runaway recursion,
+        // not a working-program limit. Trips before the 10k Ruby-
+        // frame cap on block-recursion shapes that the frame cap
+        // can't catch. Embedders that need tighter (sandboxed)
+        // bounds can configure `max_dispatch_depth` (which trips
+        // first, with ResourceExhausted instead of SystemStackError).
+        const DEFAULT_MAX_DISPATCH_DEPTH: usize = 150;
         if self.dispatch_until_depths.len() >= DEFAULT_MAX_DISPATCH_DEPTH {
             return Err(self.trap(RubyError::SystemStackError {
                 msg: "stack level too deep".to_string(),
@@ -168,6 +173,17 @@ impl Vm {
                     msg: format!("stack level too deep ({} frames, max {})", self.frames.len(), max),
                 }));
             }
+        if let Some(max) = self.max_dispatch_depth
+            && self.dispatch_until_depths.len() >= max
+        {
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: format!(
+                    "dispatch recursion too deep ({} levels, max {})",
+                    self.dispatch_until_depths.len(),
+                    max,
+                ),
+            }));
+        }
         // P1e.2 (ADR 0023 v2): when inside a Fiber, enforce
         // the per-Fiber frame cap too. Without this a Fiber
         // could deepen its frame stack to OOM while staying
@@ -685,6 +701,29 @@ mod tests {
         let trap = vm.check_frames().expect_err("0-frame cap should trap");
         assert!(matches!(trap.err, RubyError::ResourceExhausted { .. }));
         assert!(trap.err.message().contains("stack level too deep"));
+    }
+
+    #[test]
+    fn check_frames_max_dispatch_depth_traps_when_exceeded() {
+        let mut vm = mk_vm();
+        // 0-cap traps on the first push (dispatch_until_depths is
+        // empty until a dispatch_until is pushed; len() == 0 >= 0).
+        vm.max_dispatch_depth = Some(0);
+        let trap = vm
+            .check_frames()
+            .expect_err("0-dispatch cap should trap");
+        assert!(matches!(trap.err, RubyError::ResourceExhausted { .. }));
+        assert!(trap.err.message().contains("dispatch recursion too deep"));
+    }
+
+    #[test]
+    fn check_frames_max_dispatch_depth_unlimited_passes() {
+        let mut vm = mk_vm();
+        // None (the default) leaves only the always-on 500 cap.
+        // With an empty dispatch_until_depths stack, the always-on
+        // SystemStackError check at 500 won't trip either.
+        vm.max_dispatch_depth = None;
+        assert!(vm.check_frames().is_ok());
     }
 
     #[test]

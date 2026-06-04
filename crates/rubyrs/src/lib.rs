@@ -165,6 +165,17 @@ pub struct Config {
     /// returns a `ResourceExhausted` trap before the host's Rust stack
     /// can overflow.
     pub max_frames: Option<usize>,
+    /// Embedder-tunable cap on re-entrant `dispatch_until` depth
+    /// (block-call recursion through `Object#then` / `#tap` /
+    /// `Proc#call` / `yield` / native iter drivers). Layered ON TOP
+    /// of the always-on `DEFAULT_MAX_DISPATCH_DEPTH` SystemStackError
+    /// cap (500) inside `check_frames`: when `Some(n)`, trips
+    /// `ResourceExhausted` (NOT SystemStackError) at `n` so untrusted
+    /// scripts can't swallow the trap with bare `rescue`. Set this
+    /// LOWER than 500 for sandboxed code on tighter stacks (e.g. the
+    /// 2 MB worker-thread default on some platforms). Default `None`
+    /// = only the always-on cap applies. Mirrors `max_frames`'s shape.
+    pub max_dispatch_depth: Option<usize>,
     /// If `Some(n)`, runtime `String#to_sym` (and any other future
     /// script-driven intern path) traps when interning would push
     /// the total beyond `n` distinct symbols. Compile-time intern
@@ -578,6 +589,7 @@ impl Default for Config {
             fuel: None,
             max_heap_objects: None,
             max_frames: None,
+            max_dispatch_depth: None,
             max_symbols: None,
             max_value_bytes: None,
             #[cfg(feature = "_fiber")]
@@ -1017,6 +1029,7 @@ pub(crate) fn lexically_resolve_path(p: &std::path::Path) -> std::path::PathBuf 
 struct PreambleLiftedSettings {
     fuel: Option<u64>,
     max_frames: Option<usize>,
+    max_dispatch_depth: Option<usize>,
     max_symbols: Option<usize>,
     max_value_bytes: Option<usize>,
     max_live: Option<usize>,
@@ -1043,6 +1056,7 @@ impl PreambleLiftedSettings {
             // duration of the guarded scope.
             fuel: rt.fuel_budget.take(),
             max_frames: rt.vm.max_frames.take(),
+            max_dispatch_depth: rt.vm.max_dispatch_depth.take(),
             max_symbols: rt.vm.max_symbols.take(),
             max_value_bytes: rt.vm.max_value_bytes.take(),
             max_live: rt.vm.heap.max_live.take(),
@@ -1057,6 +1071,7 @@ impl PreambleLiftedSettings {
     fn restore_to(&self, rt: &mut Runtime) {
         rt.fuel_budget = self.fuel;
         rt.vm.max_frames = self.max_frames;
+        rt.vm.max_dispatch_depth = self.max_dispatch_depth;
         rt.vm.max_symbols = self.max_symbols;
         rt.vm.max_value_bytes = self.max_value_bytes;
         rt.vm.heap.max_live = self.max_live;
@@ -1429,6 +1444,7 @@ impl Runtime {
         self.vm.stress_gc = cfg.stress_gc;
         self.fuel_budget = cfg.fuel;
         self.vm.max_frames = cfg.max_frames;
+        self.vm.max_dispatch_depth = cfg.max_dispatch_depth;
         self.vm.heap.max_live = cfg.max_heap_objects;
         self.vm.max_symbols = cfg.max_symbols;
         self.vm.max_value_bytes = cfg.max_value_bytes;

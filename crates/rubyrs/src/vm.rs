@@ -857,6 +857,17 @@ pub(crate) struct Vm {
     /// Maximum simultaneously-live frames. `frames.push()` checks this
     /// against `frames.len()` before pushing. Default `None` is unlimited.
     pub(crate) max_frames: Option<usize>,
+    /// Embedder-tunable cap on re-entrant `dispatch_until` depth
+    /// (block-call recursion through `Object#then` / `#tap` /
+    /// `Proc#call` / `yield` / native iter drivers). Layered ON TOP
+    /// of the always-on `DEFAULT_MAX_DISPATCH_DEPTH` SystemStackError
+    /// cap inside `check_frames`: when `Some(n)`, trips
+    /// `ResourceExhausted` (NOT SystemStackError) at `n` so untrusted
+    /// scripts can't swallow the trap with bare `rescue`. Set this
+    /// LOWER than the always-on default (500) for sandboxed code on
+    /// tighter stacks (e.g. 2 MB worker threads). Default `None` =
+    /// only the always-on cap applies. Mirrors `max_frames`'s shape.
+    pub(crate) max_dispatch_depth: Option<usize>,
     /// Absolute wall-clock instant past which `eval` traps with
     /// `ResourceExhausted("wall-clock deadline exceeded")`. `None`
     /// means unlimited. Computed at `Runtime::eval` entry from the
@@ -1219,6 +1230,7 @@ impl Vm {
             sqlite_max_result_bytes: None,
             fuel: None,
             max_frames: None,
+            max_dispatch_depth: None,
             deadline_at: None,
             op_counter: 0,
             max_symbols: None,

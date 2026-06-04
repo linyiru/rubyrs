@@ -196,6 +196,7 @@ fn main() {
         fuel: parse_env_cap("RUBYRS_FUEL", env_lookup("RUBYRS_FUEL")),
         max_heap_objects: parse_env_cap("RUBYRS_MAX_OBJECTS", env_lookup("RUBYRS_MAX_OBJECTS")),
         max_frames: parse_env_cap("RUBYRS_MAX_FRAMES", env_lookup("RUBYRS_MAX_FRAMES")),
+        max_dispatch_depth: parse_env_cap("RUBYRS_MAX_DISPATCH_DEPTH", env_lookup("RUBYRS_MAX_DISPATCH_DEPTH")),
         deadline: parse_env_cap::<u64>("RUBYRS_DEADLINE_MS", env_lookup("RUBYRS_DEADLINE_MS"))
             .map(std::time::Duration::from_millis),
         max_symbols: parse_env_cap("RUBYRS_MAX_SYMBOLS", env_lookup("RUBYRS_MAX_SYMBOLS")),
