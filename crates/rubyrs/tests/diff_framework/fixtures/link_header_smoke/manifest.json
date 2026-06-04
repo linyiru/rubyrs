@@ -1,0 +1,39 @@
+{
+  "_doc": "Real `sinatra-contrib-4.2.1/lib/sinatra/link_header.rb` vendored 1:1 under `vendor/sinatra/link_header.rb`. Fourth sinatra-contrib fixture; first to exercise the response[]/[]= bracket-access surface and the :css mime entry. Covers the four user-facing helpers (`link`, `stylesheet`, `prefetch`, `link_headers`) across simple/multi/options shapes. The `keep_headers` manifest hook admits the `Link` header into the diff transcript so the protocol effect is byte-diffable.",
+  "name": "link_header_smoke",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 8000,
+    "duration_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sinatra/base", "sinatra/link_header"]
+  },
+  "keep_headers": [
+    "Link"
+  ],
+  "scenarios": [
+    { "name": "root",            "method": "GET", "path": "/" },
+    { "name": "link_simple",     "method": "GET", "path": "/link_simple" },
+    { "name": "link_multi",      "method": "GET", "path": "/link_multi" },
+    { "name": "link_with_opts",  "method": "GET", "path": "/link_with_opts" },
+    { "name": "stylesheet",      "method": "GET", "path": "/stylesheet" },
+    { "name": "prefetch",        "method": "GET", "path": "/prefetch" },
+    { "name": "headers_dump",    "method": "GET", "path": "/headers_dump" }
+  ],
+  "normalize": [
+    {
+      "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": "rubyrs micro-Sinatra \\(_http_server battery\\)",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": ";charset=utf-8",
+      "replacement": ""
+    }
+  ]
+}

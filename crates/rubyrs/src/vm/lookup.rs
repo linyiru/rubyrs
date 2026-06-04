@@ -718,7 +718,7 @@ impl Vm {
                 "freeze" | "frozen?" |
                 "length" | "size" | "[]" | "[]=" | "empty?" |
                 "include?" | "has_key?" | "key?" | "member?" |
-                "keys" | "values" | "to_h" | "to_a" |
+                "keys" | "values" | "to_h" | "to_hash" | "to_a" |
                 "merge" | "merge!" | "update" | "replace" | "delete" | "invert" | "store" | "except" | "slice" | "dup" |
                 "each" | "each_pair" |
                 "select" | "filter" | "reject" | "find" | "detect" |

@@ -958,6 +958,13 @@ jobs:
     # handler) and settings readers walk the superclass chain so
     # plugin-installed settings on Sinatra::Base reach every
     # subclass),
+    # `link_header_smoke` (real
+    # `sinatra-contrib-4.2.1/lib/sinatra/link_header.rb` vendored
+    # 1:1 — exercises `link` / `stylesheet` / `prefetch` /
+    # `link_headers` helpers, response[]/[]= bracket surface on
+    # sinatra_lite, :css mime entry, and Hash#to_hash duck-type
+    # probe; keep_headers admits the Link header into the diff
+    # transcript),
     # `json_smoke` + `json_canon` (menu #2),
     # `as_lite_canon` (menu #3), and `sqlite_smoke` (menu #4 / ADR
     # 0027 Phase 4). Each fixture is one ship gate, not a

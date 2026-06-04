@@ -236,6 +236,13 @@ impl Vm {
                         Some(Value::Array(nid))
                     }
                     ("to_h", []) => Some(Value::Hash(id)),
+                    // `Hash#to_hash` — explicit-conversion alias.
+                    // Mirrors `String#to_str`: gems use
+                    // `respond_to?(:to_hash)` as the duck-type
+                    // probe to distinguish a real Hash from other
+                    // values masquerading as options. Identical
+                    // to `to_h` on a real Hash.
+                    ("to_hash", []) => Some(Value::Hash(id)),
                     ("inspect", []) | ("to_s", []) => {
                         // M27 C1: CRuby's `Hash#to_s` is an alias of
                         // `Hash#inspect` (since 1.9). Pre-fix `to_s` fell

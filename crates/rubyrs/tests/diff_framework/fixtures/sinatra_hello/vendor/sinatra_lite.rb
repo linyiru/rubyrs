@@ -536,6 +536,9 @@ module Sinatra
       txt:  "text/plain",
       xml:  "application/xml",
       csv:  "text/csv",
+      # `:css` — used by sinatra-contrib/LinkHeader's `stylesheet`
+      # helper for the default `type=` of generated link tags.
+      css:  "text/css",
     }.freeze
     # Sinatra's `content_type` is dual-purpose: zero-arg form
     # returns the currently-set response Content-Type (or nil
@@ -735,6 +738,27 @@ module Sinatra
     # `finalize` reads when building the Rack triplet.
     def response
       self
+    end
+
+    # `response[]` / `response[]=` / `response.include?` — bracket-
+    # access shims that route to the response headers Hash. Real
+    # Sinatra's `response` is a Rack::Response whose `[]` IS the
+    # `headers[]` (Rack::Response inherits from Rack::Utils::
+    # HeaderHash semantics). sinatra-contrib/LinkHeader uses
+    # `(response['Link'] ||= '')` and `response.include? 'Link'`
+    # against this contract. Mirror the surface here on
+    # `Sinatra::Base` instances so the vendored gem source works
+    # unmodified.
+    def [](key)
+      headers[key]
+    end
+
+    def []=(key, value)
+      headers[key] = value
+    end
+
+    def include?(key)
+      headers.include?(key)
     end
 
     # `logger` — minimal stub. Real Sinatra hands you a logger
