@@ -1,0 +1,38 @@
+{
+  "_doc": "Real `sinatra-contrib-4.2.1/lib/sinatra/required_params.rb` vendored 1:1 under `vendor/sinatra/required_params.rb`. Second sinatra-contrib fixture (after multi_route_smoke). Exercises the helper-mixin path (`helpers RequiredParams` at module-level installs into Sinatra::Base via the upgraded register-extends), Hash#key? + recursion + Array key forms, and `halt 400` from a helper invoked inside a route. The `&.` safe-navigation in `p&.key?` lands cleanly thanks to the safe-nav AST desugar (commit a50fd84a). Nested-Hash key shapes need Rack's `user[name]=...` query parser which sinatra_lite doesn't ship — scenarios cover the two helper-recursion branches sinatra_lite's flat params can exercise.",
+  "name": "required_params_smoke",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 8000,
+    "duration_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sinatra/base", "sinatra/required_params"]
+  },
+  "scenarios": [
+    { "name": "root",                  "method": "GET", "path": "/" },
+    { "name": "simple_ok",             "method": "GET", "path": "/simple?a=1&b=2" },
+    { "name": "simple_missing_b",      "method": "GET", "path": "/simple?a=1" },
+    { "name": "simple_missing_all",    "method": "GET", "path": "/simple" },
+    { "name": "array_form_ok",         "method": "GET", "path": "/array_form?x=10&y=20" },
+    { "name": "array_form_missing_y",  "method": "GET", "path": "/array_form?x=10" },
+    { "name": "mixed_ok",              "method": "GET", "path": "/mixed?a=1&b=2&c=3" },
+    { "name": "mixed_missing_b",       "method": "GET", "path": "/mixed?a=1&c=3" },
+    { "name": "mixed_missing_array",   "method": "GET", "path": "/mixed?a=1" }
+  ],
+  "normalize": [
+    {
+      "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": "rubyrs micro-Sinatra \\(_http_server battery\\)",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": ";charset=utf-8",
+      "replacement": ""
+    }
+  ]
+}

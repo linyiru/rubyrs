@@ -941,6 +941,12 @@ jobs:
     # fixture; exercises `register Sinatra::Plugin` extend-onto-
     # singleton path, class-method `super` through extended modules,
     # and `super(*args, &block)` forwarding via Op::ApplySuperBlock),
+    # `required_params_smoke` (real
+    # `sinatra-contrib-4.2.1/lib/sinatra/required_params.rb`
+    # vendored 1:1 — exercises the helper-mixin path
+    # (`helpers Sinatra::RequiredParams`), `halt 400` from a helper
+    # invoked inside a route, Hash#key? + recursion across simple/
+    # Array key shapes, and `&.` safe-navigation on params),
     # `json_smoke` + `json_canon` (menu #2),
     # `as_lite_canon` (menu #3), and `sqlite_smoke` (menu #4 / ADR
     # 0027 Phase 4). Each fixture is one ship gate, not a

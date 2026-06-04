@@ -733,6 +733,11 @@ fn multi_route_smoke() {
 }
 
 #[test]
+fn required_params_smoke() {
+    run_fixture("required_params_smoke");
+}
+
+#[test]
 fn json_smoke() {
     run_fixture("json_smoke");
 }
