@@ -9897,6 +9897,81 @@ impl Vm {
         // `Hash.new` intercept so the Module-class-receiver path
         // isn't swallowed by a hypothetical future shared
         // pattern.
+        // `Class.new { ... }` / `Class.new(SuperClass) { ... }` —
+        // anonymous Class with the block evaluated as the class body
+        // (`class_eval`-style). The new class's superclass defaults
+        // to Object (CRuby's documented default); an explicit Class
+        // arg overrides. The block ALSO receives the new class as
+        // its sole positional arg, matching CRuby's
+        // `Class.new(Parent) { |k| ... }` shape that delegate.rb's
+        // `DelegateClass(K)` uses to define helper methods on the
+        // returned anonymous class. Sits BEFORE the universal
+        // Class-instance allocator further down so the block path
+        // isn't swallowed by the bare-Instance fallback.
+        if &*name == "new"
+            && let Some(Value::Class(cls)) = &recv
+            && cls.name.as_str() == "Class"
+        {
+            if let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+                let target_self = Value::Class(cls.clone());
+                return self.invoke_method_with_block(m, target_self, args, Some(block));
+            }
+            // 0 or 1 positional arg — anything else is ArgumentError.
+            // The single-arg form is the explicit superclass.
+            let explicit_super: Option<Rc<Class>> = match args.as_slice() {
+                [] => None,
+                [Value::Class(sc)] if !sc.is_module => Some(sc.clone()),
+                [Value::Class(_)] => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: "superclass must be a Class (Module given)".to_string(),
+                    }));
+                }
+                [other] => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!("superclass must be a Class ({} given)", other.type_name()),
+                    }));
+                }
+                _ => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0..1)",
+                            args.len(),
+                        ),
+                    }));
+                }
+            };
+            // Default to Object when no explicit superclass — same
+            // shape `Op::DefClass`'s default-parent code uses (see
+            // step.rs around the BasicObject fence).
+            let object_sym = self.interner.intern("Object");
+            let parent = explicit_super.or_else(|| self.classes.get(&object_sym).cloned());
+            let new_cls = std::rc::Rc::new(Class {
+                name: String::new(),
+                is_module: false,
+                ivars: std::cell::RefCell::new(HashMap::new()),
+                methods: std::cell::RefCell::new(HashMap::new()),
+                singleton_methods: std::cell::RefCell::new(HashMap::new()),
+                superclass: std::cell::RefCell::new(parent),
+                includes: std::cell::RefCell::new(Vec::new()),
+                prepends: std::cell::RefCell::new(Vec::new()),
+                singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                singleton_includes: std::cell::RefCell::new(Vec::new()),
+                singleton_view: std::cell::RefCell::new(None),
+                singleton_target: std::cell::RefCell::new(None),
+                class_vars: std::cell::RefCell::new(HashMap::new()),
+                #[cfg(feature = "cext")]
+                cext_alloc_func: std::cell::Cell::new(None),
+            });
+            let cls_val = Value::Class(new_cls);
+            self.invoke_block_with_self(
+                block,
+                cls_val.clone(),
+                /*as_class_body=*/ true,
+                vec![cls_val],
+            )?;
+            return Ok(());
+        }
+
         if &*name == "new"
             && let Some(Value::Class(cls)) = &recv
             && cls.name.as_str() == "Module"

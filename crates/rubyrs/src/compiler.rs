@@ -448,7 +448,7 @@ fn compile_def_arm(
 fn compile_class_arm(
     b: &mut ProtoBuilder,
     name: &str,
-    superclass: &Option<String>,
+    superclass: &Option<Box<SExpr>>,
     body: &[SExpr],
     is_module: bool,
     protos: &mut Vec<Proto>,
@@ -462,23 +462,17 @@ fn compile_class_arm(
         b.filename.clone(), protos, interner, cc, child_path,
     );
     // Push the superclass (or Nil for "default to Object") for
-    // DefClass to pop. The parent reference is a const read at
-    // the SURROUNDING lexical scope (not the child class's
-    // scope).
-    if let Some(parent) = superclass {
-        // Absolute parent paths (`class Sub < ::Foo::Bar`) skip
-        // cref-walking — same shape as the ConstRead emit arms.
-        if let Some(absolute) = crate::const_marker::strip_absolute(parent) {
-            let id = interner.intern(absolute);
-            b.emit(Op::LoadConst(id));
-        } else if let Some(chain) = build_const_chain(&b.class_path, parent, interner) {
-            let idx = b.const_chains.len() as u32;
-            b.const_chains.push(chain);
-            b.emit(Op::LoadConstChain(idx));
-        } else {
-            let parent_id = interner.intern(parent);
-            b.emit(Op::LoadConst(parent_id));
-        }
+    // DefClass to pop. The parent expression is evaluated at the
+    // SURROUNDING lexical scope (not the child class's scope) —
+    // hence we compile it BEFORE pushing the new class-body
+    // proto. Const-shaped parents (the most common case:
+    // `class Sub < Const` or `class Sub < ::Foo::Bar`) get
+    // single-op LoadConst / LoadConstChain via the fast path
+    // below; arbitrary expressions (`class Sub < local_var` or
+    // `class Sub < DelegateClass(Hash)`) route through the
+    // generic compiler walker.
+    if let Some(parent_expr) = superclass {
+        compile_expr(b, parent_expr, protos, interner, cc);
     } else {
         b.emit(Op::LoadNil);
     }

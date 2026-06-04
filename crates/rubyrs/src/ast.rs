@@ -338,8 +338,15 @@ pub(crate) enum Expr {
     },
     Class {
         name: String,
-        /// Name of the parent class, if `class Foo < Bar` syntax was used.
-        superclass: Option<String>,
+        /// Parent expression for `class Foo < <expr>` syntax.
+        /// `None` for `class Foo; end` (defaults to Object at
+        /// runtime). Was `Option<String>` historically (constant
+        /// names only); generalised so dynamic shapes like
+        /// `class Sub < some_local_var` or
+        /// `class Sub < DelegateClass(Hash)` resolve their
+        /// superclass by evaluating the expression and reading the
+        /// Value::Class off the operand stack at `DefClass` time.
+        superclass: Option<Box<SExpr>>,
         body: Vec<SExpr>,
         /// `true` when the AST node was a `module X; end` rather
         /// than `class X; end`. Drives `Class.is_module` at
@@ -2610,23 +2617,11 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // still drops the marker — that's intentional, since
         // most other consumers want the bare joined name. Each
         // caller decides whether absolute info matters.
-        let superclass = n.superclass().and_then(|s| {
-            if let Some(cr) = s.as_constant_read_node() {
-                Some(cid_to_string(cr.name()))
-            } else if s.as_constant_path_node().is_some() {
-                // Mirror the ConstantPathNode → Expr::ConstRead
-                // marker convention: prefix absolute paths with
-                // `::` so the compiler emits flat LoadConst and
-                // skips cref-walk. Without this, `class C < ::Foo`
-                // inside `module Wrapper` would walk a chain that
-                // includes `Wrapper::Foo` and incorrectly prefer
-                // the inner namespace over top-level `Foo`.
-                let joined = flatten_constant_path(&s)?;
-                Some(crate::const_marker::tag_absolute(joined, is_constant_path_absolute(&s)))
-            } else {
-                None
-            }
-        });
+        // Generic superclass — any expression. Translate via the
+        // standard `tr` recursive walker; the compiler will emit
+        // bytecode that pushes a Value onto the stack and DefClass
+        // will pop it.
+        let superclass = n.superclass().map(|s| Box::new(tr(ctx, &s)));
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
