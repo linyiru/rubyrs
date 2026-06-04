@@ -455,3 +455,41 @@ fn absolute_const_op_writes_skip_cref_walk() {
         buf.snapshot(),
     );
 }
+
+#[test]
+fn absolute_rescue_class_skips_lex_walk() {
+    // PR #355 follow-up: `rescue ::Foo::Bar` must look up the
+    // exception class at top-level only, skipping the PushRescue
+    // lex-walk. Inside `module Wrapper` that defines its own
+    // `TopErr`, `rescue ::TopErr` was matching `Wrapper::TopErr`
+    // and failing to catch top-level `TopErr` exceptions.
+    //
+    // Fix path: ast.rs prefixes `::` for absolute paths in the
+    // rescue clause class list; step.rs PushRescue handler strips
+    // the `::` and does a flat top-level lookup (no lex-walk).
+    let (mut rt, buf) = rt_with_buf();
+    rt.eval(r#"
+        class TopErr < StandardError; end
+        module Wrapper
+          class TopErr < ArgumentError; end
+          # rescue ::TopErr must match the top-level TopErr ONLY
+          begin
+            raise ::TopErr, "from-top"
+          rescue ::TopErr => e
+            puts "abs: #{e.class} - #{e.message}"
+          end
+          # rescue TopErr (relative) must match Wrapper::TopErr
+          begin
+            raise TopErr, "from-inner"
+          rescue TopErr => e
+            puts "rel: #{e.class} - #{e.message}"
+          end
+        end
+    "#, "abs_rescue.rb").expect("eval");
+    assert_eq!(
+        buf.snapshot().trim(),
+        "abs: TopErr - from-top\nrel: Wrapper::TopErr - from-inner",
+        "got: {:?}",
+        buf.snapshot(),
+    );
+}
