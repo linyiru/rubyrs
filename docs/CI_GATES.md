@@ -193,9 +193,11 @@ the main Test job.
 - **Source of truth**:
   [`deny.toml`](../deny.toml) (workspace root).
 - **Trigger**: paths-filtered — only runs on PRs touching
-  Cargo.lock, `**/Cargo.toml`, deny.toml, rust-toolchain.toml,
-  or the workflow itself. Weekly Sunday 12:00 UTC cron catches
-  advisory-DB updates against a frozen Cargo.lock.
+  Cargo.lock, `**/Cargo.toml` (but `!crates/rubyrs/fuzz/Cargo.toml`
+  is excluded, so fuzz-only manifest edits do *not* fire the gate),
+  deny.toml, rust-toolchain.toml, or the workflow itself. Weekly
+  Sunday 12:00 UTC cron catches advisory-DB updates against a
+  frozen Cargo.lock.
 - **Bump policy**: bumping the cargo-deny pin or adding a
   license/exception is a deliberate commit; the new ruleset must
   pass locally before push. Pin lives at the
@@ -251,7 +253,7 @@ Bumping is a one-line edit in that file; CI auto-follows.
 | [`deny.toml`](../deny.toml) | Supply-chain policy (advisories, licenses, bans, sources) |
 | [`crates/rubyrs/coverage_baseline.json`](../crates/rubyrs/coverage_baseline.json) | Per-file coverage ratchet |
 | [`perf/baselines.tsv`](../perf/baselines.tsv) | Peak-RSS + walltime budgets |
-| `crates/rubyrs/data/panic_budgets/*.json` | Per-file panic counts |
+| `ci.yml` `panic-budget` job, `Count panics` step (inline `check <file> <budget>` calls) | Per-file panic counts |
 | `cargo-deny.yml` composite's `with: version:` | cargo-deny version pin (literal copies in `deny.toml` header and `docs/DEVELOPMENT.md` are manual-sync) |
 | `ci.yml` coverage job's `env: CARGO_LLVM_COV_VERSION` | cargo-llvm-cov version pin (literal copy in `docs/COVERAGE.md` is manual-sync) |
 
