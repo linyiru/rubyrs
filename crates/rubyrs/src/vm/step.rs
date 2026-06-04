@@ -2980,14 +2980,12 @@ impl Vm {
                 // fall back to the bare lookup (covers top-level classes
                 // and `rescue Foo::Bar` whose sym is already qualified).
                 let filter = {
-                    let proto_idx = self.frames.last().expect("ICE: PushRescue no frame").proto_idx;
-                    let lex = self.protos[proto_idx].lexical_scope.clone();
                     // Clone the `Rc<str>` instead of materializing a
                     // fresh `String` — the interner returns
-                    // `&Rc<str>` so the clone is a refcount bump,
-                    // and the absolute-path fast path / empty-lex
-                    // case can short-circuit without paying for any
-                    // string allocation.
+                    // `&Rc<str>` so the clone is a refcount bump.
+                    // Defer the lex-walk's `lexical_scope.clone()`
+                    // into the relative branch so absolute rescues
+                    // don't pay for the Vec copy.
                     let bare_name: std::rc::Rc<str> = self.interner.resolve(filter_sym).clone();
                     // Absolute paths (`rescue ::Foo::Bar`) carry a
                     // leading `::` marker from the AST lowering.
@@ -3001,6 +2999,8 @@ impl Vm {
                                 _ => None,
                             })
                     } else {
+                        let proto_idx = self.frames.last().expect("ICE: PushRescue no frame").proto_idx;
+                        let lex = self.protos[proto_idx].lexical_scope.clone();
                         let mut found = None;
                         if !lex.is_empty() {
                             for scope_sym in &lex {
