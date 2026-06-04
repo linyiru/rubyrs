@@ -12,11 +12,44 @@
 //! (no fs, no random) so the deterministic subset matches CRuby
 //! byte-for-byte under `diff_cruby`.
 
+/// Extra pure-Ruby source that runs *unconditionally* in the
+/// lenient-stub branch (not gated behind the `stdlib` feature),
+/// for stdlib names whose ecosystem consumers assume specific
+/// constants/methods at module-load time.
+///
+/// Currently scoped to `uri`: Rack 3 / Sinatra 4 evaluate
+///
+///     URI_PARSER = defined?(::URI::RFC2396_PARSER) ?
+///                    ::URI::RFC2396_PARSER : ::URI::DEFAULT_PARSER
+///
+/// at the top of `rack/utils.rb` — i.e. before any request
+/// handling — so unless one of those constants is materialised
+/// at `require "uri"` time the require itself raises NameError
+/// and blocks every Sinatra/Rack app from loading. The shim
+/// provides both constants pointing at a minimal RFC2396_Parser
+/// object whose `escape` / `unescape` methods cover what Rack
+/// actually calls (`Rack::Utils.escape_path`,
+/// `Rack::Utils.unescape`). The full URI parser surface stays
+/// behind `--features stdlib` per ADR 0017.
+///
+/// Distinct from `stdlib_vendor_source` because this body runs
+/// for everyone (the Sinatra spike needs it in the default
+/// build), whereas the latter is the opt-in fuller stdlib.
+pub(crate) fn always_on_stub_extras(name: &str) -> Option<&'static str> {
+    match name {
+        "uri" | "uri/generic" | "uri/common" => {
+            Some(include_str!("stdlib_vendor/uri_parser_shim.rb"))
+        }
+        _ => None,
+    }
+}
+
 /// Pure-Ruby source for a stdlib name, or `None` if rubyrs has
 /// no embedded implementation. Caller (require dispatch in
 /// `kernel.rs`) parses + compiles + executes the source on the
 /// current Vm exactly once per script — the existing
 /// `loaded_stdlib_stubs` set guards re-execution.
+#[cfg(feature = "stdlib")]
 pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
     match name {
         "pathname" => Some(include_str!("stdlib_vendor/pathname.rb")),
