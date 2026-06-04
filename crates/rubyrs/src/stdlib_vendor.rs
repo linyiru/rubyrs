@@ -19,8 +19,10 @@
 ///
 /// Currently scoped to `uri`: Rack 3 / Sinatra 4 evaluate
 ///
-///     URI_PARSER = defined?(::URI::RFC2396_PARSER) ?
-///                    ::URI::RFC2396_PARSER : ::URI::DEFAULT_PARSER
+/// ```text
+/// URI_PARSER = defined?(::URI::RFC2396_PARSER) ?
+///                ::URI::RFC2396_PARSER : ::URI::DEFAULT_PARSER
+/// ```
 ///
 /// at the top of `rack/utils.rb` — i.e. before any request
 /// handling — so unless one of those constants is materialised

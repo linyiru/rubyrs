@@ -50,41 +50,17 @@ module URI
     end
 
     def unescape(str)
-      # Byte-level scan + `Array#pack('C*')` at the end. We
-      # deliberately do NOT use `gsub(/%XX/) { ... }`: when the
-      # block returns a binary single-byte string (e.g. 0xE4 from
-      # decoding `%E4`), rubyrs's current gsub-string-reassembly
-      # path views the result as UTF-8 and rewrites every invalid
-      # byte to U+FFFD (3 bytes), corrupting multi-byte sequences
-      # like `%E4%B8%AD` (中) into `���`. Collecting the decoded
-      # bytes into an Int Array and packing once sidesteps that
-      # — `Array#pack('C*')` writes the bytes raw and the
-      # resulting String carries them through unchanged. CRuby
-      # also returns a binary-encoded String here; Rack's
-      # `Utils.unescape` calls `.force_encoding(encoding)` after.
-      src = str.to_s.bytes
-      n = src.length
-      out = []
-      i = 0
-      hex_val = lambda do |b|
-        case b
-        when 48..57  then b - 48   # '0'..'9'
-        when 65..70  then b - 55   # 'A'..'F'
-        when 97..102 then b - 87   # 'a'..'f'
-        end
+      # CRuby's canonical shape: scan for percent-escapes, decode
+      # each two-hex-digit capture back to its raw byte. Block
+      # returns a binary single-byte String built via
+      # `Array#pack('C')`; gsub splices those bytes verbatim into
+      # the result, preserving multi-byte UTF-8 sequences across
+      # the encode/decode roundtrip. Encoding stays whatever the
+      # input is; Rack's `Utils.unescape` calls
+      # `.force_encoding(encoding)` after.
+      str.to_s.gsub(/%([0-9A-Fa-f]{2})/) do
+        [$1.to_i(16)].pack('C')
       end
-      while i < n
-        if src[i] == 37 && i + 2 < n \
-            && (h = hex_val.call(src[i + 1])) \
-            && (l = hex_val.call(src[i + 2]))
-          out << (h * 16 + l)
-          i += 3
-        else
-          out << src[i]
-          i += 1
-        end
-      end
-      out.pack('C*')
     end
   end
 
