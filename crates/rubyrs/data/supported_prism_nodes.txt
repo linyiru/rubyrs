@@ -65,6 +65,7 @@ ImplicitRestNode
 IndexAndWriteNode
 IndexOperatorWriteNode
 IndexOrWriteNode
+IndexTargetNode
 InstanceVariableAndWriteNode
 InstanceVariableOperatorWriteNode
 InstanceVariableOrWriteNode

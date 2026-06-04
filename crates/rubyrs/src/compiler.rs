@@ -607,6 +607,29 @@ fn compile_multiwrite_arm(
                 emit_method_call(b, id, 1, /*has_recv=*/true, false, false, cc);
                 b.emit(Op::Pop);
             }
+            MWT::Index { receiver, args } => {
+                // Stack: [..., val]. Stash val into a synthetic
+                // local so we can rebuild
+                // `[recv, idx1, ..., idxN, val]` on top for the
+                // `[]=` dispatch. The shared `__mw_idx_val`
+                // slot is overwritten by each Index target in
+                // the same multi-write — fine because their
+                // emit_store calls are strictly sequential and
+                // each one consumes its own stash before the
+                // next runs. Same "receiver evaluated after
+                // RHS" divergence as MWT::Call above.
+                let val_slot = b.local_slot("__mw_idx_val");
+                b.emit(Op::StoreLocal(val_slot));
+                compile_expr(b, receiver, protos, interner, cc);
+                for a in args {
+                    compile_expr(b, a, protos, interner, cc);
+                }
+                b.emit(Op::LoadLocal(val_slot));
+                let setter_id = interner.intern("[]=");
+                let argc = (args.len() + 1) as u8;
+                emit_method_call(b, setter_id, argc, /*has_recv=*/true, false, false, cc);
+                b.emit(Op::Pop);
+            }
         }
     };
 

@@ -547,6 +547,17 @@ pub(crate) enum MultiWriteTarget {
     /// `[..., recv, val]` on the stack, then dispatches the
     /// `name=` setter with arity 1 and pops the return.
     Call { receiver: Box<SExpr>, name: String },
+    /// `obj[idx, ...] = …` — `[]=` index-write target.
+    /// Surfaced by `arr[0], arr[1] = a, b` / `h[k1], h[k2] = a, b`
+    /// shapes. Args can be empty (`arr[] = v` — append) but
+    /// usually one or two index expressions. The compiler stores
+    /// the RHS into a synthetic local, builds the
+    /// `[recv, idx1, ..., idxN, val]` stack via local load, then
+    /// dispatches `[]=` with arity `args.len() + 1`. Mirrors the
+    /// `MWT::Call` shape for symmetry; the dedicated `Index`
+    /// variant keeps the arity-N argument list distinct from
+    /// `Call`'s always-arity-1 setter dispatch.
+    Index { receiver: Box<SExpr>, args: Vec<SExpr> },
 }
 
 #[derive(Debug, Clone)]
@@ -1422,6 +1433,18 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 let receiver = Box::new(tr(ctx, &call_tgt.receiver()));
                 let name = cid_to_string(call_tgt.name());
                 targets.push(MultiWriteTarget::Call { receiver, name });
+            } else if let Some(idx_tgt) = tgt.as_index_target_node() {
+                // `obj[idx, ...] = …` index-write target. Prism's
+                // IndexTargetNode carries the receiver + an
+                // arguments node holding the index expressions.
+                // Compiler routes through `[]=` with arity =
+                // args.len() + 1 (the RHS occupies the last slot).
+                let receiver = Box::new(tr(ctx, &idx_tgt.receiver()));
+                let args: Vec<SExpr> = idx_tgt
+                    .arguments()
+                    .map(|a| a.arguments().iter().map(|n| tr(ctx, &n)).collect())
+                    .unwrap_or_default();
+                targets.push(MultiWriteTarget::Index { receiver, args });
             } else {
                 ctx.errors.push(
                     format!("unsupported multi-write target: {:?}", tgt)
