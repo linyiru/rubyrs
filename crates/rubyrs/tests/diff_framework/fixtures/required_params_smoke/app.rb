@@ -7,14 +7,12 @@
 # gets `required_params` as a route-block helper without any
 # explicit `helpers Sinatra::RequiredParams` line.
 #
-# Nested-Hash key shapes (e.g. `required_params :user => [:name]`)
-# require Rack's bracket-syntax query parser (`user[name]=...`
-# → `params['user'] => {'name' => ...}`). Our sinatra_lite ships
-# with flat string-keyed params; the nested shape is exercised
-# end-to-end by real Rack-backed integration tests in CRuby
-# downstream, not here. This fixture covers the simple-keys and
-# Array-form recursion branches — the two branches the helper-
-# install + halt path most directly verifies.
+# Covers the helper's three recursion branches end-to-end:
+# scalar Symbol args, Array-of-Symbol args, and Hash-of-key
+# args. The Hash form needs Rack's bracket-syntax query parser
+# (`user[name]=...` → `params['user'] => {'name' => ...}`);
+# sinatra_lite now ships that parser too, so the nested
+# scenario is exercised on the rubyrs side as well.
 
 require_relative "sinatra_compat"
 
@@ -50,6 +48,17 @@ class RequiredParamsSmokeApp < Sinatra::Base
   get "/mixed" do
     required_params :a, [:b, :c]
     "ok a=#{params['a']} b=#{params['b']} c=#{params['c']}"
+  end
+
+  # Nested-Hash key shape: `required_params :user => [:name,
+  # :email]` requires `params['user']` to exist AND contain both
+  # `name` and `email`. The bracket-syntax query parser
+  # (`user[name]=Ada&user[email]=ada@example.com`) lands
+  # `{'user' => {'name' => 'Ada', 'email' => 'ada@example.com'}}`
+  # in params; the helper then recurses into the inner Hash.
+  get "/nested" do
+    required_params :user => [:name, :email]
+    "ok user.name=#{params['user']['name']} user.email=#{params['user']['email']}"
   end
 
   get "/" do

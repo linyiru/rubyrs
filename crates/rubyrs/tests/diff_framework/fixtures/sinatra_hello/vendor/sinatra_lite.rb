@@ -851,18 +851,110 @@ module Sinatra
       io ? io.read.to_s : ""
     end
 
-    # "a=1&b=hello+world&flag" -> {"a"=>"1","b"=>"hello world","flag"=>""}
+    # Parse a `&`-separated query string into a String-keyed Hash.
+    # Supports Rack's nested-bracket syntax:
+    #
+    #   "a=1&b=hello+world"             # => {"a"=>"1","b"=>"hello world"}
+    #   "user[name]=Ada"                # => {"user"=>{"name"=>"Ada"}}
+    #   "tags[]=ruby&tags[]=rust"       # => {"tags"=>["ruby","rust"]}
+    #   "u[name]=A&u[email]=a@b"        # => {"u"=>{"name"=>"A","email"=>"a@b"}}
+    #   "items[][k]=1&items[][k]=2"     # => {"items"=>[{"k"=>"1"},{"k"=>"2"}]}
+    #   "a[b][c]=x"                     # => {"a"=>{"b"=>{"c"=>"x"}}}
+    #
+    # Mirrors `Rack::Utils.parse_nested_query` for the subset that
+    # vendored sinatra-contrib helpers rely on. Forwarded into the
+    # final `params` Hash by `dispatch`, so `params['user']['name']`
+    # works in route blocks the same way real Sinatra ships it.
     def parse_query(qs)
       out = {}
       return out if qs.nil? || qs.empty?
       qs.split("&").each do |pair|
         next if pair.empty?
-        # `split("=", 2)` keeps any "=" in the value intact (GAP #9, now
-        # fixed in the engine — previously this needed a manual index slice).
         key, val = pair.split("=", 2)
-        out[unescape(plus_to_space(key))] = unescape(plus_to_space(val || ""))
+        decoded_key = unescape(plus_to_space(key))
+        # Value-less keys (`?flag` or `?single`) get `nil` — matches
+        # Rack::Utils.parse_nested_query's contract, NOT the
+        # empty-String convention older Sinatra had.
+        decoded_val = val.nil? ? nil : unescape(plus_to_space(val))
+        _normalise_into(out, decoded_key, decoded_val)
       end
       out
+    end
+
+    # Walk `key` (already URL-decoded) for trailing `[...]` segments
+    # and install `value` at the right nested slot inside `target`.
+    # Plain keys (no `[`) are direct assignments with last-write-
+    # wins semantics, matching Rack.
+    def _normalise_into(target, key, value)
+      open_idx = key.index("[")
+      return (target[key] = value) if open_idx.nil?
+      head = key[0...open_idx]
+      suffix = key[open_idx..-1]
+      _walk_suffix(target, head, suffix, value)
+    end
+
+    # `suffix` always begins with `[`. `head` is the slot name in
+    # `target` to install/descend into. Splits off the first
+    # bracket pair and recurses on what remains:
+    #
+    #   `head[]`        → bucket-append
+    #   `head[]<rest>`  → bucket-of-Hash, descend into a Hash that's
+    #                     either the last element (if it doesn't
+    #                     yet hold the next key) or a fresh
+    #                     trailing one
+    #   `head[name]`    → terminal Hash write
+    #   `head[name]<r>` → descend into nested Hash
+    def _walk_suffix(target, head, suffix, value)
+      close = suffix.index("]")
+      return (target[head] = value) if close.nil?
+      inner = suffix[1...close]
+      rest = suffix[(close + 1)..-1] || ""
+      if inner.empty?
+        bucket = (target[head] ||= [])
+        if rest.empty?
+          bucket << value
+          return
+        end
+        # `[]<rest>` — `rest` starts with `[name]...`. Need a Hash
+        # slot inside the array; reuse the trailing one when it
+        # doesn't already carry `name`, otherwise append a fresh.
+        next_key = _peek_next_bracket_name(rest)
+        last = bucket.last
+        hash_slot = if last.is_a?(Hash) && next_key && !last.key?(next_key)
+          last
+        else
+          new_h = {}
+          bucket << new_h
+          new_h
+        end
+        # Pop the leading `[name]` from `rest` and recurse with it
+        # as the next head.
+        r_close = rest.index("]")
+        next_head = rest[1...r_close]
+        next_rest = rest[(r_close + 1)..-1] || ""
+        if next_rest.empty?
+          hash_slot[next_head] = value
+        else
+          _walk_suffix(hash_slot, next_head, next_rest, value)
+        end
+      else
+        inner_hash = (target[head] ||= {})
+        if rest.empty?
+          inner_hash[inner] = value
+        else
+          _walk_suffix(inner_hash, inner, rest, value)
+        end
+      end
+    end
+
+    # Peek the name inside the first `[name]` of `suffix`. Returns
+    # nil if the bracket is empty or the suffix is malformed.
+    def _peek_next_bracket_name(suffix)
+      return nil unless suffix.start_with?("[")
+      close = suffix.index("]")
+      return nil if close.nil?
+      inner = suffix[1...close]
+      inner.empty? ? nil : inner
     end
 
     def plus_to_space(str)

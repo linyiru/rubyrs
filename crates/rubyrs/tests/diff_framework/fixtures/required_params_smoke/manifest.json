@@ -19,7 +19,10 @@
     { "name": "array_form_missing_y",  "method": "GET", "path": "/array_form?x=10" },
     { "name": "mixed_ok",              "method": "GET", "path": "/mixed?a=1&b=2&c=3" },
     { "name": "mixed_missing_b",       "method": "GET", "path": "/mixed?a=1&c=3" },
-    { "name": "mixed_missing_array",   "method": "GET", "path": "/mixed?a=1" }
+    { "name": "mixed_missing_array",   "method": "GET", "path": "/mixed?a=1" },
+    { "name": "nested_ok",             "method": "GET", "path": "/nested?user[name]=Ada&user[email]=ada%40example.com" },
+    { "name": "nested_missing_email",  "method": "GET", "path": "/nested?user[name]=Ada" },
+    { "name": "nested_missing_user",   "method": "GET", "path": "/nested" }
   ],
   "normalize": [
     {
