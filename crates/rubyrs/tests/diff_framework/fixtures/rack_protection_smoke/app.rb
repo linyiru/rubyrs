@@ -16,6 +16,12 @@ class RackProtectionSmokeApp < Sinatra::Base
   use Rack::Protection::ReferrerPolicy
   use Rack::Protection::IPSpoofing
   use Rack::Protection::StrictTransport
+  use Rack::Protection::ContentSecurityPolicy,
+      default_src: "'self'",
+      script_src: "'self' 'unsafe-inline'",
+      style_src: "'self'",
+      img_src: "'self' data:",
+      upgrade_insecure_requests: true
 
   # Routes that exercise the security-header-injection paths.
   get "/" do

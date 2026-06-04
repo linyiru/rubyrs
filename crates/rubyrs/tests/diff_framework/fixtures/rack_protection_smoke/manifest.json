@@ -1,5 +1,5 @@
 {
-  "_doc": "Real `rack-protection-4.2.1` vendored 1:1 (base.rb + FrameOptions + XSSHeader + PathTraversal). Nineteenth diff_framework fixture; second middleware-shaped vendoring (after rack_cors_smoke). Ships no-op `rack.rb`/`rack/utils.rb`/`digest.rb`/`logger.rb`/`uri.rb` stubs because the rubyrs runtime doesn't load real stdlib for those — the three middlewares we vendor don't reach any of the omitted symbols. Tests cover the `X-Frame-Options`/`X-XSS-Protection`/`X-Content-Type-Options` header injection paths AND the PathTraversal cleanup via the `keep_headers` manifest hook + an `/echo_path` route that surfaces the cleaned PATH_INFO. PATH_INFO restoration on the `ensure` block of PathTraversal is also exercised — after the request, the original PATH_INFO is back so downstream middlewares see it unchanged.",
+  "_doc": "Real `rack-protection-4.2.1` vendored 1:1 (base.rb + FrameOptions + XSSHeader + PathTraversal + ReferrerPolicy + IPSpoofing + StrictTransport + ContentSecurityPolicy). Nineteenth diff_framework fixture; second middleware-shaped vendoring (after rack_cors_smoke). Ships no-op `rack.rb`/`rack/utils.rb`/`digest.rb`/`logger.rb`/`uri.rb` stubs because the rubyrs runtime doesn't load real stdlib for those — the three middlewares we vendor don't reach any of the omitted symbols. Tests cover the `X-Frame-Options`/`X-XSS-Protection`/`X-Content-Type-Options` header injection paths AND the PathTraversal cleanup via the `keep_headers` manifest hook + an `/echo_path` route that surfaces the cleaned PATH_INFO. PATH_INFO restoration on the `ensure` block of PathTraversal is also exercised — after the request, the original PATH_INFO is back so downstream middlewares see it unchanged.",
   "name": "rack_protection_smoke",
   "server": {
     "script": "app.rb",
@@ -15,7 +15,8 @@
     "X-XSS-Protection",
     "X-Content-Type-Options",
     "Referrer-Policy",
-    "Strict-Transport-Security"
+    "Strict-Transport-Security",
+    "Content-Security-Policy"
   ],
   "scenarios": [
     { "name": "root_headers",       "method": "GET", "path": "/" },
