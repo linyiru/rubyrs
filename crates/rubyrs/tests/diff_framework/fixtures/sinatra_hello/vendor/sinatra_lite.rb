@@ -188,26 +188,77 @@ module Sinatra
       # condition { ... } }`. At route-declaration time we look up
       # the registered handler and invoke it with `arg` so it can
       # call `condition { ... }` on a per-route conditions stack.
-      def get(path, **opts, &block)
-        add_route("GET", path, opts, &block)
-        # Real Sinatra auto-registers HEAD for every GET route
-        # (HEAD requests are GETs with the body stripped). The
-        # route table thus shows HEAD entries alongside GETs,
-        # which sinatra-cors's `allowed_methods` enumeration
-        # picks up. We mirror by adding the HEAD entry too;
-        # the block runs the same way (the response body is
-        # never sent for a HEAD response in real Sinatra; our
-        # micro-Sinatra doesn't yet enforce that, but the
-        # routes-table introspection contract matches).
-        add_route("HEAD", path, opts, &block)
+      # `paths` is normalised to an Array so the same body handles
+      # both `get '/foo'` (single String) and
+      # `get '/foo', '/bar'` / `get ['/foo', '/bar']` (multiple
+      # paths). Real Sinatra supports the multi-path shape via
+      # the sinatra-contrib/MultiRoute plugin, which forwards
+      # `super(*processed_args, &block)` to the verb method —
+      # `processed_args` puts the path Array first. Accepting the
+      # Array directly here lets MultiRoute's vendored source work
+      # unmodified against our micro-Sinatra.
+      def get(*paths_and_opts, **opts, &block)
+        paths, opts = _normalise_paths_and_opts(paths_and_opts, opts)
+        paths.each do |path|
+          add_route("GET", path, opts, &block)
+          # Real Sinatra auto-registers HEAD for every GET route
+          # (HEAD requests are GETs with the body stripped). The
+          # route table thus shows HEAD entries alongside GETs,
+          # which sinatra-cors's `allowed_methods` enumeration
+          # picks up. We mirror by adding the HEAD entry too;
+          # the block runs the same way (the response body is
+          # never sent for a HEAD response in real Sinatra; our
+          # micro-Sinatra doesn't yet enforce that, but the
+          # routes-table introspection contract matches).
+          add_route("HEAD", path, opts, &block)
+        end
       end
-      def post(path, **opts, &block);    add_route("POST", path, opts, &block);    end
-      def put(path, **opts, &block);     add_route("PUT", path, opts, &block);     end
-      def delete(path, **opts, &block);  add_route("DELETE", path, opts, &block);  end
+      def post(*paths_and_opts, **opts, &block)
+        paths, opts = _normalise_paths_and_opts(paths_and_opts, opts)
+        paths.each { |p| add_route("POST", p, opts, &block) }
+      end
+      def put(*paths_and_opts, **opts, &block)
+        paths, opts = _normalise_paths_and_opts(paths_and_opts, opts)
+        paths.each { |p| add_route("PUT", p, opts, &block) }
+      end
+      def delete(*paths_and_opts, **opts, &block)
+        paths, opts = _normalise_paths_and_opts(paths_and_opts, opts)
+        paths.each { |p| add_route("DELETE", p, opts, &block) }
+      end
       # OPTIONS verb — Sinatra 4+ ships this as a normal route
       # registrar. sinatra-cors uses it for the CORS preflight
       # catch-all `app.options "*", is_cors_preflight: true do …`.
-      def options(path, **opts, &block); add_route("OPTIONS", path, opts, &block); end
+      def options(*paths_and_opts, **opts, &block)
+        paths, opts = _normalise_paths_and_opts(paths_and_opts, opts)
+        paths.each { |p| add_route("OPTIONS", p, opts, &block) }
+      end
+
+      # Splits the positional args into a flat list of path Strings
+      # and merges any trailing positional Hash with the kwargs hash.
+      # Accepts: `'/foo'`, `'/foo', '/bar'`, `['/foo', '/bar']`,
+      # and `['/foo'], opts_hash` (MultiRoute's `super(paths_array,
+      # opts_hash, &block)` shape — `route_args` returns
+      # `[paths_array, opts_hash]`).
+      def _normalise_paths_and_opts(positional, kwargs)
+        opts = kwargs.dup
+        positional = positional.dup
+        if positional.last.is_a?(Hash)
+          opts.merge!(positional.pop)
+        end
+        # Flatten so a single `[paths]` positional or a mix like
+        # `'/a', ['/b', '/c']` both reduce to a single list.
+        paths = positional.flatten
+        [paths, opts]
+      end
+
+      # Generic verb-routed declaration — the entry point
+       # sinatra-contrib/MultiRoute's `route(*verbs, paths, &block)`
+       # calls via `super(verb, route, options, &block)` after the
+       # verb/route/options demux. Real Sinatra exposes the same
+       # shape (lib/sinatra/base.rb's `route` class method).
+      def route(verb, path, opts = {}, &block)
+        add_route(verb.to_s.upcase, path, opts, &block)
+      end
 
       def add_route(verb, path, opts = {}, &block)
         # Per-route conditions list — populated by the block-form
@@ -323,6 +374,16 @@ module Sinatra
       # Sinatra's `register *extensions`.
       def register(*extensions)
         extensions.each do |ext|
+          # `extend ext` adds ext's instance methods to this app
+          # class's singleton class — so `MyApp.get(...)` etc. can
+          # resolve to the extension's overrides FIRST, with their
+          # bare `super` reaching the original Sinatra::Base verb
+          # methods. This is the canonical "register extends"
+          # contract real Sinatra implements; sinatra-contrib/
+          # MultiRoute (and the rack-cors / sinatra-cors family
+          # by virtue of their `.registered(app)` hooks calling
+          # `app.helpers Module`) all rely on it.
+          extend ext
           ext.registered(self) if ext.respond_to?(:registered)
         end
       end

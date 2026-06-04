@@ -1,0 +1,39 @@
+{
+  "_doc": "Real `sinatra-contrib-4.2.1/lib/sinatra/multi_route.rb` vendored 1:1 under `vendor/sinatra/multi_route.rb`. First sinatra-contrib fixture; exercises the `register Sinatra::Plugin` shape end-to-end (depends on `Klass.extend(M)` writing to singleton_includes, class-method `super` through extended modules, and `super(*args, &block)` via Op::ApplySuperBlock). sinatra_lite's verb declarators gained a path-Array shape so MultiRoute's `super(*route_args(args), &block)` forwarder lands cleanly.",
+  "name": "multi_route_smoke",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 8000,
+    "duration_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sinatra/base", "sinatra/multi_route"]
+  },
+  "scenarios": [
+    { "name": "root",         "method": "GET",  "path": "/" },
+    { "name": "single",       "method": "GET",  "path": "/single" },
+    { "name": "multi_a",      "method": "GET",  "path": "/multi_a" },
+    { "name": "multi_b",      "method": "GET",  "path": "/multi_b" },
+    { "name": "verbs_get",    "method": "GET",  "path": "/verbs" },
+    { "name": "verbs_post",   "method": "POST", "path": "/verbs" },
+    { "name": "cart_get_x",   "method": "GET",  "path": "/cart_x" },
+    { "name": "cart_get_y",   "method": "GET",  "path": "/cart_y" },
+    { "name": "cart_post_x",  "method": "POST", "path": "/cart_x" },
+    { "name": "cart_post_y",  "method": "POST", "path": "/cart_y" }
+  ],
+  "normalize": [
+    {
+      "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": "rubyrs micro-Sinatra \\(_http_server battery\\)",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": ";charset=utf-8",
+      "replacement": ""
+    }
+  ]
+}

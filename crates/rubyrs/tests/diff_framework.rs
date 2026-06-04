@@ -728,6 +728,11 @@ fn rack_cors_smoke() {
 }
 
 #[test]
+fn multi_route_smoke() {
+    run_fixture("multi_route_smoke");
+}
+
+#[test]
 fn json_smoke() {
     run_fixture("json_smoke");
 }

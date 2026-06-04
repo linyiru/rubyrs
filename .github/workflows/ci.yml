@@ -936,6 +936,11 @@ jobs:
     # new `use Klass` chain + Rack::Utils / Rack::Headers shim +
     # Regexp.{compile,quote} for origin matching + safe-navigation
     # `&.` for the Vary header walk),
+    # `multi_route_smoke` (real `sinatra-contrib-4.2.1`
+    # `sinatra/multi_route.rb` vendored 1:1 — first sinatra-contrib
+    # fixture; exercises `register Sinatra::Plugin` extend-onto-
+    # singleton path, class-method `super` through extended modules,
+    # and `super(*args, &block)` forwarding via Op::ApplySuperBlock),
     # `json_smoke` + `json_canon` (menu #2),
     # `as_lite_canon` (menu #3), and `sqlite_smoke` (menu #4 / ADR
     # 0027 Phase 4). Each fixture is one ship gate, not a
@@ -1033,6 +1038,14 @@ jobs:
           # vendored gem that's middleware-shaped rather than a
           # Sinatra plugin).
           gem install rack-cors
+          # `sinatra-contrib` is the parity oracle for the
+          # `multi_route_smoke` fixture — only `sinatra/multi_route`
+          # is exercised today, but the whole gem is one install.
+          # The vendored copy under
+          # `multi_route_smoke/vendor/sinatra/multi_route.rb`
+          # resolves first on both runtimes; gem install satisfies
+          # the availability probe (`require 'sinatra/multi_route'`).
+          gem install sinatra-contrib
 
       - name: Cache cargo registry + build
         uses: actions/cache@v5
