@@ -947,11 +947,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // marker so the compiler can skip the cref walk and look up
         // exactly the joined name at top level (CRuby semantics).
         if let Some(joined) = flatten_constant_path(node) {
-            let name = if is_constant_path_absolute(node) {
-                format!("::{}", joined)
-            } else {
-                joined
-            };
+            let name = crate::const_marker::tag_absolute(joined, is_constant_path_absolute(node));
             return sp(node, Expr::ConstRead(name));
         }
         // Dynamic path (rare): trailing-name fallback, matches the
@@ -1339,7 +1335,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // name + `abs` flag because ConstWrite handles the
         // class_path-alias decision separately.
         let mut make = |name: String, abs: bool| {
-            let read_name = if abs { format!("::{}", name) } else { name.clone() };
+            let read_name = crate::const_marker::tag_absolute(name.clone(), abs);
             let read = sp(node, Expr::ConstRead(read_name));
             let rhs = sp(node, Expr::Call {
                 receiver: Some(Box::new(read)),
@@ -1363,7 +1359,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // circuits on the TOP-LEVEL value, not on a same-named
         // inner shadow).
         let mut make = |name: String, abs: bool| {
-            let read_name = if abs { format!("::{}", name) } else { name.clone() };
+            let read_name = crate::const_marker::tag_absolute(name.clone(), abs);
             let read = sp(node, Expr::ConstReadOrNil(read_name));
             let write = sp(node, Expr::ConstWrite(name, abs, Box::new(tr(ctx, &n.value()))));
             sp(node, Expr::Or(Box::new(read), Box::new(write)))
@@ -1383,7 +1379,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // `&&=` short-circuits on the top-level constant rather
         // than on a cref-walked inner shadow.
         let mut make = |name: String, abs: bool| {
-            let read_name = if abs { format!("::{}", name) } else { name.clone() };
+            let read_name = crate::const_marker::tag_absolute(name.clone(), abs);
             let read = sp(node, Expr::ConstRead(read_name));
             let write = sp(node, Expr::ConstWrite(name, abs, Box::new(tr(ctx, &n.value()))));
             sp(node, Expr::And(Box::new(read), Box::new(write)))
@@ -2603,11 +2599,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 // includes `Wrapper::Foo` and incorrectly prefer
                 // the inner namespace over top-level `Foo`.
                 let joined = flatten_constant_path(&s)?;
-                if is_constant_path_absolute(&s) {
-                    Some(format!("::{}", joined))
-                } else {
-                    Some(joined)
-                }
+                Some(crate::const_marker::tag_absolute(joined, is_constant_path_absolute(&s)))
             } else {
                 None
             }
@@ -3370,12 +3362,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     // `rescue ::TopErr` would lex-walk and match
                     // `Wrapper::TopErr` instead of the intended
                     // top-level class.
-                    let name = if is_constant_path_absolute(&exc) {
-                        format!("::{}", joined)
-                    } else {
-                        joined
-                    };
-                    classes.push(name);
+                    classes.push(crate::const_marker::tag_absolute(joined, is_constant_path_absolute(&exc)));
                 }
                 // Anything else (dynamic expression in rescue
                 // position) is dropped silently for now.

@@ -1,0 +1,94 @@
+//! Centralized encoding of the "this constant path is absolute"
+//! signal that flows from the AST lowering through the compiler
+//! and into the runtime.
+//!
+//! Background: CRuby distinguishes `Foo::Bar` (relative — cref-walk
+//! the enclosing scopes) from `::Foo::Bar` (absolute — look up the
+//! joined name at top level only). Internally rubyrs's AST/compiler
+//! signals this by prefixing the joined name with `::` before
+//! interning it as a `String` / `SymId`. PR #355 introduced the
+//! convention for `Expr::ConstRead` reads and class superclass
+//! emit; PR #355 cycle 4 extended it to the three op-write
+//! variants (`+=`, `||=`, `&&=`); PR #370 extended it to the
+//! rescue-clause class list and the `PushRescue` runtime handler.
+//!
+//! With the convention spread across ten sites (six AST producers
+//! + four runtime/compile consumers), inline `format!("::{}", ..)`
+//! and `name.strip_prefix("::")` were drifting apart — code-review
+//! cycles flagged the asymmetry as an altitude risk: any future
+//! work that touches the marker semantics (autoload trigger,
+//! reflection on `Symbol#to_s`, debug dumps, alternate marker
+//! character) has to find and update every site by hand.
+//!
+//! This module makes the convention explicit: a single constant
+//! defines the marker, and two helpers (`tag_absolute` /
+//! `strip_absolute`) own the encode/decode contract. All current
+//! call sites route through them so future maintenance happens in
+//! one place.
+//!
+//! Scope: the helpers operate on `String` / `&str` only — they
+//! don't change the carrier types or remove the marker from
+//! interned `SymId`s. A deeper structural refactor (e.g., changing
+//! `Expr::ConstRead(String)` to a struct variant with an explicit
+//! `absolute: bool` field, and threading the bit through the
+//! bytecode) would remove the marker from the interner entirely
+//! but touches every Expr matcher in the codebase. Deferred until
+//! profiling or further review demands it.
+
+/// Marker prefix the AST attaches to absolute constant-path names
+/// (`::Foo::Bar`). Chosen to mirror the Ruby surface syntax so the
+/// interned form is greppable in debug output.
+pub(crate) const ABSOLUTE_PREFIX: &str = "::";
+
+/// Tag `name` as absolute when `absolute` is true; return it
+/// unchanged otherwise so the relative path stays allocation-free.
+pub(crate) fn tag_absolute(name: String, absolute: bool) -> String {
+    if absolute {
+        let mut tagged = String::with_capacity(ABSOLUTE_PREFIX.len() + name.len());
+        tagged.push_str(ABSOLUTE_PREFIX);
+        tagged.push_str(&name);
+        tagged
+    } else {
+        name
+    }
+}
+
+/// Strip the absolute marker if present. Mirrors `&str::strip_prefix`
+/// so callers can keep their idiomatic `if let Some(stripped) = ...`
+/// shape. Returns `None` for relative paths.
+pub(crate) fn strip_absolute(name: &str) -> Option<&str> {
+    name.strip_prefix(ABSOLUTE_PREFIX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_then_strip_roundtrip() {
+        let abs = tag_absolute("Foo::Bar".to_string(), true);
+        assert_eq!(abs, "::Foo::Bar");
+        assert_eq!(strip_absolute(&abs), Some("Foo::Bar"));
+
+        let rel = tag_absolute("Foo::Bar".to_string(), false);
+        assert_eq!(rel, "Foo::Bar");
+        assert_eq!(strip_absolute(&rel), None);
+    }
+
+    #[test]
+    fn tag_absolute_false_is_identity_no_realloc() {
+        // No-op path: bare relative names should not allocate.
+        let s = "Foo::Bar".to_string();
+        let ptr_before = s.as_ptr();
+        let s = tag_absolute(s, false);
+        let ptr_after = s.as_ptr();
+        assert_eq!(ptr_before, ptr_after,
+            "tag_absolute(_, false) must not reallocate the String");
+    }
+
+    #[test]
+    fn strip_absolute_single_segment() {
+        assert_eq!(strip_absolute("::TopErr"), Some("TopErr"));
+        assert_eq!(strip_absolute("TopErr"), None);
+    }
+}
