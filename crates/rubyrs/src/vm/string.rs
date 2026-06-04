@@ -685,16 +685,17 @@ pub(crate) fn string_call(
         (Value::Str(a), "match?", [Value::Regex(re)]) => {
             Some(Value::Bool(a.with_str_lossy(|s| re.is_match(s))))
         }
-        // String#match with a String needle — substring scan. CRuby
-        // returns a MatchData (or nil); we have no MatchData type, so
-        // we surface the matched substring (truthy) or nil. Good enough
-        // for the common `if foo.match(bar)` predicate idiom — which is
-        // exactly how sinatra-param exercises it on Content-Type.
-        (Value::Str(a), "match", [Value::Str(b)]) => {
-            Some(a.with_str_lossy(|sa| b.with_str_lossy(|sb| {
-                if sa.contains(sb) { Value::Str(b.clone()) } else { Value::Nil }
-            })))
-        }
+        // String#match with a String needle — CRuby treats the
+        // needle as a regex pattern (`Regexp.new(needle)` + match).
+        // Returns a MatchData (or nil). Because materialising
+        // MatchData requires `&mut self`, the actual conversion
+        // happens in `string_collection_call` further down — this
+        // arm returns `None` to defer dispatch there. (Pre-fix
+        // this arm returned the matched substring as a String,
+        // which was good enough for predicate-style use
+        // (`if s.match(needle)`) but diverged from CRuby for any
+        // call site reading `.captures` / `.pre_match` etc.)
+        // Empty match left as the dispatch target.
         // `index(substr)` / `rindex(substr)` — return the byte
         // offset where the substring first / last appears, or
         // nil if it's absent. CRuby reports a *character* index
@@ -1621,12 +1622,32 @@ impl Vm {
                 // instance with @whole = whole match and
                 // @caps = numbered captures (Strings, or nil
                 // for groups that didn't participate). Returns
-                // nil if no match. CRuby additionally accepts
-                // a String (interpreted as a literal regex) and
-                // a starting offset; both out of scope here.
+                // nil if no match. CRuby ALSO accepts a String
+                // arg, interpreted as a regex pattern
+                // (`Regexp.new(arg)` then match); we handle that
+                // by compiling the String into a CompiledRegex on
+                // the fly before falling into the regex branch.
                 #[cfg(feature = "regex")]
                 if name == "match" && args.len() == 1 {
-                    if let Value::Regex(re) = &args[0] {
+                    // Coerce a String arg into a Regex via the
+                    // same code path the regex literal `/.../`
+                    // takes. Errors surface as the regex-engine's
+                    // syntax error, matching CRuby's contract
+                    // that a bad pattern raises RegexpError.
+                    let coerced: Option<Value> = if let Value::Str(needle) = &args[0] {
+                        let pat = needle.to_string_lossy();
+                        let translated = crate::vm::step::preprocess_regex_pattern(&pat);
+                        let compiled = crate::regex_engine::compile(&translated).map_err(|e| {
+                            self.trap(RubyError::SyntaxError {
+                                msg: format!("invalid regex /{}/: {}", pat, e),
+                            })
+                        })?;
+                        Some(Value::Regex(std::rc::Rc::new(compiled)))
+                    } else {
+                        None
+                    };
+                    let regex_arg = coerced.as_ref().unwrap_or(&args[0]);
+                    if let Value::Regex(re) = regex_arg {
                         let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
                             msg: format!(
                                 "regex op 'String#match' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
@@ -1646,6 +1667,9 @@ impl Vm {
                                 let m0 = caps.get(0).unwrap();
                                 let (m_start, m_end) = (m0.start(), m0.end());
                                 let whole = m0.as_str().to_string();
+                                let pre = bound[..m_start].to_string();
+                                let post = bound[m_end..].to_string();
+                                let full_str = bound.to_string();
                                 let mut group_vals: Vec<Value> = Vec::with_capacity(caps.len().saturating_sub(1));
                                 let mut last_caps: Vec<Option<String>> = Vec::with_capacity(caps.len().saturating_sub(1));
                                 for i in 1..caps.len() {
@@ -1670,7 +1694,13 @@ impl Vm {
                                     m_start,
                                     m_end,
                                 });
-                                return Ok(Some(self.materialize_match_data(whole, group_vals)?));
+                                let ctx = crate::vm::match_data::MatchDataContext {
+                                    pre_match: Some(pre),
+                                    post_match: Some(post),
+                                    string: Some(full_str),
+                                    regexp: Some(Value::Regex(re.clone())),
+                                };
+                                return Ok(Some(self.materialize_match_data_with_context(whole, group_vals, ctx)?));
                             }
                         }
                     }

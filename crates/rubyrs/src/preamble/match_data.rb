@@ -1,19 +1,33 @@
 # MatchData — the value returned by `String#match(regex)`. Wraps
-# the whole match + numbered captures. CRuby's MatchData has a
-# lot of API surface (`pre_match`, `post_match`, `named_captures`,
-# `regexp`); we expose only `[]`, `captures`, `to_a`, `size`,
-# `to_s`, and `inspect`. Stored as a regular user-class so the
+# the whole match + numbered captures + context (pre/post slices
+# of the original string, the source string, the regexp used).
+# CRuby's MatchData has more surface (named-capture maps,
+# offset/begin/end, values_at, named_captures); we expose the
+# instance methods sinatra-contrib / Rack / mail-style gems most
+# commonly reach for. Stored as a regular user-class so the
 # existing instance-method dispatch carries the load.
 #
 # The Rust side allocates these via `Vm::materialize_match_data`
 # (vm/match_data.rs) when `String#match` produces a hit — that
 # helper looks the class up by name (`MatchData`), so this file
 # must be loaded before any `match` call.
+#
+# Optional ivars (set when the call site has the data, nil
+# otherwise — `String#match("substr")` only populates @whole/@caps,
+# leaving the regex-bound surface nil):
+#   * `@pre_match`  — String before the match in the original
+#   * `@post_match` — String after the match in the original
+#   * `@string`    — the original String the regex ran against
+#   * `@regexp`    — the Regexp object used for matching
 
 class MatchData
-  def initialize(whole, caps)
+  def initialize(whole, caps, pre_match = nil, post_match = nil, string = nil, regexp = nil)
     @whole = whole
     @caps  = caps
+    @pre_match = pre_match
+    @post_match = post_match
+    @string = string
+    @regexp = regexp
   end
   def [](i)
     if i == 0
@@ -24,6 +38,9 @@ class MatchData
   end
   def captures
     @caps
+  end
+  def named_captures
+    {}
   end
   def to_a
     [@whole] + @caps
@@ -37,6 +54,10 @@ class MatchData
   def to_s
     @whole
   end
+  def pre_match;  @pre_match;  end
+  def post_match; @post_match; end
+  def string;     @string;     end
+  def regexp;     @regexp;     end
   def inspect
     # CRuby format: `#<MatchData "<whole>" 1:"<cap1>" 2:"<cap2>" ...>`.
     # When the regex had no groups, the trailing per-group list
