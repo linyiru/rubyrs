@@ -8526,6 +8526,60 @@ impl Vm {
         Ok(())
     }
 
+    /// Fire `BasicObject#singleton_method_added(name)` (and the
+    /// `_removed`/`_undefined` siblings) on `receiver` whenever a
+    /// singleton-method install/remove/undef hits the receiver's
+    /// eigenclass. CRuby parity: this is the singleton-method twin
+    /// of `Module#method_added`. Rails / RSpec / many DSLs hook
+    /// `singleton_method_added` to auto-wrap class methods.
+    ///
+    /// Contract:
+    ///   - hook receiver is `receiver` (the object/class whose
+    ///     singleton class was modified)
+    ///   - hook is called with `Value::Sym(method_name_id)` as its
+    ///     single argument
+    ///   - return value is discarded (hook runs for side effects)
+    ///   - fast-path: skip the lookup entirely when the hook name
+    ///     has never been interned
+    ///
+    /// Lookup rule (CRuby semantics):
+    ///   - Value::Class(C): the user-defined hook lives on C's
+    ///     singleton chain — `def self.singleton_method_added(name)`
+    ///     installs into C's singleton_methods. Use
+    ///     `lookup_class_singleton_method`.
+    ///   - Value::Object(obj): the hook is a regular instance
+    ///     method of obj's class — `def singleton_method_added(n)`
+    ///     on the class fires for every instance. Use
+    ///     `lookup_method_uncached(class_of(obj), …)`.
+    ///   - Other receiver types: no hook (primitives don't carry
+    ///     singleton classes in the subset we model).
+    pub(crate) fn fire_singleton_method_lifecycle_hook(
+        &mut self,
+        receiver: Value,
+        hook_name: &str,
+        method_name_id: crate::intern::SymId,
+    ) -> Result<(), Trap> {
+        if !self.interner.contains(hook_name) {
+            return Ok(());
+        }
+        let hook_id = self.interner.intern(hook_name);
+        let m = match &receiver {
+            Value::Class(cls) => self.lookup_class_singleton_method(cls, hook_id),
+            Value::Object(oid) => {
+                let cls = self.heap.class_of(*oid);
+                self.lookup_method_uncached(&cls, hook_id)
+            }
+            _ => return Ok(()),
+        };
+        if let Some(m) = m {
+            let pre_frames = self.frames.len();
+            self.invoke_method(m, receiver, vec![Value::Sym(method_name_id)])?;
+            self.dispatch_until(pre_frames)?;
+            self.stack.pop();
+        }
+        Ok(())
+    }
+
     fn try_invoke_fixed_method_from_stack(
         &mut self,
         m: Rc<Method>,
@@ -10005,6 +10059,19 @@ impl Vm {
                 };
                 if let Some(res) = install_result {
                     let installed = res.map_err(|e| self.trap(e))?;
+                    // `singleton_method_added` fires on the receiver
+                    // — for Object recv, on the underlying object
+                    // (NOT on its eigenclass which is where the
+                    // method physically lives). For Class recv this
+                    // is already handled inside
+                    // `install_singleton_method_on_class_from_value`.
+                    if let Some(Value::Object(_)) = &target_recv {
+                        self.fire_singleton_method_lifecycle_hook(
+                            target_recv.unwrap(),
+                            "singleton_method_added",
+                            name_sym,
+                        )?;
+                    }
                     self.stack.push(Value::Sym(installed));
                     return Ok(());
                 }
@@ -10028,7 +10095,7 @@ impl Vm {
             // chain. Without an anchor, `super` raises
             // "outside of method" — mirrors the static
             // singleton install at step.rs:1273.
-            match target_recv {
+            let hook_recv: Value = match target_recv {
                 Some(Value::Object(id)) => {
                     let sc = self.heap.ensure_singleton_class(id);
                     let m = std::rc::Rc::new(crate::value::Method {
@@ -10042,6 +10109,7 @@ impl Vm {
                         original_name: Some(name_sym),
                     });
                     sc.methods.borrow_mut().insert(name_sym, m);
+                    Value::Object(id)
                 }
                 Some(Value::Class(c)) => {
                     let m = std::rc::Rc::new(crate::value::Method {
@@ -10055,6 +10123,7 @@ impl Vm {
                         original_name: Some(name_sym),
                     });
                     c.singleton_methods.borrow_mut().insert(name_sym, m);
+                    Value::Class(c)
                 }
                 Some(other) => return Err(self.trap(RubyError::NoMethodError {
                     kind: crate::error::NoMethodErrorKind::Missing,
@@ -10064,8 +10133,15 @@ impl Vm {
                 None => return Err(self.trap(RubyError::ArgumentError {
                     msg: "no receiver for define_singleton_method".into(),
                 })),
-            }
+            };
             self.method_gen = self.method_gen.wrapping_add(1);
+            // `singleton_method_added` fires on the receiver after
+            // the block-form install lands.
+            self.fire_singleton_method_lifecycle_hook(
+                hook_recv,
+                "singleton_method_added",
+                name_sym,
+            )?;
             self.stack.push(Value::Sym(name_sym));
             return Ok(());
         }
@@ -11188,6 +11264,17 @@ impl Vm {
         )?;
         cls.singleton_methods.borrow_mut().insert(name_sym, m);
         self.method_gen = self.method_gen.wrapping_add(1);
+        // `singleton_method_added` fires on the class itself — same
+        // shape as `method_added` for instance-method installs.
+        // `.map_err(|t| t.err)` flattens Trap back to RubyError to
+        // match this helper's signature (the caller rewraps at the
+        // \`.map_err(|e| self.trap(e))\` boundary).
+        self.fire_singleton_method_lifecycle_hook(
+            Value::Class(cls.clone()),
+            "singleton_method_added",
+            name_sym,
+        )
+        .map_err(|t| t.err)?;
         Ok(name_sym)
     }
 }
