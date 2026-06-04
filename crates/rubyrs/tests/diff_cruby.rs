@@ -312,6 +312,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn stack_depth_guard() { run_diff("stack_depth_guard"); }
 #[test] fn exception_full_message() { run_diff("exception_full_message"); }
 #[test] fn errno_extended() { run_diff("errno_extended"); }
+#[test] fn bare_super_splat_forwarding() { run_diff("bare_super_splat_forwarding"); }
 #[test] fn lambdas() { run_diff("lambdas"); }
 #[test] fn string_mutation() { run_diff("string_mutation"); }
 #[test] fn defined() { run_diff("defined"); }

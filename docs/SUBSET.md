@@ -738,43 +738,6 @@ h[:k] = 1  # NoMethodError in rubyrs; works in CRuby
 - No test pin (would lock in divergence); this entry is the
   contract.
 
-### Anonymous-splat `def initialize(*)` + bare `super` collapses args into an Array
-
-```ruby
-class A
-  def initialize(app, opts = {}); @app = app; @opts = opts; end
-end
-class B < A
-  def initialize(*); super; end   # CRuby forwards (app, opts) unchanged
-end
-b = B.new(->{ "x" }, foo: 1)
-# rubyrs: @app == [Lambda, {foo: 1}]  (single Array argument)
-#  CRuby: @app == Lambda, @opts == {foo: 1}
-```
-
-- rubyrs's anonymous-splat parameter `*` (no name) collects all
-  positional args into a hidden Array, and bare `super` then
-  passes that Array as ONE positional argument to the parent.
-  CRuby treats anonymous-splat + bare `super` as the
-  "forward all args unchanged" idiom and the parent's named
-  parameters receive the original positional values.
-- Hit by rack-protection-4.2.1's `HostAuthorization` and
-  `EscapedParams` middlewares, both of which do
-  `def initialize(*); super; @permitted_hosts = []; ...; end`
-  to layer extra setup on top of `Base#initialize(app,
-  options = {})`. Under rubyrs `@app` ends up `[app, opts]`
-  (Array), so `app.call(env)` in `Base#call` traps with
-  `undefined method 'call' for Array`.
-- Workaround when you control the source: name the splat and
-  forward explicitly: `def initialize(*args); super(*args);
-  end`. Not an option for vendored-1:1 gem code.
-- The proper fix is to make bare `super` from an anonymous-
-  splat method splat the captured args back out, matching
-  CRuby's forwarding semantics. See
-  `tests/diff_framework/fixtures/rack_protection_smoke/` —
-  the two HostAuthorization-shape middlewares are excluded
-  pending this fix.
-
 ### Bare-call dispatch on `nil` self inside a block body
 
 ```ruby

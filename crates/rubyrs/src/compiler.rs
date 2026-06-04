@@ -28,6 +28,19 @@ pub(crate) struct ProtoBuilder {
     /// compiling — used to emit `LoadLocal(0..n)` for the
     /// forwarding `super` (bare) form.
     pub(crate) method_param_count: u16,
+    /// Slot index of the rest (splat) parameter, when the
+    /// surrounding method declares one (`def m(*)`,
+    /// `def m(*args)`). `None` otherwise. Used by bare `super`
+    /// (no parens) emission: when the method has ONLY a rest
+    /// param (no pre/post / kw / block), CRuby's "forward all
+    /// args unchanged" idiom requires splatting the rest array
+    /// back out, not passing it as a single Array argument. We
+    /// emit `LoadLocal(slot); ApplySuper(name)` for that case.
+    /// Hit by `def initialize(*); super; end` in vendored
+    /// rack-protection middlewares (HostAuthorization,
+    /// EscapedParams) layering setup on Base#initialize(app,
+    /// options = {}).
+    pub(crate) method_rest_slot: Option<u16>,
     /// True iff this builder is compiling a real method body
     /// (the proto bound to an `Op::DefMethod` /
     /// `Op::DefSingletonMethod`). Distinct from `method_name`
@@ -398,10 +411,17 @@ fn compile_def_arm(
     let kw_lit_defaults: Vec<Option<Value>> = kw_params.iter().map(|(_, d)| {
         d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
     }).collect();
+    // Position of the rest slot inside effective_params: after
+    // pre-rest required positionals + optional defaults.
+    // Only set when there IS a rest param (named or anonymous).
+    let rest_slot_for_super: Option<u16> = rest.as_ref().map(|_| {
+        (n_required_positional as usize + n_optional as usize) as u16
+    });
     let proto_idx = compile_proto_kind(
         name.to_string(), effective_params, n_required_positional, defaults.to_vec(), body,
         b.filename.clone(), protos, interner, cc, /*is_method=*/true,
         b.class_path.clone(),
+        rest_slot_for_super,
     );
     if let Some(rname) = rest {
         protos[proto_idx].rest_param = Some(rname.clone());
@@ -921,6 +941,7 @@ impl ProtoBuilder {
             filename,
             method_name: None,
             method_param_count: 0,
+            method_rest_slot: None,
             is_method_body: false,
             loop_break_jumps: vec![],
             loop_next_jumps: vec![],
@@ -1482,25 +1503,49 @@ pub(crate) fn compile_expr(
             // documented as a gap. Realistic scripts only put
             // `super` in methods anyway.
             let mname = b.method_name.clone();
-            let argc: u8 = match args_opt {
+            let mname_resolved = mname.clone().unwrap_or_else(|| "<super-outside-method>".to_string());
+            let name_id = interner.intern(&mname_resolved);
+            match args_opt {
                 Some(args) => {
                     for a in args { compile_expr(b, a, protos, interner, cc); }
-                    args.len() as u8
+                    let argc = args.len() as u8;
+                    b.emit(Op::Super(name_id, argc));
                 }
                 None => {
                     // Forwarding form — push each enclosing-method
                     // param from its local slot. Params are
                     // always slots `0..method_param_count`
                     // (`ProtoBuilder::new` assigns them in order).
-                    for i in 0..b.method_param_count {
-                        b.emit(Op::LoadLocal(i));
+                    //
+                    // Single-rest fast path: when the surrounding
+                    // method has ONLY a rest parameter (`def m(*)`,
+                    // `def m(*args)`) — `method_rest_slot ==
+                    // Some(0) && method_param_count == 1` — CRuby's
+                    // bare-super forwarding splats the rest array
+                    // out as individual positional args to the
+                    // parent. Without this, the captured Array is
+                    // passed as a single argument, so a parent
+                    // declared `def initialize(app, opts = {})`
+                    // sees `app == [orig_app, orig_opts]` (the
+                    // whole Array). Hit by rack-protection-4.2.1's
+                    // HostAuthorization / EscapedParams, both of
+                    // which layer setup via `def initialize(*);
+                    // super; @x = ...; end`. Emit ApplySuper so the
+                    // VM op spreads the Array's elements as args
+                    // (same semantics as `super(*args)`).
+                    if b.method_param_count == 1
+                        && b.method_rest_slot == Some(0)
+                    {
+                        b.emit(Op::LoadLocal(0));
+                        b.emit(Op::ApplySuper(name_id));
+                    } else {
+                        for i in 0..b.method_param_count {
+                            b.emit(Op::LoadLocal(i));
+                        }
+                        b.emit(Op::Super(name_id, b.method_param_count as u8));
                     }
-                    b.method_param_count as u8
                 }
-            };
-            let mname = mname.unwrap_or_else(|| "<super-outside-method>".to_string());
-            let name_id = interner.intern(&mname);
-            b.emit(Op::Super(name_id, argc));
+            }
         }
         Expr::SuperApply { args: args_expr, block_arg } => {
             // `super(*args)` — assemble the args Array and let
@@ -1801,7 +1846,7 @@ pub(crate) fn compile_proto_at(
     class_path: Vec<String>,
 ) -> usize {
     let n_req = params.len() as u16;
-    compile_proto_kind(name, params, n_req, vec![], body, filename, protos, interner, cc, /*is_method=*/false, class_path)
+    compile_proto_kind(name, params, n_req, vec![], body, filename, protos, interner, cc, /*is_method=*/false, class_path, None)
 }
 
 /// Same as `compile_proto` but tags the resulting builder as a
@@ -1821,6 +1866,7 @@ pub(crate) fn compile_proto_kind(
     default_exprs: Vec<Option<SExpr>>, body: &[SExpr],
     filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
     is_method: bool, class_path: Vec<String>,
+    rest_slot_for_super: Option<u16>,
 ) -> usize {
     let mut b = ProtoBuilder::new(&params, filename);
     b.class_path = class_path;
@@ -1828,6 +1874,7 @@ pub(crate) fn compile_proto_kind(
         b.method_name = Some(name.clone());
         b.method_param_count = params.len() as u16;
         b.is_method_body = true;
+        b.method_rest_slot = rest_slot_for_super;
     }
     // Default-arg prologue. For each optional positional slot:
     // skip to `skip:` if the caller supplied it; otherwise eval
@@ -1896,6 +1943,7 @@ pub(crate) fn compile_block(
         // NoMethodError-shaped Trap.
         method_name: parent.method_name.clone(),
         method_param_count: parent.method_param_count,
+        method_rest_slot: parent.method_rest_slot,
         // Blocks are NOT method bodies — `return` inside one
         // unwinds non-locally to the enclosing method
         // (Op::ReturnMethod), not just the block frame.
