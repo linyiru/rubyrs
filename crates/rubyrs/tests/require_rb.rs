@@ -512,16 +512,29 @@ fn require_missing_file_raises_loaderror_with_cruby_message() {
     // byte against the canonical phrasing.
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let driver_path = tmp.join("require_rb_missing_driver.rb");
-    fs::write(&driver_path,
-        r#"
+    // Derive the "guaranteed missing" path under the test's own
+    // tmp dir instead of a hard-coded `/tmp/...` — the latter is
+    // a global OS path that could in principle exist on a dev
+    // machine and mask the miss case. Computing it here also
+    // keeps the message-pin exact: the same string flows into the
+    // Ruby driver and into the expected assertion.
+    let missing_path = tmp.join("definitely_missing_for_loaderror_test.rb_nonext");
+    let missing_str = missing_path.to_str().expect("tmp path is utf-8");
+    assert!(
+        !missing_path.exists(),
+        "test pre-condition: {} must not exist",
+        missing_str,
+    );
+    fs::write(&driver_path, format!(
+r#"
 begin
-  require "/tmp/this_path_does_not_exist_98765"
+  require {missing_str:?}
   puts "unexpectedly loaded"
 rescue LoadError => e
-  puts "caught: #{e.class}: #{e.message}"
+  puts "caught: #{{e.class}}: #{{e.message}}"
 end
-"#
-    ).unwrap();
+"#))
+        .unwrap();
 
     let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
     let out = Command::new(rubyrs)
@@ -532,8 +545,7 @@ end
     assert!(out.status.success(), "stdout:\n{}", stdout);
     assert_eq!(
         stdout.trim(),
-        "caught: LoadError: cannot load such file -- \
-         /tmp/this_path_does_not_exist_98765"
+        format!("caught: LoadError: cannot load such file -- {}", missing_str),
     );
 }
 
