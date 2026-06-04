@@ -101,7 +101,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/setup-rust-toolchain
 
       - name: Install cargo-deny (pinned)
         # Composite action: cache + version-pin-equality check +
