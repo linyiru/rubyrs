@@ -10075,9 +10075,9 @@ impl Vm {
                     // method physically lives). For Class recv this
                     // is already handled inside
                     // `install_singleton_method_on_class_from_value`.
-                    if let Some(Value::Object(_)) = &target_recv {
+                    if let Some(recv @ Value::Object(_)) = &target_recv {
                         self.fire_singleton_method_lifecycle_hook(
-                            target_recv.unwrap(),
+                            recv.clone(),
                             "singleton_method_added",
                             name_sym,
                         )?;
