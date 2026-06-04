@@ -485,10 +485,38 @@ fn absolute_rescue_class_skips_lex_walk() {
             puts "rel: #{e.class} - #{e.message}"
           end
         end
+
+        # Multi-segment absolute path — the actual shape used by
+        # rack/utils.rb-style gem code (`::URI::DEFAULT_PARSER`,
+        # `::Foo::Bar` exception hierarchies). Strip-prefix +
+        # flat-lookup must work for joined names too.
+        class Outer
+          class Inner < StandardError; end
+        end
+        module W2
+          class Outer
+            class Inner < ArgumentError; end
+          end
+          begin
+            raise ::Outer::Inner, "from-top-nested"
+          rescue ::Outer::Inner => e
+            puts "abs-multi: #{e.class} - #{e.message}"
+          end
+          begin
+            raise Outer::Inner, "from-inner-nested"
+          rescue Outer::Inner => e
+            puts "rel-multi: #{e.class} - #{e.message}"
+          end
+        end
     "#, "abs_rescue.rb").expect("eval");
     assert_eq!(
         buf.snapshot().trim(),
-        "abs: TopErr - from-top\nrel: Wrapper::TopErr - from-inner",
+        concat!(
+            "abs: TopErr - from-top\n",
+            "rel: Wrapper::TopErr - from-inner\n",
+            "abs-multi: Outer::Inner - from-top-nested\n",
+            "rel-multi: W2::Outer::Inner - from-inner-nested",
+        ),
         "got: {:?}",
         buf.snapshot(),
     );
