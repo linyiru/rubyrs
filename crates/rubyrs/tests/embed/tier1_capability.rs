@@ -1654,8 +1654,13 @@ fn adr_0024_phase_a_max_yield_recursion_cap_trips_resource_exhausted() {
     // Recursive yield chains hit the cap. Setting
     // max_yield_recursion: Some(N) makes a recursion depth
     // of N+1 trap ResourceExhausted.
+    // The yield-recursion shape here ALSO trips the always-on
+    // dispatch-depth cap (each `yield` re-enters `dispatch_until`),
+    // so `max_yield_recursion` only fires first when set BELOW the
+    // always-on default (debug: 5, release: 150). Pin to 3 so the
+    // yield cap wins on both build profiles.
     let cfg = rubyrs::Config {
-        max_yield_recursion: Some(10),
+        max_yield_recursion: Some(3),
         ..rubyrs::Config::default()
     };
     let mut rt = rubyrs::Runtime::with_config(cfg);
@@ -1665,12 +1670,12 @@ fn adr_0024_phase_a_max_yield_recursion_cap_trips_resource_exhausted() {
           yield
         end
         # Build a deep yield chain via mutually-recursive yields.
-        # 20 levels exceeds the cap of 10.
+        # 8 levels exceeds the cap of 3.
         def recurse(n)
           return if n <= 0
           f { recurse(n - 1) }
         end
-        recurse(20)
+        recurse(8)
         "##,
         "adr_0024_max_yield_recursion.rb",
     ).unwrap_err();

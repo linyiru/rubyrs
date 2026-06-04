@@ -471,9 +471,11 @@ fn dispatch_depth_cap_traps_block_recursion() {
     // swallow the trap with bare `rescue` (which filters on
     // StandardError; ResourceExhausted sits `< Exception`).
     //
-    // 20 is well under 500, so the embedder cap is what fires.
+    // 3 is well under both the release (150) and debug (5)
+    // always-on caps, so the embedder cap is always what fires
+    // first regardless of build profile.
     let mut rt = Runtime::with_config(Config {
-        max_dispatch_depth: Some(20),
+        max_dispatch_depth: Some(3),
         ..Default::default()
     });
     let err = rt.eval(

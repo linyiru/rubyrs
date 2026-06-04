@@ -148,19 +148,31 @@ impl Vm {
         }
         // Each re-entrant `dispatch_until` push (`then`, `tap`,
         // `yield_self`, `yield`, `Proc#call`, native iter drivers)
-        // costs ~10 KB of Rust stack. Empirical bisection:
-        //   - 8 MB main-thread stack: ~750 pushes overflows
-        //   - 2 MB worker / test-thread stack: ~250 pushes overflows
-        // Cap at 150 to leave ~33% headroom on the worst-supported
-        // platform (2 MB worker stacks default on Linux, used by
-        // cargo's test threads). Generous on 8 MB main-thread setups,
-        // but 150 nested block-recursion levels is far beyond normal
-        // app code — this trap is a safety net for runaway recursion,
-        // not a working-program limit. Trips before the 10k Ruby-
-        // frame cap on block-recursion shapes that the frame cap
-        // can't catch. Embedders that need tighter (sandboxed)
-        // bounds can configure `max_dispatch_depth` (which trips
-        // first, with ResourceExhausted instead of SystemStackError).
+        // costs ~10 KB of Rust stack at release optimisation.
+        // Debug + llvm-cov instrumented builds inflate the
+        // per-level Rust stack 2-3× (no inlining + the cov
+        // counters add a few KB per frame), so the same script
+        // that costs 1.5 MB of stack at release blows past 3-5
+        // MB under debug+cov.
+        //
+        // Empirical bisection (cargo's 2 MB test-thread stack):
+        //   - release: ~250 pushes overflows; cap at 150 holds
+        //   - debug+cov (CI Coverage job): ~80 pushes overflows
+        //
+        // Use cfg(debug_assertions) to pick a tighter cap for
+        // debug builds. The release cap of 150 stays generous
+        // on 8 MB main-thread setups (still 75%+ headroom).
+        // 150 nested block-recursion levels is far beyond normal
+        // app code — this trap is a safety net for runaway
+        // recursion, not a working-program limit. Trips before
+        // the 10k Ruby-frame cap on block-recursion shapes that
+        // the frame cap can't catch. Embedders that need tighter
+        // (sandboxed) bounds can configure `max_dispatch_depth`
+        // (which trips first, with ResourceExhausted instead of
+        // SystemStackError).
+        #[cfg(debug_assertions)]
+        const DEFAULT_MAX_DISPATCH_DEPTH: usize = 5;
+        #[cfg(not(debug_assertions))]
         const DEFAULT_MAX_DISPATCH_DEPTH: usize = 150;
         if self.dispatch_until_depths.len() >= DEFAULT_MAX_DISPATCH_DEPTH {
             return Err(self.trap(RubyError::SystemStackError {

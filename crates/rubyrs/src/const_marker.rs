@@ -13,7 +13,7 @@
 //! rescue-clause class list and the `PushRescue` runtime handler.
 //!
 //! With the convention spread across ten sites (six AST producers
-//! + four runtime/compile consumers), inline `format!("::{}", ..)`
+//! plus four runtime/compile consumers), inline `format!("::{}", ..)`
 //! and `name.strip_prefix("::")` were drifting apart — code-review
 //! cycles flagged the asymmetry as an altitude risk: any future
 //! work that touches the marker semantics (autoload trigger,

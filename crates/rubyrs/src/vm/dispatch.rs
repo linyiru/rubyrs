@@ -3919,6 +3919,12 @@ impl Vm {
     // same metacharacter set Ruby's Regexp.escape does for
     // ASCII; rack-cors uses this to quote user-supplied
     // origin hostnames before compiling a Regexp.
+    //
+    // Gated on the `regex` feature alongside the sibling
+    // `Regexp.compile` / `Regexp.new` arm above — same
+    // metacharacter handling lives in the `regex` crate and is
+    // unavailable in no-default-features builds (wasm32-wasip1).
+    #[cfg(feature = "regex")]
     if (name == "escape" || name == "quote")
         && let Value::Class(cls) = &recv
         && cls.name.as_str() == "Regexp"

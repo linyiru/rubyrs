@@ -523,7 +523,7 @@ impl Vm {
                 for caps in native.captures_iter(&source) {
                     any_match = true;
                     let m = caps.get(0).expect("ICE: captures.get(0) is always Some on a successful match");
-                    out.extend_from_slice(source[last_end..m.start()].as_bytes());
+                    out.extend_from_slice(&source.as_bytes()[last_end..m.start()]);
                     // Populate `$~` / `$1..$N` for the block body.
                     // Mirrors the snapshot shape `str_bracket_regex`
                     // (~line 2179) builds for `s[/pat/, N]`.
@@ -584,7 +584,7 @@ impl Vm {
                     let _ = last_match_before;
                     g.vm.last_match = None;
                 }
-                out.extend_from_slice(source[last_end..].as_bytes());
+                out.extend_from_slice(&source.as_bytes()[last_end..]);
                 // Bang siblings return nil when the pattern never
                 // matched (block was never invoked); otherwise
                 // mutate self in place and return self. The
