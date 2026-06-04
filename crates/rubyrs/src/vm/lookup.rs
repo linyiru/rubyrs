@@ -1469,7 +1469,19 @@ impl Vm {
     {
         let frame = self.frames.last().expect("ICE: super with empty frames");
         let self_val = frame.self_val.clone();
-        let defining = match frame.defining_class.clone() {
+        // CRuby allows `super` inside a block — it forwards to the
+        // enclosing METHOD's super-chain. Walk the frame stack
+        // top-down for the first frame that carries a
+        // `defining_class`. The block frames in between inherit
+        // their method_name from the enclosing method proto (set in
+        // compile_block via parent.method_name.clone), so the
+        // name_id passed in is already correct for the method's
+        // dispatch; only the defining_class lookup needs to skip
+        // block frames. Without this walk,
+        // `def foo; xs.each { |x| super(x) }; end` tripped
+        // "super called outside of method" because the iter block's
+        // own defining_class is None.
+        let defining = match self.frames.iter().rev().find_map(|f| f.defining_class.clone()) {
             Some(c) => c,
             None => {
                 return Err(self.trap(crate::error::RubyError::NoMethodError {

@@ -2469,7 +2469,24 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     if !buf.is_empty() {
                         chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
                     }
-                    chunks.push(tr(ctx, &inner));
+                    // Wrap the splat'd expression with `Array(x)` so
+                    // CRuby's coerce-to-array contract holds:
+                    //   - Array → unchanged
+                    //   - nil   → []
+                    //   - other → [other] (`[*"foo"]` → `["foo"]`)
+                    // Without this, `[*scalar]` collapsed to `scalar`
+                    // (the chained `Array#+` reducer relied on every
+                    // chunk being an Array). Surfaced by
+                    // sinatra-contrib/MultiRoute's
+                    // `routes = [*args.pop]` idiom — when `args.pop`
+                    // returned a String the routes loop tripped
+                    // `String#each`.
+                    chunks.push(sp(node, Expr::Call {
+                        receiver: None,
+                        name: "Array".into(),
+                        args: vec![tr(ctx, &inner)],
+                        kwargs_trailing: false,
+                    }));
                 } else {
                 buf.push(tr(ctx, en));
             }
