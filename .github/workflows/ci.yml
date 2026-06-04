@@ -1163,3 +1163,30 @@ jobs:
             --features default,stdlib,_http_server,_fiber,_json_native,_sqlite \
             --test diff_cruby \
             -- --nocapture
+
+      - name: Run diff_cruby under STRESS_GC=1
+        # GC-rooting safety net. The `test` job's STRESS_GC step
+        # only runs the default-feature test set (no stdlib gates,
+        # no `_http_server`, no `_sqlite`), so the broad parity
+        # subset that's compiled here under the full feature flags
+        # never exercised STRESS_GC pre-this-step. Catches PinGuard
+        # gaps in dispatch paths that only land under the full
+        # feature combination — surfaced PR by PR as the
+        # parity matrix expands (commit b8e326f6 fixed one such
+        # gap in Klass.new block-form initialize; the gap had
+        # silently shipped for ~15 commits before reproducing here
+        # would have caught it on PR).
+        #
+        # diff_framework is intentionally NOT in this STRESS_GC
+        # run — its HTTP-server harness is throughput-bound and
+        # STRESS_GC turns it into a multi-hour wait. The dispatch-
+        # path coverage diff_cruby gives is the high-value part;
+        # framework fixtures rely on the same dispatch routines
+        # so any STRESS_GC bug surfaces here first anyway.
+        run: |
+          cargo test --release \
+            --features default,stdlib,_http_server,_fiber,_json_native,_sqlite \
+            --test diff_cruby \
+            -- --nocapture
+        env:
+          STRESS_GC: "1"
