@@ -58,7 +58,11 @@ pub mod regex_engine;
 #[cfg(feature = "_sqlite")]
 mod sqlite;
 mod signals;
-#[cfg(feature = "stdlib")]
+// `stdlib_vendor` is unconditionally available so the "always-on"
+// shim source (currently the URI parser shim that rack/utils.rb
+// load-time code depends on) compiles in every build. The fuller
+// per-stdlib bodies inside still gate `stdlib_vendor_source` on
+// `--features stdlib` — see ADR 0017.
 mod stdlib_vendor;
 mod value;
 mod vm;

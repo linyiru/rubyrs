@@ -465,7 +465,21 @@ impl Vm {
                 g.pin(recv.clone());
                 g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
-                let mut out = String::with_capacity(source.len());
+                // Accumulate the result as raw bytes, not as a Rust
+                // `String`. A block that returns a binary-encoded
+                // `Value::Str` (the natural CRuby idiom for
+                // `gsub(/%XX/) { [hex].pack('C') }` percent-decoding,
+                // or any code that builds a String from non-UTF-8
+                // bytes) must have those bytes propagate verbatim
+                // into the result; appending via `String::push_str`
+                // would route them through `to_string_lossy` and
+                // rewrite each invalid byte to `U+FFFD` (3 bytes),
+                // corrupting multi-byte sequences like `%E4%B8%AD`
+                // (中) into `���`. Literal pre/post-match segments
+                // come from `source` which is already UTF-8 (the
+                // receiver-side lossy decode happened upstream, a
+                // separate concern); their bytes are pushed unchanged.
+                let mut out: Vec<u8> = Vec::with_capacity(source.len());
                 let mut last_end = 0usize;
                 let mut any_match = false;
                 // CRuby clears `$~` to nil when the gsub call
@@ -509,7 +523,7 @@ impl Vm {
                 for caps in native.captures_iter(&source) {
                     any_match = true;
                     let m = caps.get(0).expect("ICE: captures.get(0) is always Some on a successful match");
-                    out.push_str(&source[last_end..m.start()]);
+                    out.extend_from_slice(source[last_end..m.start()].as_bytes());
                     // Populate `$~` / `$1..$N` for the block body.
                     // Mirrors the snapshot shape `str_bracket_regex`
                     // (~line 2179) builds for `s[/pat/, N]`.
@@ -540,8 +554,23 @@ impl Vm {
                         BlockStep::Break(r) => return Ok(Some(r)),
                         BlockStep::Value(r) => r,
                     };
-                    let r_str = r.to_display(&g.vm.heap, &g.vm.interner);
-                    out.push_str(&r_str);
+                    // Block-result splice. For `Value::Str`, copy the
+                    // RStr's raw bytes directly — preserves
+                    // binary-encoded output (e.g. `[byte].pack('C')`)
+                    // through gsub without the lossy UTF-8 round-trip
+                    // `to_display` does on a Str (it routes through
+                    // `RStr::to_string_lossy` which substitutes
+                    // `U+FFFD` for every invalid byte). Non-Str values
+                    // (Int, Float, Sym, nil/true/false, etc.) have
+                    // canonical UTF-8 string forms — `to_display`
+                    // gives them and the resulting `String` bytes go
+                    // in verbatim.
+                    if let Value::Str(rs) = &r {
+                        out.extend_from_slice(&rs.borrow());
+                    } else {
+                        let r_str = r.to_display(&g.vm.heap, &g.vm.interner);
+                        out.extend_from_slice(r_str.as_bytes());
+                    }
                     last_end = m_end;
                     if only_first { break; }
                 }
@@ -555,7 +584,7 @@ impl Vm {
                     let _ = last_match_before;
                     g.vm.last_match = None;
                 }
-                out.push_str(&source[last_end..]);
+                out.extend_from_slice(source[last_end..].as_bytes());
                 // Bang siblings return nil when the pattern never
                 // matched (block was never invoked); otherwise
                 // mutate self in place and return self. The
@@ -564,13 +593,12 @@ impl Vm {
                 // (e.g. `"a".sub!(/a/) { |m| m }`).
                 if is_bang {
                     if !any_match { return Ok(Some(Value::Nil)); }
-                    let new_bytes = out.into_bytes();
-                    if *s.borrow() != new_bytes {
-                        *s.borrow_mut() = new_bytes;
+                    if *s.borrow() != out {
+                        *s.borrow_mut() = out;
                     }
                     return Ok(Some(Value::Str(s.clone())));
                 }
-                return Ok(Some(Value::new_str(out)));
+                return Ok(Some(Value::new_str_bytes(out)));
             }
         // `s.each_byte { |b| ... }` — yield each byte (Int 0..255)
         // to the block, then return the receiver String. CRuby

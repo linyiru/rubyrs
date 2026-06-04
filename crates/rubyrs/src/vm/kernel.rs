@@ -1589,6 +1589,27 @@ impl Vm {
                                     })
                                 });
                             }
+                            // Always-on extras: minimal pure-Ruby shims that
+                            // ecosystem code assumes at module-load time
+                            // (e.g. `URI::DEFAULT_PARSER` for rack/utils.rb).
+                            // Runs after the constant shells are materialised
+                            // so the shim's `module URI` reopens the same
+                            // class the shells installed. Not feature-gated
+                            // because Sinatra-on-rubyrs in the default build
+                            // relies on it; the broader stdlib body still
+                            // lives behind `--features stdlib` above.
+                            if let Some(src) =
+                                crate::stdlib_vendor::always_on_stub_extras(&path_str)
+                            {
+                                let vfs_path = std::path::PathBuf::from(
+                                    format!("<vendor-extras>/{}.rb", &*path_str)
+                                );
+                                if let Err(t) = self.compile_and_run_source(
+                                    vfs_path, src.to_string()
+                                ) {
+                                    return Some(Err(t));
+                                }
+                            }
                             Some(Ok(Value::Bool(true)))
                         } else if self.require_satisfied_by_existing_constant(&path_str) {
                             // Lenient fallback: if the namespace
