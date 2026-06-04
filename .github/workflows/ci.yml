@@ -979,6 +979,14 @@ jobs:
     # rubyrs's primitive-class `instance_methods(false)` returns
     # empty, so CRuby DelegateClass's reflection-driven path
     # can't enumerate Hash's method list),
+    # `rack_protection_smoke` (real `rack-protection-4.2.1`
+    # base.rb + FrameOptions + XSSHeader + PathTraversal vendored
+    # 1:1 — second middleware-shaped vendoring after
+    # rack_cors_smoke. Exercises the security-header injection
+    # paths AND the PathTraversal cleanup of `%2e%2e/` parent-pop
+    # and `%2f` encoded-slash. Ships no-op `rack.rb` / `digest.rb`
+    # / `logger.rb` / `uri.rb` stubs; required Array#any?
+    # no-block predicate),
     # `json_smoke` + `json_canon` (menu #2),
     # `as_lite_canon` (menu #3), and `sqlite_smoke` (menu #4 / ADR
     # 0027 Phase 4). Each fixture is one ship gate, not a
@@ -1091,6 +1099,12 @@ jobs:
           # install satisfies the `require 'sinatra/flash'`
           # availability probe.
           gem install sinatra-flash
+          # `rack-protection` is the parity oracle for the
+          # `rack_protection_smoke` fixture — base.rb + 3
+          # security-header middlewares vendored 1:1. Gem install
+          # makes the `require 'rack/protection/frame_options'`
+          # availability probe succeed.
+          gem install rack-protection
 
       - name: Cache cargo registry + build
         uses: actions/cache@v5

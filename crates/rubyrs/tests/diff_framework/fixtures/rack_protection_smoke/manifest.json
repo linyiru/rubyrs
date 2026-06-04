@@ -1,0 +1,39 @@
+{
+  "_doc": "Real `rack-protection-4.2.1` vendored 1:1 (base.rb + FrameOptions + XSSHeader + PathTraversal). Nineteenth diff_framework fixture; second middleware-shaped vendoring (after rack_cors_smoke). Ships no-op `rack.rb`/`rack/utils.rb`/`digest.rb`/`logger.rb`/`uri.rb` stubs because the rubyrs runtime doesn't load real stdlib for those — the three middlewares we vendor don't reach any of the omitted symbols. Tests cover the `X-Frame-Options`/`X-XSS-Protection`/`X-Content-Type-Options` header injection paths AND the PathTraversal cleanup via the `keep_headers` manifest hook + an `/echo_path` route that surfaces the cleaned PATH_INFO. PATH_INFO restoration on the `ensure` block of PathTraversal is also exercised — after the request, the original PATH_INFO is back so downstream middlewares see it unchanged.",
+  "name": "rack_protection_smoke",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 8000,
+    "duration_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sinatra/base", "rack/protection/frame_options"]
+  },
+  "keep_headers": [
+    "X-Frame-Options",
+    "X-XSS-Protection",
+    "X-Content-Type-Options"
+  ],
+  "scenarios": [
+    { "name": "root_headers",       "method": "GET", "path": "/" },
+    { "name": "clean_headers",      "method": "GET", "path": "/clean" },
+    { "name": "echo_no_traversal",  "method": "GET", "path": "/echo_path" },
+    { "name": "echo_parent_pop",    "method": "GET", "path": "/x/%2e%2e/echo_path" },
+    { "name": "echo_encoded_slash", "method": "GET", "path": "/echo_path%2fbar" }
+  ],
+  "normalize": [
+    {
+      "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": "rubyrs micro-Sinatra \\(_http_server battery\\)",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": ";charset=utf-8",
+      "replacement": ""
+    }
+  ]
+}

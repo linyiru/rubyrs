@@ -907,6 +907,33 @@ impl Vm {
                         return Err(self.arity_error_arg0_or_1_int(name, args));
                     }
                     ("empty?", []) => Some(Value::Bool(self.heap.array(id).is_empty())),
+                    // `Array#any?` / `Array#all?` / `Array#none?` /
+                    // `Array#one?` — no-block forms. CRuby's contract:
+                    //   * `any?` — true iff at least one element is truthy
+                    //   * `all?` — true iff every element is truthy
+                    //   * `none?` — true iff no element is truthy
+                    //   * `one?` — true iff exactly one element is truthy
+                    // The block-form lives in iter.rs's
+                    // `iter_array_filter` arm; this set covers the
+                    // (no-block) Enumerable shape gems reach for
+                    // (rack-protection's `parts.any?` is the
+                    // motivating use case).
+                    ("any?", []) => {
+                        let a = self.heap.array(id);
+                        Some(Value::Bool(a.iter().any(|x| x.is_truthy())))
+                    }
+                    ("all?", []) => {
+                        let a = self.heap.array(id);
+                        Some(Value::Bool(a.iter().all(|x| x.is_truthy())))
+                    }
+                    ("none?", []) => {
+                        let a = self.heap.array(id);
+                        Some(Value::Bool(!a.iter().any(|x| x.is_truthy())))
+                    }
+                    ("one?", []) => {
+                        let a = self.heap.array(id);
+                        Some(Value::Bool(a.iter().filter(|x| x.is_truthy()).count() == 1))
+                    }
                     ("include?", [needle]) | ("member?", [needle]) => {
                         let a = self.heap.array(id);
                         let hit = a.iter().any(|x| x.ruby_eq(needle, &self.heap));

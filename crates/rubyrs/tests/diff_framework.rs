@@ -757,6 +757,11 @@ fn sinatra_flash_smoke() {
     run_fixture("sinatra_flash_smoke");
 }
 
+#[test]
+fn rack_protection_smoke() {
+    run_fixture("rack_protection_smoke");
+}
+
 
 #[test]
 fn json_smoke() {
