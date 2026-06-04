@@ -2995,6 +2995,13 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util"
         | "rack"
+        // `tilt`: Sinatra 4 requires it at module-load time. The
+        // shim (always_on_stub_extras) installs a `Tilt` module
+        // with a no-op `default_mapping` good enough for hello-
+        // world Sinatra apps that don't actually render views.
+        // Real template rendering remains out of scope per
+        // ADR 0017 — `Tilt[engine]` etc. raise NoMethodError.
+        | "tilt"
         // ActiveSupport-lite — menu item 3. Three common require
         // shapes, all routed to the same canon under `stdlib`
         // (see `stdlib_vendor::stdlib_vendor_source`). Default

@@ -42,6 +42,15 @@ pub(crate) fn always_on_stub_extras(name: &str) -> Option<&'static str> {
         "uri" | "uri/generic" | "uri/common" => {
             Some(include_str!("stdlib_vendor/uri_parser_shim.rb"))
         }
+        // `tilt`: Sinatra 4 `require`s tilt at module-load time but
+        // only calls `Tilt.default_mapping.extensions_for(engine)`
+        // from inside the view-rendering path. A minimal shim with
+        // an `EmptyMapping` keeps `require "tilt"` succeeding so
+        // Sinatra-on-rubyrs reaches a route handler; real template
+        // rendering remains absent (ADR 0017 feature-absent surface).
+        "tilt" => {
+            Some(include_str!("stdlib_vendor/tilt_shim.rb"))
+        }
         _ => None,
     }
 }
