@@ -90,7 +90,10 @@ The CI gates (every job in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) AND
 [`.github/workflows/cargo-deny.yml`](.github/workflows/cargo-deny.yml)
 must be green; the jobs themselves run in parallel — only steps
-within each job have a fire order):
+within each job have a fire order). For the
+**what's-in-the-gate / how-to-run-locally / how-to-bump
+reference**, see [`docs/CI_GATES.md`](docs/CI_GATES.md). The
+list below names what blocks a merge:
 
 - **`cargo clippy --release --all-targets --workspace -- -D warnings`**
   (Test job, both ubuntu + macos). Catches style / pedantic /

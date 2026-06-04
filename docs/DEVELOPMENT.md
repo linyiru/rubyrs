@@ -89,32 +89,29 @@ The embedding-API surface is pinned by `crates/rubyrs/tests/embed.rs`.
 
 ## CI gates
 
-- **`diff_cruby`** — 79 fixtures, byte-identical stdout to CRuby.
-- **`panic-budget`** — counts `panic!` / `unwrap` / `expect` per
-  file; one-way ratchet down. Bumps require an explicit comment
-  in `docs/PANIC_AUDIT.md`.
-- **`perf/check.sh`** — peak-RSS + wall-time ratchet over
-  `perf/baselines.tsv`. Run locally with `bash perf/check.sh`.
-- **`STRESS_GC=1`** — second test job collects on every GC point.
-- **`gapscan`** — per-PR diff comment summarising subset-coverage
-  changes against real Ruby corpora (via the GitHub Actions
-  workflow).
-- **`cargo-deny`** — supply-chain gate: CVEs (RustSec advisory
-  DB), license-policy violations, banned-crate enforcement, and
-  source-registry pinning. Config at workspace-root `deny.toml`;
-  workflow at [`.github/workflows/cargo-deny.yml`](../.github/workflows/cargo-deny.yml)
-  (extracted from `ci.yml` so a `paths:` filter can skip the gate
-  on docs-only / Ruby-source-only PRs). A weekly cron still runs
-  on Sundays so an advisory-DB update against a frozen
-  `Cargo.lock` doesn't go unnoticed. Run locally with
-  `cargo deny check` (after
-  `cargo install cargo-deny --locked --version 0.19.8`; the
-  `0.19.8` here is a manual-sync copy of the `version:` input on
-  the `install-pinned-cargo-tool` composite call in
-  `.github/workflows/cargo-deny.yml` — bump both together).
-  Bumping the cargo-deny pin or adding a license/exception is a
-  deliberate commit; the new ruleset must pass locally before
-  push.
+For the complete map of what each gate checks, how to inspect
+failures locally, and how to bump pins / baselines, see
+[`docs/CI_GATES.md`](CI_GATES.md). Quick summary of the 9 gates:
+
+- **`Test (×2 OS)`** — clippy, build, `cargo test`, `STRESS_GC=1`,
+  cext bundle smoke. Bulk of regression catches.
+- **`Build (wasm32-wasip1)`** — wasm portability, cext-off path.
+- **`Panic budget`** — per-file `panic!`/`unwrap`/`expect` ratchet
+  (down-only); see [`docs/PANIC_AUDIT.md`](PANIC_AUDIT.md).
+- **`Perf budget`** — peak-RSS + walltime ratchet over
+  `perf/baselines.tsv`; `bash perf/check.sh` locally.
+- **`Perf budget (JSON)`** — `_json_native` per-iteration walltime.
+- **`Miri smoke`** — Stacked + Tree Borrows UB scan on unsafe FFI.
+- **`Coverage`** — per-file line% ratchet; see
+  [`docs/COVERAGE.md`](COVERAGE.md).
+- **`Framework parity`** — real Sinatra/Rack gem diff, vendored
+  1:1 (sinatra_lite, rack_cors, sinatra_cors, sinatra_param, …).
+- **`Supply-chain (cargo-deny)`** — CVE/license/bans/source
+  registry policy at workspace-root [`deny.toml`](../deny.toml).
+  Paths-filtered + weekly cron. Run locally:
+  `cargo deny check` after
+  `cargo install cargo-deny --locked --version 0.19.8`
+  (manual-sync literal — bump etiquette in `CI_GATES.md`).
 
 ## Clippy
 
