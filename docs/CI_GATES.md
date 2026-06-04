@@ -70,7 +70,7 @@ a belt-and-suspenders cext-bundle build verification step.
 
 Builds the crate for wasm32-wasip1 with `--no-default-features`
 (cext requires `libloading`/`dlopen` which wasm32-wasi doesn't
-have — see [ADR 0015](adr/0015-wasm32-wasip1-cext.md)). Then
+have — see [ADR 0015](adr/0015-concentric-architecture.md)). Then
 `perf/wasm_check.sh` does the AOT-compile + wizer pre-init +
 cold-start measurement.
 
@@ -87,10 +87,15 @@ ratcheted: **direction is always down, never up**. The intended
 workflow is to convert a panic site to a `Trap`, then lower the
 budget.
 
-- **Local**: `bash scripts/panic-budget.sh` (greps + diffs
-  against in-tree per-file JSON budgets).
-- **Source of truth**:
-  `crates/rubyrs/data/panic_budgets/*.json`.
+- **Local**: no standalone script — the logic is the inline
+  `Count panics` step of the `panic-budget` job in `ci.yml`
+  (greps `panic!` / `.unwrap()` / `.expect(` per file, excluding
+  `#[cfg(test)]` blocks and doc comments, then diffs against the
+  per-file budget).
+- **Source of truth**: the per-file `check <file> <budget>` calls
+  inline in that `ci.yml` step (budgets + bump history live
+  there); see [`docs/PANIC_AUDIT.md`](PANIC_AUDIT.md) for the
+  panic-site classification and how to lower a budget.
 - **Bump policy**: lowering = good (lands with the conversion
   commit). Raising = needs reviewer agreement the new site is
   ICE-class (invariant the compiler/dispatch loop already
