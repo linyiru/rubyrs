@@ -4,7 +4,7 @@
 # (lib/erb/compiler.rb:238 — `StringScanner.new(@src)` inside
 # both SimpleScanner and ExplicitScanner) is the motivating
 # consumer. Without this vendor, ERB load surfaces
-# "cannot find C ext: strscan".
+# `LoadError: cannot load such file -- strscan`.
 #
 # This fixture pins the API surface ERB actually exercises:
 # `new`, `eos?`, `scan(regex)`, `[](n)`, plus the few utility

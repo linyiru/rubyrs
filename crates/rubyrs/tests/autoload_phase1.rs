@@ -83,6 +83,40 @@ fn autoload_entry_cleared_after_fire() {
 }
 
 #[test]
+fn autoload_to_missing_path_raises_loaderror_at_first_reference() {
+    // Closes the autoload-Phase-1 footnote: when an autoload
+    // points at a file that doesn't exist, the first
+    // reference fires `require`, which now correctly raises
+    // `LoadError: cannot load such file -- <name>` (was
+    // `RuntimeError: cannot find C ext: <name>` pre-fix).
+    let dir = tmp();
+    let driver = dir.join("autoload_p1_missing_driver.rb");
+    fs::write(&driver,
+        "autoload(:AutoloadP1Missing, \"definitely_not_a_real_file_xyz_abc\")\n\
+         begin\n  \
+         AutoloadP1Missing\n\
+         rescue LoadError => e\n  \
+         puts \"caught LoadError: #{e.message}\"\n\
+         end\n",
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs).arg(&driver).output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rubyrs exited non-zero ({:?}).\nstdout:\n{}\nstderr:\n{}",
+        out.status.code(), stdout, stderr,
+    );
+    assert_eq!(
+        stdout.trim(),
+        "caught LoadError: cannot load such file -- definitely_not_a_real_file_xyz_abc",
+    );
+}
+
+#[test]
 fn autoload_subsequent_reference_does_not_re_require() {
     // The second reference must NOT call require again (the
     // entry has been removed and the constant is now resolved).
