@@ -518,13 +518,30 @@ fn require_missing_file_raises_loaderror_with_cruby_message() {
     // machine and mask the miss case. Computing it here also
     // keeps the message-pin exact: the same string flows into the
     // Ruby driver and into the expected assertion.
-    let missing_path = tmp.join("definitely_missing_for_loaderror_test.rb_nonext");
+    //
+    // Use an extension-less base name so neither the `.rb` probe
+    // (`find_ruby_source_candidate`) nor the cext auto-extension
+    // probe (`cext.rs`'s `.dylib`/`.bundle`/`.so`/`.dll` walk) can
+    // accidentally collide with a real file left behind from a
+    // prior local run. Then assert that *all* probed variants are
+    // absent up front — a stale `.rb` sibling under tmp would
+    // otherwise let the require silently succeed and the test
+    // would stop exercising the LoadError path it claims to pin.
+    let missing_path = tmp.join("definitely_missing_for_loaderror_test");
     let missing_str = missing_path.to_str().expect("tmp path is utf-8");
-    assert!(
-        !missing_path.exists(),
-        "test pre-condition: {} must not exist",
-        missing_str,
-    );
+    for ext in &["", ".rb", ".so", ".dylib", ".bundle", ".dll"] {
+        let probe = if ext.is_empty() {
+            missing_path.clone()
+        } else {
+            missing_path.with_extension(&ext[1..])
+        };
+        assert!(
+            !probe.exists(),
+            "test pre-condition: probed variant {:?} must not exist \
+             (left over from a prior run?)",
+            probe,
+        );
+    }
     fs::write(&driver_path, format!(
 r#"
 begin
