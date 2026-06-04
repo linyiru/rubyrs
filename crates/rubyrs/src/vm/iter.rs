@@ -1211,16 +1211,29 @@ impl Vm {
                 Some(early.unwrap_or(Value::Hash(id)))
             }
             (Value::Hash(id), "map", []) | (Value::Hash(id), "collect", []) => {
-                // `h.map { |k, v| ... }` — yields each (k, v) and
-                // collects block return values into a new Array.
-                // CRuby returns an `Enumerator` for no-block, which
-                // we don't have; falls through to NoMethodError if
-                // misused that way.
+                // `h.map { |pair| ... }` / `h.map { |k, v| ... }` —
+                // CRuby yields each entry as a single 2-elem Array
+                // `[k, v]`. Two-param blocks auto-destructure via
+                // the F4 prologue; single-param blocks receive the
+                // pair Array as their lone arg (the bug this fix
+                // closes — pre-fix we yielded two separate args,
+                // so `h.collect { |m| m }` returned `[:a, :b]`
+                // instead of `[[:a,1],[:b,2]]`). Mirrors the Hash#each
+                // shape exactly so the auto-destructure rules
+                // compose identically.
                 let id = *id;
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
                 let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                // Pre-pin every heap-ref k/v from the snapshot —
+                // same discipline as Hash#each: a block that mutates
+                // the receiver can't sweep entries held only via the
+                // Rust-local Vec.
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
                 let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
@@ -1228,7 +1241,13 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
-                    let r = match g.vm.step_block(block, vec![k, v], pre_frames)? {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    g.vm.pinned.push(Value::Array(pair_id));
+                    let step_result = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
+                    g.vm.pinned.pop();
+                    let r = match step_result? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
@@ -1251,6 +1270,10 @@ impl Vm {
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
                 let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
                 let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
@@ -1258,7 +1281,13 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
-                    let r = match g.vm.step_block(block, vec![k, v], pre_frames)? {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    g.vm.pinned.push(Value::Array(pair_id));
+                    let step_result = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
+                    g.vm.pinned.pop();
+                    let r = match step_result? {
                         BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
@@ -3378,9 +3407,19 @@ impl Vm {
                     let mut g = PinGuard::new(self);
                     g.pin(Value::Hash(*id));
                     g.pin(Value::Block(block));
+                    for (k, v) in &pairs {
+                        if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                        if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                    }
                     let pre_frames = g.vm.frames.len();
                     for (k, v) in pairs {
-                        let key = match g.vm.step_block(block, vec![k.clone(), v.clone()], pre_frames)? {
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                        g.vm.pinned.push(Value::Array(pair_id));
+                        let step_result = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
+                        g.vm.pinned.pop();
+                        let key = match step_result? {
                             BlockStep::MethodReturn => break,
                             BlockStep::Break(r) => { early = Some(r); break; }
                             BlockStep::Value(r) => r,
@@ -3438,22 +3477,24 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(*id));
                 g.pin(Value::Block(block));
+                for (k, v) in &pairs_in {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
                 let pre_frames = g.vm.frames.len();
                 for (k, v) in pairs_in {
-                    let key = match g.vm.step_block(block, vec![k.clone(), v.clone()], pre_frames)? {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    g.vm.pinned.push(Value::Array(pair_id));
+                    let step_result = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
+                    g.vm.pinned.pop();
+                    let key = match step_result? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
-                    // Pin each accumulated triple component so the
-                    // next iter's step_block (which may GC) can't
-                    // sweep them. Narrowed via `is_gc_heap_ref` to
-                    // skip immediate / Rc-shared variants — those
-                    // aren't GC-managed and pinning them only adds
-                    // GC scan work.
                     if key.is_gc_heap_ref() { g.pin(key.clone()); }
-                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
-                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
                     keyed.push((key, k, v));
                 }
                 if let Some(e) = early { return Ok(Some(e)); }
@@ -3504,20 +3545,28 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(*id));
                 g.pin(Value::Block(block));
+                for (k, v) in &pairs_in {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
                 let pre_frames = g.vm.frames.len();
                 for (k, v) in pairs_in {
-                    let group = match g.vm.step_block(block, vec![k.clone(), v.clone()], pre_frames)? {
+                    // `group_by` yields a single pair Array (CRuby's
+                    // Enumerable shape) — same as `map`/`each`. The
+                    // SAME `pair_id` Array is BOTH the block arg AND
+                    // the value pushed into the bucket below, so the
+                    // pinning needs to span the entire window.
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair = Value::Array(pid);
+                    g.pin(pair.clone());
+                    let step_result = g.vm.step_block(block, vec![pair.clone()], pre_frames);
+                    let group = match step_result? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
-                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
-                    let pair = Value::Array(pid);
-                    // `pair` is always a fresh heap Array → always
-                    // needs pinning. `group` is block-returned and
-                    // may be immediate / Rc-shared; narrow via
-                    // `is_gc_heap_ref` to skip the GC scan cost.
-                    g.pin(pair.clone());
                     if group.is_gc_heap_ref() { g.pin(group.clone()); }
                     let pos = buckets.iter().position(|(gk, _)| gk.ruby_eql(&group, &g.vm.heap));
                     match pos {
