@@ -1,0 +1,81 @@
+{
+  "_doc": "Real `rack-cors-3.0.0` gem vendored 1:1 under `vendor/rack/cors.rb`. Exercises sinatra_lite's new `use Klass` middleware chain end-to-end with an unmodified rack-cors source, the Step-1 Regexp.{compile,quote,escape} class methods (rack-cors converts `origins 'host'` declarations to Regexp via Regexp.compile(...)), and the Step-2 Rack::Utils / Rack::Headers shim (rack-cors's evaluate_path calls Rack::Utils.{valid_path?,unescape_path,clean_path_info}, and probes defined?(Rack::Headers) to pick its header-wrapping strategy).",
+  "name": "rack_cors_smoke",
+  "server": {
+    "script": "app.rb",
+    "ready_probe_path": "/",
+    "boot_timeout_ms": 8000,
+    "duration_secs": 15
+  },
+  "cruby": {
+    "required_gems": ["sinatra/base", "rack/cors"]
+  },
+  "keep_headers": [
+    "Access-Control-Allow-Origin",
+    "Access-Control-Allow-Methods",
+    "Access-Control-Allow-Headers",
+    "Access-Control-Allow-Credentials",
+    "Access-Control-Expose-Headers",
+    "Access-Control-Max-Age",
+    "Vary"
+  ],
+  "scenarios": [
+    { "name": "root_no_origin",     "method": "GET", "path": "/" },
+    { "name": "public_no_origin",   "method": "GET", "path": "/public/info" },
+    {
+      "name": "public_wildcard_origin",
+      "method": "GET", "path": "/public/info",
+      "headers": { "Origin": "http://anywhere.example" }
+    },
+    {
+      "name": "api_allowed_origin",
+      "method": "GET", "path": "/api/users",
+      "headers": { "Origin": "http://example.com" }
+    },
+    {
+      "name": "api_rejected_origin",
+      "method": "GET", "path": "/api/users",
+      "headers": { "Origin": "http://evil.example" }
+    },
+    {
+      "name": "preflight_allowed",
+      "method": "OPTIONS", "path": "/api/users",
+      "headers": {
+        "Origin": "http://example.com",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type"
+      }
+    },
+    {
+      "name": "preflight_bad_method",
+      "method": "OPTIONS", "path": "/api/users",
+      "headers": {
+        "Origin": "http://example.com",
+        "Access-Control-Request-Method": "DELETE",
+        "Access-Control-Request-Headers": "content-type"
+      }
+    },
+    {
+      "name": "preflight_bad_origin",
+      "method": "OPTIONS", "path": "/api/users",
+      "headers": {
+        "Origin": "http://evil.example",
+        "Access-Control-Request-Method": "POST"
+      }
+    }
+  ],
+  "normalize": [
+    {
+      "pattern": "CRuby \\+ Sinatra [0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": "rubyrs micro-Sinatra \\(_http_server battery\\)",
+      "replacement": "<this-runtime>"
+    },
+    {
+      "pattern": ";charset=utf-8",
+      "replacement": ""
+    }
+  ]
+}

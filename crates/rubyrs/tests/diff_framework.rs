@@ -723,6 +723,11 @@ fn sinatra_param_smoke() {
 }
 
 #[test]
+fn rack_cors_smoke() {
+    run_fixture("rack_cors_smoke");
+}
+
+#[test]
 fn json_smoke() {
     run_fixture("json_smoke");
 }

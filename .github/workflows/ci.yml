@@ -934,6 +934,11 @@ jobs:
     # `sinatra_param_smoke` (real `sinatra-param-1.6.0` gem vendored
     # 1:1 — exercises helpers shape + param coercion across Integer/
     # Float/Boolean/Array + min/max/in/format validators + any_of),
+    # `rack_cors_smoke` (real `rack-cors-3.0.0` gem vendored 1:1 —
+    # first middleware-shaped vendoring; exercises sinatra_lite's
+    # new `use Klass` chain + Rack::Utils / Rack::Headers shim +
+    # Regexp.{compile,quote} for origin matching + safe-navigation
+    # `&.` for the Vary header walk),
     # `json_smoke` + `json_canon` (menu #2),
     # `as_lite_canon` (menu #3), and `sqlite_smoke` (menu #4 / ADR
     # 0027 Phase 4). Each fixture is one ship gate, not a
@@ -1024,6 +1029,13 @@ jobs:
           # vendored copy first; gem install is needed so the
           # availability probe (`require 'sinatra/param'`) passes.
           gem install sinatra-param
+          # `rack-cors` is the parity oracle for `rack_cors_smoke`
+          # — real `rack-cors-3.0.0` gem source vendored 1:1 under
+          # `vendor/rack/cors.rb`. Exercises sinatra_lite's new
+          # `use Klass` middleware chain end-to-end (the first
+          # vendored gem that's middleware-shaped rather than a
+          # Sinatra plugin).
+          gem install rack-cors
 
       - name: Cache cargo registry + build
         uses: actions/cache@v5
