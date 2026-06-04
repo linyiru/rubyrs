@@ -13,6 +13,8 @@ class RackProtectionSmokeApp < Sinatra::Base
   use Rack::Protection::FrameOptions
   use Rack::Protection::XSSHeader
   use Rack::Protection::PathTraversal
+  use Rack::Protection::ReferrerPolicy
+  use Rack::Protection::IPSpoofing
 
   # Routes that exercise the security-header-injection paths.
   get "/" do

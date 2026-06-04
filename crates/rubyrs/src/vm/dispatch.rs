@@ -5098,6 +5098,47 @@ impl Vm {
                 self.stack.push(self_val);
                 return Ok(());
             }
+            // Bareword `alias_method(new, old)` inside a Class
+            // singleton method (self is the Class). Sibling of the
+            // explicit-receiver runtime arm — pre-fix this fell
+            // through to the no_recv NoMethodError because
+            // alias_method isn't a builtin Kernel method. rack-
+            // protection's base.rb hits this via
+            // `def self.default_reaction(reaction); alias_method(
+            // :default_reaction, reaction); end`.
+            if &*name == "alias_method" && args.len() == 2
+                && let Value::Class(target) = &self_val {
+                let new_id_opt = match &args[0] {
+                    Value::Sym(id) => Some(*id),
+                    Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
+                    _ => None,
+                };
+                let old_id_opt = match &args[1] {
+                    Value::Sym(id) => Some(*id),
+                    Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
+                    _ => None,
+                };
+                if let (Some(new_id), Some(old_id)) = (new_id_opt, old_id_opt) {
+                    let m = self.lookup_method_uncached(target, old_id);
+                    match m {
+                        Some(method) => {
+                            target.methods.borrow_mut().insert(new_id, method);
+                            self.method_gen = self.method_gen.wrapping_add(1);
+                            self.stack.push(Value::Class(target.clone()));
+                            return Ok(());
+                        }
+                        None => {
+                            let old_name = self.interner.resolve(old_id).to_string();
+                            return Err(self.trap(RubyError::NameError {
+                                msg: format!(
+                                    "undefined method '{}' for class '{}'",
+                                    old_name, target.name,
+                                ),
+                            }));
+                        }
+                    }
+                }
+            }
             if matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty()
                 && let Value::Class(target) = &self_val {
                     let is_prepend = &*name == "prepend";
@@ -6107,6 +6148,51 @@ impl Vm {
                 self.stack.push(recv.clone());
                 return Ok(());
             }
+        // `Klass.alias_method(:new_name, :old_name)` — runtime
+        // dispatch path (compile-time intercept at compiler.rs:225
+        // only catches the literal-Symbol shape inside a class
+        // body). Surfaced by rack-protection's
+        // `def self.default_reaction(reaction); alias_method(:default_reaction,
+        // reaction); end`, where the second arg is a parameter
+        // (not a literal Symbol). The lookup walks the receiver
+        // class's ancestor chain via `lookup_method_uncached`,
+        // installs the same Rc<Method> under the new name on the
+        // receiver class itself, and bumps `method_gen` so cached
+        // call sites re-resolve. CRuby's `alias_method` returns
+        // the receiver class; mirror that.
+        if let Value::Class(target) = &recv
+            && &*name == "alias_method" && args.len() == 2 {
+            let new_id_opt = match &args[0] {
+                Value::Sym(id) => Some(*id),
+                Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
+                _ => None,
+            };
+            let old_id_opt = match &args[1] {
+                Value::Sym(id) => Some(*id),
+                Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
+                _ => None,
+            };
+            if let (Some(new_id), Some(old_id)) = (new_id_opt, old_id_opt) {
+                let m = self.lookup_method_uncached(target, old_id);
+                match m {
+                    Some(method) => {
+                        target.methods.borrow_mut().insert(new_id, method);
+                        self.method_gen = self.method_gen.wrapping_add(1);
+                        self.stack.push(Value::Sym(new_id));
+                        return Ok(());
+                    }
+                    None => {
+                        let old_name = self.interner.resolve(old_id).to_string();
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!(
+                                "undefined method '{}' for class '{}'",
+                                old_name, target.name,
+                            ),
+                        }));
+                    }
+                }
+            }
+        }
         if let Value::Class(target) = &recv
             && matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty() {
                 // Explicit-receiver form: `MyClass.include(Mod)` /

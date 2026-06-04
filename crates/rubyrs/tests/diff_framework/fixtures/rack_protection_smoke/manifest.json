@@ -13,14 +13,25 @@
   "keep_headers": [
     "X-Frame-Options",
     "X-XSS-Protection",
-    "X-Content-Type-Options"
+    "X-Content-Type-Options",
+    "Referrer-Policy"
   ],
   "scenarios": [
     { "name": "root_headers",       "method": "GET", "path": "/" },
     { "name": "clean_headers",      "method": "GET", "path": "/clean" },
     { "name": "echo_no_traversal",  "method": "GET", "path": "/echo_path" },
     { "name": "echo_parent_pop",    "method": "GET", "path": "/x/%2e%2e/echo_path" },
-    { "name": "echo_encoded_slash", "method": "GET", "path": "/echo_path%2fbar" }
+    { "name": "echo_encoded_slash", "method": "GET", "path": "/echo_path%2fbar" },
+    {
+      "name": "ip_spoofing_clean",
+      "method": "GET", "path": "/",
+      "headers": { "X-Forwarded-For": "1.1.1.1, 2.2.2.2", "X-Real-Ip": "1.1.1.1" }
+    },
+    {
+      "name": "ip_spoofing_attack",
+      "method": "GET", "path": "/",
+      "headers": { "X-Forwarded-For": "1.1.1.1, 2.2.2.2", "X-Real-Ip": "9.9.9.9" }
+    }
   ],
   "normalize": [
     {

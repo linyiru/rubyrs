@@ -307,6 +307,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn class_new_and_dynamic_super() { run_diff("class_new_and_dynamic_super"); }
 #[test] fn hash_pair_yield() { run_diff("hash_pair_yield"); }
 #[test] fn array_predicates_no_block() { run_diff("array_predicates_no_block"); }
+#[test] fn alias_method_runtime() { run_diff("alias_method_runtime"); }
 #[test] fn lambdas() { run_diff("lambdas"); }
 #[test] fn string_mutation() { run_diff("string_mutation"); }
 #[test] fn defined() { run_diff("defined"); }
