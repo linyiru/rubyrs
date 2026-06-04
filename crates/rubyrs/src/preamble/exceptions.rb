@@ -32,6 +32,31 @@ class Exception
   def to_s
     @message
   end
+
+  # Minimal `Exception#full_message` for gem logging paths
+  # (rails / sentry-ruby / etc.) that call it without checking
+  # `respond_to?(:full_message)` first.
+  #
+  # CRuby's full_message renders the exception with its backtrace
+  # plus optional ANSI colour. Format:
+  #   "path:line:in 'method': msg (Class)\n\tfrom ...\n"
+  #
+  # rubyrs doesn't yet capture the trap backtrace into the
+  # rescued exception object (`Exception#backtrace` returns nil),
+  # so the rich form isn't reachable here. Return the trap-line
+  # shape with the message + class — the part gems actually log.
+  # When backtrace becomes available, extend this to emit the
+  # `\tfrom ...` continuation lines.
+  #
+  # `highlight:` and `order:` are accepted (and ignored) for
+  # API-compatibility — gems pass them positionally and would
+  # ArgumentError out if absent. Documented divergence: rubyrs
+  # never emits ANSI colour regardless of `highlight: true`,
+  # and `order: :bottom` doesn't reverse output (since there's
+  # only one line to reverse).
+  def full_message(highlight: false, order: :top)
+    "#{@message} (#{self.class})\n"
+  end
 end
 class StandardError < Exception
 end
