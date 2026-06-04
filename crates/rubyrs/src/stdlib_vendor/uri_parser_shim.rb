@@ -71,9 +71,16 @@ module URI
       # returns a binary single-byte String built via
       # `Array#pack('C')`; gsub splices those bytes verbatim into
       # the result, preserving multi-byte UTF-8 sequences across
-      # the encode/decode roundtrip. Encoding stays whatever the
-      # input is; Rack's `Utils.unescape` calls
-      # `.force_encoding(encoding)` after.
+      # the encode/decode roundtrip.
+      #
+      # Result encoding matches CRuby: bytes assembled via
+      # `pack('C')` are ASCII-8BIT (binary) — the resulting
+      # String carries those raw bytes through without imposing a
+      # text encoding interpretation. `Rack::Utils.unescape`
+      # always calls `.force_encoding(encoding)` after this
+      # (default UTF-8) to retag the binary result back to the
+      # caller's preferred encoding, so neither side ever assumes
+      # what `unescape` returns is already valid UTF-8.
       str.to_s.gsub(/%([0-9A-Fa-f]{2})/) do
         [$1.to_i(16)].pack('C')
       end

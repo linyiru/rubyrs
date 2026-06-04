@@ -12,10 +12,16 @@
 //!       checks in downstream code line up, and
 //!   (3) expose `escape` / `unescape` with CRuby-compatible
 //!       byte-level semantics — including a clean UTF-8
-//!       roundtrip, which sidesteps a known
-//!       `String#gsub`-with-binary-block lossy-decode bug in the
-//!       VM (the shim's `unescape` builds a byte array and packs
-//!       it once, avoiding the gsub pitfall).
+//!       roundtrip. The shim's `unescape` uses the canonical
+//!       CRuby idiom `gsub(/%XX/) { [hex].pack('C') }`, which
+//!       relies on the VM's `String#gsub` block-result path
+//!       preserving raw bytes from a `Value::Str` return; that
+//!       was a regression earlier in this PR (an inline
+//!       byte-array workaround sidestepped it) and is now fixed
+//!       at the VM layer (`vm/iter.rs`). This test file locks
+//!       BOTH halves: the shim contract AND the underlying
+//!       byte-fidelity guarantee, so a regression in either
+//!       surface re-breaks Sinatra-on-rubyrs.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -93,15 +99,22 @@ puts "roundtrip-empty: #{p.unescape(p.escape('')).inspect}"
 
 #[test]
 fn uri_default_parser_unescape_preserves_utf8_bytes() {
-    // Pins (3) for the UTF-8 case — the bug fixed in this shim.
+    // Pins (3) for the UTF-8 case — the contract that broke
+    // Sinatra-on-rubyrs at first probe and now must stay nailed
+    // down.
+    //
+    // Historical regression: before the VM fix in this PR,
     // `String#gsub(/%XX/) { |_| [byte].pack('C') }` (the natural
-    // CRuby idiom for `unescape`) currently lossy-decodes each
-    // raw byte returned from the block to U+FFFD in rubyrs's VM,
-    // so `%E4%B8%AD` (中) round-trips as `���` instead of `中`.
-    // The shim's byte-array + `pack('C*')` approach sidesteps
-    // that lossy path; this test locks the workaround so a
-    // future "simplify back to gsub" refactor doesn't silently
-    // re-break multi-byte URI decoding.
+    // CRuby idiom for `unescape`) lossy-decoded each raw byte
+    // returned from the block to `U+FFFD` (3 bytes), so
+    // `%E4%B8%AD` (中) round-tripped as `���` instead of `中`. The
+    // shim originally carried a byte-array + `pack('C*')`
+    // workaround; once the VM splice path was fixed to copy
+    // `Value::Str` raw bytes through unchanged, the shim reverted
+    // to the canonical CRuby shape — this test continues to lock
+    // BOTH halves end-to-end, so a future "simplify the VM gsub
+    // back to lossy" or "rewrite unescape" change that re-breaks
+    // multi-byte URI decoding gets caught here.
     let out = run(
 r#"
 require "uri"
