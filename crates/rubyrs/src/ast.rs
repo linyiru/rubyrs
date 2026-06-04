@@ -28,6 +28,12 @@ use crate::error::Span;
 pub(crate) struct TranslationCtx<'src> {
     pub(crate) errors: Vec<String>,
     pub(crate) source: Option<&'src [u8]>,
+    /// Monotonic counter that hands out unique synthesised local
+    /// names for safe-navigation desugaring (`recv&.foo` → temp
+    /// local + nil-test). `Cell<usize>` so the existing `&mut
+    /// TranslationCtx` doesn't need to thread a write borrow
+    /// through callers that just bump the counter.
+    pub(crate) safe_nav_count: std::cell::Cell<usize>,
 }
 
 impl<'src> TranslationCtx<'src> {
@@ -35,6 +41,7 @@ impl<'src> TranslationCtx<'src> {
         Self {
             errors: Vec::new(),
             source,
+            safe_nav_count: std::cell::Cell::new(0),
         }
     }
 
@@ -1473,7 +1480,61 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         });
     }
     if let Some(n) = node.as_call_node() {
-        let receiver = n.receiver().map(|r| Box::new(tr(ctx, &r)));
+        // Safe-navigation desugaring: `recv&.method(args)` evaluates
+        // `recv` ONCE; if it's nil the whole expression is nil,
+        // otherwise the regular call fires. We capture the original
+        // receiver into a fresh synthetic local (`__sn_N`), swap the
+        // call's receiver to a read of that local, and — at every
+        // return site below — wrap the call SExpr in a
+        // `Begin { LVarWrite(local, raw_recv); if local.nil? then nil
+        // else <call> end }` envelope. The single eval is what makes
+        // this different from the naive `recv.nil? ? nil :
+        // recv.method` rewrite — `recv` might be `expensive_call`,
+        // and we mustn't trigger its side effects twice. CRuby's
+        // `&.` triggers ONLY on `nil` (`false&.foo` calls), which is
+        // exactly the semantics `local.nil?` gives us.
+        let is_safe_nav = n.is_safe_navigation();
+        let raw_recv: Option<SExpr> = n.receiver().map(|r| tr(ctx, &r));
+        let safe_nav_local: Option<String> = if is_safe_nav && raw_recv.is_some() {
+            let c = ctx.safe_nav_count.get();
+            ctx.safe_nav_count.set(c + 1);
+            Some(format!("__sn_{c}"))
+        } else {
+            None
+        };
+        let receiver: Option<Box<SExpr>> = if let Some(name) = &safe_nav_local {
+            Some(Box::new(sp(node, Expr::LVarRead(name.clone()))))
+        } else {
+            raw_recv.clone().map(Box::new)
+        };
+        // Helper: wrap the call expression with the safe-nav
+        // envelope when active. No-op when this isn't a safe-nav
+        // call site — keeps every return site below uniform.
+        let wrap_sn = |call_expr: SExpr| -> SExpr {
+            match (&safe_nav_local, &raw_recv) {
+                (Some(local), Some(orig_recv)) => {
+                    let assign = sp(node, Expr::LVarWrite(local.clone(), Box::new(orig_recv.clone())));
+                    let nil_check = sp(node, Expr::Call {
+                        receiver: Some(Box::new(sp(node, Expr::LVarRead(local.clone())))),
+                        name: "nil?".into(),
+                        args: vec![],
+                        kwargs_trailing: false,
+                    });
+                    let nil_lit = sp(node, Expr::Nil);
+                    let if_expr = sp(node, Expr::If {
+                        cond: Box::new(nil_check),
+                        then_body: vec![nil_lit],
+                        else_body: vec![call_expr],
+                    });
+                    sp(node, Expr::Begin {
+                        body: vec![assign, if_expr],
+                        rescue: vec![],
+                        ensure: None,
+                    })
+                }
+                _ => call_expr,
+            }
+        };
         let name = cid_to_string(n.name());
         // Detect single-splat call `foo(*arr)` — args is a
         // single SplatNode wrapping an Array-shaped expression.
@@ -1515,12 +1576,12 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         if arg_nodes.len() == 1
             && let Some(sn) = arg_nodes[0].as_splat_node()
                 && let Some(splat_expr) = sn.expression() {
-                    return sp(node, Expr::Apply {
+                    return wrap_sn(sp(node, Expr::Apply {
                         receiver,
                         name,
                         splat: Box::new(tr(ctx, &splat_expr)),
                         block_arg: early_block_arg,
-                    });
+                    }));
                 }
         // Detect any splat anywhere in the args; if present and
         // multiple args exist, build a synthetic array expression
@@ -1562,12 +1623,12 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 receiver: Some(Box::new(lhs)),
                 name: "+".into(),
                 args: vec![rhs], kwargs_trailing: false }));
-            return sp(node, Expr::Apply {
+            return wrap_sn(sp(node, Expr::Apply {
                 receiver,
                 name,
                 splat: Box::new(acc),
                 block_arg: early_block_arg,
-            });
+            }));
         }
         // KeywordHashNode at the tail of an argument list — Prism
         // emits this for the `name: value, ...` sugar at call
@@ -1655,7 +1716,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     }
                     None => vec![],
                 };
-                return sp(node, Expr::CallWithBlock { receiver, name, args, block_params, block_body });
+                return wrap_sn(sp(node, Expr::CallWithBlock { receiver, name, args, block_params, block_body }));
             }
             // `&...` block argument. Two sub-cases:
             //   - `&:method` — symbol-to-proc. Synthesize a one-
@@ -1685,9 +1746,9 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 // Documented in docs/SUBSET.md.
                 if ba.expression().is_none() {
                     let block_arg = sp(node, Expr::LVarRead("&".to_string()));
-                    return sp(node, Expr::CallWithBlockArg {
+                    return wrap_sn(sp(node, Expr::CallWithBlockArg {
                         receiver, name, args, block_arg: Box::new(block_arg),
-                    });
+                    }));
                 }
             }
             if let Some(ba) = bnode.as_block_argument_node()
@@ -1699,11 +1760,11 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             receiver: Some(Box::new(sp(node, Expr::LVarRead(param_name.clone())))),
                             name: method_name,
                             args: vec![], kwargs_trailing: false });
-                        return sp(node, Expr::CallWithBlock {
+                        return wrap_sn(sp(node, Expr::CallWithBlock {
                             receiver, name, args,
                             block_params: vec![BlockParam::Single(param_name)],
                             block_body: vec![body_call],
-                        });
+                        }));
                     }
                     // Fall-through: any other expression becomes
                     // the block arg via CallWithBlockArg. CRuby
@@ -1711,12 +1772,12 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     // for our subset we only accept Value::Block
                     // directly (no implicit coercion).
                     let block_arg = tr(ctx, &expr);
-                    return sp(node, Expr::CallWithBlockArg {
+                    return wrap_sn(sp(node, Expr::CallWithBlockArg {
                         receiver, name, args, block_arg: Box::new(block_arg),
-                    });
+                    }));
                 }
         }
-        return sp(node, Expr::Call { receiver, name, args, kwargs_trailing });
+        return wrap_sn(sp(node, Expr::Call { receiver, name, args, kwargs_trailing }));
     }
     // `return`, `next`, `break` all collapse multi-arg forms
     // into a single value the same way CRuby does:
