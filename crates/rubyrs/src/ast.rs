@@ -3362,7 +3362,20 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 } else if exc.as_constant_path_node().is_some()
                     && let Some(joined) = flatten_constant_path(&exc)
                 {
-                    classes.push(joined);
+                    // Absolute paths (`rescue ::Foo::Bar`) carry a
+                    // leading `::` marker so the PushRescue handler
+                    // can skip the lex-walk and look up the joined
+                    // name at top level only. Without this, inside
+                    // `module Wrapper` that also defines `TopErr`,
+                    // `rescue ::TopErr` would lex-walk and match
+                    // `Wrapper::TopErr` instead of the intended
+                    // top-level class.
+                    let name = if is_constant_path_absolute(&exc) {
+                        format!("::{}", joined)
+                    } else {
+                        joined
+                    };
+                    classes.push(name);
                 }
                 // Anything else (dynamic expression in rescue
                 // position) is dropped silently for now.

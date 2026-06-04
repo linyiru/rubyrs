@@ -3017,31 +3017,50 @@ impl Vm {
                 // fall back to the bare lookup (covers top-level classes
                 // and `rescue Foo::Bar` whose sym is already qualified).
                 let filter = {
-                    let proto_idx = self.frames.last().expect("ICE: PushRescue no frame").proto_idx;
-                    let lex = self.protos[proto_idx].lexical_scope.clone();
-                    let mut found = None;
-                    if !lex.is_empty() {
-                        let bare_name = self.interner.resolve(filter_sym).to_string();
-                        for scope_sym in &lex {
-                            let scope_name = self.interner.resolve(*scope_sym).to_string();
-                            let qualified = format!("{scope_name}::{bare_name}");
-                            let qsym = self.interner.intern(&qualified);
-                            if let Some(c) = self.classes.get(&qsym).cloned() {
-                                found = Some(c);
-                                break;
-                            }
-                            if let Some(Value::Class(c)) = self.constants.get(&qsym) {
-                                found = Some(c.clone());
-                                break;
+                    // Clone the `Rc<str>` instead of materializing a
+                    // fresh `String` — the interner returns
+                    // `&Rc<str>` so the clone is a refcount bump.
+                    // Defer the lex-walk's `lexical_scope.clone()`
+                    // into the relative branch so absolute rescues
+                    // don't pay for the Vec copy.
+                    let bare_name: std::rc::Rc<str> = self.interner.resolve(filter_sym).clone();
+                    // Absolute paths (`rescue ::Foo::Bar`) carry a
+                    // leading `::` marker from the AST lowering.
+                    // CRuby semantics: skip the lex-walk and look up
+                    // the joined name at top level only.
+                    if let Some(absolute_bare) = bare_name.strip_prefix("::") {
+                        let abs_sym = self.interner.intern(absolute_bare);
+                        self.classes.get(&abs_sym).cloned()
+                            .or_else(|| match self.constants.get(&abs_sym) {
+                                Some(Value::Class(c)) => Some(c.clone()),
+                                _ => None,
+                            })
+                    } else {
+                        let proto_idx = self.frames.last().expect("ICE: PushRescue no frame").proto_idx;
+                        let lex = self.protos[proto_idx].lexical_scope.clone();
+                        let mut found = None;
+                        if !lex.is_empty() {
+                            for scope_sym in &lex {
+                                let scope_name = self.interner.resolve(*scope_sym).clone();
+                                let qualified = format!("{}::{}", scope_name, bare_name);
+                                let qsym = self.interner.intern(&qualified);
+                                if let Some(c) = self.classes.get(&qsym).cloned() {
+                                    found = Some(c);
+                                    break;
+                                }
+                                if let Some(Value::Class(c)) = self.constants.get(&qsym) {
+                                    found = Some(c.clone());
+                                    break;
+                                }
                             }
                         }
+                        found
+                            .or_else(|| self.classes.get(&filter_sym).cloned())
+                            .or_else(|| match self.constants.get(&filter_sym) {
+                                Some(Value::Class(c)) => Some(c.clone()),
+                                _ => None,
+                            })
                     }
-                    found
-                        .or_else(|| self.classes.get(&filter_sym).cloned())
-                        .or_else(|| match self.constants.get(&filter_sym) {
-                            Some(Value::Class(c)) => Some(c.clone()),
-                            _ => None,
-                        })
                 };
                 self.frames.last_mut().expect("ICE: PushRescue no frame").rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
