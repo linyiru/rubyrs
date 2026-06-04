@@ -22,6 +22,69 @@
 #   * `halt`/`redirect` use a rescued exception rather than
 #     `throw`/`catch` (Kernel#catch is unsupported — GAP #8).
 
+# `Rack::Utils` / `Rack::Headers` shim — exposes just the entry
+# points vendored middleware gems reach for (rack-cors uses
+# `Rack::Utils.valid_path?`, `unescape_path`, `clean_path_info`
+# and probes `defined?(Rack::Headers)` to pick a headers-wrapping
+# strategy). Real Rack ships these inside the `rack` gem; we
+# don't load rack, so plugin authors who `require 'rack/cors'`
+# (which itself doesn't `require 'rack/utils'`) need this fallback.
+module Rack
+  # Sentinel — defining this constant flips rack-cors's
+  # `if defined?(Rack::Headers)` branch to the identity-passthrough
+  # path (`->(h) { h }`), so we don't need a HeaderHash impl.
+  class Headers; end
+
+  module Utils
+    # `valid_path?(path)` — false for paths containing `\0` or
+    # `..` segments (path-traversal guard). The CRuby gem rejects
+    # both before clean_path_info runs.
+    def self.valid_path?(path)
+      !path.nil? && !path.include?("\0") && !path.split("/").include?("..")
+    end
+
+    # `unescape_path(path)` — URI-decode `%xx` sequences. The
+    # subset rack-cors actually needs is ASCII path bytes; real
+    # Rack uses URI::DEFAULT_PARSER. Minimal implementation:
+    # walk the string, decode `%HH` pairs, copy everything else.
+    def self.unescape_path(s)
+      out = String.new
+      i = 0
+      while i < s.length
+        c = s[i]
+        if c == "%" && i + 2 < s.length
+          hex = s[i + 1, 2]
+          out << hex.to_i(16).chr
+          i += 3
+        else
+          out << c
+          i += 1
+        end
+      end
+      out
+    end
+
+    # `clean_path_info(path)` — collapse `//`, resolve `.` and
+    # `..` segments. The CRuby implementation uses
+    # `Pathname#cleanpath`-equivalent logic; we do the same with
+    # an explicit stack walk.
+    def self.clean_path_info(path)
+      segs = []
+      path.split("/").each do |seg|
+        next if seg.empty? || seg == "."
+        if seg == ".."
+          segs.pop
+        else
+          segs << seg
+        end
+      end
+      lead = path.start_with?("/") ? "/" : ""
+      trail = (path.end_with?("/") && !segs.empty?) ? "/" : ""
+      "#{lead}#{segs.join("/")}#{trail}"
+    end
+  end
+end
+
 module Sinatra
   # Minimal Rack::Request-ish wrapper. Real Sinatra exposes `request`
   # inside route blocks; apps read `request.user_agent`, `request.path`,
@@ -290,15 +353,46 @@ module Sinatra
         end
       end
 
+      # Rack-style middleware stack. `use Klass, *args, &block`
+      # registers a middleware; `call(env)` builds the chain
+      # exactly once (lazily, memoised in @built_app) and
+      # delegates. Real Sinatra::Base uses the same
+      # outermost-first `middleware.reverse.inject(inner)` walk.
+      def middleware_stack; @middleware_stack ||= []; end
+
+      # `use(klass, *args, &block)` — append `klass` to the
+      # middleware stack. The optional `block` is forwarded to
+      # the middleware's constructor (rack-cors uses the block
+      # for its `allow do ... end` DSL configuration).
+      def use(klass, *args, &block)
+        middleware_stack << [klass, args, block]
+        @built_app = nil  # invalidate any cached chain
+        self
+      end
+
       def call(env)
-        new.dispatch(env)
+        (@built_app ||= build_app).call(env)
+      end
+
+      def build_app
+        app_class = self
+        inner = ->(env) { app_class.new.dispatch(env) }
+        middleware_stack.reverse.inject(inner) do |inner_app, mw|
+          klass, args, block = mw
+          klass.new(inner_app, *args, &block)
+        end
       end
 
       def run!(opts = {})
         bind     = opts[:bind] || "127.0.0.1"
         port     = opts[:port] || 4567
         duration = opts[:duration] || 86_400
-        app = ->(env) { call(env) }
+        # Capture self for the lambda closure. Without this, the
+        # inner `->(env) { call(env) }` would resolve `call` via
+        # the lambda's own `self` at invocation time (a different
+        # binding once the http front cross-calls into it).
+        app_class = self
+        app = ->(env) { app_class.call(env) }
         puts "== rubyrs micro-Sinatra serving on http://#{bind}:#{port} (Ctrl-C to stop)"
         __rubyrs_http_serve_with_app("#{bind}:#{port}", duration, app)
       end
