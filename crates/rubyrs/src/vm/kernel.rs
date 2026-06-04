@@ -1483,9 +1483,12 @@ impl Vm {
                         // out-of-scope absolute path would route to the cext
                         // fallback when find_ruby_source_candidate skipped
                         // the existence probe (closing the stat side-channel),
-                        // and the cext fallback's "cannot find C ext" trap is
-                        // RuntimeError — wrong class for `rescue LoadError`,
-                        // and a more revealing message than the scope reject.
+                        // and the cext fallback's generic
+                        // `LoadError: cannot load such file -- <path>` would
+                        // overwrite the more revealing scope-gate diagnostic.
+                        // (Pre-LoadError this comment described the wrong
+                        // exception class — both branches now raise LoadError;
+                        // the pre-emption is about message clarity, not class.)
                         let scope_violation: Option<std::path::PathBuf> = if self
                             .allow_filesystem_io
                             && let Some(prefixes) = self.allowed_paths.as_ref()
