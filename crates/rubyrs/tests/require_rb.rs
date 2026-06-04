@@ -594,3 +594,44 @@ puts "caught=#{caught}"
         stdout,
     );
 }
+
+#[test]
+#[cfg(all(not(feature = "cext"), not(target_os = "wasi")))]
+fn require_missing_file_raises_loaderror_when_built_without_cext_feature() {
+    // Compile-gated coverage for the `#[cfg(not(feature = "cext"))]`
+    // branch of the require dispatch in `vm/kernel.rs`. The default
+    // CI matrix runs with `cext` ON, so without this gated test the
+    // no-cext fallback's exception class is unverified — a future
+    // edit that re-introduced `RuntimeError` there would slip past
+    // the default suite. Mirrors the `cannot load such file --` shape
+    // the cext-on branch establishes so `rescue LoadError` reads the
+    // same way regardless of build flags. Gated additionally on
+    // `not(target_os = "wasi")` because the wasi target takes a
+    // separate `cfg` arm (`require: file I/O not available on
+    // wasm32-wasi`) that this test does not assert.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_rb_no_cext_loaderror_driver.rb");
+    fs::write(&driver_path,
+        r#"
+begin
+  require "definitely_not_installed_no_cext_dep_for_test"
+  puts "leaked"
+rescue LoadError => e
+  puts "caught: #{e.class}: #{e.message}"
+end
+"#
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stdout:\n{}", stdout);
+    assert_eq!(
+        stdout.trim(),
+        "caught: LoadError: cannot load such file -- \
+         definitely_not_installed_no_cext_dep_for_test"
+    );
+}
