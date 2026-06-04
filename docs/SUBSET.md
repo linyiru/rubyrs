@@ -88,6 +88,24 @@ sandbox guarantees, it doesn't go here — it's a Tier 2+ proposal.
 - `def` (top-level and inside `class`)
 - `class Foo ... end`, `Foo.new(args)`, `initialize`, instance methods,
   implicit-self method calls
+- `class Foo < ParentExpr ... end` — the parent slot accepts any
+  expression (constant name, local variable, method call), not
+  just a constant reference. Mainline cases like
+  `class Sub < SomeConstant` and `class Sub < ::Foo::Bar` use
+  the fast-path Const opcode; dynamic shapes like
+  `class Sub < some_local_var` or
+  `class Sub < DelegateClass(Hash)` (factory-method-returns-Class
+  pattern) route through the generic `compile_expr` path and
+  evaluate the expression to a `Value::Class` before
+  `Op::DefClass` consumes it.
+- `Class.new { ... }` / `Class.new(SuperClass) { ... }` — anonymous
+  Class with the block evaluated as the class body
+  (`class_eval`-style: `def name; ... end` inside lands on the
+  new class's instance-method table). Superclass defaults to
+  Object; an explicit `Class` arg overrides. The block also
+  receives the new class as its sole positional arg (CRuby
+  parity for the `Class.new { |k| k.foo }` shape that
+  `delegate.rb` uses).
 - `self`
 - `String` interpolation: `"hello #{name}"`
 - `Symbol` literal: `:foo`; shorthand hash key `{name: "x"}`
@@ -279,13 +297,19 @@ directives — see Pack/Unpack below), `dig(*keys)`, `inject` /
 
 Covered (block): `each`, `map` / `collect`, `select` /
 `filter`, `reject`, `find` / `detect`, `any?` / `all?` /
-`none?`, `each_with_index`, `each_with_object`, `sort_by`,
-`min_by` / `max_by` (both single-element and `min_by(n)` /
-`max_by(n)` top-n forms), `group_by`, `partition`,
-`chunk_while`, `take_while` / `drop_while`, `flat_map` /
-`collect_concat`, `each_slice` / `each_cons`, `bsearch`
-(two CRuby modes — Bool-block for find-minimum, Int-block
-for find-any), `filter_map`, `chunk`, `zip`.
+`none?` / `one?`, `each_with_index`, `each_with_object`,
+`sort_by`, `min_by` / `max_by` (both single-element and
+`min_by(n)` / `max_by(n)` top-n forms), `group_by`,
+`partition`, `chunk_while`, `take_while` / `drop_while`,
+`flat_map` / `collect_concat`, `each_slice` / `each_cons`,
+`bsearch` (two CRuby modes — Bool-block for find-minimum,
+Int-block for find-any), `filter_map`, `chunk`, `zip`.
+
+No-block predicate forms: `any?` / `all?` / `none?` / `one?`
+all support the zero-arg form (`arr.any?` tests element
+truthiness, no block needed). `any?` is true iff at least one
+element is truthy; `all?` iff every element is truthy;
+`none?` iff no element is; `one?` iff exactly one is.
 
 Mutating bang forms: `sort!`, `uniq!`, `compact!`, `flatten!`,
 `reverse!`.
@@ -322,15 +346,27 @@ CRuby's "nil = unchanged" convention), `dig(*keys)`,
 `fetch(key)` / `fetch(key, default)` / `fetch(key) { ... }`,
 `inspect`.
 
-Covered (block): `each` / `each_pair` (yields `|k, v|`),
-`each_with_index`, `map` / `collect` (returns Array of block
-results), `select` / `filter`, `reject`, `find` / `detect`,
-`any?` / `all?` / `none?`, `sort` / `sort_by`, `min_by` /
-`max_by`, `group_by`, `transform_keys` / `transform_values`
-(both non-mutating; collisions in `transform_keys` follow
-CRuby's later-wins iteration order), `filter_map` (collects
-truthy block returns into a flat Array — not a Hash —
-matching CRuby).
+Covered (block): `each` / `each_pair`, `each_with_index`,
+`map` / `collect` (returns Array of block results), `select`
+/ `filter`, `reject`, `find` / `detect`, `any?` / `all?` /
+`none?` / `one?`, `sort` / `sort_by`, `min_by` / `max_by`,
+`group_by`, `transform_keys` / `transform_values` (both
+non-mutating; collisions in `transform_keys` follow CRuby's
+later-wins iteration order), `filter_map` (collects truthy
+block returns into a flat Array — not a Hash — matching
+CRuby).
+
+Pair-yield contract (CRuby parity): `each` / `map` /
+`collect` / `find` / `any?` / `all?` / `none?` / `one?` /
+`sort_by` / `min_by` / `max_by` / `group_by` / `filter_map`
+all yield each entry as a single `[k, v]` Array. Two-param
+blocks (`|k, v|`) auto-destructure via the F4 block
+prologue; single-param blocks (`|pair|`) receive the pair
+Array directly. `Hash#select` / `Hash#reject` / `Hash#filter`
+override Enumerable here — they yield `(k, v)` as TWO
+separate args (so a single-arg block binds to just the key,
+matching CRuby's documented divergence for the filter
+shapes).
 
 Divergence — `Hash.new` with a default value / default proc
 isn't supported: `Hash.new(5)` and `Hash.new { ... }` both
@@ -446,8 +482,16 @@ they're handled as universal arms in `primitive_call` /
   `defining_class`, so `super` from the aliased name walks the
   original's superclass chain, matching CRuby's "module of
   definition" rule. A missing source name raises `NameError`.
-  Compile-time desugar; both args must be Symbol literals (dynamic
-  `alias_method(*syms)` falls through).
+  Two dispatch paths: the compile-time desugar (both args are
+  Symbol literals) emits `Op::AliasMethod` directly; the
+  runtime path (one or both args is a method parameter / local
+  / String) lands via `Klass.alias_method(new, old)` or bareword
+  `alias_method(new, old)` inside a class singleton method
+  body. The runtime form returns the new name as a Symbol
+  (CRuby's Ruby 3.x contract) and accepts Symbol OR String args.
+  Motivating case: rack-protection's
+  `def self.default_reaction(reaction); alias_method(:default_reaction,
+  reaction); end` — `reaction` is a parameter, not a literal.
 - `method_missing(name)` — on an Object receiver whose class chain
   defines `method_missing`, missed calls route there with the
   missed name passed as a Symbol. Inherited through the superclass
@@ -492,9 +536,13 @@ they're handled as universal arms in `primitive_call` /
 - No `*args` splat — `method_missing(name, *args)` and arity-flexible
   `define_method` aren't expressible yet. Tracking item on the
   "Not supported" list.
-- `method_missing` is only invoked when the receiver is a user-class
-  instance (`Value::Object`). Adding per-primitive class chains is
-  a follow-up.
+- `method_missing` is invoked when the receiver is a user-class
+  instance (`Value::Object`) OR a Class / Module — the latter
+  routes through `lookup_class_singleton_method` so a
+  `method_missing` defined in a module extended into the receiver
+  (the canonical sinatra-contrib/Extension recorder pattern)
+  fires. Adding per-primitive class chains (Int / Str / etc.) is
+  the remaining follow-up.
 - `alias_method` / `define_method` outside a class body (called at
   the toplevel or, more surprisingly, inside an instance method
   with implicit self) install into `toplevel_methods` instead of
