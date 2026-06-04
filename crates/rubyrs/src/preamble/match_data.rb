@@ -21,16 +21,31 @@
 #   * `@regexp`    — the Regexp object used for matching
 
 class MatchData
-  def initialize(whole, caps, pre_match = nil, post_match = nil, string = nil, regexp = nil)
+  def initialize(whole, caps, pre_match = nil, post_match = nil, string = nil, regexp = nil, named_caps = nil)
     @whole = whole
     @caps  = caps
     @pre_match = pre_match
     @post_match = post_match
     @string = string
     @regexp = regexp
+    @named_caps = named_caps
   end
+  # CRuby's MatchData#[] is overloaded:
+  #   * Integer (positional, 0 = whole, N = N-th group)
+  #   * String or Symbol (named capture lookup)
+  # The named-capture lookups consult @named_caps (Hash) which
+  # the Rust side populates when the matching Regexp had `(?<name>
+  # ...)` groups. Falls through to nil for unknown names —
+  # matches CRuby.
   def [](i)
-    if i == 0
+    if i.is_a?(Symbol) || i.is_a?(String)
+      key = i.to_s
+      if @named_caps && @named_caps.key?(key)
+        @named_caps[key]
+      else
+        raise IndexError, "undefined group name reference: #{key}"
+      end
+    elsif i == 0
       @whole
     else
       @caps[i - 1]
@@ -39,8 +54,13 @@ class MatchData
   def captures
     @caps
   end
+  # `named_captures` — returns a Hash mapping each named group's
+  # name to its captured String (or nil for groups that didn't
+  # participate). Empty Hash when the matching pattern had no
+  # named groups. CRuby returns `{}` for both shapes; we
+  # likewise return an empty Hash when @named_caps is nil.
   def named_captures
-    {}
+    @named_caps ? @named_caps.dup : {}
   end
   def to_a
     [@whole] + @caps

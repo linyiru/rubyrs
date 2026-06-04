@@ -26,6 +26,12 @@ pub(crate) struct MatchDataContext {
     pub(crate) post_match: Option<String>,
     pub(crate) string: Option<String>,
     pub(crate) regexp: Option<Value>,
+    /// Named captures extracted from the regex. Each entry is
+    /// `(name, Some(matched_string) | None)`. Non-participating
+    /// named groups (alternation arms that didn't match) keep
+    /// `None`, matching CRuby's contract that
+    /// `named_captures["x"]` returns nil rather than `""`.
+    pub(crate) named_captures: Vec<(String, Option<String>)>,
 }
 
 impl Vm {
@@ -85,6 +91,30 @@ impl Vm {
         }
         if let Some(v) = ctx.regexp {
             self.heap.instance_mut(obj_id).ivars.insert(re_ivar, v);
+        }
+        // Named captures install as @named_caps: Hash<String,
+        // String | nil>. The preamble's `MatchData#[]` consults
+        // this hash for Symbol / String indexes; `#named_captures`
+        // returns it directly. Empty Hash for unnamed-only
+        // patterns — the `Vec` is empty in that case, so the
+        // resulting Hash is also empty (matches CRuby).
+        if !ctx.named_captures.is_empty() {
+            let pairs: Vec<(Value, Value)> = ctx.named_captures
+                .into_iter()
+                .map(|(name, val)| {
+                    let v = match val {
+                        Some(s) => Value::new_str(s),
+                        None => Value::Nil,
+                    };
+                    (Value::new_str(name), v)
+                })
+                .collect();
+            self.check_alloc()?;
+            let h_id = self.heap.alloc(HeapObj::Hash(
+                crate::heap::HashObj::with_pairs(pairs)
+            ));
+            let nc_ivar = self.interner.intern("@named_caps");
+            self.heap.instance_mut(obj_id).ivars.insert(nc_ivar, Value::Hash(h_id));
         }
         Ok(Value::Object(obj_id))
     }

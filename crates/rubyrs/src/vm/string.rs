@@ -1680,6 +1680,22 @@ impl Vm {
                                         None => Value::Nil,
                                     });
                                 }
+                                // Extract named captures from the regex.
+                                // `capture_names()` yields one entry per
+                                // group (`Some(name)` for named groups,
+                                // `None` for positional); pair with the
+                                // matched slice from `caps` to build the
+                                // `(name, Option<String>)` list passed
+                                // through MatchDataContext.
+                                let mut named_caps: Vec<(String, Option<String>)> = Vec::new();
+                                for (i, name_opt) in native.capture_names().enumerate() {
+                                    if let Some(name) = name_opt {
+                                        named_caps.push((
+                                            name.to_string(),
+                                            caps.get(i).map(|m| m.as_str().to_string()),
+                                        ));
+                                    }
+                                }
                                 drop(caps);
                                 // Side-channel for `$~` / `$1`..`$N`
                                 // (numbered) AND `$&` / `$+` / `` $` ``
@@ -1699,6 +1715,7 @@ impl Vm {
                                     post_match: Some(post),
                                     string: Some(full_str),
                                     regexp: Some(Value::Regex(re.clone())),
+                                    named_captures: named_caps,
                                 };
                                 return Ok(Some(self.materialize_match_data_with_context(whole, group_vals, ctx)?));
                             }
