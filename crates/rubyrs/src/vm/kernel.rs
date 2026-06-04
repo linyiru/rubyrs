@@ -1632,12 +1632,16 @@ impl Vm {
                             { Some(self.cext_require(&path_str)) }
                             #[cfg(not(feature = "cext"))]
                             {
-                                Some(Err(self.trap(RubyError::RuntimeError {
-                                    msg: format!(
-                                        "require: no .rb at {} and built without \
-                                         `cext` feature for native extension fallback",
-                                        path_str
-                                    ),
+                                // Match the cext-on branch's surface
+                                // contract: a require-time miss is
+                                // `LoadError: cannot load such file --
+                                // <name>` regardless of whether the cext
+                                // fallback is compiled in. Build-flag
+                                // detail belongs in `--features` docs,
+                                // not in a user-visible exception that
+                                // `rescue LoadError` should catch.
+                                Some(Err(self.trap(RubyError::LoadError {
+                                    msg: format!("cannot load such file -- {}", path_str),
                                 })))
                             }
                         }

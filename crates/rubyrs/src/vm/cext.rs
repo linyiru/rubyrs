@@ -916,8 +916,19 @@ impl Vm {
                 }
             }
             found.ok_or_else(|| {
-                self.trap(RubyError::RuntimeError {
-                    msg: format!("cannot find C ext: {}", path_str),
+                // CRuby raises `LoadError` (not `RuntimeError`) and uses
+                // the exact phrasing `cannot load such file -- <name>`
+                // for every require-time miss — whether the missing
+                // candidate would have been a `.rb` source or a C ext.
+                // Sinatra and many gems gate optional deps with
+                // `begin; require "foo"; rescue LoadError; end`, so the
+                // exception class matters: the previous
+                // `RuntimeError: cannot find C ext: foo` slipped past
+                // that rescue and aborted the parent require. The
+                // C-ext-vs-Ruby-source distinction is internal routing,
+                // not part of the surface contract.
+                self.trap(RubyError::LoadError {
+                    msg: format!("cannot load such file -- {}", path_str),
                 })
             })?
         };
