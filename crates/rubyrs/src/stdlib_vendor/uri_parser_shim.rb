@@ -27,6 +27,22 @@
 # vendored. Callers that hit those methods get NoMethodError, which
 # is the right "feature absent" signal (ADR 0017).
 
+# Idempotency guard. `loaded_stdlib_stubs` (kernel.rs) dedups
+# per raw require path, so `require "uri"` followed by
+# `require "uri/common"` (or vice versa) lands in the lenient
+# stub branch twice — once per distinct path key. Without this
+# guard the shim would re-evaluate and the `DEFAULT_PARSER =
+# RFC2396_Parser.new` line would replace the existing instance,
+# silently breaking any Ruby code that has already memoized a
+# reference to the parser (e.g. `URI_PARSER = ::URI::RFC2396_PARSER`
+# at the top of rack/utils.rb).
+#
+# `defined?(URI::DEFAULT_PARSER)` returns `"constant"` on a
+# second load and `nil` on the first; the `unless` skips the
+# class+constant rebuild entirely on subsequent loads, preserving
+# instance identity across all three subpath aliases.
+unless defined?(URI::DEFAULT_PARSER)
+
 module URI
   class RFC2396_Parser
     # Default "unsafe" character set used when no second arg is
@@ -72,3 +88,5 @@ module URI
   # one object (lets identity-checks line up too).
   RFC2396_PARSER = DEFAULT_PARSER
 end
+
+end # `unless defined?(URI::DEFAULT_PARSER)`

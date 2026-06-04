@@ -165,20 +165,45 @@ fn require_uri_subpaths_route_to_same_shim() {
     // that — a future split of the routing table that forgets a
     // subpath would silently break consumers like webrick,
     // mechanize, etc.
+    //
+    // Critical extra contract: the parser INSTANCE must survive
+    // across the two requires unchanged. `loaded_stdlib_stubs`
+    // dedups per raw require path, so `require "uri"` followed
+    // by `require "uri/common"` re-enters the lenient-stub
+    // branch with a fresh path key and would re-evaluate the
+    // shim — replacing `URI::DEFAULT_PARSER` with a new instance
+    // and silently invalidating any memoized reference (e.g.
+    // `URI_PARSER = ::URI::RFC2396_PARSER` at the top of
+    // rack/utils.rb). The shim's `unless defined?(...)` guard
+    // is what keeps the instance stable; this test pins that
+    // guarantee with an `equal?` identity assertion (NOT just
+    // `defined?`).
     let out = run(
 r#"
+require "uri"
+first_default = URI::DEFAULT_PARSER
+first_rfc = URI::RFC2396_PARSER
+
 require "uri/common"
-puts "via-common: #{defined?(URI::DEFAULT_PARSER)}"
+puts "after-common-default-eq: #{first_default.equal?(URI::DEFAULT_PARSER)}"
+puts "after-common-rfc-eq: #{first_rfc.equal?(URI::RFC2396_PARSER)}"
+
 require "uri/generic"
-puts "via-generic: #{defined?(URI::DEFAULT_PARSER)}"
+puts "after-generic-default-eq: #{first_default.equal?(URI::DEFAULT_PARSER)}"
+puts "after-generic-rfc-eq: #{first_rfc.equal?(URI::RFC2396_PARSER)}"
 "#,
         "uri_shim_subpaths_driver.rb",
     );
     assert_eq!(
         out,
-        "via-common: constant\nvia-generic: constant\n",
-        "URI subpath requires did not install the parser shim.\n\
-         stdout:\n{}",
+        "after-common-default-eq: true\n\
+         after-common-rfc-eq: true\n\
+         after-generic-default-eq: true\n\
+         after-generic-rfc-eq: true\n",
+        "URI parser instance changed across subpath requires — \
+         `URI_PARSER = ::URI::RFC2396_PARSER` memoization in \
+         rack/utils.rb would silently diverge from later \
+         `URI::DEFAULT_PARSER` lookups.\nstdout:\n{}",
         out,
     );
 }
