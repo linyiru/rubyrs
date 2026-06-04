@@ -20,6 +20,8 @@ if defined?(RUBYRS)
   require "rack/protection/ip_spoofing"
   require "rack/protection/strict_transport"
   require "rack/protection/content_security_policy"
+  require "rack/request"
+  require "rack/protection/http_origin"
   SERVER_BACKEND = "rubyrs micro-Sinatra (_http_server battery)"
   HARNESS_RUN_APP = ->(app_class) {
     app_class.run!(bind: "127.0.0.1", port: HARNESS_PORT, duration: HARNESS_SECS)
@@ -34,6 +36,8 @@ else
   require "rack/protection/ip_spoofing"
   require "rack/protection/strict_transport"
   require "rack/protection/content_security_policy"
+  require "rack/request"
+  require "rack/protection/http_origin"
   SERVER_BACKEND = "CRuby + Sinatra #{Sinatra::VERSION}"
 
   HARNESS_RUN_APP = ->(app_class) {

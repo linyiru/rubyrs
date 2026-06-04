@@ -16,6 +16,7 @@ class RackProtectionSmokeApp < Sinatra::Base
   use Rack::Protection::ReferrerPolicy
   use Rack::Protection::IPSpoofing
   use Rack::Protection::StrictTransport
+  use Rack::Protection::HttpOrigin, permitted_origins: ["http://allowed.example.com"]
   use Rack::Protection::ContentSecurityPolicy,
       default_src: "'self'",
       script_src: "'self' 'unsafe-inline'",
@@ -26,6 +27,16 @@ class RackProtectionSmokeApp < Sinatra::Base
   # Routes that exercise the security-header-injection paths.
   get "/" do
     "backend: #{SERVER_BACKEND}"
+  end
+
+  # POST `/` exists so the HttpOrigin scenarios can exercise the
+  # unsafe-method path (Origin check only fires on non-GET/HEAD/
+  # OPTIONS/TRACE). Without a real route a permitted-Origin POST
+  # would land on Sinatra's 404 shell whose HTML body differs
+  # between real Sinatra and sinatra_lite — the diff would catch
+  # that divergence, not the middleware behaviour we're testing.
+  post "/" do
+    "post: #{SERVER_BACKEND}"
   end
 
   # Path-traversal cleanup — the middleware unescapes %2e (.) and
