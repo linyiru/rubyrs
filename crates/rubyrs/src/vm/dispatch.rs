@@ -8525,15 +8525,20 @@ impl Vm {
     }
 
     /// Fire a singleton-method lifecycle hook named `hook_name` on
-    /// `receiver` whenever its eigenclass is modified. CRuby parity:
-    /// this is the singleton-method twin of `Module#method_added`.
-    /// Rails / RSpec / many DSLs hook `singleton_method_added` to
-    /// auto-wrap class methods.
+    /// `receiver`. CRuby parity: this is the singleton-method twin of
+    /// `Module#method_added`. Rails / RSpec / many DSLs hook
+    /// `singleton_method_added` to auto-wrap class methods.
     ///
-    /// Currently only the `singleton_method_added` install path is
-    /// wired (see callers). The helper is name-generic so the
-    /// `_removed`/`_undefined` siblings can ride the same lookup rule
-    /// once the remove/undef paths are added — follow-up work.
+    /// Coverage is intentionally partial, not "every eigenclass
+    /// mutation". Only the dedicated `singleton_method_added` install
+    /// entry points are wired (see callers): `def self.foo` /
+    /// `def obj.foo`, their block forms, and `define_singleton_method`.
+    /// Singleton installs that go through other features do NOT yet
+    /// fire it — notably `module_function`'s singleton copy and
+    /// `alias_method` writes into `singleton_methods`. Wiring those,
+    /// plus the `_removed`/`_undefined` siblings (the helper is
+    /// name-generic and can ride the same lookup rule), is follow-up
+    /// work.
     ///
     /// Contract:
     ///   - hook receiver is `receiver` (the object/class whose
