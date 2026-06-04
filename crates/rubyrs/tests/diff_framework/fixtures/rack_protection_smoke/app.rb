@@ -18,6 +18,7 @@ class RackProtectionSmokeApp < Sinatra::Base
   use Rack::Protection::StrictTransport
   use Rack::Protection::HttpOrigin, permitted_origins: ["http://allowed.example.com"]
   use Rack::Protection::JsonCsrf
+  use Rack::Protection::RemoteReferrer
   use Rack::Protection::ContentSecurityPolicy,
       default_src: "'self'",
       script_src: "'self' 'unsafe-inline'",
