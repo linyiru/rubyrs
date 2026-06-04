@@ -51,7 +51,7 @@ use super::{primitive_call, vec_nil, Frame, LoopTransferKind, RescueHandler, Vm}
 /// like `\k<name>`, etc.) still surface as the regex crate's
 /// SyntaxError. Adding translations is per-feature on demand.
 #[cfg(feature = "regex")]
-fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
     // Fast path: most regexes don't use `\G`. Skip the whole
     // scan + allocation when the source can't possibly contain
     // the anchor.

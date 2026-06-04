@@ -3861,6 +3861,70 @@ impl Vm {
         g.vm.stack.push(Value::Hash(hid));
         return Ok(ClassOutcome::Handled);
     }
+    // `Regexp.compile(pat)` / `Regexp.new(pat)` — compile a
+    // String pattern into a Regexp. Same code path the regex
+    // literal `/.../` takes (Op::LoadRegex / Op::CompileRegex),
+    // including `preprocess_regex_pattern` so Onigmo-specific
+    // anchors like `\G` translate identically. Needed by gems
+    // that build patterns from runtime data (rack-cors uses
+    // `Regexp.compile("^[a-z]+://#{Regexp.quote(host)}$")`
+    // when turning `origins 'example.com'` into a matcher).
+    #[cfg(feature = "regex")]
+    if (name == "compile" || name_id == new_id)
+        && let Value::Class(cls) = &recv
+        && cls.name.as_str() == "Regexp"
+    {
+        if args.len() != 1 {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+            }));
+        }
+        let pat = match &args[0] {
+            Value::Str(s) => s.to_string_lossy(),
+            other => {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into String", other.type_name()),
+                }));
+            }
+        };
+        let translated = crate::vm::step::preprocess_regex_pattern(&pat);
+        let compiled = crate::regex_engine::compile(&translated).map_err(|e| {
+            self.trap(RubyError::SyntaxError {
+                msg: format!("invalid regex /{}/: {}", pat, e),
+            })
+        })?;
+        self.stack.push(Value::Regex(Rc::new(compiled)));
+        return Ok(ClassOutcome::Handled);
+    }
+
+    // `Regexp.escape(s)` / `Regexp.quote(s)` — escape regex
+    // metacharacters in `s` so it can be safely interpolated
+    // into a pattern. The `regex` crate's `escape` covers the
+    // same metacharacter set Ruby's Regexp.escape does for
+    // ASCII; rack-cors uses this to quote user-supplied
+    // origin hostnames before compiling a Regexp.
+    if (name == "escape" || name == "quote")
+        && let Value::Class(cls) = &recv
+        && cls.name.as_str() == "Regexp"
+    {
+        if args.len() != 1 {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+            }));
+        }
+        let s = match &args[0] {
+            Value::Str(s) => s.to_string_lossy(),
+            other => {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into String", other.type_name()),
+                }));
+            }
+        };
+        let escaped = regex::escape(&s);
+        self.stack.push(Value::new_str_bytes(escaped.into_bytes()));
+        return Ok(ClassOutcome::Handled);
+    }
+
     // `Class#allocate` user-singleton override — CRuby allows
     // `def self.allocate` to replace the built-in allocator (used
     // by Marshal / dup / ORM hydration hooks). Mirrors the
