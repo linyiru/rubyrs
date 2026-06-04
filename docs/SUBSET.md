@@ -714,6 +714,27 @@ h[:k] = 1  # NoMethodError in rubyrs; works in CRuby
   slot rather than the fixed primitive table. Sizeable
   refactor; deferred until a real caller needs Hash
   subclassing.
+- Related symptom — `super` from a subclass `[]=`/`[]`:
+
+  ```ruby
+  class Headers < Hash
+    def []=(key, val); super(key.downcase, val); end
+  end
+  Headers.new["X"] = 1
+  # rubyrs: super: no superclass method `[]=' for an instance of Headers
+  # CRuby: stores "x" => 1
+  ```
+
+  Even when MyHash.new IS Value::Hash (e.g. via the
+  `Hash[*pairs]` factory rather than `MyHash.new`), `super`
+  from an overridden `[]=` can't reach `Hash#[]=` because the
+  primitive arm dispatches by checking `Value::Hash` directly
+  and doesn't consult an MRO. Same root cause as the bare-
+  `.new` divergence above; the structural fix unblocks both.
+  Workaround for the Rack 3 case-insensitive-headers pattern:
+  store lowercase keys at write time in every writer (see
+  `tests/diff_framework/fixtures/sinatra_hello/vendor/sinatra_lite.rb`
+  + the vendored sinatra-cors plugin).
 - No test pin (would lock in divergence); this entry is the
   contract.
 
