@@ -6734,6 +6734,24 @@ impl Vm {
         if &*name == "instance_variable_set" && args.len() == 2 {
             let ivar_id = self.resolve_ivar_name_arg(&args[0])?;
             let value = args[1].clone();
+            // Frozen-object guard. `Object#freeze` flips the
+            // `Instance::frozen` Cell; subsequent mutation
+            // attempts (CRuby contract) must raise FrozenError.
+            // The frozen-read surface
+            // (`frozen?`/`freeze`/`Object#frozen?`) was shipped
+            // in a65e3080; this PR closes the silent-mutation
+            // path that gem code relying on the post-freeze
+            // invariant assumes is closed.
+            if let Value::Object(oid) = &recv
+                && let crate::heap::HeapObj::Instance(inst) = self.heap.get(*oid)
+                && inst.frozen.get()
+            {
+                let cls_name = self.heap.real_class_of(*oid).name.clone();
+                let inspect = recv.to_inspect(&self.heap, &self.interner);
+                return Err(self.trap(RubyError::FrozenError {
+                    msg: format!("can't modify frozen {}: {}", cls_name, inspect),
+                }));
+            }
             match &recv {
                 Value::Object(oid) => match self.heap.get_mut(*oid) {
                     crate::heap::HeapObj::Instance(inst) => {

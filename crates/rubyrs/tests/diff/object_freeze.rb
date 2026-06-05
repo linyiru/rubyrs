@@ -49,13 +49,20 @@ puts "nil_frozen=#{nil.frozen?}"
 # shape (PR #374's Tilt::EmptyMapping.new.freeze).
 puts "chain=#{Foo.new(99).freeze.frozen?}"
 
-# 8. Reading from a frozen instance still works — only
-# mutation is blocked (CRuby raises FrozenError; rubyrs leaves
-# the mutation guard as deferred work and only wires the
-# freeze/frozen? read/write surface). Ivar / attr reader
-# remain unaffected. The fixture exercises read-only paths;
-# adding a mutation-blocks-with-FrozenError scenario would
-# trigger the documented divergence.
+# 8. Reading from a frozen instance still works.
 foo2 = Foo.new(7).freeze
 puts "read_attr=#{foo2.x}"
 puts "ivar_read=#{foo2.instance_variable_get(:@x)}"
+
+# 9. Mutation via `instance_variable_set` on a frozen
+# instance raises FrozenError (CRuby parity). The freeze
+# read/write surface was shipped earlier; this scenario
+# locks in the matching mutation-guard.
+foo3 = Foo.new(99).freeze
+caught = nil
+begin
+  foo3.instance_variable_set(:@late, "set-after-freeze")
+rescue FrozenError => e
+  caught = e.message[/can't modify frozen \w+/]
+end
+puts "mut_blocked=#{caught.inspect}"
