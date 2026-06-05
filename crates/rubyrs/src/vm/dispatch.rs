@@ -4868,7 +4868,7 @@ impl Vm {
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
                     | "constants"
-                    | "autoload" | "autoload?" | "const_defined?" | "const_get" | "private_constant" | "public_constant"
+                    | "autoload" | "autoload?" | "const_defined?" | "const_get" | "const_set" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
                     | "class_eval" | "module_eval"
@@ -6086,6 +6086,57 @@ impl Vm {
         if matches!(&*name, "private_constant" | "public_constant" | "deprecate_constant")
             && let Value::Class(_) = &recv {
             self.stack.push(recv);
+            return Ok(());
+        }
+        // `cls.const_set(name, value)` — install a constant on the
+        // class. CRuby returns the assigned value. The qualified
+        // key (`Foo::Bar::Baz`) mirrors the path the existing
+        // `Op::StoreConst` emits for `class Foo; class Bar; BAZ
+        // = ...; end; end`, so subsequent `Foo::Bar::BAZ` reads
+        // resolve through the same `self.constants` lookup path.
+        //
+        // Hit by Mustermann's inherited-hook pattern at
+        // `mustermann/ast/translator.rb:62`:
+        //   subclass.const_set(:NodeTranslator, node_translator)
+        // — sets a constant on the subclass at class-build time.
+        if &*name == "const_set" && args.len() == 2
+            && let Value::Class(cls) = &recv {
+            let const_name = match &args[0] {
+                Value::Sym(s) => self.interner.resolve(*s).to_string(),
+                Value::Str(s) => s.to_string_lossy(),
+                other => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                })),
+            };
+            let value = args[1].clone();
+            // CRuby raises NameError on lowercase-leading names; the
+            // simple `Class.const_set(:foo, ...)` form is what gem
+            // code actually hits, but mirror the check so we don't
+            // silently install a name that `const_get` can't read.
+            if !const_name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                return Err(self.trap(RubyError::NameError {
+                    msg: format!("wrong constant name {}", const_name),
+                }));
+            }
+            let qualified = if cls.name.is_empty() {
+                const_name.clone()
+            } else {
+                format!("{}::{}", cls.name, const_name)
+            };
+            let key = self.interner.intern(&qualified);
+            // If the assigned value IS a Class with an empty /
+            // synthetic name (e.g. one minted by `Class.new(...)`),
+            // also register it under the new qualified path in
+            // `self.classes` so subsequent `Foo::Bar::ClassName.new`
+            // calls find it via the normal class lookup, mirroring
+            // how `class Foo::Bar; class ClassName; end; end`
+            // installs both the constant AND the class. Other
+            // value kinds just go into `constants`.
+            if let Value::Class(installed) = &value {
+                self.classes.insert(key, installed.clone());
+            }
+            self.constants.insert(key, value.clone());
+            self.stack.push(value);
             return Ok(());
         }
         // `obj.extend(Mod, ...)` for plain Value::Object — install
@@ -10955,7 +11006,7 @@ impl Vm {
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
                     | "constants"
-                    | "autoload" | "autoload?" | "const_defined?" | "const_get" | "private_constant" | "public_constant"
+                    | "autoload" | "autoload?" | "const_defined?" | "const_get" | "const_set" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
                     | "class_eval" | "module_eval"

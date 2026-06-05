@@ -788,7 +788,7 @@ impl Vm {
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
                     | "constants"
-                    | "autoload" | "autoload?" | "const_defined?" | "const_get" | "private_constant" | "public_constant"
+                    | "autoload" | "autoload?" | "const_defined?" | "const_get" | "const_set" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "module_function"
                     | "singleton_class"

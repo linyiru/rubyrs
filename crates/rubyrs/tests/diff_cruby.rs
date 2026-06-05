@@ -321,6 +321,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn multi_write_splat_call() { run_diff("multi_write_splat_call"); }
 #[test] fn forwardable_shim() { run_diff("forwardable_shim"); }
 #[test] fn delegate_shim() { run_diff("delegate_shim"); }
+#[test] fn module_const_set() { run_diff("module_const_set"); }
 #[test] fn lambdas() { run_diff("lambdas"); }
 #[test] fn string_mutation() { run_diff("string_mutation"); }
 #[test] fn defined() { run_diff("defined"); }
