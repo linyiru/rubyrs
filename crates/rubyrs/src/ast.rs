@@ -2115,6 +2115,21 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // `super(*a)` and `super(a, *rest, b)` shapes from
         // Rack / Sinatra inheritance chains tripped the
         // `unsupported node: SplatNode` trap.
+        // Per-arg translator that mirrors the regular Call args
+        // walk (~line 1681): a trailing `KeywordHashNode` (Prism's
+        // shape for `k: v, **opts` sugar inside a call) routes
+        // through `tr_kwhash` so `**opts` AssocSplats merge via
+        // the `.merge(opts)` chain. Without this, super-with-kw
+        // shapes like `super(s, **options) { options }` (Mustermann
+        // pattern.rb:59) tripped the `unsupported node:
+        // KeywordHashNode` trap. Plain nodes fall through to `tr`.
+        let tr_super_arg = |ctx: &mut TranslationCtx<'_>, c: &ruby_prism::Node<'_>| -> SExpr {
+            if let Some(kh) = c.as_keyword_hash_node() {
+                tr_kwhash(ctx, node, c, &kh)
+            } else {
+                tr(ctx, c)
+            }
+        };
         let has_splat = arg_nodes.iter().any(|c| c.as_splat_node().is_some());
         if has_splat {
             let mut chunks: Vec<SExpr> = Vec::new();
@@ -2127,7 +2142,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     }
                     chunks.push(tr(ctx, &inner));
                 } else {
-                    buf.push(tr(ctx, c));
+                    buf.push(tr_super_arg(ctx, c));
                 }
             }
             if !buf.is_empty() {
@@ -2147,14 +2162,14 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // layout. The cost is one extra Array build, but it avoids
         // a fourth Op::Super variant just to carry a block slot.
         if super_block_arg.is_some() {
-            let args_arr: Vec<SExpr> = arg_nodes.iter().map(|n| tr(ctx, n)).collect();
+            let args_arr: Vec<SExpr> = arg_nodes.iter().map(|n| tr_super_arg(ctx, n)).collect();
             let array = sp(node, Expr::ArrayLit(args_arr));
             return sp(node, Expr::SuperApply {
                 args: Box::new(array),
                 block_arg: super_block_arg,
             });
         }
-        let args: Vec<SExpr> = arg_nodes.iter().map(|n| tr(ctx, n)).collect();
+        let args: Vec<SExpr> = arg_nodes.iter().map(|n| tr_super_arg(ctx, n)).collect();
         return sp(node, Expr::Super(Some(args)));
     }
     if let Some(n) = node.as_or_node() {
