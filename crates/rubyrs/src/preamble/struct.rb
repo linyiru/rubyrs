@@ -72,7 +72,13 @@ class Struct
       members.map { |a| self.instance_variable_get("@#{a}".to_sym) }
     end
     cls.define_method(:==) do |other|
-      other.is_a?(self.class) && self.to_a == other.to_a
+      # CRuby's `Struct#==` requires EXACT class match (`==`),
+      # not `is_a?` — otherwise `parent_struct == child_struct`
+      # would be asymmetric (parent.is_a?(parent) succeeds but
+      # child.is_a?(child) only matches its own class). Mirror
+      # the exact-class semantics so `==` is reflexive AND
+      # symmetric across Struct subclass inheritance.
+      other.class == self.class && self.to_a == other.to_a
     end
     cls
   end

@@ -68,4 +68,21 @@ puts "sep=#{op.separator} allow=#{op.allow_reserved} pre=#{op.prefix} parm=#{op.
 class_v9 = Struct.new(:a, :b, :c)
 inst_v9 = class_v9.new(1)
 puts "underfill=#{inst_v9.a.inspect}|#{inst_v9.b.inspect}|#{inst_v9.c.inspect}"
+
+# 10. `==` requires exact class match between two
+# different Struct.new(...) classes — pre-fix used
+# `is_a?(self.class)` which would silently accept any
+# subclass on the LHS. The fix-now intervention is a single
+# `other.class == self.class` swap; this scenario locks
+# in the exact-match semantics across two SIBLING Struct
+# classes (subclass-of-Struct chains hit a separate
+# `@__struct_attrs` inheritance gap, kept out of scope).
+StructA10 = Struct.new(:x)
+StructB10 = Struct.new(:x)
+a = StructA10.new(1)
+b = StructB10.new(1)
+puts "siblings_eq=#{a == b}"
+# Sanity: same-class still equal.
+a2 = StructA10.new(1)
+puts "same_class_eq=#{a == a2}"
 end
