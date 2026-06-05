@@ -425,7 +425,13 @@ jobs:
           # (c09e704f) added cap-check / borrow-snapshot
           # `.expect("ICE: ...")` invariants. All ICE-class; not
           # user-reachable.
-          check crates/rubyrs/src/vm/dispatch.rs     53
+          # Bumped 53 → 54 (+1) by 1c37baaf (bare-form
+          # `instance_variable_*` routing through universal arms):
+          # the no_recv self_val lookup adds one ICE-class
+          # `.expect("ICE: do_call(no_recv) with empty frames ...")`
+          # for the bare-call ivar reroute path. Mirrors the
+          # adjacent no_recv frame-state expects.
+          check crates/rubyrs/src/vm/dispatch.rs     54
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /
