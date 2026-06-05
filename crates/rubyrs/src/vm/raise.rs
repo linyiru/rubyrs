@@ -122,6 +122,10 @@ impl Vm {
         }));
         let msg_sym = self.interner.intern("@message");
         self.heap.instance_mut(id).ivars.insert(msg_sym, Value::new_str(message));
+        // `@backtrace` is filled centrally by `unwind_with_exception`
+        // from the live frame stack on the first unwind hop — same
+        // path the user-`raise`d Object route takes — so it stays
+        // in sync regardless of how the exception got constructed.
         Some(Value::Object(id))
     }
 
@@ -138,6 +142,61 @@ impl Vm {
         // body cancels the in-flight break — the exception takes
         // over the unwind, and the break value is dropped.
         self.pending_method_break = None;
+        // Populate `@backtrace` on the raised exception from the
+        // current frame stack — covers both the `raise "msg"` /
+        // `raise FooClass.new` Object route (where normalize_
+        // exception doesn't fill backtrace) and the trap-to-
+        // exception route (where the trap.backtrace has the same
+        // shape). Skips when the ivar is already set (e.g.
+        // re-raise of an already-rescued exception that preserves
+        // its original backtrace, matching CRuby).
+        if let Value::Object(exc_id) = &exc {
+            let bt_sym = self.interner.intern("@backtrace");
+            let already_set = self.heap.instance(*exc_id).ivars.get(&bt_sym)
+                .map(|v| !matches!(v, Value::Nil))
+                .unwrap_or(false);
+            if !already_set {
+                // Innermost frame first (the raise site), oldest
+                // last — CRuby `Exception#backtrace` ordering.
+                let bt_strings: Vec<Value> = self.frames.iter().rev().filter_map(|f| {
+                    let proto = &self.protos[f.proto_idx];
+                    let filename = proto.filename.clone();
+                    let method = proto.name.clone();
+                    // `f.ip` points one past the current op; map
+                    // back through `op_spans` to a byte offset.
+                    // Fall back to `Span::ZERO` (line 0) on the
+                    // boundary case `ip == 0`, matching the
+                    // existing `Vm::trap` shape.
+                    let span = if f.ip > 0 && f.ip <= proto.op_spans.len() {
+                        proto.op_spans[f.ip - 1]
+                    } else {
+                        crate::error::Span::ZERO
+                    };
+                    let line = match self.sources.get(&filename) {
+                        Some(src) => crate::error::line_col(src, span.byte_offset).0,
+                        None => 0,
+                    };
+                    Some(Value::new_str(format!("{}:{}:in '{}'", filename, line, method)))
+                }).collect();
+                if !bt_strings.is_empty() {
+                    // GC root-hole guard: `exc` is a Rust local
+                    // (not on `self.stack` / pinned), so the
+                    // upcoming `maybe_gc` would sweep the Instance
+                    // we just unwrapped `exc_id` from. Pin
+                    // `Value::Object(exc_id)` plus each
+                    // bt_string (heap-backed Str) across the
+                    // alloc, then drop the pins.
+                    self.pinned.push(Value::Object(*exc_id));
+                    for s in &bt_strings { self.pinned.push(s.clone()); }
+                    let n_pinned = bt_strings.len() + 1;
+                    self.maybe_gc();
+                    let bt_arr_id = self.heap.alloc(HeapObj::Array(bt_strings));
+                    for _ in 0..n_pinned { self.pinned.pop(); }
+                    self.heap.instance_mut(*exc_id).ivars
+                        .insert(bt_sym, Value::Array(bt_arr_id));
+                }
+            }
+        }
         // Resolve the raised value's class once up front; the unwind loop
         // may probe many handlers before finding (or not finding) a match.
         let exc_class: Option<Rc<Class>> = match &exc {

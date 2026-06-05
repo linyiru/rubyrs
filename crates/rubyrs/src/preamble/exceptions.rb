@@ -33,29 +33,39 @@ class Exception
     @message
   end
 
-  # Minimal `Exception#full_message` for gem logging paths
+  # `Exception#backtrace` — Array<String> of `"file:line:in
+  # 'method'"` frames, oldest at the END. `@backtrace` is
+  # populated by `Vm::trap_to_exception` when a Trap is rescued;
+  # exceptions constructed directly via `RuntimeError.new("...")`
+  # carry no backtrace yet (matches CRuby — `raise`d-then-caught
+  # carries one, `.new`-but-never-raised returns nil).
+  def backtrace
+    @backtrace
+  end
+
+  # `Exception#full_message` for gem logging paths
   # (rails / sentry-ruby / etc.) that call it without checking
   # `respond_to?(:full_message)` first.
   #
-  # CRuby's full_message renders the exception with its backtrace
-  # plus optional ANSI colour. Format:
-  #   "path:line:in 'method': msg (Class)\n\tfrom ...\n"
+  # CRuby format: `"path:line:in 'method': msg (Class)\n\tfrom
+  # ...\n"`. We synthesise the first line from `@backtrace.first`
+  # (when present) and chain `\tfrom ...` lines for the rest;
+  # `@backtrace == nil` (exception constructed but never raised)
+  # falls back to the bare `"msg (Class)\n"` shape.
   #
-  # rubyrs doesn't yet capture the trap backtrace into the
-  # rescued exception object (`Exception#backtrace` returns nil),
-  # so the rich form isn't reachable here. Return the trap-line
-  # shape with the message + class — the part gems actually log.
-  # When backtrace becomes available, extend this to emit the
-  # `\tfrom ...` continuation lines.
-  #
-  # `highlight:` and `order:` are accepted (and ignored) for
-  # API-compatibility — gems pass them positionally and would
-  # ArgumentError out if absent. Documented divergence: rubyrs
-  # never emits ANSI colour regardless of `highlight: true`,
-  # and `order: :bottom` doesn't reverse output (since there's
-  # only one line to reverse).
+  # `highlight:` and `order:` are accepted for API-compatibility.
+  # Documented divergence: never emits ANSI colour regardless of
+  # `highlight: true`. `order: :top` (default for non-tty) lays
+  # the head first then `\tfrom` continuations; `order: :bottom`
+  # is mapped onto the same `:top` rendering — the CRuby
+  # `:bottom` form (numbered `"Traceback (most recent call
+  # last)\n\t1: from ..."`) isn't replicated.
   def full_message(highlight: false, order: :top)
-    "#{@message} (#{self.class})\n"
+    bt = @backtrace
+    return "#{@message} (#{self.class})\n" unless bt.is_a?(Array) && !bt.empty?
+    head = "#{bt.first}: #{@message} (#{self.class})\n"
+    tail = bt[1..].map { |f| "\tfrom #{f}\n" }.join
+    head + tail
   end
 end
 class StandardError < Exception
