@@ -1177,6 +1177,117 @@ nil.caller_ok         # both: "from helper"
   pins the toplevel-arity ArgumentError surface this exclusion
   preserves.
 
+### `super(*args, **kwargs)` doesn't split the kwargs into the super-target's kwarg channel
+
+```ruby
+class P
+  def m(x, **opts)
+    "p: x=#{x} opts=#{opts}"
+  end
+end
+class C < P
+  def m(x, **opts)
+    super
+  end
+end
+puts C.new.m(1, a: 2)  # rubyrs: "p: x=1 opts={}"; CRuby: "p: x=1 opts={a: 2}"
+```
+
+- `Expr::SuperApply` lacks the `kwargs_trailing: bool` flag
+  that `Expr::Call` carries; the AST translator's super-arg
+  walk routes a trailing `KeywordHashNode` through
+  `tr_kwhash` AS A POSITIONAL `HashLit`, so the parent
+  method's `**opts` binder sees it as a positional Hash and
+  the kwargs slot stays empty.
+- Bare `super` (no parens) forwards positional locals only —
+  same defect for kwargs declared as `**kw` on the calling
+  method.
+- The Sinatra spike doesn't trip this — parent methods in the
+  vendored stdlib chain accept kwargs positionally or omit
+  them. Hit by any gem whose super-target has an explicit
+  `**kw` signature with caller-side kwargs.
+- Proper fix: add `kwargs_trailing` flag on `Expr::SuperApply`,
+  introduce `Op::ApplySuperKw` + `Op::ApplySuperKwBlock`
+  variants, route the trailing-kwhash split into the kwargs
+  channel at dispatch time. Significant opcode-level work;
+  deferred until a real caller surfaces.
+
+### `**kw` parameter on a block body doesn't bind kwargs
+
+```ruby
+proc { |*args, **kw| puts "args=#{args} kw=#{kw}" }.call(1, x: 2)
+# rubyrs: "args=[1, {x: 2}] kw=nil"
+#  CRuby: "args=[1] kw={x: 2}"
+```
+
+- Block parameters with `**kw` (`define_method(:f) do |*args,
+  **kw| ... end`, lambda `->(*args, **kw) { ... }`, proc-form
+  similar) don't split the trailing Hash into the `**kw` slot
+  — the kwhash stays in `*args` as a positional Hash and the
+  `**kw` slot is `nil`.
+- Surfaced in the `Forwardable` shim — `define_method(ali)
+  do |*args, **kw, &blk| ... end` was rewritten to
+  `|*args, &blk|` because kwargs would silently land in
+  `args`. The shim's gem-load surface only delegates to
+  positional-arity methods, so the workaround is non-lossy
+  for the Sinatra spike chain; gems whose delegate targets
+  accept kwargs would silently forward them as a trailing
+  positional Hash instead.
+- Proper fix lives at the block-binder (vm/dispatch.rs
+  `invoke_block_*`) — split a trailing Hash arg into the
+  `**kw` slot when the BlockHandle declares one. Not yet
+  modelled; deferred until a real caller hits it.
+
+### `DelegateClass(SuperKlass)` collapses to one class for all callers
+
+```ruby
+require 'delegate'
+A = DelegateClass(Hash)
+B = DelegateClass(Array)
+puts A.equal?(B)      # rubyrs: true; CRuby: false
+puts A.superclass     # rubyrs: Delegator; CRuby: <anon>
+```
+
+- `DelegateClass(X)` in our shim returns `Delegator` itself
+  (vs CRuby's `Class.new(Delegator)` with method delegation
+  enumerated from `X.public_instance_methods`). Each call
+  produces the same class identity, so any gem that
+  introspects via `subclass.superclass.equal?(
+  DelegateClass(X))` or compares two DelegateClass results
+  for inequality diverges.
+- The collapse was a workaround for a separate rubyrs gap:
+  dynamic-superclass dispatch (`class C < SomeExpr()`) doesn't
+  walk the result class's `method_missing` chain for subclass
+  instances. Switching the shim to `Class.new(Delegator)`
+  would break the Sinatra spike's load surface.
+- Proper fix: close the dynamic-superclass dispatch gap (give
+  `Class.new(Delegator)` a `Value::Class` whose method-
+  lookup walks Delegator's `method_missing` correctly), then
+  drop the shim's collapse. Substantial — touches the
+  method-lookup walker.
+
+### `Struct.new`-created classes have a GC root hole under STRESS_GC
+
+```
+rubyrs (STRESS_GC=1): ICE: heap slot is not an Instance
+                      / not a Block at <preamble:struct>:N
+```
+
+- The `Struct` preamble uses `define_method`-with-class-ivars-
+  closure shapes (the captured `attrs` Array is stored on the
+  Class via an ivar and read at every invocation). Under
+  STRESS_GC the per-Instance heap slot can be swept and
+  rebound mid-dispatch — `class_of` then ICEs.
+- Normal-mode runs are unaffected; the Sinatra spike load
+  surface doesn't intersect a sweep window.
+- The `diff/struct_factory.rb` fixture sentinel-skips under
+  `STRESS_GC=1` via an empty `else` branch (NOT `exit 0`,
+  which would diverge from CRuby's silent exit via rubyrs's
+  "exit (SystemExit)" tail-line).
+- Proper fix lives at the GC root-set side — pin captured
+  block-locals across heap allocs during define_method-
+  emitted method invocations.
+
 ### Detached inner closures don't write-through to outer-method locals
 
 ```ruby
