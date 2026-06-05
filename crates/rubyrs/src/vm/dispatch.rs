@@ -11756,51 +11756,127 @@ impl Vm {
         {
             return ConstPathOutcome::WrongName { name: path.to_string() };
         }
+        // Build an ancestor-walk: scope_name first, then each
+        // named superclass up the chain, ending at Object (the
+        // toplevel). Used as the per-segment fallback when the
+        // direct `scope_name::segment` lookup misses — CRuby's
+        // const_get walks the inheritance chain for unqualified
+        // names. The anon-class case (scope_name == "") gets
+        // resolved here too: an anonymous class subclassing
+        // `Foo` looks up `Foo::Bar` via the chain even though
+        // the direct lookup `::Bar` would be malformed.
+        //
+        // Hit by mustermann's
+        // `Class.new(self, &block) do translate(...) end`
+        // shape: `translate`'s body calls `const_get
+        // (:NodeTranslator)` from a class whose name is empty
+        // (the anon Class.new(self, &block) class), and the
+        // constant lives on the named parent `Translator`.
+        let mut scope_chain: Vec<String> = Vec::new();
+        // Seed with the original scope_name only when non-empty
+        // (avoid the malformed `::segment` shape an anon class
+        // would otherwise emit).
+        if !scope_name.is_empty() && scope_name != "Object" {
+            scope_chain.push(scope_name.clone());
+        }
+        // Walk superclass chain. Skip empty names (intermediate
+        // anonymous classes) and stop at Object — its constant
+        // namespace IS the toplevel and is consulted via the
+        // bare `segment.to_string()` lookup the existing
+        // scope_name == "Object" branch handles.
+        let mut walker = start_cls.superclass.borrow().clone();
+        while let Some(sc) = walker {
+            if !sc.name.is_empty() && sc.name != "Object" {
+                scope_chain.push(sc.name.clone());
+            }
+            walker = sc.superclass.borrow().clone();
+        }
         let mut current_value: Option<Value> = None;
         let mut segments_remaining: usize = segments.len();
         for segment in segments {
             if !is_valid_const_name(segment) {
                 return ConstPathOutcome::WrongName { name: segment.to_string() };
             }
+            // For the FIRST segment, walk the inheritance chain
+            // looking for any scope that has the constant. For
+            // subsequent segments (deeper into a chained const
+            // path like `Foo::Bar::Baz`), keep the
+            // single-scope-name lookup since `scope_name` has
+            // been updated to the parent class we just resolved
+            // into — chaining shouldn't restart the inheritance
+            // walk.
             let lookup = if scope_name == "Object" {
                 segment.to_string()
-            } else {
+            } else if !scope_name.is_empty() {
                 format!("{}::{}", scope_name, segment)
+            } else if scope_chain.is_empty() {
+                // No named ancestor and we're not at Object —
+                // toplevel. Use the bare segment, same shape
+                // as the Object branch.
+                segment.to_string()
+            } else {
+                // Anonymous start scope with named ancestors —
+                // first chain entry is the most-specific scope
+                // to try.
+                format!("{}::{}", scope_chain[0], segment)
             };
-            if !self.interner.contains(&lookup) {
-                return ConstPathOutcome::Missing { missing_qualified: lookup };
-            }
-            let qid = self.interner.intern(&lookup);
-            if let Some(c) = self.classes.get(&qid).cloned() {
-                // Update scope_name for the NEXT step's qualified
-                // lookup, and remember the value we'd return if
-                // this is the final segment.
-                scope_name = c.name.clone();
-                current_value = Some(Value::Class(c));
-                segments_remaining -= 1;
-                continue;
-            }
-            if let Some(v) = self.constants.get(&qid).cloned() {
-                segments_remaining -= 1;
-                // Non-class constants can't be a parent scope.
-                // CRuby's behavior when used as a middle segment:
-                //   `Foo::CONST::X` →
-                //   `TypeError: Foo::CONST::X does not refer to
-                //    class/module`
-                // (regardless of whether `Foo::X` would
-                // separately resolve). If we ARE the last segment
-                // the value is the legitimate result; otherwise
-                // the path is structurally invalid and we must
-                // raise the CRuby-shape TypeError instead of
-                // continuing the walk with the OLD scope_name
-                // (which would silently resolve to a sibling
-                // under `Foo` or surface as a wrong
-                // "uninitialized constant" NameError).
-                // (Code-review #277 round 6 #1.)
-                if segments_remaining > 0 {
-                    return ConstPathOutcome::NotClass { full_path: path.to_string() };
+            // Direct lookup first.
+            let direct_qid_opt = if self.interner.contains(&lookup) {
+                Some(self.interner.intern(&lookup))
+            } else {
+                None
+            };
+            let mut hit: Option<(Value, String)> = None;
+            if let Some(qid) = direct_qid_opt {
+                if let Some(c) = self.classes.get(&qid).cloned() {
+                    hit = Some((Value::Class(c.clone()), c.name.clone()));
+                } else if let Some(v) = self.constants.get(&qid).cloned() {
+                    hit = Some((v, String::new()));
                 }
-                current_value = Some(v);
+            }
+            // Inheritance-chain fallback: only for the first
+            // segment. `scope_chain` has scope_name as entry 0
+            // already, so skip it and try entries 1..end.
+            if hit.is_none() && current_value.is_none() {
+                for ancestor in scope_chain.iter().skip(1) {
+                    let chain_lookup = format!("{}::{}", ancestor, segment);
+                    if !self.interner.contains(&chain_lookup) {
+                        continue;
+                    }
+                    let chain_qid = self.interner.intern(&chain_lookup);
+                    if let Some(c) = self.classes.get(&chain_qid).cloned() {
+                        hit = Some((Value::Class(c.clone()), c.name.clone()));
+                        break;
+                    } else if let Some(v) = self.constants.get(&chain_qid).cloned() {
+                        hit = Some((v, String::new()));
+                        break;
+                    }
+                }
+                // Final fallback: toplevel (bare segment lookup
+                // via Object) — matches CRuby's "after walking
+                // the inheritance chain, try toplevel" rule.
+                if hit.is_none() {
+                    if self.interner.contains(segment) {
+                        let tl_qid = self.interner.intern(segment);
+                        if let Some(c) = self.classes.get(&tl_qid).cloned() {
+                            hit = Some((Value::Class(c.clone()), c.name.clone()));
+                        } else if let Some(v) = self.constants.get(&tl_qid).cloned() {
+                            hit = Some((v, String::new()));
+                        }
+                    }
+                }
+            }
+            if let Some((value, found_class_name)) = hit {
+                segments_remaining -= 1;
+                if matches!(value, Value::Class(_)) {
+                    scope_name = found_class_name;
+                    current_value = Some(value);
+                } else {
+                    if segments_remaining > 0 {
+                        return ConstPathOutcome::NotClass { full_path: path.to_string() };
+                    }
+                    current_value = Some(value);
+                }
                 continue;
             }
             return ConstPathOutcome::Missing { missing_qualified: lookup };
