@@ -4027,6 +4027,67 @@ impl Vm {
         return Ok(ClassOutcome::Handled);
     }
 
+    // `Regexp.union(*patterns)` — combine String / Regexp args
+    // into one alternation Regexp. Strings are escaped via
+    // `regex::escape` so metacharacters become literals; Regexp
+    // args contribute their existing source. A single Array
+    // argument is splatted (CRuby parity). No args -> `(?!)`
+    // (never-matching pattern). Required by Rack 3
+    // `rack/utils.rb:607`
+    //   `Regexp.union(*[::File::SEPARATOR, ::File::ALT_SEPARATOR].compact)`
+    // which evaluates at class-body load time during the P3
+    // Sinatra spike.
+    #[cfg(feature = "regex")]
+    if name == "union"
+        && let Value::Class(cls) = &recv
+        && cls.name.as_str() == "Regexp"
+    {
+        // Splat a sole Array arg per CRuby (Regexp.union([a, b])
+        // behaves like Regexp.union(a, b)).
+        let parts_iter: Vec<Value> = if args.len() == 1 {
+            if let Value::Array(oid) = &args[0] {
+                self.heap.array(*oid).clone()
+            } else {
+                args.clone()
+            }
+        } else {
+            args.clone()
+        };
+        let mut chunks: Vec<String> = Vec::with_capacity(parts_iter.len());
+        for v in &parts_iter {
+            match v {
+                Value::Str(s) => chunks.push(regex::escape(&s.to_string_lossy())),
+                Value::Regex(r) => chunks.push(r.as_str().to_string()),
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!("no implicit conversion of {} into String", other.type_name()),
+                    }));
+                }
+            }
+        }
+        let combined = if chunks.is_empty() {
+            // CRuby's empty `Regexp.union` returns `/(?!)/` —
+            // a zero-width negative lookahead that always
+            // fails. The native `regex` crate doesn't support
+            // lookaround; `[^\s\S]` (intersection-complement
+            // char class — never matches anything) is the
+            // linear-engine equivalent. Behavioural difference
+            // is only in `.source` (which Sinatra/Rack don't
+            // inspect for the union result).
+            "[^\\s\\S]".to_string()
+        } else {
+            chunks.join("|")
+        };
+        let translated = crate::vm::step::preprocess_regex_pattern(&combined);
+        let compiled = crate::regex_engine::compile(&translated).map_err(|e| {
+            self.trap(RubyError::SyntaxError {
+                msg: format!("invalid regex /{}/: {}", combined, e),
+            })
+        })?;
+        self.stack.push(Value::Regex(Rc::new(compiled)));
+        return Ok(ClassOutcome::Handled);
+    }
+
     // `Class#allocate` user-singleton override — CRuby allows
     // `def self.allocate` to replace the built-in allocator (used
     // by Marshal / dup / ORM hydration hooks). Mirrors the

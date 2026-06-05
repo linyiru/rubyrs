@@ -327,6 +327,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn require_ipaddr_stub() { run_diff("require_ipaddr_stub"); }
 #[test] fn gem_version_shim() { run_diff("gem_version_shim"); }
 #[test] fn array_product() { run_diff("array_product"); }
+#[test] fn file_separator_consts() { run_diff("file_separator_consts"); }
+#[test] fn regexp_union() { run_diff("regexp_union"); }
 #[test] fn struct_factory() { run_diff("struct_factory"); }
 #[test] fn const_get_inheritance_walk() { run_diff("const_get_inheritance_walk"); }
 #[test] fn anon_class_const_set() { run_diff("anon_class_const_set"); }

@@ -2224,6 +2224,18 @@ end
 ## `Vm::file_class_dispatch`. The class body is intentionally
 ## empty; methods are not defined here.
 class File
+  ## CRuby exposes path-separator constants on File for
+  ## platform-portable path joining. Rack 3 `rack/utils.rb:607`
+  ## evaluates
+  ##   `Regexp.union(*[::File::SEPARATOR, ::File::ALT_SEPARATOR].compact)`
+  ## at class-body time during the P3 Sinatra spike. POSIX
+  ## values mirror CRuby (forward-slash + nil); on Windows
+  ## CRuby sets ALT_SEPARATOR to "\\" — rubyrs's Tier 1 build
+  ## is POSIX-only here, so we follow the POSIX values.
+  SEPARATOR = "/"
+  ALT_SEPARATOR = nil
+  PATH_SEPARATOR = ":"
+  Separator = SEPARATOR
 end
 ## `class Mutex; ... end` (single-threaded no-op shim) is loaded
 ## from `preamble/mutex.rb` BEFORE this `PREAMBLE` eval.
