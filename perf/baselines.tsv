@@ -153,7 +153,16 @@ crates/rubyrs/benches/fizzbuzz_1m.rb	7300	800	1M fizzbuzz; BinOpInt + IncLocal +
 # the ratchet is absolute so it still trips. Bumping to
 # 6700 gives ~200 KB headroom without inflating the cap
 # enough to mask a future regression.
-crates/rubyrs/benches/gc_churn.rb	7300	320	200k short-lived Array+Hash allocs; stresses mark/sweep
+# gc_churn RSS bumped 7300 → 7400 on 2026-06-04 — observed
+# CI RSS 7340 KB (40 KB over) after the Track 1/2/3 chain:
+#   * 0da682b3 added `kw_given_mask: u64` to Frame (+8 bytes
+#     per frame; gc_churn pushes ~200k frames across the run)
+#   * a65e3080 added `frozen: Cell<bool>` to Instance (+1 byte
+#     per Instance; gc_churn allocs Array+Hash heavily, not
+#     Instance, so this row is dominated by the Frame growth)
+# 100 KB headroom gives ~60 KB margin over observed CI peak
+# without masking a future per-frame or per-instance bump.
+crates/rubyrs/benches/gc_churn.rb	7400	320	200k short-lived Array+Hash allocs; stresses mark/sweep
 crates/rubyrs/benches/string_interp.rb	7300	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
 # hash_mutate WALL bumped 650 → 730 on 2026-05-27 — 3
 # consecutive master CI runs observed 690-710ms (4-9% over
