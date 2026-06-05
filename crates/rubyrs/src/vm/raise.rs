@@ -161,7 +161,7 @@ impl Vm {
             if !already_set {
                 // Innermost frame first (the raise site), oldest
                 // last — CRuby `Exception#backtrace` ordering.
-                let bt_strings: Vec<Value> = self.frames.iter().rev().filter_map(|f| {
+                let bt_strings: Vec<Value> = self.frames.iter().rev().map(|f| {
                     let proto = &self.protos[f.proto_idx];
                     let filename = proto.filename.clone();
                     let method = proto.name.clone();
@@ -179,7 +179,7 @@ impl Vm {
                         Some(src) => crate::error::line_col(src, span.byte_offset).0,
                         None => 0,
                     };
-                    Some(Value::new_str(format!("{}:{}:in '{}'", filename, line, method)))
+                    Value::new_str(format!("{}:{}:in '{}'", filename, line, method))
                 }).collect();
                 if !bt_strings.is_empty() {
                     // GC root-hole guard: `exc` is a Rust local

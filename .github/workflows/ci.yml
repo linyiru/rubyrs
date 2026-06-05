@@ -470,7 +470,11 @@ jobs:
           # bumping the budget — see fb71e917 (super splat), a490c1f8
           # (const_marker refactor), 46a19110 (singleton hook). All
           # are programmer-error invariants, not user-reachable.
-          check crates/rubyrs/src/vm/step.rs         86
+          # Bumped 86 → 87 (+1) by 0da682b3 (kwarg computed defaults):
+          # `Op::JumpIfKwArgGiven` handler adds one ICE-class
+          # `.expect("ICE: JumpIfKwArgGiven no frame")`, mirroring
+          # the existing JumpIfArgGiven handler's pattern.
+          check crates/rubyrs/src/vm/step.rs         87
           # Bumped 10 → 14 (+4) by PR #178 (step-block iter
           # refactor extracting Select/Reject accumulator logic).
           # Each accumulator path adds one `acc_id.unwrap()` —
