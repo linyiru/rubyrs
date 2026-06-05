@@ -68,6 +68,16 @@ pub(crate) fn always_on_stub_extras(name: &str) -> Option<&'static str> {
         "forwardable" => {
             Some(include_str!("stdlib_vendor/forwardable_shim.rb"))
         }
+        // `delegate`: Mustermann's
+        // `class NodeTranslator < DelegateClass(Node)` shape
+        // (mustermann/ast/translator.rb:18). The kernel stub
+        // creates empty Delegator + SimpleDelegator shells; this
+        // shim fills them with method_missing-based forwarding
+        // and installs the top-level `DelegateClass(superclass)`
+        // factory so subclassing succeeds at module-load time.
+        "delegate" => {
+            Some(include_str!("stdlib_vendor/delegate_shim.rb"))
+        }
         _ => None,
     }
 }
