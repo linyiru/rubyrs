@@ -3907,6 +3907,17 @@ impl Vm {
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
+        // Fire the parent's `inherited(subclass)` hook, matching
+        // CRuby's `Class.new(P)` → `P.inherited(<anon>)` contract.
+        // Source-form `class C < P` fires this via `Op::DefClass`;
+        // the dynamic `Class.new(P)` path didn't, breaking gems
+        // (Mustermann's AST::Translator at `mustermann/ast/
+        // translator.rb:62`) that rely on per-subclass setup
+        // happening in the hook. Look up the parent's `inherited`
+        // and invoke it with the new class as the single arg.
+        // Missing-hook is silently accepted (matches CRuby's
+        // default Object#inherited no-op).
+        self.invoke_inherited_hook(&new_cls)?;
         self.stack.push(Value::Class(new_cls));
         return Ok(ClassOutcome::Handled);
     }
@@ -8994,6 +9005,45 @@ impl Vm {
 
 
 
+    /// Invoke the parent's `inherited(subclass)` hook on
+    /// `new_cls`. Used by the `Class.new` no-block and
+    /// block-form arms to match CRuby's contract that
+    /// subclass-creation fires `<parent>.inherited(child)`
+    /// regardless of source-form vs dynamic-form. Walks the
+    /// parent's class-singleton chain via
+    /// `lookup_class_singleton_method`; absent-hook is a
+    /// silent no-op (CRuby's `Object#inherited` default).
+    pub(crate) fn invoke_inherited_hook(&mut self, new_cls: &Rc<crate::value::Class>) -> Result<(), Trap> {
+        let parent_rc = new_cls.superclass.borrow().clone();
+        let Some(parent) = parent_rc else { return Ok(()); };
+        // Fast-path: if `inherited` has never been interned,
+        // no user code can have defined a hook, so skip the
+        // lookup. Mirrors `fire_inclusion_hooks`'s gate.
+        if !self.interner.contains("inherited") {
+            return Ok(());
+        }
+        let inherited_sym = self.interner.intern("inherited");
+        let Some(m) = self.lookup_class_singleton_method(&parent, inherited_sym) else {
+            return Ok(());
+        };
+        // Frame-count synchronisation so the queued hook body
+        // actually executes before we pop the return value —
+        // `invoke_method` pushes the Frame but the bytecode
+        // runs only when dispatch resumes. Mirrors
+        // `fire_inclusion_hooks`'s pre_frames + dispatch_until
+        // + pop pattern.
+        let pre_frames = self.frames.len();
+        let parent_val = Value::Class(parent.clone());
+        let child_val = Value::Class(new_cls.clone());
+        self.invoke_method(m, parent_val, vec![child_val])?;
+        self.dispatch_until(pre_frames)?;
+        // `inherited` returns nil per CRuby contract; drop the
+        // pushed return value so the caller's stack stays
+        // balanced for the subsequent `Class.new` result push.
+        self.stack.pop();
+        Ok(())
+    }
+
     pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {
         // Builtin-method short-circuit: synthesised Methods on
         // Kernel (and any future host class with similar
@@ -10361,6 +10411,17 @@ impl Vm {
                 #[cfg(feature = "cext")]
                 cext_alloc_func: std::cell::Cell::new(None),
             });
+            // Fire the parent's `inherited(subclass)` hook
+            // BEFORE the class-body block runs. CRuby's
+            // ordering: `Class.new(P) do BODY end` invokes
+            // `P.inherited(new_cls)` and then evaluates BODY
+            // against new_cls. Mustermann's
+            // `class NodeTranslator < DelegateClass(Node)` AST
+            // construction relies on the hook running so that
+            // `subclass.const_set(:NodeTranslator, ...)` lands
+            // before any subsequent `translate(...)` block can
+            // call `const_get(:NodeTranslator)`.
+            self.invoke_inherited_hook(&new_cls)?;
             let cls_val = Value::Class(new_cls);
             self.invoke_block_with_self(
                 block,
