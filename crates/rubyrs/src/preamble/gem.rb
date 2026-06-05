@@ -27,7 +27,16 @@ module Gem
 
     def initialize(str)
       @str = str.to_s
-      @parts = @str.split(".").map { |p| p =~ /\A\d+\z/ ? p.to_i : p }
+      # Avoid regex literals so this preamble loads in
+      # no-regex builds (wasm32-wasip1 / `--no-default-features`).
+      # All-digits check is byte-level: every char must be 0..9.
+      # Equivalent to the original `=~ /\A\d+\z/` branch shape
+      # — version strings don't carry signs in practice
+      # (RubyGems sources are positive dotted ints).
+      @parts = @str.split(".").map do |p|
+        all_digits = !p.empty? && p.chars.all? { |c| c >= "0" && c <= "9" }
+        all_digits ? p.to_i : p
+      end
     end
 
     def <=>(other)
