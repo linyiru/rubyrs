@@ -2963,7 +2963,7 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
         "open3" => &[("Open3", true)],
         "shellwords" => &[("Shellwords", true)],
         "weakref" => &[("WeakRef", false)],
-        "cgi" | "cgi/util" => &[("CGI", false)],
+        "cgi" | "cgi/util" | "cgi/escape" => &[("CGI", false)],
         // `ipaddr`: Sinatra 4 + rack-protection 4 `require 'ipaddr'`
         // at module-load time. Class-body usage is constant-check
         // shape (`when IPAddr`, `rescue IPAddr::InvalidAddressError`)
@@ -3003,8 +3003,14 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "optparse" | "english" | "English"
         | "bigdecimal" | "monitor" | "erb"
         | "open3" | "shellwords" | "weakref"
-        | "cgi" | "cgi/util"
+        | "cgi" | "cgi/util" | "cgi/escape"
         | "ipaddr"
+        // `rubygems` no-op: rubyrs preloads a minimal `Gem::Version`
+        // shim in the preamble (see preamble/gem.rb). The stub
+        // lets explicit `require 'rubygems'` in user code / test
+        // fixtures succeed so they can opt into the full RubyGems
+        // surface on CRuby's side.
+        | "rubygems"
         | "rack"
         // `tilt`: Sinatra 4 requires it at module-load time. The
         // shim (always_on_stub_extras) installs a `Tilt` module

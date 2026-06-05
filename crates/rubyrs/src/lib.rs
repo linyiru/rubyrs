@@ -2154,6 +2154,19 @@ impl Runtime {
             "<rubyrs:preamble:thread>",
         )
             .expect("ICE: failed to load Thread preamble");
+        // Gem::Version — minimal version-comparison shim. CRuby
+        // always has `Gem` loaded (RubyGems auto-runs at startup);
+        // rubyrs needs an explicit preamble because ecosystem code
+        // (Sinatra 4's indifferent_hash.rb line 189) uses
+        // `Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("3.0")`
+        // for class-body method gating. Loaded after Comparable
+        // (the shim includes it) and after the basic class stubs
+        // — see preamble/gem.rb for divergences.
+        self.eval_inner(
+            include_str!("preamble/gem.rb"),
+            "<rubyrs:preamble:gem>",
+        )
+            .expect("ICE: failed to load Gem preamble");
         const PREAMBLE: &str = r#"
 ## Stub classes for built-in types. Without these, `5.class` and
 ## friends have nothing to return; the bodies stay empty because
