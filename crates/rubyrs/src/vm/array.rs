@@ -1792,6 +1792,95 @@ impl Vm {
                         };
                         Some(Value::Array(nid))
                     }
+                    // Array#product(*others) — Cartesian product.
+                    // `[1,2].product([3,4])` =>
+                    //   `[[1,3],[1,4],[2,3],[2,4]]`.
+                    // With no args, returns `[[e]]` per element.
+                    // If any factor is empty the result is `[]`.
+                    // Rack 3's `rack/utils.rb:569`
+                    //   `Hash[((100..199).to_a << 204 << 304).product([true])]`
+                    // is the spike's surface — bytecode-loaded at
+                    // module-init time, so the require chain fails
+                    // without this primitive.
+                    ("product", rest) => {
+                        let mut factors: Vec<Vec<Value>> =
+                            Vec::with_capacity(1 + rest.len());
+                        factors.push(self.heap.array(id).clone());
+                        for a in rest {
+                            match a {
+                                Value::Array(oid) => factors.push(self.heap.array(*oid).clone()),
+                                _ => return Err(self.trap(RubyError::TypeError {
+                                    msg: format!(
+                                        "wrong argument type {} (must be Array)",
+                                        a.type_name(),
+                                    ),
+                                })),
+                            }
+                        }
+                        if factors.iter().any(|f| f.is_empty()) {
+                            let nid = self.heap.alloc(HeapObj::Array(Vec::new()));
+                            return Ok(Some(Value::Array(nid)));
+                        }
+                        let row_width = factors.len();
+                        let total: usize = factors.iter()
+                            .try_fold(1usize, |acc, f| acc.checked_mul(f.len()))
+                            .ok_or_else(|| self.trap(RubyError::ResourceExhausted {
+                                msg: "Array#product result size overflow".to_string(),
+                            }))?;
+                        if let Some(max) = self.max_value_bytes {
+                            let projected = total
+                                .saturating_mul(row_width)
+                                .saturating_mul(std::mem::size_of::<Value>());
+                            if projected > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("Array#product would exceed {max} bytes"),
+                                }));
+                            }
+                        }
+                        // PinGuard the row Arrays — same shape as
+                        // the zip implementation immediately above:
+                        // freshly-alloc'd Arrays live in a Rust
+                        // local Vec until the outer alloc, so the
+                        // intermediate maybe_gc() (or a STRESS_GC
+                        // sweep on every alloc) would otherwise
+                        // collect them.
+                        let nid = {
+                            let mut g = PinGuard::new(self);
+                            let mut out: Vec<Value> = Vec::with_capacity(total);
+                            // Mixed-radix counter: indices[i]
+                            // iterates 0..factors[i].len().
+                            let mut indices = vec![0usize; row_width];
+                            loop {
+                                let mut row: Vec<Value> = Vec::with_capacity(row_width);
+                                for (i, idx) in indices.iter().enumerate() {
+                                    row.push(factors[i][*idx].clone());
+                                }
+                                let rid = g.vm.heap.alloc(HeapObj::Array(row));
+                                let rv = Value::Array(rid);
+                                g.pin(rv.clone());
+                                out.push(rv);
+                                // Increment from the LEAST-
+                                // significant position (matches
+                                // CRuby's iteration order:
+                                // last factor varies fastest).
+                                let mut k = row_width;
+                                let mut carried = true;
+                                while k > 0 && carried {
+                                    k -= 1;
+                                    indices[k] += 1;
+                                    if indices[k] < factors[k].len() {
+                                        carried = false;
+                                    } else {
+                                        indices[k] = 0;
+                                    }
+                                }
+                                if carried { break; }
+                            }
+                            g.vm.maybe_gc();
+                            g.vm.heap.alloc(HeapObj::Array(out))
+                        };
+                        Some(Value::Array(nid))
+                    }
                     _ => None,
                 }
     )

@@ -326,6 +326,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn class_new_inherited_hook() { run_diff("class_new_inherited_hook"); }
 #[test] fn require_ipaddr_stub() { run_diff("require_ipaddr_stub"); }
 #[test] fn gem_version_shim() { run_diff("gem_version_shim"); }
+#[test] fn array_product() { run_diff("array_product"); }
 #[test] fn struct_factory() { run_diff("struct_factory"); }
 #[test] fn const_get_inheritance_walk() { run_diff("const_get_inheritance_walk"); }
 #[test] fn anon_class_const_set() { run_diff("anon_class_const_set"); }
