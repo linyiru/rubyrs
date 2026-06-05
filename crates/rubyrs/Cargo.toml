@@ -240,10 +240,13 @@ serde_json = { version = "1", optional = true, features = ["preserve_order"] }
 # `_sqlite` battery deps. rusqlite + bundled SQLite C source
 # (~2 MB compiled). ADR 0027 §1 pins to 0.39 for supply-chain
 # determinism (`= 0.39` not `^0.39`). `lru` backs the per-
-# connection prepared-statement cache (ADR 0027 §4); `0.12` is
-# the latest API generation matching std HashMap shape.
+# connection prepared-statement cache (ADR 0027 §4). Bumped
+# 0.12 → 0.16 to clear RUSTSEC-2026-0002 (the 0.12 `IterMut`
+# violates Stacked Borrows; advisory fix landed in 0.16.3).
+# Our usage is `new`/`cap`/`get_mut`/`put` only — all
+# API-stable across the bump.
 rusqlite = { version = "=0.39", features = ["bundled"], optional = true }
-lru = { version = "0.12", optional = true }
+lru = { version = "0.16", optional = true }
 # Stage 7d: libc::fork + waitpid for pre-fork supervisor.
 # Unix-only inside the host fn (cfg(target_family = "unix")).
 # libc is preferred over nix here — minimal API surface
