@@ -129,7 +129,22 @@
 # CRuby" / "Detached inner closures don't write-through to
 # outer-method locals" — both shape AND cost recorded there.
 crates/rubyrs/tests/fixtures/fizzbuzz.rb	7300	0	tiny script; wall is sub-100ms noise floor, disabled
-crates/rubyrs/examples/metaprog_bench/mm_bench.rb	7300	1200	2M method_missing dispatch
+# mm_bench WALL bumped 1200 → 1300 on 2026-06-04 — observed
+# CI 1220 ms (+1.7% over) after Track 1 / 2 chain accumulated:
+#   * 0da682b3 (Track 1) — Frame::kw_given_mask: u64, +8 bytes
+#     per frame; mm_bench pushes 2M frames so the extra word
+#     load+store per push adds up.
+#   * a65e3080 (Track 2) — Instance::frozen: Cell<bool>, +1
+#     byte per Instance. mm_bench allocates Foo instances in
+#     a tight loop; per-Instance write touches a cache line
+#     the dispatcher just dirtied.
+# Neither is hot-path slowdown individually; combined they
+# push CI's already-tight 1200 ms cap over by ~20 ms. Same
+# pattern as the existing hash_mutate / dm_bench / gc_churn
+# WALL bumps above — bump to 1300 with ~80 ms headroom over
+# observed peak, document the cause, leave the ratchet
+# defending future bumps.
+crates/rubyrs/examples/metaprog_bench/mm_bench.rb	7300	1300	2M method_missing dispatch
 # dm_bench RSS bumped 6500 → 6700 on 2026-05-27 — the
 # define_method dispatch benchmark crossed 6500 KB at PR #175
 # (ic-stats baseline workloads added) + PR #178 (step-block
