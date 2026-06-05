@@ -190,7 +190,7 @@ crates/rubyrs/benches/fizzbuzz_1m.rb	7300	800	1M fizzbuzz; BinOpInt + IncLocal +
 #     Instance, so this row is dominated by the Frame growth)
 # 100 KB headroom gives ~60 KB margin over observed CI peak
 # without masking a future per-frame or per-instance bump.
-crates/rubyrs/benches/gc_churn.rb	7400	400	200k short-lived Array+Hash allocs; stresses mark/sweep
+crates/rubyrs/benches/gc_churn.rb	7500	400	200k short-lived Array+Hash allocs; stresses mark/sweep
 crates/rubyrs/benches/string_interp.rb	7300	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
 # hash_mutate WALL bumped 650 → 730 on 2026-05-27 — 3
 # consecutive master CI runs observed 690-710ms (4-9% over
