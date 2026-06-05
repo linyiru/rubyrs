@@ -1193,6 +1193,77 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let write = sp(node, Expr::IVarWrite(name, Box::new(tr(ctx, &n.value()))));
         return sp(node, Expr::And(Box::new(read), Box::new(write)));
     }
+    if let Some(n) = node.as_call_or_write_node() {
+        // `recv.attr ||= val` → `recv.attr || (recv.attr=(val))`.
+        // CRuby semantics: read via `recv.attr` (no args), and on
+        // falsy write via the writer method `recv.attr=(val)`. The
+        // writer's name is the read name plus `=`. Receiver is
+        // evaluated TWICE here (once per branch) — same shape as
+        // IndexOrWriteNode below; CRuby's version evaluates once
+        // and stashes in a temp, but the doubled eval matches
+        // observed CRuby behaviour for the simple receiver shapes
+        // (`self`, ConstRead, local var) the spike hits.
+        let recv = n.receiver().map(|r| tr(ctx, &r)).expect(
+            "CallOrWriteNode without receiver is unrepresentable",
+        );
+        let read_name = cid_to_string(n.read_name());
+        let write_name = format!("{}=", read_name);
+        let read = sp(node, Expr::Call {
+            receiver: Some(Box::new(recv.clone())),
+            name: read_name,
+            args: vec![], kwargs_trailing: false });
+        let write = sp(node, Expr::Call {
+            receiver: Some(Box::new(recv)),
+            name: write_name,
+            args: vec![tr(ctx, &n.value())], kwargs_trailing: false });
+        return sp(node, Expr::Or(Box::new(read), Box::new(write)));
+    }
+    if let Some(n) = node.as_call_and_write_node() {
+        // `recv.attr &&= val` → `recv.attr && (recv.attr=(val))`.
+        // Same shape as CallOrWrite above, just `&&` instead of
+        // `||`. Hit by attribute-and-write idioms inside attr_
+        // accessor-heavy classes.
+        let recv = n.receiver().map(|r| tr(ctx, &r)).expect(
+            "CallAndWriteNode without receiver is unrepresentable",
+        );
+        let read_name = cid_to_string(n.read_name());
+        let write_name = format!("{}=", read_name);
+        let read = sp(node, Expr::Call {
+            receiver: Some(Box::new(recv.clone())),
+            name: read_name,
+            args: vec![], kwargs_trailing: false });
+        let write = sp(node, Expr::Call {
+            receiver: Some(Box::new(recv)),
+            name: write_name,
+            args: vec![tr(ctx, &n.value())], kwargs_trailing: false });
+        return sp(node, Expr::And(Box::new(read), Box::new(write)));
+    }
+    if let Some(n) = node.as_call_operator_write_node() {
+        // `recv.attr += val` → `recv.attr=(recv.attr + val)`.
+        // Binary operator from `n.binary_operator()` (e.g. "+",
+        // "-", "*", "<<"); writer method is the read name + `=`.
+        // Receiver evaluated twice — same shape as the
+        // IndexOperatorWrite arm below.
+        let recv = n.receiver().map(|r| tr(ctx, &r)).expect(
+            "CallOperatorWriteNode without receiver is unrepresentable",
+        );
+        let read_name = cid_to_string(n.read_name());
+        let write_name = format!("{}=", read_name);
+        let op = cid_to_string(n.binary_operator());
+        let read = sp(node, Expr::Call {
+            receiver: Some(Box::new(recv.clone())),
+            name: read_name,
+            args: vec![], kwargs_trailing: false });
+        let new_val = sp(node, Expr::Call {
+            receiver: Some(Box::new(read)),
+            name: op,
+            args: vec![tr(ctx, &n.value())], kwargs_trailing: false });
+        let write = sp(node, Expr::Call {
+            receiver: Some(Box::new(recv)),
+            name: write_name,
+            args: vec![new_val], kwargs_trailing: false });
+        return write;
+    }
     if let Some(n) = node.as_index_or_write_node() {
         // `recv[idx] ||= val` → `recv[idx] || (recv[idx] = val)`.
         let recv = n.receiver().map(|r| tr(ctx, &r)).expect(

@@ -26,7 +26,10 @@ BlockNode
 BlockParameterNode
 BlockParametersNode
 BreakNode
+CallAndWriteNode
 CallNode
+CallOperatorWriteNode
+CallOrWriteNode
 CallTargetNode
 CaseNode
 ClassNode
