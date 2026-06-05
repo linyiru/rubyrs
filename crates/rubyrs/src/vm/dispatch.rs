@@ -3841,6 +3841,72 @@ impl Vm {
             })),
         }
     }
+    // `Class.new` / `Class.new(superclass)` — no-block path.
+    // Mirrors the block-form arm in `do_call_block` (which
+    // ALSO runs the body as a class_eval); this one returns
+    // the freshly-built anonymous Class without invoking any
+    // body. Pre-fix this fell through to the generic Class
+    // allocator below which produced a `Value::Object` whose
+    // class was `Class` — NOT a real `Value::Class` —
+    // breaking downstream `Class.new(anon) { ... }` block-form
+    // calls and any introspection (`#superclass`, `#name`,
+    // `#new` on the result) that requires the Class value
+    // variant. Mustermann's
+    // `mustermann/ast/translator.rb:75`
+    //   `Class.new(const_get(:NodeTranslator)) do ... end`
+    // tripped this because `NodeTranslator` (built via an
+    // earlier `Class.new(Delegator)`) was the Value::Object
+    // form, and the block-form arm's `[Value::Class(sc)]`
+    // pattern failed to match, raising "superclass must be
+    // a Class (Object given)".
+    if name_id == new_id
+        && let Value::Class(cls) = &recv
+        && cls.name.as_str() == "Class"
+    {
+        let explicit_super: Option<Rc<Class>> = match args.as_slice() {
+            [] => None,
+            [Value::Class(sc)] if !sc.is_module => Some(sc.clone()),
+            [Value::Class(_)] => {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: "superclass must be an instance of Class (given an instance of Module)".to_string(),
+                }));
+            }
+            [other] => {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!("superclass must be an instance of Class (given an instance of {})", other.type_name()),
+                }));
+            }
+            _ => {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0..1)",
+                        args.len(),
+                    ),
+                }));
+            }
+        };
+        let object_sym = self.interner.intern("Object");
+        let parent = explicit_super.or_else(|| self.classes.get(&object_sym).cloned());
+        let new_cls = Rc::new(Class {
+            name: String::new(),
+            is_module: false,
+            ivars: std::cell::RefCell::new(HashMap::new()),
+            methods: std::cell::RefCell::new(HashMap::new()),
+            singleton_methods: std::cell::RefCell::new(HashMap::new()),
+            superclass: std::cell::RefCell::new(parent),
+            includes: std::cell::RefCell::new(Vec::new()),
+            prepends: std::cell::RefCell::new(Vec::new()),
+            singleton_prepends: std::cell::RefCell::new(Vec::new()),
+            singleton_includes: std::cell::RefCell::new(Vec::new()),
+            singleton_view: std::cell::RefCell::new(None),
+            singleton_target: std::cell::RefCell::new(None),
+            class_vars: std::cell::RefCell::new(HashMap::new()),
+            #[cfg(feature = "cext")]
+            cext_alloc_func: std::cell::Cell::new(None),
+        });
+        self.stack.push(Value::Class(new_cls));
+        return Ok(ClassOutcome::Handled);
+    }
     if name_id == new_id
         && let Value::Class(cls) = &recv
         && cls.name.as_str() == "Hash"
@@ -10188,12 +10254,12 @@ impl Vm {
                 [Value::Class(sc)] if !sc.is_module => Some(sc.clone()),
                 [Value::Class(_)] => {
                     return Err(self.trap(RubyError::TypeError {
-                        msg: "superclass must be a Class (Module given)".to_string(),
+                        msg: "superclass must be an instance of Class (given an instance of Module)".to_string(),
                     }));
                 }
                 [other] => {
                     return Err(self.trap(RubyError::TypeError {
-                        msg: format!("superclass must be a Class ({} given)", other.type_name()),
+                        msg: format!("superclass must be an instance of Class (given an instance of {})", other.type_name()),
                     }));
                 }
                 _ => {
