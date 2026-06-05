@@ -52,6 +52,13 @@ puts "w_shout=#{w.shout}"         # delegated
 puts "w_helper=#{w.my_helper}"    # own
 puts "w_is_delegator=#{w.is_a?(Delegator)}"
 
+# 4b. `respond_to_missing?` returns a strict boolean even
+# when the underlying object is absent. Pre-fix the trailing-
+# if form returned nil for the target-less case, diverging
+# from CRuby's "must be a bool" contract.
+sd_no_target = SimpleDelegator.new(nil)
+puts "rtm_nil_target=#{sd_no_target.respond_to_missing?(:foo, false).inspect}"
+
 # 5. Class equality — `Wrapped < DelegateClass(Inner)`
 # pseudo-inherits Delegator (rubyrs's shim returns Delegator
 # from the factory rather than `Class.new(Delegator)`,

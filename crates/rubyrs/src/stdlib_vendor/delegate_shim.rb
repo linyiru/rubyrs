@@ -46,7 +46,13 @@ class Delegator
 
   def respond_to_missing?(name, include_private = false)
     target = __getobj__
-    target.respond_to?(name, include_private) if !target.nil?
+    # Trailing-if form returns nil when the guard is false;
+    # CRuby's `respond_to_missing?` contract demands a
+    # boolean. Explicit ternary so a target-less Delegator
+    # answers `false`, matching CRuby. Feature-detection
+    # callers (`obj.respond_to?(name)`) that compare against
+    # boolean false rely on this.
+    target.nil? ? false : target.respond_to?(name, include_private)
   end
 end
 
