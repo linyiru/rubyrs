@@ -42,6 +42,7 @@ impl Vm {
                         class: cls,
                         ivars: HashMap::new(),
                         singleton_class: None,
+            frozen: std::cell::Cell::new(false),
                     }));
                     let msg_id = self.interner.intern("@message");
                     self.heap.instance_mut(id).ivars.insert(msg_id, v);
@@ -64,6 +65,7 @@ impl Vm {
                     class: cls.clone(),
                     ivars: HashMap::new(),
                     singleton_class: None,
+            frozen: std::cell::Cell::new(false),
                 }));
                 Value::Object(id)
             }
@@ -119,6 +121,7 @@ impl Vm {
             class: cls,
             ivars: HashMap::new(),
             singleton_class: None,
+            frozen: std::cell::Cell::new(false),
         }));
         let msg_sym = self.interner.intern("@message");
         self.heap.instance_mut(id).ivars.insert(msg_sym, Value::new_str(message));
@@ -577,6 +580,7 @@ pub(crate) fn build_interrupt_exception(vm: &mut crate::vm::Vm) -> Option<crate:
         class: cls,
         ivars: std::collections::HashMap::new(),
         singleton_class: None,
+            frozen: std::cell::Cell::new(false),
     }));
     let message_sym = vm.interner.intern("@message");
     let msg_val = Value::Str(std::rc::Rc::new(RStr::new("interrupt".to_string())));
@@ -637,6 +641,7 @@ mod tests {
             class: cls,
             ivars: HashMap::new(),
             singleton_class: None,
+            frozen: std::cell::Cell::new(false),
         }));
         let v = Value::Object(id);
         let out = vm.normalize_exception(v.clone());

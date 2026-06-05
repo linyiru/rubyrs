@@ -442,6 +442,18 @@ pub struct Instance {
     /// report the original — matching CRuby, where `obj.class`
     /// returns the user-declared class, not the eigenclass.
     pub(crate) singleton_class: Option<Rc<Class>>,
+    /// CRuby's per-object frozen bit. `false` by default; flipped
+    /// to `true` by `Object#freeze` and stays true for the life
+    /// of the object (CRuby's freeze is one-way — `unfreeze`
+    /// doesn't exist). `Object#frozen?` reads this. Subsequent
+    /// mutation attempts (ivar set, singleton method install,
+    /// internal state mutation) should consult and raise
+    /// FrozenError — currently only the freeze read/write
+    /// surface is wired; full mutation guards are follow-up
+    /// work. `Cell<bool>` so `freeze` on `&self` can flip
+    /// without taking `&mut self`, matching the lazy
+    /// singleton_class allocation convention next door.
+    pub(crate) frozen: std::cell::Cell<bool>,
 }
 
 #[derive(Debug)]

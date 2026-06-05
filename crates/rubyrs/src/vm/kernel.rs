@@ -3231,6 +3231,7 @@ fn raise_system_exit(vm: &mut Vm, status: i32, message: &str) -> Option<Result<V
         class: cls,
         ivars: std::collections::HashMap::new(),
         singleton_class: None,
+            frozen: std::cell::Cell::new(false),
     }));
     let status_sym = vm.interner.intern("@status");
     let message_sym = vm.interner.intern("@message");

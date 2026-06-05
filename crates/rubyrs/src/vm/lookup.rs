@@ -544,7 +544,7 @@ impl Vm {
             // succeed on every receiver type, so feature
             // detection (`obj.respond_to?(:object_id)`) must
             // agree.
-            | "object_id" | "__id__" | "hash" | "frozen?" | "inspect"
+            | "object_id" | "__id__" | "hash" | "frozen?" | "freeze" | "inspect"
             // Object-extras family (Kleisli `then`/`yield_self`,
             // debug `tap`, identity `itself`) — universal arms
             // in `do_call` succeed on every receiver, so feature

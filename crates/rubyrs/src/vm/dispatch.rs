@@ -7982,6 +7982,7 @@ impl Vm {
                         class: cls,
                         ivars,
                         singleton_class: None,
+            frozen: std::cell::Cell::new(false),
                     }));
                     Value::Object(new_id)
                 }
@@ -8059,19 +8060,35 @@ impl Vm {
         // CRuby treats all immediates (Integer, Float, Symbol,
         // true, false, nil) as always-frozen. Str/Array/Hash/Regex
         // have their own primitive arms earlier in dispatch and
-        // never reach here. For plain user-class instances we
-        // return false (we don't model a freeze bit on
-        // Value::Object yet).
+        // never reach here. For Value::Object (plain user
+        // instances) we consult the per-Instance `frozen` Cell
+        // installed by `Object#freeze` below; everything else
+        // (Class, BoundMethod, Method, Block, ...) returns false.
         if &*name == "frozen?" && args.is_empty() {
-            let frozen = matches!(
-                &recv,
-                Value::Int(_)
-                    | Value::Float(_)
-                    | Value::Sym(_)
-                    | Value::Bool(_)
-                    | Value::Nil
-            );
+            let frozen = match &recv {
+                Value::Int(_) | Value::Float(_) | Value::Sym(_)
+                    | Value::Bool(_) | Value::Nil => true,
+                Value::Object(id) => self.heap.instance(*id).frozen.get(),
+                _ => false,
+            };
             self.stack.push(Value::Bool(frozen));
+            return Ok(());
+        }
+        // `Object#freeze` — universal, no args. CRuby's freeze is
+        // a one-way flag flip: subsequent mutation attempts
+        // surface FrozenError. For user-class instances we set
+        // the per-Instance `frozen` Cell and return self;
+        // immediates / Class / BoundMethod / ... are already
+        // immutable from script's perspective, so freeze is a
+        // no-op that returns self. Mutation guards on ivar set
+        // / singleton install are follow-up — adding the
+        // freeze read/write surface is what unblocks gems that
+        // call `EmptyMapping.new.freeze` on construction.
+        if &*name == "freeze" && args.is_empty() {
+            if let Value::Object(id) = &recv {
+                self.heap.instance(*id).frozen.set(true);
+            }
+            self.stack.push(recv);
             return Ok(());
         }
         // `Object#to_s` / `Object#inspect` — universal default.
@@ -11759,6 +11776,7 @@ impl Vm {
             class: cls.clone(),
             ivars: HashMap::new(),
             singleton_class: None,
+            frozen: std::cell::Cell::new(false),
         }));
         Ok(Value::Object(id))
     }

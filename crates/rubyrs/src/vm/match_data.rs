@@ -65,6 +65,7 @@ impl Vm {
             class: cls,
             ivars: HashMap::new(),
             singleton_class: None,
+            frozen: std::cell::Cell::new(false),
         }));
         let whole_ivar = self.interner.intern("@whole");
         let caps_ivar = self.interner.intern("@caps");

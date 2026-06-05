@@ -315,6 +315,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn bare_super_splat_forwarding() { run_diff("bare_super_splat_forwarding"); }
 #[test] fn kwarg_computed_defaults() { run_diff("kwarg_computed_defaults"); }
 #[test] fn exception_backtrace() { run_diff("exception_backtrace"); }
+#[test] fn object_freeze() { run_diff("object_freeze"); }
 #[test] fn lambdas() { run_diff("lambdas"); }
 #[test] fn string_mutation() { run_diff("string_mutation"); }
 #[test] fn defined() { run_diff("defined"); }
