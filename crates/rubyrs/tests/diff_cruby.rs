@@ -318,6 +318,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn object_freeze() { run_diff("object_freeze"); }
 #[test] fn super_kwarg_splat() { run_diff("super_kwarg_splat"); }
 #[test] fn call_or_op_write() { run_diff("call_or_op_write"); }
+#[test] fn multi_write_splat_call() { run_diff("multi_write_splat_call"); }
 #[test] fn lambdas() { run_diff("lambdas"); }
 #[test] fn string_mutation() { run_diff("string_mutation"); }
 #[test] fn defined() { run_diff("defined"); }

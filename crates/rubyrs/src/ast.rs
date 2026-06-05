@@ -546,6 +546,14 @@ pub(crate) enum MultiWriteTarget {
     /// the positional `Global` variant; pre-fix `*$g = …` still
     /// hit the legacy "unsupported splat target" error path.
     SplatGlobal(String),
+    /// `*recv.attr` — splat into an attribute writer. Hit by
+    /// Mustermann's `self.head, *self.payload = Array(payload)`
+    /// (mustermann/ast/node.rb:216). The collected rest Array
+    /// is passed through `recv.attr=(array)`; same dispatch
+    /// shape as `MWT::Call` (which handles non-splat `recv.attr
+    /// = val`). Receiver evaluated AFTER the RHS — documented
+    /// Tier-1 divergence shared with `MWT::Call`.
+    SplatCall { receiver: Box<SExpr>, name: String },
     /// `obj.attr = …` — method-call setter target. Surfaced by
     /// `obj.x, obj.y = a, b` shapes (sinatra-param uses this
     /// for `exception.param, exception.options = name, options`
@@ -1555,6 +1563,21 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             targets.push(MultiWriteTarget::SplatGlobal(
                                 cid_to_string(gvt.name()),
                             ));
+                        } else if let Some(call_tgt) = expr.as_call_target_node() {
+                            // `*recv.attr` — splat into an attribute
+                            // writer. Mustermann's
+                            // `self.head, *self.payload = ...` shape;
+                            // pre-fix this hit the "unsupported splat
+                            // target" arm despite the non-splat
+                            // CallTargetNode case (~line 1505) being
+                            // wired. Same dispatch as positional
+                            // `MWT::Call`: receiver evaluated +
+                            // swapped, setter dispatched with arity 1.
+                            let receiver = Box::new(tr(ctx, &call_tgt.receiver()));
+                            let name = cid_to_string(call_tgt.name());
+                            targets.push(MultiWriteTarget::SplatCall {
+                                receiver, name,
+                            });
                         } else {
                             ctx.errors.push(
                                 format!("unsupported splat target: {:?}", expr)

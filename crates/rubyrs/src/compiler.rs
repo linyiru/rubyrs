@@ -598,7 +598,11 @@ fn compile_multiwrite_arm(
     let splat_id = interner.intern("__mw_splat");
 
     let splat_pos = targets.iter().position(|t| matches!(
-        t, MWT::SplatLocal(_) | MWT::SplatIvar(_) | MWT::SplatGlobal(_)
+        t,
+        MWT::SplatLocal(_)
+            | MWT::SplatIvar(_)
+            | MWT::SplatGlobal(_)
+            | MWT::SplatCall { .. }
     ));
 
     let emit_store = |b: &mut ProtoBuilder,
@@ -633,6 +637,26 @@ fn compile_multiwrite_arm(
             MWT::SplatGlobal(name) => {
                 let id = interner.intern(name);
                 b.emit(Op::StoreGlobal(id));
+            }
+            MWT::SplatCall { receiver, name } => {
+                // Stack: [..., rest_array]. Same dispatch shape
+                // as MWT::Call: compile receiver, swap to land
+                // `[..., recv, rest_array]`, call `name=` setter
+                // with arity 1, pop the return value. The rest
+                // slice was already gathered into a fresh Array
+                // by the multi-write splat-collection path
+                // before this emit_store runs, so the writer
+                // receives the same Array CRuby would pass.
+                compile_expr(b, receiver, protos, interner, cc);
+                b.emit(Op::Swap);
+                let setter_name = if name.ends_with('=') {
+                    name.clone()
+                } else {
+                    format!("{name}=")
+                };
+                let id = interner.intern(&setter_name);
+                emit_method_call(b, id, 1, /*has_recv=*/true, false, false, cc);
+                b.emit(Op::Pop);
             }
             MWT::Call { receiver, name } => {
                 // Stack: [..., val]. Evaluate receiver, swap so
