@@ -2133,6 +2133,18 @@ impl Runtime {
             "<rubyrs:preamble:mutex>",
         )
             .expect("ICE: failed to load Mutex preamble");
+        // Struct — `Struct.new(:a, :b)` factory returning an
+        // anonymous Class with positional initialiser + attr
+        // accessors. Needs the anonymous-Class.new path that
+        // `1f6c8f78` shipped (Class.new returning a real
+        // Value::Class) AND `define_method` on it; preamble
+        // ordering puts it after Object/exceptions but before
+        // any consumer fragment.
+        self.eval_inner(
+            include_str!("preamble/struct.rb"),
+            "<rubyrs:preamble:struct>",
+        )
+            .expect("ICE: failed to load Struct preamble");
         // Thread — single-threaded Tier 1 stub. Only
         // `Thread.current.object_id` is modeled (tilt uses it to
         // suffix compiled-method names). See preamble/thread.rb
