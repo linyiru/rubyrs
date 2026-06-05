@@ -2971,6 +2971,8 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
         // `IPAddr.new(...)` calls are wrapped in lambdas/Procs that
         // run later — bare constant shell suffices to clear the load.
         "ipaddr" => &[("IPAddr", false)],
+        "openssl" => &[("OpenSSL", true)],
+        "zlib" => &[("Zlib", true)],
         "fiber" => &[("Fiber", false)],
         "rbconfig" => &[("RbConfig", true)],
         _ => &[],
@@ -3007,6 +3009,23 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util" | "cgi/escape"
         | "ipaddr"
+        // `openssl`: rack-session's cookie / encryptor `require
+        // 'openssl'` at module-load time but only call
+        // `OpenSSL::Cipher.new` / `OpenSSL::HMAC.digest` from
+        // inside request-time methods (cookie signing). The
+        // lenient stub materialises the `OpenSSL` module so the
+        // require succeeds; real crypto stays behind the Tier-3
+        // `_openssl` battery (rustls — ADR 0019 Part E). Calls
+        // into the stub raise NoMethodError (feature-absent
+        // surface), so an app that actually signs cookies fails
+        // loudly rather than silently mis-signing.
+        | "openssl"
+        // `zlib`: rack-session's cookie store `require 'zlib'` at
+        // load time for optional payload compression
+        // (`Zlib::Deflate` / `Inflate`), called only at request
+        // time. Same lenient-stub rationale as `openssl` above —
+        // real deflate/inflate would be a future Tier-3 battery.
+        | "zlib"
         // `fiber`: Rack 3 `rack/builder.rb` requires this. rubyrs
         // has no Fiber primitive (Tier 1 = single-threaded,
         // single-fiber); the require is a no-op stub. Downstream
