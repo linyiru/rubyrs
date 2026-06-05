@@ -11855,14 +11855,12 @@ impl Vm {
                 // Final fallback: toplevel (bare segment lookup
                 // via Object) — matches CRuby's "after walking
                 // the inheritance chain, try toplevel" rule.
-                if hit.is_none() {
-                    if self.interner.contains(segment) {
-                        let tl_qid = self.interner.intern(segment);
-                        if let Some(c) = self.classes.get(&tl_qid).cloned() {
-                            hit = Some((Value::Class(c.clone()), c.name.clone()));
-                        } else if let Some(v) = self.constants.get(&tl_qid).cloned() {
-                            hit = Some((v, String::new()));
-                        }
+                if hit.is_none() && self.interner.contains(segment) {
+                    let tl_qid = self.interner.intern(segment);
+                    if let Some(c) = self.classes.get(&tl_qid).cloned() {
+                        hit = Some((Value::Class(c.clone()), c.name.clone()));
+                    } else if let Some(v) = self.constants.get(&tl_qid).cloned() {
+                        hit = Some((v, String::new()));
                     }
                 }
             }
