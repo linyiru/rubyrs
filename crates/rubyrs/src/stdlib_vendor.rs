@@ -58,6 +58,16 @@ pub(crate) fn always_on_stub_extras(name: &str) -> Option<&'static str> {
         "tilt" => {
             Some(include_str!("stdlib_vendor/tilt_shim.rb"))
         }
+        // `forwardable`: Sinatra / Mustermann / Rack call
+        // `extend Forwardable` + `def_delegators :recv, *methods`
+        // from class bodies (executed at module-load time). The
+        // kernel-side stub already installs empty Forwardable +
+        // SingleForwardable shells; this shim reopens both and
+        // installs the actual delegation surface so `require
+        // "forwardable"` is functional, not just resolvable.
+        "forwardable" => {
+            Some(include_str!("stdlib_vendor/forwardable_shim.rb"))
+        }
         _ => None,
     }
 }
