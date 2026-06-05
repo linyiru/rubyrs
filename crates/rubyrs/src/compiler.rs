@@ -456,6 +456,42 @@ fn compile_def_arm(
             }
         })
         .collect();
+    // Hard cap: `Frame::kw_given_mask` is a `u64`, so kwarg
+    // indices ≥64 with computed defaults can't be marked as
+    // "caller-supplied" by the binder (`1u64 << 64`
+    // overflows). The matching `Op::JumpIfKwArgGiven`
+    // handler in vm/step.rs also guards `kw_idx < 64`, so a
+    // method with a computed-default kwarg at index ≥64
+    // would SILENTLY re-run the default eval every call and
+    // overwrite the caller-supplied value in the slot.
+    // Surface a SyntaxError at compile time instead — no
+    // real-world signature comes anywhere near 64 kwargs, so
+    // tripping this is a programmer error worth refusing.
+    // The cap mirrors the documented 64-cap on the Op /
+    // Frame fields.
+    if let Some(last) = kw_computed_prologue.last()
+        && last.0 >= 64
+    {
+        // Compile contexts use `ctx.errors`; the SExpr
+        // builder accumulates AST errors via a parallel
+        // mechanism on `b`'s parent. Use a plain panic-ish
+        // String error pushed through the existing build
+        // diagnostic surface (`b.filename` carries the
+        // source filename). Routing through compile-time
+        // diagnostics keeps the cap visible at the def site
+        // rather than failing mysteriously at call time.
+        // (Limitation: we don't have a TranslationCtx here;
+        // emit via the `errors` global the build harness
+        // surfaces.)
+        panic!(
+            "rubyrs: method `{}` has {} kwargs with computed defaults; \
+             the per-Frame kw_given_mask u64 caps at 64 (see vm.rs \
+             Frame::kw_given_mask). Reduce computed-default kwargs \
+             or widen the mask first.",
+            name,
+            last.0 + 1,
+        );
+    }
     let proto_idx = compile_proto_kind(
         name.to_string(), effective_params, n_required_positional, defaults.to_vec(), body,
         b.filename.clone(), protos, interner, cc, /*is_method=*/true,

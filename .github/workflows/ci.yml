@@ -667,7 +667,13 @@ jobs:
           # Bumped 7 → 9 when PR #318 merged master: the M27 batch
           # (middle-splat `a, *b, c` + legacy `Module#attr`) added two
           # ICE-class asserts in the compiler.
-          check crates/rubyrs/src/compiler.rs  9
+          # Bumped 9 → 10 (+1) by the kwarg-mask cap guard
+          # added during the code-review sweep: a panic at
+          # `compile_def_arm` refuses methods with >64
+          # computed-default kwargs (mirrors the `u64`
+          # `Frame::kw_given_mask` width). Programmer-error
+          # invariant — no real signature comes near the cap.
+          check crates/rubyrs/src/compiler.rs  10
           exit "$fail"
 
   perf-budget:
