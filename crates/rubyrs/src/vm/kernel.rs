@@ -2964,6 +2964,13 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
         "shellwords" => &[("Shellwords", true)],
         "weakref" => &[("WeakRef", false)],
         "cgi" | "cgi/util" => &[("CGI", false)],
+        // `ipaddr`: Sinatra 4 + rack-protection 4 `require 'ipaddr'`
+        // at module-load time. Class-body usage is constant-check
+        // shape (`when IPAddr`, `rescue IPAddr::InvalidAddressError`)
+        // which doesn't actually call any IPAddr methods at load.
+        // `IPAddr.new(...)` calls are wrapped in lambdas/Procs that
+        // run later — bare constant shell suffices to clear the load.
+        "ipaddr" => &[("IPAddr", false)],
         _ => &[],
     }
 }
@@ -2997,6 +3004,7 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "bigdecimal" | "monitor" | "erb"
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util"
+        | "ipaddr"
         | "rack"
         // `tilt`: Sinatra 4 requires it at module-load time. The
         // shim (always_on_stub_extras) installs a `Tilt` module
