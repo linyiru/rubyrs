@@ -168,7 +168,7 @@ crates/rubyrs/examples/metaprog_bench/mm_bench.rb	7300	1400	2M method_missing di
 # touches the bumped tables); other workloads have their own
 # headroom.
 crates/rubyrs/examples/metaprog_bench/dm_bench.rb	7300	900	2M define_method dispatch (closure-method)
-crates/rubyrs/examples/metaprog_bench/static_bench.rb	7300	1150	2M def+ivar (control for the metaprog comparisons)
+crates/rubyrs/examples/metaprog_bench/static_bench.rb	7400	1150	2M def+ivar (control for the metaprog comparisons)
 # Budgets at ~2× local M-series observed wall to absorb CI's
 # ~1.65× ubuntu-latest slowdown plus per-run jitter — same shape
 # as the metaprog rows above (static_bench: local 390ms / CI 650
@@ -200,4 +200,4 @@ crates/rubyrs/benches/string_interp.rb	7300	700	200k InterpolatedStr; Op::Interp
 # regression (no relevant merges in the affected window).
 # Headroom is ~3% over observed max; future regressions
 # still surface.
-crates/rubyrs/benches/hash_mutate.rb	7300	880	200k Hash[]= overwrites + 1k Hash[] reads
+crates/rubyrs/benches/hash_mutate.rb	7400	880	200k Hash[]= overwrites + 1k Hash[] reads
