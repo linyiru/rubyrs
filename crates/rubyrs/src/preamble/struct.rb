@@ -59,17 +59,17 @@ class Struct
     end
     cls.define_method(:initialize) do |*args|
       members.each_with_index do |attr, i|
-        self.instance_variable_set("@#{attr}".to_sym, args[i])
+        instance_variable_set("@#{attr}".to_sym, args[i])
       end
     end
     attrs.each do |attr|
       ivar = "@#{attr}".to_sym
       writer = "#{attr}=".to_sym
-      cls.define_method(attr) { self.instance_variable_get(ivar) }
-      cls.define_method(writer) { |v| self.instance_variable_set(ivar, v) }
+      cls.define_method(attr) { instance_variable_get(ivar) }
+      cls.define_method(writer) { |v| instance_variable_set(ivar, v) }
     end
     cls.define_method(:to_a) do
-      members.map { |a| self.instance_variable_get("@#{a}".to_sym) }
+      members.map { |a| instance_variable_get("@#{a}".to_sym) }
     end
     cls.define_method(:==) do |other|
       # CRuby's `Struct#==` requires EXACT class match (`==`),

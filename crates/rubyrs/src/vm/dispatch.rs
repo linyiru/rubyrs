@@ -4539,6 +4539,40 @@ impl Vm {
             return Ok(());
         }
         let name = self.interner.resolve(name_id).clone();
+        // Universal-Object bare-call routing. Three shims
+        // (Forwardable / Delegate / Struct) work around this gap
+        // by writing `self.instance_variable_get(...)` explicitly
+        // because the bare-form dispatch path doesn't reach the
+        // universal Object arms (those gate on `&recv` being
+        // `Some(Value::Object(...))`, but `no_recv` keeps `recv`
+        // None). Closes the gap by treating bare-form
+        // `instance_variable_get`/`set`/`defined?` calls as
+        // `self.<method>(args)` when self is `Value::Object` —
+        // routes through the explicit-recv arms below by pushing
+        // self and re-entering with no_recv=false.
+        if no_recv
+            && matches!(
+                &*name,
+                "instance_variable_get"
+                    | "instance_variable_set"
+                    | "instance_variable_defined?"
+                    | "instance_variables"
+            )
+        {
+            let self_val = self.frames.last()
+                .expect("ICE: do_call(no_recv) with empty frames for ivar bare-call routing")
+                .self_val.clone();
+            if matches!(&self_val, Value::Object(_)) {
+                // Insert receiver BELOW the args so the explicit-
+                // recv path's stack layout (`[..., recv, arg1,
+                // ..., argN]`) is satisfied — `do_call` drains
+                // `argc` from the top, then pops the receiver
+                // beneath it.
+                let insertion = self.stack.len() - argc;
+                self.stack.insert(insertion, self_val);
+                return self.do_call(name_id, argc, /*no_recv=*/ false, cache_id);
+            }
+        }
         if no_recv {
             let self_val = self.frames.last()
                 .expect("ICE: do_call(no_recv) with empty frames")

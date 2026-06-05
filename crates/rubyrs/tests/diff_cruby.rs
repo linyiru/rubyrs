@@ -326,6 +326,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn struct_factory() { run_diff("struct_factory"); }
 #[test] fn const_get_inheritance_walk() { run_diff("const_get_inheritance_walk"); }
 #[test] fn anon_class_const_set() { run_diff("anon_class_const_set"); }
+#[test] fn bare_object_method_call() { run_diff("bare_object_method_call"); }
 #[test] fn lambdas() { run_diff("lambdas"); }
 #[test] fn string_mutation() { run_diff("string_mutation"); }
 #[test] fn defined() { run_diff("defined"); }

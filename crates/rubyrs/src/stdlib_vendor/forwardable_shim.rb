@@ -39,17 +39,11 @@ module Forwardable
     accessor_str = accessor.to_s
     is_ivar = accessor_str.start_with?("@")
     define_method(ali) do |*args, &blk|
-      # Use explicit `self.` to route through the universal
-      # `instance_variable_get` / dispatch arm — the bare
-      # `instance_variable_get(...)` call would NoMethodError
-      # because the bare-call dispatch doesn't reach the
-      # universal arms when self is a Value::Object inside a
-      # method/block body (rubyrs gap).
       target =
         if is_ivar
-          self.instance_variable_get(accessor)
+          instance_variable_get(accessor)
         else
-          self.__send__(accessor)
+          __send__(accessor)
         end
       # Trailing kwargs would normally split via `**kw` but
       # rubyrs's block params don't yet bind `**kw` (probe:
@@ -98,9 +92,9 @@ module SingleForwardable
       # covers the gem-load surface.
       target =
         if is_ivar
-          self.instance_variable_get(accessor)
+          instance_variable_get(accessor)
         else
-          self.__send__(accessor)
+          __send__(accessor)
         end
       target.__send__(method, *args, &blk)
     end
