@@ -705,39 +705,58 @@ pub(crate) fn string_call(
         // documented in SUBSET.md.
         (Value::Str(a), "index", [Value::Str(b)]) => {
             Some(a.with_str_lossy(|sa| b.with_str_lossy(|sb| match sa.find(sb) {
-                Some(i) => Value::Int(i as i64),
+                // `str::find` yields a BYTE offset; CRuby's
+                // `String#index` returns a CHARACTER offset. Count
+                // the chars before the match so the result is
+                // consistent with `String#length` / `String#[]`
+                // (both char-based). ASCII is unaffected (byte ==
+                // char); multibyte previously diverged from CRuby.
+                Some(byte_i) => Value::Int(sa[..byte_i].chars().count() as i64),
                 None => Value::Nil,
             })))
         }
         // `String#index(needle, offset)` — start scanning at `offset`.
         // CRuby accepts negative offsets (counted from the end) and
         // returns nil when offset > length. Returns nil when needle
-        // isn't found at or after `offset`. The returned index is
-        // ABSOLUTE in the receiver (not relative to `offset`),
+        // isn't found at or after `offset`. Both the `offset`
+        // argument AND the returned index are CHARACTER positions
+        // (absolute in the receiver, not relative to `offset`),
         // matching CRuby's contract; this is what makes
         // `String#index` chainable for streaming readers like
-        // StringIO#gets.
+        // StringIO#gets / File#gets.
         (Value::Str(a), "index", [Value::Str(b), Value::Int(off)]) => {
             Some(a.with_str_lossy(|sa| b.with_str_lossy(|sb| {
-                let len = sa.len() as i64;
-                let start = if *off < 0 { len + *off } else { *off };
+                let char_len = sa.chars().count() as i64;
+                let start_char = if *off < 0 { char_len + *off } else { *off };
                 // CRuby: out-of-range offsets (either side) return
-                // nil rather than clamping. `len + offset < 0` is
-                // the "negative offset past the start" case;
-                // `offset > len` is the "offset past the end" case.
-                if !(0..=len).contains(&start) {
+                // nil rather than clamping. `char_len + offset < 0`
+                // is the "negative offset past the start" case;
+                // `offset > char_len` is the "offset past the end".
+                if !(0..=char_len).contains(&start_char) {
                     return Value::Nil;
                 }
-                let start = start as usize;
-                match sa[start..].find(sb) {
-                    Some(i) => Value::Int((start + i) as i64),
+                // Char offset → byte offset for the actual scan.
+                // `start_char == char_len` (offset at the very end)
+                // maps past the last byte, i.e. `sa.len()`.
+                let start_byte = sa
+                    .char_indices()
+                    .nth(start_char as usize)
+                    .map(|(b, _)| b)
+                    .unwrap_or(sa.len());
+                match sa[start_byte..].find(sb) {
+                    // Absolute byte index of the match → char index.
+                    Some(byte_i) => {
+                        let abs_byte = start_byte + byte_i;
+                        Value::Int(sa[..abs_byte].chars().count() as i64)
+                    }
                     None => Value::Nil,
                 }
             })))
         }
         (Value::Str(a), "rindex", [Value::Str(b)]) => {
             Some(a.with_str_lossy(|sa| b.with_str_lossy(|sb| match sa.rfind(sb) {
-                Some(i) => Value::Int(i as i64),
+                // Byte offset → char offset, as in `index` above.
+                Some(byte_i) => Value::Int(sa[..byte_i].chars().count() as i64),
                 None => Value::Nil,
             })))
         }

@@ -154,9 +154,12 @@ class StringIO
 
   def gets
     return nil if @pos >= @str.length
-    # `String#index(needle, offset)` returns the ABSOLUTE byte
-    # index in the receiver, so we can scan directly from `@pos`
-    # without slicing — one less allocation per `gets`.
+    # `String#index(needle, offset)` returns the ABSOLUTE
+    # CHARACTER index in the receiver, so we can scan directly
+    # from `@pos` (also a char index) without slicing — one less
+    # allocation per `gets`. `@pos`, `nl`, the `@str[@pos..nl]`
+    # slice, and `@str.length` are all char-based, so multibyte
+    # lines split correctly.
     nl = @str.index("\n", @pos)
     if nl
       line = @str[@pos..nl]
