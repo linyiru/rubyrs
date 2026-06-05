@@ -1574,6 +1574,12 @@ impl Vm {
                     f.ip = (f.ip as i32 + off) as usize;
                 }
             }
+            Op::JumpIfKwArgGiven(kw_idx, off) => {
+                let f = self.frames.last_mut().expect("ICE: JumpIfKwArgGiven no frame");
+                if kw_idx < 64 && (f.kw_given_mask & (1u64 << kw_idx)) != 0 {
+                    f.ip = (f.ip as i32 + off) as usize;
+                }
+            }
             Op::Call(name_id, argc, cache_id) => {
                 self.do_call(name_id, argc as usize, false, cache_id)?;
             }
@@ -2969,7 +2975,7 @@ impl Vm {
                     locals: Rc::new(RefCell::new(vec_nil(n_locals))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
                     block_writeback: None,
                 });
             }

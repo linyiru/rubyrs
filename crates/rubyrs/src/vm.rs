@@ -116,6 +116,15 @@ pub(crate) struct Frame {
     /// / toplevel frames all use 0 — they don't carry an arity
     /// model that the prologue op would consult.
     pub(crate) n_given_positional: u16,
+    /// Bitmap of caller-supplied keyword args, indexed by the
+    /// method's 0-based kwarg position (NOT local slot index).
+    /// `Op::JumpIfKwArgGiven(kw_idx, off)` consults bit
+    /// `1 << kw_idx`. Set by the kwarg binder when the caller
+    /// supplied a value for that name. Block / class-body /
+    /// toplevel frames use 0 (they don't model kwargs the
+    /// prologue would consult). 64-bit caps non-literal-default
+    /// kwargs per method at 64 — far above any real signature.
+    pub(crate) kw_given_mask: u64,
     pub(crate) rescues: Vec<RescueHandler>,
     /// Stack of `rescues.len()` snapshots, one per enclosing
     /// `while` loop currently active in this frame. `Op::EnterLoop`

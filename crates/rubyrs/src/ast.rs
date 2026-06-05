@@ -2389,22 +2389,16 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 } else if let Some(ok) = kw.as_optional_keyword_parameter_node() {
                     let name = cid_to_string(ok.name());
                     let val = tr(ctx, &ok.value());
-                    // Same literal-only restriction as positional
-                    // defaults: anything else needs a per-callsite
-                    // prologue we don't generate. Surface as a
-                    // SyntaxError via ctx.errors.
-                    match &val.node {
-                        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StrLit(_) | Expr::SymbolLit(_)
-                        | Expr::BoolLit(_) | Expr::Nil => {
-                            kw_params.push((name, Some(val)));
-                        }
-                        _ => {
-                            ctx.errors.push(
-                                format!("default value for keyword parameter `{}` must be a literal", name)
-                            );
-                            kw_params.push((name, Some(sp(&kw, Expr::Nil))));
-                        }
-                    }
+                    // Accept any expression as a kwarg default —
+                    // mirrors positional defaults. The compiler
+                    // routes literals (`Int`, `Float`, `Str`, `Symbol`,
+                    // `Bool`, `Nil`) into `Proto::kw_param_defaults`
+                    // for the binder's fast path; non-literals
+                    // (`ConstRead`, method call, prior-param ref,
+                    // ...) get a `JumpIfKwArgGiven` prologue at
+                    // method-body entry — same shape as the
+                    // positional default-arg prologue.
+                    kw_params.push((name, Some(val)));
                 }
             }
             for r in p.requireds().iter() {

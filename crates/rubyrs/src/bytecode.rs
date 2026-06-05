@@ -177,6 +177,20 @@ pub(crate) enum Op {
     /// positional param; emitted at the very top of the method
     /// body by the compiler.
     JumpIfArgGiven(u16, i32),
+    /// Kwarg-default prologue helper, analogous to
+    /// `JumpIfArgGiven` but for keyword params with computed
+    /// (non-literal) defaults. If kwarg index `kw_idx` (0-based,
+    /// within the method's kw_params list) was supplied by the
+    /// caller — `frame.kw_given_mask & (1 << kw_idx) != 0` —
+    /// jump by `off` to skip the default-eval body. Otherwise
+    /// fall through to the body that evaluates the default
+    /// expression and `StoreLocal(slot)`. One per keyword
+    /// param with a non-literal default; emitted immediately
+    /// after the positional-default prologue at the top of the
+    /// method body. Mask is 64-bit, capping non-literal kwarg
+    /// defaults per method at 64 — far beyond any real
+    /// signature.
+    JumpIfKwArgGiven(u16, i32),
     /// Args: name SymId, argc, per-call-site inline-cache slot id.
     Call(SymId, u8, u16),
     CallNoRecv(SymId, u8, u16),
@@ -619,8 +633,22 @@ pub(crate) struct Proto {
     /// the parallel defaults. Length matches the number of
     /// keyword params. `None` = required keyword (raises
     /// ArgumentError on miss); `Some(v)` = optional with literal
-    /// default.
+    /// default. NOTE: a kwarg with a non-literal (computed)
+    /// default has `None` here AND `true` in
+    /// `kw_has_computed_default` — the binder leaves the slot
+    /// Nil and the prologue evaluates the default expression.
+    /// `None + computed=false` is the only shape that surfaces
+    /// the missing-keyword ArgumentError.
     pub(crate) kw_param_defaults: Vec<Option<Value>>,
+    /// Parallel to `kw_param_defaults`: `true` at index `i`
+    /// means kwarg `i` has a computed (non-literal) default
+    /// emitted in the method-body prologue (via
+    /// `Op::JumpIfKwArgGiven(i, _)`). Binder uses this to
+    /// distinguish "leave nil for prologue" (computed) from
+    /// "raise missing-keyword" (required) — see kw bind loop
+    /// in `vm/dispatch.rs`. Empty when the method has no
+    /// kwargs OR every kwarg default is a literal.
+    pub(crate) kw_has_computed_default: Vec<bool>,
     /// `Some(name)` for `def foo(**opts)` — the keyword-rest
     /// parameter name. Leftover keyword args (those whose key
     /// isn't bound by a named entry in `kw_param_defaults`)

@@ -408,8 +408,26 @@ fn compile_def_arm(
     if let Some(bname) = block_param {
         effective_params.push(bname.clone());
     }
+    // Split kwarg defaults into literal (binder fast path) and
+    // computed (prologue-emitted) buckets. For literals, store
+    // the Value in `kw_param_defaults[i]`; for non-literals
+    // (`ConstRead`, method-chain, prior-param ref, ...), set
+    // `kw_has_computed_default[i] = true`, leave the literal
+    // entry as `None`, and remember the SExpr so the prologue
+    // can emit the eval at the right kw slot index.
     let kw_lit_defaults: Vec<Option<Value>> = kw_params.iter().map(|(_, d)| {
-        d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
+        d.as_ref().and_then(|sx| {
+            if expr_is_compile_time_literal(&sx.node) {
+                Some(literal_to_value(&sx.node, interner))
+            } else {
+                None
+            }
+        })
+    }).collect();
+    let kw_has_computed: Vec<bool> = kw_params.iter().map(|(_, d)| {
+        d.as_ref()
+            .map(|sx| !expr_is_compile_time_literal(&sx.node))
+            .unwrap_or(false)
     }).collect();
     // Position of the rest slot inside effective_params: after
     // pre-rest required positionals + optional defaults.
@@ -417,17 +435,40 @@ fn compile_def_arm(
     let rest_slot_for_super: Option<u16> = rest.as_ref().map(|_| {
         (n_required_positional as usize + n_optional as usize) as u16
     });
+    // Build the kw prologue triples (kw_idx, slot, expr) the
+    // compile_proto_kind callee uses to emit the per-kwarg
+    // computed-default prologue. `kw_start` mirrors the dispatch
+    // binder's layout: after positionals, optionals, post-required,
+    // and the rest slot (if any).
+    let kw_start: u16 = n_required_positional
+        + n_optional
+        + n_required_post
+        + if rest.is_some() { 1 } else { 0 };
+    let kw_computed_prologue: Vec<(u16, u16, SExpr)> = kw_params
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (_, d))| {
+            let sx = d.as_ref()?;
+            if expr_is_compile_time_literal(&sx.node) {
+                None
+            } else {
+                Some((i as u16, kw_start + i as u16, sx.clone()))
+            }
+        })
+        .collect();
     let proto_idx = compile_proto_kind(
         name.to_string(), effective_params, n_required_positional, defaults.to_vec(), body,
         b.filename.clone(), protos, interner, cc, /*is_method=*/true,
         b.class_path.clone(),
         rest_slot_for_super,
+        kw_computed_prologue,
     );
     if let Some(rname) = rest {
         protos[proto_idx].rest_param = Some(rname.clone());
     }
     protos[proto_idx].n_required_post = n_required_post;
     protos[proto_idx].kw_param_defaults = kw_lit_defaults;
+    protos[proto_idx].kw_has_computed_default = kw_has_computed;
     if let Some(krname) = kw_rest {
         let slot_name = if krname.is_empty() { "__kw_rest_anon".to_string() } else { krname.clone() };
         protos[proto_idx].kw_rest_param = Some(slot_name);
@@ -984,6 +1025,7 @@ impl ProtoBuilder {
             Op::Jump(o) => *o = off,
             Op::JumpIfFalse(o) => *o = off,
             Op::JumpIfArgGiven(_, o) => *o = off,
+            Op::JumpIfKwArgGiven(_, o) => *o = off,
             Op::BreakLoop(o) => *o = off,
             Op::NextLoop(o) => *o = off,
             _ => panic!("ICE: patch_jump on non-jump op at {}", at),
@@ -995,6 +1037,7 @@ impl ProtoBuilder {
             n_required_post: 0,
             rest_param: None,
             kw_param_defaults: vec![],
+            kw_has_computed_default: vec![],
             kw_rest_param: None,
             block_param: None,
             n_locals: self.n_locals,
@@ -1846,7 +1889,7 @@ pub(crate) fn compile_proto_at(
     class_path: Vec<String>,
 ) -> usize {
     let n_req = params.len() as u16;
-    compile_proto_kind(name, params, n_req, vec![], body, filename, protos, interner, cc, /*is_method=*/false, class_path, None)
+    compile_proto_kind(name, params, n_req, vec![], body, filename, protos, interner, cc, /*is_method=*/false, class_path, None, vec![])
 }
 
 /// Same as `compile_proto` but tags the resulting builder as a
@@ -1867,6 +1910,12 @@ pub(crate) fn compile_proto_kind(
     filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
     is_method: bool, class_path: Vec<String>,
     rest_slot_for_super: Option<u16>,
+    // `(kw_idx, kw_slot, computed_default_expr)` triples — one per
+    // kwarg with a computed (non-literal) default. The kw prologue
+    // emits `Op::JumpIfKwArgGiven(kw_idx, _)` plus the default-eval
+    // body for each. Empty when the method has no kwargs or all
+    // kwarg defaults are literals.
+    kw_computed_prologue: Vec<(u16, u16, SExpr)>,
 ) -> usize {
     let mut b = ProtoBuilder::new(&params, filename);
     b.class_path = class_path;
@@ -1891,6 +1940,21 @@ pub(crate) fn compile_proto_kind(
             b.patch_jump(jmp, skip);
         }
     }
+    // Kwarg computed-default prologue. Runs after positional
+    // defaults so a kwarg default expression can reference any
+    // earlier positional param (including ones filled by their
+    // own default). Same shape as the positional prologue:
+    // `JumpIfKwArgGiven(kw_idx, skip) + <expr> + StoreLocal(slot)`.
+    // The binder leaves the slot Nil for computed-default kwargs
+    // when caller missing AND sets `kw_given_mask` bit `kw_idx`
+    // when present; the jump consults the mask.
+    for (kw_idx, slot, def_expr) in &kw_computed_prologue {
+        let jmp = b.emit(Op::JumpIfKwArgGiven(*kw_idx, 0));
+        compile_expr(&mut b, def_expr, protos, interner, cc);
+        b.emit(Op::StoreLocal(*slot));
+        let skip = b.pos();
+        b.patch_jump(jmp, skip);
+    }
     compile_body(&mut b, body, protos, interner, cc);
     b.emit(Op::Return);
     let lex = build_lexical_scope(&b.class_path, interner);
@@ -1902,6 +1966,25 @@ pub(crate) fn compile_proto_kind(
 /// Convert an `Expr` known to be a literal into a runtime `Value`.
 /// AST translation has already gated which `Expr` variants reach
 /// here, so this only needs the literal cases.
+/// True iff `e` is a compile-time literal that `literal_to_value`
+/// can encode directly into a `Value`. Used to route kwarg
+/// defaults: literals go into `Proto::kw_param_defaults` for the
+/// binder's fast path; non-literals (constants, method calls,
+/// prior-param refs, ...) get a `JumpIfKwArgGiven` prologue
+/// emitted in the method body, mirroring positional defaults.
+fn expr_is_compile_time_literal(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::IntLit(_)
+            | Expr::FloatLit(_)
+            | Expr::StrLit(_)
+            | Expr::StrLitBytes(_)
+            | Expr::SymbolLit(_)
+            | Expr::BoolLit(_)
+            | Expr::Nil
+    )
+}
+
 fn literal_to_value(e: &Expr, interner: &mut Interner) -> Value {
     match e {
         Expr::IntLit(n) => Value::Int(*n),

@@ -8782,6 +8782,7 @@ impl Vm {
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
             is_block: false,
             n_given_positional: fixed.required,
+            kw_given_mask: 0,
             rescues: vec![],
             loop_rescue_depths: vec![],
             loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
@@ -8930,6 +8931,7 @@ impl Vm {
                 // `define_method` enforces exact arity (no
                 // defaults), so all params are "given".
                 n_given_positional: given as u16,
+                kw_given_mask: 0,
                 rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
                 block_writeback: None,
             });
@@ -8953,6 +8955,7 @@ impl Vm {
                 defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
                 is_block: false,
                 n_given_positional: fixed.required,
+                kw_given_mask: 0,
                 rescues: vec![],
                 loop_rescue_depths: vec![],
                 loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
@@ -9031,6 +9034,15 @@ impl Vm {
         // subsequent maybe_gc / heap.alloc calls (for the rest
         // Array) can take &mut self.
         let kw_defaults_snapshot: Vec<Option<Value>> = proto.kw_param_defaults.clone();
+        let kw_has_computed_snapshot: Vec<bool> = proto.kw_has_computed_default.clone();
+        // Track which kwarg names the caller actually supplied;
+        // bit `1 << i` set iff kwarg index `i` was found in
+        // kw_hash. Threaded into the new frame as `kw_given_mask`
+        // so the body's `Op::JumpIfKwArgGiven(kw_idx, off)`
+        // prologue (one per computed-default kwarg) can skip
+        // default eval when the caller supplied a value. 64-bit
+        // caps non-literal-default kwargs per method at 64.
+        let mut kw_given_mask: u64 = 0;
         // Optional positional slots that the caller omitted stay
         // `Nil` here; the method body's entry prologue runs
         // `Op::JumpIfArgGiven(slot, skip)` + default-expr +
@@ -9145,12 +9157,37 @@ impl Vm {
                     h.iter().find(|(k, _)| k.ruby_eql(&key_val, &self.heap))
                         .map(|(_, v)| v.clone())
                 });
-                match (found, default) {
-                    (Some(v), _) => locals[kw_start + i] = v,
-                    (None, Some(d)) => locals[kw_start + i] = d.clone(),
-                    (None, None) => return Err(self.trap(RubyError::ArgumentError {
+                let has_computed = kw_has_computed_snapshot.get(i).copied().unwrap_or(false);
+                match (found, default, has_computed) {
+                    (Some(v), _, _) => {
+                        locals[kw_start + i] = v;
+                        // Mark kwarg `i` as caller-supplied so the
+                        // body's `Op::JumpIfKwArgGiven(i, _)` prologue
+                        // (when emitted for a computed-default kwarg)
+                        // skips the default-eval path.
+                        if i < 64 {
+                            kw_given_mask |= 1u64 << i;
+                        }
+                    }
+                    // Literal-default optional kwarg, caller missing
+                    // → fill from the snapshot. No prologue runs for
+                    // this slot — same fast path as before.
+                    (None, Some(d), false) => locals[kw_start + i] = d.clone(),
+                    // Computed-default optional kwarg, caller missing
+                    // → leave nil; the body's prologue evaluates the
+                    // default expression and stores into the slot.
+                    // Bit stays unset → prologue falls through.
+                    (None, None, true) => {}
+                    // Required kwarg, caller missing → ArgumentError.
+                    // `(None, Some, true)` is structurally impossible
+                    // — computed defaults set the snapshot entry to
+                    // `None` (compiler emission, ast.rs lowering).
+                    (None, None, false) => return Err(self.trap(RubyError::ArgumentError {
                         msg: format!("missing keyword: :{}", kw_name),
                     })),
+                    (None, Some(_), true) => unreachable!(
+                        "computed kwarg default must also have None literal snapshot"
+                    ),
                 }
             }
         }
@@ -9237,6 +9274,7 @@ impl Vm {
             // the default-eval for the former, executes it for
             // the latter.
             n_given_positional: positional_take as u16,
+            kw_given_mask,
             rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
             block_writeback: None,
         });
@@ -9355,6 +9393,7 @@ impl Vm {
             // in `vm/step.rs`.
             is_block: true,
             n_given_positional: 0,
+            kw_given_mask: 0,
             rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
             block_writeback: None,
         });
@@ -9392,6 +9431,7 @@ impl Vm {
                 n_required_post: 0,
                 rest_param: None,
                 kw_param_defaults: Vec::new(),
+                kw_has_computed_default: Vec::new(),
                 kw_rest_param: None,
                 block_param: None,
                 n_locals: 2,
@@ -9476,6 +9516,7 @@ impl Vm {
                 n_required_post: 0,
                 rest_param: None,
                 kw_param_defaults: Vec::new(),
+                kw_has_computed_default: Vec::new(),
                 kw_rest_param: None,
                 block_param: None,
                 n_locals: 3,
@@ -9782,7 +9823,7 @@ impl Vm {
             self_val,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
-            is_block: true, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            is_block: true, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
             block_writeback: Some((captured, param_start)),
         });
         Ok(())
@@ -11771,6 +11812,7 @@ impl Vm {
             n_required_post: 0,
             rest_param: Some("args".to_string()),
             kw_param_defaults: vec![],
+            kw_has_computed_default: vec![],
             kw_rest_param: None,
             block_param: None,
             n_locals: 1,
