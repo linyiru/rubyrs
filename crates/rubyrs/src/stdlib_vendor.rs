@@ -37,6 +37,13 @@
 /// Distinct from `stdlib_vendor_source` because this body runs
 /// for everyone (the Sinatra spike needs it in the default
 /// build), whereas the latter is the opt-in fuller stdlib.
+///
+/// `cfg(not(target_os = "wasi"))` mirrors the caller's gating in
+/// `vm/kernel.rs` — the `require` resolution arm that calls this
+/// helper is itself wasi-excluded (no filesystem on wasm32-wasip1
+/// builds), so without the gate the wasm `--no-default-features`
+/// build trips `-D dead-code`.
+#[cfg(not(target_os = "wasi"))]
 pub(crate) fn always_on_stub_extras(name: &str) -> Option<&'static str> {
     match name {
         "uri" | "uri/generic" | "uri/common" => {

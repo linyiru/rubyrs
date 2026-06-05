@@ -463,7 +463,14 @@ jobs:
           # one ICE-class `.expect("ICE: ...")` in the
           # singleton-copy Method install path. Both ICE-class
           # invariants; not user-reachable.
-          check crates/rubyrs/src/vm/step.rs         83
+          # Bumped 83 → 86 (+3) by master commits between PR #355's
+          # chained-const-lookup fix, PR #369 (singleton_method_added
+          # hook), and PR #370 (`rescue ::Foo::Bar`). Each landed one
+          # ICE-class `.unwrap()` / `.expect()` in step.rs without
+          # bumping the budget — see fb71e917 (super splat), a490c1f8
+          # (const_marker refactor), 46a19110 (singleton hook). All
+          # are programmer-error invariants, not user-reachable.
+          check crates/rubyrs/src/vm/step.rs         86
           # Bumped 10 → 14 (+4) by PR #178 (step-block iter
           # refactor extracting Select/Reject accumulator logic).
           # Each accumulator path adds one `acc_id.unwrap()` —
