@@ -2971,6 +2971,8 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
         // `IPAddr.new(...)` calls are wrapped in lambdas/Procs that
         // run later — bare constant shell suffices to clear the load.
         "ipaddr" => &[("IPAddr", false)],
+        "fiber" => &[("Fiber", false)],
+        "rbconfig" => &[("RbConfig", true)],
         _ => &[],
     }
 }
@@ -3005,6 +3007,20 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util" | "cgi/escape"
         | "ipaddr"
+        // `fiber`: Rack 3 `rack/builder.rb` requires this. rubyrs
+        // has no Fiber primitive (Tier 1 = single-threaded,
+        // single-fiber); the require is a no-op stub. Downstream
+        // `Fiber.new { ... }` raises NoMethodError at the bare
+        // constant-shell surface — matches CRuby's "feature
+        // absent" contract.
+        | "fiber"
+        // `rbconfig`: Ruby's build configuration module. Some
+        // gems in the Sinatra/Rack chain require it to detect
+        // host_os / platform. rubyrs has no build-config to
+        // expose; the require is a no-op stub. `RbConfig::CONFIG`
+        // accesses raise NoMethodError on the bare module shell
+        // — matches CRuby's "feature absent" contract.
+        | "rbconfig"
         // `rubygems` no-op: rubyrs preloads a minimal `Gem::Version`
         // shim in the preamble (see preamble/gem.rb). The stub
         // lets explicit `require 'rubygems'` in user code / test

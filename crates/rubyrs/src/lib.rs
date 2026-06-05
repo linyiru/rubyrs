@@ -2236,6 +2236,27 @@ class File
   ALT_SEPARATOR = nil
   PATH_SEPARATOR = ":"
   Separator = SEPARATOR
+  ## POSIX open(2) flag constants. CRuby exposes these (via
+  ## File::Constants) so user code can OR them when opening
+  ## files. rubyrs doesn't open files in Tier 1, but
+  ## logger 1.7 `log_device.rb:69`
+  ##   MODE = File::WRONLY | File::APPEND
+  ## is evaluated at class-body load time during the P3
+  ## Sinatra spike, so the constants must resolve. Values
+  ## mirror Linux POSIX — the OR'd result is never passed to
+  ## an actual open() call in the stub build.
+  RDONLY = 0
+  WRONLY = 1
+  RDWR = 2
+  APPEND = 1024
+  CREAT = 64
+  EXCL = 128
+  TRUNC = 512
+  NOCTTY = 256
+  NONBLOCK = 2048
+  SYNC = 1052672
+  BINARY = 0
+  SHARE_DELETE = 0
 end
 ## `class Mutex; ... end` (single-threaded no-op shim) is loaded
 ## from `preamble/mutex.rb` BEFORE this `PREAMBLE` eval.

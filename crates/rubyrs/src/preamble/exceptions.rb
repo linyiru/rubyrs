@@ -105,6 +105,12 @@ end
 ## gated off (see vm/gc.rs::check_filesystem_io_allowed).
 class IOError < StandardError
 end
+## EOFError — raised by IO read methods when they hit EOF. CRuby
+## subclass of IOError. Rack 3 references it in class-body
+## `rescue` clauses; no IO support means we never raise it, but
+## the constant must resolve.
+class EOFError < IOError
+end
 class IndexError < StandardError
 end
 class KeyError < IndexError

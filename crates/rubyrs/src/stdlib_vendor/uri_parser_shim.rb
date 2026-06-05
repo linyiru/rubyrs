@@ -65,6 +65,23 @@ module URI
       end
     end
 
+    # `make_regexp(schemes = nil)` — CRuby returns its precompiled
+    # `@regexp[:ABS_URI_REF]` (an absolute URI reference matcher)
+    # when no schemes are given. Rack 3 `rack/lint.rb:15` writes
+    #   REQUEST_PATH_ABSOLUTE_FORM = /\A#{Utils::URI_PARSER.make_regexp}\z/
+    # at module-load time, interpolating the result. Just needs to
+    # return SOME Regexp whose `.to_s` (`(?-mix:...)` shape) can be
+    # spliced. Actual REQUEST_PATH_ABSOLUTE_FORM lookups happen at
+    # request-validation time which the spike never reaches.
+    #
+    # The pattern below is intentionally minimal — a permissive
+    # absolute-URI shape (`scheme:rest`); the spike's URL handling
+    # never matches against this Regexp during gem load.
+    ABS_URI_REF_REGEXP = /[a-zA-Z][a-zA-Z0-9+.\-]*:\S+/
+    def make_regexp(schemes = nil)
+      ABS_URI_REF_REGEXP
+    end
+
     def unescape(str)
       # CRuby's canonical shape: scan for percent-escapes, decode
       # each two-hex-digit capture back to its raw byte. Block

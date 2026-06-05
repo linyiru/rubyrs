@@ -275,6 +275,7 @@ const BUILTIN_EXCEPTION_PARENT: &[(&str, &str)] = &[
     // (or `rescue Exception`) explicitly.
     ("SystemStackError", "Exception"),
     ("IOError", "StandardError"),
+    ("EOFError", "IOError"),
     ("LoadError", "ScriptError"),
     // Signal-driven exception hierarchy. Pre-installed for ADR
     // 0025 — embedders can already `raise Interrupt` / write
