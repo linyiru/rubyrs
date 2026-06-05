@@ -2418,6 +2418,19 @@ RUBYRS = "rubyrs".freeze
 "#;
         self.eval_inner(PREAMBLE, "<rubyrs:preamble>")
             .expect("ICE: failed to load built-in exception preamble");
+        // File IO veneer — pure-Ruby `File.open` / `File.new` /
+        // read-side instance methods on top of the Tier-1
+        // `File.read` host primitive (ADR 0019 `_io`-veneer
+        // shape). Reopens the `class File` the inline PREAMBLE
+        // just defined (consts already installed), so it loads
+        // immediately after. Unblocks gems that self-probe
+        // `File.open(__FILE__)` at load time (logger 1.7 →
+        // Sinatra). See preamble/file.rb for the divergence list.
+        self.eval_inner(
+            include_str!("preamble/file.rb"),
+            "<rubyrs:preamble:file>",
+        )
+            .expect("ICE: failed to load File preamble");
         // Enumerable — empty stub so `class Foo; include
         // Enumerable; def each; ...; end; end` doesn't crash.
         // Loaded after the main PREAMBLE because nothing in the

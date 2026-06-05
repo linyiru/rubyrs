@@ -655,7 +655,11 @@ jobs:
           # adds `.expect("ICE: failed to load Gem preamble")` to
           # cover the new `preamble/gem.rb` eval. Same ICE-class
           # invariant as the surrounding preamble loads.
-          check crates/rubyrs/src/lib.rs       18
+          # Bumped 18 → 19 by the File IO veneer (preamble/file.rb)
+          # — adds `.expect("ICE: failed to load File preamble")`
+          # alongside the other per-preamble expects. Same
+          # unrecoverable-preamble-eval invariant.
+          check crates/rubyrs/src/lib.rs       19
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
           # never went down, just up here. See docs/PANIC_AUDIT.md.
