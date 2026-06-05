@@ -461,6 +461,7 @@ impl Heap {
             singleton_view: RefCell::new(None),
             singleton_target: RefCell::new(None),
             class_vars: RefCell::new(HashMap::new()),
+            consts: RefCell::new(HashMap::new()),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });

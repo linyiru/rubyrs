@@ -1583,6 +1583,7 @@ impl Vm {
                                         singleton_view: std::cell::RefCell::new(None),
                                         singleton_target: std::cell::RefCell::new(None),
                                         class_vars: std::cell::RefCell::new(std::collections::HashMap::new()),
+                                        consts: std::cell::RefCell::new(std::collections::HashMap::new()),
                                         ivars: std::cell::RefCell::new(std::collections::HashMap::new()),
                                         #[cfg(feature = "cext")]
                                         cext_alloc_func: std::cell::Cell::new(None),

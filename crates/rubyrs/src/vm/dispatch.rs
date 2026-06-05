@@ -3122,6 +3122,7 @@ impl Vm {
                             singleton_view: std::cell::RefCell::new(None),
                             singleton_target: std::cell::RefCell::new(Some(std::rc::Rc::downgrade(&cls))),
                             class_vars: std::cell::RefCell::new(HashMap::new()),
+            consts: std::cell::RefCell::new(HashMap::new()),
                             #[cfg(feature = "cext")]
                             cext_alloc_func: std::cell::Cell::new(None),
                         });
@@ -3745,6 +3746,7 @@ impl Vm {
             singleton_view: std::cell::RefCell::new(None),
             singleton_target: std::cell::RefCell::new(None),
             class_vars: std::cell::RefCell::new(HashMap::new()),
+            consts: std::cell::RefCell::new(HashMap::new()),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -3901,6 +3903,7 @@ impl Vm {
             singleton_view: std::cell::RefCell::new(None),
             singleton_target: std::cell::RefCell::new(None),
             class_vars: std::cell::RefCell::new(HashMap::new()),
+            consts: std::cell::RefCell::new(HashMap::new()),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -6184,24 +6187,36 @@ impl Vm {
                     msg: format!("wrong constant name {}", const_name),
                 }));
             }
-            let qualified = if cls.name.is_empty() {
-                const_name.clone()
+            let const_id = self.interner.intern(&const_name);
+            if cls.name.is_empty() {
+                // Anonymous receiver — route through the
+                // per-class `consts` table. The qualified-name
+                // scheme (`format!("{}::{}", ...)`) would
+                // collapse `("" + "BAZ")` into a key that
+                // aliases toplevel `BAZ`, and the
+                // `self.classes.insert` below would then
+                // clobber the toplevel class registration as a
+                // side effect. Per-class storage isolates each
+                // anon class's const writes from the global
+                // namespace. resolve_const_path checks this
+                // table first when the start scope is anon.
+                cls.consts.borrow_mut().insert(const_id, value.clone());
             } else {
-                format!("{}::{}", cls.name, const_name)
-            };
-            let key = self.interner.intern(&qualified);
-            // If the assigned value IS a Class with an empty /
-            // synthetic name (e.g. one minted by `Class.new(...)`),
-            // also register it under the new qualified path in
-            // `self.classes` so subsequent `Foo::Bar::ClassName.new`
-            // calls find it via the normal class lookup, mirroring
-            // how `class Foo::Bar; class ClassName; end; end`
-            // installs both the constant AND the class. Other
-            // value kinds just go into `constants`.
-            if let Value::Class(installed) = &value {
-                self.classes.insert(key, installed.clone());
+                let qualified = format!("{}::{}", cls.name, const_name);
+                let key = self.interner.intern(&qualified);
+                // If the assigned value IS a Class with an empty /
+                // synthetic name (e.g. one minted by `Class.new(...)`),
+                // also register it under the new qualified path in
+                // `self.classes` so subsequent `Foo::Bar::ClassName.new`
+                // calls find it via the normal class lookup, mirroring
+                // how `class Foo::Bar; class ClassName; end; end`
+                // installs both the constant AND the class. Other
+                // value kinds just go into `constants`.
+                if let Value::Class(installed) = &value {
+                    self.classes.insert(key, installed.clone());
+                }
+                self.constants.insert(key, value.clone());
             }
-            self.constants.insert(key, value.clone());
             self.stack.push(value);
             return Ok(());
         }
@@ -10290,6 +10305,7 @@ impl Vm {
                 singleton_view: std::cell::RefCell::new(None),
                 singleton_target: std::cell::RefCell::new(None),
                 class_vars: std::cell::RefCell::new(HashMap::new()),
+            consts: std::cell::RefCell::new(HashMap::new()),
                 #[cfg(feature = "cext")]
                 cext_alloc_func: std::cell::Cell::new(None),
             });
@@ -10339,6 +10355,7 @@ impl Vm {
                 singleton_view: std::cell::RefCell::new(None),
                 singleton_target: std::cell::RefCell::new(None),
                 class_vars: std::cell::RefCell::new(HashMap::new()),
+            consts: std::cell::RefCell::new(HashMap::new()),
                 #[cfg(feature = "cext")]
                 cext_alloc_func: std::cell::Cell::new(None),
             });
@@ -11820,14 +11837,34 @@ impl Vm {
                 // to try.
                 format!("{}::{}", scope_chain[0], segment)
             };
+            let mut hit: Option<(Value, String)> = None;
+            // Anonymous-scope per-class consts: first segment
+            // only, and only when the starting scope is the
+            // anon class itself (i.e. before we've stepped
+            // into a named child via chained-path lookup).
+            // const_set on an anon receiver lives here per the
+            // explanation in `const_set`'s dispatch arm — this
+            // is the symmetric read path.
+            if current_value.is_none() && start_cls.name.is_empty() {
+                let seg_id = self.interner.intern(segment);
+                if let Some(v) = start_cls.consts.borrow().get(&seg_id).cloned() {
+                    let nm = if let Value::Class(c) = &v {
+                        c.name.clone()
+                    } else {
+                        String::new()
+                    };
+                    hit = Some((v, nm));
+                }
+            }
             // Direct lookup first.
             let direct_qid_opt = if self.interner.contains(&lookup) {
                 Some(self.interner.intern(&lookup))
             } else {
                 None
             };
-            let mut hit: Option<(Value, String)> = None;
-            if let Some(qid) = direct_qid_opt {
+            if hit.is_none()
+                && let Some(qid) = direct_qid_opt
+            {
                 if let Some(c) = self.classes.get(&qid).cloned() {
                     hit = Some((Value::Class(c.clone()), c.name.clone()));
                 } else if let Some(v) = self.constants.get(&qid).cloned() {

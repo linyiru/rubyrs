@@ -325,6 +325,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn class_new_no_block() { run_diff("class_new_no_block"); }
 #[test] fn struct_factory() { run_diff("struct_factory"); }
 #[test] fn const_get_inheritance_walk() { run_diff("const_get_inheritance_walk"); }
+#[test] fn anon_class_const_set() { run_diff("anon_class_const_set"); }
 #[test] fn lambdas() { run_diff("lambdas"); }
 #[test] fn string_mutation() { run_diff("string_mutation"); }
 #[test] fn defined() { run_diff("defined"); }

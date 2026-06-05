@@ -365,6 +365,22 @@ pub struct Class {
     /// class anyway. Documented divergence — recorded in
     /// SUBSET.md when this lands.
     pub(crate) class_vars: RefCell<HashMap<SymId, Value>>,
+    /// Per-class constant storage for ANONYMOUS classes
+    /// (cls.name == ""). Named classes still keep their
+    /// constants in the Vm-level `self.constants` HashMap
+    /// keyed by qualified name (`Foo::Bar::BAZ`) — that's
+    /// the back-compat path for nested class bodies. Anon
+    /// classes can't use the qualified-name scheme because
+    /// `format!("{}::{}", "", "BAZ")` collapses to `"::BAZ"`
+    /// which collides with the toplevel `BAZ` constant key
+    /// (or, worse, `"BAZ"` itself if we strip the leading
+    /// `::`). Routing anon-class `const_set` through this
+    /// per-class table keeps each anon class's constants
+    /// scoped to that class instance. `resolve_const_path`
+    /// consults this table FIRST when the starting scope is
+    /// anon, before falling through to the
+    /// inheritance-chain walk.
+    pub(crate) consts: RefCell<HashMap<SymId, Value>>,
     /// L3-F: optional cext-side allocator. When `Klass.new(args)` is
     /// dispatched and this is `Some(fn)`, the host calls `fn(klass)`
     /// to produce the instance handle (typically a

@@ -1036,6 +1036,7 @@ impl Vm {
                     singleton_view: RefCell::new(None),
                     singleton_target: RefCell::new(None),
                     class_vars: RefCell::new(HashMap::new()),
+            consts: RefCell::new(HashMap::new()),
                     cext_alloc_func: std::cell::Cell::new(None),
                 });
                 self.classes.insert(name_sym, new_class);
