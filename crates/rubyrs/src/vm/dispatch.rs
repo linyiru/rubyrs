@@ -5140,45 +5140,117 @@ impl Vm {
             // self matches CRuby's chainable form. Required for tilt
             // load (tilt.rb:11/14, tilt/mapping.rb:77/411 all use this).
             //
-            // `autoload :Const, "path"` — CRuby's lazy-load hook: the
-            // constant materialises when first referenced. rubyrs
-            // doesn't model lazy loads (the embeddable host registers
-            // template engines eagerly), so this is a no-op returning
-            // nil (CRuby's actual return value for autoload). The
-            // constant simply won't exist until someone explicitly
-            // requires the target file. tilt's `register_lazy` calls
-            // autoload internally; the documented gap is that
-            // `Tilt['erb']` won't find the engine without a separate
-            // eager `require 'tilt/erb'`.
+            // `Mod.autoload :Const, "path"` (or a bare
+            // `autoload :Const, "path"` inside a `module Mod` body,
+            // where self is the Class) — CRuby's lazy-load hook: the
+            // constant materialises when first referenced. Phase 2 of
+            // issue #224 records the entry in `autoloads_scoped` keyed
+            // by the QUALIFIED name (`Mod::Const`); the first
+            // reference that would otherwise miss in
+            // `resolve_const_path` pops the entry, `require`s the
+            // path, and re-resolves. Rack 3 / Sinatra register 40+ of
+            // these at module-load time, so without this every
+            // `Rack::Response` / `Rack::Builder` reference NameErrors.
             //
             // Arity matches CRuby: exactly 2 args. Wrong arity still
             // raises ArgumentError so caller bugs don't get hidden by
-            // the stub fast-path.
+            // the stub fast-path. Returns nil (CRuby's actual return).
             if &*name == "autoload"
-                && let Value::Class(_) = &self_val {
+                && let Value::Class(owner) = &self_val {
+                // `owner` drives the scoped-registry key, which only
+                // exists on non-wasi (no `require` on wasm32-wasi).
+                #[cfg(target_os = "wasi")]
+                let _ = owner;
                 if args.len() != 2 {
                     return Err(self.trap(RubyError::ArgumentError {
                         msg: format!("wrong number of arguments (given {}, expected 2)", args.len()),
                     }));
                 }
+                // wasm32-wasi has no `require` (no file I/O), so the
+                // trigger can never fire there — keep the historical
+                // no-op rather than registering an entry that would
+                // dangle. Named build registers into `autoloads_scoped`.
+                #[cfg(not(target_os = "wasi"))]
+                {
+                    let const_name = match &args[0] {
+                        Value::Sym(id) => self.interner.resolve(*id).to_string(),
+                        Value::Str(s) => s.to_string_lossy(),
+                        other => {
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: format!(
+                                    "{} is not a symbol nor a string",
+                                    other.type_name()
+                                ),
+                            }));
+                        }
+                    };
+                    let path = match &args[1] {
+                        Value::Str(s) => s.to_string_lossy(),
+                        other => {
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: format!(
+                                    "no implicit conversion of {} into String",
+                                    other.type_name()
+                                ),
+                            }));
+                        }
+                    };
+                    // Qualified key parallel to `self.constants`:
+                    // `Mod::Const`. A toplevel / anonymous owner
+                    // (empty or "Object" name) keys by the bare
+                    // const name — it can't form a useful `::`
+                    // prefix, and the scoped trigger only consults
+                    // qualified `Owner::Const` lookups anyway.
+                    let key = if owner.name.is_empty() || owner.name == "Object" {
+                        const_name
+                    } else {
+                        format!("{}::{}", owner.name, const_name)
+                    };
+                    let key_id = self.interner.intern(&key);
+                    self.autoloads_scoped.insert(key_id, path);
+                }
                 self.stack.push(Value::Nil);
                 return Ok(());
             }
             // `autoload?(:Const [, inherit])` — CRuby returns the
-            // file path string if `:Const` is set for autoload on
-            // this module, else nil. Since `autoload` is itself a
-            // no-op stub (rubyrs doesn't model lazy loading), the
-            // registry is always empty and `autoload?` always
-            // returns nil. tilt's `mapping.rb:362` calls
-            // `scope.autoload?(n)` inside `constant_defined?` —
-            // expects nil so the second `const_defined?` check
-            // proceeds. (TRY_RUNS pass-10 layer #1.)
+            // file path string if `:Const` is still pending autoload
+            // on this module, else nil. Phase 2 (issue #224) reads
+            // the `autoloads_scoped` registry by qualified key
+            // (`Mod::Const`) — returns the path while pending, nil
+            // once the trigger has fired (the entry is removed) or
+            // when never registered. tilt's `mapping.rb:362` calls
+            // `scope.autoload?(n)` inside `constant_defined?`.
             if &*name == "autoload?"
-                && let Value::Class(_) = &self_val {
+                && let Value::Class(owner) = &self_val {
+                #[cfg(target_os = "wasi")]
+                let _ = owner;
                 if args.is_empty() || args.len() > 2 {
                     return Err(self.trap(RubyError::ArgumentError {
                         msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
                     }));
+                }
+                #[cfg(not(target_os = "wasi"))]
+                {
+                    let const_name = match &args[0] {
+                        Value::Sym(id) => Some(self.interner.resolve(*id).to_string()),
+                        Value::Str(s) => Some(s.to_string_lossy()),
+                        _ => None,
+                    };
+                    if let Some(cn) = const_name {
+                        let key = if owner.name.is_empty() || owner.name == "Object" {
+                            cn
+                        } else {
+                            format!("{}::{}", owner.name, cn)
+                        };
+                        if self.interner.contains(&key) {
+                            let key_id = self.interner.intern(&key);
+                            if let Some(path) = self.autoloads_scoped.get(&key_id) {
+                                let v = Value::new_str(path.clone());
+                                self.stack.push(v);
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
                 self.stack.push(Value::Nil);
                 return Ok(());
@@ -5223,6 +5295,9 @@ impl Vm {
                     ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
                         msg: format!("{} does not refer to class/module", full_path),
                     })),
+                    // A scoped-autoload `require` trapped — re-raise.
+                    #[cfg(not(target_os = "wasi"))]
+                    ConstPathOutcome::Trap(t) => return Err(t),
                 }
                 return Ok(());
             }
@@ -5258,6 +5333,9 @@ impl Vm {
                     ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
                         msg: format!("{} does not refer to class/module", full_path),
                     })),
+                    // A scoped-autoload `require` trapped — re-raise.
+                    #[cfg(not(target_os = "wasi"))]
+                    ConstPathOutcome::Trap(t) => return Err(t),
                 }
             }
             // `private_constant` / `public_constant` /
@@ -6166,30 +6244,90 @@ impl Vm {
         };
         // Explicit-receiver no-op stubs — `Foo.private_constant :X`,
         // `Foo.public_constant :X`, `Foo.deprecate_constant :X`,
-        // `Foo.autoload :X, "path"`. Counterparts to the no-recv
-        // arm above. See that arm for the rationale (visibility /
-        // lazy-load / deprecation hooks rubyrs doesn't model yet).
-        // Tilt's `Tilt.autoload class_name, file` inside
-        // `register_lazy` is the canonical caller.
+        // `Foo.autoload :X, "path"`. Explicit-receiver parallel of
+        // the no_recv arm in `do_call`; both register into
+        // `autoloads_scoped` (Phase 2 of issue #224) so the first
+        // `Foo::X` reference triggers a `require`. Tilt's
+        // `Tilt.autoload class_name, file` inside `register_lazy`
+        // and Rack's 40+ `autoload :Response, 'rack/response'` are
+        // the canonical callers.
         if &*name == "autoload"
-            && let Value::Class(_) = &recv {
+            && let Value::Class(owner) = &recv {
+            #[cfg(target_os = "wasi")]
+            let _ = owner;
             if args.len() != 2 {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!("wrong number of arguments (given {}, expected 2)", args.len()),
                 }));
             }
+            #[cfg(not(target_os = "wasi"))]
+            {
+                let const_name = match &args[0] {
+                    Value::Sym(id) => self.interner.resolve(*id).to_string(),
+                    Value::Str(s) => s.to_string_lossy(),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!("{} is not a symbol nor a string", other.type_name()),
+                        }));
+                    }
+                };
+                let path = match &args[1] {
+                    Value::Str(s) => s.to_string_lossy(),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into String",
+                                other.type_name()
+                            ),
+                        }));
+                    }
+                };
+                let key = if owner.name.is_empty() || owner.name == "Object" {
+                    const_name
+                } else {
+                    format!("{}::{}", owner.name, const_name)
+                };
+                let key_id = self.interner.intern(&key);
+                self.autoloads_scoped.insert(key_id, path);
+            }
             self.stack.push(Value::Nil);
             return Ok(());
         }
-        // `Foo.autoload?(:Bar)` — explicit-receiver parallel of
-        // the no_recv arm above. Returns nil since the registry
-        // is always empty (autoload is a no-op stub).
+        // `Foo.autoload?(:Bar)` — explicit-receiver parallel of the
+        // no_recv arm above. Returns the pending path String while
+        // the scoped autoload is registered, nil once it has fired
+        // (or was never set).
         if &*name == "autoload?"
-            && let Value::Class(_) = &recv {
+            && let Value::Class(owner) = &recv {
+            #[cfg(target_os = "wasi")]
+            let _ = owner;
             if args.is_empty() || args.len() > 2 {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
                 }));
+            }
+            #[cfg(not(target_os = "wasi"))]
+            {
+                let const_name = match &args[0] {
+                    Value::Sym(id) => Some(self.interner.resolve(*id).to_string()),
+                    Value::Str(s) => Some(s.to_string_lossy()),
+                    _ => None,
+                };
+                if let Some(cn) = const_name {
+                    let key = if owner.name.is_empty() || owner.name == "Object" {
+                        cn
+                    } else {
+                        format!("{}::{}", owner.name, cn)
+                    };
+                    if self.interner.contains(&key) {
+                        let key_id = self.interner.intern(&key);
+                        if let Some(path) = self.autoloads_scoped.get(&key_id) {
+                            let v = Value::new_str(path.clone());
+                            self.stack.push(v);
+                            return Ok(());
+                        }
+                    }
+                }
             }
             self.stack.push(Value::Nil);
             return Ok(());
@@ -6226,6 +6364,9 @@ impl Vm {
                 ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
                     msg: format!("{} does not refer to class/module", full_path),
                 })),
+                // A scoped-autoload `require` trapped — re-raise.
+                #[cfg(not(target_os = "wasi"))]
+                ConstPathOutcome::Trap(t) => return Err(t),
             }
             return Ok(());
         }
@@ -6256,6 +6397,9 @@ impl Vm {
                 ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
                     msg: format!("{} does not refer to class/module", full_path),
                 })),
+                // A scoped-autoload `require` trapped — re-raise.
+                #[cfg(not(target_os = "wasi"))]
+                ConstPathOutcome::Trap(t) => return Err(t),
             }
         }
         if matches!(&*name, "private_constant" | "public_constant" | "deprecate_constant")
@@ -11908,6 +12052,54 @@ impl Vm {
     ///     calling `intern` (defends `Config::max_symbols`).
     ///
     /// (Copilot review #277 round 4 #3.)
+    /// Fire a pending autoload for a flat (possibly qualified)
+    /// constant key that just missed in `classes` / `constants`.
+    /// Tries the exact name first, then each shorter `::`-prefix
+    /// (longest first), consulting BOTH the toplevel registry
+    /// (bare keys) and the scoped registry (qualified keys). The
+    /// first pending entry found is popped and its target
+    /// `require`d; the caller re-checks `classes` / `constants`
+    /// afterwards.
+    ///
+    /// The prefix walk is what makes a deep toplevel reference
+    /// like `M5::Inner::THE` work when the autoload is registered
+    /// on the intermediate `M5::Inner`: the flat `Op::LoadConst`
+    /// key is the full `"M5::Inner::THE"`, so without the prefix
+    /// fallback only an exact-key autoload would fire. (The
+    /// segment-by-segment `resolve_const_path` already handles
+    /// this for `const_get`; this brings the flat LoadConst path
+    /// to parity.)
+    ///
+    /// Returns `Ok(true)` if a require ran (caller should
+    /// re-resolve), `Ok(false)` if nothing was pending.
+    #[cfg(not(target_os = "wasi"))]
+    pub(crate) fn fire_pending_autoload(&mut self, name: &str) -> Result<bool, Trap> {
+        let parts: Vec<&str> = name.split("::").collect();
+        for take in (1..=parts.len()).rev() {
+            let prefix = if take == parts.len() {
+                name.to_string()
+            } else {
+                parts[..take].join("::")
+            };
+            if !self.interner.contains(&prefix) {
+                continue;
+            }
+            let pid = self.interner.intern(&prefix);
+            let path = self
+                .autoloads_toplevel
+                .remove(&pid)
+                .or_else(|| self.autoloads_scoped.remove(&pid));
+            if let Some(path) = path {
+                return match self.builtin_call("require", &[Value::new_str(path)]) {
+                    Some(Ok(_)) => Ok(true),
+                    Some(Err(t)) => Err(t),
+                    None => Ok(false), // unreachable: "require" is a builtin
+                };
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) fn resolve_const_path(
         &mut self,
         start_cls: &std::rc::Rc<crate::value::Class>,
@@ -12072,6 +12264,39 @@ impl Vm {
                         hit = Some((Value::Class(c.clone()), c.name.clone()));
                     } else if let Some(v) = self.constants.get(&tl_qid).cloned() {
                         hit = Some((v, String::new()));
+                    }
+                }
+            }
+            // Scoped autoload trigger — Phase 2 of issue #224.
+            // If the qualified `lookup` (`Mod::Const`) missed but is
+            // registered as a pending scoped autoload, pop it,
+            // `require` the target, and retry the direct lookup once
+            // — refilling `hit` so the shared handler below runs.
+            // Mirrors the toplevel trigger in Op::LoadConst. Popping
+            // BEFORE the require prevents re-entry into the same
+            // autoload mid-flight (and turns a require that fails to
+            // define the constant into a clean NameError on retry
+            // rather than an infinite loop). Wasi has no `require`,
+            // so the whole block compiles out there.
+            #[cfg(not(target_os = "wasi"))]
+            if hit.is_none() {
+                let lookup_id = self.interner.intern(&lookup);
+                if let Some(al_path) = self.autoloads_scoped.remove(&lookup_id) {
+                    match self.builtin_call("require", &[Value::new_str(al_path)]) {
+                        Some(Ok(_)) => {
+                            if let Some(c) = self.classes.get(&lookup_id).cloned() {
+                                hit = Some((Value::Class(c.clone()), c.name.clone()));
+                            } else if let Some(v) = self.constants.get(&lookup_id).cloned() {
+                                hit = Some((v, String::new()));
+                            }
+                            // require ran but didn't define `lookup`
+                            // → fall through to Missing below.
+                        }
+                        // require itself trapped (LoadError, a syntax
+                        // error in the target, …) — surface it rather
+                        // than masking as "uninitialized constant".
+                        Some(Err(t)) => return ConstPathOutcome::Trap(t),
+                        None => {} // unreachable: "require" is a builtin
                     }
                 }
             }
@@ -12292,6 +12517,14 @@ pub(crate) enum ConstPathOutcome {
     Missing { missing_qualified: String },
     /// Some name in the path was not a valid constant identifier.
     WrongName { name: String },
+    /// A scoped-autoload trigger fired `require` and it trapped
+    /// (LoadError, or an error raised while loading the target).
+    /// `resolve_const_path` can't return `Result`, so it threads
+    /// the Trap out through this variant; every caller re-raises
+    /// it via `return Err(t)`. Only constructible on non-wasi
+    /// builds (the trigger is wasi-gated).
+    #[cfg(not(target_os = "wasi"))]
+    Trap(crate::error::Trap),
     /// A middle segment of the path resolved to a non-class /
     /// non-module value (e.g. `Foo::CONST::X` where `Foo::CONST`
     /// is `42`). CRuby raises

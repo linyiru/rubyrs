@@ -598,6 +598,26 @@ pub(crate) struct Vm {
     /// trigger points.
     #[cfg(not(target_os = "wasi"))]
     pub(crate) autoloads_toplevel: HashMap<SymId, String>,
+    /// Per-class (scoped) pending autoload registry — Phase 2 of
+    /// issue #224. `Mod.autoload :Foo, "path"` (or a bare
+    /// `autoload :Foo, "path"` inside a `module Mod` body, where
+    /// self is the Class) records the entry here keyed by the
+    /// QUALIFIED-name SymId (`intern("Mod::Foo")`), exactly
+    /// parallel to how named-class constants live in
+    /// `self.constants`. First reference to `Mod::Foo` via
+    /// `resolve_const_path` that would otherwise miss pops the
+    /// entry and `require`s the path, then re-resolves;
+    /// `Mod.autoload?(:Foo)` reads it without firing.
+    ///
+    /// Rack 3 / Sinatra register 40+ of these
+    /// (`autoload :Response, 'rack/response'`, …) at module-load
+    /// time; without the trigger every `Rack::Response` /
+    /// `Rack::Builder` / `Rack::Utils` reference NameErrors.
+    ///
+    /// Wasi-gated like `autoloads_toplevel`: the trigger needs
+    /// `require`, which traps on wasm32-wasi (no file I/O).
+    #[cfg(not(target_os = "wasi"))]
+    pub(crate) autoloads_scoped: HashMap<SymId, String>,
     /// Per-call-site inline-cache counter. Each compiled `Op::Call`
     /// gets a unique u16 slot id; the Vm side allocates
     /// `call_caches[id]` lazily. Lives on the Vm so kernel
@@ -1166,6 +1186,8 @@ impl Vm {
             loaded_stdlib_stubs: std::collections::HashSet::new(),
             #[cfg(not(target_os = "wasi"))]
             autoloads_toplevel: HashMap::new(),
+            #[cfg(not(target_os = "wasi"))]
+            autoloads_scoped: HashMap::new(),
             cache_counter: 0,
             globals: HashMap::new(),
             toplevel_methods: HashMap::new(),

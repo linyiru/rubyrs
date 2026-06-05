@@ -1264,28 +1264,32 @@ impl Vm {
                     // wasm32-wasi (no require), so this whole block
                     // compiles out and the original NameError path
                     // is taken.
+                    // Try a pending autoload before raising. The
+                    // helper walks the exact name then each shorter
+                    // `::`-prefix (longest first) across the toplevel
+                    // registry (`autoload :Foo` at top level, bare
+                    // keys) and the scoped registry (Phase 2 of issue
+                    // #224, qualified `Foo::Bar` keys). A qualified
+                    // reference AT toplevel compiles to a flat
+                    // `LoadConst` keyed by the full name, and a deep
+                    // `M5::Inner::THE` whose autoload sits on the
+                    // intermediate `M5::Inner` resolves via the prefix
+                    // walk. After a require runs, re-check the full
+                    // key.
                     #[cfg(not(target_os = "wasi"))]
-                    if let Some(path) = self.autoloads_toplevel.remove(&name_id) {
-                        // Move `path` into the Ruby String — `path`
-                        // is already an owned `String` we removed
-                        // from the registry, no need to clone.
-                        let path_val = Value::new_str(path);
-                        match self.builtin_call("require", &[path_val]) {
-                            Some(Ok(_)) => {
-                                if let Some(c) = self.classes.get(&name_id).cloned() {
-                                    self.stack.push(Value::Class(c));
-                                    return Ok(true);
-                                }
-                                if let Some(v) = self.constants.get(&name_id).cloned() {
-                                    self.stack.push(v);
-                                    return Ok(true);
-                                }
-                                // require succeeded but the file
-                                // didn't define `name_id` — fall
-                                // through to the NameError below.
+                    {
+                        let name_str = self.interner.resolve(name_id).to_string();
+                        if self.fire_pending_autoload(&name_str)? {
+                            if let Some(c) = self.classes.get(&name_id).cloned() {
+                                self.stack.push(Value::Class(c));
+                                return Ok(true);
                             }
-                            Some(Err(t)) => return Err(t),
-                            None => {} // unreachable: "require" is a known builtin
+                            if let Some(v) = self.constants.get(&name_id).cloned() {
+                                self.stack.push(v);
+                                return Ok(true);
+                            }
+                            // require ran but didn't define `name_id`
+                            // — fall through to the NameError below.
                         }
                     }
                     // CRuby raises `NameError: uninitialized constant
@@ -1346,6 +1350,46 @@ impl Vm {
                 let v = match found {
                     Some(v) => v,
                     None => {
+                        // Scoped autoload trigger — Phase 2 of issue
+                        // #224. The chain entries ARE qualified-name
+                        // SymIds (`Foo::Bar`, `Rack::Response`, …),
+                        // i.e. exactly the keys `autoloads_scoped`
+                        // uses. Before falling through to the ENV
+                        // intercept / NameError, check whether any
+                        // candidate is a pending scoped autoload; if
+                        // so, pop it, `require` the target, and retry
+                        // the walk. Popping first prevents re-entry
+                        // mid-require. Wasi has no `require`, so the
+                        // block compiles out (and `autoloads_scoped`
+                        // doesn't exist there).
+                        #[cfg(not(target_os = "wasi"))]
+                        {
+                            let mut required = false;
+                            for sym in &chain {
+                                if let Some(path) = self.autoloads_scoped.remove(sym) {
+                                    match self.builtin_call("require", &[Value::new_str(path)]) {
+                                        Some(Ok(_)) => { required = true; break; }
+                                        Some(Err(t)) => return Err(t),
+                                        None => {} // unreachable: builtin
+                                    }
+                                }
+                            }
+                            if required {
+                                for sym in &chain {
+                                    if let Some(c) = self.classes.get(sym).cloned() {
+                                        self.stack.push(Value::Class(c));
+                                        return Ok(true);
+                                    }
+                                    if let Some(cv) = self.constants.get(sym).cloned() {
+                                        self.stack.push(cv);
+                                        return Ok(true);
+                                    }
+                                }
+                                // require ran but didn't define any
+                                // candidate — fall through to the
+                                // NameError below.
+                            }
+                        }
                         // ENV fallback: when the chain walk fails to
                         // find any user-defined constant matching the
                         // qualified candidates, AND the bare-name
