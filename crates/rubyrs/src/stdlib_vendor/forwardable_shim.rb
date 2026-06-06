@@ -38,20 +38,28 @@ module Forwardable
     # value, and ivar-named accessors reflect mutation.
     accessor_str = accessor.to_s
     is_ivar = accessor_str.start_with?("@")
-    # A dotted accessor (`'self.class'`, `'a.b'`) is a RECEIVER
-    # EXPRESSION, not a single method name — CRuby's Forwardable
-    # splices it verbatim into the generated body. mustermann's
+    # A dotted accessor (`'self.class'`) is a RECEIVER EXPRESSION,
+    # not a single method name — CRuby's Forwardable splices it
+    # verbatim into the generated body. mustermann's
     # `instance_delegate [...] => 'self.class'` (ast/pattern.rb:23)
-    # is the canonical caller. Walk the dotted chain via __send__;
-    # a leading `self` segment is the delegating object itself.
-    is_dotted = !is_ivar && accessor_str.include?(".")
-    chain = is_dotted ? accessor_str.split(".") : nil
+    # is the canonical (and only real-world) caller.
+    #
+    # GC discipline: classify the accessor shape OUT HERE, where
+    # `accessor`/`accessor_str` are fresh locals, and capture only
+    # the resulting BOOL into the define_method closure. Calling a
+    # method on a captured heap String inside the block (e.g.
+    # `accessor.split`) tripped `ICE: class_of on non-Object slot`
+    # under STRESS_GC — the closure doesn't mark its captured
+    # heap-String, so it gets swept mid-call. `__send__(accessor)`
+    # / `instance_variable_get(accessor)` stay safe (they don't
+    # `class_of` the symbol-ish accessor).
+    is_self_class = (accessor_str == "self.class")
     define_method(ali) do |*args, &blk|
       target =
         if is_ivar
           instance_variable_get(accessor)
-        elsif is_dotted
-          chain.reduce(self) { |recv, seg| seg == "self" ? recv : recv.__send__(seg) }
+        elsif is_self_class
+          self.class
         else
           __send__(accessor)
         end
