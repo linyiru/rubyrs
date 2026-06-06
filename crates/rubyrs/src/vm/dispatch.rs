@@ -5085,6 +5085,16 @@ impl Vm {
                     | "deprecate_constant"
                     | "private_class_method" | "public_class_method"
                     | "singleton_class"
+                    // Reflection over the class-method tier: bare
+                    // `public_methods` / `methods` / … inside a
+                    // `module M; ... end` body (no_recv, self = the
+                    // Class) bridges to the receiver-form arm so it
+                    // returns the singleton-method list instead of
+                    // raising NoMethodError. colorator's
+                    // `CORE_METHODS = (public_methods - Object.methods)`
+                    // at module-body top level is the motivating case.
+                    | "methods" | "public_methods" | "private_methods"
+                    | "protected_methods" | "singleton_methods"
                     | "class_eval" | "module_eval"
                     // `define_method` joins the bridge so bare
                     // `define_method(:foo)` inside a class body
@@ -6835,13 +6845,14 @@ impl Vm {
                 names.sort_by(|a, b| {
                     self.interner.resolve(*a).cmp(self.interner.resolve(*b))
                 });
-            } else if &*name == "methods" {
-                // Class receiver — class-method chain. Visibility
-                // filtering for the class-method tier doesn't have a
-                // user-facing surface today (singleton methods don't
-                // carry per-entry visibility in rubyrs's Class
-                // shape), so the variants other than `methods` skip
-                // this branch and report an empty Array for now.
+            } else if matches!(&*name, "methods" | "public_methods") {
+                // Class receiver — class-method chain. Singleton
+                // methods don't carry per-entry visibility in
+                // rubyrs's Class shape and are all public by default,
+                // so `public_methods` reports the same set as
+                // `methods` here; `private_methods` /
+                // `protected_methods` have no surface and fall
+                // through to an empty Array.
                 if let Value::Class(cls) = &recv {
                 // Walk a prepended module's transitive includes /
                 // prepends — same shape as `walk_module` in

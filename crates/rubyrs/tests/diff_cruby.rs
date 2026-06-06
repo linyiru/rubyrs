@@ -156,6 +156,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn undef_keyword() { run_diff("undef_keyword"); }
 #[test] fn singleton_alias_method() { run_diff("singleton_alias_method"); }
 #[test] fn integer_size() { run_diff("integer_size"); }
+#[test] fn class_public_methods() { run_diff("class_public_methods"); }
 #[test] fn symbol_basics() { run_diff("symbol_basics"); }
 #[test] fn symbol_methods() { run_diff("symbol_methods"); }
 #[test] fn symbol_inspect() { run_diff("symbol_inspect"); }
