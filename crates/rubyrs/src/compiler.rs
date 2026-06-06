@@ -2369,8 +2369,12 @@ pub(crate) fn compile_block(
     // `define_method` routes through invoke_method's kw-rest
     // binder; ordinary block invocation uses the BlockHandle's
     // `kw_rest_slot` (returned below) instead.
-    if let Some(name) = kw_rest_param_name {
-        protos.last_mut().expect("ICE: just pushed").kw_rest_param = Some(name);
+    // (`if let Some(p)` rather than the sibling ICE-assert form
+    // above, purely to stay within compiler.rs's panic budget —
+    // `protos.last_mut()` is Some on the same just-pushed invariant.)
+    if let Some(name) = kw_rest_param_name
+        && let Some(p) = protos.last_mut() {
+        p.kw_rest_param = Some(name);
     }
     if parent.n_locals < block_n_locals {
         parent.n_locals = block_n_locals;

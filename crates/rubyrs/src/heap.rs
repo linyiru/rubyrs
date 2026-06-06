@@ -1011,9 +1011,11 @@ pub(crate) fn symbol_name_is_simple(s: &str) -> bool {
         return false;
     }
     let mut chars = core.chars();
-    let first = chars.next().unwrap();
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return false;
+    // `core` is non-empty (checked above); match on the first char
+    // rather than an infallible-pop to stay off the panic budget.
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
