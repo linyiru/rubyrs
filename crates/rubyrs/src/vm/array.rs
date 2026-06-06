@@ -1291,6 +1291,43 @@ impl Vm {
                         }
                         Some(acc)
                     }
+                    // `reduce(init, :op)` / `inject(init, :op)` — the
+                    // two-arg form: fold every element starting from
+                    // the explicit seed `init` (so an empty receiver
+                    // returns `init`, not nil). Same numeric fast-path
+                    // + BigInt-promotion + ZeroDivision shape as the
+                    // single-symbol arm above.
+                    ("inject", [init, Value::Sym(op_sym)]) | ("reduce", [init, Value::Sym(op_sym)]) => {
+                        let op_name = self.interner.resolve(*op_sym).clone();
+                        let kind = match crate::bytecode::BinOpKind::from_op_name(&op_name) { Some(k) => k, None => return Ok(None) };
+                        let init_val = init.clone();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        g.pin(init_val.clone());
+                        let a = g.vm.heap.array(id).clone();
+                        let mut acc = init_val;
+                        for v in &a {
+                            match (&acc, v) {
+                                (Value::Int(x), Value::Int(y)) => {
+                                    if matches!(kind, crate::bytecode::BinOpKind::Div | crate::bytecode::BinOpKind::Mod) && *y == 0 {
+                                        return Err(g.vm.trap(RubyError::ZeroDivisionError {
+                                            msg: "divided by 0".to_string(),
+                                        }));
+                                    }
+                                    acc = g.vm.apply_int_promote(kind, *x, *y)?;
+                                }
+                                _ => {
+                                    #[cfg(feature = "bignum")]
+                                    if let Some(next) = g.vm.try_bigint_binop(kind, &acc, v)? {
+                                        acc = next;
+                                        continue;
+                                    }
+                                    return Ok(None);
+                                }
+                            }
+                        }
+                        Some(acc)
+                    }
                     ("to_a", []) => Some(Value::Array(id)),
                     // `arr.dup` / `arr.clone` — shallow copy. CRuby's
                     // `clone` also preserves the frozen flag; Tier-1
