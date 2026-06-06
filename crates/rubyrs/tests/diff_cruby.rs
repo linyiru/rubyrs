@@ -342,6 +342,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn array_reduce_init_sym() { run_diff("array_reduce_init_sym"); }
 #[test] fn regexp_options_carrier() { run_diff("regexp_options_carrier"); }
 #[test] fn regex_flags() { run_diff("regex_flags"); }
+#[test] fn forwardable_dotted_accessor() { run_diff("forwardable_dotted_accessor"); }
 #[test] fn struct_factory() { run_diff("struct_factory"); }
 #[test] fn const_get_inheritance_walk() { run_diff("const_get_inheritance_walk"); }
 #[test] fn anon_class_const_set() { run_diff("anon_class_const_set"); }

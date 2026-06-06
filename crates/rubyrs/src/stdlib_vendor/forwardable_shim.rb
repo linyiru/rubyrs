@@ -38,10 +38,20 @@ module Forwardable
     # value, and ivar-named accessors reflect mutation.
     accessor_str = accessor.to_s
     is_ivar = accessor_str.start_with?("@")
+    # A dotted accessor (`'self.class'`, `'a.b'`) is a RECEIVER
+    # EXPRESSION, not a single method name — CRuby's Forwardable
+    # splices it verbatim into the generated body. mustermann's
+    # `instance_delegate [...] => 'self.class'` (ast/pattern.rb:23)
+    # is the canonical caller. Walk the dotted chain via __send__;
+    # a leading `self` segment is the delegating object itself.
+    is_dotted = !is_ivar && accessor_str.include?(".")
+    chain = is_dotted ? accessor_str.split(".") : nil
     define_method(ali) do |*args, &blk|
       target =
         if is_ivar
           instance_variable_get(accessor)
+        elsif is_dotted
+          chain.reduce(self) { |recv, seg| seg == "self" ? recv : recv.__send__(seg) }
         else
           __send__(accessor)
         end
