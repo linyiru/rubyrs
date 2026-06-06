@@ -556,22 +556,20 @@ fn unsupported_ast_node_returns_syntax_error_trap_not_panic() {
     // arbitrary third-party Ruby — that's a denial-of-service waiting
     // to happen.
     //
-    // `for x in [...]` (ForNode) — old-style imperative
-    // for-loop, vanishingly rare in real-world Ruby (Rubocop
-    // even flags it). Currently outside the supported subset
-    // and reaches the unsupported-node fallback. We expect a
-    // SyntaxError Trap back, not a SIGABRT.
-    // (Previous canaries: `case`, `Foo::Bar = 1`, `@@count` —
-    // all landed as supported. Pick something genuinely
+    // `alias $new $old` (AliasGlobalVariableNode) — global-variable
+    // aliasing, vanishingly rare and outside the supported subset
+    // (the AST translator only handles method-name `alias`). Reaches
+    // the unsupported-node fallback; we expect a SyntaxError Trap
+    // back, not a SIGABRT.
+    // (Previous canaries: `case`, `Foo::Bar = 1`, `@@count`, and
+    // `for x in […]` — all now supported. Pick something genuinely
     // unimplemented each time the gap closes.)
     let mut rt = Runtime::new();
     let err = rt.eval(
         r#"
-        for x in [1, 2, 3]
-          puts x
-        end
+        alias $new_global $old_global
         "#,
-        "for_loop.rb",
+        "alias_gvar.rb",
     ).unwrap_err();
     assert!(
         matches!(err.err, RubyError::SyntaxError { .. }),
