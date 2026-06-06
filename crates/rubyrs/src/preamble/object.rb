@@ -87,6 +87,10 @@ end
 ## promote them. The preamble runs once at boot, before any
 ## user code observes `Integer.superclass`, so the promotion
 ## is invisible to scripts that don't look.
+## `Numeric` mixes in `Comparable` — but the `include` lives at
+## the END of preamble/comparable.rb (which loads AFTER this
+## fragment), because the `Comparable` constant doesn't exist
+## yet at this point. See that file for the rationale.
 class Numeric < Object
 end
 class Integer < Numeric

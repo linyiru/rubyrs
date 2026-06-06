@@ -81,3 +81,17 @@ class Comparable
     end
   end
 end
+
+## Mix `Comparable` into `Numeric` — CRuby's
+## `Integer.include?(Comparable)` is true, and `between?` /
+## `clamp` come from there. Numeric is defined in
+## preamble/object.rb (loaded earlier), but the `include` has to
+## wait until HERE because the `Comparable` constant only exists
+## once the block above has run. The primitive comparison ops
+## (`Int < Int`, etc.) are intercepted by `primitive_call`
+## BEFORE the method-table walk, so the fast path is unaffected;
+## Comparable supplies only the non-primitive `between?` /
+## `clamp` (Integer/Float/Rational inherit via `< Numeric`).
+class Numeric
+  include Comparable
+end
