@@ -791,6 +791,7 @@ impl Vm {
                     | "constants"
                     | "autoload" | "autoload?" | "const_defined?" | "const_get" | "const_set" | "private_constant" | "public_constant"
                     | "deprecate_constant"
+                    | "private_class_method" | "public_class_method"
                     | "module_function"
                     | "singleton_class"
                     // Bridge keeping the bare-call shape (inside a

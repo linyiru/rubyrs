@@ -157,6 +157,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn symbol_methods() { run_diff("symbol_methods"); }
 #[test] fn symbol_inspect() { run_diff("symbol_inspect"); }
 #[test] fn string_intern() { run_diff("string_intern"); }
+#[test] fn private_class_method() { run_diff("private_class_method"); }
 #[test] fn interpolation() { run_diff("interpolation"); }
 #[test] fn rescue_basics() { run_diff("rescue_basics"); }
 #[test] fn fizzbuzz_15() { run_diff("fizzbuzz_15"); }

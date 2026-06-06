@@ -5083,6 +5083,7 @@ impl Vm {
                     | "constants"
                     | "autoload" | "autoload?" | "const_defined?" | "const_get" | "const_set" | "private_constant" | "public_constant"
                     | "deprecate_constant"
+                    | "private_class_method" | "public_class_method"
                     | "singleton_class"
                     | "class_eval" | "module_eval"
                     // `define_method` joins the bridge so bare
@@ -5390,6 +5391,20 @@ impl Vm {
             // Motivating use: MRI `lib/erb.rb:264`
             // (`deprecate_constant :Revision`).
             if matches!(&*name, "private_constant" | "public_constant" | "deprecate_constant")
+                && let Value::Class(_) = &self_val {
+                self.stack.push(self_val);
+                return Ok(());
+            }
+            // `private_class_method` / `public_class_method` accept
+            // any number of method-name args (Symbol or String) and
+            // return the receiver. rubyrs doesn't model singleton-
+            // method visibility, so these are no-ops — the same
+            // trade-off as the `private_constant` stub above. The
+            // documented gap is that a "privatised" class method
+            // stays publicly callable. Motivating use: rubygems,
+            // fileutils, and forwardable-extended all call
+            // `klass.private_class_method(...)` during their require.
+            if matches!(&*name, "private_class_method" | "public_class_method")
                 && let Value::Class(_) = &self_val {
                 self.stack.push(self_val);
                 return Ok(());
@@ -6445,6 +6460,19 @@ impl Vm {
             }
         }
         if matches!(&*name, "private_constant" | "public_constant" | "deprecate_constant")
+            && let Value::Class(_) = &recv {
+            self.stack.push(recv);
+            return Ok(());
+        }
+        // `Foo.private_class_method :m` / `Foo.public_class_method :m`
+        // — explicit-receiver parallel of the no_recv arm in
+        // `do_call`. No-op (returns the receiver): rubyrs doesn't
+        // model singleton-method visibility, so a "privatised" class
+        // method stays publicly callable (same trade-off as the
+        // `private_constant` stub above). forwardable-extended's
+        // `klass.private_class_method(method)` and rubygems both
+        // hit this during their require.
+        if matches!(&*name, "private_class_method" | "public_class_method")
             && let Value::Class(_) = &recv {
             self.stack.push(recv);
             return Ok(());
@@ -11480,6 +11508,7 @@ impl Vm {
                     | "constants"
                     | "autoload" | "autoload?" | "const_defined?" | "const_get" | "const_set" | "private_constant" | "public_constant"
                     | "deprecate_constant"
+                    | "private_class_method" | "public_class_method"
                     | "singleton_class"
                     | "class_eval" | "module_eval"
                 );
