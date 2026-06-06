@@ -169,6 +169,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn require_time_date() { run_diff("require_time_date"); }
 #[test] fn yaml_is_psych() { run_diff("yaml_is_psych"); }
 #[test] fn yaml_load() { run_diff("yaml_load"); }
+#[test] fn yaml_load_file() { run_diff("yaml_load_file"); }
 #[test] fn singleton_alias_method() { run_diff("singleton_alias_method"); }
 #[test] fn singleton_class_body_more() { run_diff("singleton_class_body_more"); }
 #[test] fn singleton_class_conditional_def() { run_diff("singleton_class_conditional_def"); }

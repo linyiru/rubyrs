@@ -23,7 +23,10 @@ module YAML
     alias_method :parse, :load
 
     def load_file(path, *_args, **_opts)
-      load(File.read(path))
+      # Call the parser directly rather than bare `load` — inside this
+      # singleton method a bare `load` can resolve to Kernel#load (the
+      # file loader) instead of YAML.load.
+      RubyrsYAMLParse.parse_document(File.read(path))
     end
   end
 end
@@ -37,7 +40,10 @@ module SafeYAML
     end
 
     def load_file(path, *_args, **_opts)
-      load(File.read(path))
+      # Call the parser directly rather than bare `load` — inside this
+      # singleton method a bare `load` can resolve to Kernel#load (the
+      # file loader) instead of YAML.load.
+      RubyrsYAMLParse.parse_document(File.read(path))
     end
   end
 end

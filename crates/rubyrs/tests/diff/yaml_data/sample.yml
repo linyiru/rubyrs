@@ -1,0 +1,7 @@
+title: rubyrs
+nums:
+  - 1
+  - 2
+nested:
+  flag: true
+  name: "quoted value"
