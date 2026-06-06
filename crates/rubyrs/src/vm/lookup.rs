@@ -1636,6 +1636,49 @@ impl Vm {
     /// inherited hook firing during base.rb's own load (when
     /// `Sinatra::Application < Sinatra::Base` is defined)
     /// raises NoMethodError. (Layer #20.)
+    /// `super` to the builtin `Class#new` — allocate a default
+    /// instance of `cls` and run its `initialize` (if any),
+    /// yielding the new object as the super expression's value.
+    /// Used when an override `def self.new; ...; super; end`
+    /// resolves super to the builtin allocator (CRuby ships a
+    /// real `Class#new`; rubyrs handles it inline, so the super
+    /// chain finds no user method and we substitute the builtin
+    /// here).
+    ///
+    /// Runs `initialize` synchronously via `dispatch_until` (the
+    /// same reentrant pattern `invoke_inherited_hook` uses) so we
+    /// can discard initialize's return and push the OBJECT — `new`
+    /// yields the instance, not whatever `initialize` returned.
+    /// The fresh object is pinned across the initialize call so a
+    /// GC triggered inside it can't sweep the not-yet-rooted
+    /// instance.
+    pub(crate) fn super_builtin_class_new(
+        &mut self,
+        cls: &Rc<crate::value::Class>,
+        args: Vec<Value>,
+    ) -> Result<(), crate::error::Trap> {
+        let obj = self.alloc_default_instance(cls)?;
+        self.pinned.push(obj.clone());
+        let init_id = self.interner.intern("initialize");
+        let ruby_init = self.lookup_method_uncached(cls, init_id);
+        if let Some(m) = ruby_init {
+            let pre_frames = self.frames.len();
+            if let Err(t) = self.invoke_method(m, obj.clone(), args) {
+                self.pinned.pop();
+                return Err(t);
+            }
+            if let Err(t) = self.dispatch_until(pre_frames) {
+                self.pinned.pop();
+                return Err(t);
+            }
+            // initialize's return value is discarded by `new`.
+            self.stack.pop();
+        }
+        self.pinned.pop();
+        self.stack.push(obj);
+        Ok(())
+    }
+
     pub(crate) fn super_call_with_lifecycle_noop(
         &mut self,
         name_id: SymId,
@@ -1644,6 +1687,49 @@ impl Vm {
         match self.super_lookup(name_id) {
             Ok((m, self_val)) => self.invoke_method(m, self_val, args),
             Err(trap) => {
+                // `super` to a builtin Class / BasicObject method
+                // that rubyrs handles inline (so the ancestor walk
+                // finds no user Method above the override). CRuby
+                // ships real `Class#new` / `Class#allocate` /
+                // `BasicObject#initialize`, so an overriding
+                // `def self.new` / `def initialize` can call super.
+                // Mustermann's `def self.new(...); ...; super(...)
+                // { ... } end` (pattern.rb) and Sinatra::Templates'
+                // `def initialize; ...; super; end` both depend on
+                // this. Gate on the same typed `SuperNoSuperclass`
+                // miss the lifecycle-hook intercept below uses.
+                if matches!(
+                    &trap.err,
+                    crate::error::RubyError::NoMethodError {
+                        kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
+                        ..
+                    },
+                ) {
+                    let cur_self = self.frames.last().map(|f| f.self_val.clone());
+                    let nm = self.interner.resolve(name_id).to_string();
+                    match (nm.as_str(), cur_self) {
+                        ("new", Some(Value::Class(cls))) => {
+                            return self.super_builtin_class_new(&cls, args);
+                        }
+                        ("allocate", Some(Value::Class(cls))) => {
+                            let obj = self.alloc_default_instance(&cls)?;
+                            self.stack.push(obj);
+                            return Ok(());
+                        }
+                        ("initialize", Some(Value::Object(_))) => {
+                            // BasicObject#initialize is a no-op
+                            // returning nil. (CRuby raises
+                            // ArgumentError if the default
+                            // initialize is handed args; the common
+                            // `super()` forwarding shape passes
+                            // none, so we accept any and no-op —
+                            // documented spike divergence.)
+                            self.stack.push(Value::Nil);
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
                 // Only intercept the specific "no superclass
                 // method on the ancestor chain" shape — NOT the
                 // sibling "super called outside of method"
