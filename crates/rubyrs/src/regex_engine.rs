@@ -122,11 +122,89 @@ pub(crate) fn compile_with_flags(
     Ok(CompiledRegex { engine, ruby_flags, source: bare_source.into() })
 }
 
+/// Rewrite octal escapes (`\NNN`) that appear INSIDE a character
+/// class to the equivalent `\x{..}` hex escape, which both the
+/// `regex` and `fancy-regex` engines accept. CRuby/Onigmo treat
+/// `\2` inside `[...]` as the octal character U+0002 (backreferences
+/// are only meaningful outside a class), but the Rust engines reject
+/// the bare-octal-in-class form. Octal escapes OUTSIDE a class are
+/// left untouched (there `\2` is a backreference, handled by
+/// fancy-regex). No-op (borrowed) for the common case with no
+/// such escape.
+///
+/// Discovery: P3 Jekyll spike — kramdown's IAL parser builds
+/// `/...=("|')((?:\\\}|\\\2|[^}\2])*?)\2/` at load time; the
+/// `[^}\2]` class tripped both engines.
+fn rewrite_charclass_octal_escapes(pat: &str) -> std::borrow::Cow<'_, str> {
+    if !pat.contains('[') {
+        return std::borrow::Cow::Borrowed(pat);
+    }
+    let chars: Vec<char> = pat.chars().collect();
+    let mut out = String::with_capacity(pat.len());
+    let mut in_class = false;
+    // True while still at the start of a class (`[` / `[^`), where a
+    // `]` is a literal member rather than the class terminator.
+    let mut at_class_start = false;
+    let mut changed = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            let n = chars[i + 1];
+            if in_class && ('0'..='7').contains(&n) {
+                // Collect up to 3 octal digits.
+                let mut j = i + 1;
+                let mut val: u32 = 0;
+                let mut cnt = 0;
+                while j < chars.len() && cnt < 3 && ('0'..='7').contains(&chars[j]) {
+                    val = val * 8 + (chars[j] as u32 - '0' as u32);
+                    j += 1;
+                    cnt += 1;
+                }
+                out.push_str(&format!("\\x{{{:x}}}", val));
+                i = j;
+                changed = true;
+                at_class_start = false;
+                continue;
+            }
+            // Any other escape pair: copy verbatim (handles `\[`,
+            // `\]`, `\\`, `\2` backref outside a class, etc.).
+            out.push(c);
+            out.push(n);
+            i += 2;
+            at_class_start = false;
+            continue;
+        }
+        if !in_class {
+            if c == '[' {
+                in_class = true;
+                at_class_start = true;
+            }
+        } else if c == '^' && at_class_start {
+            // Negation right after `[` — still at the start.
+        } else if c == ']' && !at_class_start {
+            in_class = false;
+            at_class_start = false;
+        } else {
+            at_class_start = false;
+        }
+        out.push(c);
+        i += 1;
+    }
+    if changed {
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(pat)
+    }
+}
+
 /// Engine selection without the `CompiledRegex` wrapper — shared
 /// by `compile` and `compile_with_flags`. Tries `regex` first,
 /// falls back to `fancy-regex` only on a genuine syntax error
 /// (CompiledTooBig surfaces as-is; see the `compile` doc above).
 fn build_engine(pattern: &str) -> Result<Engine, String> {
+    let pattern = rewrite_charclass_octal_escapes(pattern);
+    let pattern: &str = &pattern;
     match regex::Regex::new(pattern) {
         Ok(re) => Ok(Engine::Native(re)),
         Err(native_err) => match &native_err {

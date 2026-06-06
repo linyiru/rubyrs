@@ -366,6 +366,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn array_reduce_init_sym() { run_diff("array_reduce_init_sym"); }
 #[test] fn regexp_options_carrier() { run_diff("regexp_options_carrier"); }
 #[test] fn regex_flags() { run_diff("regex_flags"); }
+#[cfg(feature = "regex")]
+#[test] fn regex_charclass_octal() { run_diff("regex_charclass_octal"); }
 #[test] fn forwardable_dotted_accessor() { run_diff("forwardable_dotted_accessor"); }
 #[test] fn block_kwrest_param() { run_diff("block_kwrest_param"); }
 #[test] fn struct_factory() { run_diff("struct_factory"); }
