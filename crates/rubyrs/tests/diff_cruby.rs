@@ -158,6 +158,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn set_merge() { run_diff("set_merge"); }
 #[test] fn block_basics() { run_diff("block_basics"); }
 #[test] fn class_basics() { run_diff("class_basics"); }
+#[test] fn def_class_method() { run_diff("def_class_method"); }
 #[test] fn undef_keyword() { run_diff("undef_keyword"); }
 #[test] fn condition_variable() { run_diff("condition_variable"); }
 #[test] fn for_loop() { run_diff("for_loop"); }

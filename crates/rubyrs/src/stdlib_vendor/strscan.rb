@@ -37,6 +37,12 @@
 # could swap in `regex.match_at(pos)`.
 
 class StringScanner
+  # Version gate consumed by libraries that branch on the strscan
+  # API level (rexml: `if StringScanner::Version < "1.0.0"` to decide
+  # whether to install a `#check`-on-String refinement). Reporting a
+  # modern version makes those legacy-compat refinement paths no-ops.
+  Version = "3.1.0"
+
   def initialize(str)
     @str = str
     @pos = 0

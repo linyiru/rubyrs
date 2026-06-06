@@ -2265,6 +2265,38 @@ impl Vm {
                 // this op (see `compile_expr`'s Def arm).
                 let recv = self.stack.pop()
                     .expect("ICE: DefObjectSingletonMethod stack underflow");
+                // `def Foo.bar` / `def Foo::bar` where the receiver is
+                // a Class constant — define a CLASS method (singleton
+                // method on Foo), exactly like `def self.bar` inside
+                // Foo's body. rexml's `def SourceFactory::create_from(
+                // arg); …; end` is the motivating case. Eigenclass
+                // shells redirect to the real class via
+                // `singleton_target`.
+                if let Value::Class(cls) = &recv {
+                    let proto = &self.protos[p_idx as usize];
+                    let params = proto.params.clone();
+                    let fixed_arity = Self::fixed_arity_for_proto(proto, params.len());
+                    let anchor = cls.effective_install_class();
+                    let m = Rc::new(Method {
+                        params,
+                        proto_idx: p_idx as usize,
+                        fixed_arity,
+                        defining_class: Some(Rc::downgrade(&anchor)),
+                        visibility: std::cell::Cell::new(Visibility::Public),
+                        closure: None,
+                        builtin: None,
+                        original_name: Some(name_id),
+                    });
+                    anchor.singleton_methods.borrow_mut().insert(name_id, m);
+                    self.method_gen = self.method_gen.wrapping_add(1);
+                    self.fire_singleton_method_lifecycle_hook(
+                        Value::Class(anchor),
+                        "singleton_method_added",
+                        name_id,
+                    )?;
+                    self.stack.push(Value::Nil);
+                    return Ok(true);
+                }
                 let obj_id = match recv {
                     Value::Object(id) => id,
                     other => {
