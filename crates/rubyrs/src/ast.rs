@@ -734,6 +734,771 @@ fn tr_kwhash(
         args: vec![rhs], kwargs_trailing: false }))
 }
 
+/// Extracted body of the `class << recv` (singleton-class) AST
+/// translation. Lives in its own function so its large local set
+/// (the per-body `out` / `then_body` / `else_body` Vecs, the
+/// `mk_singleton_def` closure, etc.) does NOT inflate the stack
+/// frame of the recursive `tr` hot path — preamble compilation
+/// recurses through `tr` deeply, and on a 2 MB test thread the
+/// combined frame previously overflowed in debug / coverage
+/// builds. Returns `Expr::Nil` if the node isn't a singleton
+/// class (unreachable via the guarded call site).
+fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
+    let Some(n) = node.as_singleton_class_node() else { return sp(node, Expr::Nil); };
+        let recv_expr = tr(ctx, &n.expression());
+        let body_nodes: Vec<_> = match n.body() {
+            Some(b) => {
+                if let Some(stmts) = b.as_statements_node() {
+                    stmts.body().iter().collect::<Vec<_>>()
+                } else { vec![b] }
+            }
+            None => vec![],
+        };
+        // CRuby evaluates the `class << expr` receiver exactly
+        // ONCE for the whole body. Naive desugar `def expr.foo;
+        // def expr.bar; ...` would re-evaluate expr per def —
+        // fine for pure exprs (SelfExpr, ConstRead) but wrong
+        // for anything side-effectful.
+        //
+        // For SelfExpr specifically, we MUST keep the literal
+        // SelfExpr as the receiver — the compiler's special
+        // case emits `Op::DefSingletonMethod` (lands on
+        // class_stack.last().singleton_methods) only when it
+        // sees `receiver: Some(SelfExpr)`. A synthetic-local
+        // indirection would route to `Op::DefObjectSingletonMethod`
+        // instead, which rejects Class receivers.
+        //
+        // For ConstRead the constant lookup is also pure and
+        // can be re-evaluated cheaply, AND classes don't go
+        // through DefObjectSingletonMethod's reject path because
+        // the compiler routes them via the same special case.
+        // Actually no — only `SelfExpr` hits the special case.
+        // So for ConstRead we ALSO need to keep it literal so
+        // the compiler can detect Class-shaped receivers at
+        // dispatch time without going through the
+        // Object-only path.
+        //
+        // Rule: only bind to a synthetic local for receivers
+        // that are NEITHER SelfExpr NOR ConstRead — the
+        // side-effectful / allocating cases. For pure receivers
+        // the per-def re-evaluation is observably identical to
+        // one-eval anyway.
+        let needs_local = !matches!(
+            &recv_expr.node,
+            Expr::SelfExpr | Expr::ConstRead(_)
+        );
+        let synth_local = format!("__cls_lt_lt_recv_{}", node_span(node).byte_offset);
+        let mut out: Vec<SExpr> = Vec::with_capacity(body_nodes.len() + 1);
+        // Closure helper: make a `def recv.name(params) body` SExpr
+        // rewriting the receiver-less Def into a singleton-method
+        // form. Reused for both real DefNodes in the body and for
+        // synthetic Defs we generate when expanding `attr_*` calls.
+        let mk_singleton_def = |bn: &Node<'_>, def_translated: Expr| -> Option<SExpr> {
+            if let Expr::Def {
+                name, params, defaults, rest, n_required_post,
+                kw_params, kw_rest, block_param, receiver: _, body,
+            } = def_translated {
+                let receiver = if needs_local {
+                    sp(bn, Expr::LVarRead(synth_local.clone()))
+                } else {
+                    recv_expr.clone()
+                };
+                Some(sp(bn, Expr::Def {
+                    name, params, defaults, rest, n_required_post,
+                    kw_params, kw_rest, block_param,
+                    receiver: Some(Box::new(receiver)),
+                    body,
+                }))
+            } else {
+                None
+            }
+        };
+        for bn in &body_nodes {
+            if bn.as_def_node().is_some() {
+                let translated = tr(ctx, bn);
+                if let Some(s) = mk_singleton_def(bn, translated.node) {
+                    out.push(s);
+                } else {
+                    ctx.errors.push(
+                        "class << X: internal — def translated unexpectedly".into()
+                    );
+                    out.push(sp(bn, Expr::Nil));
+                }
+                continue;
+            }
+            // `attr_reader :foo` / `attr_writer :foo` / `attr_accessor :foo`
+            // inside `class << X` body. CRuby installs reader/writer
+            // methods on X's singleton class. We desugar each symbol
+            // arg into one or two synthetic `def X.foo; @foo; end` /
+            // `def X.foo=(val); @foo = val; end` Defs and route them
+            // through the existing singleton-rewrite path above.
+            //
+            // Caveat: ivar persistence on Class receivers diverges
+            // from CRuby (class-level @foo on a Class value doesn't
+            // currently round-trip across method calls — separate gap).
+            // The reader returns nil instead of CRuby's last-written
+            // value. Tilt's template.rb:503 only checks
+            // `extract_fixed_locals.nil?`, so nil-vs-false is moot.
+            if let Some(call) = bn.as_call_node()
+                && call.receiver().is_none()
+            {
+                let name = cid_to_string(call.name());
+                // Pre-helper arm: legacy `attr :name, true/false`
+                // accessor form. Single Symbol followed by a
+                // BoolLit second arg. Mirrors compiler.rs's
+                // dedicated `(SymbolLit, BoolLit)` intercept arm
+                // for the normal class-body path. CRuby 3.4 still
+                // accepts this with a suppressed warning; without
+                // the special case the all-symbols gate further
+                // down would reject it as unsupported.
+                // (Copilot review #313 round 1.)
+                if name == "attr" {
+                    let raw_args: Vec<_> = call.arguments()
+                        .map(|args| args.arguments().iter().collect())
+                        .unwrap_or_default();
+                    if raw_args.len() == 2
+                        && let (Some(sym), Some(b)) = (
+                            raw_args[0].as_symbol_node(),
+                            raw_args[1].as_true_node().map(|_| true)
+                                .or_else(|| raw_args[1].as_false_node().map(|_| false)),
+                        )
+                    {
+                        let sym_name = String::from_utf8_lossy(sym.unescaped()).into_owned();
+                        let ivar_name = format!("@{}", sym_name);
+                        // Reader.
+                        let body = vec![sp(bn, Expr::IVarRead(ivar_name.clone()))];
+                        let def = Expr::Def {
+                            name: sym_name.clone(),
+                            params: vec![], defaults: vec![], rest: None,
+                            n_required_post: 0,
+                            kw_params: vec![], kw_rest: None, block_param: None,
+                            receiver: None,
+                            body,
+                        };
+                        if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
+                        // Writer (only when arg is `true`).
+                        if b {
+                            let setter_name = format!("{sym_name}=");
+                            let val_read = sp(bn, Expr::LVarRead("val".into()));
+                            let body = vec![sp(
+                                bn,
+                                Expr::IVarWrite(ivar_name.clone(), Box::new(val_read)),
+                            )];
+                            let def = Expr::Def {
+                                name: setter_name,
+                                params: vec!["val".into()], defaults: vec![], rest: None,
+                                n_required_post: 0,
+                                kw_params: vec![], kw_rest: None, block_param: None,
+                                receiver: None,
+                                body,
+                            };
+                            if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
+                        }
+                        continue;
+                    }
+                }
+                // Decode via the shared helper (paired with
+                // compiler.rs's normal-class-body attr_* arm).
+                // NOTE: zero-arg `attr_accessor` (etc.) is a SILENT
+                // NO-OP in CRuby 3.4 (verified: no ArgumentError,
+                // no methods defined). Our loop below handles that
+                // case naturally — empty sym_names → no iterations
+                // → nothing emitted. Don't add a guard rejecting
+                // zero-arg; that would diverge from CRuby.
+                if let Some((do_reader, do_writer)) = attr_reader_writer_flags(&name) {
+                    let mut all_sym_args = true;
+                    let sym_names: Vec<String> = call.arguments()
+                        .map(|args| args.arguments().iter().filter_map(|a| {
+                            a.as_symbol_node().map(|s| String::from_utf8_lossy(s.unescaped()).into_owned())
+                        }).collect())
+                        .unwrap_or_default();
+                    let expected = call.arguments().map(|a| a.arguments().iter().count()).unwrap_or(0);
+                    if sym_names.len() != expected { all_sym_args = false; }
+                    if !all_sym_args {
+                        ctx.errors.push(
+                            "class << X body: attr_* with non-symbol args is not supported".into()
+                        );
+                        out.push(sp(bn, Expr::Nil));
+                        continue;
+                    }
+                    for sym_name in sym_names {
+                        let ivar_name = format!("@{}", sym_name);
+                        if do_reader {
+                            let body = vec![sp(bn, Expr::IVarRead(ivar_name.clone()))];
+                            let def = Expr::Def {
+                                name: sym_name.clone(),
+                                params: vec![], defaults: vec![], rest: None,
+                                n_required_post: 0,
+                                kw_params: vec![], kw_rest: None, block_param: None,
+                                receiver: None,
+                                body,
+                            };
+                            if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
+                        }
+                        if do_writer {
+                            let setter_name = format!("{sym_name}=");
+                            let body = vec![sp(bn, Expr::IVarWrite(
+                                ivar_name.clone(),
+                                Box::new(sp(bn, Expr::LVarRead("val".into()))),
+                            ))];
+                            let def = Expr::Def {
+                                name: setter_name,
+                                params: vec!["val".into()], defaults: vec![], rest: None,
+                                n_required_post: 0,
+                                kw_params: vec![], kw_rest: None, block_param: None,
+                                receiver: None,
+                                body,
+                            };
+                            if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
+                        }
+                    }
+                    continue;
+                }
+            }
+            // `alias new old` keyword form INSIDE `class << X`
+            // body. Routes to `Op::AliasSingletonMethod` so the
+            // alias lands on X's singleton_methods rather than
+            // its instance methods (which is what the regular
+            // top-level translation would do). Tilt's tilt.rb:99
+            // `class << self; alias prefer register; end` is the
+            // motivating case — `register` is a class method of
+            // Tilt, `prefer` should also be a class method.
+            // IMPORTANT scope guard: `Op::AliasSingletonMethod`
+            // installs on `class_stack.last().singleton_methods`,
+            // which is only the correct target when the surrounding
+            // shape is `class << self` inside a class body — the
+            // existing class_stack entry IS X. For
+            // `class << SomeConst` / `class << obj`, the body runs
+            // in the same frame without any class_stack push, so
+            // the op would silently alias on the wrong receiver
+            // (or on toplevel). Those receivers still fall through
+            // to the existing unsupported-node SyntaxError.
+            let recv_is_self = matches!(&recv_expr.node, Expr::SelfExpr);
+            if recv_is_self
+                && let Some(alias_node) = bn.as_alias_method_node()
+                && let (Some(new_sym), Some(old_sym)) = (
+                    alias_node.new_name().as_symbol_node(),
+                    alias_node.old_name().as_symbol_node(),
+                )
+            {
+                let new_name = String::from_utf8_lossy(new_sym.unescaped()).into_owned();
+                let old_name = String::from_utf8_lossy(old_sym.unescaped()).into_owned();
+                out.push(sp(bn, Expr::AliasSingletonMethod(new_name, old_name)));
+                continue;
+            }
+            // Tighter error if we declined to handle alias due to
+            // the non-self receiver guard above — separate from
+            // the general "only def / attr_* / alias" message.
+            if bn.as_alias_method_node().is_some() && !recv_is_self {
+                ctx.errors.push(
+                    "class << <non-self>: `alias` is only supported when the receiver is `self` (inside a class body)".into()
+                );
+                out.push(sp(bn, Expr::Nil));
+                continue;
+            }
+            // `class << self; alias_method :new, :old; end` — the
+            // method-call form of `alias` (vs. the keyword arm
+            // above). Same `self`-receiver gate; routes to
+            // `Op::AliasSingletonMethod` so the alias lands on X's
+            // singleton_methods table. Both operands must be plain
+            // Symbols (the common case). addressable's uri.rb does
+            // `class << self; alias_method :escape_component,
+            // :encode_component; end` (and three more), which the
+            // Jekyll require chain hits.
+            if recv_is_self
+                && let Some(call) = bn.as_call_node()
+                && call.receiver().is_none()
+                && cid_to_string(call.name()) == "alias_method"
+                && let Some(args) = call.arguments()
+            {
+                let arg_vec: Vec<_> = args.arguments().iter().collect();
+                if arg_vec.len() == 2
+                    && let (Some(new_sym), Some(old_sym)) =
+                        (arg_vec[0].as_symbol_node(), arg_vec[1].as_symbol_node())
+                {
+                    let new_name = String::from_utf8_lossy(new_sym.unescaped()).into_owned();
+                    let old_name = String::from_utf8_lossy(old_sym.unescaped()).into_owned();
+                    out.push(sp(bn, Expr::AliasSingletonMethod(new_name, old_name)));
+                    continue;
+                }
+            }
+            // `class << self; prepend Mod; end` — install Mod on
+            // X's singleton-class prepend chain. Same `self`-
+            // receiver gate as `alias`. The recogniser is purely
+            // syntactic: this arm matches any `class << self;
+            // prepend Mod; end` regardless of enclosing scope.
+            // The compiled `Op::SingletonChainPrepend` enforces
+            // the install-target check at runtime — it uses
+            // `class_stack.last()` when present, traps with
+            // SyntaxError otherwise (covers toplevel and any
+            // context where the surrounding self isn't a
+            // class/module). Tilt's finalize! is the motivating
+            // case (`prepend(Module.new { ... })`).
+            //
+            // Single-arg form only (matches CRuby's single-module
+            // prepend grammar in practice — `prepend(A, B)` is
+            // legal but rare).
+            if recv_is_self
+                && let Some(call) = bn.as_call_node()
+                && call.receiver().is_none()
+                && cid_to_string(call.name()) == "prepend"
+                && let Some(args) = call.arguments()
+                && args.arguments().iter().count() == 1
+            {
+                let src = tr(ctx, &args.arguments().iter().next().unwrap());
+                out.push(sp(bn, Expr::SingletonChainPrepend(Box::new(src))));
+                continue;
+            }
+            // `class << self; FOO = expr; ...` — constant assignment
+            // inside the singleton class body. CRuby places the
+            // constant on the singleton class itself, accessible
+            // via `Foo.singleton_class::FOO`. rubyrs's spike-scope
+            // constants model is flatter — `Vm.constants` is a
+            // single name-keyed table — so we route the assignment
+            // through the regular toplevel `Expr::ConstWrite`. The
+            // result: a bare `FOO` read inside the singleton class
+            // resolves through the same table that a top-level
+            // `FOO` would, which is the model rubyrs already uses
+            // for all other constants in the spike scope.
+            //
+            // Motivating call site: sinatra/base.rb:1292's
+            // `class << self; CALLERS_TO_IGNORE = [...].freeze;
+            // attr_reader :routes, ...; def callers_to_ignore;
+            // CALLERS_TO_IGNORE; end; end` — the constant is
+            // assigned once and read from the singleton method
+            // body that follows. (TRY_RUNS pass 9 layer #11.)
+            if recv_is_self && bn.as_constant_write_node().is_some() {
+                out.push(tr(ctx, bn));
+                continue;
+            }
+            // `class << self; @@cvar = expr; ...` — class variable
+            // assignment inside the singleton class body. Same
+            // shape as the CWN arm above: the toplevel
+            // `Expr::CvarWrite` path already exists; we just
+            // admit it here so the spike-subset doesn't reject
+            // the form. CRuby places class variables on the
+            // enclosing class hierarchy regardless of whether the
+            // write happens inside `class << self` (cvars are
+            // hierarchy-keyed in CRuby, NOT singleton-class-
+            // scoped). rubyrs's Tier-1 cvar model is per-class
+            // (no hierarchy walk — see `Op::LoadCvar` /
+            // `StoreCvar`); admitting this arm doesn't change
+            // that pre-existing divergence either way. So the
+            // write goes to the same table whether the write
+            // syntactically appears at class-body top level or
+            // inside `class << self`; what this arm fixes is
+            // strictly the parse-time admission, not any
+            // semantic alignment with CRuby's hierarchy-walking
+            // cvar lookup.
+            //
+            // Motivating call site: sinatra/base.rb:1292's
+            // `class << self; ...; @@mutex = Mutex.new; def
+            // synchronize(&block); @@mutex.synchronize(&block);
+            // ...; end; end` — cvar assigned once then read from
+            // singleton methods defined in the same body.
+            // (TRY_RUNS pass 9.5 layer #12.)
+            if recv_is_self && bn.as_class_variable_write_node().is_some() {
+                out.push(tr(ctx, bn));
+                continue;
+            }
+            // `class << self; private; def secret; ...; end; ...` —
+            // bare visibility modifier (`private` / `public` /
+            // `protected`) at body top level. Translates as a
+            // regular method call (Expr::Call with name="private"
+            // and implicit receiver). At runtime self is the
+            // surrounding class (= `class_stack.last()` —
+            // singleton-class body shares the outer class's
+            // class_stack entry), and do_call's
+            // `visibility_from_name` arm at ~line 2417 mutates
+            // `class_visibility_stack.last_mut()` accordingly.
+            // Subsequent `def`s in the same body read that stack
+            // when DefSingletonMethod runs, so the modifier flows
+            // correctly to following method definitions.
+            //
+            // Scope: only the bare-receiver form. The args form
+            // (`private :foo, :bar`) retroactively flips named
+            // methods' visibility on the OUTER class — but
+            // sinatra/base.rb:1690 uses the bare form, and the
+            // args form's interaction with singleton methods is
+            // a separate question we don't need to answer here.
+            //
+            // Motivating call site: sinatra/base.rb:1690's
+            // `class << self; ...; private; ...; end` — bare
+            // `private` precedes a block of helper methods that
+            // sinatra hides from external callers.
+            // (TRY_RUNS pass 9.7 layer #14.)
+            if recv_is_self
+                && let Some(call) = bn.as_call_node()
+                && call.receiver().is_none()
+                && call.arguments().is_none_or(|a| a.arguments().iter().next().is_none())
+                && matches!(cid_to_string(call.name()).as_str(),
+                    "private" | "public" | "protected"
+                )
+            {
+                out.push(tr(ctx, bn));
+                continue;
+            }
+            // `class << self; private :new; end` — visibility
+            // modifier WITH method-name args at body top level.
+            // Equivalent to `private_class_method :new`: it sets the
+            // named SINGLETON method's visibility. rubyrs doesn't
+            // model singleton-method visibility (same documented
+            // Tier-1 trade-off as `private_class_method` / the bare
+            // form's effect on later defs), so this is a no-op — the
+            // method stays callable. Motivating case: Liquid's
+            // tag.rb does `class << self; def parse(...); ...; end;
+            // private :new; end` to push callers toward `Tag.parse`.
+            if recv_is_self
+                && let Some(call) = bn.as_call_node()
+                && call.receiver().is_none()
+                && call.arguments().is_some_and(|a| a.arguments().iter().next().is_some())
+                && matches!(cid_to_string(call.name()).as_str(),
+                    "private" | "public" | "protected"
+                )
+            {
+                out.push(sp(bn, Expr::Nil));
+                continue;
+            }
+            // `class << self; <stmt> if cond` / `class << self;
+            // <stmt> unless cond` — and structurally-equivalent
+            // block forms `if cond; <stmt>; end` / `unless cond;
+            // <stmt>; end` — at body top level wrapping a single
+            // supported inner stmt. The recogniser admits ANY
+            // `IfNode` / `UnlessNode` with exactly one statement
+            // and no `subsequent` / `else_clause` (Prism's
+            // names for the else/elsif tail): the modifier and one-stmt
+            // block forms compile identically (modifier is just
+            // sugar), so handling both is safe and gives a
+            // slightly broader green path. Tightening to truly
+            // modifier-form via `end_keyword_loc().is_none()`
+            // would be the alternative; chose the broader
+            // wording over the narrower recogniser since the
+            // semantics are equivalent. (PR #218 Copilot
+            // round 3 caught the previous "modifier-form only"
+            // wording as inaccurate.)
+            // Recognised inner shapes: bare-call (CallNode, e.g.
+            // `ruby2_keywords(:use)`) and the `alias new old` form
+            // (AliasMethodNode). Both are wrapped as
+            // `Expr::If { cond, then_body: [<inner>], else_body: [] }`
+            // (matches the rest of `tr()` — empty `else_body`
+            // compiles to `LoadNil` at the codegen layer).
+            // The condition is translated via the regular `tr()`
+            // path (so `respond_to?(...)` / `method_defined? :foo`
+            // dispatch through their usual builtins).
+            //
+            // Motivating call sites (TRY_RUNS pass 9.5 layers
+            // #13 / #15):
+            //   - `ruby2_keywords(:use) if respond_to?(:ruby2_keywords, true)`
+            //   - `alias new! new unless method_defined? :new!`
+            // The Ruby 2.7 guard pattern: try the call only when
+            // the receiver advertises support. The guard's
+            // truthiness is computed by the regular dispatch
+            // path — whether the guarded call ultimately fires
+            // depends on the same dispatch decisions
+            // `respond_to?` / `method_defined?` make for any
+            // other caller, not on something specific to this
+            // arm.
+            //
+            // Scope deliberately narrow: only CallNode and
+            // AliasMethodNode inner statements are admitted; other
+            // shapes (def / attr_* / const-write / cvar-write
+            // wrapped in if/unless) fall through to
+            // NotImplementedError because sinatra/base.rb doesn't
+            // surface them and the inner-form recogniser can be
+            // widened on demand.
+            // `class << self; if cond; def a; ...; else; def a; ...;
+            // end; end` — conditional method definitions. Each branch
+            // must contain ONLY `def`s; they become singleton defs
+            // (class methods) wrapped in the runtime `if`. The
+            // condition translates through the regular path. A plain
+            // `else` is admitted; `elsif` (a nested IfNode subsequent)
+            // is not. Motivating case: i18n's utils.rb guards
+            // `def except(hash, *keys)` on
+            // `Hash.method_defined?(:except)` to pick the native vs.
+            // polyfill implementation.
+            if recv_is_self
+                && let Some(if_n) = bn.as_if_node()
+            {
+                // Shape-validate first (no translation side effects):
+                // every then-stmt is a def, and the subsequent is
+                // either absent or an ElseNode of only defs.
+                let all_defs = |stmts: Option<ruby_prism::StatementsNode<'_>>| -> bool {
+                    match stmts {
+                        Some(s) => {
+                            let mut it = s.body().iter().peekable();
+                            if it.peek().is_none() { return false; }
+                            s.body().iter().all(|n| n.as_def_node().is_some())
+                        }
+                        None => false,
+                    }
+                };
+                let then_ok = all_defs(if_n.statements());
+                let else_node = if_n.subsequent().and_then(|s| s.as_else_node());
+                let else_ok = match (if_n.subsequent(), &else_node) {
+                    (None, _) => true,                       // no else
+                    (Some(_), Some(en)) => all_defs(en.statements()),
+                    (Some(_), None) => false,                // elsif — bail
+                };
+                if then_ok && else_ok {
+                    let mut then_body: Vec<SExpr> = Vec::new();
+                    if let Some(stmts) = if_n.statements() {
+                        for s in stmts.body().iter() {
+                            let t = tr(ctx, &s);
+                            if let Some(sd) = mk_singleton_def(&s, t.node) {
+                                then_body.push(sd);
+                            }
+                        }
+                    }
+                    let mut else_body: Vec<SExpr> = Vec::new();
+                    if let Some(en) = &else_node
+                        && let Some(stmts) = en.statements() {
+                        for s in stmts.body().iter() {
+                            let t = tr(ctx, &s);
+                            if let Some(sd) = mk_singleton_def(&s, t.node) {
+                                else_body.push(sd);
+                            }
+                        }
+                    }
+                    let cond = tr(ctx, &if_n.predicate());
+                    out.push(sp(bn, Expr::If {
+                        cond: Box::new(cond),
+                        then_body,
+                        else_body,
+                    }));
+                    continue;
+                }
+            }
+            if recv_is_self {
+                let modifier_if = bn.as_if_node()
+                    .and_then(|if_n| {
+                        if if_n.subsequent().is_some() { return None; }
+                        let stmts = if_n.statements()?;
+                        // Exactly-one-stmt check via a single
+                        // iterator walk: take one, error if there
+                        // are more. Cheaper than `count() + next()`.
+                        let mut it = stmts.body().iter();
+                        let inner = it.next()?;
+                        if it.next().is_some() { return None; }
+                        Some((if_n.predicate(), inner, false))
+                    });
+                let modifier_unless = bn.as_unless_node()
+                    .and_then(|un_n| {
+                        if un_n.else_clause().is_some() { return None; }
+                        let stmts = un_n.statements()?;
+                        let mut it = stmts.body().iter();
+                        let inner = it.next()?;
+                        if it.next().is_some() { return None; }
+                        Some((un_n.predicate(), inner, true))
+                    });
+                if let Some((cond_node, inner, negated)) = modifier_if.or(modifier_unless) {
+                    // Translate the inner stmt only if it's one of
+                    // the admitted shapes; otherwise fall through.
+                    let inner_expr: Option<SExpr> = if let Some(alias_node) = inner.as_alias_method_node()
+                        && let (Some(new_sym), Some(old_sym)) = (
+                            alias_node.new_name().as_symbol_node(),
+                            alias_node.old_name().as_symbol_node(),
+                        )
+                    {
+                        let new_name = String::from_utf8_lossy(new_sym.unescaped()).into_owned();
+                        let old_name = String::from_utf8_lossy(old_sym.unescaped()).into_owned();
+                        Some(sp(&inner, Expr::AliasSingletonMethod(new_name, old_name)))
+                    } else if let Some(call) = inner.as_call_node() {
+                        // Bare-receiver CallNode admitted only
+                        // when its name is NOT one of the forms
+                        // the body translator would otherwise
+                        // special-case for the singleton class.
+                        // `attr_reader` / `attr_writer` /
+                        // `attr_accessor` / `prepend` translated
+                        // through the regular `tr()` path WITH
+                        // IMPLICIT RECEIVER would install on the
+                        // OUTER class (instance methods), not the
+                        // singleton class — semantic divergence
+                        // from the unconditional forms supported
+                        // earlier in this loop. Calls with an
+                        // EXPLICIT receiver (`Other.attr_reader(:x)
+                        // if cond`) don't trigger the body
+                        // special-casing and route to whatever
+                        // method `Other` provides, so they're
+                        // admitted regardless of name. Real
+                        // sinatra cases (`ruby2_keywords(:use)`)
+                        // are bare-receiver but with names that
+                        // have no body-level special-case, so
+                        // they pass uneventfully. PR #218
+                        // code-review #4 / Copilot round 5.
+                        let is_silently_misdirected = call.receiver().is_none()
+                            && matches!(cid_to_string(call.name()).as_str(),
+                                "attr_reader" | "attr_writer" | "attr_accessor" | "prepend"
+                            );
+                        if is_silently_misdirected {
+                            None
+                        } else {
+                            Some(tr(ctx, &inner))
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(inner_expr) = inner_expr {
+                        let raw_cond = tr(ctx, &cond_node);
+                        let cond = if negated {
+                            sp(&cond_node, Expr::Call {
+                                receiver: Some(Box::new(raw_cond)),
+                                name: "!".into(),
+                                args: vec![], kwargs_trailing: false })
+                        } else {
+                            raw_cond
+                        };
+                        out.push(sp(bn, Expr::If {
+                            cond: Box::new(cond),
+                            then_body: vec![inner_expr],
+                            else_body: vec![],
+                        }));
+                        continue;
+                    }
+                }
+            }
+            // `class << self` body: any remaining unsupported form
+            // compiles to a runtime `raise NotImplementedError`
+            // rather than a parse-time SyntaxError. The raise fires
+            // WHEN THE SURROUNDING SCOPE EXECUTES — not necessarily
+            // at method-call time. Two distinct scenarios:
+            //
+            //   1. Inside a `def` body: the raise sits in the
+            //      method body and only fires when the method is
+            //      invoked. Scripts that never call it load fine.
+            //
+            //   2. At class-body top level (`class Foo; class <<
+            //      self; unsupported; end; end`): the raise sits
+            //      in the class body and fires at LOAD time when
+            //      the enclosing `class` / `module` block executes.
+            //      The file load fails — matching the pre-PR
+            //      SyntaxError outcome ("file doesn't load") with
+            //      two differences:
+            //        - error class is NotImplementedError
+            //          (catchable by explicit
+            //          `rescue NotImplementedError`), not SyntaxError;
+            //        - NotImplementedError < ScriptError < Exception,
+            //          so a bare `rescue` does NOT catch it
+            //          (matches CRuby).
+            //
+            // Case (1) is a strict improvement (file loads); case
+            // (2) is roughly equivalent. The deferral is the right
+            // trade-off only when the unsupported form sits inside
+            // an infrequently-called method. Specific shapes already
+            // handled above (def / attr_* / alias / prepend-Mod)
+            // bypass this path; everything else (e.g. `include Mod`
+            // inside `class << self`, generic method calls) lands
+            // here.
+            //
+            // `class << <non-self>` still hard-errors at parse time —
+            // that branch has no surrounding class_stack frame, so
+            // even silently emitting nil would do the wrong thing
+            // (the body's intended target receiver is lost).
+            // Explicit-receiver statement at body top level —
+            // `Template.default_exception_renderer = lambda { … }`,
+            // `Other.configure(...)`, etc. These don't depend on the
+            // singleton-class `self` at all (the receiver is named
+            // explicitly), so translating them through the regular
+            // `tr()` path and running them in the surrounding context
+            // (where `self` is the enclosing class) is observably
+            // identical to CRuby. Only BARE-receiver statements need
+            // the singleton-class self, and those are handled by the
+            // def / attr_* / alias / prepend / visibility arms above
+            // (or fall through to NotImplementedError). Prism models
+            // `Foo.bar = x` as a CallNode with name `bar=` and an
+            // explicit receiver, so attribute-assignment is covered.
+            // Motivating case: Liquid's template.rb sets
+            // `Template.default_exception_renderer = lambda { … }`
+            // inside `class << self`.
+            if recv_is_self
+                && let Some(call) = bn.as_call_node()
+                && call.receiver().is_some()
+            {
+                out.push(tr(ctx, bn));
+                continue;
+            }
+            // Bare-receiver method call at body top level — `extend
+            // Gem::Deprecate`, `deprecate :x, …`, `ruby2_keywords
+            // :foo`, etc. Translated through the regular path and run
+            // in the surrounding context (self = the enclosing
+            // class). For `extend M` this matches CRuby's observable
+            // effect: M's instance methods become callable as class
+            // methods, and a following bare call to one of them (e.g.
+            // addressable idna's `deprecate` after `extend
+            // Gem::Deprecate`) then dispatches to it. The `attr_*` /
+            // `prepend` names that WOULD be silently misdirected are
+            // already consumed by their dedicated arms above. Known
+            // divergence: `include M` here installs M on the
+            // surrounding class's instance methods rather than its
+            // singleton (rubyrs's flat per-class model) — rare and
+            // documented. Motivating case: addressable's idna/pure.rb
+            // `class << self; …; extend Gem::Deprecate; deprecate
+            // :unicode_normalize_kc, …; end`.
+            if recv_is_self
+                && bn.as_call_node().is_some()
+            {
+                out.push(tr(ctx, bn));
+                continue;
+            }
+            if recv_is_self {
+                let msg = "class << self body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, `prepend Mod` (single Module arg, with `self` receiver), constant assignment (`FOO = expr`), and class variable assignment (`@@cvar = expr`) are supported in the spike subset";
+                out.push(sp(bn, Expr::Call {
+                    receiver: None,
+                    name: "raise".into(),
+                    args: vec![
+                        sp(bn, Expr::ConstRead("NotImplementedError".into())),
+                        sp(bn, Expr::StrLit(msg.into())),
+                    ], kwargs_trailing: false }));
+                continue;
+            }
+            ctx.errors.push(
+                "class << <non-self> body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, and `alias` are supported in the spike subset".into()
+            );
+            out.push(sp(bn, Expr::Nil));
+        }
+        // Pin the trailing value to nil so the synthetic receiver
+        // LVarWrite (when `needs_local`) doesn't leak as the body's
+        // result. Empty bodies (`class << X; end`) and zero-arg
+        // attr_* (`class << X; attr_accessor; end`) would otherwise
+        // return the receiver value — CRuby returns nil for the
+        // empty case. We don't try to match CRuby's attr_*
+        // return-Array shape (`[]` for zero-arg); nil is the
+        // user-friendly common case and the spec for `class << X`
+        // generally is "evaluates to the last expression in body";
+        // every supported entry's last op is already nil-pushing
+        // (Def → LoadNil, expanded attr_* → LoadNil), so this only
+        // changes the rare zero-arg/empty edge.
+        // Wrap the body in a `Begin { ensure: [Pop] }` so the
+        // visibility scope pop runs on BOTH normal exit and
+        // exception unwind. Without the ensure, a raise inside
+        // the body (or rescued by an outer begin) would skip the
+        // pop and leak an extra entry into
+        // `class_visibility_stack`, corrupting default visibility
+        // for later defs. The Push runs FIRST, OUTSIDE the inner
+        // Begin, so it's not double-counted by any unwind path —
+        // the inner Begin's ensure handles the pairing on every
+        // exit. PR #233 code-review round 2 (#1 unwind safety,
+        // #3 doc accuracy).
+        let inner_begin = sp(node, Expr::Begin {
+            body: out,
+            rescue: vec![],
+            ensure: Some(vec![sp(node, Expr::PopClassVisibility)]),
+        });
+        // Outer Begin runs: synthetic-local write (if needed),
+        // Push, inner Begin (with ensure-Pop), final Nil.
+        let mut outer: Vec<SExpr> = Vec::with_capacity(4);
+        if needs_local {
+            outer.push(sp(node, Expr::LVarWrite(synth_local.clone(), Box::new(recv_expr.clone()))));
+        }
+        outer.push(sp(node, Expr::PushClassVisibilityPublic));
+        outer.push(inner_begin);
+        outer.push(sp(node, Expr::Nil));
+        sp(node, Expr::Begin {
+            body: outer,
+            rescue: vec![],
+            ensure: None,
+        })
+}
+
 pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     let span = node_span(node);
     if let Some(n) = node.as_program_node() {
@@ -2948,759 +3713,8 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             });
         }
     }
-    if let Some(n) = node.as_singleton_class_node() {
-        let recv_expr = tr(ctx, &n.expression());
-        let body_nodes: Vec<_> = match n.body() {
-            Some(b) => {
-                if let Some(stmts) = b.as_statements_node() {
-                    stmts.body().iter().collect::<Vec<_>>()
-                } else { vec![b] }
-            }
-            None => vec![],
-        };
-        // CRuby evaluates the `class << expr` receiver exactly
-        // ONCE for the whole body. Naive desugar `def expr.foo;
-        // def expr.bar; ...` would re-evaluate expr per def —
-        // fine for pure exprs (SelfExpr, ConstRead) but wrong
-        // for anything side-effectful.
-        //
-        // For SelfExpr specifically, we MUST keep the literal
-        // SelfExpr as the receiver — the compiler's special
-        // case emits `Op::DefSingletonMethod` (lands on
-        // class_stack.last().singleton_methods) only when it
-        // sees `receiver: Some(SelfExpr)`. A synthetic-local
-        // indirection would route to `Op::DefObjectSingletonMethod`
-        // instead, which rejects Class receivers.
-        //
-        // For ConstRead the constant lookup is also pure and
-        // can be re-evaluated cheaply, AND classes don't go
-        // through DefObjectSingletonMethod's reject path because
-        // the compiler routes them via the same special case.
-        // Actually no — only `SelfExpr` hits the special case.
-        // So for ConstRead we ALSO need to keep it literal so
-        // the compiler can detect Class-shaped receivers at
-        // dispatch time without going through the
-        // Object-only path.
-        //
-        // Rule: only bind to a synthetic local for receivers
-        // that are NEITHER SelfExpr NOR ConstRead — the
-        // side-effectful / allocating cases. For pure receivers
-        // the per-def re-evaluation is observably identical to
-        // one-eval anyway.
-        let needs_local = !matches!(
-            &recv_expr.node,
-            Expr::SelfExpr | Expr::ConstRead(_)
-        );
-        let synth_local = format!("__cls_lt_lt_recv_{}", node_span(node).byte_offset);
-        let mut out: Vec<SExpr> = Vec::with_capacity(body_nodes.len() + 1);
-        // Closure helper: make a `def recv.name(params) body` SExpr
-        // rewriting the receiver-less Def into a singleton-method
-        // form. Reused for both real DefNodes in the body and for
-        // synthetic Defs we generate when expanding `attr_*` calls.
-        let mk_singleton_def = |bn: &Node<'_>, def_translated: Expr| -> Option<SExpr> {
-            if let Expr::Def {
-                name, params, defaults, rest, n_required_post,
-                kw_params, kw_rest, block_param, receiver: _, body,
-            } = def_translated {
-                let receiver = if needs_local {
-                    sp(bn, Expr::LVarRead(synth_local.clone()))
-                } else {
-                    recv_expr.clone()
-                };
-                Some(sp(bn, Expr::Def {
-                    name, params, defaults, rest, n_required_post,
-                    kw_params, kw_rest, block_param,
-                    receiver: Some(Box::new(receiver)),
-                    body,
-                }))
-            } else {
-                None
-            }
-        };
-        for bn in &body_nodes {
-            if bn.as_def_node().is_some() {
-                let translated = tr(ctx, bn);
-                if let Some(s) = mk_singleton_def(bn, translated.node) {
-                    out.push(s);
-                } else {
-                    ctx.errors.push(
-                        "class << X: internal — def translated unexpectedly".into()
-                    );
-                    out.push(sp(bn, Expr::Nil));
-                }
-                continue;
-            }
-            // `attr_reader :foo` / `attr_writer :foo` / `attr_accessor :foo`
-            // inside `class << X` body. CRuby installs reader/writer
-            // methods on X's singleton class. We desugar each symbol
-            // arg into one or two synthetic `def X.foo; @foo; end` /
-            // `def X.foo=(val); @foo = val; end` Defs and route them
-            // through the existing singleton-rewrite path above.
-            //
-            // Caveat: ivar persistence on Class receivers diverges
-            // from CRuby (class-level @foo on a Class value doesn't
-            // currently round-trip across method calls — separate gap).
-            // The reader returns nil instead of CRuby's last-written
-            // value. Tilt's template.rb:503 only checks
-            // `extract_fixed_locals.nil?`, so nil-vs-false is moot.
-            if let Some(call) = bn.as_call_node()
-                && call.receiver().is_none()
-            {
-                let name = cid_to_string(call.name());
-                // Pre-helper arm: legacy `attr :name, true/false`
-                // accessor form. Single Symbol followed by a
-                // BoolLit second arg. Mirrors compiler.rs's
-                // dedicated `(SymbolLit, BoolLit)` intercept arm
-                // for the normal class-body path. CRuby 3.4 still
-                // accepts this with a suppressed warning; without
-                // the special case the all-symbols gate further
-                // down would reject it as unsupported.
-                // (Copilot review #313 round 1.)
-                if name == "attr" {
-                    let raw_args: Vec<_> = call.arguments()
-                        .map(|args| args.arguments().iter().collect())
-                        .unwrap_or_default();
-                    if raw_args.len() == 2
-                        && let (Some(sym), Some(b)) = (
-                            raw_args[0].as_symbol_node(),
-                            raw_args[1].as_true_node().map(|_| true)
-                                .or_else(|| raw_args[1].as_false_node().map(|_| false)),
-                        )
-                    {
-                        let sym_name = String::from_utf8_lossy(sym.unescaped()).into_owned();
-                        let ivar_name = format!("@{}", sym_name);
-                        // Reader.
-                        let body = vec![sp(bn, Expr::IVarRead(ivar_name.clone()))];
-                        let def = Expr::Def {
-                            name: sym_name.clone(),
-                            params: vec![], defaults: vec![], rest: None,
-                            n_required_post: 0,
-                            kw_params: vec![], kw_rest: None, block_param: None,
-                            receiver: None,
-                            body,
-                        };
-                        if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
-                        // Writer (only when arg is `true`).
-                        if b {
-                            let setter_name = format!("{sym_name}=");
-                            let val_read = sp(bn, Expr::LVarRead("val".into()));
-                            let body = vec![sp(
-                                bn,
-                                Expr::IVarWrite(ivar_name.clone(), Box::new(val_read)),
-                            )];
-                            let def = Expr::Def {
-                                name: setter_name,
-                                params: vec!["val".into()], defaults: vec![], rest: None,
-                                n_required_post: 0,
-                                kw_params: vec![], kw_rest: None, block_param: None,
-                                receiver: None,
-                                body,
-                            };
-                            if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
-                        }
-                        continue;
-                    }
-                }
-                // Decode via the shared helper (paired with
-                // compiler.rs's normal-class-body attr_* arm).
-                // NOTE: zero-arg `attr_accessor` (etc.) is a SILENT
-                // NO-OP in CRuby 3.4 (verified: no ArgumentError,
-                // no methods defined). Our loop below handles that
-                // case naturally — empty sym_names → no iterations
-                // → nothing emitted. Don't add a guard rejecting
-                // zero-arg; that would diverge from CRuby.
-                if let Some((do_reader, do_writer)) = attr_reader_writer_flags(&name) {
-                    let mut all_sym_args = true;
-                    let sym_names: Vec<String> = call.arguments()
-                        .map(|args| args.arguments().iter().filter_map(|a| {
-                            a.as_symbol_node().map(|s| String::from_utf8_lossy(s.unescaped()).into_owned())
-                        }).collect())
-                        .unwrap_or_default();
-                    let expected = call.arguments().map(|a| a.arguments().iter().count()).unwrap_or(0);
-                    if sym_names.len() != expected { all_sym_args = false; }
-                    if !all_sym_args {
-                        ctx.errors.push(
-                            "class << X body: attr_* with non-symbol args is not supported".into()
-                        );
-                        out.push(sp(bn, Expr::Nil));
-                        continue;
-                    }
-                    for sym_name in sym_names {
-                        let ivar_name = format!("@{}", sym_name);
-                        if do_reader {
-                            let body = vec![sp(bn, Expr::IVarRead(ivar_name.clone()))];
-                            let def = Expr::Def {
-                                name: sym_name.clone(),
-                                params: vec![], defaults: vec![], rest: None,
-                                n_required_post: 0,
-                                kw_params: vec![], kw_rest: None, block_param: None,
-                                receiver: None,
-                                body,
-                            };
-                            if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
-                        }
-                        if do_writer {
-                            let setter_name = format!("{sym_name}=");
-                            let body = vec![sp(bn, Expr::IVarWrite(
-                                ivar_name.clone(),
-                                Box::new(sp(bn, Expr::LVarRead("val".into()))),
-                            ))];
-                            let def = Expr::Def {
-                                name: setter_name,
-                                params: vec!["val".into()], defaults: vec![], rest: None,
-                                n_required_post: 0,
-                                kw_params: vec![], kw_rest: None, block_param: None,
-                                receiver: None,
-                                body,
-                            };
-                            if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
-                        }
-                    }
-                    continue;
-                }
-            }
-            // `alias new old` keyword form INSIDE `class << X`
-            // body. Routes to `Op::AliasSingletonMethod` so the
-            // alias lands on X's singleton_methods rather than
-            // its instance methods (which is what the regular
-            // top-level translation would do). Tilt's tilt.rb:99
-            // `class << self; alias prefer register; end` is the
-            // motivating case — `register` is a class method of
-            // Tilt, `prefer` should also be a class method.
-            // IMPORTANT scope guard: `Op::AliasSingletonMethod`
-            // installs on `class_stack.last().singleton_methods`,
-            // which is only the correct target when the surrounding
-            // shape is `class << self` inside a class body — the
-            // existing class_stack entry IS X. For
-            // `class << SomeConst` / `class << obj`, the body runs
-            // in the same frame without any class_stack push, so
-            // the op would silently alias on the wrong receiver
-            // (or on toplevel). Those receivers still fall through
-            // to the existing unsupported-node SyntaxError.
-            let recv_is_self = matches!(&recv_expr.node, Expr::SelfExpr);
-            if recv_is_self
-                && let Some(alias_node) = bn.as_alias_method_node()
-                && let (Some(new_sym), Some(old_sym)) = (
-                    alias_node.new_name().as_symbol_node(),
-                    alias_node.old_name().as_symbol_node(),
-                )
-            {
-                let new_name = String::from_utf8_lossy(new_sym.unescaped()).into_owned();
-                let old_name = String::from_utf8_lossy(old_sym.unescaped()).into_owned();
-                out.push(sp(bn, Expr::AliasSingletonMethod(new_name, old_name)));
-                continue;
-            }
-            // Tighter error if we declined to handle alias due to
-            // the non-self receiver guard above — separate from
-            // the general "only def / attr_* / alias" message.
-            if bn.as_alias_method_node().is_some() && !recv_is_self {
-                ctx.errors.push(
-                    "class << <non-self>: `alias` is only supported when the receiver is `self` (inside a class body)".into()
-                );
-                out.push(sp(bn, Expr::Nil));
-                continue;
-            }
-            // `class << self; alias_method :new, :old; end` — the
-            // method-call form of `alias` (vs. the keyword arm
-            // above). Same `self`-receiver gate; routes to
-            // `Op::AliasSingletonMethod` so the alias lands on X's
-            // singleton_methods table. Both operands must be plain
-            // Symbols (the common case). addressable's uri.rb does
-            // `class << self; alias_method :escape_component,
-            // :encode_component; end` (and three more), which the
-            // Jekyll require chain hits.
-            if recv_is_self
-                && let Some(call) = bn.as_call_node()
-                && call.receiver().is_none()
-                && cid_to_string(call.name()) == "alias_method"
-                && let Some(args) = call.arguments()
-            {
-                let arg_vec: Vec<_> = args.arguments().iter().collect();
-                if arg_vec.len() == 2
-                    && let (Some(new_sym), Some(old_sym)) =
-                        (arg_vec[0].as_symbol_node(), arg_vec[1].as_symbol_node())
-                {
-                    let new_name = String::from_utf8_lossy(new_sym.unescaped()).into_owned();
-                    let old_name = String::from_utf8_lossy(old_sym.unescaped()).into_owned();
-                    out.push(sp(bn, Expr::AliasSingletonMethod(new_name, old_name)));
-                    continue;
-                }
-            }
-            // `class << self; prepend Mod; end` — install Mod on
-            // X's singleton-class prepend chain. Same `self`-
-            // receiver gate as `alias`. The recogniser is purely
-            // syntactic: this arm matches any `class << self;
-            // prepend Mod; end` regardless of enclosing scope.
-            // The compiled `Op::SingletonChainPrepend` enforces
-            // the install-target check at runtime — it uses
-            // `class_stack.last()` when present, traps with
-            // SyntaxError otherwise (covers toplevel and any
-            // context where the surrounding self isn't a
-            // class/module). Tilt's finalize! is the motivating
-            // case (`prepend(Module.new { ... })`).
-            //
-            // Single-arg form only (matches CRuby's single-module
-            // prepend grammar in practice — `prepend(A, B)` is
-            // legal but rare).
-            if recv_is_self
-                && let Some(call) = bn.as_call_node()
-                && call.receiver().is_none()
-                && cid_to_string(call.name()) == "prepend"
-                && let Some(args) = call.arguments()
-                && args.arguments().iter().count() == 1
-            {
-                let src = tr(ctx, &args.arguments().iter().next().unwrap());
-                out.push(sp(bn, Expr::SingletonChainPrepend(Box::new(src))));
-                continue;
-            }
-            // `class << self; FOO = expr; ...` — constant assignment
-            // inside the singleton class body. CRuby places the
-            // constant on the singleton class itself, accessible
-            // via `Foo.singleton_class::FOO`. rubyrs's spike-scope
-            // constants model is flatter — `Vm.constants` is a
-            // single name-keyed table — so we route the assignment
-            // through the regular toplevel `Expr::ConstWrite`. The
-            // result: a bare `FOO` read inside the singleton class
-            // resolves through the same table that a top-level
-            // `FOO` would, which is the model rubyrs already uses
-            // for all other constants in the spike scope.
-            //
-            // Motivating call site: sinatra/base.rb:1292's
-            // `class << self; CALLERS_TO_IGNORE = [...].freeze;
-            // attr_reader :routes, ...; def callers_to_ignore;
-            // CALLERS_TO_IGNORE; end; end` — the constant is
-            // assigned once and read from the singleton method
-            // body that follows. (TRY_RUNS pass 9 layer #11.)
-            if recv_is_self && bn.as_constant_write_node().is_some() {
-                out.push(tr(ctx, bn));
-                continue;
-            }
-            // `class << self; @@cvar = expr; ...` — class variable
-            // assignment inside the singleton class body. Same
-            // shape as the CWN arm above: the toplevel
-            // `Expr::CvarWrite` path already exists; we just
-            // admit it here so the spike-subset doesn't reject
-            // the form. CRuby places class variables on the
-            // enclosing class hierarchy regardless of whether the
-            // write happens inside `class << self` (cvars are
-            // hierarchy-keyed in CRuby, NOT singleton-class-
-            // scoped). rubyrs's Tier-1 cvar model is per-class
-            // (no hierarchy walk — see `Op::LoadCvar` /
-            // `StoreCvar`); admitting this arm doesn't change
-            // that pre-existing divergence either way. So the
-            // write goes to the same table whether the write
-            // syntactically appears at class-body top level or
-            // inside `class << self`; what this arm fixes is
-            // strictly the parse-time admission, not any
-            // semantic alignment with CRuby's hierarchy-walking
-            // cvar lookup.
-            //
-            // Motivating call site: sinatra/base.rb:1292's
-            // `class << self; ...; @@mutex = Mutex.new; def
-            // synchronize(&block); @@mutex.synchronize(&block);
-            // ...; end; end` — cvar assigned once then read from
-            // singleton methods defined in the same body.
-            // (TRY_RUNS pass 9.5 layer #12.)
-            if recv_is_self && bn.as_class_variable_write_node().is_some() {
-                out.push(tr(ctx, bn));
-                continue;
-            }
-            // `class << self; private; def secret; ...; end; ...` —
-            // bare visibility modifier (`private` / `public` /
-            // `protected`) at body top level. Translates as a
-            // regular method call (Expr::Call with name="private"
-            // and implicit receiver). At runtime self is the
-            // surrounding class (= `class_stack.last()` —
-            // singleton-class body shares the outer class's
-            // class_stack entry), and do_call's
-            // `visibility_from_name` arm at ~line 2417 mutates
-            // `class_visibility_stack.last_mut()` accordingly.
-            // Subsequent `def`s in the same body read that stack
-            // when DefSingletonMethod runs, so the modifier flows
-            // correctly to following method definitions.
-            //
-            // Scope: only the bare-receiver form. The args form
-            // (`private :foo, :bar`) retroactively flips named
-            // methods' visibility on the OUTER class — but
-            // sinatra/base.rb:1690 uses the bare form, and the
-            // args form's interaction with singleton methods is
-            // a separate question we don't need to answer here.
-            //
-            // Motivating call site: sinatra/base.rb:1690's
-            // `class << self; ...; private; ...; end` — bare
-            // `private` precedes a block of helper methods that
-            // sinatra hides from external callers.
-            // (TRY_RUNS pass 9.7 layer #14.)
-            if recv_is_self
-                && let Some(call) = bn.as_call_node()
-                && call.receiver().is_none()
-                && call.arguments().is_none_or(|a| a.arguments().iter().next().is_none())
-                && matches!(cid_to_string(call.name()).as_str(),
-                    "private" | "public" | "protected"
-                )
-            {
-                out.push(tr(ctx, bn));
-                continue;
-            }
-            // `class << self; private :new; end` — visibility
-            // modifier WITH method-name args at body top level.
-            // Equivalent to `private_class_method :new`: it sets the
-            // named SINGLETON method's visibility. rubyrs doesn't
-            // model singleton-method visibility (same documented
-            // Tier-1 trade-off as `private_class_method` / the bare
-            // form's effect on later defs), so this is a no-op — the
-            // method stays callable. Motivating case: Liquid's
-            // tag.rb does `class << self; def parse(...); ...; end;
-            // private :new; end` to push callers toward `Tag.parse`.
-            if recv_is_self
-                && let Some(call) = bn.as_call_node()
-                && call.receiver().is_none()
-                && call.arguments().is_some_and(|a| a.arguments().iter().next().is_some())
-                && matches!(cid_to_string(call.name()).as_str(),
-                    "private" | "public" | "protected"
-                )
-            {
-                out.push(sp(bn, Expr::Nil));
-                continue;
-            }
-            // `class << self; <stmt> if cond` / `class << self;
-            // <stmt> unless cond` — and structurally-equivalent
-            // block forms `if cond; <stmt>; end` / `unless cond;
-            // <stmt>; end` — at body top level wrapping a single
-            // supported inner stmt. The recogniser admits ANY
-            // `IfNode` / `UnlessNode` with exactly one statement
-            // and no `subsequent` / `else_clause` (Prism's
-            // names for the else/elsif tail): the modifier and one-stmt
-            // block forms compile identically (modifier is just
-            // sugar), so handling both is safe and gives a
-            // slightly broader green path. Tightening to truly
-            // modifier-form via `end_keyword_loc().is_none()`
-            // would be the alternative; chose the broader
-            // wording over the narrower recogniser since the
-            // semantics are equivalent. (PR #218 Copilot
-            // round 3 caught the previous "modifier-form only"
-            // wording as inaccurate.)
-            // Recognised inner shapes: bare-call (CallNode, e.g.
-            // `ruby2_keywords(:use)`) and the `alias new old` form
-            // (AliasMethodNode). Both are wrapped as
-            // `Expr::If { cond, then_body: [<inner>], else_body: [] }`
-            // (matches the rest of `tr()` — empty `else_body`
-            // compiles to `LoadNil` at the codegen layer).
-            // The condition is translated via the regular `tr()`
-            // path (so `respond_to?(...)` / `method_defined? :foo`
-            // dispatch through their usual builtins).
-            //
-            // Motivating call sites (TRY_RUNS pass 9.5 layers
-            // #13 / #15):
-            //   - `ruby2_keywords(:use) if respond_to?(:ruby2_keywords, true)`
-            //   - `alias new! new unless method_defined? :new!`
-            // The Ruby 2.7 guard pattern: try the call only when
-            // the receiver advertises support. The guard's
-            // truthiness is computed by the regular dispatch
-            // path — whether the guarded call ultimately fires
-            // depends on the same dispatch decisions
-            // `respond_to?` / `method_defined?` make for any
-            // other caller, not on something specific to this
-            // arm.
-            //
-            // Scope deliberately narrow: only CallNode and
-            // AliasMethodNode inner statements are admitted; other
-            // shapes (def / attr_* / const-write / cvar-write
-            // wrapped in if/unless) fall through to
-            // NotImplementedError because sinatra/base.rb doesn't
-            // surface them and the inner-form recogniser can be
-            // widened on demand.
-            // `class << self; if cond; def a; ...; else; def a; ...;
-            // end; end` — conditional method definitions. Each branch
-            // must contain ONLY `def`s; they become singleton defs
-            // (class methods) wrapped in the runtime `if`. The
-            // condition translates through the regular path. A plain
-            // `else` is admitted; `elsif` (a nested IfNode subsequent)
-            // is not. Motivating case: i18n's utils.rb guards
-            // `def except(hash, *keys)` on
-            // `Hash.method_defined?(:except)` to pick the native vs.
-            // polyfill implementation.
-            if recv_is_self
-                && let Some(if_n) = bn.as_if_node()
-            {
-                // Shape-validate first (no translation side effects):
-                // every then-stmt is a def, and the subsequent is
-                // either absent or an ElseNode of only defs.
-                let all_defs = |stmts: Option<ruby_prism::StatementsNode<'_>>| -> bool {
-                    match stmts {
-                        Some(s) => {
-                            let mut it = s.body().iter().peekable();
-                            if it.peek().is_none() { return false; }
-                            s.body().iter().all(|n| n.as_def_node().is_some())
-                        }
-                        None => false,
-                    }
-                };
-                let then_ok = all_defs(if_n.statements());
-                let else_node = if_n.subsequent().and_then(|s| s.as_else_node());
-                let else_ok = match (if_n.subsequent(), &else_node) {
-                    (None, _) => true,                       // no else
-                    (Some(_), Some(en)) => all_defs(en.statements()),
-                    (Some(_), None) => false,                // elsif — bail
-                };
-                if then_ok && else_ok {
-                    let mut then_body: Vec<SExpr> = Vec::new();
-                    if let Some(stmts) = if_n.statements() {
-                        for s in stmts.body().iter() {
-                            let t = tr(ctx, &s);
-                            if let Some(sd) = mk_singleton_def(&s, t.node) {
-                                then_body.push(sd);
-                            }
-                        }
-                    }
-                    let mut else_body: Vec<SExpr> = Vec::new();
-                    if let Some(en) = &else_node
-                        && let Some(stmts) = en.statements() {
-                        for s in stmts.body().iter() {
-                            let t = tr(ctx, &s);
-                            if let Some(sd) = mk_singleton_def(&s, t.node) {
-                                else_body.push(sd);
-                            }
-                        }
-                    }
-                    let cond = tr(ctx, &if_n.predicate());
-                    out.push(sp(bn, Expr::If {
-                        cond: Box::new(cond),
-                        then_body,
-                        else_body,
-                    }));
-                    continue;
-                }
-            }
-            if recv_is_self {
-                let modifier_if = bn.as_if_node()
-                    .and_then(|if_n| {
-                        if if_n.subsequent().is_some() { return None; }
-                        let stmts = if_n.statements()?;
-                        // Exactly-one-stmt check via a single
-                        // iterator walk: take one, error if there
-                        // are more. Cheaper than `count() + next()`.
-                        let mut it = stmts.body().iter();
-                        let inner = it.next()?;
-                        if it.next().is_some() { return None; }
-                        Some((if_n.predicate(), inner, false))
-                    });
-                let modifier_unless = bn.as_unless_node()
-                    .and_then(|un_n| {
-                        if un_n.else_clause().is_some() { return None; }
-                        let stmts = un_n.statements()?;
-                        let mut it = stmts.body().iter();
-                        let inner = it.next()?;
-                        if it.next().is_some() { return None; }
-                        Some((un_n.predicate(), inner, true))
-                    });
-                if let Some((cond_node, inner, negated)) = modifier_if.or(modifier_unless) {
-                    // Translate the inner stmt only if it's one of
-                    // the admitted shapes; otherwise fall through.
-                    let inner_expr: Option<SExpr> = if let Some(alias_node) = inner.as_alias_method_node()
-                        && let (Some(new_sym), Some(old_sym)) = (
-                            alias_node.new_name().as_symbol_node(),
-                            alias_node.old_name().as_symbol_node(),
-                        )
-                    {
-                        let new_name = String::from_utf8_lossy(new_sym.unescaped()).into_owned();
-                        let old_name = String::from_utf8_lossy(old_sym.unescaped()).into_owned();
-                        Some(sp(&inner, Expr::AliasSingletonMethod(new_name, old_name)))
-                    } else if let Some(call) = inner.as_call_node() {
-                        // Bare-receiver CallNode admitted only
-                        // when its name is NOT one of the forms
-                        // the body translator would otherwise
-                        // special-case for the singleton class.
-                        // `attr_reader` / `attr_writer` /
-                        // `attr_accessor` / `prepend` translated
-                        // through the regular `tr()` path WITH
-                        // IMPLICIT RECEIVER would install on the
-                        // OUTER class (instance methods), not the
-                        // singleton class — semantic divergence
-                        // from the unconditional forms supported
-                        // earlier in this loop. Calls with an
-                        // EXPLICIT receiver (`Other.attr_reader(:x)
-                        // if cond`) don't trigger the body
-                        // special-casing and route to whatever
-                        // method `Other` provides, so they're
-                        // admitted regardless of name. Real
-                        // sinatra cases (`ruby2_keywords(:use)`)
-                        // are bare-receiver but with names that
-                        // have no body-level special-case, so
-                        // they pass uneventfully. PR #218
-                        // code-review #4 / Copilot round 5.
-                        let is_silently_misdirected = call.receiver().is_none()
-                            && matches!(cid_to_string(call.name()).as_str(),
-                                "attr_reader" | "attr_writer" | "attr_accessor" | "prepend"
-                            );
-                        if is_silently_misdirected {
-                            None
-                        } else {
-                            Some(tr(ctx, &inner))
-                        }
-                    } else {
-                        None
-                    };
-                    if let Some(inner_expr) = inner_expr {
-                        let raw_cond = tr(ctx, &cond_node);
-                        let cond = if negated {
-                            sp(&cond_node, Expr::Call {
-                                receiver: Some(Box::new(raw_cond)),
-                                name: "!".into(),
-                                args: vec![], kwargs_trailing: false })
-                        } else {
-                            raw_cond
-                        };
-                        out.push(sp(bn, Expr::If {
-                            cond: Box::new(cond),
-                            then_body: vec![inner_expr],
-                            else_body: vec![],
-                        }));
-                        continue;
-                    }
-                }
-            }
-            // `class << self` body: any remaining unsupported form
-            // compiles to a runtime `raise NotImplementedError`
-            // rather than a parse-time SyntaxError. The raise fires
-            // WHEN THE SURROUNDING SCOPE EXECUTES — not necessarily
-            // at method-call time. Two distinct scenarios:
-            //
-            //   1. Inside a `def` body: the raise sits in the
-            //      method body and only fires when the method is
-            //      invoked. Scripts that never call it load fine.
-            //
-            //   2. At class-body top level (`class Foo; class <<
-            //      self; unsupported; end; end`): the raise sits
-            //      in the class body and fires at LOAD time when
-            //      the enclosing `class` / `module` block executes.
-            //      The file load fails — matching the pre-PR
-            //      SyntaxError outcome ("file doesn't load") with
-            //      two differences:
-            //        - error class is NotImplementedError
-            //          (catchable by explicit
-            //          `rescue NotImplementedError`), not SyntaxError;
-            //        - NotImplementedError < ScriptError < Exception,
-            //          so a bare `rescue` does NOT catch it
-            //          (matches CRuby).
-            //
-            // Case (1) is a strict improvement (file loads); case
-            // (2) is roughly equivalent. The deferral is the right
-            // trade-off only when the unsupported form sits inside
-            // an infrequently-called method. Specific shapes already
-            // handled above (def / attr_* / alias / prepend-Mod)
-            // bypass this path; everything else (e.g. `include Mod`
-            // inside `class << self`, generic method calls) lands
-            // here.
-            //
-            // `class << <non-self>` still hard-errors at parse time —
-            // that branch has no surrounding class_stack frame, so
-            // even silently emitting nil would do the wrong thing
-            // (the body's intended target receiver is lost).
-            // Explicit-receiver statement at body top level —
-            // `Template.default_exception_renderer = lambda { … }`,
-            // `Other.configure(...)`, etc. These don't depend on the
-            // singleton-class `self` at all (the receiver is named
-            // explicitly), so translating them through the regular
-            // `tr()` path and running them in the surrounding context
-            // (where `self` is the enclosing class) is observably
-            // identical to CRuby. Only BARE-receiver statements need
-            // the singleton-class self, and those are handled by the
-            // def / attr_* / alias / prepend / visibility arms above
-            // (or fall through to NotImplementedError). Prism models
-            // `Foo.bar = x` as a CallNode with name `bar=` and an
-            // explicit receiver, so attribute-assignment is covered.
-            // Motivating case: Liquid's template.rb sets
-            // `Template.default_exception_renderer = lambda { … }`
-            // inside `class << self`.
-            if recv_is_self
-                && let Some(call) = bn.as_call_node()
-                && call.receiver().is_some()
-            {
-                out.push(tr(ctx, bn));
-                continue;
-            }
-            // Bare-receiver method call at body top level — `extend
-            // Gem::Deprecate`, `deprecate :x, …`, `ruby2_keywords
-            // :foo`, etc. Translated through the regular path and run
-            // in the surrounding context (self = the enclosing
-            // class). For `extend M` this matches CRuby's observable
-            // effect: M's instance methods become callable as class
-            // methods, and a following bare call to one of them (e.g.
-            // addressable idna's `deprecate` after `extend
-            // Gem::Deprecate`) then dispatches to it. The `attr_*` /
-            // `prepend` names that WOULD be silently misdirected are
-            // already consumed by their dedicated arms above. Known
-            // divergence: `include M` here installs M on the
-            // surrounding class's instance methods rather than its
-            // singleton (rubyrs's flat per-class model) — rare and
-            // documented. Motivating case: addressable's idna/pure.rb
-            // `class << self; …; extend Gem::Deprecate; deprecate
-            // :unicode_normalize_kc, …; end`.
-            if recv_is_self
-                && bn.as_call_node().is_some()
-            {
-                out.push(tr(ctx, bn));
-                continue;
-            }
-            if recv_is_self {
-                let msg = "class << self body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, `prepend Mod` (single Module arg, with `self` receiver), constant assignment (`FOO = expr`), and class variable assignment (`@@cvar = expr`) are supported in the spike subset";
-                out.push(sp(bn, Expr::Call {
-                    receiver: None,
-                    name: "raise".into(),
-                    args: vec![
-                        sp(bn, Expr::ConstRead("NotImplementedError".into())),
-                        sp(bn, Expr::StrLit(msg.into())),
-                    ], kwargs_trailing: false }));
-                continue;
-            }
-            ctx.errors.push(
-                "class << <non-self> body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, and `alias` are supported in the spike subset".into()
-            );
-            out.push(sp(bn, Expr::Nil));
-        }
-        // Pin the trailing value to nil so the synthetic receiver
-        // LVarWrite (when `needs_local`) doesn't leak as the body's
-        // result. Empty bodies (`class << X; end`) and zero-arg
-        // attr_* (`class << X; attr_accessor; end`) would otherwise
-        // return the receiver value — CRuby returns nil for the
-        // empty case. We don't try to match CRuby's attr_*
-        // return-Array shape (`[]` for zero-arg); nil is the
-        // user-friendly common case and the spec for `class << X`
-        // generally is "evaluates to the last expression in body";
-        // every supported entry's last op is already nil-pushing
-        // (Def → LoadNil, expanded attr_* → LoadNil), so this only
-        // changes the rare zero-arg/empty edge.
-        // Wrap the body in a `Begin { ensure: [Pop] }` so the
-        // visibility scope pop runs on BOTH normal exit and
-        // exception unwind. Without the ensure, a raise inside
-        // the body (or rescued by an outer begin) would skip the
-        // pop and leak an extra entry into
-        // `class_visibility_stack`, corrupting default visibility
-        // for later defs. The Push runs FIRST, OUTSIDE the inner
-        // Begin, so it's not double-counted by any unwind path —
-        // the inner Begin's ensure handles the pairing on every
-        // exit. PR #233 code-review round 2 (#1 unwind safety,
-        // #3 doc accuracy).
-        let inner_begin = sp(node, Expr::Begin {
-            body: out,
-            rescue: vec![],
-            ensure: Some(vec![sp(node, Expr::PopClassVisibility)]),
-        });
-        // Outer Begin runs: synthetic-local write (if needed),
-        // Push, inner Begin (with ensure-Pop), final Nil.
-        let mut outer: Vec<SExpr> = Vec::with_capacity(4);
-        if needs_local {
-            outer.push(sp(node, Expr::LVarWrite(synth_local.clone(), Box::new(recv_expr.clone()))));
-        }
-        outer.push(sp(node, Expr::PushClassVisibilityPublic));
-        outer.push(inner_begin);
-        outer.push(sp(node, Expr::Nil));
-        return sp(node, Expr::Begin {
-            body: outer,
-            rescue: vec![],
-            ensure: None,
-        });
+    if node.as_singleton_class_node().is_some() {
+        return tr_singleton_class(ctx, node);
     }
     if let Some(n) = node.as_parentheses_node() {
         // `(expr)` — just unwrap to the inner expression / statements.
