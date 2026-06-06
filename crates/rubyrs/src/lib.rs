@@ -2258,6 +2258,14 @@ class File
   BINARY = 0
   SHARE_DELETE = 0
 end
+## Dir — class-method dispatch (glob / `[]` / entries / children /
+## exist? / pwd) is wired host-side in `Vm::dir_class_dispatch`. The
+## body is intentionally empty; methods are not defined here. Added
+## for the P3 Jekyll spike — Liquid's liquid.rb loads its tag files
+## via a Dir glob of its tags directory, and Jekyll globs site
+## sources extensively.
+class Dir
+end
 ## `class Mutex; ... end` (single-threaded no-op shim) is loaded
 ## from `preamble/mutex.rb` BEFORE this `PREAMBLE` eval.
 ## Kernel is now defined as a real Module in `preamble/object.rb`

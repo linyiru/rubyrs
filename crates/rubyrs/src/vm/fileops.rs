@@ -4,12 +4,205 @@
 //! itself happens in `do_call` (vm.rs) and routes to
 //! `Vm::file_class_dispatch` here.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{RubyError, Trap};
+use crate::heap::HeapObj;
 use crate::value::Value;
 
 use super::Vm;
+
+/// Match a single glob path-segment pattern (`*`, `?`, literals)
+/// against a filename. `*` matches any run of non-`/` chars, `?` one
+/// char. (Brace/bracket classes `{a,b}` / `[..]` are not yet
+/// supported — documented gap.)
+fn glob_seg_match(pat: &[u8], txt: &[u8]) -> bool {
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star_pi, mut star_ti): (Option<usize>, usize) = (None, 0);
+    while ti < txt.len() {
+        if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == txt[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < pat.len() && pat[pi] == b'*' {
+            star_pi = Some(pi);
+            star_ti = ti;
+            pi += 1;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+    while pi < pat.len() && pat[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pat.len()
+}
+
+/// Whether glob segment `pat` matches directory entry `name`,
+/// honouring Ruby's rule that wildcard segments don't match names
+/// beginning with `.` unless the pattern itself begins with `.`.
+fn glob_name_match(pat: &str, name: &str) -> bool {
+    if name.starts_with('.') && !pat.starts_with('.') {
+        return false;
+    }
+    glob_seg_match(pat.as_bytes(), name.as_bytes())
+}
+
+/// Sorted directory entries (name, full path) of `base`, or empty on
+/// any read error (Ruby's glob silently skips unreadable dirs).
+fn sorted_entries(base: &Path) -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = match std::fs::read_dir(base) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Recursive glob walk. `segs` is the remaining pattern segments;
+/// matches accumulate as PathBufs into `results`.
+fn glob_walk(base: &Path, segs: &[String], results: &mut Vec<PathBuf>) {
+    let Some(seg) = segs.first() else { return };
+    let rest = &segs[1..];
+    if seg == "**" {
+        // `**` matches zero path components: apply the rest here.
+        if rest.is_empty() {
+            // Trailing `**` — match every descendant directory.
+            for (name, p) in sorted_entries(base) {
+                if name.starts_with('.') || !p.is_dir() {
+                    continue;
+                }
+                results.push(p.clone());
+                glob_walk(&p, segs, results);
+            }
+        } else {
+            glob_walk(base, rest, results);
+            // …and one-or-more components: descend keeping `**`.
+            for (name, p) in sorted_entries(base) {
+                if name.starts_with('.') || !p.is_dir() {
+                    continue;
+                }
+                glob_walk(&p, segs, results);
+            }
+        }
+        return;
+    }
+    for (name, p) in sorted_entries(base) {
+        if !glob_name_match(seg, &name) {
+            continue;
+        }
+        if rest.is_empty() {
+            results.push(p);
+        } else if p.is_dir() {
+            glob_walk(&p, rest, results);
+        }
+    }
+}
+
+/// Split a brace group's interior on top-level commas (commas not
+/// inside a nested `{...}`).
+fn split_top_commas(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(s[start..i].to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(s[start..].to_string());
+    parts
+}
+
+/// Expand `{a,b,c}` brace alternations into concrete patterns
+/// (cartesian over multiple/nested groups). `*.{rb,txt}` →
+/// `["*.rb", "*.txt"]`.
+fn expand_braces(pattern: &str, out: &mut Vec<String>) {
+    let Some(open) = pattern.find('{') else {
+        out.push(pattern.to_string());
+        return;
+    };
+    // Find the matching close brace, honouring nesting.
+    let mut depth = 0i32;
+    let mut close = None;
+    for (i, c) in pattern[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        // Unbalanced brace — treat literally.
+        out.push(pattern.to_string());
+        return;
+    };
+    let pre = &pattern[..open];
+    let post = &pattern[close + 1..];
+    let inner = &pattern[open + 1..close];
+    for alt in split_top_commas(inner) {
+        expand_braces(&format!("{}{}{}", pre, alt, post), out);
+    }
+}
+
+/// Expand a single glob pattern into matching path strings (Ruby
+/// `Dir.glob` semantics for `*` / `?` / `**` / `{a,b}` / literal
+/// segments). Absolute patterns yield absolute paths; relative
+/// patterns yield paths without a leading `./`. Results are deduped
+/// and sorted (Ruby 3.0+).
+fn glob_expand(pattern: &str) -> Vec<String> {
+    if pattern.is_empty() {
+        return Vec::new();
+    }
+    let mut patterns: Vec<String> = Vec::new();
+    expand_braces(pattern, &mut patterns);
+    let mut out: Vec<String> = Vec::new();
+    for pat in &patterns {
+        let absolute = pat.starts_with('/');
+        let segs: Vec<String> = pat
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        if segs.is_empty() {
+            continue;
+        }
+        let root = if absolute { PathBuf::from("/") } else { PathBuf::from(".") };
+        let mut results: Vec<PathBuf> = Vec::new();
+        glob_walk(&root, &segs, &mut results);
+        for p in results {
+            let s = if absolute {
+                p.to_string_lossy().into_owned()
+            } else {
+                // Strip the synthetic "./" root we walked from.
+                p.strip_prefix(".").unwrap_or(&p).to_string_lossy().into_owned()
+            };
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    }
+    out.sort();
+    out
+}
 
 impl Vm {
     /// File class-method shims. Implements the half-dozen path-
@@ -265,6 +458,107 @@ impl Vm {
                     resolved
                 };
                 Value::new_str(final_path.to_string_lossy().into_owned())
+            }
+            _ => return Ok(None),
+        }))
+    }
+
+    /// `Dir` class-method shims — `glob` / `[]` / `entries` /
+    /// `children` / `exist?` / `pwd`. Returns `Ok(Some(v))` on a
+    /// handled method, `Ok(None)` to let dispatch keep walking.
+    /// Discovery: P3 Jekyll spike — Liquid loads its tags via
+    /// `Dir["…/tags/*.rb"]` and Jekyll globs site sources.
+    pub(crate) fn dir_class_dispatch(&mut self, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
+        let str_arg = |a: &Value| -> Result<String, Trap> {
+            match a {
+                Value::Str(s) => Ok(s.to_string_lossy()),
+                _ => Err(self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into String", a.type_name()),
+                })),
+            }
+        };
+        Ok(Some(match (name, args) {
+            // `Dir.glob(pat)` / `Dir[pat]` (+ ignored flags arg).
+            // A single String pattern, or an Array of patterns whose
+            // results union. No block form (Ruby's block-yield
+            // variant) — returns the Array.
+            ("glob", [pat]) | ("glob", [pat, _]) | ("[]", [pat]) | ("[]", [pat, _]) => {
+                self.check_filesystem_io_allowed("Dir.glob", None)?;
+                let patterns: Vec<String> = match pat {
+                    Value::Str(s) => vec![s.to_string_lossy()],
+                    Value::Array(id) => {
+                        let elems: Vec<Value> = self.heap.array(*id).clone();
+                        let mut ps = Vec::with_capacity(elems.len());
+                        for e in &elems {
+                            ps.push(str_arg(e)?);
+                        }
+                        ps
+                    }
+                    _ => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!("no implicit conversion of {} into String", pat.type_name()),
+                        }));
+                    }
+                };
+                let mut paths: Vec<String> = Vec::new();
+                for p in &patterns {
+                    for m in glob_expand(p) {
+                        if !paths.contains(&m) {
+                            paths.push(m);
+                        }
+                    }
+                }
+                // A multi-pattern glob unions in pattern order; a
+                // single pattern is already sorted by glob_expand.
+                if patterns.len() > 1 {
+                    paths.sort();
+                }
+                let elems: Vec<Value> = paths.into_iter().map(Value::new_str).collect();
+                self.maybe_gc();
+                self.check_alloc()?;
+                Value::Array(self.heap.alloc(HeapObj::Array(elems)))
+            }
+            // `Dir.entries(path)` — names in the directory, INCLUDING
+            // "." and ".." (CRuby). `Dir.children(path)` — same but
+            // without "." / "..".
+            ("entries", [p]) | ("children", [p]) => {
+                self.check_filesystem_io_allowed("Dir.entries", None)?;
+                let path = str_arg(p)?;
+                self.check_filesystem_io_allowed("Dir.entries", Some(Path::new(&path)))?;
+                let mut names: Vec<String> = match std::fs::read_dir(&path) {
+                    Ok(rd) => rd
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect(),
+                    Err(e) => {
+                        return Err(self.trap(RubyError::RuntimeError {
+                            msg: format!("Dir.{}({}): {}", name, path, e),
+                        }));
+                    }
+                };
+                names.sort();
+                if name == "entries" {
+                    names.insert(0, "..".to_string());
+                    names.insert(0, ".".to_string());
+                }
+                let elems: Vec<Value> = names.into_iter().map(Value::new_str).collect();
+                self.maybe_gc();
+                self.check_alloc()?;
+                Value::Array(self.heap.alloc(HeapObj::Array(elems)))
+            }
+            ("exist?", [p]) | ("exists?", [p]) | ("directory?", [p]) => {
+                self.check_filesystem_io_allowed("Dir.exist?", None)?;
+                let path = str_arg(p)?;
+                self.check_filesystem_io_allowed("Dir.exist?", Some(Path::new(&path)))?;
+                Value::Bool(std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false))
+            }
+            ("pwd", []) | ("getwd", []) => {
+                self.check_filesystem_io_allowed("Dir.pwd", None)?;
+                Value::new_str(
+                    std::env::current_dir()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                )
             }
             _ => return Ok(None),
         }))

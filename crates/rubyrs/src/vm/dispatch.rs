@@ -6241,6 +6241,11 @@ impl Vm {
                     self.stack.push(v);
                     return Ok(());
                 }
+            if cls.name.as_str() == "Dir"
+                && let Some(v) = self.dir_class_dispatch(&name, &args)? {
+                    self.stack.push(v);
+                    return Ok(());
+                }
             // `Module.nesting` — CRuby reflection returning the
             // lexical scope chain at the call site, innermost-first.
             // Resolves through the current frame's proto's
