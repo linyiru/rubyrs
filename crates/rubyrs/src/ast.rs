@@ -3596,6 +3596,29 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 out.push(tr(ctx, bn));
                 continue;
             }
+            // Bare-receiver method call at body top level — `extend
+            // Gem::Deprecate`, `deprecate :x, …`, `ruby2_keywords
+            // :foo`, etc. Translated through the regular path and run
+            // in the surrounding context (self = the enclosing
+            // class). For `extend M` this matches CRuby's observable
+            // effect: M's instance methods become callable as class
+            // methods, and a following bare call to one of them (e.g.
+            // addressable idna's `deprecate` after `extend
+            // Gem::Deprecate`) then dispatches to it. The `attr_*` /
+            // `prepend` names that WOULD be silently misdirected are
+            // already consumed by their dedicated arms above. Known
+            // divergence: `include M` here installs M on the
+            // surrounding class's instance methods rather than its
+            // singleton (rubyrs's flat per-class model) — rare and
+            // documented. Motivating case: addressable's idna/pure.rb
+            // `class << self; …; extend Gem::Deprecate; deprecate
+            // :unicode_normalize_kc, …; end`.
+            if recv_is_self
+                && bn.as_call_node().is_some()
+            {
+                out.push(tr(ctx, bn));
+                continue;
+            }
             if recv_is_self {
                 let msg = "class << self body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, `prepend Mod` (single Module arg, with `self` receiver), constant assignment (`FOO = expr`), and class variable assignment (`@@cvar = expr`) are supported in the spike subset";
                 out.push(sp(bn, Expr::Call {
