@@ -1272,6 +1272,14 @@ pub(crate) fn string_call(
         // Regex#source — the raw pattern string.
         #[cfg(feature = "regex")]
         (Value::Regex(re), "source", []) => Some(Value::new_str(re.as_str().to_string())),
+        // `Regexp#options` — the Ruby flag bitmask
+        // (IGNORECASE=1 | EXTENDED=2 | MULTILINE=4). `0` for a
+        // flagless regexp. Flag THREADING from `/.../imx` literals
+        // lands in a follow-up; today every compiled regexp
+        // carries flags=0, so this returns 0 (correct for the
+        // flagless common case + `Regexp.new(str)`).
+        #[cfg(feature = "regex")]
+        (Value::Regex(re), "options", []) => Some(Value::Int(re.options() as i64)),
         #[cfg(feature = "regex")]
         (Value::Regex(re), "to_s", []) => Some(Value::new_str(format!("(?-mix:{})", re.as_str()))),
         #[cfg(feature = "regex")]

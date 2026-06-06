@@ -53,13 +53,32 @@ use std::fmt;
 /// #353 round 4 — first round caught the doc story; this
 /// rounds locks it in at the type level.)
 #[non_exhaustive]
-pub enum CompiledRegex {
+pub enum Engine {
     /// Linear-time `regex` engine — preferred. Most Ruby
     /// patterns land here.
     Native(regex::Regex),
     /// fancy-regex backtracking engine — fallback for patterns
     /// the linear engine rejects (lookaround, backrefs).
     Fancy(fancy_regex::Regex),
+}
+
+/// A compiled Ruby regexp: the chosen linear-or-backtracking
+/// `Engine` plus the Ruby-level metadata the `Regexp` reflection
+/// methods need. `Value::Regex(Rc<CompiledRegex>)` is the single
+/// shared shape across every dispatch site, so keeping the inner
+/// type a struct (rather than the bare engine enum) lets the
+/// Ruby flag bitmask + the bare source travel with it without
+/// touching any `Value::Regex(_)` match arm.
+pub struct CompiledRegex {
+    engine: Engine,
+    /// Ruby flag bitmask (`RB_IGNORECASE | RB_EXTENDED |
+    /// RB_MULTILINE`). `Regexp#options` returns this verbatim.
+    ruby_flags: u8,
+    /// The BARE pattern as written (no inline `(?is)` flag
+    /// prefix). `Regexp#source` / `#to_s` / `#inspect` and trap
+    /// formatting render this, never the flag-prefixed string fed
+    /// to the engine.
+    source: Box<str>,
 }
 
 /// Builds either engine. Tries `regex` first; falls back to
@@ -75,14 +94,26 @@ pub enum CompiledRegex {
 /// both engines' messages so a pattern that's malformed (not
 /// just lookaround-shaped) gives a useful trap.
 pub(crate) fn compile(pattern: &str) -> Result<CompiledRegex, String> {
+    let engine = build_engine(pattern)?;
+    // Flagless literal / `Regexp.new(str)` path: the engine
+    // pattern IS the bare source, and there are no Ruby flags.
+    // The flag-prefixed path is `compile_with_flags`.
+    Ok(CompiledRegex { engine, ruby_flags: 0, source: pattern.into() })
+}
+
+/// Engine selection without the `CompiledRegex` wrapper — shared
+/// by `compile` and `compile_with_flags`. Tries `regex` first,
+/// falls back to `fancy-regex` only on a genuine syntax error
+/// (CompiledTooBig surfaces as-is; see the `compile` doc above).
+fn build_engine(pattern: &str) -> Result<Engine, String> {
     match regex::Regex::new(pattern) {
-        Ok(re) => Ok(CompiledRegex::Native(re)),
+        Ok(re) => Ok(Engine::Native(re)),
         Err(native_err) => match &native_err {
             // Syntax error → try fancy-regex. The wider syntax
             // surface (lookaround, backrefs) is exactly what
             // fancy-regex exists for.
             regex::Error::Syntax(_) => match fancy_regex::Regex::new(pattern) {
-                Ok(re) => Ok(CompiledRegex::Fancy(re)),
+                Ok(re) => Ok(Engine::Fancy(re)),
                 Err(fancy_err) => {
                     // Both engines rejected. Prefer the
                     // fancy-regex error message (covers the
@@ -105,13 +136,21 @@ pub(crate) fn compile(pattern: &str) -> Result<CompiledRegex, String> {
 }
 
 impl CompiledRegex {
-    /// Original source pattern. Used by `Regexp#source`,
-    /// `Regexp#to_s`, `Regexp#inspect`, and trap formatting.
+    /// The BARE source pattern as written (NO inline `(?is)` flag
+    /// prefix — that only lives in the engine's compiled pattern).
+    /// Used by `Regexp#source` / `#to_s` / `#inspect` and trap
+    /// formatting. For the flagless path this equals the engine's
+    /// own pattern; for the flagged path it's the pre-prefix
+    /// source so `#source` never leaks the `(?is)` group.
     pub(crate) fn as_str(&self) -> &str {
-        match self {
-            CompiledRegex::Native(r) => r.as_str(),
-            CompiledRegex::Fancy(r) => r.as_str(),
-        }
+        &self.source
+    }
+
+    /// Ruby flag bitmask (`RB_IGNORECASE | RB_EXTENDED |
+    /// RB_MULTILINE`) — what `Regexp#options` returns. `0` for a
+    /// flagless regexp.
+    pub(crate) fn options(&self) -> u8 {
+        self.ruby_flags
     }
 
     /// Borrow the underlying linear-time regex. Returns `None`
@@ -123,9 +162,9 @@ impl CompiledRegex {
     /// as a `RubyError` variant). New operations are written
     /// to dispatch through the enum from the start.
     pub(crate) fn as_native(&self) -> Option<&regex::Regex> {
-        match self {
-            CompiledRegex::Native(r) => Some(r),
-            CompiledRegex::Fancy(_) => None,
+        match &self.engine {
+            Engine::Native(r) => Some(r),
+            Engine::Fancy(_) => None,
         }
     }
 
@@ -137,9 +176,9 @@ impl CompiledRegex {
     /// third engine or routes traps through a builder, this
     /// helper is the right place to centralise the label.
     pub(crate) fn engine_name(&self) -> &'static str {
-        match self {
-            CompiledRegex::Native(_) => "regex",
-            CompiledRegex::Fancy(_) => "fancy-regex",
+        match &self.engine {
+            Engine::Native(_) => "regex",
+            Engine::Fancy(_) => "fancy-regex",
         }
     }
 
@@ -165,9 +204,9 @@ impl CompiledRegex {
     /// #353 round 1 flagged this; documenting the trade-off
     /// is the adopted resolution.
     pub(crate) fn is_match(&self, haystack: &str) -> bool {
-        match self {
-            CompiledRegex::Native(r) => r.is_match(haystack),
-            CompiledRegex::Fancy(r) => r.is_match(haystack).unwrap_or(false),
+        match &self.engine {
+            Engine::Native(r) => r.is_match(haystack),
+            Engine::Fancy(r) => r.is_match(haystack).unwrap_or(false),
         }
     }
 
@@ -179,18 +218,18 @@ impl CompiledRegex {
     /// no match — rubyrs's `sub!` path uses that as the
     /// no-match signal.
     pub(crate) fn replace<'h>(&self, haystack: &'h str, replacement: &str) -> std::borrow::Cow<'h, str> {
-        match self {
-            CompiledRegex::Native(r) => r.replace(haystack, replacement),
-            CompiledRegex::Fancy(r) => r.replace(haystack, replacement),
+        match &self.engine {
+            Engine::Native(r) => r.replace(haystack, replacement),
+            Engine::Fancy(r) => r.replace(haystack, replacement),
         }
     }
 
     /// `String#gsub` — replace all. Same Cow discipline as
     /// `replace`.
     pub(crate) fn replace_all<'h>(&self, haystack: &'h str, replacement: &str) -> std::borrow::Cow<'h, str> {
-        match self {
-            CompiledRegex::Native(r) => r.replace_all(haystack, replacement),
-            CompiledRegex::Fancy(r) => r.replace_all(haystack, replacement),
+        match &self.engine {
+            Engine::Native(r) => r.replace_all(haystack, replacement),
+            Engine::Fancy(r) => r.replace_all(haystack, replacement),
         }
     }
 
@@ -241,8 +280,8 @@ impl CompiledRegex {
         // unbounded for the \`None\` case. Code-review #357
         // round 6.
         let bound = max_matches.unwrap_or(usize::MAX);
-        match self {
-            CompiledRegex::Native(r) => {
+        match &self.engine {
+            Engine::Native(r) => {
                 for caps in r.captures_iter(haystack).take(bound) {
                     if let Some(m0) = caps.get(0) {
                         let range = (m0.start(), m0.end());
@@ -253,7 +292,7 @@ impl CompiledRegex {
                     }
                 }
             }
-            CompiledRegex::Fancy(r) => {
+            Engine::Fancy(r) => {
                 for caps_res in r.captures_iter(haystack).take(bound) {
                     let caps = match caps_res {
                         Ok(c) => c,
@@ -291,8 +330,8 @@ impl CompiledRegex {
         &self,
         haystack: &str,
     ) -> Result<Option<OwnedCaptures>, String> {
-        match self {
-            CompiledRegex::Native(r) => match r.captures(haystack) {
+        match &self.engine {
+            Engine::Native(r) => match r.captures(haystack) {
                 None => Ok(None),
                 Some(caps) => {
                     let m0 = match caps.get(0) {
@@ -320,7 +359,7 @@ impl CompiledRegex {
                     }))
                 }
             },
-            CompiledRegex::Fancy(r) => match r.captures(haystack) {
+            Engine::Fancy(r) => match r.captures(haystack) {
                 Err(e) => Err(e.to_string()),
                 Ok(None) => Ok(None),
                 Ok(Some(caps)) => {

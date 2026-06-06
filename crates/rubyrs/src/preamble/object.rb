@@ -109,4 +109,11 @@ end
 ## shell here is the *constant* needed for `is_a?` and
 ## `case/when Regexp` shapes.
 class Regexp < Object
+  ## Flag constants — CRuby's exact bitmask values. Consumed by
+  ## `#options` (returns the OR of the set flags) and by gem code
+  ## that tests `re.options & Regexp::EXTENDED`. The Ruby /m flag
+  ## is "dot matches newline" (NOT multi-line `^`/`$`).
+  IGNORECASE = 1
+  EXTENDED   = 2
+  MULTILINE  = 4
 end
