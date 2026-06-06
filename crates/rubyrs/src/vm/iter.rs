@@ -3387,6 +3387,26 @@ impl Vm {
             (Value::Array(id), "select", []) | (Value::Array(id), "filter", []) => Some(self.iter_array_filter(*id, IterMode::Select, block)?),
             (Value::Array(id), "reject", []) => Some(self.iter_array_filter(*id, IterMode::Reject, block)?),
             (Value::Array(id), "find", []) | (Value::Array(id), "detect", []) => Some(self.iter_array_filter(*id, IterMode::Find, block)?),
+            // `find(ifnone) { … }` / `detect(ifnone) { … }` — when no
+            // element matches, the `ifnone` callable is invoked and
+            // its result returned (CRuby `Enumerable#find`). NOTE: a
+            // legitimately-nil matching element is indistinguishable
+            // from "not found" here, so the ifnone fires on a nil
+            // match too — a rare, documented edge. Discovery: P3
+            // Jekyll spike — configuration.rb's
+            // `%w(yml yaml toml).find(-> { "yml" }) { |ext| … }`.
+            (Value::Array(id), "find", [ifnone]) | (Value::Array(id), "detect", [ifnone]) => {
+                let found = self.iter_array_filter(*id, IterMode::Find, block)?;
+                if matches!(found, Value::Nil) && let Value::Block(ifnone_id) = ifnone {
+                    let pre = self.frames.len();
+                    match self.step_block(*ifnone_id, vec![], pre)? {
+                        BlockStep::Value(r) | BlockStep::Break(r) => Some(r),
+                        BlockStep::MethodReturn => Some(Value::Nil),
+                    }
+                } else {
+                    Some(found)
+                }
+            }
             (Value::Array(id), "any?", []) => Some(self.iter_array_filter(*id, IterMode::Any, block)?),
             (Value::Array(id), "all?", []) => Some(self.iter_array_filter(*id, IterMode::All, block)?),
             (Value::Array(id), "none?", []) => Some(self.iter_array_filter(*id, IterMode::NoneM, block)?),
