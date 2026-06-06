@@ -831,7 +831,7 @@ impl Vm {
                         let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
                         Some(Value::Array(pid))
                     }
-                    ("dup", []) => {
+                    ("dup", []) | ("clone", []) => {
                         // Shallow copy: clones the pair vector and
                         // re-allocates a new Hash heap slot. Pair
                         // Values are copied by ObjId (children
@@ -856,13 +856,24 @@ impl Vm {
                         let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
                         let default_block = self.heap.hash_default_block(id);
                         let default_value = self.heap.hash_default_value(id);
+                        // Preserve the Hash-subclass tag + ivars so
+                        // `Conf[...].dup` / `.clone` stays a Conf with
+                        // its instance state (CRuby copies both).
+                        let class_tag = self.heap.hash_class_tag(id);
+                        let ivars = self.heap.hash_ivars_clone(id);
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
                         if let Some(bid) = default_block {
                             g.pin(Value::Block(bid));
                         }
                         g.vm.maybe_gc();
-                        let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+                        let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj {
+                            pairs,
+                            default_block: None,
+                            default_value: None,
+                            class_tag,
+                            ivars,
+                        }));
                         if default_block.is_some() {
                             g.vm.heap.hash_set_default_block(nid, default_block);
                         }
@@ -970,6 +981,16 @@ impl Vm {
                         } else {
                             Some(Value::Nil)
                         }
+                    }
+                    // `Hash#key(value)` — the first key whose value
+                    // `==` the argument, or nil. Reverse of `[]`.
+                    // Discovery: P3 Jekyll spike — log_adapter.rb's
+                    // `LOG_LEVELS.key(writer.level)`.
+                    ("key", [v]) => {
+                        let found = self.heap.hash(id).iter()
+                            .find(|(_, val)| val.ruby_eql(v, &self.heap))
+                            .map(|(k, _)| k.clone());
+                        Some(found.unwrap_or(Value::Nil))
                     }
                     ("invert", []) => {
                         let pairs: Vec<(Value, Value)> = self.heap.hash(id).iter()

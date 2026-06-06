@@ -516,6 +516,10 @@ impl Heap {
     pub(crate) fn hash_ivar_set(&mut self, id: ObjId, name: crate::intern::SymId, v: Value) {
         if let HeapObj::Hash(h) = self.get_mut(id) { h.ivars.insert(name, v); }
     }
+    /// Clone a (subclass) Hash's full ivar table — used by dup/clone.
+    pub(crate) fn hash_ivars_clone(&self, id: ObjId) -> std::collections::HashMap<crate::intern::SymId, Value> {
+        if let HeapObj::Hash(h) = self.get(id) { h.ivars.clone() } else { std::collections::HashMap::new() }
+    }
     /// Default-value block stored alongside the Hash by `Hash.new {
     /// |h, k| ... }`. None for hash literals (`{}`) and the common
     /// `Hash.new` no-arg form. `Hash#[]` checks this slot when the

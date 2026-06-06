@@ -152,6 +152,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn array_basics() { run_diff("array_basics"); }
 #[test] fn hash_basics() { run_diff("hash_basics"); }
 #[test] fn hash_clear() { run_diff("hash_clear"); }
+#[test] fn hash_key_clone() { run_diff("hash_key_clone"); }
 #[test] fn hash_subclass() { run_diff("hash_subclass"); }
 #[test] fn hash_subclass_override() { run_diff("hash_subclass_override"); }
 #[cfg(feature = "stdlib")]

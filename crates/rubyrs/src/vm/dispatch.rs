@@ -3557,8 +3557,17 @@ impl Vm {
     // CRuby; mirror that.
     if name == "[]"
         && let Value::Class(cls) = &recv
-        && cls.name.as_str() == "Hash"
+        && (cls.name.as_str() == "Hash" || class_inherits_named(cls, "Hash"))
     {
+        // A Hash subclass (`class Conf < Hash`) constructs a tagged
+        // instance of itself — `Jekyll::Configuration[override]` is
+        // `Configuration.[]` inherited from Hash. The literal Hash
+        // class tags None (a plain Hash).
+        let class_tag = if cls.name.as_str() == "Hash" {
+            None
+        } else {
+            Some(cls.clone())
+        };
         // GC rooting: `args` came from `self.stack.drain(...)`
         // and is a Rust-local Vec with no GC root, so any heap-
         // shaped element (Array / Hash for the `Hash[[[k,v],...]]`
@@ -3613,7 +3622,13 @@ impl Vm {
                 msg: "odd number of arguments for Hash".into(),
             }));
         };
-        let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+        let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj {
+            pairs,
+            default_block: None,
+            default_value: None,
+            class_tag,
+            ivars: std::collections::HashMap::new(),
+        }));
         g.vm.stack.push(Value::Hash(hid));
         return Ok(ClassOutcome::Handled);
     }
