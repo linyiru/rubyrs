@@ -1145,6 +1145,8 @@ impl Vm {
                 let v = match &self_val {
                     Value::Object(id) => self.heap.instance(*id).ivars.get(&name_id).cloned().unwrap_or(Value::Nil),
                     Value::Class(c) => c.ivars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
+                    // Hash-subclass instances carry their own ivar table.
+                    Value::Hash(id) => self.heap.hash_ivar_get(*id, name_id).unwrap_or(Value::Nil),
                     _ => Value::Nil,
                 };
                 self.stack.push(v);
@@ -1155,6 +1157,8 @@ impl Vm {
                 match &self_val {
                     Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, v); }
                     Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v); }
+                    // Hash-subclass instances carry their own ivar table.
+                    Value::Hash(id) => { self.heap.hash_ivar_set(*id, name_id, v); }
                     _ => { /* drop — CRuby raises but the toplevel/primitive cases are rare */ }
                 }
             }

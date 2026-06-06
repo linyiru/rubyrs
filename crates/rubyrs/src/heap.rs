@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use crate::intern::Interner;
-use crate::value::{BlockHandle, Instance, ObjId, Value};
+use crate::value::{BlockHandle, Class, Instance, ObjId, Value};
 
 // ---------- GC Heap ----------
 
@@ -296,11 +296,30 @@ pub(crate) struct HashObj {
     /// ArgumentError on the both-given form, so the slots are
     /// effectively exclusive at allocation time).
     pub(crate) default_value: Option<Value>,
+    /// `Some(c)` when this Hash is an instance of a user subclass of
+    /// Hash (`class CaseAgnosticMap < Hash`). A Hash-subclass instance
+    /// IS a Hash (so Hash primitives — `[]=`, `merge!`, `size`, … —
+    /// dispatch on it), but reports `c` as its class and consults
+    /// `c`'s method chain for user overrides before the primitives.
+    /// `None` for plain `{}` / `Hash.new` literals. Held as an
+    /// `Rc<Class>` which is also rooted in `Vm.classes`, so no extra
+    /// GC marking is needed.
+    pub(crate) class_tag: Option<Rc<Class>>,
+    /// Instance variables, for Hash-subclass instances that set
+    /// `@foo` in their methods. Empty (and never touched) for plain
+    /// `{}` / `Hash.new`. Values are GC-marked alongside `pairs`.
+    pub(crate) ivars: std::collections::HashMap<crate::intern::SymId, Value>,
 }
 
 impl HashObj {
     pub(crate) fn with_pairs(pairs: Vec<(Value, Value)>) -> Self {
-        Self { pairs, default_block: None, default_value: None }
+        Self {
+            pairs,
+            default_block: None,
+            default_value: None,
+            class_tag: None,
+            ivars: std::collections::HashMap::new(),
+        }
     }
 }
 
@@ -482,6 +501,20 @@ impl Heap {
     }
     pub(crate) fn hash_mut(&mut self, id: ObjId) -> &mut Vec<(Value, Value)> {
         if let HeapObj::Hash(h) = self.get_mut(id) { &mut h.pairs } else { panic!("ICE: heap slot is not a Hash") }
+    }
+    /// The user Hash-subclass this Hash is an instance of, if any
+    /// (`class M < Hash; end; M.new` → `Some(M)`). `None` for plain
+    /// `{}` / `Hash.new`.
+    pub(crate) fn hash_class_tag(&self, id: ObjId) -> Option<Rc<Class>> {
+        if let HeapObj::Hash(h) = self.get(id) { h.class_tag.clone() } else { None }
+    }
+    /// Read `@name` ivar off a (subclass) Hash; `None` if unset.
+    pub(crate) fn hash_ivar_get(&self, id: ObjId, name: crate::intern::SymId) -> Option<Value> {
+        if let HeapObj::Hash(h) = self.get(id) { h.ivars.get(&name).cloned() } else { None }
+    }
+    /// Set `@name` ivar on a (subclass) Hash.
+    pub(crate) fn hash_ivar_set(&mut self, id: ObjId, name: crate::intern::SymId, v: Value) {
+        if let HeapObj::Hash(h) = self.get_mut(id) { h.ivars.insert(name, v); }
     }
     /// Default-value block stored alongside the Hash by `Hash.new {
     /// |h, k| ... }`. None for hash literals (`{}`) and the common
@@ -717,6 +750,10 @@ impl Heap {
                     // String or Array); walk via the usual Value
                     // visitor.
                     if let Some(v) = &h.default_value {
+                        Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
+                    // Hash-subclass instance variables.
+                    for v in h.ivars.values() {
                         Heap::visit_value(v, &mut self.marks, &mut worklist);
                     }
                 }

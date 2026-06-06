@@ -6822,6 +6822,19 @@ impl Vm {
         if self.try_dispatch_class_introspection(&name, &args, &recv)? {
             return Ok(());
         }
+        // Hash-subclass user override: a tagged Hash consults its
+        // class's method chain BEFORE the Hash primitives, so
+        // `class M < Hash; def [](k); …; end; end` wins over Hash#[]
+        // (CRuby override semantics). Plain Hashes (tag None) skip
+        // this and go straight to the primitives below. The no-block
+        // path only — block-form overrides flow through
+        // `do_call_block`'s own collection bridge.
+        if let Value::Hash(id) = &recv
+            && let Some(tag) = self.heap.hash_class_tag(*id)
+            && let Some(m) = self.lookup_method_uncached(&tag, name_id)
+        {
+            return self.invoke_method(m, recv.clone(), args);
+        }
         if let Some(v) = self.collection_call(&recv, &name, &args)? {
             self.stack.push(v);
             return Ok(());
@@ -12564,6 +12577,22 @@ impl Vm {
     pub(crate) fn alloc_default_instance(&mut self, cls: &Rc<Class>) -> Result<Value, Trap> {
         self.maybe_gc();
         self.check_alloc()?;
+        // A user subclass of Hash allocates a real (tagged) Hash so
+        // the Hash primitives (`[]=`, `merge!`, `size`, …) dispatch on
+        // its instances; the tag carries the actual class for
+        // `obj.class` / `is_a?` / user-override lookup. (Array / String
+        // subclasses still fall through to a plain Instance — separate
+        // follow-ups.)
+        if class_inherits_named(cls, "Hash") {
+            let id = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj {
+                pairs: Vec::new(),
+                default_block: None,
+                default_value: None,
+                class_tag: Some(cls.clone()),
+                ivars: std::collections::HashMap::new(),
+            }));
+            return Ok(Value::Hash(id));
+        }
         let id = self.heap.alloc(HeapObj::Instance(Instance {
             class: cls.clone(),
             ivars: HashMap::new(),
@@ -12752,6 +12781,29 @@ impl Vm {
             original_name: Some(orig_id),
         })
     }
+}
+
+/// Whether `cls` is a STRICT subclass of a class named `name` —
+/// i.e. some ancestor along its superclass chain (excluding `cls`
+/// itself) has that name. Used to decide that `class M < Hash`
+/// instances should allocate as tagged Hashes. Name-based (like the
+/// `cls.name == "File"` dispatch checks) — robust because the builtin
+/// Hash/Array/String classes have fixed names.
+fn class_inherits_named(cls: &Rc<Class>, name: &str) -> bool {
+    let mut cur = cls.superclass.borrow().clone();
+    let mut guard = 0;
+    while let Some(c) = cur {
+        if c.name == name {
+            return true;
+        }
+        // Cycle / runaway guard (superclass chains are short).
+        guard += 1;
+        if guard > 4096 {
+            return false;
+        }
+        cur = c.superclass.borrow().clone();
+    }
+    false
 }
 
 /// CRuby's constant-name validation rule: the bare name must

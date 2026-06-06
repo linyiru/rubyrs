@@ -897,6 +897,12 @@ impl Vm {
     /// `Integer.class.superclass` games on a stripped runtime),
     /// returns `Value::Nil` rather than panicking.
     pub(crate) fn class_of(&mut self, recv: &Value) -> Value {
+        // A Hash-subclass instance carries its real class as a tag;
+        // report that (so `obj.class` / `is_a?` see the subclass).
+        if let Value::Hash(id) = recv
+            && let Some(c) = self.heap.hash_class_tag(*id) {
+            return Value::Class(c);
+        }
         let name: &'static str = match recv {
             Value::Int(_) => "Integer",
             #[cfg(feature = "bignum")]
@@ -1728,6 +1734,26 @@ impl Vm {
                             // documented spike divergence.)
                             self.stack.push(Value::Nil);
                             return Ok(());
+                        }
+                        // `super` from a method defined on a Hash
+                        // subclass → the Hash PRIMITIVE of the same
+                        // name (`class M < Hash; def [](k); super(
+                        // k.downcase); end`). The ancestor walk finds
+                        // no user Method above the override because
+                        // Hash's methods are inline primitives; route
+                        // to `collection_call`. `initialize` has no
+                        // collection_call arm (Hash#initialize is a
+                        // no-op), so it falls through to nil.
+                        (_, Some(Value::Hash(id))) if self.heap.hash_class_tag(id).is_some() => {
+                            let recv = Value::Hash(id);
+                            if let Some(v) = self.collection_call(&recv, &nm, &args)? {
+                                self.stack.push(v);
+                                return Ok(());
+                            }
+                            if nm == "initialize" {
+                                self.stack.push(Value::Nil);
+                                return Ok(());
+                            }
                         }
                         _ => {}
                     }
