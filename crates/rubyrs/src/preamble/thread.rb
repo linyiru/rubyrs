@@ -49,3 +49,31 @@ class Thread
     1
   end
 end
+
+# ConditionVariable — single-threaded no-op companion to Mutex.
+# Real code pairs `@cond = ConditionVariable.new` with `@cond.wait(
+# mutex)` / `signal` / `broadcast` for cross-thread coordination;
+# with one thread there is nothing to wait for and no one to signal,
+# so every operation degenerates to a no-op returning self.
+#
+# Motivating consumer: P3 Jekyll spike — jekyll/commands/serve.rb
+# builds `@run_cond = ConditionVariable.new` at class-body load time
+# (the dev-server run loop, not exercised by `jekyll build`).
+#
+# DIVERGENCE: `wait` returns immediately instead of blocking. Correct
+# for the single-threaded model (a blocking wait with no signaller
+# would deadlock); actively wrong if Tier 2 ever adds real threads,
+# at which point this shim should be replaced, not extended.
+class ConditionVariable
+  def initialize
+  end
+  def wait(*_args)
+    self
+  end
+  def signal
+    self
+  end
+  def broadcast
+    self
+  end
+end
