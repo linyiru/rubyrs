@@ -6487,6 +6487,46 @@ impl Vm {
             self.stack.push(recv);
             return Ok(());
         }
+        // `Foo.attr_accessor(:x)` / `Foo.singleton_class.send(
+        // :attr_accessor, :x)` — the explicit-receiver runtime form
+        // of the attr_* family (the bareword class-body form is
+        // compile-time, compiler.rs). Installs ivar accessors on the
+        // receiver class's instance-method table; for a singleton
+        // class that means class-level accessors on the original.
+        // CRuby 3.0+ returns the created method names. Liquid does
+        // `singleton_class.send(:attr_accessor, :cache_classes)`.
+        if let Some((do_reader, do_writer)) = crate::ast::attr_reader_writer_flags(&name)
+            && let Value::Class(cls) = &recv
+        {
+            // All args must be Symbol/String method names. A non-name
+            // arg → TypeError (CRuby parity), matching the strictness
+            // of the compile-time path's SymbolLit-only guard.
+            let mut names: Vec<String> = Vec::with_capacity(args.len());
+            for a in &args {
+                match a {
+                    Value::Sym(sid) => names.push(self.interner.resolve(*sid).to_string()),
+                    Value::Str(s) => names.push(s.to_string_lossy()),
+                    other => {
+                        let inspected = other.to_inspect(&self.heap, &self.interner);
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!("{} is not a symbol nor a string", inspected),
+                        }));
+                    }
+                }
+            }
+            let cls = cls.clone();
+            let mut created: Vec<Value> = Vec::new();
+            for n in &names {
+                for sid in self.install_attr_accessor(&cls, n, do_reader, do_writer) {
+                    created.push(Value::Sym(sid));
+                }
+            }
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::Array(created));
+            self.stack.push(Value::Array(id));
+            return Ok(());
+        }
         // `cls.const_set(name, value)` — install a constant on the
         // class. CRuby returns the assigned value. The qualified
         // key (`Foo::Bar::Baz`) mirrors the path the existing
@@ -12552,6 +12592,106 @@ impl Vm {
             Some(s) => self.responds_to(&s, sid),
             None => is_primitive_class_name(class_name),
         }
+    }
+
+    /// Runtime `attr_reader` / `attr_writer` / `attr_accessor` for an
+    /// explicit Class receiver (`Foo.attr_accessor(:x)` /
+    /// `Foo.singleton_class.send(:attr_accessor, :x)`). The
+    /// compile-time path (compiler.rs) handles the bareword class-body
+    /// form; this is the dispatch-time sibling. Installs the getter
+    /// (`LoadIvar @name; Return`) and/or setter (`LoadLocal 0; Dup;
+    /// StoreIvar @name; Return`) into `cls`'s instance-method table,
+    /// backed by the `@name` ivar — same shape compile_proto emits.
+    /// Returns the created method-name SymIds (CRuby 3.0+ return).
+    pub(crate) fn install_attr_accessor(
+        &mut self,
+        cls: &Rc<Class>,
+        sym_name: &str,
+        do_reader: bool,
+        do_writer: bool,
+    ) -> Vec<SymId> {
+        use crate::bytecode::{Op, Proto};
+        use crate::error::Span;
+        let ivar_id = self.interner.intern(&format!("@{}", sym_name));
+        // For an eigenclass shell `install_method` redirects to the
+        // target's singleton_methods (class-level accessor); the
+        // `defining_class` anchor is the real class so `super` walks
+        // the right chain.
+        let anchor = cls.effective_install_class();
+        let mut created = Vec::new();
+        if do_reader {
+            let proto = Proto {
+                name: format!("<attr-reader:{}>", sym_name),
+                params: vec![],
+                n_required_positional: 0,
+                n_required_post: 0,
+                rest_param: None,
+                kw_param_defaults: vec![],
+                kw_has_computed_default: vec![],
+                kw_rest_param: None,
+                block_param: None,
+                n_locals: 0,
+                code: vec![Op::LoadIvar(ivar_id), Op::Return],
+                op_spans: vec![Span::ZERO; 2],
+                filename: "<attr_accessor>".into(),
+                block_body_local_start: u16::MAX,
+                byte_literals: vec![],
+                const_chains: vec![],
+                lexical_scope: vec![],
+            };
+            let idx = self.protos.len();
+            self.protos.push(proto);
+            let nid = self.interner.intern(sym_name);
+            cls.install_method(nid, Rc::new(crate::value::Method {
+                params: vec![],
+                proto_idx: idx,
+                fixed_arity: None,
+                defining_class: Some(Rc::downgrade(&anchor)),
+                visibility: std::cell::Cell::new(crate::value::Visibility::Public),
+                closure: None,
+                builtin: None,
+                original_name: Some(nid),
+            }));
+            created.push(nid);
+        }
+        if do_writer {
+            let setter = format!("{sym_name}=");
+            let proto = Proto {
+                name: format!("<attr-writer:{}>", setter),
+                params: vec!["val".to_string()],
+                n_required_positional: 1,
+                n_required_post: 0,
+                rest_param: None,
+                kw_param_defaults: vec![],
+                kw_has_computed_default: vec![],
+                kw_rest_param: None,
+                block_param: None,
+                n_locals: 1,
+                code: vec![Op::LoadLocal(0), Op::Dup, Op::StoreIvar(ivar_id), Op::Return],
+                op_spans: vec![Span::ZERO; 4],
+                filename: "<attr_accessor>".into(),
+                block_body_local_start: u16::MAX,
+                byte_literals: vec![],
+                const_chains: vec![],
+                lexical_scope: vec![],
+            };
+            let idx = self.protos.len();
+            self.protos.push(proto);
+            let nid = self.interner.intern(&setter);
+            cls.install_method(nid, Rc::new(crate::value::Method {
+                params: vec!["val".to_string()],
+                proto_idx: idx,
+                fixed_arity: None,
+                defining_class: Some(Rc::downgrade(&anchor)),
+                visibility: std::cell::Cell::new(crate::value::Visibility::Public),
+                closure: None,
+                builtin: None,
+                original_name: Some(nid),
+            }));
+            created.push(nid);
+        }
+        self.method_gen = self.method_gen.wrapping_add(1);
+        created
     }
 
     /// Build a Method that forwards to a primitive method on
