@@ -1493,7 +1493,9 @@ impl Vm {
         recv_opt: Option<Value>,
     ) -> SendBypass {
         // Early out for non-send names — the common case.
-        if !matches!(name, "send" | "__send__") {
+        // `public_send` routes through the same machinery; rubyrs
+        // doesn't model send-visibility, so it behaves like `send`.
+        if !matches!(name, "send" | "__send__" | "public_send") {
             return SendBypass::NotHandled { args, recv_opt };
         }
         // Subject for the user-override check:
@@ -11505,9 +11507,10 @@ impl Vm {
                 return Ok(());
             }
             // Bare `send(:foo) { ... }` / `__send__(:foo) { ... }`
-            // — same re-aim as the no_recv arm in `do_call`. See
-            // there for the override + visibility rationale.
-            if matches!(&*name, "send" | "__send__") {
+            // (and `public_send`) — same re-aim as the no_recv arm in
+            // `do_call`. See there for the override + visibility
+            // rationale.
+            if matches!(&*name, "send" | "__send__" | "public_send") {
                 let frame_self = self.frames.last()
                     .expect("ICE: do_call_block(no_recv) with empty frames")
                     .self_val.clone();
@@ -11732,7 +11735,7 @@ impl Vm {
             Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
             _ => false,
         };
-        if matches!(&*name, "send" | "__send__") && !user_send_override {
+        if matches!(&*name, "send" | "__send__" | "public_send") && !user_send_override {
             let target_sym = self.parse_send_target(&args)?;
             let new_argc = args.len() - 1;
             self.bypass_visibility_once = true;

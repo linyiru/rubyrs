@@ -53,6 +53,23 @@ impl Vm {
                             None => Value::Nil,
                         })
                     }
+                    // `default_proc = proc` / `= nil` — set (or clear)
+                    // the missing-key default block. Returns the arg.
+                    // Discovery: P3 Jekyll spike — jekyll's
+                    // `merge_default_proc` copies one Hash's
+                    // default_proc onto another.
+                    ("default_proc=", [arg]) => {
+                        match arg {
+                            Value::Block(bid) => self.heap.hash_set_default_block(id, Some(*bid)),
+                            Value::Nil => self.heap.hash_set_default_block(id, None),
+                            _ => {
+                                return Err(self.trap(RubyError::TypeError {
+                                    msg: format!("no implicit conversion of {} into Proc", arg.type_name()),
+                                }));
+                            }
+                        }
+                        Some(arg.clone())
+                    }
                     // `any?` no-block — true iff non-empty. The
                     // with-block form goes through iter.rs's
                     // `iter_hash_filter` Any mode.

@@ -729,7 +729,7 @@ impl Vm {
                 "transform_keys" | "transform_values" |
                 "transform_keys!" | "transform_values!" |
                 "compact" | "compact!" | "filter_map" |
-                "default" | "default_proc" | "count" | "each_with_object" |
+                "default" | "default_proc" | "default_proc=" | "count" | "each_with_object" |
                 "flat_map" | "collect_concat" | "reduce" | "inject" | "sum" |
                 "first" | "min" | "max" | "one?" | "partition" |
                 "take" | "drop" | "take_while" | "drop_while" | "find_index" |
