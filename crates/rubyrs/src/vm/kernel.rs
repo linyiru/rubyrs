@@ -3031,15 +3031,6 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
 /// See the gate note on `stdlib_constant_names` above — same
 /// reasoning, same cfg.
 #[cfg(not(target_os = "wasi"))]
-/// Names whose rubyrs vendored implementation must take precedence
-/// over an on-disk gem of the same name (ADR 0026 blessed reimpl).
-/// The real gems can't run on rubyrs — `safe_yaml` subclasses
-/// `Psych::Handler` — so we route the require to the vendored
-/// stub/loader even when the gem is installed and on `$LOAD_PATH`.
-fn is_blessed_reimpl_name(name: &str) -> bool {
-    matches!(name, "safe_yaml" | "safe_yaml/load")
-}
-
 fn is_stdlib_stub_name(name: &str) -> bool {
     matches!(
         name,
@@ -3121,6 +3112,17 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         // the battery is in this build."
         | "rubyrs/sqlite"
     )
+}
+
+/// Names whose rubyrs vendored implementation must take precedence
+/// over an on-disk gem of the same name (ADR 0026 blessed reimpl).
+/// The real gems can't run on rubyrs — `safe_yaml` subclasses
+/// `Psych::Handler` — so we route the require to the vendored
+/// stub/loader even when the gem is installed and on `$LOAD_PATH`.
+/// Only used from the non-wasi require path, so gated to match.
+#[cfg(not(target_os = "wasi"))]
+fn is_blessed_reimpl_name(name: &str) -> bool {
+    matches!(name, "safe_yaml" | "safe_yaml/load")
 }
 
 /// ASCII-lowercase name → "is this the preamble-defined core
