@@ -670,7 +670,7 @@ impl Vm {
                 "tr!" | "squeeze!" |
                 "center" | "ljust" | "rjust" |
                 "include?" | "start_with?" | "end_with?" |
-                "to_i" | "to_f" | "chars" | "split" | "to_sym" |
+                "to_i" | "to_f" | "chars" | "split" | "to_sym" | "intern" |
                 "to_s" | "to_str" | "inspect" |
                 "sub" | "sub!" | "gsub" | "gsub!" |
                 "tr" | "squeeze" |

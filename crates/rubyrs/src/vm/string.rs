@@ -2390,7 +2390,9 @@ impl Vm {
                             .map_err(|m| self.trap(RubyError::ArgumentError { msg: m }))?;
                         Some(if result.is_empty() { Value::Nil } else { result.swap_remove(0) })
                     }
-                    ("to_sym", []) => {
+                    // `intern` is a CRuby alias of `to_sym`; kramdown's
+                    // `configurable.rb` calls `name.intern`.
+                    ("to_sym", []) | ("intern", []) => {
                         // P2-14b: cap the interner before a hot loop
                         // (`arr.map { |x| x.to_s.to_sym }` and similar)
                         // can quietly grow it without bound. Existing
