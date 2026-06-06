@@ -271,6 +271,86 @@ impl CompiledRegex {
         }
         out
     }
+
+    /// Single-match capture extraction in engine-agnostic owned
+    /// form — the `captures` counterpart to `split_matches`. Used
+    /// by `String#match` / `Regexp#match` / `=~` so those ops work
+    /// on BOTH the linear `regex` engine AND the fancy-regex
+    /// fallback (Mustermann wraps every route in `/\A...\Z/`, and
+    /// the `\Z` anchor forces fancy, so route matching depends on
+    /// this).
+    ///
+    /// Returns `Ok(None)` for no-match, `Ok(Some(..))` with the
+    /// whole-match span + per-group matched strings + named
+    /// captures, or `Err` only when the fancy engine errors at
+    /// match time (recursion-limit / backtracking blow-up). The
+    /// linear arm never errors. Mirrors `split_matches`' fancy
+    /// `Result` handling but surfaces the error to the caller
+    /// (match/`=~` want a clean trap, not a silent no-match).
+    pub(crate) fn captures_owned(
+        &self,
+        haystack: &str,
+    ) -> Result<Option<OwnedCaptures>, String> {
+        match self {
+            CompiledRegex::Native(r) => match r.captures(haystack) {
+                None => Ok(None),
+                Some(caps) => {
+                    let m0 = match caps.get(0) {
+                        Some(m) => m,
+                        None => return Ok(None),
+                    };
+                    let groups = (1..caps.len())
+                        .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                        .collect();
+                    let named = r
+                        .capture_names()
+                        .enumerate()
+                        .filter_map(|(i, n)| {
+                            n.map(|name| {
+                                (name.to_string(), caps.get(i).map(|m| m.as_str().to_string()))
+                            })
+                        })
+                        .collect();
+                    Ok(Some(OwnedCaptures {
+                        whole: m0.as_str().to_string(),
+                        m_start: m0.start(),
+                        m_end: m0.end(),
+                        groups,
+                        named,
+                    }))
+                }
+            },
+            CompiledRegex::Fancy(r) => match r.captures(haystack) {
+                Err(e) => Err(e.to_string()),
+                Ok(None) => Ok(None),
+                Ok(Some(caps)) => {
+                    let m0 = match caps.get(0) {
+                        Some(m) => m,
+                        None => return Ok(None),
+                    };
+                    let groups = (1..caps.len())
+                        .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                        .collect();
+                    let named = r
+                        .capture_names()
+                        .enumerate()
+                        .filter_map(|(i, n)| {
+                            n.map(|name| {
+                                (name.to_string(), caps.get(i).map(|m| m.as_str().to_string()))
+                            })
+                        })
+                        .collect();
+                    Ok(Some(OwnedCaptures {
+                        whole: m0.as_str().to_string(),
+                        m_start: m0.start(),
+                        m_end: m0.end(),
+                        groups,
+                        named,
+                    }))
+                }
+            },
+        }
+    }
 }
 
 /// One match for `String#split(regex)`: the full match span
@@ -284,6 +364,26 @@ impl CompiledRegex {
 pub(crate) struct SplitMatch {
     pub(crate) range: (usize, usize),
     pub(crate) groups: Vec<Option<(usize, usize)>>,
+}
+
+/// Owned, engine-agnostic single-match capture data for
+/// `String#match` / `Regexp#match` / `=~`. The MatchData
+/// materializer wants owned `String`s (independent of the
+/// engine's lifetime-bound `Captures`), so this carries matched
+/// strings, not just spans like `SplitMatch`.
+#[derive(Debug, Clone)]
+pub(crate) struct OwnedCaptures {
+    /// The whole match (`$~[0]` / `$&`).
+    pub(crate) whole: String,
+    /// Byte offsets of the whole match in the haystack — used to
+    /// derive pre/post-match and the `$~` side-channel.
+    pub(crate) m_start: usize,
+    pub(crate) m_end: usize,
+    /// Groups 1..N — matched string, or `None` for a group that
+    /// didn't participate (e.g. an unmatched `|` arm).
+    pub(crate) groups: Vec<Option<String>>,
+    /// `(name, matched | None)` for each NAMED capture group.
+    pub(crate) named: Vec<(String, Option<String>)>,
 }
 
 /// Hand-rolled because `regex::Regex` and `fancy_regex::Regex`

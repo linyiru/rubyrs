@@ -1667,55 +1667,33 @@ impl Vm {
                     };
                     let regex_arg = coerced.as_ref().unwrap_or(&args[0]);
                     if let Value::Regex(re) = regex_arg {
-                        let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
-                            msg: format!(
-                                "regex op 'String#match' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
-                                re.as_str(),
-                            ),
-                        }))?;
                         let bound = s.to_string_lossy();
-                        let captures = native.captures(&bound);
-                        match captures {
+                        // Engine-agnostic capture extraction — works on
+                        // BOTH the linear and fancy-regex backends. The
+                        // fancy arm only errors on a match-time
+                        // backtracking blow-up; surface that as a trap.
+                        let owned = re.captures_owned(&bound).map_err(|e| {
+                            self.trap(RubyError::RuntimeError {
+                                msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
+                            })
+                        })?;
+                        match owned {
                             None => {
                                 // CRuby parity: a failed `match`
                                 // wipes the prior match's globals.
                                 self.last_match = None;
                                 return Ok(Some(Value::Nil));
                             }
-                            Some(caps) => {
-                                let m0 = caps.get(0).unwrap();
-                                let (m_start, m_end) = (m0.start(), m0.end());
-                                let whole = m0.as_str().to_string();
-                                let pre = bound[..m_start].to_string();
-                                let post = bound[m_end..].to_string();
+                            Some(oc) => {
+                                let pre = bound[..oc.m_start].to_string();
+                                let post = bound[oc.m_end..].to_string();
                                 let full_str = bound.to_string();
-                                let mut group_vals: Vec<Value> = Vec::with_capacity(caps.len().saturating_sub(1));
-                                let mut last_caps: Vec<Option<String>> = Vec::with_capacity(caps.len().saturating_sub(1));
-                                for i in 1..caps.len() {
-                                    let m = caps.get(i);
-                                    last_caps.push(m.map(|m| m.as_str().to_string()));
-                                    group_vals.push(match m {
-                                        Some(m) => Value::new_str(m.as_str().to_string()),
+                                let group_vals: Vec<Value> = oc.groups.iter()
+                                    .map(|g| match g {
+                                        Some(s) => Value::new_str(s.clone()),
                                         None => Value::Nil,
-                                    });
-                                }
-                                // Extract named captures from the regex.
-                                // `capture_names()` yields one entry per
-                                // group (`Some(name)` for named groups,
-                                // `None` for positional); pair with the
-                                // matched slice from `caps` to build the
-                                // `(name, Option<String>)` list passed
-                                // through MatchDataContext.
-                                let mut named_caps: Vec<(String, Option<String>)> = Vec::new();
-                                for (i, name_opt) in native.capture_names().enumerate() {
-                                    if let Some(name) = name_opt {
-                                        named_caps.push((
-                                            name.to_string(),
-                                            caps.get(i).map(|m| m.as_str().to_string()),
-                                        ));
-                                    }
-                                }
-                                drop(caps);
+                                    })
+                                    .collect();
                                 // Side-channel for `$~` / `$1`..`$N`
                                 // (numbered) AND `$&` / `$+` / `` $` ``
                                 // / `$'` (BackReferenceReadNode) — the
@@ -1723,20 +1701,20 @@ impl Vm {
                                 // pre/post-match without re-running
                                 // the regex.
                                 self.last_match = Some(crate::vm::LastMatch {
-                                    whole: whole.clone(),
-                                    caps: last_caps,
+                                    whole: oc.whole.clone(),
+                                    caps: oc.groups.clone(),
                                     input: bound,
-                                    m_start,
-                                    m_end,
+                                    m_start: oc.m_start,
+                                    m_end: oc.m_end,
                                 });
                                 let ctx = crate::vm::match_data::MatchDataContext {
                                     pre_match: Some(pre),
                                     post_match: Some(post),
                                     string: Some(full_str),
                                     regexp: Some(Value::Regex(re.clone())),
-                                    named_captures: named_caps,
+                                    named_captures: oc.named,
                                 };
-                                return Ok(Some(self.materialize_match_data_with_context(whole, group_vals, ctx)?));
+                                return Ok(Some(self.materialize_match_data_with_context(oc.whole, group_vals, ctx)?));
                             }
                         }
                     }

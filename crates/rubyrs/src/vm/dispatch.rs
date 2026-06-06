@@ -8085,28 +8085,25 @@ impl Vm {
             let result = match (&recv, &args[0]) {
                 #[cfg(feature = "regex")]
                 (Value::Regex(re), Value::Str(s)) | (Value::Str(s), Value::Regex(re)) => {
-                    let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
-                        msg: format!(
-                            "regex op '=~' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
-                            re.as_str(),
-                        ),
-                    }))?;
                     let bound = s.to_string_lossy();
-                    match native.captures(&bound) {
-                        Some(caps) => {
-                            let m0 = caps.get(0).unwrap();
-                            let (m_start, m_end) = (m0.start(), m0.end());
-                            let whole = m0.as_str().to_string();
-                            let last_caps: Vec<Option<String>> = (1..caps.len())
-                                .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
-                                .collect();
-                            drop(caps);
+                    // Engine-agnostic — handles both the linear and
+                    // fancy-regex backends (Mustermann's `/\A...\Z/`
+                    // routes force fancy). Fancy errors only on a
+                    // match-time blow-up; surface as a trap.
+                    let owned = re.captures_owned(&bound).map_err(|e| {
+                        self.trap(RubyError::RuntimeError {
+                            msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
+                        })
+                    })?;
+                    match owned {
+                        Some(oc) => {
+                            let m_start = oc.m_start;
                             self.last_match = Some(crate::vm::LastMatch {
-                                whole,
-                                caps: last_caps,
+                                whole: oc.whole,
+                                caps: oc.groups,
                                 input: bound,
                                 m_start,
-                                m_end,
+                                m_end: oc.m_end,
                             });
                             Value::Int(m_start as i64)
                         }
