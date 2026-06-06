@@ -78,6 +78,15 @@ pub(crate) fn always_on_stub_extras(name: &str) -> Option<&'static str> {
         "delegate" => {
             Some(include_str!("stdlib_vendor/delegate_shim.rb"))
         }
+        // `yaml` / `safe_yaml`: a focused pure-Ruby YAML loader for
+        // the front-matter / config subset. `YAML.load` /
+        // `SafeYAML.load` parse directly; safe_yaml's real
+        // Psych::Handler internals (which rubyrs can't satisfy) are
+        // bypassed. Discovery: P3 Jekyll spike — jekyll reads
+        // front-matter via SafeYAML.load / load_file.
+        "yaml" | "safe_yaml" | "safe_yaml/load" => {
+            Some(include_str!("stdlib_vendor/yaml.rb"))
+        }
         _ => None,
     }
 }

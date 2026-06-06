@@ -1513,7 +1513,17 @@ impl Vm {
                                 ),
                             })));
                         }
-                        let rb_found = self.allow_filesystem_io
+                        // Blessed-reimpl override (ADR 0026): for a few
+                        // names rubyrs ships a vendored implementation
+                        // that MUST win over any on-disk gem of the
+                        // same name, because the real gem can't run on
+                        // rubyrs (e.g. safe_yaml subclasses
+                        // Psych::Handler). Skip the LOAD_PATH probe so
+                        // the require routes to the stub/vendor path
+                        // below even when the gem is installed.
+                        let force_vendor = is_blessed_reimpl_name(&path_str);
+                        let rb_found = !force_vendor
+                            && self.allow_filesystem_io
                             && self.find_ruby_source_candidate(&path_str);
                         if rb_found {
                             Some(self.require_ruby(&path_str))
@@ -3021,6 +3031,15 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
 /// See the gate note on `stdlib_constant_names` above — same
 /// reasoning, same cfg.
 #[cfg(not(target_os = "wasi"))]
+/// Names whose rubyrs vendored implementation must take precedence
+/// over an on-disk gem of the same name (ADR 0026 blessed reimpl).
+/// The real gems can't run on rubyrs — `safe_yaml` subclasses
+/// `Psych::Handler` — so we route the require to the vendored
+/// stub/loader even when the gem is installed and on `$LOAD_PATH`.
+fn is_blessed_reimpl_name(name: &str) -> bool {
+    matches!(name, "safe_yaml" | "safe_yaml/load")
+}
+
 fn is_stdlib_stub_name(name: &str) -> bool {
     matches!(
         name,
@@ -3031,6 +3050,10 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "digest" | "digest/md5" | "digest/sha1" | "digest/sha2"
         | "base64" | "securerandom"
         | "json" | "yaml" | "date" | "time" | "csv"
+        // safe_yaml: rubyrs ships a focused YAML loader (yaml.rb) and
+        // routes safe_yaml's load API to it, bypassing the real gem's
+        // Psych::Handler internals. See `is_blessed_reimpl_name`.
+        | "safe_yaml" | "safe_yaml/load"
         | "optparse" | "english" | "English"
         | "bigdecimal" | "monitor" | "erb"
         | "open3" | "shellwords" | "weakref"
