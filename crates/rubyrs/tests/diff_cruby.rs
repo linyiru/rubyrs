@@ -157,6 +157,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn block_basics() { run_diff("block_basics"); }
 #[test] fn class_basics() { run_diff("class_basics"); }
 #[test] fn undef_keyword() { run_diff("undef_keyword"); }
+#[test] fn backtick_sandbox() { run_diff("backtick_sandbox"); }
 #[test] fn singleton_alias_method() { run_diff("singleton_alias_method"); }
 #[test] fn singleton_class_body_more() { run_diff("singleton_class_body_more"); }
 #[test] fn singleton_class_conditional_def() { run_diff("singleton_class_conditional_def"); }

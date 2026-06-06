@@ -2904,6 +2904,30 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     // interpolated name (`undef :"a#{i}"`) is exotic and falls
     // through to the unsupported-node trail unchanged. Motivating
     // consumer: concurrent-ruby's `undef freeze` (pulled by i18n).
+    // Backtick / `%x{…}` command execution (`XStringNode` and its
+    // interpolated form). rubyrs is a Tier-1 sandbox with no
+    // subprocess capability, so rather than reject the syntax at
+    // compile time (which fails the whole file load), we COMPILE it
+    // to a runtime `raise` of a StandardError. A bare `rescue`
+    // catches it — matching how CRuby's `Errno::ENOENT` (raised when
+    // the command isn't found) is caught — so guarded probes degrade
+    // gracefully. Discovery: P3 Jekyll spike — safe_yaml's
+    // libyaml_checker.rb does `(`which dpkg` rescue '').empty?` at
+    // (deferred) runtime; compiling the backtick lets safe_yaml load,
+    // and the rescue yields '' so its libyaml probe reports "absent".
+    if node.as_x_string_node().is_some() || node.as_interpolated_x_string_node().is_some() {
+        return sp(node, Expr::Call {
+            receiver: None,
+            name: "raise".into(),
+            args: vec![
+                sp(node, Expr::ConstRead("RuntimeError".into())),
+                sp(node, Expr::StrLit(
+                    "rubyrs: backtick / %x command execution is not available (Tier-1 sandbox)".into(),
+                )),
+            ],
+            kwargs_trailing: false,
+        });
+    }
     if let Some(n) = node.as_undef_node() {
         let name_nodes: Vec<_> = n.names().iter().collect();
         let args: Vec<SExpr> = name_nodes
