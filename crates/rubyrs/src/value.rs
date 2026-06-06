@@ -226,6 +226,11 @@ pub struct BlockHandle {
     /// overflow args are silently dropped (CRuby behaviour for
     /// blocks).
     pub(crate) rest_slot: Option<u16>,
+    /// `Some(slot)` when the block declares a `|**opts|`
+    /// keyword-rest param. `invoke_block` binds the trailing
+    /// kwargs Hash (or a fresh `{}`) into this slot. `None` means
+    /// no `**opts` — a trailing Hash arg stays a positional.
+    pub(crate) kw_rest_slot: Option<u16>,
 }
 
 #[derive(Debug)]

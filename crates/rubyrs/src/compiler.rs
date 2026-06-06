@@ -274,9 +274,9 @@ fn try_call_with_block_compile_time_intercept(
         && matches!(args[0].node, Expr::SymbolLit(_))
     {
         let sym_name = if let Expr::SymbolLit(s) = &args[0].node { s.clone() } else { unreachable!() };
-        let (block_proto_idx, param_start, n_params, rest_slot) =
+        let (block_proto_idx, param_start, n_params, rest_slot, kw_rest_slot) =
             compile_block(b, block_params, block_body, protos, interner, cc);
-        b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
+        b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot, kw_rest_slot));
         let nid = interner.intern(&sym_name);
         b.emit(Op::DefMethodBlock(nid));
         return true;
@@ -290,9 +290,9 @@ fn try_call_with_block_compile_time_intercept(
     {
         let sym_name = if let Expr::SymbolLit(s) = &args[0].node { s.clone() } else { unreachable!() };
         compile_expr(b, r, protos, interner, cc);
-        let (block_proto_idx, param_start, n_params, rest_slot) =
+        let (block_proto_idx, param_start, n_params, rest_slot, kw_rest_slot) =
             compile_block(b, block_params, block_body, protos, interner, cc);
-        b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
+        b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot, kw_rest_slot));
         let nid = interner.intern(&sym_name);
         b.emit(Op::DefObjectSingletonMethodBlock(nid));
         return true;
@@ -1730,12 +1730,12 @@ pub(crate) fn compile_expr(
             ) {
                 return;
             }
-            let (block_proto_idx, param_start, n_params, rest_slot) =
+            let (block_proto_idx, param_start, n_params, rest_slot, kw_rest_slot) =
                 compile_block(b, block_params, block_body, protos, interner, cc);
             let name_id = interner.intern(name);
             let has_recv = receiver.is_some();
             if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
-            b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
+            b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot, kw_rest_slot));
             for a in args { compile_expr(b, a, protos, interner, cc); }
             let argc = args.len() as u8;
             emit_method_call(b, name_id, argc, has_recv, true, false, cc);
@@ -1912,9 +1912,9 @@ pub(crate) fn compile_expr(
             // Value::Block (which supports `.call(args)` already).
             // Lambda params are now `Vec<BlockParam>` (post K7), so
             // they go straight into compile_block without rewrapping.
-            let (block_proto_idx, param_start, n_params, rest_slot) =
+            let (block_proto_idx, param_start, n_params, rest_slot, kw_rest_slot) =
                 compile_block(b, params, body, protos, interner, cc);
-            b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
+            b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot, kw_rest_slot));
         }
         Expr::Begin { body, rescue, ensure } => {
             compile_begin_arm(b, body, rescue, ensure, protos, interner, cc);
@@ -2070,7 +2070,7 @@ fn literal_to_value(e: &Expr, interner: &mut Interner) -> Value {
 pub(crate) fn compile_block(
     parent: &mut ProtoBuilder, block_params: &[BlockParam], body: &[SExpr],
     protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
-) -> (usize, u16, u16, u16) {
+) -> (usize, u16, u16, u16, u16) {
     let mut b = ProtoBuilder {
         code: vec![],
         op_spans: vec![],
@@ -2177,6 +2177,10 @@ pub(crate) fn compile_block(
                     // `&blk` inside a destructure (`|(a, &b)|`)
                     // isn't legal Ruby; defensive skip.
                 }
+                BlockParam::KwRest(_) => {
+                    // `**opts` inside a destructure (`|(a, **b)|`)
+                    // isn't legal Ruby; defensive skip.
+                }
             }
         }
         jobs.push(Job::Job(parent_slot, child_slots));
@@ -2206,6 +2210,11 @@ pub(crate) fn compile_block(
     // empty and `&blk` arrived Nil.
     let mut rest_param_name: Option<String> = None;
     let mut block_arg_name: Option<String> = None;
+    // `|**opts|` keyword-rest: a slot (not counted in n_params,
+    // like rest) that invoke_block fills with the trailing kwargs
+    // Hash (default `{}`). `u16::MAX` sentinel = no kw-rest param.
+    let mut kw_rest_slot: u16 = u16::MAX;
+    let mut kw_rest_param_name: Option<String> = None;
     for (i, p) in block_params.iter().enumerate() {
         match p {
             BlockParam::Single(name) => {
@@ -2234,6 +2243,14 @@ pub(crate) fn compile_block(
                 let slot_name = if name == "&" { format!("__blkarg_{i}") } else { name.clone() };
                 b.define_local_slot(&slot_name);
                 block_arg_name = Some(slot_name);
+            }
+            BlockParam::KwRest(name) => {
+                // Anonymous `|**|` reserves a synth-named slot
+                // (data dropped, slot still bound to `{}`).
+                let slot_name = if name.is_empty() { format!("__kwrest_{i}") } else { name.clone() };
+                let s = b.define_local_slot(&slot_name);
+                kw_rest_slot = s;
+                kw_rest_param_name = Some(slot_name);
             }
         }
     }
@@ -2308,6 +2325,9 @@ pub(crate) fn compile_block(
         BlockParam::BlockArg(name) => {
             if name == "&" { format!("__blkarg_{i}") } else { name.clone() }
         }
+        BlockParam::KwRest(name) => {
+            if name.is_empty() { format!("__kwrest_{i}") } else { name.clone() }
+        }
     }).collect();
     let proto_param_count = proto_params.len();
     let idx = protos.len();
@@ -2345,8 +2365,15 @@ pub(crate) fn compile_block(
     if let Some(name) = block_arg_name {
         protos.last_mut().expect("ICE: just pushed").block_param = Some(name);
     }
+    // Stamp `kw_rest_param` so a block installed AS A METHOD via
+    // `define_method` routes through invoke_method's kw-rest
+    // binder; ordinary block invocation uses the BlockHandle's
+    // `kw_rest_slot` (returned below) instead.
+    if let Some(name) = kw_rest_param_name {
+        protos.last_mut().expect("ICE: just pushed").kw_rest_param = Some(name);
+    }
     if parent.n_locals < block_n_locals {
         parent.n_locals = block_n_locals;
     }
-    (idx, param_start, n_params, rest_slot)
+    (idx, param_start, n_params, rest_slot, kw_rest_slot)
 }

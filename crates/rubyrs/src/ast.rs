@@ -530,6 +530,14 @@ pub(crate) enum BlockParam {
     /// `define_method(:foo) do |arg, &blk| blk.call(arg) end` that
     /// Sinatra's route table uses heavily.
     BlockArg(String),
+    /// `|**opts|` keyword-rest parameter — binds the trailing
+    /// keyword arguments as a Hash (`{}` when none were passed).
+    /// Empty name is the anonymous `|**|`. compile_block reserves
+    /// a slot + sets `proto.kw_rest_param`; invoke_block extracts
+    /// the trailing kwargs Hash and binds it. Mustermann's
+    /// `def_delegator`-generated blocks and many gems use
+    /// `do |*a, **o| ... end`; pre-fix `**o` bound nil.
+    KwRest(String),
 }
 
 #[derive(Debug, Clone)]
@@ -1867,6 +1875,18 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             let name = b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string());
                             out.push(BlockParam::BlockArg(name));
                         }
+                        // `|**opts|` keyword-rest param. Prism exposes
+                        // it via `keyword_rest()` (singular Option);
+                        // the `KeywordRestParameterNode` shape is
+                        // `**name` (anonymous `**` has no name). The
+                        // `NoKeywordsParameterNode` (`**nil`) shape is
+                        // skipped — it declares "no kwargs", nothing
+                        // to bind.
+                        if let Some(kr) = p.keyword_rest()
+                            && let Some(krp) = kr.as_keyword_rest_parameter_node() {
+                                let name = krp.name().map(cid_to_string).unwrap_or_default();
+                                out.push(BlockParam::KwRest(name));
+                            }
                         out
                     })
                     .unwrap_or_default();
@@ -2173,6 +2193,12 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     let name = b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string());
                     out.push(BlockParam::BlockArg(name));
                 }
+                // `->(**opts) { }` keyword-rest, same as block form.
+                if let Some(kr) = p.keyword_rest()
+                    && let Some(krp) = kr.as_keyword_rest_parameter_node() {
+                        let name = krp.name().map(cid_to_string).unwrap_or_default();
+                        out.push(BlockParam::KwRest(name));
+                    }
                 out
             })
             .unwrap_or_default();

@@ -31,6 +31,11 @@ use super::{
 };
 use crate::HostCtx;
 
+/// A `(local-slot, value)` binding produced while rooting a block's
+/// rest-array / keyword-rest Hash through the GC fence in
+/// [`Vm::invoke_block`] (see the combined `PinGuard` block there).
+type SlotBinding = Option<(u16, Value)>;
+
 /// Outcome of [`Vm::try_dispatch_send_bypass`].
 ///
 /// `Handled(r)` means the helper has already done the work
@@ -9972,6 +9977,7 @@ impl Vm {
             param_start: 0,
             n_params: 0,
             rest_slot: Some(1),
+            kw_rest_slot: None,
         }));
         Ok(id)
     }
@@ -10048,6 +10054,7 @@ impl Vm {
             param_start: 0,
             n_params: 0,
             rest_slot: Some(2),
+            kw_rest_slot: None,
         }));
         Ok(id)
     }
@@ -10147,15 +10154,33 @@ impl Vm {
         }
     }
 
-    pub(crate) fn invoke_block(&mut self, block_id: ObjId, args: Vec<Value>) -> Result<(), Trap> {
+    pub(crate) fn invoke_block(&mut self, block_id: ObjId, mut args: Vec<Value>) -> Result<(), Trap> {
         self.check_frames()?;
         // Snapshot what we need out of the block's heap slot before
         // taking any `&mut self` action. BlockHandle.captured is a
         // shared `Rc<RefCell<Vec<Value>>>` — cheap to clone.
-        let (proto_idx, captured, self_val, param_start, n_params, rest_slot) = {
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
-             bh.param_start, bh.n_params, bh.rest_slot)
+             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot)
+        };
+        // `|**opts|` keyword-rest: peel the trailing kwargs Hash off
+        // the args BEFORE positional binding (so it doesn't land in
+        // a positional slot or the auto-splat), defaulting to an
+        // empty Hash. CRuby: `proc { |a, **o| }.call(1, x: 2)` →
+        // a=1, o={x:2}; `proc { |**o| }.call` → o={}. The kwargs
+        // arrive as a trailing positional Hash (verified: a block
+        // called with `k: v` receives `[{k=>v}]`).
+        let kw_rest_value: Option<Value> = if kw_rest_slot.is_some() {
+            // Only treat a trailing Hash as kwargs; otherwise the
+            // block was called with no keywords → bind `{}`.
+            if matches!(args.last(), Some(Value::Hash(_))) {
+                args.pop()
+            } else {
+                None
+            }
+        } else {
+            None
         };
         // CRuby auto-splat: when a block declared with >1 parameter
         // is called with a single Array argument, the Array's
@@ -10200,37 +10225,46 @@ impl Vm {
         // `m`'s BoundMethod gets swept between pop and the
         // recursive `m.call`, panicking later at heap.rs's
         // `class_of called on non-Object slot`.
-        let rest_array_val = if let Some(slot) = rest_slot {
-            let rest_args: Vec<Value> = args.iter().skip(n_params as usize).cloned().collect();
-            // Truncate args to the leading required slots — the
-            // overflow now lives in rest_args.
+        // Build the rest-array AND the kw-rest binding under ONE
+        // PinGuard so the peeled kwargs Hash, every heap-shaped
+        // rest-arg element, and any freshly-alloc'd `{}` all stay
+        // rooted across the maybe_gc/alloc calls. (`rest_args` and
+        // the peeled `kw_rest_value` are Rust-local Values with no
+        // GC root — under STRESS_GC an unrooted Hash element would
+        // be swept and the later alloc would store a dangling
+        // ObjId; same hazard the callable_coerce.rb / proc_curry_
+        // compose.rb fixtures pinned against.)
+        let (rest_array_val, kw_rest_final): (SlotBinding, SlotBinding) = {
             let mut g = crate::vm::PinGuard::new(self);
             g.pin(Value::Block(block_id));
-            // Every heap-shaped element of `rest_args` ALSO needs
-            // a pin across `maybe_gc` — `rest_args` is a Rust-
-            // local Vec with no GC root, so an element like
-            // `Value::Hash(hid)` would otherwise be swept and
-            // the eventual `HeapObj::Array(rest_args)` alloc
-            // would store dangling ObjIds. Reproduced under
-            // STRESS_GC=1 by `callable_coerce.rb`'s
-            // `app.method(:call).to_proc.call({"VIA" => "x"})`
-            // — the Hash arg gets unrooted between args-collect
-            // and rest-array alloc, surfacing later as
-            // `ICE: heap slot is not a Hash` at heap.rs:479
-            // when the `<callable-forwarder>` proto loads the
-            // dangling slot. Same shape as the previously-
-            // documented compose-forwarder case (proc_curry_
-            // compose.rb) but with Hash args, which the earlier
-            // fix didn't cover.
-            for a in &rest_args {
-                g.pin(a.clone());
-            }
-            g.vm.maybe_gc();
-            g.vm.check_alloc()?;
-            let id = g.vm.heap.alloc(HeapObj::Array(rest_args));
-            Some((slot, Value::Array(id)))
-        } else {
-            None
+            if let Some(v) = &kw_rest_value { g.pin(v.clone()); }
+            let rest = if let Some(slot) = rest_slot {
+                let rest_args: Vec<Value> = args.iter().skip(n_params as usize).cloned().collect();
+                for a in &rest_args { g.pin(a.clone()); }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let id = g.vm.heap.alloc(HeapObj::Array(rest_args));
+                Some((slot, Value::Array(id)))
+            } else {
+                None
+            };
+            let kwr = if let Some(slot) = kw_rest_slot {
+                // The peeled kwargs Hash, or a fresh `{}` (CRuby
+                // binds `{}` when the block was called with no
+                // keywords).
+                let v = match &kw_rest_value {
+                    Some(h) => h.clone(),
+                    None => {
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        Value::Hash(g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new()))))
+                    }
+                };
+                Some((slot, v))
+            } else {
+                None
+            };
+            (rest, kwr)
         };
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
@@ -10303,6 +10337,9 @@ impl Vm {
                 locals[param_start as usize + i] = it.next().unwrap_or(Value::Nil);
             }
             if let Some((slot, val)) = rest_array_val {
+                locals[slot as usize] = val;
+            }
+            if let Some((slot, val)) = kw_rest_final {
                 locals[slot as usize] = val;
             }
         }

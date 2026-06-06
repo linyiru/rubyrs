@@ -1801,7 +1801,7 @@ impl Vm {
                 let args: Vec<Value> = self.stack.drain(split..).collect();
                 self.super_call_with_lifecycle_noop(name_id, args)?;
             }
-            Op::CreateBlock(p_idx, param_start, n_params, rest_slot_raw) => {
+            Op::CreateBlock(p_idx, param_start, n_params, rest_slot_raw, kw_rest_slot_raw) => {
                 // Snapshot the surrounding frame's captured locals
                 // (shared Rc with subsequent invocations of this
                 // block) and self before any mutable borrow of
@@ -1820,6 +1820,7 @@ impl Vm {
                     (f.locals.clone(), f.self_val.clone())
                 };
                 let rest_slot = if rest_slot_raw == u16::MAX { None } else { Some(rest_slot_raw) };
+                let kw_rest_slot = if kw_rest_slot_raw == u16::MAX { None } else { Some(kw_rest_slot_raw) };
                 self.maybe_gc();
                 self.check_alloc()?;
                 let id = self.heap.alloc(HeapObj::Block(BlockHandle {
@@ -1829,6 +1830,7 @@ impl Vm {
                     param_start,
                     n_params,
                     rest_slot,
+                    kw_rest_slot,
                 }));
                 self.stack.push(Value::Block(id));
             }

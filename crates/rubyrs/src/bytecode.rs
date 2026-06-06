@@ -388,11 +388,14 @@ pub(crate) enum Op {
     NewHash(u16),
     /// Pops two values (begin, end). u8 nonzero = exclusive (`...`).
     NewRange(u8),
-    /// proto_idx, param_start, n_params, rest_slot.
+    /// proto_idx, param_start, n_params, rest_slot, kw_rest_slot.
     /// `rest_slot == u16::MAX` is the sentinel for "no rest";
     /// any other value is the local-slot index where `*args`
     /// gathers overflow into a fresh Array at invoke time.
-    CreateBlock(u32, u16, u16, u16),
+    /// `kw_rest_slot == u16::MAX` likewise means "no `**opts`";
+    /// otherwise the slot invoke_block binds the trailing kwargs
+    /// Hash (default `{}`) into.
+    CreateBlock(u32, u16, u16, u16, u16),
     CallBlock(SymId, u8, u16),
     CallNoRecvBlock(SymId, u8, u16),
     Yield(u8),
