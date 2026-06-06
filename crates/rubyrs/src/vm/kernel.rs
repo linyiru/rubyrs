@@ -2953,7 +2953,11 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
         "json" => &[("JSON", true)],
         "yaml" => &[("YAML", true)],
         "date" => &[("Date", false), ("DateTime", false)],
-        "time" => &[],
+        // CRuby's lib/time.rb does `require 'date'` internally, so
+        // `require "time"` makes Date / DateTime resolvable too.
+        // Discovery: P3 Jekyll spike — safe_yaml/parse/date.rb does
+        // `require 'time'` then references bare `DateTime`.
+        "time" => &[("Date", false), ("DateTime", false)],
         "csv" => &[("CSV", false)],
         "optparse" => &[("OptionParser", false)],
         "english" | "English" => &[],
