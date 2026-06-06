@@ -3045,6 +3045,9 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         // routes safe_yaml's load API to it, bypassing the real gem's
         // Psych::Handler internals. See `is_blessed_reimpl_name`.
         | "safe_yaml" | "safe_yaml/load"
+        // jekyll-sass-converter: shim routes SCSS→CSS to the grass
+        // `sass` battery instead of native sass-embedded.
+        | "jekyll-sass-converter"
         | "optparse" | "english" | "English"
         | "bigdecimal" | "monitor" | "erb"
         | "open3" | "shellwords" | "weakref"
@@ -3122,7 +3125,7 @@ fn is_stdlib_stub_name(name: &str) -> bool {
 /// Only used from the non-wasi require path, so gated to match.
 #[cfg(not(target_os = "wasi"))]
 fn is_blessed_reimpl_name(name: &str) -> bool {
-    matches!(name, "safe_yaml" | "safe_yaml/load")
+    matches!(name, "safe_yaml" | "safe_yaml/load" | "jekyll-sass-converter")
 }
 
 /// ASCII-lowercase name → "is this the preamble-defined core

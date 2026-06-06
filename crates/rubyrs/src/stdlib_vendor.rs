@@ -87,6 +87,14 @@ pub(crate) fn always_on_stub_extras(name: &str) -> Option<&'static str> {
         "yaml" | "safe_yaml" | "safe_yaml/load" => {
             Some(include_str!("stdlib_vendor/yaml.rb"))
         }
+        // `jekyll-sass-converter`: the real gem requires sass-embedded
+        // (native dart-sass). The shim defines the Jekyll converter
+        // classes and routes SCSS→CSS to the `RubyrsSass.compile` host
+        // primitive (grass-backed `sass` battery). See
+        // `is_blessed_reimpl_name`.
+        "jekyll-sass-converter" => {
+            Some(include_str!("stdlib_vendor/jekyll_sass_converter_shim.rb"))
+        }
         _ => None,
     }
 }

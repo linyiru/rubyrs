@@ -6246,6 +6246,25 @@ impl Vm {
                     self.stack.push(v);
                     return Ok(());
                 }
+            // `RubyrsSass.compile(scss)` — host primitive backing the
+            // jekyll-sass-converter shim. Compiles SCSS/Sass to CSS via
+            // the active `SassBackend` (grass under `--features sass`);
+            // a backend error or the feature-absent case raises so the
+            // caller's `rescue` surfaces it.
+            if cls.name.as_str() == "RubyrsSass"
+                && &*name == "compile"
+                && let [Value::Str(src)] = args.as_slice() {
+                let scss = src.to_string_lossy();
+                match crate::sass::compile(&scss) {
+                    Ok(css) => {
+                        self.stack.push(Value::new_str(css));
+                        return Ok(());
+                    }
+                    Err(msg) => {
+                        return Err(self.trap(RubyError::RuntimeError { msg }));
+                    }
+                }
+            }
             // `Module.nesting` — CRuby reflection returning the
             // lexical scope chain at the call site, innermost-first.
             // Resolves through the current frame's proto's

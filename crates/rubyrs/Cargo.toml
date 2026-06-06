@@ -93,6 +93,16 @@ regex = ["dep:regex", "dep:fancy-regex"]
 # place Tier 1 core grows a Tier 3 surface; the default build
 # stays minimal per ADR 0017.
 stdlib = []
+# `sass` enables in-process SCSS/Sass compilation via the pure-Rust
+# `grass` crate (ADR 0019-style Tier-3 battery — a Rust crate behind
+# a feature, surfaced to Ruby). With it OFF, `RubyrsSass.compile`
+# raises a clear "feature absent" error and the jekyll-sass-converter
+# shim's `convert` fails loudly (plain, non-SCSS sites still build).
+# Kept out of `default` so the base + wasm builds don't pay grass's
+# ~2-3 MB. The backend lives behind a `SassBackend` seam (src/sass.rs)
+# so a future native rubyrs-sass impl can replace grass without
+# touching the Ruby/Jekyll side.
+sass = ["dep:grass"]
 # `std-sink` enables the `StdSink` adapter that bridges
 # `std::io::Write` to the `OutputSink` trait. Default-on
 # because the facade crate's `Runtime::set_stdout` public API
@@ -175,7 +185,7 @@ _sqlite = ["dep:rusqlite", "dep:lru"]
 # are the load-bearing batteries; `stdlib` brings the pure-Ruby
 # canon (json/active_support_lite/…). Total ≤ 40 MB stripped
 # per ADR 0019 v3's binary budget.
-cli-defaults = ["stdlib", "_sqlite", "_http_server"]
+cli-defaults = ["stdlib", "_sqlite", "_http_server", "sass"]
 # `everything` — kitchen sink for embedders who want every
 # available battery pre-wired. ADR 0019 v3 line 314's "Bun-
 # class CLI / Edge runtime" target. ≤ 150 MB stripped.
@@ -219,6 +229,10 @@ fancy-regex = { version = "0.18", optional = true }
 # pulled in. ADR 0018 Phase 1 will switch this to `default-features =
 # false` when rubyrs-core extracts (num-bigint's `std` is opt-out).
 num-bigint = { version = "0.4", optional = true }
+# `sass` battery: pure-Rust SCSS/Sass compiler. `default-features =
+# false` drops grass's CLI deps (clap/anstream/…) — we only use the
+# library entry point `grass::from_string`.
+grass = { version = "0.13", default-features = false, optional = true }
 # `_http_server` battery dependencies (ADR 0022 v4). All
 # optional behind the feature flag.
 hyper = { version = "1", features = ["server", "http1"], optional = true }

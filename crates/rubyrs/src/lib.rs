@@ -55,6 +55,11 @@ mod output;
 // addition stays a non-breaking change.
 #[cfg(feature = "regex")]
 pub mod regex_engine;
+// `sass` is unconditionally declared so the `SassBackend` seam +
+// the `RubyrsSass.compile` host primitive exist in every build; the
+// `grass`-backed implementation inside is gated on `feature = "sass"`
+// (it returns a feature-absent error otherwise).
+mod sass;
 #[cfg(feature = "_sqlite")]
 mod sqlite;
 mod signals;
@@ -2265,6 +2270,13 @@ end
 ## via a Dir glob of its tags directory, and Jekyll globs site
 ## sources extensively.
 class Dir
+end
+## RubyrsSass — anchor for the `RubyrsSass.compile(scss) -> css` host
+## primitive (wired in vm/dispatch.rs to crate::sass::compile, the
+## grass-backed `sass` battery). The jekyll-sass-converter shim's
+## `convert` delegates here; defined always so the primitive is
+## reachable even without the shim loaded.
+class RubyrsSass
 end
 ## `class Mutex; ... end` (single-threaded no-op shim) is loaded
 ## from `preamble/mutex.rb` BEFORE this `PREAMBLE` eval.
