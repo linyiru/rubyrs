@@ -3386,6 +3386,68 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             // NotImplementedError because sinatra/base.rb doesn't
             // surface them and the inner-form recogniser can be
             // widened on demand.
+            // `class << self; if cond; def a; ...; else; def a; ...;
+            // end; end` — conditional method definitions. Each branch
+            // must contain ONLY `def`s; they become singleton defs
+            // (class methods) wrapped in the runtime `if`. The
+            // condition translates through the regular path. A plain
+            // `else` is admitted; `elsif` (a nested IfNode subsequent)
+            // is not. Motivating case: i18n's utils.rb guards
+            // `def except(hash, *keys)` on
+            // `Hash.method_defined?(:except)` to pick the native vs.
+            // polyfill implementation.
+            if recv_is_self
+                && let Some(if_n) = bn.as_if_node()
+            {
+                // Shape-validate first (no translation side effects):
+                // every then-stmt is a def, and the subsequent is
+                // either absent or an ElseNode of only defs.
+                let all_defs = |stmts: Option<ruby_prism::StatementsNode<'_>>| -> bool {
+                    match stmts {
+                        Some(s) => {
+                            let mut it = s.body().iter().peekable();
+                            if it.peek().is_none() { return false; }
+                            s.body().iter().all(|n| n.as_def_node().is_some())
+                        }
+                        None => false,
+                    }
+                };
+                let then_ok = all_defs(if_n.statements());
+                let else_node = if_n.subsequent().and_then(|s| s.as_else_node());
+                let else_ok = match (if_n.subsequent(), &else_node) {
+                    (None, _) => true,                       // no else
+                    (Some(_), Some(en)) => all_defs(en.statements()),
+                    (Some(_), None) => false,                // elsif — bail
+                };
+                if then_ok && else_ok {
+                    let mut then_body: Vec<SExpr> = Vec::new();
+                    if let Some(stmts) = if_n.statements() {
+                        for s in stmts.body().iter() {
+                            let t = tr(ctx, &s);
+                            if let Some(sd) = mk_singleton_def(&s, t.node) {
+                                then_body.push(sd);
+                            }
+                        }
+                    }
+                    let mut else_body: Vec<SExpr> = Vec::new();
+                    if let Some(en) = &else_node
+                        && let Some(stmts) = en.statements() {
+                        for s in stmts.body().iter() {
+                            let t = tr(ctx, &s);
+                            if let Some(sd) = mk_singleton_def(&s, t.node) {
+                                else_body.push(sd);
+                            }
+                        }
+                    }
+                    let cond = tr(ctx, &if_n.predicate());
+                    out.push(sp(bn, Expr::If {
+                        cond: Box::new(cond),
+                        then_body,
+                        else_body,
+                    }));
+                    continue;
+                }
+            }
             if recv_is_self {
                 let modifier_if = bn.as_if_node()
                     .and_then(|if_n| {

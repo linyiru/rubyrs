@@ -159,6 +159,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn undef_keyword() { run_diff("undef_keyword"); }
 #[test] fn singleton_alias_method() { run_diff("singleton_alias_method"); }
 #[test] fn singleton_class_body_more() { run_diff("singleton_class_body_more"); }
+#[test] fn singleton_class_conditional_def() { run_diff("singleton_class_conditional_def"); }
 #[test] fn integer_size() { run_diff("integer_size"); }
 #[test] fn class_public_methods() { run_diff("class_public_methods"); }
 #[test] fn runtime_attr_accessor() { run_diff("runtime_attr_accessor"); }
