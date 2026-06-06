@@ -170,6 +170,7 @@ pub(crate) fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
 /// path; flagless regexps compile exactly as before). Run AFTER
 /// `preprocess_regex_pattern` so the `\G` translation never sees
 /// the prefix and the prefix never lands inside the `\G` scan.
+#[cfg(feature = "regex")]
 pub(crate) fn apply_ruby_flags(pattern: &str, flags: u8) -> std::borrow::Cow<'_, str> {
     use crate::regex_engine::{RB_IGNORECASE, RB_EXTENDED, RB_MULTILINE};
     if flags == 0 {

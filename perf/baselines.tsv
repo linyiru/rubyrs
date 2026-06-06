@@ -167,7 +167,12 @@ crates/rubyrs/examples/metaprog_bench/mm_bench.rb	7300	1400	2M method_missing di
 # growth is dm-specific (define_method's closure surface
 # touches the bumped tables); other workloads have their own
 # headroom.
-crates/rubyrs/examples/metaprog_bench/dm_bench.rb	7300	900	2M define_method dispatch (closure-method)
+# dm_bench RSS bumped 7300 → 7400 on 2026-06-06 — the regex-flag
+# carrier (CompiledRegex enum → struct with `source: Box<str>` +
+# `ruby_flags`) grew the binary's static + per-regex footprint;
+# CI observed dm_bench RSS 7316 KB, ~16 KB over. Same per-row
+# rationale as the bumps above.
+crates/rubyrs/examples/metaprog_bench/dm_bench.rb	7400	900	2M define_method dispatch (closure-method)
 crates/rubyrs/examples/metaprog_bench/static_bench.rb	7400	1150	2M def+ivar (control for the metaprog comparisons)
 # Budgets at ~2× local M-series observed wall to absorb CI's
 # ~1.65× ubuntu-latest slowdown plus per-run jitter — same shape
