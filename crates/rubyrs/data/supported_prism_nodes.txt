@@ -117,6 +117,7 @@ StringNode
 SuperNode
 SymbolNode
 TrueNode
+UndefNode
 UnlessNode
 UntilNode
 WhenNode

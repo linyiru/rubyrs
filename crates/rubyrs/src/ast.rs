@@ -2895,6 +2895,35 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 sp(node, Expr::SymbolLit(old_name)),
             ], kwargs_trailing: false });
     }
+    // `undef foo, bar` keyword form — desugar into a synthetic
+    // `undef_method :foo, :bar` Call so the existing class-intrinsic
+    // `undef_method` arm (dispatch.rs) handles it. Removal itself is
+    // a Tier-1 no-op there (only the `method_undefined` hook fires),
+    // so `undef` carries the same semantics. All names must be plain
+    // `SymbolNode`s (the common case, `undef freeze`); a dynamic /
+    // interpolated name (`undef :"a#{i}"`) is exotic and falls
+    // through to the unsupported-node trail unchanged. Motivating
+    // consumer: concurrent-ruby's `undef freeze` (pulled by i18n).
+    if let Some(n) = node.as_undef_node() {
+        let name_nodes: Vec<_> = n.names().iter().collect();
+        let args: Vec<SExpr> = name_nodes
+            .iter()
+            .filter_map(|nm| {
+                nm.as_symbol_node().map(|sym| {
+                    let name = String::from_utf8_lossy(sym.unescaped()).into_owned();
+                    sp(node, Expr::SymbolLit(name))
+                })
+            })
+            .collect();
+        if !name_nodes.is_empty() && args.len() == name_nodes.len() {
+            return sp(node, Expr::Call {
+                receiver: None,
+                name: "undef_method".into(),
+                args,
+                kwargs_trailing: false,
+            });
+        }
+    }
     if let Some(n) = node.as_singleton_class_node() {
         let recv_expr = tr(ctx, &n.expression());
         let body_nodes: Vec<_> = match n.body() {
