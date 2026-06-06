@@ -84,6 +84,15 @@ class Set
   alias_method :+, :|
   alias_method :union, :|
 
+  # Merge the elements of each enumerable into self (in place),
+  # returning self. Accepts multiple enums (Ruby 3.x). Used by
+  # Liquid's strainer.rb `add_filter` to fold a filter module's
+  # public instance methods into the global filter set.
+  def merge(*enums)
+    enums.each { |enum| enum.each { |o| add(o) } }
+    self
+  end
+
   # Difference — elements in self that aren't in enum.
   def -(enum)
     result = Set.new
