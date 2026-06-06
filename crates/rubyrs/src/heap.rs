@@ -977,6 +977,62 @@ pub(crate) fn inspect_escape_into(raw: &str, out: &mut String) {
     }
 }
 
+/// Whether a Symbol's name renders as the bare `:name` form in
+/// `Symbol#inspect` (vs. the quoted `:"..."` form). Mirrors CRuby's
+/// `rb_str_symname_p`: bare identifiers (with `@`/`@@`/`$` prefixes
+/// and `?`/`!`/`=` suffixes for method-name symbols) and operator
+/// method names render bare. Anything else — empty, spaces, leading
+/// digit, punctuation — needs quoting.
+pub(crate) fn symbol_name_is_simple(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    // Operator method names that print bare.
+    const OPS: &[&str] = &[
+        "+", "-", "*", "/", "%", "**", "==", "===", "!=", "=~", "!~", "<", "<=", ">", ">=",
+        "<=>", "<<", ">>", "&", "|", "^", "~", "!", "+@", "-@", "[]", "[]=", "`",
+    ];
+    if OPS.contains(&s) {
+        return true;
+    }
+    // Strip a leading sigil (`@@`, `@`, `$`) for ivar/cvar/gvar names.
+    let body = s
+        .strip_prefix("@@")
+        .or_else(|| s.strip_prefix('@'))
+        .or_else(|| s.strip_prefix('$'))
+        .unwrap_or(s);
+    // Method-name symbols may carry one trailing `?`, `!`, or `=`.
+    let core = body
+        .strip_suffix('?')
+        .or_else(|| body.strip_suffix('!'))
+        .or_else(|| body.strip_suffix('='))
+        .unwrap_or(body);
+    if core.is_empty() {
+        return false;
+    }
+    let mut chars = core.chars();
+    let first = chars.next().unwrap();
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Render a Symbol's name in `Symbol#inspect` form (`:name` or the
+/// quoted `:"..."` form). Shared by `Value::to_inspect` and the
+/// `sym_primitive` inspect arm so they can't drift.
+pub(crate) fn symbol_inspect(name: &str) -> String {
+    if symbol_name_is_simple(name) {
+        format!(":{}", name)
+    } else {
+        let mut s = String::with_capacity(name.len() + 4);
+        s.push_str(":\"");
+        inspect_escape_into(name, &mut s);
+        s.push('"');
+        s
+    }
+}
+
 impl Value {
     /// Build a `Value::Str` from anything stringy. Centralises the
     /// `Rc<RefCell<String>>` wrap so call sites don't repeat the
@@ -1177,7 +1233,7 @@ impl Value {
                 out.push('"');
                 out
             },
-            Value::Sym(id) => format!(":{}", interner.resolve(*id)),
+            Value::Sym(id) => symbol_inspect(interner.resolve(*id)),
             Value::Nil => "nil".into(),
             // Range#inspect joins the endpoints via `#inspect`, not
             // `#to_s` — so String endpoints come out quoted

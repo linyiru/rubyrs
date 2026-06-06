@@ -682,7 +682,8 @@ impl Vm {
                 "freeze" | "frozen?" | "dup" | "+@" | "-@" | "dump" | "count" |
                 "hash"
             ),
-            Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect" | "name" | "succ" | "next" | "dup" | "clone"),
+            Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect" | "name" | "succ" | "next" | "dup" | "clone"
+                | "empty?" | "length" | "size" | "upcase" | "downcase" | "capitalize" | "swapcase"),
             Value::Array(_) => matches!(name,
                 "freeze" | "frozen?" |
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
@@ -1796,11 +1797,58 @@ impl Vm {
             // `if method_defined?(:name)` Ruby-version probe land
             // on the modern branch.
             (Value::Sym(id), "name", []) => Some(Value::new_str(self.interner.resolve(*id).to_string())),
-            // Symbol#inspect — `:name` form (prefix with colon).
+            // Symbol#inspect — `:name` for symbols whose name is a
+            // bare identifier / operator, else the quoted `:"..."`
+            // form with string-style escaping (CRuby:
+            // `:"with space"`, `:""`, `:"1abc"`). Discovery: P3
+            // Jekyll spike surfaced `:"".inspect` / spaced symbols
+            // diverging from `p`.
             (Value::Sym(id), "inspect", []) => {
-                Some(Value::new_str(format!(":{}", self.interner.resolve(*id))))
+                Some(Value::new_str(crate::heap::symbol_inspect(self.interner.resolve(*id))))
             }
             (Value::Sym(id), "to_sym", []) => Some(Value::Sym(*id)),
+            // Symbol#empty? / #length / #size operate on the
+            // underlying name (`:"".empty?` → true, `:abc.length`
+            // → 3). Length counts characters, not bytes, matching
+            // CRuby's Symbol#length. forwardable-extended's
+            // `def_modern_delegator` calls `accessor.empty?`.
+            (Value::Sym(id), "empty?", []) => {
+                Some(Value::Bool(self.interner.resolve(*id).is_empty()))
+            }
+            (Value::Sym(id), "length", []) | (Value::Sym(id), "size", []) => {
+                Some(Value::Int(self.interner.resolve(*id).chars().count() as i64))
+            }
+            // Symbol#upcase / #downcase / #capitalize / #swapcase
+            // case-transform the name and re-intern, returning a
+            // Symbol (CRuby: `:abc.upcase` → :ABC). Gated on
+            // `max_symbols` like #succ — a transform can mint a new
+            // name. ASCII-simple casing matches the String builtins.
+            (Value::Sym(id), op @ ("upcase" | "downcase" | "capitalize" | "swapcase"), []) => {
+                let src = self.interner.resolve(*id);
+                let transformed = match op {
+                    "upcase" => src.to_uppercase(),
+                    "downcase" => src.to_lowercase(),
+                    "swapcase" => src.chars().map(|c| {
+                        if c.is_uppercase() { c.to_lowercase().next().unwrap_or(c) }
+                        else if c.is_lowercase() { c.to_uppercase().next().unwrap_or(c) }
+                        else { c }
+                    }).collect(),
+                    _ /* capitalize */ => {
+                        let mut cs = src.chars();
+                        match cs.next() {
+                            Some(f) => f.to_uppercase().chain(cs.flat_map(|c| c.to_lowercase())).collect(),
+                            None => String::new(),
+                        }
+                    }
+                };
+                if let Some(max) = self.max_symbols
+                    && !self.interner.contains(&transformed) && self.interner.len() >= max {
+                        return Err(self.trap(RubyError::ResourceExhausted {
+                            msg: format!("interner exhausted: {} symbols", max),
+                        }));
+                    }
+                Some(Value::Sym(self.interner.intern(&transformed)))
+            }
             // Symbol#succ / Symbol#next — alphanumeric successor of
             // the underlying name, then re-interned. Matches
             // `String#succ` semantics; CRuby treats Symbol#succ as

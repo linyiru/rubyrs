@@ -154,6 +154,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn block_basics() { run_diff("block_basics"); }
 #[test] fn class_basics() { run_diff("class_basics"); }
 #[test] fn symbol_basics() { run_diff("symbol_basics"); }
+#[test] fn symbol_methods() { run_diff("symbol_methods"); }
+#[test] fn symbol_inspect() { run_diff("symbol_inspect"); }
 #[test] fn interpolation() { run_diff("interpolation"); }
 #[test] fn rescue_basics() { run_diff("rescue_basics"); }
 #[test] fn fizzbuzz_15() { run_diff("fizzbuzz_15"); }
