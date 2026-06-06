@@ -2958,10 +2958,13 @@ fn rational_phase_c1_construction_and_readers() {
         ("puts Rational(1, 2).is_a?(Object)",   "true"),
         ("puts 5.is_a?(Numeric)",               "true"),
         ("puts 5.0.is_a?(Numeric)",             "true"),
-        ("puts 5.class.ancestors.inspect",      "[Integer, Numeric, Object, Kernel, BasicObject]"),
-        ("puts 5.0.class.ancestors.inspect",    "[Float, Numeric, Object, Kernel, BasicObject]"),
+        // `Comparable` sits between Numeric and Object since
+        // Numeric `include Comparable` (CRuby parity — supplies
+        // between?/clamp).
+        ("puts 5.class.ancestors.inspect",      "[Integer, Numeric, Comparable, Object, Kernel, BasicObject]"),
+        ("puts 5.0.class.ancestors.inspect",    "[Float, Numeric, Comparable, Object, Kernel, BasicObject]"),
         ("puts Rational(1, 2).class.ancestors.inspect",
-         "[Rational, Numeric, Object, Kernel, BasicObject]"),
+         "[Rational, Numeric, Comparable, Object, Kernel, BasicObject]"),
         // to_s drops the parens; inspect keeps them.
         ("puts Rational(3, 4).to_s",            "3/4"),
         // Readers.
