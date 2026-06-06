@@ -62,6 +62,17 @@ pub enum Engine {
     Fancy(fancy_regex::Regex),
 }
 
+/// Ruby `Regexp` option bits — match CRuby's
+/// `Regexp::IGNORECASE` / `EXTENDED` / `MULTILINE` constant
+/// values. Carried on `CompiledRegex` so `Regexp#options` /
+/// `#to_s` / `#inspect` render the flag set, AND folded into the
+/// regex-cache key so `/foo/` and `/foo/i` don't collide. Note
+/// the Ruby `/m` flag is "dot matches newline" (engine `(?s)`),
+/// NOT multi-line `^`/`$`.
+pub(crate) const RB_IGNORECASE: u8 = 1;
+pub(crate) const RB_EXTENDED: u8 = 2;
+pub(crate) const RB_MULTILINE: u8 = 4;
+
 /// A compiled Ruby regexp: the chosen linear-or-backtracking
 /// `Engine` plus the Ruby-level metadata the `Regexp` reflection
 /// methods need. `Value::Regex(Rc<CompiledRegex>)` is the single
@@ -94,11 +105,21 @@ pub struct CompiledRegex {
 /// both engines' messages so a pattern that's malformed (not
 /// just lookaround-shaped) gives a useful trap.
 pub(crate) fn compile(pattern: &str) -> Result<CompiledRegex, String> {
-    let engine = build_engine(pattern)?;
-    // Flagless literal / `Regexp.new(str)` path: the engine
-    // pattern IS the bare source, and there are no Ruby flags.
-    // The flag-prefixed path is `compile_with_flags`.
-    Ok(CompiledRegex { engine, ruby_flags: 0, source: pattern.into() })
+    // Flagless path: the engine pattern IS the bare source.
+    compile_with_flags(pattern, 0, pattern)
+}
+
+/// Compile with Ruby flags already applied to `engine_pattern`
+/// (an inline `(?is)` prefix prepended by `apply_ruby_flags`),
+/// while retaining the BARE `source` (no prefix) for `#source` /
+/// `#inspect` and the raw `ruby_flags` bitmask for `#options`.
+pub(crate) fn compile_with_flags(
+    engine_pattern: &str,
+    ruby_flags: u8,
+    bare_source: &str,
+) -> Result<CompiledRegex, String> {
+    let engine = build_engine(engine_pattern)?;
+    Ok(CompiledRegex { engine, ruby_flags, source: bare_source.into() })
 }
 
 /// Engine selection without the `CompiledRegex` wrapper — shared
@@ -151,6 +172,36 @@ impl CompiledRegex {
     /// flagless regexp.
     pub(crate) fn options(&self) -> u8 {
         self.ruby_flags
+    }
+
+    /// `Regexp#to_s` rendering: `(?<on>-<off>:source)`. CRuby
+    /// orders the flag letters `m, i, x` (where `m` is dotall),
+    /// puts SET flags before the `-` and UNSET after, and drops
+    /// the `-` entirely when no flag is unset. Flagless → the
+    /// familiar `(?-mix:source)`.
+    pub(crate) fn to_s_string(&self) -> String {
+        let (on, off) = self.flag_letter_split();
+        if off.is_empty() {
+            format!("(?{}:{})", on, self.source)
+        } else {
+            format!("(?{}-{}:{})", on, off, self.source)
+        }
+    }
+
+    /// `Regexp#inspect` rendering: `/source/<set letters>` in the
+    /// same `m, i, x` order. Flagless → `/source/`.
+    pub(crate) fn inspect_string(&self) -> String {
+        let (on, _) = self.flag_letter_split();
+        format!("/{}/{}", self.source, on)
+    }
+
+    /// `(set-letters, unset-letters)` in CRuby's `m, i, x` order.
+    fn flag_letter_split(&self) -> (String, String) {
+        let f = self.ruby_flags;
+        let table = [(RB_MULTILINE, 'm'), (RB_IGNORECASE, 'i'), (RB_EXTENDED, 'x')];
+        let on: String = table.iter().filter(|(b, _)| f & b != 0).map(|(_, c)| *c).collect();
+        let off: String = table.iter().filter(|(b, _)| f & b == 0).map(|(_, c)| *c).collect();
+        (on, off)
     }
 
     /// Borrow the underlying linear-time regex. Returns `None`

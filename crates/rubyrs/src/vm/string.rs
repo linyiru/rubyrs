@@ -1281,9 +1281,9 @@ pub(crate) fn string_call(
         #[cfg(feature = "regex")]
         (Value::Regex(re), "options", []) => Some(Value::Int(re.options() as i64)),
         #[cfg(feature = "regex")]
-        (Value::Regex(re), "to_s", []) => Some(Value::new_str(format!("(?-mix:{})", re.as_str()))),
+        (Value::Regex(re), "to_s", []) => Some(Value::new_str(re.to_s_string())),
         #[cfg(feature = "regex")]
-        (Value::Regex(re), "inspect", []) => Some(Value::new_str(format!("/{}/", re.as_str()))),
+        (Value::Regex(re), "inspect", []) => Some(Value::new_str(re.inspect_string())),
         // `Regexp#freeze` / `frozen?` — Regexp values are immutable
         // by construction (no mutating instance methods exist), so
         // freezing has nothing to enforce. CRuby still defines the

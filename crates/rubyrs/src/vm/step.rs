@@ -159,6 +159,32 @@ pub(crate) fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
     )
 }
 
+/// Prepend an inline flag group (`(?is)…`) translating Ruby's
+/// `i`/`x`/`m` literal flags into the regex-crate letters the
+/// linear AND fancy backends both honor. THE TRAP: Ruby `/m`
+/// (dot-matches-newline) maps to engine `(?s)` (single-line /
+/// dotall), NOT `(?m)` (which in the regex crate is multi-line
+/// `^`/`$` anchoring — a different concept Ruby has no flag for).
+///
+/// `flags == 0` returns the pattern Borrowed (zero-alloc fast
+/// path; flagless regexps compile exactly as before). Run AFTER
+/// `preprocess_regex_pattern` so the `\G` translation never sees
+/// the prefix and the prefix never lands inside the `\G` scan.
+pub(crate) fn apply_ruby_flags(pattern: &str, flags: u8) -> std::borrow::Cow<'_, str> {
+    use crate::regex_engine::{RB_IGNORECASE, RB_EXTENDED, RB_MULTILINE};
+    if flags == 0 {
+        return std::borrow::Cow::Borrowed(pattern);
+    }
+    let mut prefix = String::with_capacity(6 + pattern.len());
+    prefix.push_str("(?");
+    if flags & RB_IGNORECASE != 0 { prefix.push('i'); }
+    if flags & RB_MULTILINE != 0 { prefix.push('s'); } // Ruby /m == engine (?s)
+    if flags & RB_EXTENDED != 0 { prefix.push('x'); }
+    prefix.push(')');
+    prefix.push_str(pattern);
+    std::borrow::Cow::Owned(prefix)
+}
+
 /// ADR 0025 Phase 2 cext-deferral helper. With `_fiber` on,
 /// `cext_depth` exists and is honored; without `_fiber`, the
 /// counter doesn't exist (no Fiber to integrate with), so the
@@ -894,25 +920,31 @@ impl Vm {
                 }
             }
             #[cfg(feature = "regex")]
-            Op::LoadRegex(id) => {
-                let regex_rc = if let Some(r) = self.regex_cache.get(&id) {
+            Op::LoadRegex(id, flags) => {
+                let key = (id, flags);
+                let regex_rc = if let Some(r) = self.regex_cache.get(&key) {
                     r.clone()
                 } else {
                     let src = self.interner.resolve(id).clone();
+                    // `\G`-translate first, then prepend the inline
+                    // flag group; the engine sees the prefixed
+                    // pattern, but the BARE `translated` is stored as
+                    // the regexp's `#source`.
                     let translated = preprocess_regex_pattern(&src);
-                    let compiled = crate::regex_engine::compile(&translated).map_err(|e| {
+                    let prefixed = apply_ruby_flags(&translated, flags);
+                    let compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
                         self.trap(RubyError::SyntaxError {
                             msg: format!("invalid regex /{}/: {}", src, e),
                         })
                     })?;
                     let rc = Rc::new(compiled);
-                    self.regex_cache.insert(id, rc.clone());
+                    self.regex_cache.insert(key, rc.clone());
                     rc
                 };
                 self.stack.push(Value::Regex(regex_rc));
             }
             #[cfg(feature = "regex")]
-            Op::CompileRegex => {
+            Op::CompileRegex(flags) => {
                 // Top of stack: a `Value::Str` produced by the
                 // InterpolatedRegex build sequence. The assembled
                 // pattern is interned so cache lookups can dedup
@@ -962,17 +994,19 @@ impl Vm {
                             }));
                         }
                     let id = self.interner.intern(pat);
-                    if let Some(r) = self.regex_cache.get(&id) {
+                    let key = (id, flags);
+                    if let Some(r) = self.regex_cache.get(&key) {
                         return Ok(r.clone());
                     }
                     let translated = preprocess_regex_pattern(pat);
-                    let compiled = crate::regex_engine::compile(&translated).map_err(|e| {
+                    let prefixed = apply_ruby_flags(&translated, flags);
+                    let compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
                         self.trap(RubyError::SyntaxError {
                             msg: format!("invalid regex /{}/: {}", pat, e),
                         })
                     })?;
                     let rc = Rc::new(compiled);
-                    self.regex_cache.insert(id, rc.clone());
+                    self.regex_cache.insert(key, rc.clone());
                     Ok(rc)
                 })?;
                 self.stack.push(Value::Regex(regex_rc));

@@ -3970,9 +3970,9 @@ impl Vm {
         && let Value::Class(cls) = &recv
         && cls.name.as_str() == "Regexp"
     {
-        if args.len() != 1 {
+        if args.is_empty() || args.len() > 2 {
             return Err(self.trap(RubyError::ArgumentError {
-                msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+                msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
             }));
         }
         let pat = match &args[0] {
@@ -3983,8 +3983,19 @@ impl Vm {
                 }));
             }
         };
+        // `Regexp.new(str, options)`: an Integer is a flag bitmask
+        // (IGNORECASE=1|EXTENDED=2|MULTILINE=4, plus
+        // encoding bits rubyrs ignores for matching but preserves
+        // in #options); any other truthy value is the legacy
+        // boolean form meaning IGNORECASE; nil/false/absent → 0.
+        let flags: u8 = match args.get(1) {
+            None | Some(Value::Nil) | Some(Value::Bool(false)) => 0,
+            Some(Value::Int(n)) => *n as u8,
+            Some(_) => crate::regex_engine::RB_IGNORECASE,
+        };
         let translated = crate::vm::step::preprocess_regex_pattern(&pat);
-        let compiled = crate::regex_engine::compile(&translated).map_err(|e| {
+        let prefixed = crate::vm::step::apply_ruby_flags(&translated, flags);
+        let compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
             self.trap(RubyError::SyntaxError {
                 msg: format!("invalid regex /{}/: {}", pat, e),
             })

@@ -694,8 +694,11 @@ pub(crate) struct Vm {
     /// caches, subsequent loads return the same Rc. Cfg-gated on
     /// the `regex` feature (ADR 0017 Rule 3) — disappears with
     /// `--no-default-features`.
+    /// Keyed by `(source SymId, Ruby flag bitmask)` so the same
+    /// source text with different flags (`/foo/` vs `/foo/i`)
+    /// compiles to distinct cached regexps rather than colliding.
     #[cfg(feature = "regex")]
-    pub(crate) regex_cache: HashMap<SymId, Rc<crate::regex_engine::CompiledRegex>>,
+    pub(crate) regex_cache: HashMap<(SymId, u8), Rc<crate::regex_engine::CompiledRegex>>,
     /// Parsed-BigInt cache for `Op::LoadBigInt`. Keyed by the
     /// interned decimal-string SymId; first load decodes via
     /// `BigInt::from_str`, subsequent loads return the cached

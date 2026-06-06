@@ -141,8 +141,12 @@ pub(crate) enum Expr {
     /// (ADR 0017 Rule 3) — when the feature is off, AST
     /// translation emits a clear "regex feature not enabled"
     /// error instead of producing this variant.
+    /// `/pattern/imx` — the `u8` is the Ruby flag bitmask
+    /// (IGNORECASE=1 | EXTENDED=2 | MULTILINE=4), threaded to the
+    /// compiler so the runtime can apply the flags + answer
+    /// `#options`.
     #[cfg(feature = "regex")]
-    RegexLit(String),
+    RegexLit(String, u8),
     SymbolLit(String),
     /// Integer literal that overflows `i64`. The string is the
     /// canonical decimal representation built from Prism's
@@ -169,8 +173,10 @@ pub(crate) enum Expr {
     /// `Vm::regex_cache` keyed by the assembled pattern's SymId,
     /// so identical expansions only compile once. Cfg-gated on the
     /// `regex` feature alongside `RegexLit`.
+    /// `/#{...}/imx` — parts plus the Ruby flag bitmask (same
+    /// encoding as `RegexLit`).
     #[cfg(feature = "regex")]
-    InterpolatedRegex(Vec<SExpr>),
+    InterpolatedRegex(Vec<SExpr>, u8),
     BoolLit(bool),
     Nil,
     LVarRead(String),
@@ -888,7 +894,14 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     if let Some(_n) = node.as_regular_expression_node() {
         #[cfg(feature = "regex")]
         {
-            return sp(node, Expr::RegexLit(String::from_utf8_lossy(_n.unescaped()).into_owned()));
+            // Ruby flag bitmask from Prism: i=1, x=2, m=4 (CRuby's
+            // Regexp::IGNORECASE/EXTENDED/MULTILINE). Ruby /m is
+            // dot-matches-newline (engine `(?s)`), applied at
+            // runtime by `apply_ruby_flags`.
+            let flags = (_n.is_ignore_case() as u8)
+                | ((_n.is_extended() as u8) << 1)
+                | ((_n.is_multi_line() as u8) << 2);
+            return sp(node, Expr::RegexLit(String::from_utf8_lossy(_n.unescaped()).into_owned(), flags));
         }
         #[cfg(not(feature = "regex"))]
         {
@@ -945,7 +958,10 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     tr(ctx, &p)
                 }
             }).collect();
-            return sp(node, Expr::InterpolatedRegex(parts));
+            let flags = (_n.is_ignore_case() as u8)
+                | ((_n.is_extended() as u8) << 1)
+                | ((_n.is_multi_line() as u8) << 2);
+            return sp(node, Expr::InterpolatedRegex(parts, flags));
         }
         #[cfg(not(feature = "regex"))]
         {

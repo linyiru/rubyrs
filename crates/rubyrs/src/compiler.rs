@@ -1332,7 +1332,7 @@ pub(crate) fn compile_expr(
             b.emit(Op::LoadConstStrBytes(idx));
         }
         #[cfg(feature = "regex")]
-        Expr::RegexLit(src) => { let id = interner.intern(src); b.emit(Op::LoadRegex(id)); }
+        Expr::RegexLit(src, flags) => { let id = interner.intern(src); b.emit(Op::LoadRegex(id, *flags)); }
         #[cfg(feature = "bignum")]
         Expr::BigIntLit(decimal) => { let id = interner.intern(decimal); b.emit(Op::LoadBigInt(id)); }
         Expr::RationalLit { num, den } => {
@@ -1367,7 +1367,7 @@ pub(crate) fn compile_expr(
         // builds an empty pattern and then a regex that matches
         // everywhere; CRuby behaves the same.
         #[cfg(feature = "regex")]
-        Expr::InterpolatedRegex(parts) => {
+        Expr::InterpolatedRegex(parts, flags) => {
             if parts.is_empty() {
                 let id = interner.intern("");
                 b.emit(Op::LoadConstStr(id));
@@ -1386,7 +1386,7 @@ pub(crate) fn compile_expr(
                     }
                 }
             }
-            b.emit(Op::CompileRegex);
+            b.emit(Op::CompileRegex(*flags));
         }
         Expr::BoolLit(true) => { b.emit(Op::LoadTrue); }
         Expr::BoolLit(false) => { b.emit(Op::LoadFalse); }

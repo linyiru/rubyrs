@@ -341,6 +341,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn call_kwsplat_empty() { run_diff("call_kwsplat_empty"); }
 #[test] fn array_reduce_init_sym() { run_diff("array_reduce_init_sym"); }
 #[test] fn regexp_options_carrier() { run_diff("regexp_options_carrier"); }
+#[test] fn regex_flags() { run_diff("regex_flags"); }
 #[test] fn struct_factory() { run_diff("struct_factory"); }
 #[test] fn const_get_inheritance_walk() { run_diff("const_get_inheritance_walk"); }
 #[test] fn anon_class_const_set() { run_diff("anon_class_const_set"); }

@@ -38,8 +38,13 @@ pub(crate) enum Op {
     /// (ADR 0017 Rule 3) — with the feature off the variant
     /// disappears, AST translation rejects `/.../` literals,
     /// and `Expr::RegexLit` never reaches the compiler arm.
+    /// The `u8` is the Ruby flag bitmask (IGNORECASE=1 |
+    /// EXTENDED=2 | MULTILINE=4); the runtime applies it as an
+    /// inline `(?is)` prefix before compiling and folds it into
+    /// the `regex_cache` key (so `/foo/` and `/foo/i` don't
+    /// collide).
     #[cfg(feature = "regex")]
-    LoadRegex(SymId),
+    LoadRegex(SymId, u8),
     /// Load an integer literal that overflows i64. The SymId is
     /// the interned decimal representation of the value; the
     /// runtime parses to `BigInt` on first load and caches in
@@ -71,8 +76,10 @@ pub(crate) enum Op {
     /// of the assembled pattern. Compile errors surface as
     /// SyntaxError traps at runtime (same shape as `LoadRegex`,
     /// since the pattern is unknown until interpolation runs).
+    /// The `u8` carries the Ruby flag bitmask for the
+    /// interpolated pattern (same encoding as `LoadRegex`).
     #[cfg(feature = "regex")]
-    CompileRegex,
+    CompileRegex(u8),
     LoadSymbol(SymId),
     LoadNil,
     LoadTrue,
