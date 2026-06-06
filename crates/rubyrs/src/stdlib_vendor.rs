@@ -87,6 +87,13 @@ pub(crate) fn always_on_stub_extras(name: &str) -> Option<&'static str> {
         "yaml" | "safe_yaml" | "safe_yaml/load" => {
             Some(include_str!("stdlib_vendor/yaml.rb"))
         }
+        // `logger`: reopen the Logger shell with the severity-level
+        // constants + the debug/info/warn/error/add surface (and the
+        // format_* helpers subclasses call). Discovery: P3 Jekyll
+        // spike — jekyll's Stevenson < Logger writer.
+        "logger" => {
+            Some(include_str!("stdlib_vendor/logger.rb"))
+        }
         // `jekyll-sass-converter`: the real gem requires sass-embedded
         // (native dart-sass). The shim defines the Jekyll converter
         // classes and routes SCSS→CSS to the `RubyrsSass.compile` host
