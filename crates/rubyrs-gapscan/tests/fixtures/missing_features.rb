@@ -15,9 +15,5 @@ class Foo                        # ClassNode (supported)
   def quux
     $&                           # BackReferenceReadNode (× 1)
   end
-  def loop
-    for x in [1, 2, 3]           # ForNode (× 1)
-      puts x
-    end
-  end
+  alias $new_global $old_global  # AliasGlobalVariableNode (× 1)
 end

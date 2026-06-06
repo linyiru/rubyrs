@@ -102,7 +102,7 @@ fn classify_returns_expected_for_known_classes() {
     // feature). The two remaining probes (ForNode, ImaginaryNode
     // — checked in the fixture-set test below) are the canonical
     // "stayed missing" canaries.
-    assert_eq!(classify("ForNode"), Classification::Missing);
+    assert_eq!(classify("AliasGlobalVariableNode"), Classification::Missing);
     // Sanity: a name that is not a Prism node at all also lands in
     // Missing (caller's job to validate using `unknown_classes_in`).
     assert_eq!(classify("NotARealNode"), Classification::Missing);
@@ -150,11 +150,11 @@ fn fixture_exercises_exact_missing_class_set() {
     // now counts as a Supported BackReferenceReadNode in the
     // histogram (drops out of the Missing set below).
     let expected: std::collections::BTreeSet<&str> =
-        ["ImaginaryNode", "ForNode"]
+        ["ImaginaryNode", "AliasGlobalVariableNode"]
             .into_iter()
             .collect();
     assert_eq!(names, expected, "Missing-class set drifted");
-    for cls in ["ImaginaryNode", "ForNode"] {
+    for cls in ["ImaginaryNode", "AliasGlobalVariableNode"] {
         let count = report.histogram.get(cls).map(|s| s.count).unwrap_or(0);
         assert_eq!(count, 1, "{cls} count");
     }
@@ -225,7 +225,7 @@ fn diff_detects_closed_and_new_gaps() {
         },
     );
     after.histogram.insert(
-        "ForNode".to_string(),
+        "AliasGlobalVariableNode".to_string(),
         rubyrs_gapscan::NodeStat {
             count: 2,
             ..Default::default()
@@ -236,7 +236,7 @@ fn diff_detects_closed_and_new_gaps() {
     assert_eq!(d.supported_delta, 5);
     assert_eq!(d.missing_delta, -3);
     assert_eq!(d.closed_missing_classes, vec![("ImaginaryNode".to_string(), 5)]);
-    assert_eq!(d.new_missing_classes, vec![("ForNode".to_string(), 2)]);
+    assert_eq!(d.new_missing_classes, vec![("AliasGlobalVariableNode".to_string(), 2)]);
 }
 
 #[test]
