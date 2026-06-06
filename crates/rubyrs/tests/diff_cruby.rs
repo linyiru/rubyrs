@@ -187,6 +187,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_intern() { run_diff("string_intern"); }
 #[test] fn private_class_method() { run_diff("private_class_method"); }
 #[test] fn interpolation() { run_diff("interpolation"); }
+#[test] fn interpolated_symbol() { run_diff("interpolated_symbol"); }
 #[test] fn rescue_basics() { run_diff("rescue_basics"); }
 #[test] fn fizzbuzz_15() { run_diff("fizzbuzz_15"); }
 #[test] fn inheritance() { run_diff("inheritance"); }

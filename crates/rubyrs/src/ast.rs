@@ -1710,6 +1710,35 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         }).collect();
         return sp(node, Expr::InterpolatedStr(parts));
     }
+    // `:"#{x}=…"` — interpolated symbol. Same `parts()` shape as an
+    // interpolated string; build the string then `.to_sym`. Discovery:
+    // P3 Jekyll spike — jekyll builds setter symbols dynamically, e.g.
+    // `:"#{key}="`.
+    if let Some(n) = node.as_interpolated_symbol_node() {
+        let parts: Vec<SExpr> = n.parts().iter().map(|p| {
+            if let Some(es) = p.as_embedded_statements_node() {
+                let stmts: Vec<SExpr> = es.statements()
+                    .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
+                    .unwrap_or_default();
+                if stmts.len() == 1 {
+                    stmts.into_iter().next().unwrap_or_else(|| sp(&p, Expr::Nil))
+                } else {
+                    Spanned::new(node_span(&p), seq_inner(stmts))
+                }
+            } else if let Some(ev) = p.as_embedded_variable_node() {
+                tr(ctx, &ev.variable())
+            } else {
+                tr(ctx, &p)
+            }
+        }).collect();
+        let interp = sp(node, Expr::InterpolatedStr(parts));
+        return sp(node, Expr::Call {
+            receiver: Some(Box::new(interp)),
+            name: "to_sym".into(),
+            args: vec![],
+            kwargs_trailing: false,
+        });
+    }
     // `/pre #{x} post/` — same `parts()` shape as InterpolatedString;
     // the per-part `to_s + +` build runs in the compiler, then
     // `Op::CompileRegex` turns the resulting String into a Regex.

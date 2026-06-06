@@ -78,6 +78,7 @@ InstanceVariableWriteNode
 IntegerNode
 InterpolatedRegularExpressionNode
 InterpolatedStringNode
+InterpolatedSymbolNode
 InterpolatedXStringNode
 KeywordRestParameterNode
 KeywordHashNode
