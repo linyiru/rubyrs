@@ -4386,6 +4386,28 @@ impl Vm {
         /// when the proto declares kw_params) and for primitives
         /// that genuinely take a positional Hash.
         pub(crate) fn do_call_kw(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
+            // Empty / nil keyword-splat contributes ZERO arguments,
+            // matching CRuby: `f(**{})` and `f(**nil)` pass nothing
+            // (and `f(1, **{})` passes just `1`). The kwargs travel
+            // as the trailing stack arg under CallKw; an EMPTY Hash
+            // (from `**{}` or an empty `**h`) or `nil` (from `**nil`)
+            // must be dropped so a `*rest` callee doesn't collect a
+            // phantom positional — `pos(**{})` is `[]`, not `[{}]`.
+            // Non-empty kwargs hashes are left intact (they're real
+            // kwargs / the trailing positional hash a no-kwarg callee
+            // receives). Runs before the `round` arm so
+            // `5.round(**{})` degrades to `5.round`.
+            if argc > 0 {
+                let drop_trailing = match self.stack.last() {
+                    Some(Value::Hash(hid)) => self.heap.hash(*hid).is_empty(),
+                    Some(Value::Nil) => true,
+                    _ => false,
+                };
+                if drop_trailing {
+                    self.stack.pop();
+                    return self.do_call(name_id, argc - 1, no_recv, cache_id);
+                }
+            }
             // Only `round` is kwarg-aware today, AND only for
             // Int/Float receivers with a supported arg shape.
             // Every other shape — user-defined `C#round(half:)`,
