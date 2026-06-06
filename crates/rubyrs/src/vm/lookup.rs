@@ -598,7 +598,7 @@ impl Vm {
                 "zero?" | "positive?" | "negative?" |
                 "succ" | "next" | "pred" | "-@" | "+@" |
                 "times" | "upto" | "downto" |
-                "digits" | "bit_length" | "[]" |
+                "digits" | "bit_length" | "size" | "[]" |
                 "allbits?" | "anybits?" | "nobits?" |
                 "gcd" | "lcm" | "fdiv" | "divmod" |
                 "ceil" | "floor" | "round" | "truncate" |
@@ -632,7 +632,7 @@ impl Vm {
                 "to_i" | "to_f" |
                 "zero?" | "positive?" | "negative?" |
                 "even?" | "odd?" |
-                "bit_length" | "digits" |
+                "bit_length" | "digits" | "size" |
                 "allbits?" | "anybits?" | "nobits?" |
                 "gcd" | "lcm" | "fdiv" | "divmod" |
                 "ceil" | "floor" | "round" | "truncate" |

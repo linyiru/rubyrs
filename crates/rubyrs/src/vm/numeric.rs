@@ -1099,6 +1099,13 @@ pub(crate) fn numeric_call(
             let bits = 64 - magnitude.leading_zeros();
             Some(Value::Int(bits as i64))
         }
+        // `Integer#size` — bytes in the machine representation. Every
+        // i64-domain value fits in one 64-bit word, so CRuby returns
+        // 8 for all of them (`0.size`, `255.size`, `(2**62).size`
+        // are all 8); only Bignums exceed a word (handled in
+        // bignum.rs). Discovery: P3 Jekyll spike — i18n's
+        // `interpolate` arithmetic calls `Integer#size`.
+        (Value::Int(_), "size", []) => Some(Value::Int(8)),
         // `succ` / `next` / `pred` — with bignum on, decline at
         // the i64 boundary so bigint_primitive's unary arm
         // promotes (`i64::MAX.succ` → BigInt(2^63),

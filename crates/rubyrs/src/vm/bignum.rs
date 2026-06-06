@@ -2067,6 +2067,19 @@ impl Vm {
                         let n = i64::try_from(bits).unwrap_or(i64::MAX);
                         return Ok(Some(Value::Int(n)));
                     }
+                    // `Integer#size` — bytes in the machine
+                    // representation: `max(8, ceil(magnitude_bits /
+                    // 8))`. Unlike `bit_length`, size uses the plain
+                    // magnitude bit count (`BigInt::bits`, which is
+                    // sign-agnostic — `|n|`), NOT the `|n| - 1`
+                    // two's-complement convention: `(2**128).size`
+                    // and `(-(2**128)).size` are both 17, never 16.
+                    // CRuby never reports fewer than one 64-bit word.
+                    "size" => {
+                        let bytes = b.bits().div_ceil(8).max(8);
+                        let n = i64::try_from(bytes).unwrap_or(i64::MAX);
+                        return Ok(Some(Value::Int(n)));
+                    }
                     _ => {}
             }
         }
