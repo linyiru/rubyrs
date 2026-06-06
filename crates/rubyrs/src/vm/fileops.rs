@@ -155,6 +155,57 @@ impl Vm {
                     .unwrap_or_default();
                 Value::new_str(ext)
             }
+            ("join", parts) => {
+                // CRuby `File.join(*parts)` — concatenate path
+                // components with "/", collapsing a doubled separator
+                // only at each join boundary (`File.join("a/", "/b")`
+                // → "a/b", but internal "//" is preserved). Nested
+                // Array args are flattened left-to-right; non-String/
+                // Array leaves raise TypeError. Pure string op — no
+                // filesystem access, so no capability gate. Discovery:
+                // P3 Jekyll spike — Liquid's i18n.rb builds its
+                // DEFAULT_LOCALE via `File.join(...)`.
+                let mut comps: Vec<String> = Vec::new();
+                let mut work: Vec<Value> = parts.iter().rev().cloned().collect();
+                while let Some(v) = work.pop() {
+                    match v {
+                        Value::Str(s) => comps.push(s.to_string_lossy()),
+                        Value::Array(id) => {
+                            let elems: Vec<Value> = self.heap.array(id).clone();
+                            for e in elems.into_iter().rev() {
+                                work.push(e);
+                            }
+                        }
+                        other => {
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: format!(
+                                    "no implicit conversion of {} into String",
+                                    other.type_name()
+                                ),
+                            }));
+                        }
+                    }
+                }
+                let mut result = String::new();
+                for (i, c) in comps.iter().enumerate() {
+                    if i == 0 {
+                        result.push_str(c);
+                        continue;
+                    }
+                    let left = result.ends_with('/');
+                    let right = c.starts_with('/');
+                    if left && right {
+                        result.pop();
+                        result.push_str(c);
+                    } else if left || right {
+                        result.push_str(c);
+                    } else {
+                        result.push('/');
+                        result.push_str(c);
+                    }
+                }
+                Value::new_str(result)
+            }
             ("expand_path", [p]) | ("expand_path", [p, _]) => {
                 // `File.expand_path(path, base=cwd)`. CRuby
                 // doesn't require the path to exist — it just
