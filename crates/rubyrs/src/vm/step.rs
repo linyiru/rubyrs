@@ -352,6 +352,33 @@ impl Vm {
         }
     }
 
+    /// The class along `start`'s superclass chain that owns class
+    /// variable `name`, or `None` if no ancestor defines it. CRuby
+    /// class variables are shared across the hierarchy: a `@@x`
+    /// defined in a parent is the SAME variable when read/written
+    /// from a subclass. Used by Load/StoreCvar so e.g. kramdown's
+    /// `@@parsers` (set in `Kramdown::Parser::Kramdown`) is visible
+    /// to its `SmartyPants` subclass's inherited `define_parser`.
+    pub(crate) fn cvar_owner_class(
+        &self,
+        start: &Rc<Class>,
+        name: crate::intern::SymId,
+    ) -> Option<Rc<Class>> {
+        let mut cur = Some(start.clone());
+        let mut guard = 0;
+        while let Some(c) = cur {
+            if c.class_vars.borrow().contains_key(&name) {
+                return Some(c);
+            }
+            guard += 1;
+            if guard > 4096 {
+                return None;
+            }
+            cur = c.superclass.borrow().clone();
+        }
+        None
+    }
+
     pub(crate) fn dispatch(&mut self) -> Result<(), Trap> {
         while !self.frames.is_empty() {
             // ADR 0024 Phase A.5: block-break in flight. Op::Yield
@@ -1170,11 +1197,16 @@ impl Vm {
                 //     `heap.real_class_of` gives the class.
                 //   - toplevel / block-in-toplevel: no class on
                 //     hand → fall back to Vm.toplevel_cvars.
-                // Tier 1: no hierarchy walk — each class's
-                // `class_vars` is independent of parent/child.
+                // CRuby class variables are shared across the class
+                // hierarchy: read resolves to the nearest ancestor
+                // that defines `@@name` (so a subclass sees a parent's
+                // `@@x`). Falls back to nil if no ancestor has it.
                 let cls_opt = self.surrounding_class();
                 let v = match cls_opt {
-                    Some(cls) => cls.class_vars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
+                    Some(cls) => match self.cvar_owner_class(&cls, name_id) {
+                        Some(owner) => owner.class_vars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
+                        None => Value::Nil,
+                    },
                     None => self.toplevel_cvars.get(&name_id).cloned().unwrap_or(Value::Nil),
                 };
                 self.stack.push(v);
@@ -1183,7 +1215,13 @@ impl Vm {
                 let v = self.stack.pop().expect("ICE: StoreCvar stack underflow");
                 let cls_opt = self.surrounding_class();
                 match cls_opt {
-                    Some(cls) => { cls.class_vars.borrow_mut().insert(name_id, v); }
+                    // Write to the ancestor that already owns `@@name`
+                    // (shared hierarchy semantics); if none does, the
+                    // variable is created on the current class.
+                    Some(cls) => {
+                        let owner = self.cvar_owner_class(&cls, name_id).unwrap_or(cls);
+                        owner.class_vars.borrow_mut().insert(name_id, v);
+                    }
                     None => { self.toplevel_cvars.insert(name_id, v); }
                 }
             }

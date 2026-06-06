@@ -530,6 +530,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn super_splat() { run_diff("super_splat"); }
 #[test] fn object_send() { run_diff("object_send"); }
 #[test] fn class_variables() { run_diff("class_variables"); }
+#[test] fn cvar_hierarchy() { run_diff("cvar_hierarchy"); }
 #[test] fn load_path() { run_diff("load_path"); }
 #[test] fn source_location() { run_diff("source_location"); }
 #[test] fn source_line() { run_diff("source_line"); }
