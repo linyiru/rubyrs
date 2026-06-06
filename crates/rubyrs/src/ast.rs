@@ -3318,6 +3318,27 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 out.push(tr(ctx, bn));
                 continue;
             }
+            // `class << self; private :new; end` — visibility
+            // modifier WITH method-name args at body top level.
+            // Equivalent to `private_class_method :new`: it sets the
+            // named SINGLETON method's visibility. rubyrs doesn't
+            // model singleton-method visibility (same documented
+            // Tier-1 trade-off as `private_class_method` / the bare
+            // form's effect on later defs), so this is a no-op — the
+            // method stays callable. Motivating case: Liquid's
+            // tag.rb does `class << self; def parse(...); ...; end;
+            // private :new; end` to push callers toward `Tag.parse`.
+            if recv_is_self
+                && let Some(call) = bn.as_call_node()
+                && call.receiver().is_none()
+                && call.arguments().is_some_and(|a| a.arguments().iter().next().is_some())
+                && matches!(cid_to_string(call.name()).as_str(),
+                    "private" | "public" | "protected"
+                )
+            {
+                out.push(sp(bn, Expr::Nil));
+                continue;
+            }
             // `class << self; <stmt> if cond` / `class << self;
             // <stmt> unless cond` — and structurally-equivalent
             // block forms `if cond; <stmt>; end` / `unless cond;
@@ -3490,6 +3511,29 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             // that branch has no surrounding class_stack frame, so
             // even silently emitting nil would do the wrong thing
             // (the body's intended target receiver is lost).
+            // Explicit-receiver statement at body top level —
+            // `Template.default_exception_renderer = lambda { … }`,
+            // `Other.configure(...)`, etc. These don't depend on the
+            // singleton-class `self` at all (the receiver is named
+            // explicitly), so translating them through the regular
+            // `tr()` path and running them in the surrounding context
+            // (where `self` is the enclosing class) is observably
+            // identical to CRuby. Only BARE-receiver statements need
+            // the singleton-class self, and those are handled by the
+            // def / attr_* / alias / prepend / visibility arms above
+            // (or fall through to NotImplementedError). Prism models
+            // `Foo.bar = x` as a CallNode with name `bar=` and an
+            // explicit receiver, so attribute-assignment is covered.
+            // Motivating case: Liquid's template.rb sets
+            // `Template.default_exception_renderer = lambda { … }`
+            // inside `class << self`.
+            if recv_is_self
+                && let Some(call) = bn.as_call_node()
+                && call.receiver().is_some()
+            {
+                out.push(tr(ctx, bn));
+                continue;
+            }
             if recv_is_self {
                 let msg = "class << self body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, `prepend Mod` (single Module arg, with `self` receiver), constant assignment (`FOO = expr`), and class variable assignment (`@@cvar = expr`) are supported in the spike subset";
                 out.push(sp(bn, Expr::Call {
