@@ -12279,7 +12279,16 @@ impl Vm {
             // rather than an infinite loop). Wasi has no `require`,
             // so the whole block compiles out there.
             #[cfg(not(target_os = "wasi"))]
-            if hit.is_none() {
+            if hit.is_none()
+                // Only intern when the name already exists — a
+                // scoped-autoload key is always interned at
+                // registration time, so a not-yet-interned `lookup`
+                // can't be pending. The `contains` guard keeps a
+                // `const_defined?` / `const_get` MISS from growing
+                // the interner (the `const_defined_misses_do_not_
+                // grow_interner` resource-cap invariant).
+                && self.interner.contains(&lookup)
+            {
                 let lookup_id = self.interner.intern(&lookup);
                 if let Some(al_path) = self.autoloads_scoped.remove(&lookup_id) {
                     match self.builtin_call("require", &[Value::new_str(al_path)]) {
