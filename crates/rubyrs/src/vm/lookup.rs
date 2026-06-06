@@ -720,7 +720,7 @@ impl Vm {
                 "length" | "size" | "[]" | "[]=" | "empty?" |
                 "include?" | "has_key?" | "key?" | "member?" |
                 "keys" | "values" | "to_h" | "to_hash" | "to_a" |
-                "merge" | "merge!" | "update" | "replace" | "delete" | "invert" | "store" | "except" | "slice" | "dup" |
+                "merge" | "merge!" | "update" | "replace" | "clear" | "delete" | "invert" | "store" | "except" | "slice" | "dup" |
                 "each" | "each_pair" |
                 "select" | "filter" | "reject" | "find" | "detect" |
                 "any?" | "all?" | "none?" |

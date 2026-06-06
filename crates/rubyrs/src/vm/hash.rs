@@ -953,6 +953,14 @@ impl Vm {
                         *self.heap.hash_mut(id) = pairs;
                         Some(Value::Hash(id))
                     }
+                    // `Hash#clear` — remove all pairs, return self.
+                    // Discovery: P3 Jekyll spike — Liquid's
+                    // strainer.rb `global_filter` clears its filter
+                    // cache.
+                    ("clear", []) => {
+                        self.heap.hash_mut(id).clear();
+                        Some(Value::Hash(id))
+                    }
                     ("delete", [k]) => {
                         let pos = self.heap.hash(id).iter()
                             .position(|(key, _)| key.ruby_eql(k, &self.heap));

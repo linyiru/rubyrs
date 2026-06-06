@@ -151,6 +151,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_basics() { run_diff("string_basics"); }
 #[test] fn array_basics() { run_diff("array_basics"); }
 #[test] fn hash_basics() { run_diff("hash_basics"); }
+#[test] fn hash_clear() { run_diff("hash_clear"); }
 #[test] fn block_basics() { run_diff("block_basics"); }
 #[test] fn class_basics() { run_diff("class_basics"); }
 #[test] fn undef_keyword() { run_diff("undef_keyword"); }
