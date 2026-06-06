@@ -1590,6 +1590,29 @@ impl Vm {
                                     })
                                 });
                             }
+                            // CRuby's `YAML` is literally `Psych` (the
+                            // same object). Mirror that: after
+                            // `require "yaml"` / `"psych"`, point both
+                            // constants at one shared Class so
+                            // `defined?(Psych)` is true and
+                            // `YAML == Psych` holds. safe_yaml's engine
+                            // probe (`defined?(Psych) && YAML == Psych
+                            // ? "psych" : "syck"`) then selects the
+                            // modern psych branch instead of the legacy
+                            // syck path (which calls `YAML.tagged_classes`).
+                            if &*path_str == "yaml" || &*path_str == "psych" {
+                                let yaml_id = self.interner.intern("YAML");
+                                let psych_id = self.interner.intern("Psych");
+                                let shared = self
+                                    .classes
+                                    .get(&yaml_id)
+                                    .or_else(|| self.classes.get(&psych_id))
+                                    .cloned();
+                                if let Some(cls) = shared {
+                                    self.classes.entry(yaml_id).or_insert_with(|| cls.clone());
+                                    self.classes.entry(psych_id).or_insert(cls);
+                                }
+                            }
                             // Always-on extras: minimal pure-Ruby shims that
                             // ecosystem code assumes at module-load time
                             // (e.g. `URI::DEFAULT_PARSER` for rack/utils.rb).
