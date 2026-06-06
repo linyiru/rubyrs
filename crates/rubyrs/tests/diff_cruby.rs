@@ -337,6 +337,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn super_to_primitive() { run_diff("super_to_primitive"); }
 #[test] fn fancy_regex_captures() { run_diff("fancy_regex_captures"); }
 #[test] fn numeric_comparable() { run_diff("numeric_comparable"); }
+#[test] fn call_splat_coerce() { run_diff("call_splat_coerce"); }
 #[test] fn struct_factory() { run_diff("struct_factory"); }
 #[test] fn const_get_inheritance_walk() { run_diff("const_get_inheritance_walk"); }
 #[test] fn anon_class_const_set() { run_diff("anon_class_const_set"); }

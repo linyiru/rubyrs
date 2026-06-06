@@ -1701,10 +1701,22 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         if arg_nodes.len() == 1
             && let Some(sn) = arg_nodes[0].as_splat_node()
                 && let Some(splat_expr) = sn.expression() {
+                    // Wrap the splat'd expression in `Array(x)` so
+                    // the call-splat obeys CRuby's coerce-to-array
+                    // contract (Array→unchanged, nil→[], scalar→
+                    // [scalar]) — same as the array-literal splat
+                    // path below. Without it `foo(*5)` reached
+                    // `Op::ApplyCall` with a bare Integer and tripped
+                    // "no implicit conversion of Integer into Array".
                     return wrap_sn(sp(node, Expr::Apply {
                         receiver,
                         name,
-                        splat: Box::new(tr(ctx, &splat_expr)),
+                        splat: Box::new(sp(node, Expr::Call {
+                            receiver: None,
+                            name: "Array".into(),
+                            args: vec![tr(ctx, &splat_expr)],
+                            kwargs_trailing: false,
+                        })),
                         block_arg: early_block_arg,
                     }));
                 }
@@ -1730,7 +1742,16 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         if !buf.is_empty() {
                             chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
                         }
-                        chunks.push(tr(ctx, &inner));
+                        // `Array(inner)` coerce — keeps the `+`-chain
+                        // valid for scalar/nil splats (`foo(a, *5)`)
+                        // and matches the single-splat + array-literal
+                        // paths' CRuby coerce-to-array contract.
+                        chunks.push(sp(node, Expr::Call {
+                            receiver: None,
+                            name: "Array".into(),
+                            args: vec![tr(ctx, &inner)],
+                            kwargs_trailing: false,
+                        }));
                     } else if let Some(kh) = cn.as_keyword_hash_node() {
                     // Trailing kwarg-hash retains its sugar shape;
                     // **opts merges via tr_kwhash's `.merge` chain.
