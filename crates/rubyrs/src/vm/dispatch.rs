@@ -5176,11 +5176,12 @@ impl Vm {
                         Value::Sym(id) => self.interner.resolve(*id).to_string(),
                         Value::Str(s) => s.to_string_lossy(),
                         other => {
+                            // CRuby reports the INSPECTED value
+                            // (`123 is not a symbol nor a string`),
+                            // not the type name.
+                            let inspected = other.to_inspect(&self.heap, &self.interner);
                             return Err(self.trap(RubyError::TypeError {
-                                msg: format!(
-                                    "{} is not a symbol nor a string",
-                                    other.type_name()
-                                ),
+                                msg: format!("{} is not a symbol nor a string", inspected),
                             }));
                         }
                     };
@@ -6266,8 +6267,11 @@ impl Vm {
                     Value::Sym(id) => self.interner.resolve(*id).to_string(),
                     Value::Str(s) => s.to_string_lossy(),
                     other => {
+                        // CRuby reports the inspected value, not the
+                        // type name (`123 is not a symbol nor a string`).
+                        let inspected = other.to_inspect(&self.heap, &self.interner);
                         return Err(self.trap(RubyError::TypeError {
-                            msg: format!("{} is not a symbol nor a string", other.type_name()),
+                            msg: format!("{} is not a symbol nor a string", inspected),
                         }));
                     }
                 };

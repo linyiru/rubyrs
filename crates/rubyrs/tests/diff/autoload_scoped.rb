@@ -56,3 +56,24 @@ File.write("#{base}_6.rb", "module M6; class Baz; end; end\n")
 module M6; end
 M6.autoload("Baz", "/tmp/rubyrs_autoload_scoped_6.rb")
 puts "string_form=#{M6::Baz.is_a?(Class)}"
+
+# Shape 7: explicit-receiver autoload? returns the pending path
+# String while registered.
+module M7; end
+M7.autoload(:Later, "/tmp/rubyrs_autoload_scoped_does_not_exist.rb")
+puts "explicit_autoload_q=#{M7.autoload?(:Later).inspect}"
+
+# Shape 8: malformed autoload args raise TypeError. CRuby reports
+# the INSPECTED const-name value (not its type) and the path's
+# type-name for the conversion error.
+module M8; end
+begin
+  M8.autoload(123, "p")
+rescue TypeError => e
+  puts "bad_const=#{e.message}"
+end
+begin
+  M8.autoload(:Ok, 99)
+rescue TypeError => e
+  puts "bad_path=#{e.message}"
+end

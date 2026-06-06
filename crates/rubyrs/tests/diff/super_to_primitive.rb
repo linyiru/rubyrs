@@ -94,3 +94,16 @@ class Child < Grand
 end
 puts "shape6_from=#{Child.new.from}"
 puts "shape6_class=#{Child.new.class}"
+
+# Shape 7: `def self.allocate; super; end` -> builtin
+# Class#allocate produces a bare instance (no initialize) of the
+# receiver class.
+class Alloc1
+  def self.allocate
+    super
+  end
+end
+class Alloc2 < Alloc1; end
+bare = Alloc2.allocate
+puts "shape7_class=#{bare.class}"
+puts "shape7_isa=#{bare.is_a?(Alloc2)}"
