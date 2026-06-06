@@ -117,6 +117,7 @@ StatementsNode
 StringNode
 SuperNode
 SymbolNode
+ForNode
 TrueNode
 UndefNode
 UnlessNode

@@ -160,6 +160,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn class_basics() { run_diff("class_basics"); }
 #[test] fn undef_keyword() { run_diff("undef_keyword"); }
 #[test] fn condition_variable() { run_diff("condition_variable"); }
+#[test] fn for_loop() { run_diff("for_loop"); }
 #[test] fn backtick_sandbox() { run_diff("backtick_sandbox"); }
 #[test] fn require_time_date() { run_diff("require_time_date"); }
 #[test] fn yaml_is_psych() { run_diff("yaml_is_psych"); }

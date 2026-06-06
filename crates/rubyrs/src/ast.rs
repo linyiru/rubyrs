@@ -3693,6 +3693,54 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             kwargs_trailing: false,
         });
     }
+    // `for x in coll; body; end` — desugar to `coll.each { |x| body
+    // }`. The loop target is a `LocalVariableTargetNode` (the common
+    // `for x in …` shape); a multi-target (`for a, b in …`) maps to a
+    // destructuring block param. Other target shapes (ivar/cvar
+    // targets) fall through to the unsupported-node trail.
+    //
+    // DIVERGENCE: CRuby's `for` does NOT introduce a new scope (the
+    // loop var and any vars first-assigned in the body leak to the
+    // surrounding scope); the `.each` block does scope its params.
+    // Bodies that rely on post-loop leakage diverge — a documented
+    // Tier-1 trade-off, same family as the block-scope notes in
+    // SUBSET.md. Discovery: P3 Jekyll spike — kramdown's html.rb
+    // uses `for element in @stack … end` at load time.
+    if let Some(n) = node.as_for_node() {
+        let index = n.index();
+        let block_params: Option<Vec<BlockParam>> =
+            if let Some(lt) = index.as_local_variable_target_node() {
+                Some(vec![BlockParam::Single(cid_to_string(lt.name()))])
+            } else if let Some(mt) = index.as_multi_target_node() {
+                let mut inner = Vec::new();
+                let mut ok = true;
+                for t in mt.lefts().iter() {
+                    if let Some(lt) = t.as_local_variable_target_node() {
+                        inner.push(BlockParam::Single(cid_to_string(lt.name())));
+                    } else {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok { Some(vec![BlockParam::Destructure(inner)]) } else { None }
+            } else {
+                None
+            };
+        if let Some(block_params) = block_params {
+            let receiver = Some(Box::new(tr(ctx, &n.collection())));
+            let block_body: Vec<SExpr> = match n.statements() {
+                Some(stmts) => stmts.body().iter().map(|c| tr(ctx, &c)).collect(),
+                None => vec![],
+            };
+            return sp(node, Expr::CallWithBlock {
+                receiver,
+                name: "each".into(),
+                args: vec![],
+                block_params,
+                block_body,
+            });
+        }
+    }
     if let Some(n) = node.as_undef_node() {
         let name_nodes: Vec<_> = n.names().iter().collect();
         let args: Vec<SExpr> = name_nodes
