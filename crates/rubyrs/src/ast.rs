@@ -3176,6 +3176,32 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 out.push(sp(bn, Expr::Nil));
                 continue;
             }
+            // `class << self; alias_method :new, :old; end` — the
+            // method-call form of `alias` (vs. the keyword arm
+            // above). Same `self`-receiver gate; routes to
+            // `Op::AliasSingletonMethod` so the alias lands on X's
+            // singleton_methods table. Both operands must be plain
+            // Symbols (the common case). addressable's uri.rb does
+            // `class << self; alias_method :escape_component,
+            // :encode_component; end` (and three more), which the
+            // Jekyll require chain hits.
+            if recv_is_self
+                && let Some(call) = bn.as_call_node()
+                && call.receiver().is_none()
+                && cid_to_string(call.name()) == "alias_method"
+                && let Some(args) = call.arguments()
+            {
+                let arg_vec: Vec<_> = args.arguments().iter().collect();
+                if arg_vec.len() == 2
+                    && let (Some(new_sym), Some(old_sym)) =
+                        (arg_vec[0].as_symbol_node(), arg_vec[1].as_symbol_node())
+                {
+                    let new_name = String::from_utf8_lossy(new_sym.unescaped()).into_owned();
+                    let old_name = String::from_utf8_lossy(old_sym.unescaped()).into_owned();
+                    out.push(sp(bn, Expr::AliasSingletonMethod(new_name, old_name)));
+                    continue;
+                }
+            }
             // `class << self; prepend Mod; end` — install Mod on
             // X's singleton-class prepend chain. Same `self`-
             // receiver gate as `alias`. The recogniser is purely
