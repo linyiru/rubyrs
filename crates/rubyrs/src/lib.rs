@@ -836,17 +836,17 @@ struct PostPreambleSnapshot {
     /// `reset()` clones this and assigns to `vm.classes`,
     /// preserving every preamble class object identity (Rc clone)
     /// and erasing any user `class X; end` definitions.
-    classes: std::collections::HashMap<intern::SymId, std::rc::Rc<value::Class>>,
+    classes: crate::intern::FxHashMap<intern::SymId, std::rc::Rc<value::Class>>,
     /// `vm.constants` as of preamble completion. `reset()` clones
     /// and replaces. Catches the case where user code redefines a
     /// preamble constant (e.g. `Exception = 1`) — the snapshot's
     /// original Class value is restored, not just left.
-    constants: std::collections::HashMap<intern::SymId, value::Value>,
+    constants: crate::intern::FxHashMap<intern::SymId, value::Value>,
     /// `vm.toplevel_methods` as of preamble completion.
     /// Restored by clone-and-replace so a user `def foo; ...` —
     /// or a redefinition of a preamble-supplied toplevel method —
     /// fully rewinds.
-    toplevel_methods: std::collections::HashMap<intern::SymId, std::rc::Rc<value::Method>>,
+    toplevel_methods: crate::intern::FxHashMap<intern::SymId, std::rc::Rc<value::Method>>,
     /// For every preamble class, a snapshot of EVERY mutable
     /// `RefCell` field on the Class struct. Restored by
     /// clone-and-replace into the live `Class`'s RefCells.

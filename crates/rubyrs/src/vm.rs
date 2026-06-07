@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::bytecode::Proto;
 use crate::error::Trap;
 use crate::heap::Heap;
-use crate::intern::{Interner, SymId};
+use crate::intern::{FxHashMap, Interner, SymId};
 use crate::value::{Class, FixedArity, Method, ObjId, Value, Visibility};
 
 mod array;
@@ -553,7 +553,7 @@ pub(crate) struct LastMatch {
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
     pub(crate) interner: Interner,
-    pub(crate) classes: HashMap<SymId, Rc<Class>>,
+    pub(crate) classes: FxHashMap<SymId, Rc<Class>>,
     /// Bare constant assignments (`FOO = expr`), kept in a separate
     /// table from `classes` so `class Foo` and `Foo = 42` can coexist
     /// without collision. `Op::LoadConst` resolves classes first,
@@ -561,7 +561,7 @@ pub(crate) struct Vm {
     /// implementation simplicity, NOT to mirror CRuby (CRuby would
     /// emit "already initialized constant" and reassign). If you
     /// need to shadow a class with a constant, pick a different name.
-    pub(crate) constants: HashMap<SymId, Value>,
+    pub(crate) constants: FxHashMap<SymId, Value>,
     /// Files already loaded via `require_relative` — keyed by
     /// canonical path. Suppresses re-loading on subsequent calls
     /// the same way CRuby's `$LOADED_FEATURES` does. The Set
@@ -639,8 +639,8 @@ pub(crate) struct Vm {
     /// are not stored here; `Op::LoadGlobal` intercepts a known
     /// set and returns the computed value. Plain user globals
     /// fall through to this table.
-    pub(crate) globals: HashMap<SymId, Value>,
-    pub(crate) toplevel_methods: HashMap<SymId, Rc<Method>>,
+    pub(crate) globals: FxHashMap<SymId, Value>,
+    pub(crate) toplevel_methods: FxHashMap<SymId, Rc<Method>>,
     /// Toplevel `@@foo` fallback. CRuby raises RuntimeError on
     /// class-variable use outside a class body; rubyrs takes the
     /// lenient route consistent with our ivar / global handling.
@@ -1194,8 +1194,8 @@ impl Vm {
         Vm {
             protos,
             interner,
-            classes: HashMap::new(),
-            constants: HashMap::new(),
+            classes: FxHashMap::default(),
+            constants: FxHashMap::default(),
             #[cfg(not(target_os = "wasi"))]
             loaded_features: std::collections::HashSet::new(),
             #[cfg(not(target_os = "wasi"))]
@@ -1205,8 +1205,8 @@ impl Vm {
             #[cfg(not(target_os = "wasi"))]
             autoloads_scoped: HashMap::new(),
             cache_counter: 0,
-            globals: HashMap::new(),
-            toplevel_methods: HashMap::new(),
+            globals: FxHashMap::default(),
+            toplevel_methods: FxHashMap::default(),
             toplevel_cvars: HashMap::new(),
             load_path: None,
             host_fns: HashMap::new(),
