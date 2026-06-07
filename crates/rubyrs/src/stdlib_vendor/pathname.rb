@@ -42,18 +42,45 @@ class Pathname
     @path.hash
   end
 
+  # Join `other` onto self, resolving ONLY the leading `.`/`..` of
+  # `other` against the trailing components of self — CRuby's
+  # `Pathname#plus`. Internal `..`/`.` on either side are left intact
+  # (this is deliberately NOT a full `cleanpath`): `Pathname.new("a/../b")
+  # + "c"` stays `"a/../b/c"`. Naive concatenation diverged here —
+  # `(Pathname.new("/usr/bin") + "..").to_s` returned `"/usr/bin/.."`
+  # where CRuby collapses it to `"/usr"`.
   def +(other)
-    other_str = other.is_a?(Pathname) ? other.to_s : other.to_s
-    if other_str.start_with?("/")
-      Pathname.new(other_str)
-    elsif @path.empty?
-      Pathname.new(other_str)
-    elsif @path.end_with?("/")
-      Pathname.new(@path + other_str)
-    else
-      Pathname.new(@path + "/" + other_str)
+    other = other.is_a?(Pathname) ? other.to_s : other.to_s
+    return Pathname.new(other) if other.start_with?("/")
+    absolute = @path.start_with?("/")
+    base = @path.split("/").reject { |c| c.empty? }
+    add = other.split("/").reject { |c| c.empty? }
+    ai = 0
+    loop do
+      ai += 1 while ai < add.length && add[ai] == "."
+      break if base.empty?
+      last = base.pop
+      next if last == "."
+      if last == ".." || ai >= add.length || add[ai] != ".."
+        base.push(last)
+        break
+      end
+      ai += 1
     end
+    rest = add[ai..] || []
+    rest.shift while absolute && rest.first == ".."
+    comps = base + rest
+    result =
+      if absolute
+        "/" + comps.join("/")
+      elsif comps.empty?
+        "."
+      else
+        comps.join("/")
+      end
+    Pathname.new(result)
   end
+  alias_method :/, :+
 
   def basename
     Pathname.new(File.basename(@path))

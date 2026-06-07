@@ -613,6 +613,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "stdlib")]
 #[test] fn pathname_ascend() { run_diff("pathname_ascend"); }
 #[cfg(feature = "stdlib")]
+#[test] fn pathname_plus() { run_diff("pathname_plus"); }
+#[cfg(feature = "stdlib")]
 #[test] fn set_enumerable() { run_diff("set_enumerable"); }
 #[cfg(feature = "stdlib")]
 #[test] fn set_ops() { run_diff("set_ops"); }
