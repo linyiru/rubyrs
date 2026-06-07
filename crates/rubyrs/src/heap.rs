@@ -1103,6 +1103,36 @@ impl Heap {
                 let i = id.0 as usize;
                 marks[i] = true;
             }
+            // A class is `Rc<Class>` and owns no GC slot of its own, but
+            // its instance variables hold real heap Values — e.g. an
+            // anonymous `Struct`'s `@__struct_attrs` Array. The root scan
+            // (vm/gc.rs) descends into classes bound to a constant,
+            // global, or `self.classes`, but a class reachable ONLY
+            // through a container (an Array/Hash constant, an instance or
+            // class ivar, a local, a frame slot) was never reached here,
+            // so its ivars were swept mid-use — a use-after-free. Walk
+            // the class graph iteratively (classes can hold classes; the
+            // `seen` set guards cycles and keeps this non-recursive) and
+            // mark each heap-backed ivar. Found by /code-review; the
+            // constant/global root scan fixed only the direct-binding
+            // case. (Matches that scan's ivars-only scope.)
+            Value::Class(c) => {
+                let mut stack: Vec<Rc<Class>> = vec![c.clone()];
+                let mut seen: Vec<*const Class> = vec![Rc::as_ptr(c)];
+                while let Some(cls) = stack.pop() {
+                    for iv in cls.ivars.borrow().values() {
+                        if let Value::Class(d) = iv {
+                            let p = Rc::as_ptr(d);
+                            if !seen.contains(&p) {
+                                seen.push(p);
+                                stack.push(d.clone());
+                            }
+                        } else {
+                            Heap::visit_value(iv, marks, worklist);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }

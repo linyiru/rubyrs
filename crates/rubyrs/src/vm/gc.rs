@@ -539,20 +539,17 @@ impl Vm {
         for cls in self.classes.values() {
             for v in cls.ivars.borrow().values() { roots.push(v.clone()); }
         }
-        // Classes reachable ONLY via a constant or a global — anonymous
-        // classes named by assignment (`S = Struct.new(...)`) or a class
-        // stashed in `$global` — are NOT in `self.classes`, so the loop
-        // above misses their class-level ivars. `visit_value` has no
-        // `Value::Class` arm (a Class is Rc-counted, not a GC slot), so
-        // those ivars are otherwise never reached and a heap-backed
-        // class ivar (e.g. Struct's `@__struct_attrs` Array) gets swept
-        // mid-use. Root them here too. Found via STRESS_GC on
-        // `Struct.new(...).new(...)`.
-        for v in self.constants.values().chain(self.globals.values()) {
-            if let Value::Class(c) = v {
-                for iv in c.ivars.borrow().values() { roots.push(iv.clone()); }
-            }
-        }
+        // Anonymous classes named only by assignment (`S = Struct.new`),
+        // stashed in a `$global`, or held inside a container (an
+        // Array/Hash constant, an ivar, a local) are NOT in
+        // `self.classes`, so the loop above misses their class-level
+        // ivars. They no longer need a hand-rolled root here: rooting the
+        // constant/global/container Value is enough because
+        // `visit_value`'s `Value::Class` arm descends into class ivars
+        // when the mark phase reaches the class through ANY rooted Value
+        // (replacing the earlier constant/global-only special case;
+        // found via /code-review — the special case missed sibling
+        // container paths and the Struct `@__struct_attrs` UAF).
         for f in &self.frames {
             roots.push(f.self_val.clone());
             for v in f.locals.borrow().iter() { roots.push(v.clone()); }
