@@ -25,7 +25,9 @@ module Jekyll
       safe true
       priority :low
 
-      def matches?(ext)
+      # Jekyll's renderer selects converters via `c.matches(ext)`
+      # (no `?`), matching the real jekyll-sass-converter Scss#matches.
+      def matches(ext)
         ext =~ self.class::EXTENSION_PATTERN
       end
 
