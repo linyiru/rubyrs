@@ -705,16 +705,28 @@ impl Vm {
             }
             ("cp" | "copy", [src, dst]) => {
                 self.check_filesystem_io_allowed("FileUtils.cp", None)?;
-                let s = paths(self, src)?.into_iter().next().unwrap_or_default();
+                let srcs = paths(self, src)?;
                 let d = paths(self, dst)?.into_iter().next().unwrap_or_default();
-                self.check_filesystem_io_allowed("FileUtils.cp", Some(Path::new(&s)))?;
                 self.check_filesystem_io_allowed("FileUtils.cp", Some(Path::new(&d)))?;
-                // If dst is an existing directory, copy INTO it (CRuby).
-                let dest = if Path::new(&d).is_dir() {
-                    Path::new(&d).join(Path::new(&s).file_name().unwrap_or_default())
-                        .to_string_lossy().into_owned()
-                } else { d };
-                std::fs::copy(&s, &dest).map_err(|e| self.trap(io_error(&e, Some(Path::new(&s)))))?;
+                // CRuby: a *list* of sources (or an existing-directory
+                // dest) always joins dest/basename(src) — copying only
+                // the first source, as the old code did, silently dropped
+                // the rest. A single source to a non-dir dest copies to
+                // dest verbatim.
+                let into_dir = matches!(src, Value::Array(_)) || Path::new(&d).is_dir();
+                for s in &srcs {
+                    self.check_filesystem_io_allowed("FileUtils.cp", Some(Path::new(s)))?;
+                    let dest = if into_dir {
+                        Path::new(&d)
+                            .join(Path::new(s).file_name().unwrap_or_default())
+                            .to_string_lossy()
+                            .into_owned()
+                    } else {
+                        d.clone()
+                    };
+                    std::fs::copy(s, &dest)
+                        .map_err(|e| self.trap(io_error(&e, Some(Path::new(s)))))?;
+                }
                 Value::Nil
             }
             ("touch", [a]) => {

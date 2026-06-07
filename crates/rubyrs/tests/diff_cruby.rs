@@ -632,4 +632,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn file_fnmatch() { run_diff("file_fnmatch"); }
 #[test] fn fileops_write() { run_diff("fileops_write"); }
 #[test] fn errno_rescue() { run_diff("errno_rescue"); }
+#[test] fn fileutils_cp_array() { run_diff("fileutils_cp_array"); }
 #[test] fn scoped_autoload() { run_diff("scoped_autoload"); }
