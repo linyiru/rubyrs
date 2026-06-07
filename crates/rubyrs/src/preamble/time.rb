@@ -85,6 +85,62 @@ class Time
     end
   end
 
+  # Howard Hinnant's `days_from_civil` — the inverse of `decompose`'s
+  # `civil_from_days`. Returns days since 1970-01-01 for a proleptic
+  # Gregorian (year, month 1..12, day) triple, correct for pre-1970
+  # dates too. Used by `Time.parse` to turn a parsed date back into a
+  # Unix timestamp.
+  def self.days_from_civil(y, m, d)
+    y -= 1 if m <= 2
+    era = (y >= 0 ? y : y - 399) / 400
+    yoe = y - era * 400
+    mp = m > 2 ? m - 3 : m + 9
+    doy = (153 * mp + 2) / 5 + d - 1
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    era * 146_097 + doe - 719_468
+  end
+
+  # `Time.parse(str)` — a focused parser for the ISO-8601-ish date /
+  # datetime shapes the front-matter / filename-date world uses:
+  # `YYYY-MM-DD`, optionally `[ T]HH:MM[:SS]`, optionally a `Z` /
+  # `±HH:MM` / `±HHMM` offset. Tier 1 is UTC-only, so an offset is
+  # normalised to UTC at parse time and the result carries no zone of
+  # its own. Bad input raises ArgumentError (CRuby's contract, which
+  # jekyll's `Utils.parse_date` rescues). The full `Time.parse`
+  # natural-language surface (weekday names, `now`-relative fills) is
+  # out of scope. Discovery: P3 Jekyll spike — `Utils.parse_date`
+  # does `Time.parse(input).localtime`.
+  def self.parse(str, _now = nil)
+    s = str.to_s
+    m = s.match(%r!(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?\s*(Z|[+-]\d{2}:?\d{2})?!)
+    raise ArgumentError, "no time information in #{str.inspect}" unless m
+    year  = m[1].to_i
+    month = m[2].to_i
+    day   = m[3].to_i
+    hour  = (m[4] || "0").to_i
+    minute = (m[5] || "0").to_i
+    second = (m[6] || "0").to_i
+    off = 0
+    tz = m[7]
+    if tz && tz != "Z"
+      sign = tz.start_with?("-") ? -1 : 1
+      digits = tz.gsub(":", "")
+      off = sign * (digits[1, 2].to_i * 3600 + digits[3, 2].to_i * 60)
+    end
+    total = days_from_civil(year, month, day) * 86_400 +
+            hour * 3600 + minute * 60 + second - off
+    new(total, 0)
+  end
+
+  # Tier-1 UTC-only: `#localtime` / `#getlocal` have no separate local
+  # zone to convert into, so they return self (the time value is
+  # unchanged; only the would-be zone label differs, and we don't
+  # model zones). Accept and ignore an explicit-offset argument.
+  def localtime(*)
+    self
+  end
+  alias_method :getlocal, :localtime
+
   # Accessors mirroring CRuby's surface. `tv_sec` / `tv_nsec`
   # are the POSIX names; `sec` / `nsec` / `usec` are the
   # human-friendly ones. All are integer-typed.
