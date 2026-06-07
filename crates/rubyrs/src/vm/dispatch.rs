@@ -9666,6 +9666,49 @@ impl Vm {
         }
     }
 
+    /// Build a block invocation's fresh locals cell as a snapshot of
+    /// `captured`, grown to `n_locals`, reusing a pooled cell's buffer
+    /// when one is available. This is the block-form counterpart to
+    /// [`intern_locals`] for the hot `arr.each { … }` / `map` / `select`
+    /// loop: instead of `Rc::new(RefCell::new(captured.clone()))` (a
+    /// fresh Rc + Vec allocation every element — the #1 leaf cost in the
+    /// primitive-block-iteration profile), it pops a recycled cell and
+    /// refills its retained-capacity buffer via `extend_from_slice`, so
+    /// only the element copy remains; the per-element malloc/free churn
+    /// is gone.
+    ///
+    /// Correctness piggybacks on `recycle_frame_locals`'s
+    /// `strong_count == 1` guard: a block whose body creates an escaping
+    /// closure leaves `strong_count >= 2` at `Op::Return`, so its cell is
+    /// NOT recycled and the next invocation cannot reuse it — each
+    /// escaping iteration keeps its own distinct Rc, preserving the
+    /// `.each`-capture-isolation fix. Non-escaping blocks (the common
+    /// case) cycle one cell through the loop.
+    fn block_locals_from_captured(
+        &mut self,
+        captured: &Rc<RefCell<Vec<Value>>>,
+        n_locals: usize,
+    ) -> Rc<RefCell<Vec<Value>>> {
+        let src = captured.borrow();
+        if let Some(cell) = self.locals_pool.pop() {
+            {
+                let mut v = cell.borrow_mut();
+                v.clear();
+                v.extend_from_slice(&src);
+                if v.len() < n_locals {
+                    v.resize(n_locals, Value::Nil);
+                }
+            }
+            cell
+        } else {
+            let mut v = src.clone();
+            if v.len() < n_locals {
+                v.resize(n_locals, Value::Nil);
+            }
+            Rc::new(RefCell::new(v))
+        }
+    }
+
     /// Return a popped frame's locals cell to the pool, IFF nothing else
     /// still references it. A `define_method` body shares its locals Rc
     /// with the closure's capture (`strong_count >= 2`), and a pending
@@ -10996,15 +11039,12 @@ impl Vm {
         // outer block frame has popped) is a documented Tier-1
         // divergence — see the Op::Return write-back arm and
         // SUBSET.md for the trade-off.
-        let fresh_locals: Rc<RefCell<Vec<Value>>> = {
-            let src = captured.borrow();
-            Rc::new(RefCell::new(src.clone()))
-        };
+        // Snapshot the captured outer scope into a fresh (pool-reused)
+        // cell sized to `needed`. The helper grows to `needed`, so the
+        // explicit grow loop that used to live here is gone.
+        let fresh_locals = self.block_locals_from_captured(&captured, needed);
         {
             let mut locals = fresh_locals.borrow_mut();
-            if locals.len() < needed {
-                while locals.len() < needed { locals.push(Value::Nil); }
-            }
             // Reset body-introduced block-local slots before
             // rebinding params. CRuby's "block-locals are fresh
             // each invocation" semantics: a variable

@@ -662,3 +662,4 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn file_fnmatch_globstar() { run_diff("file_fnmatch_globstar"); }
 #[test] fn scoped_autoload() { run_diff("scoped_autoload"); }
 #[test] fn explicit_recv_block_fastpath() { run_diff("explicit_recv_block_fastpath"); }
+#[test] fn block_locals_pool_reuse() { run_diff("block_locals_pool_reuse"); }
