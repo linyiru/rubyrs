@@ -880,14 +880,14 @@ struct PostPreambleSnapshot {
 /// not by user Ruby, and clearing it across resets would break
 /// hosts that rely on the registration surviving.
 struct ClassStateSnapshot {
-    ivars: std::collections::HashMap<intern::SymId, value::Value>,
-    methods: std::collections::HashMap<intern::SymId, std::rc::Rc<value::Method>>,
-    singleton_methods: std::collections::HashMap<intern::SymId, std::rc::Rc<value::Method>>,
+    ivars: crate::intern::FxHashMap<intern::SymId, value::Value>,
+    methods: crate::intern::FxHashMap<intern::SymId, std::rc::Rc<value::Method>>,
+    singleton_methods: crate::intern::FxHashMap<intern::SymId, std::rc::Rc<value::Method>>,
     superclass: Option<std::rc::Rc<value::Class>>,
     includes: Vec<std::rc::Rc<value::Class>>,
     prepends: Vec<std::rc::Rc<value::Class>>,
     singleton_prepends: Vec<std::rc::Rc<value::Class>>,
-    class_vars: std::collections::HashMap<intern::SymId, value::Value>,
+    class_vars: crate::intern::FxHashMap<intern::SymId, value::Value>,
 }
 
 /// Per-process slot used by the wizer pre-initialize path. On

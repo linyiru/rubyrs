@@ -1,5 +1,60 @@
-use std::collections::HashMap;
 use std::rc::Rc;
+
+/// rustc-hash-style `FxHasher` — a fast, non-cryptographic hasher for the
+/// integer `SymId` keys the method / ivar / const tables use on the dispatch
+/// hot path. The std default `SipHash` is cryptographic (DoS-resistant) but
+/// overkill for these internal, non-attacker-controlled integer keys, and
+/// showed up at ~6% self-time in the call-path profile. Not used for the
+/// user-facing `Hash` (that keeps its own FNV-consistent path in heap.rs).
+#[derive(Default)]
+pub(crate) struct FxHasher {
+    hash: u64,
+}
+
+impl FxHasher {
+    const K: u64 = 0x517c_c1b7_2722_0a95;
+    #[inline]
+    fn add(&mut self, i: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(Self::K);
+    }
+}
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.add(b as u64);
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+/// A `HashMap` keyed with [`FxHasher`] — for the internal SymId/Rc<str> tables.
+pub(crate) type FxHashMap<K, V> =
+    std::collections::HashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
 
 /// Opaque token identifying a string in the [`Interner`]. Equality is a
 /// single u32 compare, which is what makes Ruby `Symbol#==`, method-dispatch
@@ -12,13 +67,13 @@ pub struct SymId(pub(crate) u32);
 /// content gets one [`SymId`]. The same table is shared by every Proto in
 /// a Vm — it replaces the per-Proto `strings: Vec<String>` we used before.
 pub(crate) struct Interner {
-    map: HashMap<Rc<str>, SymId>,
+    map: FxHashMap<Rc<str>, SymId>,
     vec: Vec<Rc<str>>,
 }
 
 impl Interner {
     pub(crate) fn new() -> Self {
-        Interner { map: HashMap::new(), vec: Vec::new() }
+        Interner { map: FxHashMap::default(), vec: Vec::new() }
     }
 
     pub(crate) fn intern(&mut self, s: &str) -> SymId {

@@ -6,7 +6,6 @@
 //! other consumer of `last_match`.
 #![cfg(feature = "regex")]
 
-use std::collections::HashMap;
 
 use crate::error::Trap;
 use crate::heap::HeapObj;
@@ -55,7 +54,7 @@ impl Vm {
         self.check_alloc()?;
         let obj_id = self.heap.alloc(HeapObj::Instance(Instance {
             class: cls,
-            ivars: HashMap::new(),
+            ivars: crate::intern::FxHashMap::default(),
             singleton_class: None,
             frozen: std::cell::Cell::new(false),
         }));

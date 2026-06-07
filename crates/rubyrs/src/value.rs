@@ -1,8 +1,7 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::intern::SymId;
+use crate::intern::{FxHashMap, SymId};
 
 /// Heap-shared string body with a frozen flag. Holds raw bytes
 /// (not Rust `String`) so that arbitrary byte sequences can
@@ -269,8 +268,8 @@ pub struct Class {
     /// matching CRuby. Use cases: `module Tilt; @default = ...;
     /// class << self; attr_accessor :default; end; end` round-
     /// trips, `Foo.instance_variable_set(...)` semantics later.
-    pub(crate) ivars: RefCell<HashMap<SymId, Value>>,
-    pub(crate) methods: RefCell<HashMap<SymId, Rc<Method>>>,
+    pub(crate) ivars: RefCell<FxHashMap<SymId, Value>>,
+    pub(crate) methods: RefCell<FxHashMap<SymId, Rc<Method>>>,
     /// Per-class singleton-method table — `def self.foo; ...; end`
     /// inside a class body installs `foo` here. Dispatched against
     /// `Value::Class(c)` receivers in `do_call`. Parallel to
@@ -279,7 +278,7 @@ pub struct Class {
     /// singletons keyed by interned method SymId on the Class
     /// itself, so it survives class re-opening naturally and
     /// doesn't need a separate generation counter.
-    pub(crate) singleton_methods: RefCell<HashMap<SymId, Rc<Method>>>,
+    pub(crate) singleton_methods: RefCell<FxHashMap<SymId, Rc<Method>>>,
     /// Parent class for method lookup. `None` only for the implicit root
     /// (Object); every user-defined class has a superclass (defaulting to
     /// Object if not specified).
@@ -369,7 +368,7 @@ pub struct Class {
     /// dry-struct caches, etc.) keep class vars on a single
     /// class anyway. Documented divergence — recorded in
     /// SUBSET.md when this lands.
-    pub(crate) class_vars: RefCell<HashMap<SymId, Value>>,
+    pub(crate) class_vars: RefCell<FxHashMap<SymId, Value>>,
     /// Per-class constant storage for ANONYMOUS classes
     /// (cls.name == ""). Named classes still keep their
     /// constants in the Vm-level `self.constants` HashMap
@@ -385,7 +384,7 @@ pub struct Class {
     /// consults this table FIRST when the starting scope is
     /// anon, before falling through to the
     /// inheritance-chain walk.
-    pub(crate) consts: RefCell<HashMap<SymId, Value>>,
+    pub(crate) consts: RefCell<FxHashMap<SymId, Value>>,
     /// L3-F: optional cext-side allocator. When `Klass.new(args)` is
     /// dispatched and this is `Some(fn)`, the host calls `fn(klass)`
     /// to produce the instance handle (typically a
@@ -446,7 +445,7 @@ impl Class {
 #[derive(Debug)]
 pub struct Instance {
     pub(crate) class: Rc<Class>,
-    pub(crate) ivars: HashMap<SymId, Value>,
+    pub(crate) ivars: FxHashMap<SymId, Value>,
     /// CRuby-style eigenclass: a synthetic Class whose
     /// `superclass` is `self.class`, holding methods unique to
     /// this one object. `None` until the first singleton method

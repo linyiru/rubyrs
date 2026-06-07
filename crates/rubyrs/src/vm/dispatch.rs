@@ -16,7 +16,6 @@
 //!     name lookup fails.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::error::{RubyError, Trap};
@@ -3118,9 +3117,9 @@ impl Vm {
                         let v = std::rc::Rc::new(crate::value::Class {
                             name: format!("#<Class:{}>", cls.name),
                             is_module: false,
-                            ivars: std::cell::RefCell::new(HashMap::new()),
-                            methods: std::cell::RefCell::new(HashMap::new()),
-                            singleton_methods: std::cell::RefCell::new(HashMap::new()),
+                            ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                            methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                            singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                             superclass: std::cell::RefCell::new(shell_superclass),
                             includes: std::cell::RefCell::new(Vec::new()),
                             prepends: std::cell::RefCell::new(Vec::new()),
@@ -3128,8 +3127,8 @@ impl Vm {
                             singleton_includes: std::cell::RefCell::new(Vec::new()),
                             singleton_view: std::cell::RefCell::new(None),
                             singleton_target: std::cell::RefCell::new(Some(std::rc::Rc::downgrade(&cls))),
-                            class_vars: std::cell::RefCell::new(HashMap::new()),
-            consts: std::cell::RefCell::new(HashMap::new()),
+                            class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                             #[cfg(feature = "cext")]
                             cext_alloc_func: std::cell::Cell::new(None),
                         });
@@ -3629,7 +3628,7 @@ impl Vm {
             default_block: None,
             default_value: None,
             class_tag,
-            ivars: std::collections::HashMap::new(),
+            ivars: crate::intern::FxHashMap::default(),
             index: None,
         }));
         g.vm.stack.push(Value::Hash(hid));
@@ -3758,9 +3757,9 @@ impl Vm {
         let m = std::rc::Rc::new(Class {
             name: String::new(),
             is_module: true,
-            ivars: std::cell::RefCell::new(HashMap::new()),
-            methods: std::cell::RefCell::new(HashMap::new()),
-            singleton_methods: std::cell::RefCell::new(HashMap::new()),
+            ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             superclass: std::cell::RefCell::new(None),
             includes: std::cell::RefCell::new(Vec::new()),
             prepends: std::cell::RefCell::new(Vec::new()),
@@ -3768,8 +3767,8 @@ impl Vm {
             singleton_includes: std::cell::RefCell::new(Vec::new()),
             singleton_view: std::cell::RefCell::new(None),
             singleton_target: std::cell::RefCell::new(None),
-            class_vars: std::cell::RefCell::new(HashMap::new()),
-            consts: std::cell::RefCell::new(HashMap::new()),
+            class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -3915,9 +3914,9 @@ impl Vm {
         let new_cls = Rc::new(Class {
             name: String::new(),
             is_module: false,
-            ivars: std::cell::RefCell::new(HashMap::new()),
-            methods: std::cell::RefCell::new(HashMap::new()),
-            singleton_methods: std::cell::RefCell::new(HashMap::new()),
+            ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             superclass: std::cell::RefCell::new(parent),
             includes: std::cell::RefCell::new(Vec::new()),
             prepends: std::cell::RefCell::new(Vec::new()),
@@ -3925,8 +3924,8 @@ impl Vm {
             singleton_includes: std::cell::RefCell::new(Vec::new()),
             singleton_view: std::cell::RefCell::new(None),
             singleton_target: std::cell::RefCell::new(None),
-            class_vars: std::cell::RefCell::new(HashMap::new()),
-            consts: std::cell::RefCell::new(HashMap::new()),
+            class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -11028,9 +11027,9 @@ impl Vm {
             let new_cls = std::rc::Rc::new(Class {
                 name: String::new(),
                 is_module: false,
-                ivars: std::cell::RefCell::new(HashMap::new()),
-                methods: std::cell::RefCell::new(HashMap::new()),
-                singleton_methods: std::cell::RefCell::new(HashMap::new()),
+                ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 superclass: std::cell::RefCell::new(parent),
                 includes: std::cell::RefCell::new(Vec::new()),
                 prepends: std::cell::RefCell::new(Vec::new()),
@@ -11038,8 +11037,8 @@ impl Vm {
                 singleton_includes: std::cell::RefCell::new(Vec::new()),
                 singleton_view: std::cell::RefCell::new(None),
                 singleton_target: std::cell::RefCell::new(None),
-                class_vars: std::cell::RefCell::new(HashMap::new()),
-            consts: std::cell::RefCell::new(HashMap::new()),
+                class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 #[cfg(feature = "cext")]
                 cext_alloc_func: std::cell::Cell::new(None),
             });
@@ -11089,9 +11088,9 @@ impl Vm {
             let new_mod = std::rc::Rc::new(Class {
                 name: String::new(),
                 is_module: true,
-                ivars: std::cell::RefCell::new(HashMap::new()),
-                methods: std::cell::RefCell::new(HashMap::new()),
-                singleton_methods: std::cell::RefCell::new(HashMap::new()),
+                ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 superclass: std::cell::RefCell::new(None),
                 includes: std::cell::RefCell::new(Vec::new()),
                 prepends: std::cell::RefCell::new(Vec::new()),
@@ -11099,8 +11098,8 @@ impl Vm {
                 singleton_includes: std::cell::RefCell::new(Vec::new()),
                 singleton_view: std::cell::RefCell::new(None),
                 singleton_target: std::cell::RefCell::new(None),
-                class_vars: std::cell::RefCell::new(HashMap::new()),
-            consts: std::cell::RefCell::new(HashMap::new()),
+                class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 #[cfg(feature = "cext")]
                 cext_alloc_func: std::cell::Cell::new(None),
             });
@@ -12849,14 +12848,14 @@ impl Vm {
                 default_block: None,
                 default_value: None,
                 class_tag: Some(cls.clone()),
-                ivars: std::collections::HashMap::new(),
+                ivars: crate::intern::FxHashMap::default(),
                 index: None,
             }));
             return Ok(Value::Hash(id));
         }
         let id = self.heap.alloc(HeapObj::Instance(Instance {
             class: cls.clone(),
-            ivars: HashMap::new(),
+            ivars: crate::intern::FxHashMap::default(),
             singleton_class: None,
             frozen: std::cell::Cell::new(false),
         }));

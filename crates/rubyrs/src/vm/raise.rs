@@ -14,7 +14,6 @@
 //!   for a matching `rescue` handler; runs the handler if found,
 //!   re-raises as Uncaught Trap otherwise.
 
-use std::collections::HashMap;
 
 use std::hint::cold_path;
 use std::rc::Rc;
@@ -40,7 +39,7 @@ impl Vm {
                     self.maybe_gc();
                     let id = self.heap.alloc(HeapObj::Instance(Instance {
                         class: cls,
-                        ivars: HashMap::new(),
+                        ivars: crate::intern::FxHashMap::default(),
                         singleton_class: None,
             frozen: std::cell::Cell::new(false),
                     }));
@@ -63,7 +62,7 @@ impl Vm {
                 self.maybe_gc();
                 let id = self.heap.alloc(HeapObj::Instance(Instance {
                     class: cls.clone(),
-                    ivars: HashMap::new(),
+                    ivars: crate::intern::FxHashMap::default(),
                     singleton_class: None,
             frozen: std::cell::Cell::new(false),
                 }));
@@ -119,7 +118,7 @@ impl Vm {
         self.maybe_gc();
         let id = self.heap.alloc(HeapObj::Instance(Instance {
             class: cls,
-            ivars: HashMap::new(),
+            ivars: crate::intern::FxHashMap::default(),
             singleton_class: None,
             frozen: std::cell::Cell::new(false),
         }));
@@ -578,7 +577,7 @@ pub(crate) fn build_interrupt_exception(vm: &mut crate::vm::Vm) -> Option<crate:
     }
     let id = vm.heap.alloc(HeapObj::Instance(Instance {
         class: cls,
-        ivars: std::collections::HashMap::new(),
+        ivars: crate::intern::FxHashMap::default(),
         singleton_class: None,
             frozen: std::cell::Cell::new(false),
     }));
@@ -592,7 +591,6 @@ pub(crate) fn build_interrupt_exception(vm: &mut crate::vm::Vm) -> Option<crate:
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use std::collections::HashMap;
     use crate::bytecode::Proto;
     use crate::intern::Interner;
 
@@ -604,9 +602,9 @@ mod tests {
         Rc::new(Class {
             name: name.to_string(),
             is_module: false,
-            ivars: RefCell::new(HashMap::new()),
-            methods: RefCell::new(HashMap::new()),
-            singleton_methods: RefCell::new(HashMap::new()),
+            ivars: RefCell::new(crate::intern::FxHashMap::default()),
+            methods: RefCell::new(crate::intern::FxHashMap::default()),
+            singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
             includes: RefCell::new(Vec::new()),
             prepends: RefCell::new(Vec::new()),
             singleton_prepends: RefCell::new(Vec::new()),
@@ -614,8 +612,8 @@ mod tests {
             singleton_view: RefCell::new(None),
             singleton_target: RefCell::new(None),
             superclass: RefCell::new(superclass),
-            class_vars: RefCell::new(HashMap::new()),
-            consts: RefCell::new(HashMap::new()),
+            class_vars: RefCell::new(crate::intern::FxHashMap::default()),
+            consts: RefCell::new(crate::intern::FxHashMap::default()),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         })
@@ -640,7 +638,7 @@ mod tests {
         // Allocate an empty Instance directly.
         let id = vm.heap.alloc(HeapObj::Instance(Instance {
             class: cls,
-            ivars: HashMap::new(),
+            ivars: crate::intern::FxHashMap::default(),
             singleton_class: None,
             frozen: std::cell::Cell::new(false),
         }));

@@ -403,6 +403,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn method_call_block() { run_diff("method_call_block"); }
 #[test] fn yield_through_nested_block() { run_diff("yield_through_nested_block"); }
 #[test] fn frame_locals_pool() { run_diff("frame_locals_pool"); }
+#[test] fn fxhash_internal_maps() { run_diff("fxhash_internal_maps"); }
 #[test] fn p0_each_yield_composability() { run_diff("p0_each_yield_composability"); }
 #[test] fn string_dump() { run_diff("string_dump"); }
 #[test] fn string_count() { run_diff("string_count"); }

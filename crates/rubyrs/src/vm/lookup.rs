@@ -1919,7 +1919,6 @@ impl Vm {
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
-    use std::collections::HashMap;
     use crate::bytecode::Proto;
     use crate::intern::Interner;
     use crate::value::Visibility;
@@ -1944,9 +1943,9 @@ mod tests {
         Rc::new(Class {
             name: name.to_string(),
             is_module: false,
-            ivars: RefCell::new(HashMap::new()),
-            methods: RefCell::new(HashMap::new()),
-            singleton_methods: RefCell::new(HashMap::new()),
+            ivars: RefCell::new(crate::intern::FxHashMap::default()),
+            methods: RefCell::new(crate::intern::FxHashMap::default()),
+            singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
             includes: RefCell::new(Vec::new()),
             prepends: RefCell::new(Vec::new()),
             singleton_prepends: RefCell::new(Vec::new()),
@@ -1954,8 +1953,8 @@ mod tests {
             singleton_view: RefCell::new(None),
             singleton_target: RefCell::new(None),
             superclass: RefCell::new(superclass),
-            class_vars: RefCell::new(HashMap::new()),
-            consts: RefCell::new(HashMap::new()),
+            class_vars: RefCell::new(crate::intern::FxHashMap::default()),
+            consts: RefCell::new(crate::intern::FxHashMap::default()),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         })

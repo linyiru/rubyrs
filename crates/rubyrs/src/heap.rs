@@ -308,7 +308,7 @@ pub(crate) struct HashObj {
     /// Instance variables, for Hash-subclass instances that set
     /// `@foo` in their methods. Empty (and never touched) for plain
     /// `{}` / `Hash.new`. Values are GC-marked alongside `pairs`.
-    pub(crate) ivars: std::collections::HashMap<crate::intern::SymId, Value>,
+    pub(crate) ivars: crate::intern::FxHashMap<crate::intern::SymId, Value>,
     /// O(1) key index: `ruby_hash(key)` → the positions in `pairs`
     /// whose key hashes there (usually one). `None` means "not built
     /// / invalidated" — rebuilt lazily on the next indexed lookup.
@@ -355,7 +355,7 @@ impl HashObj {
             default_block: None,
             default_value: None,
             class_tag: None,
-            ivars: std::collections::HashMap::new(),
+            ivars: crate::intern::FxHashMap::default(),
             index: None,
         }
     }
@@ -493,7 +493,6 @@ impl Heap {
     /// class after exhausting singleton methods.
     pub(crate) fn ensure_singleton_class(&mut self, id: ObjId) -> Rc<crate::value::Class> {
         use std::cell::RefCell;
-        use std::collections::HashMap;
         let inst = self.instance_mut(id);
         if let Some(sc) = &inst.singleton_class {
             return sc.clone();
@@ -502,14 +501,14 @@ impl Heap {
         let sc = Rc::new(crate::value::Class {
             name: format!("#<Class:#<{}>>", original.name),
             is_module: false,
-            ivars: RefCell::new(HashMap::new()),
-            methods: RefCell::new(HashMap::new()),
+            ivars: RefCell::new(crate::intern::FxHashMap::default()),
+            methods: RefCell::new(crate::intern::FxHashMap::default()),
             // Eigenclasses have no per-class singleton-method
             // table of their own — `def self.foo` (master's
             // class-level singletons) doesn't apply to a
             // synthetic singleton class. Keep this empty so
             // dispatch sites that walk the chain don't break.
-            singleton_methods: RefCell::new(HashMap::new()),
+            singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
             superclass: RefCell::new(Some(original)),
             includes: RefCell::new(Vec::new()),
             prepends: RefCell::new(Vec::new()),
@@ -517,8 +516,8 @@ impl Heap {
             singleton_includes: RefCell::new(Vec::new()),
             singleton_view: RefCell::new(None),
             singleton_target: RefCell::new(None),
-            class_vars: RefCell::new(HashMap::new()),
-            consts: RefCell::new(HashMap::new()),
+            class_vars: RefCell::new(crate::intern::FxHashMap::default()),
+            consts: RefCell::new(crate::intern::FxHashMap::default()),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -673,8 +672,8 @@ impl Heap {
         if let HeapObj::Hash(h) = self.get_mut(id) { h.ivars.insert(name, v); }
     }
     /// Clone a (subclass) Hash's full ivar table — used by dup/clone.
-    pub(crate) fn hash_ivars_clone(&self, id: ObjId) -> std::collections::HashMap<crate::intern::SymId, Value> {
-        if let HeapObj::Hash(h) = self.get(id) { h.ivars.clone() } else { std::collections::HashMap::new() }
+    pub(crate) fn hash_ivars_clone(&self, id: ObjId) -> crate::intern::FxHashMap<crate::intern::SymId, Value> {
+        if let HeapObj::Hash(h) = self.get(id) { h.ivars.clone() } else { crate::intern::FxHashMap::default() }
     }
     /// Default-value block stored alongside the Hash by `Hash.new {
     /// |h, k| ... }`. None for hash literals (`{}`) and the common

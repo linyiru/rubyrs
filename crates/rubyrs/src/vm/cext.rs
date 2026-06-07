@@ -21,7 +21,6 @@
 #![cfg(not(target_os = "wasi"))]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::error::{RubyError, Trap};
@@ -1025,9 +1024,9 @@ impl Vm {
                 let new_class = Rc::new(Class {
                     name: cls.joined_name.clone(),
                     is_module: false,
-                    ivars: RefCell::new(HashMap::new()),
-                    methods: RefCell::new(HashMap::new()),
-                    singleton_methods: RefCell::new(HashMap::new()),
+                    ivars: RefCell::new(crate::intern::FxHashMap::default()),
+                    methods: RefCell::new(crate::intern::FxHashMap::default()),
+                    singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
                     superclass: RefCell::new(None),
                     includes: RefCell::new(Vec::new()),
                     prepends: RefCell::new(Vec::new()),
@@ -1035,8 +1034,8 @@ impl Vm {
                     singleton_includes: RefCell::new(Vec::new()),
                     singleton_view: RefCell::new(None),
                     singleton_target: RefCell::new(None),
-                    class_vars: RefCell::new(HashMap::new()),
-            consts: RefCell::new(HashMap::new()),
+                    class_vars: RefCell::new(crate::intern::FxHashMap::default()),
+            consts: RefCell::new(crate::intern::FxHashMap::default()),
                     cext_alloc_func: std::cell::Cell::new(None),
                 });
                 self.classes.insert(name_sym, new_class);

@@ -1583,8 +1583,8 @@ impl Vm {
                                     std::rc::Rc::new(crate::value::Class {
                                         name: cname.to_string(),
                                         is_module,
-                                        methods: std::cell::RefCell::new(std::collections::HashMap::new()),
-                                        singleton_methods: std::cell::RefCell::new(std::collections::HashMap::new()),
+                                        methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                                        singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                                         superclass: std::cell::RefCell::new(None),
                                         includes: std::cell::RefCell::new(Vec::new()),
                                         prepends: std::cell::RefCell::new(Vec::new()),
@@ -1592,9 +1592,9 @@ impl Vm {
                                         singleton_includes: std::cell::RefCell::new(Vec::new()),
                                         singleton_view: std::cell::RefCell::new(None),
                                         singleton_target: std::cell::RefCell::new(None),
-                                        class_vars: std::cell::RefCell::new(std::collections::HashMap::new()),
-                                        consts: std::cell::RefCell::new(std::collections::HashMap::new()),
-                                        ivars: std::cell::RefCell::new(std::collections::HashMap::new()),
+                                        class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                                        consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                                        ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                                         #[cfg(feature = "cext")]
                                         cext_alloc_func: std::cell::Cell::new(None),
                                     })
@@ -3343,7 +3343,7 @@ fn raise_system_exit(vm: &mut Vm, status: i32, message: &str) -> Option<Result<V
     // state, no need to round-trip through invoke_method).
     let id = vm.heap.alloc(HeapObj::Instance(crate::value::Instance {
         class: cls,
-        ivars: std::collections::HashMap::new(),
+        ivars: crate::intern::FxHashMap::default(),
         singleton_class: None,
             frozen: std::cell::Cell::new(false),
     }));

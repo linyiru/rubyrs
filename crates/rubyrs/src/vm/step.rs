@@ -11,7 +11,6 @@
 //!   - `step` — the per-opcode big match. The bulk of the file.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::bytecode::{BinOpKind, Op};
@@ -3023,9 +3022,9 @@ impl Vm {
                 let cls = self.classes.entry(table_key).or_insert_with(|| Rc::new(Class {
                     name: name_str,
                     is_module,
-                    ivars: RefCell::new(HashMap::new()),
-                    methods: RefCell::new(HashMap::new()),
-                    singleton_methods: RefCell::new(HashMap::new()),
+                    ivars: RefCell::new(crate::intern::FxHashMap::default()),
+                    methods: RefCell::new(crate::intern::FxHashMap::default()),
+                    singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
                     superclass: RefCell::new(parent.clone()),
                     includes: RefCell::new(Vec::new()),
                     prepends: RefCell::new(Vec::new()),
@@ -3033,8 +3032,8 @@ impl Vm {
                     singleton_includes: RefCell::new(Vec::new()),
                     singleton_view: RefCell::new(None),
                     singleton_target: RefCell::new(None),
-                    class_vars: RefCell::new(HashMap::new()),
-            consts: RefCell::new(HashMap::new()),
+                    class_vars: RefCell::new(crate::intern::FxHashMap::default()),
+            consts: RefCell::new(crate::intern::FxHashMap::default()),
                     #[cfg(feature = "cext")]
                     cext_alloc_func: std::cell::Cell::new(None),
                 })).clone();
