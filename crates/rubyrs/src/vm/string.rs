@@ -2833,13 +2833,19 @@ fn regex_split_into_values(
     out
 }
 
-/// Translate Ruby's `\0` / `\1` / … backref syntax in a
-/// String#gsub replacement template into the `regex` crate's
-/// `$0` / `$1` / … convention. Doubled backslash (`\\`) escapes
-/// a literal backslash. `\&` is the entire match (CRuby alias
-/// for `\0`); `\'` (post-match) / `\`` (pre-match) are NOT
-/// supported in our subset — they'd need MatchData state we
-/// don't currently carry.
+/// Translate Ruby's `\0` / `\1` / … / `\k<name>` backref syntax
+/// in a String#gsub replacement template into the `regex` crate's
+/// `${0}` / `${1}` / `${name}` convention. Doubled backslash
+/// (`\\`) escapes a literal backslash. `\&` is the entire match
+/// (CRuby alias for `\0`); `\'` (post-match) / `\`` (pre-match)
+/// are NOT supported in our subset — they'd need MatchData state
+/// we don't currently carry.
+///
+/// Numbered and named refs use the *brace* form (`${1}`, not
+/// `$1`): the bare `$1` form makes the regex crate greedily read
+/// a following alnum into the group name — `'\1X'` becomes `$1X`,
+/// parsed as a group literally named `1X` (never exists → empty),
+/// silently dropping the capture. `${1}X` is unambiguous.
 ///
 /// Also escapes any literal `$` in the template so the regex
 /// crate doesn't interpret it as its own backref form.
@@ -2852,13 +2858,38 @@ pub(crate) fn ruby_backref_to_dollar(template: &str) -> String {
             '\\' => match chars.peek() {
                 Some(&n) if n.is_ascii_digit() => {
                     chars.next();
-                    out.push('$');
+                    out.push_str("${");
                     out.push(n);
+                    out.push('}');
                 }
                 Some(&'&') => {
                     chars.next();
-                    out.push('$');
-                    out.push('0');
+                    out.push_str("${0}");
+                }
+                // `\k<name>` / `\k'name'` — named backref → `${name}`.
+                Some(&'k') => {
+                    chars.next(); // consume `k`
+                    let close = match chars.peek() {
+                        Some('<') => Some('>'),
+                        Some('\'') => Some('\''),
+                        _ => None,
+                    };
+                    if let Some(close) = close {
+                        chars.next(); // consume the opening delimiter
+                        out.push_str("${");
+                        for nc in chars.by_ref() {
+                            if nc == close {
+                                break;
+                            }
+                            out.push(nc);
+                        }
+                        out.push('}');
+                    } else {
+                        // Bare `\k…` with no delimiter — not a CRuby
+                        // backref form; keep the literal `\k`.
+                        out.push('\\');
+                        out.push('k');
+                    }
                 }
                 Some(&'\\') => {
                     chars.next();

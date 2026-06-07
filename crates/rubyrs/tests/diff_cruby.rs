@@ -626,6 +626,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn massign_coerce() { run_diff("massign_coerce"); }
 #[test] fn regex_named_captures() { run_diff("regex_named_captures"); }
 #[test] fn regex_fancy_gsub() { run_diff("regex_fancy_gsub"); }
+#[test] fn regex_backref_replace() { run_diff("regex_backref_replace"); }
 #[test] fn file_fnmatch() { run_diff("file_fnmatch"); }
 #[test] fn fileops_write() { run_diff("fileops_write"); }
 #[test] fn scoped_autoload() { run_diff("scoped_autoload"); }
