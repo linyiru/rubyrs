@@ -615,6 +615,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "stdlib")]
 #[test] fn set_enumerable() { run_diff("set_enumerable"); }
 #[cfg(feature = "stdlib")]
+#[test] fn set_ops() { run_diff("set_ops"); }
+#[cfg(feature = "stdlib")]
 #[test] fn stringscanner_full() { run_diff("stringscanner_full"); }
 #[cfg(feature = "stdlib")]
 #[test] fn stringscanner_units() { run_diff("stringscanner_units"); }

@@ -29,6 +29,19 @@ class Set
     self
   end
 
+  # `add?` / `delete?` return self on a real change, nil otherwise
+  # (CRuby) — the idiomatic "insert/remove and tell me if it did
+  # anything" form.
+  def add?(o)
+    return nil if include?(o)
+    add(o)
+  end
+
+  def delete?(o)
+    return nil unless include?(o)
+    delete(o)
+  end
+
   def clear
     @hash = {}
     self
@@ -65,14 +78,12 @@ class Set
   end
   alias_method :eql?, :==
 
-  # Note: CRuby's `Set#hash` returns an order-independent integer
-  # so two sets with the same contents hash equally. We'd
-  # implement it as XOR over `k.hash` for each element, but
-  # Tier 1 Integer / Symbol don't carry `.hash` yet — only
-  # `String#hash` is wired today. Leaving `hash` out means
-  # equal Sets still report `Set#==` true (content walk through
-  # `include?`); only `Hash` keyed by Set instances would
-  # diverge, which isn't a shape gem helpers exercise.
+  # `Set#hash` is order-independent — two sets with equal contents
+  # hash equally — so Sets can be used as Hash keys. The backing
+  # Hash's own `#hash` already folds its keys order-independently.
+  def hash
+    @hash.hash
+  end
 
   # Union — every element from self, plus every element from
   # enum that wasn't already there.
@@ -127,6 +138,21 @@ class Set
   end
   alias_method :>=, :superset?
 
+  # Proper (strict) subset / superset — contained AND not equal.
+  # `<` / `>` are the strict operators (CRuby), distinct from the
+  # `<=` / `>=` non-strict aliases above.
+  def proper_subset?(other)
+    return false unless other.is_a?(Set)
+    size < other.size && subset?(other)
+  end
+  alias_method :<, :proper_subset?
+
+  def proper_superset?(other)
+    return false unless other.is_a?(Set)
+    size > other.size && superset?(other)
+  end
+  alias_method :>, :proper_superset?
+
   def inspect
     if empty?
       "#<Set: {}>"
@@ -178,7 +204,11 @@ class Set
   end
 
   def each_with_index(&block)
+    # Enumerable#each_with_index returns the receiver (the Set), not
+    # the intermediate Array `to_a` yields.
+    return to_a.each_with_index unless block_given?
     to_a.each_with_index(&block)
+    self
   end
 
   def inject(*args, &block)
