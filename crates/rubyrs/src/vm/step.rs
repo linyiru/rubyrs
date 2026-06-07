@@ -509,8 +509,16 @@ impl Vm {
             // fiber_yield_pending → interrupt → fuel). dispatch has
             // no fiber path so the middle item is absent. See
             // `dispatch_until` below for the full safety rationale.
+            // Hoist the cheap pending-flag load inline so the common
+            // (no-interrupt) path skips the `safe_point_interrupt_action`
+            // function call entirely — it showed up per-op in the
+            // call-path profile. SIGINT latency is unchanged: the atomic
+            // is still read every op; only the function call (which would
+            // re-check the same flag and return None) is elided.
             #[cfg(unix)]
-            if let Some(action) = self.safe_point_interrupt_action() {
+            if self.interrupt_pending.load(std::sync::atomic::Ordering::Relaxed)
+                && let Some(action) = self.safe_point_interrupt_action()
+            {
                 action.deliver(self)?;
                 continue;
             }
@@ -754,8 +762,13 @@ impl Vm {
             // round-3 expansion just makes the upgrade
             // checklist explicit so a future implementer
             // doesn't miss site #3.
+            // Same inline pending-flag hoist as the `dispatch` loop — skip
+            // the per-op `safe_point_interrupt_action` call when no
+            // interrupt is pending. SIGINT latency unchanged.
             #[cfg(unix)]
-            if let Some(action) = self.safe_point_interrupt_action() {
+            if self.interrupt_pending.load(std::sync::atomic::Ordering::Relaxed)
+                && let Some(action) = self.safe_point_interrupt_action()
+            {
                 action.deliver(self)?;
                 // Unwind / trap-block dispatch handled by
                 // `action.deliver`. Loop back to the top.
