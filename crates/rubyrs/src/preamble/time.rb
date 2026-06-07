@@ -110,22 +110,66 @@ class Time
   # natural-language surface (weekday names, `now`-relative fills) is
   # out of scope. Discovery: P3 Jekyll spike — `Utils.parse_date`
   # does `Time.parse(input).localtime`.
+  # Hand-rolled (no Regexp) so this loads on no-`regex`-feature builds
+  # too — the preamble must compile without the regex Cargo feature
+  # (wasm32-wasip1 / Tier-1 minimal), and a `/.../` literal there is a
+  # load-time SyntaxError.
   def self.parse(str, _now = nil)
-    s = str.to_s
-    m = s.match(%r!(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?\s*(Z|[+-]\d{2}:?\d{2})?!)
-    raise ArgumentError, "no time information in #{str.inspect}" unless m
-    year  = m[1].to_i
-    month = m[2].to_i
-    day   = m[3].to_i
-    hour  = (m[4] || "0").to_i
-    minute = (m[5] || "0").to_i
-    second = (m[6] || "0").to_i
+    s = str.to_s.strip
+    # Split the date from the time/zone at the first space or 'T'.
+    sep = nil
+    i = 0
+    while i < s.length
+      c = s[i]
+      if c == " " || c == "T"
+        sep = i
+        break
+      end
+      i += 1
+    end
+    date_str = sep ? s[0...sep] : s
+    rest = sep ? s[(sep + 1)..].to_s.strip : ""
+    d = date_str.split("-")
+    if d.length < 3 || d[0].empty? || d[1].empty? || d[2].empty?
+      raise ArgumentError, "no time information in #{str.inspect}"
+    end
+    year  = d[0].to_i
+    month = d[1].to_i
+    day   = d[2].to_i
+    hour = 0
+    minute = 0
+    second = 0
     off = 0
-    tz = m[7]
-    if tz && tz != "Z"
-      sign = tz.start_with?("-") ? -1 : 1
-      digits = tz.gsub(":", "")
-      off = sign * (digits[1, 2].to_i * 3600 + digits[3, 2].to_i * 60)
+    unless rest.empty?
+      # Peel a trailing zone: `Z`, or `±HHMM` / `±HH:MM`.
+      if rest.end_with?("Z")
+        rest = rest[0...-1].strip
+      else
+        tzpos = nil
+        j = rest.length - 1
+        while j >= 0
+          ch = rest[j]
+          if ch == "+" || ch == "-"
+            tzpos = j
+            break
+          end
+          j -= 1
+        end
+        if tzpos
+          tz = rest[tzpos..]
+          rest = rest[0...tzpos].strip
+          sign = tz[0] == "-" ? -1 : 1
+          body = tz[1..].to_s
+          oh = body[0, 2].to_i
+          mm_at = body[2] == ":" ? 3 : 2
+          om = body[mm_at, 2].to_i
+          off = sign * (oh * 3600 + om * 60)
+        end
+      end
+      t = rest.split(":")
+      hour   = (t[0] || "0").to_i
+      minute = (t[1] || "0").to_i
+      second = (t[2] || "0").to_i
     end
     total = days_from_civil(year, month, day) * 86_400 +
             hour * 3600 + minute * 60 + second - off
