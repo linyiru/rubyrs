@@ -431,7 +431,13 @@ jobs:
           # `.expect("ICE: do_call(no_recv) with empty frames ...")`
           # for the bare-call ivar reroute path. Mirrors the
           # adjacent no_recv frame-state expects.
-          check crates/rubyrs/src/vm/dispatch.rs     54
+          # Bumped 54 → 55 (+1) by the explicit-receiver inline-cache
+          # fast path (`try_invoke_explicit_recv_cached`): one ICE-class
+          # `.expect("ICE: explicit-recv fast path arg/recv underflow")`
+          # survives the panic-strip (the other is a doc-line sibling).
+          # Both mirror `try_invoke_fixed_method_from_stack`'s existing
+          # stack-direct expects and are not user-reachable.
+          check crates/rubyrs/src/vm/dispatch.rs     55
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /

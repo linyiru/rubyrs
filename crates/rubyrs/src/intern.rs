@@ -122,3 +122,46 @@ impl Interner {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::hash::Hasher;
+
+    #[test]
+    fn fxhasher_covers_all_write_widths() {
+        // Every Hasher::write_* width + the byte path; deterministic, and
+        // distinct inputs don't collapse to the same digest.
+        let mut a = FxHasher::default();
+        a.write_u8(1);
+        a.write_u16(2);
+        a.write_u32(3);
+        a.write_u64(4);
+        a.write_usize(5);
+        a.write(b"rubyrs");
+        let h1 = a.finish();
+
+        let mut b = FxHasher::default();
+        b.write_u8(1);
+        b.write_u16(2);
+        b.write_u32(3);
+        b.write_u64(4);
+        b.write_usize(5);
+        b.write(b"rubyrs");
+        assert_eq!(h1, b.finish(), "FxHasher is deterministic");
+
+        let mut c = FxHasher::default();
+        c.write_u32(99);
+        assert_ne!(h1, c.finish(), "different input → different digest");
+    }
+
+    #[test]
+    fn fxhashmap_round_trips_symid_keys() {
+        let mut m: FxHashMap<SymId, i32> = FxHashMap::default();
+        m.insert(SymId(1), 10);
+        m.insert(SymId(2), 20);
+        assert_eq!(m.get(&SymId(1)), Some(&10));
+        assert_eq!(m.get(&SymId(2)), Some(&20));
+        assert_eq!(m.get(&SymId(3)), None);
+    }
+}
