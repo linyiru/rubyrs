@@ -612,3 +612,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn set_enumerable() { run_diff("set_enumerable"); }
 #[cfg(feature = "stdlib")]
 #[test] fn stringscanner_full() { run_diff("stringscanner_full"); }
+#[cfg(feature = "stdlib")]
+#[test] fn yaml_psych_error() { run_diff("yaml_psych_error"); }

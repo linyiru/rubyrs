@@ -31,6 +31,21 @@ module YAML
   end
 end
 
+# Psych/YAML exception hierarchy. The real Psych raises
+# `Psych::SyntaxError` on malformed YAML. rubyrs's focused loader is
+# lenient (it doesn't raise these), but the constants must still
+# resolve: jekyll's `Document#handle_read_error` does
+# `error.is_a? Psych::SyntaxError`. Constants are keyed by their
+# joined name, so the `Psych::`-qualified references need their own
+# registrations even though `YAML`/`Psych` are the same module
+# object — the `Psych::X = YAML::X` writes seed those keys.
+module YAML
+  class Exception < StandardError; end
+  class SyntaxError < Exception; end
+end
+Psych::Exception = YAML::Exception unless defined?(Psych::Exception)
+Psych::SyntaxError = YAML::SyntaxError unless defined?(Psych::SyntaxError)
+
 module SafeYAML
   OPTIONS = {} unless defined?(OPTIONS)
 
