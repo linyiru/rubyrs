@@ -35,6 +35,126 @@ use crate::HostCtx;
 /// [`Vm::invoke_block`] (see the combined `PinGuard` block there).
 type SlotBinding = Option<(u16, Value)>;
 
+/// Inline capacity of [`ArgsBuf`]'s stack-resident array. Sized at
+/// 3 because the overwhelming majority of method calls in real Ruby
+/// pass 0–3 positional args (`arr.push(x)`, `h[k] = v`, `a.insert(i,
+/// x)`, etc.); argc above this spills to a heap `Vec`. Bump with
+/// care — `[Value; N]` is `N * size_of::<Value>()` bytes on every
+/// `do_call` stack frame.
+const ARGS_INLINE: usize = 3;
+
+/// Owned, `&mut self`-independent container for the positional args
+/// of a single `do_call` / `do_call_block`, drained off the operand
+/// stack at the dispatch boundary.
+///
+/// Why it exists: the args must be **owned** (the `&mut self`
+/// primitive handlers — `primitive_call`, `array_collection_call`,
+/// `hash_collection_call`, … — run while `self.stack` is otherwise
+/// borrowed, so they can't read the args back off the stack) AND, on
+/// the hot small-argc path (`arr.push(i)`, `h[k] = v`, `s << t`),
+/// they must **not** heap-allocate (profiling showed the per-call
+/// `stack.drain(..).collect::<Vec<_>>()` — `from_iter` + the matching
+/// free/drop — was ~10–12 % of top-of-stack samples in primitive-arg-
+/// heavy loops). `Inline` holds up to [`ARGS_INLINE`] args in a
+/// stack-resident array with no allocation; `Heap` falls back to a
+/// `Vec` for larger argc (and is also how the dispatch helpers hand
+/// the args back when they don't consume them).
+///
+/// It `Deref`s to `&[Value]`, so every read-only use in the dispatch
+/// body (`args.len()`, `args[0]`, `args.iter()`, `&args`,
+/// `args.as_slice()`, …) is unchanged. By-value consumers (the
+/// `invoke_method` / `invoke_block` user-method paths, the `for a in
+/// args` re-push loops, `args.to_vec()`) call [`ArgsBuf::into_vec`]
+/// / iterate via `IntoIterator`. The dispatch decision sequence is
+/// **identical** to the previous all-`Vec` shape — only the args
+/// *container* changes.
+enum ArgsBuf {
+    /// `len` valid args in `buf[..len]`; `buf[len..]` is `Value::Nil`
+    /// filler (never read — `Deref` slices to `..len`). `len <=
+    /// ARGS_INLINE` always.
+    Inline { buf: [Value; ARGS_INLINE], len: usize },
+    Heap(Vec<Value>),
+}
+
+impl ArgsBuf {
+    /// Drain the top `argc` operand-stack slots into an `ArgsBuf`,
+    /// preserving their order (`[..., a1, …, aN]` → `[a1, …, aN]`).
+    /// argc ≤ [`ARGS_INLINE`] stays on the stack (no allocation);
+    /// larger argc uses the same `drain(..).collect()` as before.
+    #[inline]
+    fn drain_from(stack: &mut Vec<Value>, argc: usize) -> Self {
+        let split = stack.len() - argc;
+        if argc <= ARGS_INLINE {
+            // Fill an inline array bottom-up by popping the stack
+            // top (which yields aN first), writing into slot
+            // argc-1 down to 0 — restoring source order. `Value`
+            // isn't `Copy`, so seed with `Nil` then overwrite.
+            let mut buf: [Value; ARGS_INLINE] = std::array::from_fn(|_| Value::Nil);
+            for slot in (0..argc).rev() {
+                // `pop` can't underflow: callers guarantee
+                // `stack.len() >= argc` (the receiver, if any,
+                // sits below these slots).
+                if let Some(v) = stack.pop() {
+                    buf[slot] = v;
+                }
+            }
+            ArgsBuf::Inline { buf, len: argc }
+        } else {
+            ArgsBuf::Heap(stack.drain(split..).collect())
+        }
+    }
+
+    /// Consume into an owned `Vec<Value>` for the by-value dispatch
+    /// paths (user-method invoke, send-arg re-push, `to_h`-style
+    /// `args.to_vec()` callers). The `Inline` case allocates here —
+    /// but those paths already needed a `Vec` (or were cold), so the
+    /// hot primitive path that never calls this stays allocation-free.
+    #[inline]
+    fn into_vec(self) -> Vec<Value> {
+        match self {
+            ArgsBuf::Heap(v) => v,
+            // `buf` owns ARGS_INLINE Values (`buf[len..]` are `Nil`
+            // filler); consume by-value and keep the first `len`.
+            ArgsBuf::Inline { buf, len } => {
+                let mut v = Vec::with_capacity(len);
+                v.extend(buf.into_iter().take(len));
+                v
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for ArgsBuf {
+    type Target = [Value];
+    #[inline]
+    fn deref(&self) -> &[Value] {
+        match self {
+            ArgsBuf::Inline { buf, len } => &buf[..*len],
+            ArgsBuf::Heap(v) => v.as_slice(),
+        }
+    }
+}
+
+impl IntoIterator for ArgsBuf {
+    type Item = Value;
+    type IntoIter = std::vec::IntoIter<Value>;
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_vec().into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a ArgsBuf {
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        // Borrows the args via `Deref` — `for a in &args` yields
+        // `&Value` exactly as it did over the previous `Vec`.
+        self.iter()
+    }
+}
+
 /// Outcome of [`Vm::try_dispatch_send_bypass`].
 ///
 /// `Handled(r)` means the helper has already done the work
@@ -52,7 +172,7 @@ type SlotBinding = Option<(u16, Value)>;
 enum SendBypass {
     Handled(Result<(), Trap>),
     NotHandled {
-        args: Vec<Value>,
+        args: ArgsBuf,
         recv_opt: Option<Value>,
     },
 }
@@ -70,7 +190,7 @@ enum SendBypass {
 enum CallableOutcome {
     Handled,
     NotHandled {
-        args: Vec<Value>,
+        args: ArgsBuf,
         recv: Value,
     },
 }
@@ -86,7 +206,7 @@ enum CallableOutcome {
 enum ClassOutcome {
     Handled,
     NotHandled {
-        args: Vec<Value>,
+        args: ArgsBuf,
         recv: Value,
     },
 }
@@ -1488,7 +1608,7 @@ impl Vm {
         name: &str,
         name_id: SymId,
         cache_id: u16,
-        args: Vec<Value>,
+        args: ArgsBuf,
         recv_opt: Option<Value>,
     ) -> SendBypass {
         // Early out for non-send names — the common case.
@@ -1567,7 +1687,7 @@ impl Vm {
         &mut self,
         name: &str,
         _name_id: SymId,
-        args: Vec<Value>,
+        args: ArgsBuf,
         recv: Value,
     ) -> Result<CallableOutcome, Trap> {
         if let Value::Block(bid) = &recv
@@ -1580,7 +1700,7 @@ impl Vm {
                 // way: invoke the block, drive until its frame
                 // returns, leave the result on the stack.
                 let pre_frames = self.frames.len();
-                self.invoke_block(*bid, args)?;
+                self.invoke_block(*bid, args.into_vec())?;
                 self.dispatch_until(pre_frames)?;
                 // ADR 0024 Phase A.6 round 2: stored Proc tried
                 // to `break` after returning to its caller. There
@@ -1917,7 +2037,7 @@ impl Vm {
                 }
                 _ => panic!("ICE: UnboundMethod slot holds non-UnboundMethod"),
             };
-            let mut args = args;
+            let mut args = args.into_vec();
             let target = args.swap_remove(0);
             // Use dispatch class (heap.class_of) for Object
             // targets — matches the eigenclass-aware capture in
@@ -2019,7 +2139,7 @@ impl Vm {
                     })),
                 },
             };
-            let mut args = args;
+            let mut args = args.into_vec();
             let target = args.remove(0);
             let target_class = match &target {
                 Value::Object(id) => self.heap.class_of(*id),
@@ -2064,7 +2184,7 @@ impl Vm {
                 }
                 _ => panic!("ICE: UnboundMethod slot holds non-UnboundMethod"),
             };
-            let mut args = args;
+            let mut args = args.into_vec();
             let target = args.remove(0);
             // Dispatch class for Object targets — mirrors the
             // eigenclass-aware capture in unbind so a
@@ -2256,7 +2376,7 @@ impl Vm {
         // chain in the right order.
         if matches!(&recv, Value::BoundMethod(_) | Value::Block(_))
             && matches!(name, ">>" | "<<") && args.len() == 1 {
-                let mut args = args;
+                let mut args = args.into_vec();
                 let other = args.swap_remove(0);
                 if !matches!(&other, Value::BoundMethod(_) | Value::Block(_)) {
                     return Err(self.trap(RubyError::TypeError {
@@ -2781,7 +2901,7 @@ impl Vm {
                 // `bm.call` (CRuby parity, matches the bind_call
                 // path).
                 if let Some(m) = bm_method {
-                    self.invoke_method(m, bm_recv, args)?;
+                    self.invoke_method(m, bm_recv, args.into_vec())?;
                     return Ok(CallableOutcome::Handled);
                 }
                 let argc = args.len();
@@ -3515,7 +3635,7 @@ impl Vm {
         name: &str,
         name_id: SymId,
         _cache_id: u16,
-        args: Vec<Value>,
+        args: ArgsBuf,
         recv: Value,
     ) -> Result<ClassOutcome, Trap> {
         // Local SymId for "new" — used by the `cls.new`
@@ -3663,7 +3783,7 @@ impl Vm {
     if name_id == new_id
         && let Value::Class(cls) = &recv
         && let Some(m) = self.lookup_class_singleton_method(cls, new_id) {
-        self.invoke_method(m, recv.clone(), args)?;
+        self.invoke_method(m, recv.clone(), args.into_vec())?;
         return Ok(ClassOutcome::Handled);
     }
     // `String.new` / `String.new(s)` — Tier 1 primitive
@@ -3682,7 +3802,7 @@ impl Vm {
         && let Value::Class(cls) = &recv
         && cls.name.as_str() == "String"
     {
-        match args.as_slice() {
+        match &args[..] {
             [] => {
                 self.stack.push(Value::new_str(""));
                 return Ok(ClassOutcome::Handled);
@@ -3792,7 +3912,7 @@ impl Vm {
         // own its own validation).
         if let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
             let recv_val = Value::Class(cls.clone());
-            self.invoke_method(m, recv_val, args)?;
+            self.invoke_method(m, recv_val, args.into_vec())?;
             return Ok(ClassOutcome::Handled);
         }
         // CRuby validates arity before the missing-block check:
@@ -3887,7 +4007,7 @@ impl Vm {
         && let Value::Class(cls) = &recv
         && cls.name.as_str() == "Class"
     {
-        let explicit_super: Option<Rc<Class>> = match args.as_slice() {
+        let explicit_super: Option<Rc<Class>> = match &args[..] {
             [] => None,
             [Value::Class(sc)] if !sc.is_module => Some(sc.clone()),
             [Value::Class(_)] => {
@@ -4159,10 +4279,10 @@ impl Vm {
             if let Value::Array(oid) = &args[0] {
                 self.heap.array(*oid).clone()
             } else {
-                args.clone()
+                args.to_vec()
             }
         } else {
-            args.clone()
+            args.to_vec()
         };
         let mut chunks: Vec<String> = Vec::with_capacity(parts_iter.len());
         for v in &parts_iter {
@@ -4210,7 +4330,7 @@ impl Vm {
     if name == "allocate"
         && let Value::Class(cls) = &recv
         && let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
-        self.invoke_method(m, recv.clone(), args)?;
+        self.invoke_method(m, recv.clone(), args.into_vec())?;
         return Ok(ClassOutcome::Handled);
     }
     // `Class#allocate` — bare-instance allocator without calling
@@ -4431,7 +4551,7 @@ impl Vm {
                 // point obj/args are already on Rust locals that
                 // invoke_method propagates.
                 drop(g);
-                self.invoke_method(m, obj.clone(), args)?;
+                self.invoke_method(m, obj.clone(), args.into_vec())?;
                 self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
             } else {
                 // L3-F + L3-H: cext-defined initialize (registered
@@ -4465,7 +4585,7 @@ impl Vm {
                         let func = reg.func;
                         let arity = reg.arity;
                         let obj_clone = obj.clone();
-                        let args_ref = args.clone();
+                        let args_ref = args.to_vec();
                         let vm_ptr: *mut Vm = g.vm;
                         super::cext::with_vm_ptr_set(vm_ptr, || {
                             super::cext::cext_dispatch(
@@ -4808,8 +4928,14 @@ impl Vm {
                 return Ok(());
             }
         }
-        let split = self.stack.len() - argc;
-        let args: Vec<Value> = self.stack.drain(split..).collect();
+        // Stack-buffer the args for small argc (the hot primitive-
+        // receiver case — `arr.push(i)`, `h[k] = v`, `s << t`): no
+        // heap Vec alloc on the path through `primitive_call` /
+        // `collection_call`, which only ever borrow `&args`. argc >
+        // ARGS_INLINE falls back to the prior `drain(..).collect()`.
+        // The dispatch decision sequence below is byte-identical to
+        // the all-`Vec` shape; only the args *container* changes.
+        let args = ArgsBuf::drain_from(&mut self.stack, argc);
         let recv = if no_recv {
             None
         } else {
@@ -4948,7 +5074,7 @@ impl Vm {
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.class_of(*id);
                 if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
-                    self.invoke_method(m, self_val.clone(), args)?;
+                    self.invoke_method(m, self_val.clone(), args.into_vec())?;
                     return Ok(());
                 }
             }
@@ -4970,7 +5096,7 @@ impl Vm {
             // identically.
             if let Value::Class(c) = &self_val
                 && let Some(m) = self.lookup_class_singleton_method(c, name_id) {
-                self.invoke_method(m, self_val.clone(), args)?;
+                self.invoke_method(m, self_val.clone(), args.into_vec())?;
                 return Ok(());
             }
             // Bare calls inside reopened-primitive method bodies —
@@ -5037,14 +5163,14 @@ impl Vm {
                 && let Value::Class(cls) = self.class_of(&self_val)
                 && let Some(m) = self.lookup_method_uncached(&cls, name_id)
             {
-                self.invoke_method(m, self_val.clone(), args)?;
+                self.invoke_method(m, self_val.clone(), args.into_vec())?;
                 return Ok(());
             }
             if !matches!(&self_val, Value::Object(_) | Value::Class(_) | Value::Nil) {
                 if let Value::Class(cls) = self.class_of(&self_val)
                     && let Some(m) = self.lookup_method_uncached(&cls, name_id)
                 {
-                    self.invoke_method(m, self_val.clone(), args)?;
+                    self.invoke_method(m, self_val.clone(), args.into_vec())?;
                     return Ok(());
                 }
                 // No Ruby-level method — bridge to receiver form
@@ -5278,7 +5404,7 @@ impl Vm {
             if !Self::is_builtin_name(&name)
                 && let Some(m) = self.lookup_toplevel_method_cached(name_id, cache_id)
             {
-                self.invoke_method(m, self_val, args)?;
+                self.invoke_method(m, self_val, args.into_vec())?;
                 return Ok(());
             }
             // `include Mod` / `extend Mod` / `prepend Mod` inside
@@ -5921,7 +6047,7 @@ impl Vm {
                     && let Value::Class(cls) = self.class_of(&self_val)
                     && let Some(m) = self.lookup_method_uncached(&cls, name_id)
                 {
-                    self.invoke_method(m, self_val.clone(), args)?;
+                    self.invoke_method(m, self_val.clone(), args.into_vec())?;
                     return Ok(());
                 }
                 // Type: CRuby raises `TypeError: X is not a symbol nor
@@ -5947,7 +6073,7 @@ impl Vm {
             // method_missing fallback (PoC #2). For Object self, look
             // up the class chain — if found, hand it the missed name
             // as a Symbol arg. Primitives skip this and raise directly.
-            if self.try_method_missing(&self_val, name_id, args, None)? {
+            if self.try_method_missing(&self_val, name_id, args.into_vec(), None)? {
                 return Ok(());
             }
             return Err(self.trap(RubyError::NoMethodError {
@@ -6221,14 +6347,14 @@ impl Vm {
         if !matches!(&recv, Value::Object(_) | Value::Class(_))
             && let Value::Class(cls) = self.class_of(&recv)
             && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
-            self.invoke_method(m, recv.clone(), args)?;
+            self.invoke_method(m, recv.clone(), args.into_vec())?;
             return Ok(());
         }
         if let Value::Object(id) = &recv {
             let cls = self.heap.class_of(*id);
             if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
                 self.check_method_visibility(&m, &recv, &name, bypass_visibility)?;
-                self.invoke_method(m, recv.clone(), args)?;
+                self.invoke_method(m, recv.clone(), args.into_vec())?;
                 return Ok(());
             }
             // L3-C: cext-registered instance method
@@ -6344,7 +6470,7 @@ impl Vm {
             let user_singleton = self.lookup_class_singleton_method(cls, name_id);
             if let Some(m) = user_singleton {
                 let target_self = recv.clone();
-                return self.invoke_method(m, target_self, args);
+                return self.invoke_method(m, target_self, args.into_vec());
             }
             if cls.name.as_str() == "File"
                 && let Some(v) = self.file_class_dispatch(&name, &args)? {
@@ -6368,7 +6494,7 @@ impl Vm {
             // caller's `rescue` surfaces it.
             if cls.name.as_str() == "RubyrsSass"
                 && &*name == "compile"
-                && let [Value::Str(src)] = args.as_slice() {
+                && let [Value::Str(src)] = &args[..] {
                 let scss = src.to_string_lossy();
                 match crate::sass::compile(&scss) {
                     Ok(css) => {
@@ -6388,7 +6514,7 @@ impl Vm {
             // String; `digest` returns the raw bytes as a binary String.
             if cls.name.as_str() == "RubyrsDigest"
                 && matches!(&*name, "hexdigest" | "digest")
-                && let [Value::Str(algo), Value::Str(data)] = args.as_slice() {
+                && let [Value::Str(algo), Value::Str(data)] = &args[..] {
                 let algo_s = algo.to_string_lossy();
                 let bytes = data.borrow().clone();
                 match crate::digest::raw(&algo_s, &bytes) {
@@ -6995,7 +7121,7 @@ impl Vm {
             && let Some(tag) = self.heap.hash_class_tag(*id)
             && let Some(m) = self.lookup_method_uncached(&tag, name_id)
         {
-            return self.invoke_method(m, recv.clone(), args);
+            return self.invoke_method(m, recv.clone(), args.into_vec());
         }
         if let Some(v) = self.collection_call(&recv, &name, &args)? {
             self.stack.push(v);
@@ -9282,7 +9408,7 @@ impl Vm {
             self.stack.push(Value::Bool(yes));
             return Ok(());
         }
-        if self.try_method_missing(&recv, name_id, args.clone(), None)? {
+        if self.try_method_missing(&recv, name_id, args.to_vec(), None)? {
             return Ok(());
         }
         // Kernel module-function fallback: CRuby's `Kernel#Array`,
