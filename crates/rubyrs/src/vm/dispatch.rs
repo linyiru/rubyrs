@@ -9494,6 +9494,34 @@ impl Vm {
         Ok(())
     }
 
+    /// Wrap freshly-built frame locals in an `Rc<RefCell<…>>`, reusing a
+    /// recycled cell from the pool when one is available so the common
+    /// method call avoids a per-call `Rc` allocation. The built `locals`
+    /// Vec replaces the pooled cell's (empty) inner Vec.
+    fn intern_locals(&mut self, locals: Vec<Value>) -> Rc<RefCell<Vec<Value>>> {
+        if let Some(cell) = self.locals_pool.pop() {
+            *cell.borrow_mut() = locals;
+            cell
+        } else {
+            Rc::new(RefCell::new(locals))
+        }
+    }
+
+    /// Return a popped frame's locals cell to the pool, IFF nothing else
+    /// still references it. A `define_method` body shares its locals Rc
+    /// with the closure's capture (`strong_count >= 2`), and a pending
+    /// non-local return parks one in `method_return_locals` — the
+    /// `strong_count == 1` guard excludes both, so a recycled cell can
+    /// never alias live state. Clearing drops the stale Values (releasing
+    /// their refs); the buffer capacity is kept for the next call.
+    pub(crate) fn recycle_frame_locals(&mut self, locals: Rc<RefCell<Vec<Value>>>) {
+        const LOCALS_POOL_CAP: usize = 256;
+        if self.locals_pool.len() < LOCALS_POOL_CAP && Rc::strong_count(&locals) == 1 {
+            locals.borrow_mut().clear();
+            self.locals_pool.push(locals);
+        }
+    }
+
     fn try_invoke_fixed_method_from_stack(
         &mut self,
         m: Rc<Method>,
@@ -9533,10 +9561,11 @@ impl Vm {
             }
             locals
         };
+        let locals = self.intern_locals(locals);
         self.frames.push(Frame {
             proto_idx: m.proto_idx,
             ip: 0,
-            locals: Rc::new(RefCell::new(locals)),
+            locals,
             self_val,
             base_sp: self.stack.len(),
             is_class_body: false,
@@ -9763,10 +9792,11 @@ impl Vm {
             self.check_frames()?;
             let mut locals = args;
             locals.resize(fixed.n_locals as usize, Value::Nil);
+            let locals = self.intern_locals(locals);
             self.frames.push(Frame {
                 proto_idx: m.proto_idx,
                 ip: 0,
-                locals: Rc::new(RefCell::new(locals)),
+                locals,
                 self_val,
                 base_sp: self.stack.len(),
                 is_class_body: false,
@@ -10080,10 +10110,11 @@ impl Vm {
                 None => Value::Nil,
             };
         }
+        let locals = self.intern_locals(locals);
         self.frames.push(Frame {
             proto_idx: m.proto_idx,
             ip: 0,
-            locals: Rc::new(RefCell::new(locals)),
+            locals,
             self_val,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), is_block: false,

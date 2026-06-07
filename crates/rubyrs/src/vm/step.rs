@@ -3540,7 +3540,14 @@ impl Vm {
                 } else {
                     self.stack.push(ret);
                 }
-                if self.frames.is_empty() { return Ok(false); }
+                let done = self.frames.is_empty();
+                // Recycle this frame's locals cell for the next call
+                // (skipped automatically when a closure still shares it —
+                // see `recycle_frame_locals`'s strong_count guard).
+                self.recycle_frame_locals(f.locals);
+                if done {
+                    return Ok(false);
+                }
             }
             Op::ReturnMethod => {
                 // Pop the value but don't pop the frame here —

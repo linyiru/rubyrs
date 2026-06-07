@@ -981,6 +981,14 @@ pub(crate) struct Vm {
     /// to preserve existing behavior). (TRY_RUNS pass-10
     /// layer #4.)
     pub(crate) method_return_locals: Option<Rc<RefCell<Vec<Value>>>>,
+    /// Free-list of recycled frame-locals cells. Every method call
+    /// allocates an `Rc<RefCell<Vec<Value>>>` for its frame's locals;
+    /// on return, a cell with no remaining references (`strong_count
+    /// == 1` — i.e. NOT shared with a `define_method` closure capture)
+    /// is cleared and parked here, so the next call reuses the
+    /// allocation instead of minting a fresh one. Bounded so a deep
+    /// recursion that unwinds doesn't park an unbounded pool.
+    pub(crate) locals_pool: Vec<Rc<RefCell<Vec<Value>>>>,
     /// In-flight `break`/`next` through `ensure` chain. Set by
     /// `Op::BreakLoop`/`Op::NextLoop` when an `is_ensure` handler
     /// sits between the source and the target; cleared once the
@@ -1288,6 +1296,7 @@ impl Vm {
             method_return: None,
             dispatch_until_depths: Vec::new(),
             method_return_locals: None,
+            locals_pool: Vec::new(),
             pending_loop_transfer: None,
             pending_method_break: None,
             suppress_call_result_push: false,
