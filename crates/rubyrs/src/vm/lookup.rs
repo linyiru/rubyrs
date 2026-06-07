@@ -687,7 +687,7 @@ impl Vm {
             Value::Array(_) => matches!(name,
                 "freeze" | "frozen?" |
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
-                "unshift" | "prepend" |
+                "unshift" | "prepend" | "insert" |
                 "shift" | "pop" | "delete" | "reverse_each" |
                 "first" | "last" | "empty?" | "include?" | "member?" |
                 "count" | "sum" | "min" | "max" | "sort" | "tally" |

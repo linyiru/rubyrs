@@ -617,3 +617,4 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "stdlib")]
 #[test] fn digest_hexdigest() { run_diff("digest_hexdigest"); }
 #[test] fn regex_line_anchors() { run_diff("regex_line_anchors"); }
+#[test] fn array_insert() { run_diff("array_insert"); }

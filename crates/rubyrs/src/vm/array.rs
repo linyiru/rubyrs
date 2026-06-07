@@ -428,6 +428,57 @@ impl Vm {
                         a.splice(0..0, owned);
                         Some(Value::Array(id))
                     }
+                    // `Array#insert(index, *objs)`. Non-negative index
+                    // inserts the objects BEFORE that position (padding
+                    // with nils if index > length); a negative index
+                    // inserts AFTER the referenced element
+                    // (`len + index + 1`). No objects → no-op. Returns
+                    // self. Discovery: P3 Jekyll spike — liquid/jekyll
+                    // splice into rendered-content arrays via `insert`.
+                    ("insert", []) => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "wrong number of arguments (given 0, expected 1+)".to_string(),
+                        }));
+                    }
+                    ("insert", [Value::Int(idx), rest @ ..]) => {
+                        if rest.is_empty() {
+                            return Ok(Some(Value::Array(id)));
+                        }
+                        let len = self.heap.array(id).len() as i64;
+                        // Negative index inserts after the element it
+                        // names, so the position is `len + idx + 1`.
+                        let pos = if *idx < 0 { len + *idx + 1 } else { *idx };
+                        if pos < 0 {
+                            return Err(self.trap(RubyError::IndexError {
+                                msg: format!(
+                                    "index {idx} too small for array; minimum: {}",
+                                    -len - 1
+                                ),
+                            }));
+                        }
+                        let pos = pos as usize;
+                        let new_len = self
+                            .heap
+                            .array(id)
+                            .len()
+                            .max(pos)
+                            .saturating_add(rest.len());
+                        if let Some(max) = self.max_value_bytes
+                            && new_len.saturating_mul(std::mem::size_of::<Value>()) > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("Array.insert would exceed {max} bytes"),
+                                }));
+                            }
+                        let owned: Vec<Value> = rest.to_vec();
+                        let a = self.heap.array_mut(id);
+                        if pos > a.len() {
+                            a.resize(pos, Value::Nil);
+                            a.extend(owned);
+                        } else {
+                            a.splice(pos..pos, owned);
+                        }
+                        Some(Value::Array(id))
+                    }
                     ("push", [v]) | ("<<", [v]) => {
                         // P2-14c: refuse a push that would make this
                         // Array's storage exceed the per-value byte
