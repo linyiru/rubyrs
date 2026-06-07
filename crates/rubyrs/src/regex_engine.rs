@@ -204,7 +204,20 @@ fn rewrite_charclass_octal_escapes(pat: &str) -> std::borrow::Cow<'_, str> {
 /// (CompiledTooBig surfaces as-is; see the `compile` doc above).
 fn build_engine(pattern: &str) -> Result<Engine, String> {
     let pattern = rewrite_charclass_octal_escapes(pattern);
-    let pattern: &str = &pattern;
+    // Ruby's `^` / `$` are ALWAYS line anchors (they match at every
+    // line boundary, not just the string ends — `\A` / `\z` / `\Z`
+    // are the string anchors). The regex / fancy-regex crates default
+    // `^` / `$` to string-only anchoring, switching to line anchors
+    // only under engine `(?m)` (multi-line). So every Ruby pattern
+    // gets a `(?m)` engine prefix. This is ORTHOGONAL to Ruby's `/m`
+    // literal flag, which means dot-matches-newline → engine `(?s)`
+    // (applied separately in `apply_ruby_flags`). The bare `source`
+    // stored on `CompiledRegex` is untouched, so `#source` / `#inspect`
+    // never see this prefix. Discovery: P3 Jekyll spike — jekyll's
+    // `YAML_FRONT_MATTER_REGEXP` (`\A(...)^((---|\.\.\.)\s*$...)/m`)
+    // relies on `^`/`$` matching the front-matter delimiter lines.
+    let prefixed = format!("(?m){pattern}");
+    let pattern: &str = &prefixed;
     match regex::Regex::new(pattern) {
         Ok(re) => Ok(Engine::Native(re)),
         Err(native_err) => match &native_err {
