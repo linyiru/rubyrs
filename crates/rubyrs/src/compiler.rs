@@ -984,8 +984,21 @@ fn compile_call_arm(
         b.emit(Op::LoadNil);
         return;
     }
-    // `<expr> <op> <int_literal>` fusion → BinOpInt single op.
+    // `<expr> <op> <rhs>` fusion → single BinOp* superinstruction.
     if let (Some(r), 1, Some(kind)) = (receiver.as_ref(), args.len(), BinOpKind::from_op_name(name)) {
+        // `<local> <op> <local>` → BinOpLocalLocal. Both operands are
+        // confirmed local-variable reads (prism resolves local-vs-method
+        // before we see the AST), so reading them straight from the frame
+        // is semantically identical to LoadLocal+LoadLocal+BinOp — and
+        // `local_slot` returns the same slot the normal `LVarRead` path
+        // would. Checked before the `LVarRead` compile of the receiver so
+        // we never emit a stray LoadLocal first.
+        if let (Expr::LVarRead(lname), Expr::LVarRead(rname)) = (&r.node, &args[0].node) {
+            let a_slot = b.local_slot(lname);
+            let b_slot = b.local_slot(rname);
+            b.emit(Op::BinOpLocalLocal(kind, a_slot, b_slot));
+            return;
+        }
         compile_expr(b, r, protos, interner, cc);
         if let Expr::IntLit(rhs) = &args[0].node {
             b.emit(Op::BinOpInt(kind, *rhs));

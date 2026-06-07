@@ -3521,6 +3521,62 @@ impl Vm {
                     self.do_call(name_id, 1, false, u16::MAX)?;
                 }
             }
+            Op::BinOpLocalLocal(kind, a_slot, b_slot) => {
+                // Superinstruction for `<local> <op> <local>`: read both
+                // operands straight from the frame's locals instead of
+                // doing two LoadLocals + a BinOp through the stack. The
+                // body below is byte-for-byte identical to the `Op::BinOp`
+                // arm (same Int×Int fast path, bigint/rational promotions,
+                // primitive dispatch, fall-to-do_call), only the source of
+                // `a`/`b` differs.
+                // Frame is always present here (the dispatch loop in
+                // `dispatch` / `dispatch_until` only reaches `step` with a
+                // non-empty frame stack), so the `None` arm is unreachable
+                // rather than a panic — keeps this off the panic budget.
+                let (a, b) = match self.frames.last() {
+                    Some(frame) => {
+                        let locals = frame.locals.borrow();
+                        (locals[a_slot as usize].clone(), locals[b_slot as usize].clone())
+                    }
+                    None => unreachable!("BinOpLocalLocal with empty frame stack"),
+                };
+                if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
+                    // Same divide/mod-by-zero guard as the other BinOp
+                    // arms — `n / m` with a zero RHS raises rather than
+                    // panicking the host process.
+                    if matches!(kind, BinOpKind::Div | BinOpKind::Mod) && *y == 0 {
+                        return Err(self.trap(RubyError::ZeroDivisionError {
+                            msg: "divided by 0".to_string(),
+                        }));
+                    }
+                    let v = match kind.apply_int(*x, *y) {
+                        Some(v) => v,
+                        // Overflow on Add/Sub/Mul — promote to BigInt.
+                        // `bigint_arith` returns `Some` for Int operands;
+                        // the `None` arm is unreachable (kept off the panic
+                        // budget via `unreachable!`).
+                        #[cfg(feature = "bignum")]
+                        None => match self.bigint_arith(kind, &a, &b) {
+                            Some(r) => r?,
+                            None => unreachable!("bigint_arith None for Int operands"),
+                        },
+                        #[cfg(not(feature = "bignum"))]
+                        None => unreachable!("apply_int returns None only when bignum is on"),
+                    };
+                    self.stack.push(v);
+                } else if let Some(v) = self.try_bigint_binop(kind, &a, &b)? {
+                    self.stack.push(v);
+                } else if let Some(v) = self.try_rational_binop(kind, &a, &b)? {
+                    self.stack.push(v);
+                } else if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b), self.max_value_bytes).map_err(|e| self.trap(e))? {
+                    self.stack.push(v);
+                } else {
+                    self.stack.push(a);
+                    self.stack.push(b);
+                    let name_id = self.interner.intern(kind.name());
+                    self.do_call(name_id, 1, false, u16::MAX)?;
+                }
+            }
             Op::Return => {
                 let f = self.frames.pop().expect("ICE: Return no frame");
                 // Per-invocation block-locals model: writes to

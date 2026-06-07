@@ -253,6 +253,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn methods_batch() { run_diff("methods_batch"); }
 #[test] fn rescue_primitive() { run_diff("rescue_primitive"); }
 #[test] fn zero_division() { run_diff("zero_division"); }
+#[test] fn superinstr_binop_locals() { run_diff("superinstr_binop_locals"); }
 #[test] fn multi_write() { run_diff("multi_write"); }
 #[test] fn splat_multi_write() { run_diff("splat_multi_write"); }
 #[test] fn string_format() { run_diff("string_format"); }

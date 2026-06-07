@@ -415,6 +415,16 @@ pub(crate) enum Op {
     /// round-trip per such expression. Falls back to generic dispatch
     /// when LHS isn't an `Int`.
     BinOpInt(BinOpKind, i64),
+    /// Superinstruction for `<local> <op> <local>` — fuses
+    /// `LoadLocal(a); LoadLocal(b); BinOp(kind)` into a single op
+    /// reading both operands directly from the frame's locals (no
+    /// two-op stack round-trip). The args are the LHS and RHS local
+    /// slot indices. Semantically identical to the unfused sequence:
+    /// the handler mirrors `Op::BinOp`'s Int×Int fast path, bigint /
+    /// rational promotions, primitive dispatch, and the fall-to-
+    /// `do_call` cold path for user-defined operators. Targets the
+    /// `i < n` loop-condition shape and two-local arithmetic.
+    BinOpLocalLocal(BinOpKind, u16, u16),
     /// Args: handler-offset, bind-slot, bind-flag, filter-class
     /// SymId. The filter SymId is resolved to a class at push-time
     /// by looking it up in `Vm.classes`. Bare `rescue` (no class
