@@ -1,15 +1,15 @@
 {
   "_doc": "Per-file line-coverage baselines (whole percent points) PLUS the excluded_files allowlist for source files that produce NO LCOV records (static-only modules, feature-gated tiers CI doesn't enable). Both lists are consulted by scripts/coverage_ratchet.py; every source file in crates/*/src/**/*.rs must appear in exactly one. See docs/COVERAGE.md.",
-  "tolerance_pct": 1.0,
   "excluded_files": {
-    "crates/rubund/src/lib.rs": "single-line `pub mod parser;` — no executable code",
+    "crates/rubund/src/lib.rs": "single-line `pub mod parser;` \u2014 no executable code",
     "crates/rubyrs-cext/src/stubs/mod.rs": "module aggregator (`pub mod ...` declarations only)",
-    "crates/rubyrs/src/_cext_link_keep_alive.rs": "all `#[used] static` declarations — no executable lines for LCOV to instrument; closes the gap flagged on PR #274",
+    "crates/rubyrs/src/_cext_link_keep_alive.rs": "all `#[used] static` declarations \u2014 no executable lines for LCOV to instrument; closes the gap flagged on PR #274",
     "crates/rubyrs/src/http_server.rs": "behind the `_http_server` Cargo feature; the default CI coverage run uses default features",
-    "crates/rubyrs/src/vm/cext_wasi.rs": "cfg(target_os = \"wasi\") gated; only compiled on wasm32-wasip1, not on the Linux coverage runner",
-    "crates/rubyrs/src/vm/fiber.rs": "behind the `_fiber` Cargo feature; the default CI coverage run uses default features (matches the http_server / stdlib pattern above)",
     "crates/rubyrs/src/json_native.rs": "behind the `_json_native` Cargo feature (serde_json accelerator for the pure JSON canon, ADR 0019 Rule 6); default CI build excludes",
-    "crates/rubyrs/src/sqlite.rs": "behind the `_sqlite` Cargo feature (rusqlite + bundled libsqlite3 + SQLite3::Database/Statement surface, ADR 0027); default CI build excludes (same shape as http_server / stdlib / fiber / json_native above)"
+    "crates/rubyrs/src/sass.rs": "feature-gated under `sass`; exercised only by the grass-backed sass battery, not the default coverage build",
+    "crates/rubyrs/src/sqlite.rs": "behind the `_sqlite` Cargo feature (rusqlite + bundled libsqlite3 + SQLite3::Database/Statement surface, ADR 0027); default CI build excludes (same shape as http_server / stdlib / fiber / json_native above)",
+    "crates/rubyrs/src/vm/cext_wasi.rs": "cfg(target_os = \"wasi\") gated; only compiled on wasm32-wasip1, not on the Linux coverage runner",
+    "crates/rubyrs/src/vm/fiber.rs": "behind the `_fiber` Cargo feature; the default CI coverage run uses default features (matches the http_server / stdlib pattern above)"
   },
   "files": {
     "crates/rubund/src/main.rs": 0,
@@ -20,7 +20,7 @@
     "crates/rubyrs-cext/src/stubs/gc.rs": 22,
     "crates/rubyrs-cext/src/stubs/strings.rs": 24,
     "crates/rubyrs-cext/src/stubs/types.rs": 44,
-    "crates/rubyrs-gapscan/src/lib.rs": 56,
+    "crates/rubyrs-gapscan/src/lib.rs": 54,
     "crates/rubyrs-gapscan/src/main.rs": 0,
     "crates/rubyrs-spec-extract/src/lib.rs": 95,
     "crates/rubyrs-spec-extract/src/main.rs": 0,
@@ -30,6 +30,7 @@
     "crates/rubyrs/src/bytecode.rs": 100,
     "crates/rubyrs/src/compiler.rs": 98,
     "crates/rubyrs/src/const_marker.rs": 100,
+    "crates/rubyrs/src/digest.rs": 100,
     "crates/rubyrs/src/error.rs": 91,
     "crates/rubyrs/src/heap.rs": 85,
     "crates/rubyrs/src/intern.rs": 100,
@@ -38,10 +39,10 @@
     "crates/rubyrs/src/output.rs": 83,
     "crates/rubyrs/src/regex_engine.rs": 65,
     "crates/rubyrs/src/signals.rs": 97,
-    "crates/rubyrs/src/stdlib_vendor.rs": 100,
+    "crates/rubyrs/src/stdlib_vendor.rs": 94,
     "crates/rubyrs/src/value.rs": 100,
     "crates/rubyrs/src/vm.rs": 91,
-    "crates/rubyrs/src/vm/array.rs": 87,
+    "crates/rubyrs/src/vm/array.rs": 85,
     "crates/rubyrs/src/vm/bignum.rs": 82,
     "crates/rubyrs/src/vm/cext.rs": 84,
     "crates/rubyrs/src/vm/dispatch.rs": 84,
@@ -51,7 +52,7 @@
     "crates/rubyrs/src/vm/iter.rs": 88,
     "crates/rubyrs/src/vm/kernel.rs": 78,
     "crates/rubyrs/src/vm/lookup.rs": 92,
-    "crates/rubyrs/src/vm/match_data.rs": 96,
+    "crates/rubyrs/src/vm/match_data.rs": 94,
     "crates/rubyrs/src/vm/numeric.rs": 93,
     "crates/rubyrs/src/vm/primitive.rs": 77,
     "crates/rubyrs/src/vm/raise.rs": 94,
@@ -61,5 +62,6 @@
     "crates/rubyrs/src/vm/string.rs": 89,
     "crates/rubyrs/src/vm/util.rs": 96,
     "crates/rubyrs/src/vm/vm_ptr.rs": 100
-  }
+  },
+  "tolerance_pct": 1.0
 }

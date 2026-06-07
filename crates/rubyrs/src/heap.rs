@@ -1602,9 +1602,14 @@ impl Value {
                 )
             }
             Value::Rational(id) => {
+                // `num`/`den` are BigInt under `bignum` and i64 without
+                // it; hash the canonical (normalised) decimal form so
+                // this compiles on both (and on wasm, where bignum is
+                // off). Rationals are rare as Hash keys, so the
+                // formatting cost is irrelevant.
                 let r = heap.rational(*id);
                 let hh = mix(h, &[12]);
-                mix(mix(hh, &r.num.to_signed_bytes_le()), &r.den.to_signed_bytes_le())
+                mix(mix(hh, r.num.to_string().as_bytes()), r.den.to_string().as_bytes())
             }
             #[cfg(feature = "bignum")]
             Value::BigInt(id) => mix(mix(h, &[13]), &heap.bigint(*id).to_signed_bytes_le()),

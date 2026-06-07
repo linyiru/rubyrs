@@ -580,7 +580,11 @@ jobs:
           # `panic!("ICE: heap slot is not an X")` shape as the
           # existing accessors. Programmer-error class — wrong-typed
           # ObjId reaching the accessor.
-          check crates/rubyrs/src/heap.rs            24
+          # Bumped 24 → 26 (+2) by the Hash O(1) key index —
+          # `hash_obj_mut` and `ensure_hash_index` carry the same
+          # `panic!("ICE: heap slot is not a Hash")` slot-type assert
+          # as the existing `hash` / `hash_mut` accessors.
+          check crates/rubyrs/src/heap.rs            26
           # Bumped 3 → 6 by master commits a5d61f1 / cc89211 / 92feabb
           # (multi-write assignment, splat receive, op-assignment forms)
           # which added new ICE-class panics in ast::tr for partially-
@@ -924,11 +928,11 @@ jobs:
       - name: Upload LCOV artifact
         # Available for download from the Actions UI so reviewers can
         # inspect the per-line picture when investigating a regression.
-        # The actions/upload-artifact@v4 default is 90 days (or org-
+        # The actions/upload-artifact@v7 default is 90 days (or org-
         # configured), not 30 — set retention-days explicitly so the
         # contract matches docs/COVERAGE.md and this workflow comment.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lcov-${{ github.run_id }}
           path: lcov.info
