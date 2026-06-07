@@ -2431,9 +2431,10 @@ RUBYRS = "rubyrs".freeze
 ## comment that used to describe Comparable here (about
 ## `include Comparable` semantics and the ArgumentError-on-nil
 ## rule) moved to the externalised file's header.
-## `class Enumerable; end` (empty stub so `include Enumerable`
-## doesn't crash) is loaded from `preamble/enumerable.rb` AFTER
-## this `PREAMBLE` eval; the full rationale lives in the
+## `module Enumerable; end` (empty stub so `include Enumerable`
+## doesn't crash; a Module so `Mod.include?(Enumerable)` passes the
+## expected-Module check) is loaded from `preamble/enumerable.rb`
+## AFTER this `PREAMBLE` eval; the full rationale lives in the
 ## externalised file's header.
 "#;
         self.eval_inner(PREAMBLE, "<rubyrs:preamble>")

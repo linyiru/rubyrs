@@ -23,5 +23,11 @@
 # on a user `LinkedList` instance still NoMethodError at call
 # time — documented divergence, follow-up PR.
 
-class Enumerable
+# Defined as a `module` (not `class`) so `is_module` is true:
+# CRuby's `Enumerable` is a Module, and `Mod.include?(Enumerable)` /
+# `Class#include Enumerable` validate the argument is a Module
+# (`wrong argument type Class (expected Module)` otherwise).
+# Discovery: P3 Jekyll spike — liquid `Drop.invokable_methods` does
+# `include?(Enumerable)`.
+module Enumerable
 end
