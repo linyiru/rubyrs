@@ -1112,6 +1112,60 @@ pub(crate) fn string_call(
         (Value::Str(a), "end_with?", [Value::Str(b)]) => {
             Some(Value::Bool(a.with_str_lossy(|sa| b.with_str_lossy(|sb| sa.ends_with(sb)))))
         }
+        // `String#delete_prefix` / `delete_suffix` — return a copy
+        // with the affix stripped (unchanged copy if absent). CRuby.
+        // Discovery: P3 Jekyll spike — `page.rb#relative_path` does
+        // `path.delete_prefix("/")`.
+        (Value::Str(a), "delete_prefix", [Value::Str(pre)]) => {
+            let s = a.to_string_lossy();
+            let out = pre.with_str_lossy(|p| match s.strip_prefix(p) {
+                Some(r) => r.to_string(),
+                None => s.clone(),
+            });
+            Some(Value::new_str(out))
+        }
+        (Value::Str(a), "delete_suffix", [Value::Str(suf)]) => {
+            let s = a.to_string_lossy();
+            let out = suf.with_str_lossy(|p| match s.strip_suffix(p) {
+                Some(r) => r.to_string(),
+                None => s.clone(),
+            });
+            Some(Value::new_str(out))
+        }
+        // Bang variants mutate in place and return self when changed,
+        // nil when the affix was absent (CRuby).
+        (Value::Str(a), "delete_prefix!", [Value::Str(pre)]) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let s = a.to_string_lossy();
+            match pre.with_str_lossy(|p| s.strip_prefix(p).map(|r| r.to_string())) {
+                Some(r) => {
+                    check(r.len())?;
+                    *a.borrow_mut() = r.into_bytes();
+                    Some(Value::Str(a.clone()))
+                }
+                None => Some(Value::Nil),
+            }
+        }
+        (Value::Str(a), "delete_suffix!", [Value::Str(suf)]) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let s = a.to_string_lossy();
+            match suf.with_str_lossy(|p| s.strip_suffix(p).map(|r| r.to_string())) {
+                Some(r) => {
+                    check(r.len())?;
+                    *a.borrow_mut() = r.into_bytes();
+                    Some(Value::Str(a.clone()))
+                }
+                None => Some(Value::Nil),
+            }
+        }
         (Value::Str(a), "to_i", []) => {
             // CRuby's `String#to_i` is famously lenient: leading
             // whitespace, optional sign, then as many digits as it
