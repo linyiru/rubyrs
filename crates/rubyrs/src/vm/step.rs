@@ -1386,6 +1386,45 @@ impl Vm {
                             // — fall through to the NameError below.
                         }
                     }
+                    // Qualified `Scope::CONST` (`C::FOO`,
+                    // `A::B::FOO`, `C::Str::Double`) whose direct
+                    // global key missed: resolve the LEADING segment
+                    // to its class, then walk the rest of the path
+                    // through `resolve_const_path`, which searches the
+                    // full ancestor chain (includes / prepends /
+                    // superclasses) segment-by-segment. This is what
+                    // makes `C::FOO` resolve through an INCLUDED
+                    // module (`class C; include M; end` then `C::FOO`
+                    // → `M::FOO`), and a chained `C::Str::Double`
+                    // resolve `C::Str` to `M::Str` (via include) then
+                    // `Double` inside it — CRuby's `rb_const_get`
+                    // searches the full ancestry. Splitting on the
+                    // FIRST `::` (not the last) is what lets the
+                    // intermediate segment go through ancestor
+                    // resolution too.
+                    {
+                        let name_str = self.interner.resolve(name_id).to_string();
+                        if let Some((head, rest)) = name_str.split_once("::")
+                            && !head.is_empty()
+                            && self.interner.contains(head)
+                        {
+                            let head_id = self.interner.intern(head);
+                            if let Some(head_cls) = self.classes.get(&head_id).cloned() {
+                                match self.resolve_const_path(&head_cls, rest, true) {
+                                    crate::vm::dispatch::ConstPathOutcome::Found(v) => {
+                                        self.stack.push(v);
+                                        return Ok(true);
+                                    }
+                                    crate::vm::dispatch::ConstPathOutcome::Trap(t) => return Err(t),
+                                    // Miss / WrongName / NotClass: fall
+                                    // through to the NameError below so
+                                    // the message keeps the original
+                                    // full-path shape.
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
                     // CRuby raises `NameError: uninitialized constant
                     // <name>` for missing constants — silent-nil here
                     // masks real user errors AND lets downstream code
@@ -1430,8 +1469,28 @@ impl Vm {
                 // through to the top-level `Bar`.
                 let proto_idx = self.frames.last().expect("ICE: LoadConstChain no frame").proto_idx;
                 let chain = self.protos[proto_idx].const_chains[chain_idx as usize].clone();
+                // CRuby bare-constant resolution has three ordered
+                // phases (see `rb_const_search`):
+                //   1. Lexical nesting (`Module.nesting`, innermost
+                //      first) — each scope's OWN const table.
+                //   2. Ancestors of the INNERMOST lexical cref —
+                //      `flatten_ancestors`, each scope's own table.
+                //      This is the include/prepend/superclass path.
+                //   3. Toplevel (Object).
+                // The compiled `chain` is `[scope_inner::bare, …,
+                // scope_outer::bare, bare]`: the qualified entries are
+                // the `Module.nesting` scopes (phase 1) and the LAST,
+                // unqualified entry is the Object/toplevel candidate
+                // (phase 3). So we must run phase 2 (the ancestor
+                // walk) BETWEEN the qualified lexical entries and the
+                // bare entry — otherwise a constant present at BOTH
+                // toplevel AND an ancestor module would wrongly bind
+                // to toplevel (CRuby picks the ancestor).
+                let lex_split = chain.len().saturating_sub(1);
                 let mut found: Option<Value> = None;
-                for sym in &chain {
+                // Phase 1: qualified lexical scopes (all but the last,
+                // bare entry).
+                for sym in &chain[..lex_split] {
                     if let Some(c) = self.classes.get(sym).cloned() {
                         found = Some(Value::Class(c));
                         break;
@@ -1439,6 +1498,48 @@ impl Vm {
                     if let Some(v) = self.constants.get(sym).cloned() {
                         found = Some(v);
                         break;
+                    }
+                }
+                // Phase 2: ancestors of the innermost lexical cref.
+                // This is what makes `include M` bring M's constants
+                // into scope — `class C; include M; def f = FOO; end`
+                // resolves bare `FOO` to `M::FOO` here (rouge's ~240
+                // lexers do `include Token::Tokens` then reference
+                // bare `Text` / `Str::Double`). The innermost cref is
+                // `chain[0]` (innermost-first ordering) minus its
+                // trailing `::<bare>` segment; `chain.last()` is the
+                // fully-unqualified candidate. A single-segment chain
+                // (`[bare]` only) means top-level scope — no enclosing
+                // class — so `lex_split == 0` skips this. For a
+                // multi-segment bare like `Str::Double`,
+                // `const_via_ancestors` probes
+                // `<ancestor>::Str::Double`, so an included
+                // `Token::Tokens` resolves `Token::Tokens::Str::Double`.
+                if found.is_none()
+                    && let (Some(&inner_qid), Some(&bare_sym)) =
+                        (chain.first(), chain.last())
+                    && inner_qid != bare_sym
+                {
+                    let inner_full = self.interner.resolve(inner_qid).to_string();
+                    let bare_str = self.interner.resolve(bare_sym).to_string();
+                    let suffix = format!("::{}", bare_str);
+                    if let Some(scope_name) = inner_full.strip_suffix(&suffix)
+                        && self.interner.contains(scope_name)
+                    {
+                        let scope_id = self.interner.intern(scope_name);
+                        if let Some(cref) = self.classes.get(&scope_id).cloned() {
+                            found = self.const_via_ancestors(&cref, bare_sym);
+                        }
+                    }
+                }
+                // Phase 3: toplevel / Object (the bare last entry).
+                if found.is_none()
+                    && let Some(bare_sym) = chain.last()
+                {
+                    if let Some(c) = self.classes.get(bare_sym).cloned() {
+                        found = Some(Value::Class(c));
+                    } else if let Some(v) = self.constants.get(bare_sym).cloned() {
+                        found = Some(v);
                     }
                 }
                 let v = match found {

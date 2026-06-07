@@ -1187,6 +1187,74 @@ pub(crate) fn flatten_ancestors(cls: &Rc<Class>) -> Vec<Rc<Class>> {
 }
 
 impl Vm {
+    /// Walk `start`'s ancestor chain looking for a constant named
+    /// `bare` (an interned bare SymId like `Text`), returning the
+    /// first hit. This is CRuby's step-2 of bare-constant resolution:
+    /// after the lexical nesting (`Module.nesting`) is exhausted, the
+    /// ancestors of the INNERMOST lexical cref are searched, each
+    /// scope's OWN constant table only.
+    ///
+    /// Order mirrors `flatten_ancestors` — `[prepends…, self,
+    /// includes…, superclass + its prepends/includes, …]` — WITH ONE
+    /// CRuby-specific twist: the start class's own constant table is
+    /// consulted BEFORE its prepended modules. CRuby's `rb_const_get`
+    /// checks the class itself first, then walks the (prepend-aware)
+    /// super chain, so a constant defined on both the class and a
+    /// prepended module resolves to the class's own
+    /// (`prepend Pre; X=…on C` → `C::X`, not `Pre::X`), even though
+    /// METHOD lookup would pick the prepend. We model that by trying
+    /// `start` first, then the full `flatten_ancestors` list (which
+    /// re-lists `start` harmlessly after the prepends).
+    ///
+    /// rubyrs keys module/class constants in the GLOBAL `classes` /
+    /// `constants` maps under their qualified name (`M::FOO`), so for
+    /// each named ancestor we probe `"<ancestor.name>::<bare>"`.
+    /// Anonymous ancestors (empty name, e.g. a `Class.new` module)
+    /// keep their constants in the per-class `consts` table, which we
+    /// probe directly. Returns `None` if no ancestor defines it (the
+    /// caller then falls through to its NameError / nil path).
+    pub(crate) fn const_via_ancestors(
+        &mut self,
+        start: &Rc<Class>,
+        bare: SymId,
+    ) -> Option<Value> {
+        // Own table first (CRuby checks the class before its
+        // prepends for constants), then the flattened ancestry.
+        let mut chain: Vec<Rc<Class>> = Vec::new();
+        chain.push(start.clone());
+        chain.extend(super::flatten_ancestors(start));
+        let bare_name = self.interner.resolve(bare).to_string();
+        for anc in &chain {
+            // Anonymous scope: const_set / nested defines land in the
+            // per-class `consts` map keyed by the bare SymId.
+            if anc.name.is_empty() {
+                if let Some(v) = anc.consts.borrow().get(&bare).cloned() {
+                    return Some(v);
+                }
+                continue;
+            }
+            // Named scope: probe the qualified global key. Only intern
+            // when the name already exists so a miss doesn't grow the
+            // interner (mirrors `resolve_const_path`'s `contains`
+            // guard — keeps `const_defined?` misses cheap).
+            let mut qual = String::with_capacity(anc.name.len() + 2 + bare_name.len());
+            qual.push_str(&anc.name);
+            qual.push_str("::");
+            qual.push_str(&bare_name);
+            if !self.interner.contains(&qual) {
+                continue;
+            }
+            let qid = self.interner.intern(&qual);
+            if let Some(c) = self.classes.get(&qid).cloned() {
+                return Some(Value::Class(c));
+            }
+            if let Some(v) = self.constants.get(&qid).cloned() {
+                return Some(v);
+            }
+        }
+        None
+    }
+
     /// Install synthesised `Method` records on the Kernel module
     /// (loaded by preamble/object.rb) so `Kernel.instance_method(:foo)`
     /// reflection — `.arity`, `.parameters`, `.source_location` —

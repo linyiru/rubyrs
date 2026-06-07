@@ -276,6 +276,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn kernel_array_via_method() { run_diff("kernel_array_via_method"); }
 #[test] fn array_dup_clone() { run_diff("array_dup_clone"); }
 #[test] fn module_const_reflection() { run_diff("module_const_reflection"); }
+#[test] fn include_const_resolution() { run_diff("include_const_resolution"); }
+#[test] fn include_const_precedence() { run_diff("include_const_precedence"); }
+#[test] fn include_const_prepend_super() { run_diff("include_const_prepend_super"); }
+#[test] fn include_const_reflection_nameerror() { run_diff("include_const_reflection_nameerror"); }
 #[test] fn string_sub_bang() { run_diff("string_sub_bang"); }
 #[test] fn op_assign() { run_diff("op_assign"); }
 #[test] fn range_enumerable() { run_diff("range_enumerable"); }

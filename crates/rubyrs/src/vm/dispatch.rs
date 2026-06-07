@@ -3320,6 +3320,18 @@ impl Vm {
             ("constants", args_) if args_.is_empty()
                 || matches!(args_, [Value::Bool(_)]) =>
             {
+                // `Module#constants(inherit=true)` lists the
+                // module's own constants PLUS those of its ancestors
+                // (included/prepended modules and superclasses up to
+                // — but not including — Object). `constants(false)`
+                // lists own constants only. CRuby returns own-first
+                // then inherited (deduped); we approximate definition
+                // order within each ancestor by the HashMap iteration
+                // order (rubyrs has no insertion-ordered const table),
+                // so the relative order WITHIN a scope can differ from
+                // CRuby — but own-before-inherited and the
+                // inherit-vs-own membership match.
+                let inherit = !matches!(args_, [Value::Bool(false)]);
                 let mut names: Vec<String> = Vec::new();
                 let collect = |prefix: &str, names: &mut Vec<String>| {
                     for k in self.constants.keys() {
@@ -3333,11 +3345,23 @@ impl Vm {
                 };
                 let own_prefix = format!("{}::", cls.name);
                 collect(&own_prefix, &mut names);
-                for inc in cls.includes.borrow().iter() {
-                    let inc_prefix = format!("{}::", inc.name);
-                    collect(&inc_prefix, &mut names);
+                if inherit {
+                    // Walk the full ancestry (prepends, includes,
+                    // superclasses) for inherited constants. Skip the
+                    // class itself (already collected) and Object —
+                    // its toplevel constants are NOT reported by
+                    // `Foo.constants` in CRuby.
+                    for anc in super::flatten_ancestors(&cls) {
+                        if anc.name.is_empty()
+                            || anc.name == cls.name
+                            || anc.name == "Object"
+                        {
+                            continue;
+                        }
+                        let anc_prefix = format!("{}::", anc.name);
+                        collect(&anc_prefix, &mut names);
+                    }
                 }
-                names.sort();
                 let elems: Vec<Value> = names.into_iter()
                     .map(|n| Value::Sym(self.interner.intern(&n)))
                     .collect();
@@ -12805,17 +12829,28 @@ impl Vm {
         if !scope_name.is_empty() && scope_name != "Object" {
             scope_chain.push(scope_name.clone());
         }
-        // Walk superclass chain. Skip empty names (intermediate
-        // anonymous classes) and stop at Object — its constant
-        // namespace IS the toplevel and is consulted via the
-        // bare `segment.to_string()` lookup the existing
-        // scope_name == "Object" branch handles.
-        let mut walker = start_cls.superclass.borrow().clone();
-        while let Some(sc) = walker {
-            if !sc.name.is_empty() && sc.name != "Object" {
-                scope_chain.push(sc.name.clone());
+        // Walk the FULL ancestor chain (`flatten_ancestors`):
+        // prepends, self, included modules, then up the superclass
+        // chain with each super's own prepends/includes. CRuby's
+        // `rb_const_get(C, :X)` searches this whole inheritance set,
+        // so `C::FOO` resolves through an included module M (and a
+        // superclass that includes M, and prepended modules). The
+        // start class's OWN table is already seeded as entry 0 above;
+        // `flatten_ancestors` re-lists it after any prepends, which
+        // gives CRuby's "class-before-its-prepends" const precedence
+        // for free (the entry-0 seed is the first one tried).
+        //
+        // Skip empty names (intermediate anonymous classes/modules)
+        // and Object — its constant namespace IS the toplevel and is
+        // consulted via the bare `segment.to_string()` lookup the
+        // existing `scope_name == "Object"` branch handles.
+        for anc in super::flatten_ancestors(start_cls) {
+            if !anc.name.is_empty()
+                && anc.name != "Object"
+                && anc.name != scope_name
+            {
+                scope_chain.push(anc.name.clone());
             }
-            walker = sc.superclass.borrow().clone();
         }
         let mut current_value: Option<Value> = None;
         let mut segments_remaining: usize = segments.len();
