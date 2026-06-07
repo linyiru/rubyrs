@@ -55,6 +55,9 @@ class StringScanner
 
   def pos=(n)
     n += @str.length if n < 0
+    # CRuby raises RangeError when the resulting position falls outside
+    # 0..length, rather than silently storing a degenerate @pos.
+    raise RangeError, "index out of range" if n < 0 || n > @str.length
     @pos = n
     n
   end
@@ -159,8 +162,10 @@ class StringScanner
   def getch
     return nil if eos?
     ch = @str[@pos]
-    @last_md = nil
+    # CRuby's getch SETS the match register to the consumed character
+    # (so #matched / #[0] / #post_match work), rather than clearing it.
     @match_pos = @pos
+    @last_md = Regexp.new(Regexp.escape(ch)).match(ch)
     @pos += 1
     ch
   end
