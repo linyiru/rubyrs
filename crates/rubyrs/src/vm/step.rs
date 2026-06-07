@@ -1433,44 +1433,46 @@ impl Vm {
                     Some(v) => v,
                     None => {
                         // Scoped autoload trigger — Phase 2 of issue
-                        // #224. The chain entries ARE qualified-name
-                        // SymIds (`Foo::Bar`, `Rack::Response`, …),
-                        // i.e. exactly the keys `autoloads_scoped`
-                        // uses. Before falling through to the ENV
-                        // intercept / NameError, check whether any
-                        // candidate is a pending scoped autoload; if
-                        // so, pop it, `require` the target, and retry
-                        // the walk. Popping first prevents re-entry
-                        // mid-require. Wasi has no `require`, so the
-                        // block compiles out (and `autoloads_scoped`
-                        // doesn't exist there).
+                        // #224. Before falling through to the ENV
+                        // intercept / NameError, try to satisfy each
+                        // chain candidate via a pending autoload.
+                        //
+                        // Crucially this walks every `::`-PREFIX of each
+                        // candidate (via `fire_pending_autoload`), not
+                        // just the exact qualified key: a reference like
+                        // `Document::DATE_FILENAME_MATCHER` inside
+                        // `module Jekyll` compiles to the candidate
+                        // `Jekyll::Document::DATE_FILENAME_MATCHER`, but
+                        // the pending autoload is registered on the
+                        // INTERMEDIATE namespace `Jekyll::Document`
+                        // (`autoload :Document, "jekyll/document"`).
+                        // Matching only the full key missed it, so the
+                        // constant stayed unresolved until something
+                        // else happened to touch bare `Document` first.
+                        // After each successful require, re-attempt the
+                        // whole walk. Wasi has no `require`, so this
+                        // compiles out. Discovery: P3 Jekyll spike —
+                        // `post_reader.rb` reads
+                        // `Document::DATE_FILENAME_MATCHER` cold.
                         #[cfg(not(target_os = "wasi"))]
                         {
-                            let mut required = false;
                             for sym in &chain {
-                                if let Some(path) = self.autoloads_scoped.remove(sym) {
-                                    match self.builtin_call("require", &[Value::new_str(path)]) {
-                                        Some(Ok(_)) => { required = true; break; }
-                                        Some(Err(t)) => return Err(t),
-                                        None => {} // unreachable: builtin
+                                let cand = self.interner.resolve(*sym).to_string();
+                                if self.fire_pending_autoload(&cand)? {
+                                    for s2 in &chain {
+                                        if let Some(c) = self.classes.get(s2).cloned() {
+                                            self.stack.push(Value::Class(c));
+                                            return Ok(true);
+                                        }
+                                        if let Some(cv) = self.constants.get(s2).cloned() {
+                                            self.stack.push(cv);
+                                            return Ok(true);
+                                        }
                                     }
                                 }
                             }
-                            if required {
-                                for sym in &chain {
-                                    if let Some(c) = self.classes.get(sym).cloned() {
-                                        self.stack.push(Value::Class(c));
-                                        return Ok(true);
-                                    }
-                                    if let Some(cv) = self.constants.get(sym).cloned() {
-                                        self.stack.push(cv);
-                                        return Ok(true);
-                                    }
-                                }
-                                // require ran but didn't define any
-                                // candidate — fall through to the
-                                // NameError below.
-                            }
+                            // requires ran but defined no candidate —
+                            // fall through to the NameError below.
                         }
                         // ENV fallback: when the chain walk fails to
                         // find any user-defined constant matching the
