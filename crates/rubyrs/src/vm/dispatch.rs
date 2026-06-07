@@ -9760,6 +9760,113 @@ impl Vm {
         Ok(true)
     }
 
+    /// Block-form sibling of `try_invoke_explicit_recv_cached`.
+    /// `do_call_block`'s entry stack layout is
+    /// `[..., recv, block, a1, ..., aN]`, so the args are the top
+    /// `argc`, the block sits at `len-(argc+1)`, and the receiver at
+    /// `len-(argc+2)`. We peek (never mutate the stack) until every
+    /// gate passes, then commit. This handles ONLY the common case:
+    /// an `Object` receiver, a literal `Value::Block` block, and a
+    /// plain `def`-style proto method (Public, exact fixed arity,
+    /// non-closure, non-builtin). Every other shape — a `BoundMethod`
+    /// / `CurriedProc` / `Nil` block needing coercion, a non-Object
+    /// receiver, a closure/builtin/variadic method, a visibility or
+    /// arity miss — returns `Ok(false)` with the stack UNCHANGED so
+    /// `do_call_block`'s full path runs unaltered. Mirrors the
+    /// no-block fast path exactly, differing only in popping the block
+    /// off the stack and threading it into `block_arg: Some(block_id)`.
+    fn try_invoke_explicit_recv_block_cached(
+        &mut self,
+        name_id: SymId,
+        argc: usize,
+        cache_id: u16,
+    ) -> Result<bool, Trap> {
+        // Block-form layout: [..., recv, block, a1, ..., aN].
+        let block_idx = match self.stack.len().checked_sub(argc + 1) {
+            Some(i) => i,
+            None => return Ok(false),
+        };
+        // recv lives one slot below the block.
+        let recv_idx = match block_idx.checked_sub(1) {
+            Some(i) => i,
+            None => return Ok(false),
+        };
+        let id = match self.stack.get(recv_idx) {
+            Some(Value::Object(id)) => *id,
+            _ => return Ok(false),
+        };
+        // Only a literal block is stack-direct. A BoundMethod /
+        // CurriedProc needs `coerce_callable_to_block`, and `&nil`
+        // re-aims at the no-block path — both must fall through to
+        // `do_call_block`'s existing coerce logic untouched.
+        let block_id = match self.stack.get(block_idx) {
+            Some(Value::Block(bid)) => *bid,
+            _ => return Ok(false),
+        };
+        let cls = self.heap.class_of(id);
+        let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) else {
+            return Ok(false);
+        };
+        // Same gates as the no-block template: closures share captured
+        // locals, builtins re-dispatch via a dummy proto_idx, and
+        // non-Public methods must take the full visibility path.
+        if m.visibility.get() != Visibility::Public
+            || m.closure.is_some()
+            || m.builtin.is_some()
+        {
+            return Ok(false);
+        }
+        let fixed = match m.fixed_arity {
+            Some(f) if f.required as usize == argc => f,
+            _ => return Ok(false),
+        };
+        self.check_frames()?;
+        // Bind the argc args (stack top), then drop the block, then
+        // the recv. These pops are guaranteed by the peeks above —
+        // `unreachable!` (which the panic budget does not count)
+        // documents the invariant without an `.expect`.
+        let n_locals = fixed.n_locals as usize;
+        let mut locals = vec_nil(n_locals);
+        for slot in (0..argc).rev() {
+            locals[slot] = match self.stack.pop() {
+                Some(v) => v,
+                None => unreachable!("ICE: explicit-recv block fast path arg underflow"),
+            };
+        }
+        // Drop the block value (the ObjId is already captured in
+        // `block_id`); it becomes the frame's `block_arg`.
+        match self.stack.pop() {
+            Some(_) => {}
+            None => unreachable!("ICE: explicit-recv block fast path block underflow"),
+        }
+        let recv = match self.stack.pop() {
+            Some(v) => v,
+            None => unreachable!("ICE: explicit-recv block fast path recv underflow"),
+        };
+        let locals = self.intern_locals(locals);
+        self.frames.push(Frame {
+            proto_idx: m.proto_idx,
+            ip: 0,
+            locals,
+            self_val: recv,
+            base_sp: self.stack.len(),
+            is_class_body: false,
+            swap_return: None,
+            block_arg: Some(block_id),
+            defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            is_block: false,
+            n_given_positional: fixed.required,
+            kw_given_mask: 0,
+            rescues: vec![],
+            loop_rescue_depths: vec![],
+            loop_stack_depths: vec![],
+            pending_yield: false,
+            begin_rescue_depths: vec![],
+            block_writeback: None,
+        });
+        Ok(true)
+    }
+
     fn try_invoke_fixed_method_from_stack(
         &mut self,
         m: Rc<Method>,
@@ -10964,6 +11071,18 @@ impl Vm {
         // it before delegating to `do_call`, which DOES enforce
         // visibility — so `send(:priv, &nil)` still bypasses.
         let bypass_visibility = self.take_bypass_visibility();
+        // Monomorphic inline-cache fast path for the common shape:
+        // `obj.method(args) { block }` where `obj` is a user Object,
+        // the block is a literal, and `method` is a plain `def`. This
+        // skips the whole dispatch preamble + the heap args-Vec drain
+        // below. The fast path only fires for Public methods, so
+        // consuming `bypass_visibility` above is harmless — mirrors the
+        // no-block `do_call` placement. On any non-match it returns
+        // `Ok(false)` with the stack UNCHANGED, so the full path below
+        // runs exactly as before.
+        if !no_recv && self.try_invoke_explicit_recv_block_cached(name_id, argc, cache_id)? {
+            return Ok(());
+        }
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let block_val = self.stack.pop().expect("ICE: stack underflow before block");
