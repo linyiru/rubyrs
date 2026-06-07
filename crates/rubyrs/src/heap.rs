@@ -553,15 +553,26 @@ impl Heap {
     fn hash_obj_mut(&mut self, id: ObjId) -> &mut HashObj {
         if let HeapObj::Hash(h) = self.get_mut(id) { h } else { panic!("ICE: heap slot is not a Hash") }
     }
-    /// Build the key index (`ruby_hash(key)` → positions) if it isn't
-    /// present. After this returns, `HashObj.index` is `Some`.
+    /// Build the key index (`ruby_hash(key)` → positions) for a Hash
+    /// large enough to benefit. Below `HASH_INDEX_MIN` entries the index
+    /// is left `None` and callers fall back to a linear `ruby_eql` scan:
+    /// for a handful of keys that scan beats allocating and probing a
+    /// HashMap (most Jekyll hashes are this small, so building the index
+    /// eagerly was a net allocation regression), and it stays
+    /// deterministic — a cached content-hash index silently, and
+    /// order-dependently, misses a key mutated in place, whereas the
+    /// linear scan always compares live key content.
     fn ensure_hash_index(&mut self, id: ObjId) {
         if let HeapObj::Hash(h) = self.get(id) {
             if h.index.is_some() { return; }
         } else {
             panic!("ICE: heap slot is not a Hash");
         }
+        const HASH_INDEX_MIN: usize = 16;
         let n = self.hash(id).len();
+        if n < HASH_INDEX_MIN {
+            return;
+        }
         let mut map = HashIndex::with_capacity_and_hasher(n, Default::default());
         for i in 0..n {
             let kh = self.hash(id)[i].0.ruby_hash(self);
@@ -569,17 +580,30 @@ impl Heap {
         }
         self.hash_obj_mut(id).index = Some(map);
     }
-    /// O(1)-amortised position of `key` in the Hash, or `None`.
-    /// Replaces the old `pairs.iter().position(ruby_eql)` linear scan.
+    /// O(1)-amortised position of `key` in the Hash, or `None`. Uses the
+    /// key index for large Hashes; small ones (no index) fall back to a
+    /// linear `ruby_eql` scan — the old behaviour, restored below the
+    /// `ensure_hash_index` threshold.
     pub(crate) fn hash_index_lookup(&mut self, id: ObjId, key: &Value) -> Option<usize> {
         self.ensure_hash_index(id);
         let kh = key.ruby_hash(self);
-        if let HeapObj::Hash(h) = self.get(id)
-            && let Some(cands) = h.index.as_ref().and_then(|m| m.get(&kh))
-        {
-            for &i in cands {
-                if h.pairs[i as usize].0.ruby_eql(key, self) {
-                    return Some(i as usize);
+        if let HeapObj::Hash(h) = self.get(id) {
+            match h.index.as_ref() {
+                Some(m) => {
+                    if let Some(cands) = m.get(&kh) {
+                        for &i in cands {
+                            if h.pairs[i as usize].0.ruby_eql(key, self) {
+                                return Some(i as usize);
+                            }
+                        }
+                    }
+                }
+                None => {
+                    for i in 0..h.pairs.len() {
+                        if h.pairs[i].0.ruby_eql(key, self) {
+                            return Some(i);
+                        }
+                    }
                 }
             }
         }
@@ -592,16 +616,17 @@ impl Heap {
         self.ensure_hash_index(id);
         let kh = key.ruby_hash(self);
         let existing: Option<usize> = if let HeapObj::Hash(h) = self.get(id) {
-            h.index
-                .as_ref()
-                .and_then(|m| m.get(&kh))
-                .and_then(|cands| {
+            match h.index.as_ref() {
+                Some(m) => m.get(&kh).and_then(|cands| {
                     cands
                         .iter()
                         .copied()
                         .find(|&i| h.pairs[i as usize].0.ruby_eql(&key, self))
                         .map(|i| i as usize)
-                })
+                }),
+                // Small hash (no index): linear ruby_eql scan.
+                None => (0..h.pairs.len()).find(|&i| h.pairs[i].0.ruby_eql(&key, self)),
+            }
         } else {
             None
         };
