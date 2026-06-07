@@ -8429,6 +8429,14 @@ impl Vm {
                     match owned {
                         Some(oc) => {
                             let m_start = oc.m_start;
+                            // `=~` returns a CHARACTER index (CRuby),
+                            // consistent with String#index — not the regex
+                            // engine's byte offset, which diverges on
+                            // multibyte input and corrupts StringScanner's
+                            // pre_match/post_match (they add this offset to
+                            // a char-based position). The byte `m_start` is
+                            // still stored for internal pre/post slicing.
+                            let char_idx = bound[..m_start].chars().count() as i64;
                             self.last_match = Some(crate::vm::LastMatch {
                                 whole: oc.whole,
                                 caps: oc.groups,
@@ -8437,7 +8445,7 @@ impl Vm {
                                 m_end: oc.m_end,
                                 named: oc.named,
                             });
-                            Value::Int(m_start as i64)
+                            Value::Int(char_idx)
                         }
                         None => {
                             self.last_match = None;

@@ -632,6 +632,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn regex_backref_replace() { run_diff("regex_backref_replace"); }
 #[test] fn match_data_index() { run_diff("match_data_index"); }
 #[test] fn last_match_named() { run_diff("last_match_named"); }
+#[test] fn regex_match_char_offset() { run_diff("regex_match_char_offset"); }
 #[test] fn file_fnmatch() { run_diff("file_fnmatch"); }
 #[test] fn fileops_write() { run_diff("fileops_write"); }
 #[test] fn errno_rescue() { run_diff("errno_rescue"); }
