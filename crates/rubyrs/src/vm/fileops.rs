@@ -626,8 +626,8 @@ impl Vm {
 
     /// `FileUtils` module-method shims — the directory/file mutation
     /// surface site generators reach for: `mkdir_p` / `mkdir` /
-    /// `rm_rf` / `rm_f` / `rm` / `cp` / `cp_r` / `touch`. Each path
-    /// goes through the filesystem capability gate. Returns
+    /// `rm_rf` / `rm_f` / `rm` / `cp` / `cp_r` / `mv` / `touch`. Each
+    /// path goes through the filesystem capability gate. Returns
     /// `Ok(Some(v))` on a handled method, `Ok(None)` otherwise.
     /// Discovery: P3 Jekyll spike — jekyll writes the cache dir +
     /// `_site` output via `FileUtils.mkdir_p` etc.
@@ -729,6 +729,53 @@ impl Vm {
                 }
                 Value::Nil
             }
+            ("cp_r", [src, dst]) => {
+                self.check_filesystem_io_allowed("FileUtils.cp_r", None)?;
+                let srcs = paths(self, src)?;
+                let d = paths(self, dst)?.into_iter().next().unwrap_or_default();
+                self.check_filesystem_io_allowed("FileUtils.cp_r", Some(Path::new(&d)))?;
+                let into_dir = matches!(src, Value::Array(_)) || Path::new(&d).is_dir();
+                for s in &srcs {
+                    self.check_filesystem_io_allowed("FileUtils.cp_r", Some(Path::new(s)))?;
+                    let target = if into_dir {
+                        Path::new(&d).join(Path::new(s).file_name().unwrap_or_default())
+                    } else {
+                        Path::new(&d).to_path_buf()
+                    };
+                    copy_tree(Path::new(s), &target)
+                        .map_err(|e| self.trap(io_error(&e, Some(Path::new(s)))))?;
+                }
+                Value::Nil
+            }
+            ("mv" | "move", [src, dst]) => {
+                self.check_filesystem_io_allowed("FileUtils.mv", None)?;
+                let srcs = paths(self, src)?;
+                let d = paths(self, dst)?.into_iter().next().unwrap_or_default();
+                self.check_filesystem_io_allowed("FileUtils.mv", Some(Path::new(&d)))?;
+                let into_dir = matches!(src, Value::Array(_)) || Path::new(&d).is_dir();
+                for s in &srcs {
+                    self.check_filesystem_io_allowed("FileUtils.mv", Some(Path::new(s)))?;
+                    let sp = Path::new(s);
+                    let target = if into_dir {
+                        Path::new(&d).join(sp.file_name().unwrap_or_default())
+                    } else {
+                        Path::new(&d).to_path_buf()
+                    };
+                    // Same-filesystem rename is atomic; fall back to a
+                    // recursive copy + remove across devices.
+                    if std::fs::rename(sp, &target).is_err() {
+                        copy_tree(sp, &target)
+                            .map_err(|e| self.trap(io_error(&e, Some(sp))))?;
+                        let rm = if sp.is_dir() {
+                            std::fs::remove_dir_all(sp)
+                        } else {
+                            std::fs::remove_file(sp)
+                        };
+                        rm.map_err(|e| self.trap(io_error(&e, Some(sp))))?;
+                    }
+                }
+                Value::Nil
+            }
             ("touch", [a]) => {
                 self.check_filesystem_io_allowed("FileUtils.touch", None)?;
                 let ps = paths(self, a)?;
@@ -743,6 +790,23 @@ impl Vm {
             }
             _ => return Ok(None),
         }))
+    }
+}
+
+/// Recursively copy `src` to `dst` (files and directory trees),
+/// backing `FileUtils.cp_r` and the cross-device fallback of
+/// `FileUtils.mv`. Directories are created as the walk descends; a
+/// plain file is copied directly.
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if src.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(src, dst).map(|_| ())
     }
 }
 
