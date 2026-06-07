@@ -119,6 +119,16 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         "stringio" => Some(include_str!("stdlib_vendor/stringio.rb")),
         "strscan" => Some(include_str!("stdlib_vendor/strscan.rb")),
         "json" => Some(include_str!("stdlib_vendor/json.rb")),
+        // `digest` (+ the per-algorithm require paths): a pure-Ruby
+        // veneer defining `Digest::SHA2 / SHA256 / SHA1 / MD5` over
+        // the native `RubyrsDigest` host primitive. The real `digest`
+        // is a C extension (OpenSSL-backed); this is the ADR 0026
+        // blessed reimpl. Discovery: P3 Jekyll spike —
+        // `jekyll/cache.rb` keys its disk cache with
+        // `Digest::SHA2.hexdigest(key)`.
+        "digest" | "digest/sha2" | "digest/sha1" | "digest/md5" => {
+            Some(include_str!("stdlib_vendor/digest.rb"))
+        }
         // ActiveSupport-lite menu item 3 (ADR 0026 v2). All three
         // common require-paths users reach for (`active_support`,
         // `active_support/all`, `active_support/core_ext`) route

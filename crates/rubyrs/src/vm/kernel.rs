@@ -3125,7 +3125,16 @@ fn is_stdlib_stub_name(name: &str) -> bool {
 /// Only used from the non-wasi require path, so gated to match.
 #[cfg(not(target_os = "wasi"))]
 fn is_blessed_reimpl_name(name: &str) -> bool {
-    matches!(name, "safe_yaml" | "safe_yaml/load" | "jekyll-sass-converter")
+    matches!(
+        name,
+        "safe_yaml" | "safe_yaml/load" | "jekyll-sass-converter"
+        // `digest` is a C extension (OpenSSL-backed) in CRuby; it
+        // cannot be hosted. Route every `require "digest"` /
+        // `"digest/sha2"` / ... to the native `RubyrsDigest`-backed
+        // veneer even when CRuby's own `digest.rb` is on `$LOAD_PATH`
+        // (it would otherwise `require "digest.so"` and fail).
+        | "digest" | "digest/sha2" | "digest/sha1" | "digest/md5"
+    )
 }
 
 /// ASCII-lowercase name → "is this the preamble-defined core

@@ -614,3 +614,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn stringscanner_full() { run_diff("stringscanner_full"); }
 #[cfg(feature = "stdlib")]
 #[test] fn yaml_psych_error() { run_diff("yaml_psych_error"); }
+#[cfg(feature = "stdlib")]
+#[test] fn digest_hexdigest() { run_diff("digest_hexdigest"); }

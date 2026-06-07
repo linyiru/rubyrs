@@ -33,6 +33,7 @@ mod ast;
 mod bytecode;
 mod compiler;
 mod const_marker;
+mod digest;
 mod error;
 mod heap;
 #[cfg(feature = "_http_server")]
@@ -2277,6 +2278,13 @@ end
 ## `convert` delegates here; defined always so the primitive is
 ## reachable even without the shim loaded.
 class RubyrsSass
+end
+## RubyrsDigest — anchor for the `RubyrsDigest.hexdigest(algo, data)`
+## / `.digest(algo, data)` host primitives (wired in vm/dispatch.rs
+## to crate::digest, pure-Rust SHA-256/SHA-1/MD5). The Digest::*
+## veneer (stdlib_vendor/digest.rb) delegates here; defined always
+## so the primitive is reachable in every build.
+class RubyrsDigest
 end
 ## `class Mutex; ... end` (single-threaded no-op shim) is loaded
 ## from `preamble/mutex.rb` BEFORE this `PREAMBLE` eval.

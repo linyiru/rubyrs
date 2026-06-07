@@ -6283,6 +6283,34 @@ impl Vm {
                     }
                 }
             }
+            // `RubyrsDigest.hexdigest(algo, data)` / `.digest(algo, data)`
+            // — host primitive backing the `Digest::SHA2 / SHA1 / MD5`
+            // veneer (`stdlib_vendor/digest.rb`). `algo` is the lowercase
+            // tag ("sha256"/"sha1"/"md5"); `data` is hashed by its raw
+            // bytes (binary-safe). `hexdigest` returns the lowercase hex
+            // String; `digest` returns the raw bytes as a binary String.
+            if cls.name.as_str() == "RubyrsDigest"
+                && matches!(&*name, "hexdigest" | "digest")
+                && let [Value::Str(algo), Value::Str(data)] = args.as_slice() {
+                let algo_s = algo.to_string_lossy();
+                let bytes = data.borrow().clone();
+                match crate::digest::raw(&algo_s, &bytes) {
+                    Some(raw) => {
+                        let v = if &*name == "hexdigest" {
+                            Value::new_str(crate::digest::to_hex(&raw))
+                        } else {
+                            Value::new_str_bytes(raw)
+                        };
+                        self.stack.push(v);
+                        return Ok(());
+                    }
+                    None => {
+                        return Err(self.trap(RubyError::RuntimeError {
+                            msg: format!("rubyrs: unsupported digest algorithm {algo_s:?}"),
+                        }));
+                    }
+                }
+            }
             // `Module.nesting` — CRuby reflection returning the
             // lexical scope chain at the call site, innermost-first.
             // Resolves through the current frame's proto's
