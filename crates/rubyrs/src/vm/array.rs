@@ -1284,7 +1284,14 @@ impl Vm {
                             while j > 0 {
                                 let ord = g.vm.user_cmp(&copy[j - 1], &copy[j])?;
                                 match ord {
-                                    None => return Ok(None),
+                                    // Incomparable pair (no usable `<=>`):
+                                    // CRuby raises ArgumentError, not the
+                                    // NoMethodError the old `Ok(None)` bail
+                                    // produced.
+                                    None => {
+                                        let t = g.vm.cmp_failed(&copy[j - 1], &copy[j]);
+                                        return Err(t);
+                                    }
                                     Some(std::cmp::Ordering::Greater) => {
                                         copy.swap(j - 1, j);
                                         j -= 1;
@@ -1466,14 +1473,25 @@ impl Vm {
                     // actually changed (matching CRuby for
                     // `uniq!` / `compact!` / `flatten!`).
                     ("sort!", []) => {
-                        let mut copy = self.heap.array(id).clone();
+                        // PinGuard the receiver Array: `user_cmp` can now
+                        // invoke a user-defined `<=>` (instance method, or
+                        // a Class's `def self.<=>`), which may trigger
+                        // maybe_gc. `copy`'s element ObjIds stay reachable
+                        // via the pinned receiver's mark walk — mirrors the
+                        // no-block `sort` arm above.
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let mut copy = g.vm.heap.array(id).clone();
                         let n = copy.len();
                         for i in 1..n {
                             let mut j = i;
                             while j > 0 {
-                                let ord = self.user_cmp(&copy[j - 1], &copy[j])?;
+                                let ord = g.vm.user_cmp(&copy[j - 1], &copy[j])?;
                                 match ord {
-                                    None => return Ok(None),
+                                    None => {
+                                        let t = g.vm.cmp_failed(&copy[j - 1], &copy[j]);
+                                        return Err(t);
+                                    }
                                     Some(std::cmp::Ordering::Greater) => {
                                         copy.swap(j - 1, j);
                                         j -= 1;
@@ -1482,7 +1500,7 @@ impl Vm {
                                 }
                             }
                         }
-                        *self.heap.array_mut(id) = copy;
+                        *g.vm.heap.array_mut(id) = copy;
                         Some(Value::Array(id))
                     }
                     ("uniq!", []) => {

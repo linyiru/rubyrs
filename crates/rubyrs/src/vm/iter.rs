@@ -224,6 +224,47 @@ impl Vm {
         })
     }
 
+    /// In-place filter family. `keep_truthy` picks the predicate
+    /// polarity: `true` keeps elements the block matches
+    /// (`select!` / `filter!` / `keep_if`); `false` keeps the ones
+    /// it rejects (`delete_if` / `reject!`). `bang` picks the CRuby
+    /// return convention: the `!` variants (`reject!` / `select!` /
+    /// `filter!`) return `nil` when nothing changed, while
+    /// `delete_if` / `keep_if` always return self. Mutates the
+    /// receiver Array in place. Discovery: P3 Jekyll spike —
+    /// `reader.rb#get_entries` does `entries.delete_if { … }`.
+    pub(crate) fn iter_array_delete_if(
+        &mut self,
+        id: ObjId,
+        keep_truthy: bool,
+        bang: bool,
+        block: ObjId,
+    ) -> Result<Value, Trap> {
+        let snapshot: Vec<Value> = self.heap.array(id).clone();
+        let mut g = PinGuard::new(self);
+        g.pin(Value::Array(id));
+        g.pin(Value::Block(block));
+        for v in &snapshot {
+            if v.is_gc_heap_ref() { g.pin(v.clone()); }
+        }
+        let pre_frames = g.vm.frames.len();
+        let mut kept: Vec<Value> = Vec::with_capacity(snapshot.len());
+        let mut early: Option<Value> = None;
+        for v in snapshot {
+            let r = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
+                BlockStep::MethodReturn => break,
+                BlockStep::Break(r) => { early = Some(r); break; }
+                BlockStep::Value(r) => r,
+            };
+            let keep = if keep_truthy { r.is_truthy() } else { !r.is_truthy() };
+            if keep { kept.push(v); }
+        }
+        if let Some(e) = early { return Ok(e); }
+        let changed = kept.len() != g.vm.heap.array(id).len();
+        *g.vm.heap.array_mut(id) = kept;
+        Ok(if bang && !changed { Value::Nil } else { Value::Array(id) })
+    }
+
     /// Same shape as `iter_array_filter`, but the source is a Hash.
     /// Yield convention:
     ///   - `select` / `reject` yield `(k, v)` as TWO args
@@ -2411,6 +2452,25 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Array(*id)))
             }
+            (Value::Array(id), "each_index", []) => {
+                // Yield each valid index (0..length), return self.
+                // Discovery: P3 Jekyll spike — kramdown's tree walker
+                // iterates child positions via `each_index`.
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let len = g.vm.heap.array(*id).len();
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for i in 0..len {
+                    match g.vm.step_block(block, vec![Value::Int(i as i64)], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(*id)))
+            }
             (Value::Array(id), "each_with_object", [seed]) => {
                 // `arr.each_with_object(memo) { |elem, memo| ... }`.
                 // CRuby threads `memo` unchanged across iterations
@@ -3135,7 +3195,7 @@ impl Vm {
                     Some(Value::Array(nid))
                 }
             }
-            (Value::Array(id), "sort_by", []) => {
+            (Value::Array(id), "sort_by", []) | (Value::Array(id), "sort_by!", []) => {
                 // PinGuard wraps the entire impl — the previous code
                 // dropped the guard after the key-collection loop,
                 // leaving `pairs` (a Rust local) to carry ObjId-
@@ -3178,7 +3238,13 @@ impl Vm {
                         };
                         let ord = g.vm.user_cmp(&k_prev, &k_curr)?;
                         match ord {
-                            None => return Ok(None),
+                            // Incomparable keys raise ArgumentError, as
+                            // CRuby does — not the NoMethodError the old
+                            // `Ok(None)` bail produced.
+                            None => {
+                                let t = g.vm.cmp_failed(&k_prev, &k_curr);
+                                return Err(t);
+                            }
                             Some(std::cmp::Ordering::Greater) => {
                                 pairs.swap(j - 1, j);
                                 j -= 1;
@@ -3188,10 +3254,17 @@ impl Vm {
                     }
                 }
                 let sorted: Vec<Value> = pairs.into_iter().map(|(_, v)| v).collect();
-                g.vm.maybe_gc();
-                g.vm.check_alloc()?;
-                let nid = g.vm.heap.alloc(HeapObj::Array(sorted));
-                Some(Value::Array(nid))
+                // `sort_by!` writes the order back into the receiver and
+                // returns self; `sort_by` allocates a fresh Array.
+                if name == "sort_by!" {
+                    *g.vm.heap.array_mut(*id) = sorted;
+                    Some(Value::Array(*id))
+                } else {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let nid = g.vm.heap.alloc(HeapObj::Array(sorted));
+                    Some(Value::Array(nid))
+                }
             }
             (Value::Array(id), "inject", []) | (Value::Array(id), "reduce", []) => {
                 // Pilot migration to `step_block` per #151.
@@ -3386,6 +3459,10 @@ impl Vm {
 
             (Value::Array(id), "select", []) | (Value::Array(id), "filter", []) => Some(self.iter_array_filter(*id, IterMode::Select, block)?),
             (Value::Array(id), "reject", []) => Some(self.iter_array_filter(*id, IterMode::Reject, block)?),
+            (Value::Array(id), "delete_if", []) => Some(self.iter_array_delete_if(*id, false, false, block)?),
+            (Value::Array(id), "reject!", []) => Some(self.iter_array_delete_if(*id, false, true, block)?),
+            (Value::Array(id), "keep_if", []) => Some(self.iter_array_delete_if(*id, true, false, block)?),
+            (Value::Array(id), "select!", []) | (Value::Array(id), "filter!", []) => Some(self.iter_array_delete_if(*id, true, true, block)?),
             (Value::Array(id), "find", []) | (Value::Array(id), "detect", []) => Some(self.iter_array_filter(*id, IterMode::Find, block)?),
             // `find(ifnone) { … }` / `detect(ifnone) { … }` — when no
             // element matches, the `ifnone` callable is invoked and

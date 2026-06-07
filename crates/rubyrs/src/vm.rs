@@ -1578,30 +1578,60 @@ impl Vm {
         if let Some(ord) = value_cmp_v_heap(a, b, &self.interner, &self.heap) {
             return Ok(Some(ord));
         }
-        // Try the receiver's `<=>` method (user-defined). Only
-        // Value::Object can have user methods; other receivers
-        // would have been resolved by value_cmp_v above.
-        if let Value::Object(id) = a {
-            let cls = self.heap.class_of(*id);
-            let spaceship = self.interner.intern("<=>");
-            if let Some(m) = self.lookup_method_uncached(&cls, spaceship) {
-                let pre_frames = self.frames.len();
-                let mut g = PinGuard::new(self);
-                g.pin(a.clone());
-                g.pin(b.clone());
-                g.vm.invoke_method(m, a.clone(), vec![b.clone()])?;
-                g.vm.dispatch_until(pre_frames)?;
-                let result = g.vm.stack.pop().unwrap_or(Value::Nil);
-                drop(g);
-                return Ok(match result {
-                    Value::Int(n) if n < 0 => Some(std::cmp::Ordering::Less),
-                    Value::Int(0) => Some(std::cmp::Ordering::Equal),
-                    Value::Int(_) => Some(std::cmp::Ordering::Greater),
-                    _ => None,
-                });
+        // Try the receiver's `<=>` method (user-defined). A
+        // `Value::Object` resolves it as an instance method; a
+        // `Value::Class` resolves it as a class/singleton method —
+        // `def self.<=>` walked via the metaclass chain (jekyll's
+        // `Plugin.<=>` sorts plugin *classes* by priority, so
+        // `klass_array.sort` compares Class receivers). Other
+        // receiver types were already handled by value_cmp_v above.
+        let spaceship = self.interner.intern("<=>");
+        let method = match a {
+            Value::Object(id) => {
+                let cls = self.heap.class_of(*id);
+                self.lookup_method_uncached(&cls, spaceship)
             }
+            Value::Class(c) => self.lookup_class_singleton_method(c, spaceship),
+            _ => None,
+        };
+        if let Some(m) = method {
+            let pre_frames = self.frames.len();
+            let mut g = PinGuard::new(self);
+            g.pin(a.clone());
+            g.pin(b.clone());
+            g.vm.invoke_method(m, a.clone(), vec![b.clone()])?;
+            g.vm.dispatch_until(pre_frames)?;
+            let result = g.vm.stack.pop().unwrap_or(Value::Nil);
+            drop(g);
+            return Ok(match result {
+                Value::Int(n) if n < 0 => Some(std::cmp::Ordering::Less),
+                Value::Int(0) => Some(std::cmp::Ordering::Equal),
+                Value::Int(_) => Some(std::cmp::Ordering::Greater),
+                _ => None,
+            });
         }
         Ok(None)
+    }
+
+    /// The `ArgumentError: comparison of X with Y failed` trap CRuby
+    /// raises when a no-block `sort` / `sort!` / `min` / `max` reaches
+    /// two elements with no usable `<=>` (returns nil, or none
+    /// defined). `X` / `Y` are the operands' class names. Before this
+    /// existed the no-block sort arms returned `Ok(None)` on an
+    /// incomparable pair, which mis-surfaced as
+    /// `NoMethodError: undefined method 'sort' for Array`.
+    pub(crate) fn cmp_failed(&mut self, a: &Value, b: &Value) -> Trap {
+        let an = match self.class_of(a) {
+            Value::Class(c) => c.name.clone(),
+            _ => a.type_name().to_string(),
+        };
+        let bn = match self.class_of(b) {
+            Value::Class(c) => c.name.clone(),
+            _ => b.type_name().to_string(),
+        };
+        self.trap(crate::error::RubyError::ArgumentError {
+            msg: format!("comparison of {an} with {bn} failed"),
+        })
     }
 
 

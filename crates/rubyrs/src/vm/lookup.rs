@@ -700,13 +700,14 @@ impl Vm {
                 "each" | "map" | "collect" | "select" | "filter" |
                 "reject" | "find" | "detect" |
                 "any?" | "all?" | "none?" |
-                "each_with_index" | "sort_by" |
+                "each_with_index" | "each_index" | "sort_by" |
                 "min_by" | "max_by" | "group_by" |
                 "each_with_object" | "partition" | "chunk_while" | "bsearch" |
                 "take_while" | "drop_while" |
                 "zip" |
                 "sort!" | "uniq!" | "compact!" | "flatten!" | "reverse!" |
-                "map!" | "collect!" |
+                "map!" | "collect!" | "sort_by!" |
+                "delete_if" | "reject!" | "keep_if" | "select!" | "filter!" |
                 "flat_map" | "collect_concat" | "chunk" | "filter_map" |
                 "each_slice" | "each_cons" |
                 "inspect" |
