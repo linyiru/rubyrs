@@ -539,6 +539,20 @@ impl Vm {
         for cls in self.classes.values() {
             for v in cls.ivars.borrow().values() { roots.push(v.clone()); }
         }
+        // Classes reachable ONLY via a constant or a global — anonymous
+        // classes named by assignment (`S = Struct.new(...)`) or a class
+        // stashed in `$global` — are NOT in `self.classes`, so the loop
+        // above misses their class-level ivars. `visit_value` has no
+        // `Value::Class` arm (a Class is Rc-counted, not a GC slot), so
+        // those ivars are otherwise never reached and a heap-backed
+        // class ivar (e.g. Struct's `@__struct_attrs` Array) gets swept
+        // mid-use. Root them here too. Found via STRESS_GC on
+        // `Struct.new(...).new(...)`.
+        for v in self.constants.values().chain(self.globals.values()) {
+            if let Value::Class(c) = v {
+                for iv in c.ivars.borrow().values() { roots.push(iv.clone()); }
+            }
+        }
         for f in &self.frames {
             roots.push(f.self_val.clone());
             for v in f.locals.borrow().iter() { roots.push(v.clone()); }

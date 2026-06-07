@@ -9514,9 +9514,27 @@ impl Vm {
                 } else {
                     Vec::new()
                 };
-                self.maybe_gc();
-                self.check_alloc()?;
-                let id = self.heap.alloc(HeapObj::Array(rest_vec));
+                // Pin `self_val` (and the heap-ref args) across this
+                // rest-Array allocation's `maybe_gc`. The frame that
+                // will root `self_val` isn't pushed until below, and a
+                // `define_method(:initialize) do |*a| … end` reaches
+                // here from `Class#new` AFTER that path dropped its own
+                // PinGuard — so without this, a sweep frees the
+                // freshly-allocated receiver and the closure body runs
+                // on a dangling `self`. Found via STRESS_GC on a
+                // `define_method`-defined `initialize` with `*args`.
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(self_val.clone());
+                for a in &args {
+                    if a.is_gc_heap_ref() { g.pin(a.clone()); }
+                }
+                for a in &rest_vec {
+                    if a.is_gc_heap_ref() { g.pin(a.clone()); }
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let id = g.vm.heap.alloc(HeapObj::Array(rest_vec));
+                drop(g);
                 (args, Some(id))
             } else {
                 (args, None)
