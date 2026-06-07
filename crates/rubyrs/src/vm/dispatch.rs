@@ -4667,17 +4667,19 @@ impl Vm {
             return Ok(());
         }
         let name = self.interner.resolve(name_id).clone();
-        // Universal-Object bare-call routing. Three shims
-        // (Forwardable / Delegate / Struct) work around this gap
-        // by writing `self.instance_variable_get(...)` explicitly
-        // because the bare-form dispatch path doesn't reach the
-        // universal Object arms (those gate on `&recv` being
-        // `Some(Value::Object(...))`, but `no_recv` keeps `recv`
-        // None). Closes the gap by treating bare-form
-        // `instance_variable_get`/`set`/`defined?` calls as
-        // `self.<method>(args)` when self is `Value::Object` —
-        // routes through the explicit-recv arms below by pushing
-        // self and re-entering with no_recv=false.
+        // Universal-Object bare-call routing. Several universal
+        // `Object` methods are implemented only in the explicit-recv
+        // dispatch arms (they gate on `&recv` being
+        // `Some(Value::Object(...))`), but a bare/implicit-self call
+        // keeps `recv` None and never reaches them — so e.g.
+        // `is_a?(Foo)` inside an instance method raised
+        // `NoMethodError: undefined method 'is_a?'` even though
+        // `obj.is_a?(Foo)` works. Close the gap by treating these
+        // bare-form calls as `self.<method>(args)` when self is a
+        // `Value::Object`: push self below the args and re-enter
+        // with no_recv=false so the explicit path (incl. any user
+        // override) handles them. Discovery: P3 Jekyll spike —
+        // `convertible.rb#type` does `:pages if is_a?(Page)`.
         if no_recv
             && matches!(
                 &*name,
@@ -4685,6 +4687,9 @@ impl Vm {
                     | "instance_variable_set"
                     | "instance_variable_defined?"
                     | "instance_variables"
+                    | "is_a?"
+                    | "kind_of?"
+                    | "instance_of?"
             )
         {
             let self_val = self.frames.last()
