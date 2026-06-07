@@ -44,6 +44,10 @@ class File
   def self.open(path, mode = "r", **_opts)
     mode_s = mode.to_s
     writing = mode_s.include?("w") || mode_s.include?("a")
+    # Readable unless the mode is write/append-only ("w"/"a" without
+    # "+"). A pure write handle must reject reads (CRuby IOError),
+    # rather than silently returning "".
+    reading = mode_s.include?("r") || mode_s.include?("+")
     if writing
       # Write/append mode: start from "" (truncate) or the existing
       # content (append). Buffered in memory; flushed to disk via the
@@ -51,14 +55,14 @@ class File
       # append case (missing file) just starts empty.
       buf = mode_s.include?("a") ? (File.read(path) rescue "") : ""
       f = allocate
-      f.__io_init(path.to_s, buf, write: true)
+      f.__io_init(path.to_s, buf, write: true, read: reading)
     else
       # Reuse the capability-gated Tier-1 `File.read` primitive for
       # the actual disk reach. A read failure (missing file, sandbox
       # denial) surfaces as whatever `File.read` raises.
       buf = File.read(path)
       f = allocate
-      f.__io_init(path.to_s, buf)
+      f.__io_init(path.to_s, buf, read: reading)
     end
     if block_given?
       begin
@@ -85,12 +89,13 @@ class File
   # --- instance surface (operates on the buffered content) ---
 
   # @!visibility private
-  def __io_init(path, buf, write: false)
+  def __io_init(path, buf, write: false, read: true)
     @__io_path = path
     @__io_buf = buf
     @__io_pos = write ? buf.length : 0
     @__io_closed = false
     @__io_write = write
+    @__io_read = read
     @__io_dirty = false
     self
   end
@@ -143,6 +148,7 @@ class File
 
   def read(length = nil)
     raise IOError, "closed stream" if @__io_closed
+    raise IOError, "not opened for reading" unless @__io_read
     rest = @__io_buf[@__io_pos..] || ""
     if length.nil?
       @__io_pos = @__io_buf.length
@@ -156,6 +162,7 @@ class File
 
   def gets(sep = "\n")
     raise IOError, "closed stream" if @__io_closed
+    raise IOError, "not opened for reading" unless @__io_read
     return nil if @__io_pos >= @__io_buf.length
     idx = @__io_buf.index(sep, @__io_pos)
     if idx
