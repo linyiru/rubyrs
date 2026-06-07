@@ -4041,21 +4041,64 @@ impl Vm {
         let v = match args.first() {
             // No arg → the whole MatchData (with pre/post-match), or nil.
             None => self.materialize_last_match()?,
-            // `Regexp.last_match(n)`: group 0 is the whole match,
-            // group n (n>=1) is the n-th capture. `LastMatch.caps`
-            // holds ONLY the captures (index 0 == group 1), with the
-            // whole match in `.whole` — so map the index accordingly.
-            Some(Value::Int(n)) if *n >= 0 => match &self.last_match {
-                Some(lm) if *n == 0 => Value::new_str(lm.whole.clone()),
-                Some(lm) => lm
-                    .caps
-                    .get((*n as usize) - 1)
-                    .and_then(|c| c.as_ref())
-                    .map(|s| Value::new_str(s.clone()))
-                    .unwrap_or(Value::Nil),
+            // `Regexp.last_match(n)`: same as `MatchData#[]`. Index 0
+            // is the whole match; n>=1 the n-th capture. A negative
+            // index counts from the end of the *captures* (CRuby's
+            // `rb_reg_nth_match`) — it can reach any capture but never
+            // wraps to the whole match. `LastMatch.caps` holds ONLY
+            // the captures (index 0 == group 1).
+            Some(Value::Int(n)) => match &self.last_match {
                 None => Value::Nil,
+                Some(lm) => {
+                    let cl = lm.caps.len() as i64;
+                    // Resolve to a captures index, -1 for the whole
+                    // match, or None for out-of-range.
+                    let pick: Option<i64> = if *n < 0 {
+                        let j = *n + cl;
+                        if j >= 0 { Some(j) } else { None }
+                    } else if *n == 0 {
+                        Some(-1)
+                    } else if *n - 1 < cl {
+                        Some(*n - 1)
+                    } else {
+                        None
+                    };
+                    match pick {
+                        None => Value::Nil,
+                        Some(-1) => Value::new_str(lm.whole.clone()),
+                        Some(j) => lm.caps[j as usize]
+                            .as_ref()
+                            .map(|s| Value::new_str(s.clone()))
+                            .unwrap_or(Value::Nil),
+                    }
+                }
             },
-            // Negative index / named-capture forms aren't modelled.
+            // `Regexp.last_match(:name)` / `("name")` — named capture.
+            // An existing-but-non-participating group is nil; an
+            // unknown name raises IndexError (CRuby, via MatchData#[]).
+            Some(Value::Sym(_)) | Some(Value::Str(_)) => {
+                let key = match args.first() {
+                    Some(Value::Sym(id)) => self.interner.resolve(*id).to_string(),
+                    Some(Value::Str(s)) => s.to_string_lossy(),
+                    _ => unreachable!(),
+                };
+                let resolved: Option<Value> = match &self.last_match {
+                    None => Some(Value::Nil),
+                    Some(lm) => match lm.named.iter().find(|(n, _)| *n == key) {
+                        Some((_, Some(s))) => Some(Value::new_str(s.clone())),
+                        Some((_, None)) => Some(Value::Nil),
+                        None => None,
+                    },
+                };
+                match resolved {
+                    Some(v) => v,
+                    None => {
+                        return Err(self.trap(RubyError::IndexError {
+                            msg: format!("undefined group name reference: {}", key),
+                        }));
+                    }
+                }
+            }
             Some(_) => Value::Nil,
         };
         self.stack.push(v);
