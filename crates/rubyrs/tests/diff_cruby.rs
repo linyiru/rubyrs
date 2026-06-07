@@ -623,3 +623,4 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_delete_affix() { run_diff("string_delete_affix"); }
 #[test] fn string_index_substr() { run_diff("string_index_substr"); }
 #[test] fn bare_is_a() { run_diff("bare_is_a"); }
+#[test] fn massign_coerce() { run_diff("massign_coerce"); }

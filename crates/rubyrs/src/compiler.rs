@@ -630,6 +630,11 @@ fn compile_multiwrite_arm(
 ) {
     use crate::ast::MultiWriteTarget as MWT;
     compile_expr(b, value, protos, interner, cc);
+    // Coerce the RHS to an Array (CRuby massign semantics) so the
+    // per-target `[]` / `__mw_splat` / `__mw_post` calls below see an
+    // Array even when the RHS is nil / a scalar / a `to_ary`-shaped
+    // object. Without this `a, b = nil` raised `nil[0]` NoMethodError.
+    b.emit(Op::MassignSplat);
     let bracket_id = interner.intern("[]");
     let splat_id = interner.intern("__mw_splat");
 

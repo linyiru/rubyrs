@@ -1160,6 +1160,11 @@ impl Vm {
                 let n = self.stack.len();
                 self.stack.swap(n - 1, n - 2);
             }
+            Op::MassignSplat => {
+                let v = self.stack.pop().unwrap_or(Value::Nil);
+                let coerced = self.massign_coerce_to_array(v)?;
+                self.stack.push(coerced);
+            }
             Op::LoadIvar(name_id) => {
                 // `@foo` reads route to whichever table `self`
                 // carries: instance ivars for `Value::Object`,

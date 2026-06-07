@@ -1634,6 +1634,32 @@ impl Vm {
         })
     }
 
+    /// Coerce `v` to an Array for parallel assignment (`a, b = v`),
+    /// CRuby-style: an Array stays as-is; an object that responds to
+    /// `to_ary` is converted (a non-Array `to_ary` result falls back
+    /// to wrapping, leniently); anything else (`nil`, a scalar)
+    /// becomes a one-element `[v]`. Backs `Op::MassignSplat`.
+    pub(crate) fn massign_coerce_to_array(&mut self, v: Value) -> Result<Value, Trap> {
+        if matches!(v, Value::Array(_)) {
+            return Ok(v);
+        }
+        if let Value::Object(id) = &v {
+            let cls = self.heap.class_of(*id);
+            let to_ary = self.interner.intern("to_ary");
+            if let Some(m) = self.lookup_method_uncached(&cls, to_ary) {
+                let pre = self.frames.len();
+                self.invoke_method(m, v.clone(), vec![])?;
+                self.dispatch_until(pre)?;
+                let r = self.stack.pop().unwrap_or(Value::Nil);
+                if matches!(r, Value::Array(_)) {
+                    return Ok(r);
+                }
+            }
+        }
+        self.maybe_gc();
+        self.check_alloc()?;
+        Ok(Value::Array(self.heap.alloc(crate::heap::HeapObj::Array(vec![v]))))
+    }
 
 }
 

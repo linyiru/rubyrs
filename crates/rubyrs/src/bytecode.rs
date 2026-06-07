@@ -102,6 +102,16 @@ pub(crate) enum Op {
     /// produces `[..., val, recv]`. One Op::Swap fixes it
     /// without needing a temp local.
     Swap,
+    /// Coerce the top-of-stack into an Array for parallel
+    /// assignment (`a, b = rhs`). An Array stays as-is; a value that
+    /// responds to `to_ary` is converted; anything else (including
+    /// `nil`) becomes a one-element `[rhs]`. Mirrors CRuby's massign
+    /// RHS handling so `a, b = nil` → `[nil, nil]` (not a
+    /// `NoMethodError` from `nil[0]`). Emitted by
+    /// `compile_multiwrite_arm` right after the RHS so the
+    /// subsequent `[]` / `__mw_splat` / `__mw_post` calls always see
+    /// an Array.
+    MassignSplat,
     LoadIvar(SymId),
     StoreIvar(SymId),
     /// `@@name` read. Resolves the surrounding class at runtime
