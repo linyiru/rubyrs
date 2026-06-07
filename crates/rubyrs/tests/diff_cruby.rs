@@ -621,3 +621,4 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn array_block_mutation() { run_diff("array_block_mutation"); }
 #[test] fn sort_class_spaceship() { run_diff("sort_class_spaceship"); }
 #[test] fn string_delete_affix() { run_diff("string_delete_affix"); }
+#[test] fn string_index_substr() { run_diff("string_index_substr"); }

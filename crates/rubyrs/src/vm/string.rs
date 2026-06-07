@@ -2005,6 +2005,32 @@ impl Vm {
                         *s.borrow_mut() = buf.into_bytes();
                         return Ok(Some(args[1].clone()));
                     }
+                    // `str[substring] = repl` — replace the FIRST
+                    // occurrence of `substring` with `repl`. CRuby
+                    // raises `IndexError: string not matched` when the
+                    // substring is absent. Discovery: P3 Jekyll spike —
+                    // `entry_filter.rb` does `base_dir[site.source] = ""`
+                    // to strip the source prefix.
+                    if let (Value::Str(needle), Value::Str(repl)) = (&args[0], &args[1]) {
+                        let hay = s.to_string_lossy();
+                        let pat = needle.to_string_lossy();
+                        match hay.find(&pat) {
+                            Some(byte_idx) => {
+                                let mut buf =
+                                    String::with_capacity(hay.len() + repl.borrow().len());
+                                buf.push_str(&hay[..byte_idx]);
+                                buf.push_str(&repl.to_string_lossy());
+                                buf.push_str(&hay[byte_idx + pat.len()..]);
+                                *s.borrow_mut() = buf.into_bytes();
+                                return Ok(Some(args[1].clone()));
+                            }
+                            None => {
+                                return Err(self.trap(RubyError::IndexError {
+                                    msg: "string not matched".to_string(),
+                                }));
+                            }
+                        }
+                    }
                     return Ok(None);
                 }
                 if name == "[]=" && args.len() == 3 {
