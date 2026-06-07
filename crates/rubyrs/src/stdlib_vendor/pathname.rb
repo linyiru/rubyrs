@@ -82,4 +82,32 @@ class Pathname
   def empty?
     @path.empty?
   end
+
+  # Yield `self` then each ancestor, stripping one trailing path
+  # component per step, until the root ("/" for absolute paths) or
+  # the first relative component is reached — matching CRuby's
+  # `Pathname#ascend`. The block form returns nil; without a block
+  # CRuby returns an Enumerator (rubyrs returns the Array of
+  # Pathnames, which supports the common `.each`/`.to_a`/`.map`
+  # uses). Discovery: P3 Jekyll spike — `site.rb#ensure_not_in_dest`
+  # walks `Pathname.new(source).ascend` checking against dest.
+  def ascend
+    paths = [Pathname.new(@path)]
+    path = @path
+    loop do
+      parent = File.dirname(path)
+      # Stop at the root ("/" is its own dirname) or once a relative
+      # path is exhausted — CRuby's File.dirname yields "." there, but
+      # rubyrs's can yield "" for a no-separator name, so guard both.
+      break if parent == path || parent == "." || parent.empty?
+      paths << Pathname.new(parent)
+      path = parent
+    end
+    if block_given?
+      paths.each { |p| yield p }
+      nil
+    else
+      paths
+    end
+  end
 end
