@@ -3630,6 +3630,7 @@ impl Vm {
             default_value: None,
             class_tag,
             ivars: std::collections::HashMap::new(),
+            index: None,
         }));
         g.vm.stack.push(Value::Hash(hid));
         return Ok(ClassOutcome::Handled);
@@ -12627,6 +12628,7 @@ impl Vm {
                 default_value: None,
                 class_tag: Some(cls.clone()),
                 ivars: std::collections::HashMap::new(),
+                index: None,
             }));
             return Ok(Value::Hash(id));
         }

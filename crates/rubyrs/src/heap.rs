@@ -309,6 +309,43 @@ pub(crate) struct HashObj {
     /// `@foo` in their methods. Empty (and never touched) for plain
     /// `{}` / `Hash.new`. Values are GC-marked alongside `pairs`.
     pub(crate) ivars: std::collections::HashMap<crate::intern::SymId, Value>,
+    /// O(1) key index: `ruby_hash(key)` → the positions in `pairs`
+    /// whose key hashes there (usually one). `None` means "not built
+    /// / invalidated" — rebuilt lazily on the next indexed lookup.
+    /// Holds only `u32` offsets (no `Value`s), so the GC never has to
+    /// mark it. Without this, every `Hash#[]` / `[]=` / `key?` was an
+    /// O(n) linear `ruby_eql` scan over `pairs` (O(n²) to build a
+    /// hash), which the Jekyll-build profile showed dominating run
+    /// time (>50% in `ruby_eq`/`ruby_eql`). The map uses a
+    /// passthrough hasher (`U64BuildHasher`) because `ruby_hash`
+    /// already returns a well-mixed 64-bit value — re-hashing it
+    /// through SipHash would just burn cycles.
+    pub(crate) index: Option<HashIndex>,
+}
+
+/// `ruby_hash(key)` → pair positions, keyed directly on the 64-bit
+/// `ruby_hash` (no SipHash re-mix).
+pub(crate) type HashIndex =
+    std::collections::HashMap<u64, Vec<u32>, std::hash::BuildHasherDefault<U64Hasher>>;
+
+/// Passthrough `Hasher` for `u64` keys whose source value is already a
+/// high-quality hash. `write_u64` stores the value; any other `write`
+/// path (unused by the index) folds bytes in cheaply.
+#[derive(Default)]
+pub(crate) struct U64Hasher(u64);
+impl std::hash::Hasher for U64Hasher {
+    #[inline]
+    fn finish(&self) -> u64 { self.0 }
+    #[inline]
+    fn write_u64(&mut self, n: u64) { self.0 = n; }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        // Not on the index hot path (keys go through write_u64), but a
+        // correct fallback for any other use.
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8)) ^ b as u64;
+        }
+    }
 }
 
 impl HashObj {
@@ -319,6 +356,7 @@ impl HashObj {
             default_value: None,
             class_tag: None,
             ivars: std::collections::HashMap::new(),
+            index: None,
         }
     }
 }
@@ -500,7 +538,100 @@ impl Heap {
         if let HeapObj::Hash(h) = self.get(id) { &h.pairs } else { panic!("ICE: heap slot is not a Hash") }
     }
     pub(crate) fn hash_mut(&mut self, id: ObjId) -> &mut Vec<(Value, Value)> {
-        if let HeapObj::Hash(h) = self.get_mut(id) { &mut h.pairs } else { panic!("ICE: heap slot is not a Hash") }
+        // A caller taking `&mut pairs` may insert / delete / reorder
+        // entries the index can't track, so invalidate it — the next
+        // indexed lookup rebuilds it lazily. Single-key fast paths use
+        // `hash_insert` / `hash_delete` instead, which keep the index
+        // live (so building a Hash stays O(1) per key, not O(n²)).
+        if let HeapObj::Hash(h) = self.get_mut(id) {
+            h.index = None;
+            &mut h.pairs
+        } else {
+            panic!("ICE: heap slot is not a Hash")
+        }
+    }
+    fn hash_obj_mut(&mut self, id: ObjId) -> &mut HashObj {
+        if let HeapObj::Hash(h) = self.get_mut(id) { h } else { panic!("ICE: heap slot is not a Hash") }
+    }
+    /// Build the key index (`ruby_hash(key)` → positions) if it isn't
+    /// present. After this returns, `HashObj.index` is `Some`.
+    fn ensure_hash_index(&mut self, id: ObjId) {
+        if let HeapObj::Hash(h) = self.get(id) {
+            if h.index.is_some() { return; }
+        } else {
+            panic!("ICE: heap slot is not a Hash");
+        }
+        let n = self.hash(id).len();
+        let mut map = HashIndex::with_capacity_and_hasher(n, Default::default());
+        for i in 0..n {
+            let kh = self.hash(id)[i].0.ruby_hash(self);
+            map.entry(kh).or_default().push(i as u32);
+        }
+        self.hash_obj_mut(id).index = Some(map);
+    }
+    /// O(1)-amortised position of `key` in the Hash, or `None`.
+    /// Replaces the old `pairs.iter().position(ruby_eql)` linear scan.
+    pub(crate) fn hash_index_lookup(&mut self, id: ObjId, key: &Value) -> Option<usize> {
+        self.ensure_hash_index(id);
+        let kh = key.ruby_hash(self);
+        if let HeapObj::Hash(h) = self.get(id)
+            && let Some(cands) = h.index.as_ref().and_then(|m| m.get(&kh))
+        {
+            for &i in cands {
+                if h.pairs[i as usize].0.ruby_eql(key, self) {
+                    return Some(i as usize);
+                }
+            }
+        }
+        None
+    }
+    /// Insert or update `key => val`, keeping the index live. Returns
+    /// the previous value when the key already existed (CRuby keeps the
+    /// ORIGINAL key object and only swaps the value), else `None`.
+    pub(crate) fn hash_insert(&mut self, id: ObjId, key: Value, val: Value) -> Option<Value> {
+        self.ensure_hash_index(id);
+        let kh = key.ruby_hash(self);
+        let existing: Option<usize> = if let HeapObj::Hash(h) = self.get(id) {
+            h.index
+                .as_ref()
+                .and_then(|m| m.get(&kh))
+                .and_then(|cands| {
+                    cands
+                        .iter()
+                        .copied()
+                        .find(|&i| h.pairs[i as usize].0.ruby_eql(&key, self))
+                        .map(|i| i as usize)
+                })
+        } else {
+            None
+        };
+        match existing {
+            Some(i) => {
+                let h = self.hash_obj_mut(id);
+                Some(std::mem::replace(&mut h.pairs[i].1, val))
+            }
+            None => {
+                let h = self.hash_obj_mut(id);
+                let new_i = h.pairs.len() as u32;
+                h.pairs.push((key, val));
+                if let Some(m) = h.index.as_mut() {
+                    m.entry(kh).or_default().push(new_i);
+                }
+                None
+            }
+        }
+    }
+    /// Delete `key`, returning its value (or `None`). Removal shifts
+    /// later positions, so the index is dropped and rebuilt lazily —
+    /// delete is rare relative to insert/lookup, so an O(n) reindex on
+    /// the next lookup is an acceptable trade for keeping insertion
+    /// order intact.
+    pub(crate) fn hash_delete(&mut self, id: ObjId, key: &Value) -> Option<Value> {
+        let i = self.hash_index_lookup(id, key)?;
+        let h = self.hash_obj_mut(id);
+        let (_, v) = h.pairs.remove(i);
+        h.index = None;
+        Some(v)
     }
     /// The user Hash-subclass this Hash is an instance of, if any
     /// (`class M < Hash; end; M.new` → `Some(M)`). `None` for plain
@@ -1400,6 +1531,88 @@ impl Value {
             }
             // Same-type primitives + non-numeric paths reuse ruby_eq.
             _ => self.ruby_eq(other, heap),
+        }
+    }
+
+    /// A hash code consistent with `ruby_eql`: whenever
+    /// `a.ruby_eql(b, heap)` holds, `a.ruby_hash(heap) ==
+    /// b.ruby_hash(heap)`. Backs the O(1) `HashObj` key index.
+    ///
+    /// Numeric strictness mirrors `ruby_eql` — `Int(5)` and
+    /// `Float(5.0)` are NOT eql, so they live in different hash
+    /// domains (distinct type tags). Object / Class keys hash by
+    /// identity (ObjId / Rc pointer), matching `ruby_eq`'s
+    /// identity comparison for those (rubyrs doesn't honour a
+    /// user-defined `hash`/`eql?` pair for Hash keys — same blind
+    /// spot the prior linear scan had).
+    pub(crate) fn ruby_hash(&self, heap: &Heap) -> u64 {
+        const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+        #[inline]
+        fn mix(mut h: u64, bytes: &[u8]) -> u64 {
+            for &b in bytes {
+                h ^= b as u64;
+                h = h.wrapping_mul(FNV_PRIME);
+            }
+            h
+        }
+        let h = FNV_OFFSET;
+        match self {
+            Value::Nil => mix(h, &[0]),
+            Value::Bool(false) => mix(h, &[1]),
+            Value::Bool(true) => mix(h, &[2]),
+            Value::Int(n) => mix(mix(h, &[3]), &n.to_le_bytes()),
+            Value::Float(f) => {
+                // `-0.0`/`+0.0` are eql → normalise; NaN keeps its bits
+                // (matching ruby_eql's NaN-bits identity).
+                let bits = if *f == 0.0 { 0u64 } else { f.to_bits() };
+                mix(mix(h, &[4]), &bits.to_le_bytes())
+            }
+            Value::Sym(s) => mix(mix(h, &[5]), &s.0.to_le_bytes()),
+            Value::Str(rs) => mix(mix(h, &[6]), &rs.content.borrow()),
+            Value::Object(id) => mix(mix(h, &[7]), &id.0.to_le_bytes()),
+            Value::Class(c) => {
+                mix(mix(h, &[8]), &(Rc::as_ptr(c) as usize as u64).to_le_bytes())
+            }
+            Value::Array(id) => {
+                // Order-dependent (ruby_eql for Array is positional).
+                let mut hh = mix(h, &[9]);
+                for e in heap.array(*id).iter() {
+                    hh = hh.wrapping_mul(FNV_PRIME) ^ e.ruby_hash(heap);
+                }
+                hh
+            }
+            Value::Hash(id) => {
+                // Order-INdependent (ruby_eql for Hash ignores order):
+                // XOR the per-pair contributions.
+                let mut acc = 0u64;
+                for (k, v) in heap.hash(*id).iter() {
+                    acc ^= k
+                        .ruby_hash(heap)
+                        .wrapping_mul(31)
+                        .wrapping_add(v.ruby_hash(heap));
+                }
+                mix(h, &[10]) ^ acc
+            }
+            Value::Range(id) => {
+                let r = heap.range(*id);
+                let hh = mix(h, &[11, r.exclusive as u8]);
+                hh.wrapping_mul(FNV_PRIME) ^ r.begin.ruby_hash(heap).wrapping_add(
+                    r.end.ruby_hash(heap).wrapping_mul(FNV_PRIME),
+                )
+            }
+            Value::Rational(id) => {
+                let r = heap.rational(*id);
+                let hh = mix(h, &[12]);
+                mix(mix(hh, &r.num.to_signed_bytes_le()), &r.den.to_signed_bytes_le())
+            }
+            #[cfg(feature = "bignum")]
+            Value::BigInt(id) => mix(mix(h, &[13]), &heap.bigint(*id).to_signed_bytes_le()),
+            // Procs / Methods / Blocks etc. aren't realistic Hash keys;
+            // collapse to one bucket (still correct — identity-eql, and
+            // they share the bucket so a linear ruby_eql scan resolves
+            // any genuine collision).
+            _ => mix(h, &[255]),
         }
     }
 

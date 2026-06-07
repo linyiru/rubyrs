@@ -81,14 +81,9 @@ impl Vm {
                     // `Array#count` block).
                     ("count", []) => Some(Value::Int(self.heap.hash(id).len() as i64)),
                     ("[]", [k]) => {
-                        // Direct hit first.
-                        {
-                            let h = self.heap.hash(id);
-                            for (key, val) in h {
-                                if key.ruby_eql(k, &self.heap) {
-                                    return Ok(Some(val.clone()));
-                                }
-                            }
+                        // O(1) indexed hit.
+                        if let Some(pos) = self.heap.hash_index_lookup(id, k) {
+                            return Ok(Some(self.heap.hash(id)[pos].1.clone()));
                         }
                         // Missing key — invoke default-block if the
                         // Hash was built via `Hash.new { |h, k| ... }`.
@@ -150,29 +145,25 @@ impl Vm {
                         }
                         Some(Value::Nil)
                     }
-                    ("[]=", [k, v]) => {
-                        // Need a way to compare without borrowing heap while mutating.
-                        // Snapshot positions first.
-                        let pos = self.heap.hash(id).iter()
-                            .position(|(key, _)| key.ruby_eql(k, &self.heap));
-                        // P2-14c byte cap: only a key that isn't
-                        // already present grows the table. Update
-                        // of an existing key is free (size-wise).
-                        if pos.is_none() {
+                    ("[]=", [k, v]) | ("store", [k, v]) => {
+                        // P2-14c byte cap: only a key that isn't already
+                        // present grows the table. The cap is unset in
+                        // the common (CLI/embed) case, so skip the
+                        // membership probe entirely then — `hash_insert`
+                        // does its own single O(1) lookup.
+                        if let Some(max) = self.max_value_bytes
+                            && self.heap.hash_index_lookup(id, k).is_none()
+                        {
                             let new_len = self.heap.hash(id).len().saturating_add(1);
-                            if let Some(max) = self.max_value_bytes
-                                && new_len.saturating_mul(std::mem::size_of::<(Value, Value)>()) > max {
-                                    return Err(self.trap(RubyError::ResourceExhausted {
-                                        msg: format!("Hash []= would exceed {max} bytes"),
-                                    }));
-                                }
+                            if new_len.saturating_mul(std::mem::size_of::<(Value, Value)>()) > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("Hash []= would exceed {max} bytes"),
+                                }));
+                            }
                         }
-                        let h = self.heap.hash_mut(id);
-                        if let Some(p) = pos {
-                            h[p].1 = v.clone();
-                        } else {
-                            h.push((k.clone(), v.clone()));
-                        }
+                        // Index-maintaining insert: O(1) amortised, so
+                        // building an N-key Hash is O(n), not O(n²).
+                        self.heap.hash_insert(id, k.clone(), v.clone());
                         Some(v.clone())
                     }
                     ("empty?", []) => Some(Value::Bool(self.heap.hash(id).is_empty())),
@@ -195,9 +186,7 @@ impl Vm {
                         // machinery by `dispatch`, so a script
                         // `begin ... rescue KeyError => e; ... end`
                         // catches it like CRuby.
-                        let pos = self.heap.hash(id).iter()
-                            .position(|(key, _)| key.ruby_eql(k, &self.heap));
-                        match pos {
+                        match self.heap.hash_index_lookup(id, k) {
                             Some(p) => Some(self.heap.hash(id)[p].1.clone()),
                             None => {
                                 return Err(self.trap(RubyError::KeyError {
@@ -208,9 +197,7 @@ impl Vm {
                         }
                     }
                     ("fetch", [k, default]) => {
-                        let pos = self.heap.hash(id).iter()
-                            .position(|(key, _)| key.ruby_eql(k, &self.heap));
-                        Some(match pos {
+                        Some(match self.heap.hash_index_lookup(id, k) {
                             Some(p) => self.heap.hash(id)[p].1.clone(),
                             None => default.clone(),
                         })
@@ -232,9 +219,7 @@ impl Vm {
                         }));
                     }
                     ("include?", [k]) | ("has_key?", [k]) | ("key?", [k]) | ("member?", [k]) => {
-                        let h = self.heap.hash(id);
-                        let hit = h.iter().any(|(key, _)| key.ruby_eql(k, &self.heap));
-                        Some(Value::Bool(hit))
+                        Some(Value::Bool(self.heap.hash_index_lookup(id, k).is_some()))
                     }
                     ("keys", []) => {
                         let keys: Vec<Value> = self.heap.hash(id).iter().map(|(k, _)| k.clone()).collect();
@@ -890,6 +875,7 @@ impl Vm {
                             default_value: None,
                             class_tag,
                             ivars,
+                            index: None,
                         }));
                         if default_block.is_some() {
                             g.vm.heap.hash_set_default_block(nid, default_block);
@@ -990,14 +976,10 @@ impl Vm {
                         Some(Value::Hash(id))
                     }
                     ("delete", [k]) => {
-                        let pos = self.heap.hash(id).iter()
-                            .position(|(key, _)| key.ruby_eql(k, &self.heap));
-                        if let Some(p) = pos {
-                            let removed = self.heap.hash_mut(id).remove(p).1;
-                            Some(removed)
-                        } else {
-                            Some(Value::Nil)
-                        }
+                        // Index-aware delete (O(1) lookup; drops + lazily
+                        // rebuilds the index since removal shifts later
+                        // positions). Returns the removed value or nil.
+                        Some(self.heap.hash_delete(id, k).unwrap_or(Value::Nil))
                     }
                     // `Hash#key(value)` — the first key whose value
                     // `==` the argument, or nil. Reverse of `[]`.
@@ -1073,14 +1055,6 @@ impl Vm {
                         self.maybe_gc();
                         let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
                         Some(Value::Hash(nid))
-                    }
-                    ("store", [k, v]) => {
-                        let pos = self.heap.hash(id).iter()
-                            .position(|(key, _)| key.ruby_eql(k, &self.heap));
-                        let h = self.heap.hash_mut(id);
-                        if let Some(p) = pos { h[p].1 = v.clone(); }
-                        else { h.push((k.clone(), v.clone())); }
-                        Some(v.clone())
                     }
                     _ => None,
                 }
