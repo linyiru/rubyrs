@@ -136,4 +136,151 @@ class Set
     end
   end
   alias_method :to_s, :inspect
+
+  # --- Enumerable surface ---
+  #
+  # CRuby's `Set` mixes in `Enumerable`, whose methods are all built
+  # on `#each`. rubyrs's `Enumerable` stub adds nothing (the generic
+  # over-#each implementation is a separate follow-up), so the Set
+  # veneer carries the common slice directly. Each delegates to the
+  # insertion-ordered element array (`to_a` == `@hash.keys`), so the
+  # iteration order and per-element results inherit Array's
+  # CRuby-parity behaviour. Discovery: P3 Jekyll spike —
+  # `plugin.rb#descendants` does `@children.map(&:descendants)` then
+  # `Set.new(out).flatten`.
+
+  def map(&block)
+    to_a.map(&block)
+  end
+  alias_method :collect, :map
+
+  def flat_map(&block)
+    to_a.flat_map(&block)
+  end
+  alias_method :collect_concat, :flat_map
+
+  def select(&block)
+    to_a.select(&block)
+  end
+  alias_method :filter, :select
+
+  def reject(&block)
+    to_a.reject(&block)
+  end
+
+  def find(&block)
+    to_a.find(&block)
+  end
+  alias_method :detect, :find
+
+  def each_with_object(memo, &block)
+    to_a.each_with_object(memo, &block)
+  end
+
+  def each_with_index(&block)
+    to_a.each_with_index(&block)
+  end
+
+  def inject(*args, &block)
+    to_a.inject(*args, &block)
+  end
+  alias_method :reduce, :inject
+
+  def any?(&block)
+    to_a.any?(&block)
+  end
+
+  def all?(&block)
+    to_a.all?(&block)
+  end
+
+  def none?(&block)
+    to_a.none?(&block)
+  end
+
+  def count(*args, &block)
+    to_a.count(*args, &block)
+  end
+
+  def sum(*args, &block)
+    to_a.sum(*args, &block)
+  end
+
+  def min(&block)
+    to_a.min(&block)
+  end
+
+  def max(&block)
+    to_a.max(&block)
+  end
+
+  def sort(&block)
+    to_a.sort(&block)
+  end
+
+  def sort_by(&block)
+    to_a.sort_by(&block)
+  end
+
+  def min_by(&block)
+    to_a.min_by(&block)
+  end
+
+  def max_by(&block)
+    to_a.max_by(&block)
+  end
+
+  def group_by(&block)
+    to_a.group_by(&block)
+  end
+
+  def partition(&block)
+    to_a.partition(&block)
+  end
+
+  def first(*args)
+    to_a.first(*args)
+  end
+
+  def to_set
+    self
+  end
+
+  # `Set#flatten` (Set-specific, not Enumerable): recursively merge
+  # any nested Sets into a single new Set. Non-Set members are added
+  # as-is.
+  def flatten
+    result = self.class.new
+    each do |item|
+      if item.is_a?(Set)
+        item.flatten.each { |e| result.add(e) }
+      else
+        result.add(item)
+      end
+    end
+    result
+  end
+end
+
+# CRuby's `set` stdlib adds `#to_set` to Enumerable, so every
+# Array/Hash/Range gains it once `set` is required. rubyrs's
+# Enumerable mixin doesn't propagate methods to includers, so wire
+# the common collections directly. Discovery: P3 Jekyll spike —
+# `cleaner.rb#keep_dirs` does `dirs.to_set`.
+class Array
+  def to_set
+    Set.new(self)
+  end
+end
+
+class Hash
+  def to_set
+    Set.new(to_a)
+  end
+end
+
+class Range
+  def to_set
+    Set.new(to_a)
+  end
 end

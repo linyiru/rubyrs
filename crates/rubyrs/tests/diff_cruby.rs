@@ -608,3 +608,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn super_block_literal() { run_diff("super_block_literal"); }
 #[cfg(feature = "stdlib")]
 #[test] fn pathname_ascend() { run_diff("pathname_ascend"); }
+#[cfg(feature = "stdlib")]
+#[test] fn set_enumerable() { run_diff("set_enumerable"); }
