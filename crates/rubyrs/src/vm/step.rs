@@ -1614,27 +1614,9 @@ impl Vm {
                 // we can call `maybe_gc` + `check_alloc?` cleanly.
                 #[cfg(feature = "regex")]
                 if &*name == "$~" {
-                    // Borrow first: avoid cloning the whole
-                    // `LastMatch` (Vec + every capture String) just
-                    // to materialise. We only need to clone the
-                    // specific strings we hand to `Value::new_str`.
-                    let v = if self.last_match.is_some() {
-                        // Materialise capture Values up front so the
-                        // immutable borrow of `last_match` is dropped
-                        // before any `&mut self` calls (`maybe_gc`,
-                        // `check_alloc`, `heap.alloc`).
-                        let caps: Vec<Value> = self.last_match.as_ref().unwrap()
-                            .caps.iter()
-                            .map(|c| match c {
-                                Some(s) => Value::new_str(s.clone()),
-                                None => Value::Nil,
-                            })
-                            .collect();
-                        let whole_str = self.last_match.as_ref().unwrap().whole.clone();
-                        self.materialize_match_data(whole_str, caps)?
-                    } else {
-                        Value::Nil
-                    };
+                    // Full MatchData incl. pre/post-match + string,
+                    // shared with `Regexp.last_match`.
+                    let v = self.materialize_last_match()?;
                     self.stack.push(v);
                     return Ok(true);
                 }

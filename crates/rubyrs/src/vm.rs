@@ -543,6 +543,11 @@ pub(crate) struct LastMatch {
     pub(crate) input: String,
     pub(crate) m_start: usize,
     pub(crate) m_end: usize,
+    /// `(name, matched | None)` for each NAMED capture group, so
+    /// `$~[:name]` / `$~["name"]` (and any `MatchData` re-materialised
+    /// from `$~`, e.g. a `StringScanner`'s `@src[:name]`) can resolve
+    /// named groups. Empty for patterns without named captures.
+    pub(crate) named: Vec<(String, Option<String>)>,
 }
 
 pub(crate) struct Vm {

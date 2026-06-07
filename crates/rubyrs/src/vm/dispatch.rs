@@ -4027,6 +4027,41 @@ impl Vm {
         return Ok(ClassOutcome::Handled);
     }
 
+    // `Regexp.last_match` / `Regexp.last_match(n)` — the `$~` of the
+    // current scope. No arg returns the whole MatchData (or nil); an
+    // Integer returns that capture group (0 = whole match), or nil.
+    // Discovery: P3 Jekyll spike — `convertible.rb#read_yaml` splits
+    // front matter with `Regexp.last_match.post_match` /
+    // `Regexp.last_match(1)`.
+    #[cfg(feature = "regex")]
+    if name == "last_match"
+        && let Value::Class(cls) = &recv
+        && cls.name.as_str() == "Regexp"
+    {
+        let v = match args.first() {
+            // No arg → the whole MatchData (with pre/post-match), or nil.
+            None => self.materialize_last_match()?,
+            // `Regexp.last_match(n)`: group 0 is the whole match,
+            // group n (n>=1) is the n-th capture. `LastMatch.caps`
+            // holds ONLY the captures (index 0 == group 1), with the
+            // whole match in `.whole` — so map the index accordingly.
+            Some(Value::Int(n)) if *n >= 0 => match &self.last_match {
+                Some(lm) if *n == 0 => Value::new_str(lm.whole.clone()),
+                Some(lm) => lm
+                    .caps
+                    .get((*n as usize) - 1)
+                    .and_then(|c| c.as_ref())
+                    .map(|s| Value::new_str(s.clone()))
+                    .unwrap_or(Value::Nil),
+                None => Value::Nil,
+            },
+            // Negative index / named-capture forms aren't modelled.
+            Some(_) => Value::Nil,
+        };
+        self.stack.push(v);
+        return Ok(ClassOutcome::Handled);
+    }
+
     // `Regexp.escape(s)` / `Regexp.quote(s)` — escape regex
     // metacharacters in `s` so it can be safely interpolated
     // into a pattern. The `regex` crate's `escape` covers the
@@ -8258,12 +8293,20 @@ impl Vm {
                             let last_caps: Vec<Option<String>> = (1..caps.len())
                                 .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
                                 .collect();
+                            let named: Vec<(String, Option<String>)> = native
+                                .capture_names()
+                                .enumerate()
+                                .filter_map(|(i, n)| {
+                                    n.map(|name| (name.to_string(), caps.get(i).map(|m| m.as_str().to_string())))
+                                })
+                                .collect();
                             self.last_match = Some(crate::vm::LastMatch {
                                 whole,
                                 caps: last_caps,
                                 input: input.to_string(),
                                 m_start,
                                 m_end,
+                                named,
                             });
                             true
                         }
@@ -8280,13 +8323,48 @@ impl Vm {
             self.stack.push(Value::Bool(result));
             return Ok(());
         }
+        // `Regexp#match(str)` — symmetric with `String#match(regex)`.
+        // Returns a MatchData (setting `$~`) or nil. A nil arg is a
+        // no-match (CRuby returns nil and clears `$~`). Discovery: P3
+        // Jekyll spike — kramdown's header parser does
+        // `HEADER_ID.match(text)`.
+        #[cfg(feature = "regex")]
+        if &*name == "match" && args.len() == 1
+            && let Value::Regex(re) = &recv
+        {
+            let result = match &args[0] {
+                Value::Str(s) => {
+                    let re = re.clone();
+                    let bound = s.to_string_lossy();
+                    self.do_regexp_match(&re, bound)?
+                }
+                Value::Nil => {
+                    self.last_match = None;
+                    Value::Nil
+                }
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            other.type_name()
+                        ),
+                    }));
+                }
+            };
+            self.stack.push(result);
+            return Ok(());
+        }
         // `=~` — Regex/String matching. Returns the byte offset of
         // the first match, or nil. On a hit, populate `last_match`
         // (with captures) so `$~` and `$1`..`$N` (any positive
         // index — multi-digit forms like `$10` work too) see the
         // same match; on a miss, clear it (CRuby parity — a failed
         // `=~` wipes the prior match's globals).
-        if &*name == "=~" && args.len() == 1 {
+        // `!~` is `!(self =~ other)` — shares the match logic below
+        // (it still sets `$~` via the same path) but yields a boolean:
+        // true when there's NO match. Discovery: P3 Jekyll spike —
+        // kramdown's block parser uses `str !~ /pat/`.
+        if (&*name == "=~" || &*name == "!~") && args.len() == 1 {
             let result = match (&recv, &args[0]) {
                 #[cfg(feature = "regex")]
                 (Value::Regex(re), Value::Str(s)) | (Value::Str(s), Value::Regex(re)) => {
@@ -8309,6 +8387,7 @@ impl Vm {
                                 input: bound,
                                 m_start,
                                 m_end: oc.m_end,
+                                named: oc.named,
                             });
                             Value::Int(m_start as i64)
                         }
@@ -8320,7 +8399,12 @@ impl Vm {
                 }
                 _ => Value::Nil,
             };
-            self.stack.push(result);
+            if &*name == "!~" {
+                // No match (`result` is Nil) → true.
+                self.stack.push(Value::Bool(matches!(result, Value::Nil)));
+            } else {
+                self.stack.push(result);
+            }
             return Ok(());
         }
         // `Object#<=>` fallback for `Value::Object` receivers. The

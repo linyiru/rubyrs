@@ -533,54 +533,39 @@ impl Vm {
                 // per-match update inside the loop leaves
                 // `last_match` set to the FINAL match (also
                 // matches CRuby).
-                // Layer #17: dual-engine fallback. Block-form
-                // `gsub`/`sub` with regex receiver iterates via
-                // `captures_iter`; we haven't migrated this
-                // path to the unified dispatcher yet, so trap
-                // clearly on fancy-engine patterns until a
-                // follow-up wires it through. Native patterns
-                // (the overwhelming majority) take the existing
-                // fast path unchanged.
+                // Engine-agnostic: `captures_iter_owned` walks the
+                // matches on EITHER the linear or fancy-regex backend,
+                // so lookahead/backref patterns (kramdown's IAL
+                // parser) work in block-form `gsub`/`sub` too. The
+                // matches are computed up front from the original
+                // `source` (CRuby also matches against the pre-edit
+                // string), so the block's side effects don't perturb
+                // the match set.
                 //
-                // Check BEFORE \`last_match.take()\` so a trap
-                // here doesn't have the side effect of wiping
-                // \`$~\` — the operation never ran, so the
-                // caller's prior \`$~\` should survive untouched.
-                // Code-review #353 round 5.
-                let native = re.as_native().ok_or_else(|| g.vm.trap(crate::error::RubyError::RuntimeError {
-                    msg: format!(
-                        "regex op 'String#sub/gsub block-form' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
-                        re.as_str(),
-                    ),
-                }))?;
+                // Computed BEFORE `last_match.take()` so a fancy
+                // match-time error doesn't have the side effect of
+                // wiping `$~` — the operation never produced output, so
+                // the caller's prior `$~` should survive untouched.
+                let owned_matches = re.captures_iter_owned(&source).map_err(|e| {
+                    g.vm.trap(crate::error::RubyError::RuntimeError {
+                        msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
+                    })
+                })?;
                 let last_match_before = g.vm.last_match.take();
-                // `captures_iter` gives us group info per match
-                // (find_iter doesn't). Slight cost: each iteration
-                // builds a `Captures` rather than a bare `Match`,
-                // but the work is what users expect — `$1` /
-                // `$~` semantics — and it's amortised against the
-                // block dispatch which dominates per-match cost
-                // anyway.
-                for caps in native.captures_iter(&source) {
+                for oc in owned_matches {
                     any_match = true;
-                    let m = caps.get(0).expect("ICE: captures.get(0) is always Some on a successful match");
-                    out.extend_from_slice(&source.as_bytes()[last_end..m.start()]);
+                    out.extend_from_slice(&source.as_bytes()[last_end..oc.m_start]);
                     // Populate `$~` / `$1..$N` for the block body.
-                    // Mirrors the snapshot shape `str_bracket_regex`
-                    // (~line 2179) builds for `s[/pat/, N]`.
-                    let m_start = m.start();
-                    let m_end = m.end();
-                    let whole = m.as_str().to_string();
-                    let mut group_caps: Vec<Option<String>> = Vec::with_capacity(caps.len().saturating_sub(1));
-                    for i in 1..caps.len() {
-                        group_caps.push(caps.get(i).map(|cm| cm.as_str().to_string()));
-                    }
+                    let m_start = oc.m_start;
+                    let m_end = oc.m_end;
+                    let whole = oc.whole.clone();
                     g.vm.last_match = Some(crate::vm::LastMatch {
                         whole: whole.clone(),
-                        caps: group_caps,
+                        caps: oc.groups,
                         input: source.clone(),
                         m_start,
                         m_end,
+                        named: oc.named,
                     });
                     let r = match g.vm.step_block(block, vec![Value::new_str(whole)], pre_frames)? {
                         // Non-local `return` from the block —

@@ -1730,55 +1730,10 @@ impl Vm {
                     let regex_arg = coerced.as_ref().unwrap_or(&args[0]);
                     if let Value::Regex(re) = regex_arg {
                         let bound = s.to_string_lossy();
-                        // Engine-agnostic capture extraction — works on
-                        // BOTH the linear and fancy-regex backends. The
-                        // fancy arm only errors on a match-time
-                        // backtracking blow-up; surface that as a trap.
-                        let owned = re.captures_owned(&bound).map_err(|e| {
-                            self.trap(RubyError::RuntimeError {
-                                msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
-                            })
-                        })?;
-                        match owned {
-                            None => {
-                                // CRuby parity: a failed `match`
-                                // wipes the prior match's globals.
-                                self.last_match = None;
-                                return Ok(Some(Value::Nil));
-                            }
-                            Some(oc) => {
-                                let pre = bound[..oc.m_start].to_string();
-                                let post = bound[oc.m_end..].to_string();
-                                let full_str = bound.to_string();
-                                let group_vals: Vec<Value> = oc.groups.iter()
-                                    .map(|g| match g {
-                                        Some(s) => Value::new_str(s.clone()),
-                                        None => Value::Nil,
-                                    })
-                                    .collect();
-                                // Side-channel for `$~` / `$1`..`$N`
-                                // (numbered) AND `$&` / `$+` / `` $` ``
-                                // / `$'` (BackReferenceReadNode) — the
-                                // input + span lets us derive
-                                // pre/post-match without re-running
-                                // the regex.
-                                self.last_match = Some(crate::vm::LastMatch {
-                                    whole: oc.whole.clone(),
-                                    caps: oc.groups.clone(),
-                                    input: bound,
-                                    m_start: oc.m_start,
-                                    m_end: oc.m_end,
-                                });
-                                let ctx = crate::vm::match_data::MatchDataContext {
-                                    pre_match: Some(pre),
-                                    post_match: Some(post),
-                                    string: Some(full_str),
-                                    regexp: Some(Value::Regex(re.clone())),
-                                    named_captures: oc.named,
-                                };
-                                return Ok(Some(self.materialize_match_data_with_context(oc.whole, group_vals, ctx)?));
-                            }
-                        }
+                        // Shared with `Regexp#match` — runs the match,
+                        // sets `$~`, materialises MatchData (or Nil).
+                        let re = re.clone();
+                        return Ok(Some(self.do_regexp_match(&re, bound)?));
                     }
                     return Ok(None);
                 }
@@ -2555,6 +2510,13 @@ impl Vm {
         } else {
             None
         };
+        let named: Vec<(String, Option<String>)> = native
+            .capture_names()
+            .enumerate()
+            .filter_map(|(i, n)| {
+                n.map(|name| (name.to_string(), caps.get(i).map(|m| m.as_str().to_string())))
+            })
+            .collect();
         drop(caps);
         self.last_match = Some(crate::vm::LastMatch {
             whole,
@@ -2562,6 +2524,7 @@ impl Vm {
             input: bound,
             m_start,
             m_end,
+            named,
         });
         Ok(match picked {
             Some(s) => Value::new_str(s),

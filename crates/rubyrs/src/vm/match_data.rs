@@ -35,14 +35,6 @@ pub(crate) struct MatchDataContext {
 }
 
 impl Vm {
-    pub(crate) fn materialize_match_data(
-        &mut self,
-        whole: String,
-        caps: Vec<Value>,
-    ) -> Result<Value, Trap> {
-        self.materialize_match_data_with_context(whole, caps, MatchDataContext::default())
-    }
-
     pub(crate) fn materialize_match_data_with_context(
         &mut self,
         whole: String,
@@ -118,5 +110,91 @@ impl Vm {
             self.heap.instance_mut(obj_id).ivars.insert(nc_ivar, Value::Hash(h_id));
         }
         Ok(Value::Object(obj_id))
+    }
+
+    /// Materialize the current `$~` (`self.last_match`) into a full
+    /// MatchData Value — including `#pre_match` / `#post_match` /
+    /// `#string`, reconstructed from the stored input + match span.
+    /// Returns nil when there is no last match. Shared by the `$~`
+    /// global read and `Regexp.last_match` so both expose the same
+    /// surface, including named-capture access (`$~[:name]`).
+    pub(crate) fn materialize_last_match(&mut self) -> Result<Value, Trap> {
+        let extracted = self.last_match.as_ref().map(|lm| {
+            let caps: Vec<Value> = lm
+                .caps
+                .iter()
+                .map(|c| match c {
+                    Some(s) => Value::new_str(s.clone()),
+                    None => Value::Nil,
+                })
+                .collect();
+            let ctx = MatchDataContext {
+                pre_match: lm.input.get(..lm.m_start).map(|s| s.to_string()),
+                post_match: lm.input.get(lm.m_end..).map(|s| s.to_string()),
+                string: Some(lm.input.clone()),
+                regexp: None,
+                named_captures: lm.named.clone(),
+            };
+            (lm.whole.clone(), caps, ctx)
+        });
+        match extracted {
+            Some((whole, caps, ctx)) => {
+                self.materialize_match_data_with_context(whole, caps, ctx)
+            }
+            None => Ok(Value::Nil),
+        }
+    }
+
+    /// Run `re` against `bound`, set the `$~` side-channel, and return
+    /// a materialised `MatchData` (or `Nil` on no match, which also
+    /// clears `$~` — CRuby parity). Shared by `String#match` and
+    /// `Regexp#match` so both expose identical capture / `$~`
+    /// behaviour. Discovery: P3 Jekyll spike — kramdown's header
+    /// parser does `HEADER_ID.match(text)` (Regexp receiver).
+    pub(crate) fn do_regexp_match(
+        &mut self,
+        re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
+        bound: String,
+    ) -> Result<Value, Trap> {
+        let owned = re.captures_owned(&bound).map_err(|e| {
+            self.trap(crate::error::RubyError::RuntimeError {
+                msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
+            })
+        })?;
+        match owned {
+            None => {
+                self.last_match = None;
+                Ok(Value::Nil)
+            }
+            Some(oc) => {
+                let pre = bound[..oc.m_start].to_string();
+                let post = bound[oc.m_end..].to_string();
+                let full_str = bound.clone();
+                let group_vals: Vec<Value> = oc
+                    .groups
+                    .iter()
+                    .map(|g| match g {
+                        Some(s) => Value::new_str(s.clone()),
+                        None => Value::Nil,
+                    })
+                    .collect();
+                self.last_match = Some(crate::vm::LastMatch {
+                    whole: oc.whole.clone(),
+                    caps: oc.groups.clone(),
+                    input: bound,
+                    m_start: oc.m_start,
+                    m_end: oc.m_end,
+                    named: oc.named.clone(),
+                });
+                let ctx = MatchDataContext {
+                    pre_match: Some(pre),
+                    post_match: Some(post),
+                    string: Some(full_str),
+                    regexp: Some(Value::Regex(re.clone())),
+                    named_captures: oc.named,
+                };
+                self.materialize_match_data_with_context(oc.whole, group_vals, ctx)
+            }
+        }
     }
 }

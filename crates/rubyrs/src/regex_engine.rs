@@ -532,6 +532,74 @@ impl CompiledRegex {
             },
         }
     }
+
+    /// All non-overlapping matches of this regex in `haystack`, each
+    /// as an `OwnedCaptures`. Engine-agnostic (linear OR fancy-regex),
+    /// so callers that need per-match group info across both backends
+    /// — block-form `gsub` / `sub` — don't branch on the engine. A
+    /// fancy-regex match-time error surfaces as `Err`. Discovery: P3
+    /// Jekyll spike — kramdown's IAL parser drives a lookahead pattern
+    /// (fancy engine) through `gsub { … }`.
+    pub(crate) fn captures_iter_owned(
+        &self,
+        haystack: &str,
+    ) -> Result<Vec<OwnedCaptures>, String> {
+        let mut out = Vec::new();
+        match &self.engine {
+            Engine::Native(r) => {
+                for caps in r.captures_iter(haystack) {
+                    let m0 = match caps.get(0) {
+                        Some(m) => m,
+                        None => continue,
+                    };
+                    let groups = (1..caps.len())
+                        .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                        .collect();
+                    let named = r
+                        .capture_names()
+                        .enumerate()
+                        .filter_map(|(i, n)| {
+                            n.map(|name| (name.to_string(), caps.get(i).map(|m| m.as_str().to_string())))
+                        })
+                        .collect();
+                    out.push(OwnedCaptures {
+                        whole: m0.as_str().to_string(),
+                        m_start: m0.start(),
+                        m_end: m0.end(),
+                        groups,
+                        named,
+                    });
+                }
+            }
+            Engine::Fancy(r) => {
+                for caps in r.captures_iter(haystack) {
+                    let caps = caps.map_err(|e| e.to_string())?;
+                    let m0 = match caps.get(0) {
+                        Some(m) => m,
+                        None => continue,
+                    };
+                    let groups = (1..caps.len())
+                        .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                        .collect();
+                    let named = r
+                        .capture_names()
+                        .enumerate()
+                        .filter_map(|(i, n)| {
+                            n.map(|name| (name.to_string(), caps.get(i).map(|m| m.as_str().to_string())))
+                        })
+                        .collect();
+                    out.push(OwnedCaptures {
+                        whole: m0.as_str().to_string(),
+                        m_start: m0.start(),
+                        m_end: m0.end(),
+                        groups,
+                        named,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// One match for `String#split(regex)`: the full match span
