@@ -31,12 +31,14 @@ class MatchData
     @named_caps = named_caps
   end
   # CRuby's MatchData#[] is overloaded:
-  #   * Integer (positional, 0 = whole, N = N-th group)
-  #   * String or Symbol (named capture lookup)
+  #   * Integer (positional, 0 = whole, N = N-th group; negative
+  #     counts from the end of [whole, *caps])
+  #   * Range (slice of the [whole, *caps] array)
+  #   * String or Symbol (named capture lookup; an unknown name
+  #     raises IndexError, matching CRuby)
   # The named-capture lookups consult @named_caps (Hash) which
   # the Rust side populates when the matching Regexp had `(?<name>
-  # ...)` groups. Falls through to nil for unknown names —
-  # matches CRuby.
+  # ...)` groups.
   def [](i)
     if i.is_a?(Symbol) || i.is_a?(String)
       key = i.to_s
@@ -45,10 +47,16 @@ class MatchData
       else
         raise IndexError, "undefined group name reference: #{key}"
       end
-    elsif i == 0
-      @whole
+    elsif i.is_a?(Integer)
+      # CRuby (rb_reg_nth_match): a negative index counts from the
+      # end of the *captures* — it can reach any capture but never
+      # wraps to the whole match (index 0). A non-negative index
+      # addresses the [whole, *caps] array. `@caps[i - 1]` was off
+      # by one for negatives (m[-1] -> @caps[-2]).
+      i < 0 ? @caps[i] : ([@whole] + @caps)[i]
     else
-      @caps[i - 1]
+      # Range — to_a slice semantics.
+      ([@whole] + @caps)[i]
     end
   end
   def captures
