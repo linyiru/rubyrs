@@ -291,9 +291,12 @@ impl Vm {
                 }
             }
             // `File.write(path, content)` and the keyword-opts form
-            // `File.write(path, content, mode: "wb")` (trailing opts
-            // Hash is accepted and ignored — we always write the bytes
-            // verbatim). jekyll's page/document writer uses the latter.
+            // `File.write(path, content, mode: "a")`. The trailing opts
+            // Hash's `mode:` is honoured — append ("a"/"ab"/"a+") vs the
+            // default truncate ("w"/"wb") — since silently truncating an
+            // append write overwrites prior content. Other opts (perm:,
+            // binmode:) are still accepted and ignored. jekyll's
+            // page/document writer uses the keyword form.
             ("write", [p, body]) | ("write", [p, body, _]) => {
                 self.check_filesystem_io_allowed("File.write", None)?;
                 let path = path_arg(p)?;
@@ -305,7 +308,30 @@ impl Vm {
                     Value::Str(s) => s.content.borrow().clone(),
                     _ => body.to_display(&self.heap, &self.interner).into_bytes(),
                 };
-                match std::fs::write(&path, &contents) {
+                let append = if let Some(Value::Hash(hid)) = args.get(2) {
+                    let hid = *hid;
+                    let mode_key = Value::Sym(self.interner.intern("mode"));
+                    match self.heap.hash_index_lookup(hid, &mode_key) {
+                        Some(pos) => matches!(
+                            &self.heap.hash(hid)[pos].1,
+                            Value::Str(s) if s.to_string_lossy().starts_with('a')
+                        ),
+                        None => false,
+                    }
+                } else {
+                    false
+                };
+                let result = if append {
+                    use std::io::Write as _;
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .and_then(|mut f| f.write_all(&contents))
+                } else {
+                    std::fs::write(&path, &contents)
+                };
+                match result {
                     Ok(()) => Value::Int(contents.len() as i64),
                     Err(e) => return Err(self.trap(io_error(&e, Some(Path::new(&path))))),
                 }
