@@ -1415,6 +1415,11 @@ impl Vm {
                                         self.stack.push(v);
                                         return Ok(true);
                                     }
+                                    // A scoped-autoload `require` trapped —
+                                    // re-raise. The variant is wasi-gated
+                                    // (the trigger is), so on wasi the `_`
+                                    // arm below covers the remaining cases.
+                                    #[cfg(not(target_os = "wasi"))]
                                     crate::vm::dispatch::ConstPathOutcome::Trap(t) => return Err(t),
                                     // Miss / WrongName / NotClass: fall
                                     // through to the NameError below so
