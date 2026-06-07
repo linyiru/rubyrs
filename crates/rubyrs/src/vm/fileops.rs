@@ -280,6 +280,22 @@ impl Vm {
                     })),
                 }
             }
+            // `File.fnmatch?(pattern, path)` / `fnmatch(pattern, path,
+            // flags)` — glob-style match. Pure string work (no disk
+            // access, no capability gate). `flags` is the FNM_* bitmask
+            // (default 0); both method names are the same operation.
+            ("fnmatch", [pat, path])
+            | ("fnmatch?", [pat, path])
+            | ("fnmatch", [pat, path, _])
+            | ("fnmatch?", [pat, path, _]) => {
+                let pattern = path_arg(pat)?;
+                let target = path_arg(path)?;
+                let flags = match args.get(2) {
+                    Some(Value::Int(n)) => *n,
+                    _ => 0,
+                };
+                Value::Bool(fnmatch(&pattern, &target, flags))
+            }
             ("exist?", [p]) | ("exists?", [p]) | ("file?", [p]) => {
                 // Resolve to a `&'static str` upfront — passing
                 // `&format!("File.{name}")` would allocate a
@@ -560,7 +576,330 @@ impl Vm {
                         .unwrap_or_default(),
                 )
             }
+            // `Dir.__chdir(path)` — the OS-level `set_current_dir`
+            // backing the `Dir.chdir` veneer (preamble). The block /
+            // non-block bracketing (save cwd, restore via
+            // begin/ensure) lives in Ruby so it reuses `yield`; this
+            // primitive only performs the move. Capability-gated.
+            // Discovery: P3 Jekyll spike — `layout_reader.rb#within`
+            // does `Dir.chdir(dir) { Dir["**/*.*"] }`.
+            ("__chdir", [p]) => {
+                self.check_filesystem_io_allowed("Dir.chdir", None)?;
+                let path = str_arg(p)?;
+                self.check_filesystem_io_allowed("Dir.chdir", Some(Path::new(&path)))?;
+                match std::env::set_current_dir(&path) {
+                    Ok(()) => Value::new_str(path),
+                    Err(e) => {
+                        return Err(self.trap(RubyError::RuntimeError {
+                            msg: format!("Dir.chdir({path}): {e}"),
+                        }));
+                    }
+                }
+            }
             _ => return Ok(None),
         }))
     }
+
+    /// `FileUtils` module-method shims — the directory/file mutation
+    /// surface site generators reach for: `mkdir_p` / `mkdir` /
+    /// `rm_rf` / `rm_f` / `rm` / `cp` / `cp_r` / `touch`. Each path
+    /// goes through the filesystem capability gate. Returns
+    /// `Ok(Some(v))` on a handled method, `Ok(None)` otherwise.
+    /// Discovery: P3 Jekyll spike — jekyll writes the cache dir +
+    /// `_site` output via `FileUtils.mkdir_p` etc.
+    pub(crate) fn fileutils_class_dispatch(&mut self, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
+        // Each path arg may be a String or an Array of Strings (CRuby
+        // FileUtils accepts both for most ops). Flatten to a Vec.
+        let paths = |vm: &Vm, a: &Value| -> Result<Vec<String>, Trap> {
+            match a {
+                Value::Str(s) => Ok(vec![s.to_string_lossy()]),
+                Value::Array(id) => {
+                    let mut out = Vec::new();
+                    for e in vm.heap.array(*id).clone() {
+                        if let Value::Str(s) = e {
+                            out.push(s.to_string_lossy());
+                        } else {
+                            return Err(vm.trap(RubyError::TypeError {
+                                msg: format!("no implicit conversion of {} into String", e.type_name()),
+                            }));
+                        }
+                    }
+                    Ok(out)
+                }
+                other => Err(vm.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into String", other.type_name()),
+                })),
+            }
+        };
+        // Trailing options Hash (e.g. `mkdir_p(path, mode: 0755)`) is
+        // accepted and ignored — strip it from the positional args.
+        let positional: &[Value] = match args.last() {
+            Some(Value::Hash(_)) => &args[..args.len() - 1],
+            _ => args,
+        };
+        Ok(Some(match (name, positional) {
+            ("mkdir_p" | "makedirs" | "mkpath", [a]) => {
+                self.check_filesystem_io_allowed("FileUtils.mkdir_p", None)?;
+                let ps = paths(self, a)?;
+                for p in &ps {
+                    self.check_filesystem_io_allowed("FileUtils.mkdir_p", Some(Path::new(p)))?;
+                    std::fs::create_dir_all(p).map_err(|e| self.trap(RubyError::RuntimeError {
+                        msg: format!("FileUtils.mkdir_p({}): {}", p, e),
+                    }))?;
+                }
+                a.clone()
+            }
+            ("mkdir", [a]) => {
+                self.check_filesystem_io_allowed("FileUtils.mkdir", None)?;
+                let ps = paths(self, a)?;
+                for p in &ps {
+                    self.check_filesystem_io_allowed("FileUtils.mkdir", Some(Path::new(p)))?;
+                    std::fs::create_dir(p).map_err(|e| self.trap(RubyError::RuntimeError {
+                        msg: format!("FileUtils.mkdir({}): {}", p, e),
+                    }))?;
+                }
+                a.clone()
+            }
+            ("rm_rf" | "remove_entry_secure", [a]) => {
+                self.check_filesystem_io_allowed("FileUtils.rm_rf", None)?;
+                let ps = paths(self, a)?;
+                for p in &ps {
+                    self.check_filesystem_io_allowed("FileUtils.rm_rf", Some(Path::new(p)))?;
+                    // rm_rf ignores missing paths (CRuby :force).
+                    if Path::new(p).is_dir() {
+                        let _ = std::fs::remove_dir_all(p);
+                    } else {
+                        let _ = std::fs::remove_file(p);
+                    }
+                }
+                a.clone()
+            }
+            ("rm" | "rm_f" | "remove" | "safe_unlink", [a]) => {
+                self.check_filesystem_io_allowed("FileUtils.rm", None)?;
+                let ps = paths(self, a)?;
+                for p in &ps {
+                    self.check_filesystem_io_allowed("FileUtils.rm", Some(Path::new(p)))?;
+                    let _ = std::fs::remove_file(p);
+                }
+                a.clone()
+            }
+            ("cp" | "copy", [src, dst]) => {
+                self.check_filesystem_io_allowed("FileUtils.cp", None)?;
+                let s = paths(self, src)?.into_iter().next().unwrap_or_default();
+                let d = paths(self, dst)?.into_iter().next().unwrap_or_default();
+                self.check_filesystem_io_allowed("FileUtils.cp", Some(Path::new(&s)))?;
+                self.check_filesystem_io_allowed("FileUtils.cp", Some(Path::new(&d)))?;
+                // If dst is an existing directory, copy INTO it (CRuby).
+                let dest = if Path::new(&d).is_dir() {
+                    Path::new(&d).join(Path::new(&s).file_name().unwrap_or_default())
+                        .to_string_lossy().into_owned()
+                } else { d };
+                std::fs::copy(&s, &dest).map_err(|e| self.trap(RubyError::RuntimeError {
+                    msg: format!("FileUtils.cp({}, {}): {}", s, dest, e),
+                }))?;
+                Value::Nil
+            }
+            ("touch", [a]) => {
+                self.check_filesystem_io_allowed("FileUtils.touch", None)?;
+                let ps = paths(self, a)?;
+                for p in &ps {
+                    self.check_filesystem_io_allowed("FileUtils.touch", Some(Path::new(p)))?;
+                    // Create if absent; leave content untouched otherwise.
+                    if !Path::new(p).exists() {
+                        std::fs::write(p, b"").map_err(|e| self.trap(RubyError::RuntimeError {
+                            msg: format!("FileUtils.touch({}): {}", p, e),
+                        }))?;
+                    }
+                }
+                a.clone()
+            }
+            _ => return Ok(None),
+        }))
+    }
+}
+
+// --- File.fnmatch glob-pattern matcher ---
+//
+// Pure string matching (no filesystem access) mirroring CRuby's
+// `File.fnmatch` / `fnmatch?`. Supports `*`, `?`, `[set]` (with
+// ranges, `!`/`^` negation, `\`-escapes) and the FNM_* flag bitmask
+// below. The leading-period rule (a `.` at the start of a path
+// segment must be matched explicitly, not by a wildcard) is honoured
+// unless FNM_DOTMATCH. Discovery: P3 Jekyll spike —
+// EntryFilter#glob_include? filters site entries with
+// `File.fnmatch?`.
+
+const FNM_NOESCAPE: i64 = 0x01;
+const FNM_PATHNAME: i64 = 0x02;
+const FNM_DOTMATCH: i64 = 0x04;
+const FNM_CASEFOLD: i64 = 0x08;
+
+#[inline]
+fn fnm_char_eq(a: char, b: char, flags: i64) -> bool {
+    if flags & FNM_CASEFOLD != 0 {
+        a.eq_ignore_ascii_case(&b)
+    } else {
+        a == b
+    }
+}
+
+#[inline]
+fn fnm_in_range(ch: char, lo: char, hi: char, flags: i64) -> bool {
+    if (lo..=hi).contains(&ch) {
+        return true;
+    }
+    if flags & FNM_CASEFOLD != 0 {
+        let c = ch.to_ascii_lowercase();
+        let cu = ch.to_ascii_uppercase();
+        (lo..=hi).contains(&c) || (lo..=hi).contains(&cu)
+    } else {
+        false
+    }
+}
+
+/// True if a wildcard at `s[i]` is forbidden from matching because
+/// `s[i]` is a leading period of a path segment (and FNM_DOTMATCH
+/// is off).
+fn fnm_period_blocked(s: &[char], i: usize, flags: i64) -> bool {
+    if flags & FNM_DOTMATCH != 0 || i >= s.len() || s[i] != '.' {
+        return false;
+    }
+    if i == 0 {
+        return true;
+    }
+    flags & FNM_PATHNAME != 0 && s[i - 1] == '/'
+}
+
+/// Parse a `[set]` starting at `p[start]` ('[') against `ch`.
+/// Returns `Some((matched, index_after_class))`, or `None` if the
+/// bracket is malformed (no closing `]`) — the caller then treats
+/// `[` as a literal.
+fn fnm_bracket(p: &[char], start: usize, ch: char, flags: i64) -> Option<(bool, usize)> {
+    let mut i = start + 1;
+    let mut negate = false;
+    if i < p.len() && (p[i] == '!' || p[i] == '^') {
+        negate = true;
+        i += 1;
+    }
+    let mut matched = false;
+    let mut first = true;
+    while i < p.len() {
+        if p[i] == ']' && !first {
+            return Some((matched != negate, i + 1));
+        }
+        first = false;
+        // Escaped member.
+        let lo = if p[i] == '\\' && flags & FNM_NOESCAPE == 0 && i + 1 < p.len() {
+            i += 1;
+            p[i]
+        } else {
+            p[i]
+        };
+        // Range `lo-hi` (a trailing `-` before `]` is a literal `-`).
+        if i + 2 < p.len() && p[i + 1] == '-' && p[i + 2] != ']' {
+            i += 2;
+            let hi = if p[i] == '\\' && flags & FNM_NOESCAPE == 0 && i + 1 < p.len() {
+                i += 1;
+                p[i]
+            } else {
+                p[i]
+            };
+            if fnm_in_range(ch, lo, hi, flags) {
+                matched = true;
+            }
+            i += 1;
+        } else {
+            if fnm_char_eq(ch, lo, flags) {
+                matched = true;
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+fn fnm_match(p: &[char], mut pi: usize, s: &[char], mut si: usize, flags: i64) -> bool {
+    while pi < p.len() {
+        match p[pi] {
+            '*' => {
+                while pi < p.len() && p[pi] == '*' {
+                    pi += 1;
+                }
+                if fnm_period_blocked(s, si, flags) {
+                    return false;
+                }
+                if pi == p.len() {
+                    // Trailing `*` matches the rest; under FNM_PATHNAME
+                    // it cannot cross a `/`.
+                    return flags & FNM_PATHNAME == 0 || !s[si..].contains(&'/');
+                }
+                let mut k = si;
+                loop {
+                    if fnm_match(p, pi, s, k, flags) {
+                        return true;
+                    }
+                    if k >= s.len() {
+                        return false;
+                    }
+                    if flags & FNM_PATHNAME != 0 && s[k] == '/' {
+                        return false;
+                    }
+                    k += 1;
+                }
+            }
+            '?' => {
+                if si >= s.len()
+                    || (flags & FNM_PATHNAME != 0 && s[si] == '/')
+                    || fnm_period_blocked(s, si, flags)
+                {
+                    return false;
+                }
+                pi += 1;
+                si += 1;
+            }
+            '[' => {
+                if si >= s.len()
+                    || (flags & FNM_PATHNAME != 0 && s[si] == '/')
+                    || fnm_period_blocked(s, si, flags)
+                {
+                    return false;
+                }
+                match fnm_bracket(p, pi, s[si], flags) {
+                    Some((true, next)) => {
+                        pi = next;
+                        si += 1;
+                    }
+                    Some((false, _)) => return false,
+                    // Unterminated `[` — CRuby fails the whole match
+                    // (it does NOT fall back to a literal `[`):
+                    // `File.fnmatch?("a[b", "a[b") == false`.
+                    None => return false,
+                }
+            }
+            '\\' if flags & FNM_NOESCAPE == 0 => {
+                pi += 1;
+                let lit = if pi < p.len() { p[pi] } else { '\\' };
+                if si >= s.len() || !fnm_char_eq(s[si], lit, flags) {
+                    return false;
+                }
+                pi += 1;
+                si += 1;
+            }
+            c => {
+                if si >= s.len() || !fnm_char_eq(s[si], c, flags) {
+                    return false;
+                }
+                pi += 1;
+                si += 1;
+            }
+        }
+    }
+    si == s.len()
+}
+
+/// CRuby `File.fnmatch(pattern, path, flags)` — glob-style match.
+pub(crate) fn fnmatch(pattern: &str, path: &str, flags: i64) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let s: Vec<char> = path.chars().collect();
+    fnm_match(&p, 0, &s, 0, flags)
 }

@@ -2263,14 +2263,46 @@ class File
   SYNC = 1052672
   BINARY = 0
   SHARE_DELETE = 0
+  ## `File.fnmatch` flag bitmask (File::Constants in CRuby). The
+  ## matcher lives host-side in `Vm::file_class_dispatch` → `fnmatch`;
+  ## these let user code OR the flags (`File::FNM_PATHNAME` etc.).
+  ## FNM_SYSCASE is 0 on case-sensitive platforms — matches the
+  ## `ruby --disable=gems` parity oracle.
+  FNM_NOESCAPE = 1
+  FNM_PATHNAME = 2
+  FNM_DOTMATCH = 4
+  FNM_CASEFOLD = 8
+  FNM_EXTGLOB = 16
+  FNM_SYSCASE = 0
 end
 ## Dir — class-method dispatch (glob / `[]` / entries / children /
-## exist? / pwd) is wired host-side in `Vm::dir_class_dispatch`. The
-## body is intentionally empty; methods are not defined here. Added
-## for the P3 Jekyll spike — Liquid's liquid.rb loads its tag files
-## via a Dir glob of its tags directory, and Jekyll globs site
-## sources extensively.
+## exist? / pwd / __chdir) is wired host-side in
+## `Vm::dir_class_dispatch`. Added for the P3 Jekyll spike — Liquid's
+## liquid.rb loads its tag files via a Dir glob of its tags
+## directory, and Jekyll globs site sources extensively.
 class Dir
+  ## `Dir.chdir(path)` / `Dir.chdir(path) { ... }`. The actual cwd
+  ## move is the host primitive `Dir.__chdir`; the block form's
+  ## save-and-restore bracketing lives here so it reuses Ruby's
+  ## `yield` + `ensure` (CRuby restores the original cwd even when
+  ## the block raises, and yields the new directory to the block).
+  ## Non-block form returns 0, matching CRuby. Jekyll's
+  ## `layout_reader.rb#within` uses the block form to scope a
+  ## relative `Dir["**/*.*"]` glob.
+  def self.chdir(path = nil)
+    if block_given?
+      old = Dir.pwd
+      Dir.__chdir(path) unless path.nil?
+      begin
+        yield(path.nil? ? old : path)
+      ensure
+        Dir.__chdir(old)
+      end
+    else
+      Dir.__chdir(path) unless path.nil?
+      0
+    end
+  end
 end
 ## RubyrsSass — anchor for the `RubyrsSass.compile(scss) -> css` host
 ## primitive (wired in vm/dispatch.rs to crate::sass::compile, the
