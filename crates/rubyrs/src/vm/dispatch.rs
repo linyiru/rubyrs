@@ -4743,6 +4743,16 @@ impl Vm {
         if self.try_fast_primitive(name_id, argc, no_recv) {
             return Ok(());
         }
+        // Explicit-receiver monomorphic fast path: an `obj.method(args)`
+        // call on a user Object whose cached method is public, fixed-arity
+        // and non-closure invokes stack-direct (no args Vec, pooled
+        // locals), short-circuiting the full dispatch preamble. Everything
+        // else (private/protected, method_missing, the send-forms,
+        // primitives, non-fixed arity) falls through to the path below,
+        // which resolves identically (same class_of + lookup_method_cached).
+        if !no_recv && self.try_invoke_explicit_recv_cached(name_id, argc, cache_id)? {
+            return Ok(());
+        }
         let name = self.interner.resolve(name_id).clone();
         // Universal-Object bare-call routing. Several universal
         // `Object` methods are implemented only in the explicit-recv
@@ -9519,6 +9529,85 @@ impl Vm {
             locals.borrow_mut().clear();
             self.locals_pool.push(locals);
         }
+    }
+
+    /// Explicit-receiver monomorphic fast path — see the call site in
+    /// `do_call`. Resolves via the SAME `class_of` + `lookup_method_cached`
+    /// the slow path uses, so method resolution (including the
+    /// eigenclass/singleton chain, prepends, and the cext fall-through) is
+    /// identical; only PUBLIC, fixed-arity, non-closure methods are invoked
+    /// stack-direct here, and everything else returns `Ok(false)` to fall
+    /// through. A public method always passes `check_method_visibility`, so
+    /// skipping it for the fast path is safe.
+    fn try_invoke_explicit_recv_cached(
+        &mut self,
+        name_id: SymId,
+        argc: usize,
+        cache_id: u16,
+    ) -> Result<bool, Trap> {
+        // Explicit-recv stack layout: [..., recv, a1, ..., aN].
+        let recv_idx = match self.stack.len().checked_sub(argc + 1) {
+            Some(i) => i,
+            None => return Ok(false),
+        };
+        let id = match self.stack.get(recv_idx) {
+            Some(Value::Object(id)) => *id,
+            _ => return Ok(false),
+        };
+        let cls = self.heap.class_of(id);
+        let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) else {
+            return Ok(false);
+        };
+        // Only plain `def`-style proto methods are stack-direct here.
+        // Closures (define_method) share captured locals; builtins carry a
+        // dummy `proto_idx` and re-dispatch in `invoke_method_with_block`;
+        // both must take the full path.
+        if m.visibility.get() != Visibility::Public
+            || m.closure.is_some()
+            || m.builtin.is_some()
+        {
+            return Ok(false);
+        }
+        let fixed = match m.fixed_arity {
+            Some(f) if f.required as usize == argc => f,
+            _ => return Ok(false),
+        };
+        self.check_frames()?;
+        // Bind the argc args (stack top) into the locals, then drop the recv.
+        let n_locals = fixed.n_locals as usize;
+        let mut locals = vec_nil(n_locals);
+        for slot in (0..argc).rev() {
+            locals[slot] = self
+                .stack
+                .pop()
+                .expect("ICE: explicit-recv fast path arg underflow");
+        }
+        let recv = self
+            .stack
+            .pop()
+            .expect("ICE: explicit-recv fast path recv underflow");
+        let locals = self.intern_locals(locals);
+        self.frames.push(Frame {
+            proto_idx: m.proto_idx,
+            ip: 0,
+            locals,
+            self_val: recv,
+            base_sp: self.stack.len(),
+            is_class_body: false,
+            swap_return: None,
+            block_arg: None,
+            defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            is_block: false,
+            n_given_positional: fixed.required,
+            kw_given_mask: 0,
+            rescues: vec![],
+            loop_rescue_depths: vec![],
+            loop_stack_depths: vec![],
+            pending_yield: false,
+            begin_rescue_depths: vec![],
+            block_writeback: None,
+        });
+        Ok(true)
     }
 
     fn try_invoke_fixed_method_from_stack(
