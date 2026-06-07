@@ -627,3 +627,4 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn regex_named_captures() { run_diff("regex_named_captures"); }
 #[test] fn regex_fancy_gsub() { run_diff("regex_fancy_gsub"); }
 #[test] fn file_fnmatch() { run_diff("file_fnmatch"); }
+#[test] fn fileops_write() { run_diff("fileops_write"); }

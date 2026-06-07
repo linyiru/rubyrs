@@ -6304,6 +6304,11 @@ impl Vm {
                     self.stack.push(v);
                     return Ok(());
                 }
+            if cls.name.as_str() == "FileUtils"
+                && let Some(v) = self.fileutils_class_dispatch(&name, &args)? {
+                    self.stack.push(v);
+                    return Ok(());
+                }
             // `RubyrsSass.compile(scss)` — host primitive backing the
             // jekyll-sass-converter shim. Compiles SCSS/Sass to CSS via
             // the active `SassBackend` (grass under `--features sass`);

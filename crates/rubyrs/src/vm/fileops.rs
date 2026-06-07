@@ -221,7 +221,14 @@ impl Vm {
             }
         };
         Ok(Some(match (name, args) {
-            ("read", [p]) => {
+            // `File.read(path)` plus the optional `length` / `offset`
+            // positionals and a trailing options Hash. The opts Hash
+            // (encoding/mode keywords, e.g. jekyll's
+            // `File.read(f, **Utils.merged_file_read_opts(...))`) is
+            // accepted and ignored — rubyrs always reads raw bytes.
+            ("read", [p])
+            | ("read", [p, _])
+            | ("read", [p, _, _]) => {
                 // First-gate: bool capability. Runs BEFORE path_arg so
                 // a wrong-type arg under sandbox-on traps with IOError,
                 // not TypeError (PR #257 F6 ordering contract).
@@ -234,6 +241,17 @@ impl Vm {
                     "File.read",
                     Some(Path::new(&path)),
                 )?;
+                // Positional `length` (bytes to read) / `offset` (byte
+                // start). Non-Integer 2nd/3rd args are the options
+                // Hash and contribute nothing.
+                let length = match args.get(1) {
+                    Some(Value::Int(n)) if *n >= 0 => Some(*n as usize),
+                    _ => None,
+                };
+                let offset = match args.get(2) {
+                    Some(Value::Int(n)) if *n >= 0 => *n as usize,
+                    _ => 0,
+                };
                 // L3-G follow-up: read raw bytes, not UTF-8-validated
                 // String. msgpack/protobuf/binary-protocol fixtures
                 // are not valid UTF-8; the previous read_to_string
@@ -256,13 +274,29 @@ impl Vm {
                 // can opt back into the strict-text mode if they
                 // want it.
                 match std::fs::read(&path) {
-                    Ok(b) => Value::new_str_bytes(b),
+                    Ok(b) => {
+                        if offset == 0 && length.is_none() {
+                            Value::new_str_bytes(b)
+                        } else {
+                            let start = offset.min(b.len());
+                            let slice = &b[start..];
+                            let out = match length {
+                                Some(n) => &slice[..n.min(slice.len())],
+                                None => slice,
+                            };
+                            Value::new_str_bytes(out.to_vec())
+                        }
+                    }
                     Err(e) => return Err(self.trap(RubyError::RuntimeError {
                         msg: format!("File.read({}): {}", path, e),
                     })),
                 }
             }
-            ("write", [p, body]) => {
+            // `File.write(path, content)` and the keyword-opts form
+            // `File.write(path, content, mode: "wb")` (trailing opts
+            // Hash is accepted and ignored — we always write the bytes
+            // verbatim). jekyll's page/document writer uses the latter.
+            ("write", [p, body]) | ("write", [p, body, _]) => {
                 self.check_filesystem_io_allowed("File.write", None)?;
                 let path = path_arg(p)?;
                 self.check_filesystem_io_allowed(
