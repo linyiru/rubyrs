@@ -608,6 +608,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn file_open_write() { run_diff("file_open_write"); }
 #[test] fn file_gets_separator() { run_diff("file_gets_separator"); }
 #[test] fn file_write_handle_read() { run_diff("file_write_handle_read"); }
+#[test] fn file_write_bytecount() { run_diff("file_write_bytecount"); }
 #[test] fn enumerable_module() { run_diff("enumerable_module"); }
 #[test] fn super_block_literal() { run_diff("super_block_literal"); }
 #[cfg(feature = "stdlib")]

@@ -109,7 +109,9 @@ class File
     strs.each do |s|
       str = s.to_s
       @__io_buf << str
-      n += str.length
+      # IO#write returns the number of BYTES written, not characters —
+      # they differ for multibyte content.
+      n += str.bytesize
     end
     @__io_dirty = true
     n
