@@ -159,7 +159,10 @@ class File
     return nil if @__io_pos >= @__io_buf.length
     idx = @__io_buf.index(sep, @__io_pos)
     if idx
-      line = @__io_buf[@__io_pos..idx]
+      # Include the FULL separator in the returned line (CRuby). The
+      # inclusive `[@__io_pos..idx]` kept only the separator's first
+      # character; a multi-char separator ("XX") was truncated to "X".
+      line = @__io_buf[@__io_pos...(idx + sep.length)]
       @__io_pos = idx + sep.length
     else
       line = @__io_buf[@__io_pos..] || ""

@@ -606,6 +606,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn struct_in_container_gc() { run_diff("struct_in_container_gc"); }
 #[test] fn time_parse() { run_diff("time_parse"); }
 #[test] fn file_open_write() { run_diff("file_open_write"); }
+#[test] fn file_gets_separator() { run_diff("file_gets_separator"); }
 #[test] fn enumerable_module() { run_diff("enumerable_module"); }
 #[test] fn super_block_literal() { run_diff("super_block_literal"); }
 #[cfg(feature = "stdlib")]
