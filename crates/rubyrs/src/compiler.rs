@@ -1670,6 +1670,43 @@ pub(crate) fn compile_expr(
                 b.emit(Op::ApplySuper(name_id));
             }
         }
+        Expr::SuperWithBlock { args, block_params, block_body } => {
+            // `super do … end` — compile the block LITERAL, assemble
+            // the args into an Array, and route through
+            // `Op::ApplySuperBlock` (same `[block, array]` stack shape
+            // as `super(*args, &proc)`). `args == None` forwards the
+            // enclosing method's params, mirroring the bare-`super`
+            // forwarding in `Expr::Super`.
+            let mname = b.method_name.clone()
+                .unwrap_or_else(|| "<super-outside-method>".to_string());
+            let name_id = interner.intern(&mname);
+            // Block literal first → CreateBlock pushes the Block.
+            let (block_proto_idx, param_start, n_params, rest_slot, kw_rest_slot) =
+                compile_block(b, block_params, block_body, protos, interner, cc);
+            b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot, kw_rest_slot));
+            // Args Array on top.
+            match args {
+                Some(arg_exprs) => {
+                    for a in arg_exprs { compile_expr(b, a, protos, interner, cc); }
+                    b.emit(Op::NewArray(arg_exprs.len() as u16));
+                }
+                None => {
+                    // Forwarding form. A lone `*rest` param IS the args
+                    // Array already (spread its elements), matching the
+                    // bare-super rest fast-path; otherwise gather each
+                    // param slot into a fresh Array.
+                    if b.method_param_count == 1 && b.method_rest_slot == Some(0) {
+                        b.emit(Op::LoadLocal(0));
+                    } else {
+                        for i in 0..b.method_param_count {
+                            b.emit(Op::LoadLocal(i));
+                        }
+                        b.emit(Op::NewArray(b.method_param_count));
+                    }
+                }
+            }
+            b.emit(Op::ApplySuperBlock(name_id));
+        }
         Expr::Class { name, superclass, body, is_module } => {
             compile_class_arm(b, name, superclass, body, *is_module, protos, interner, cc);
         }

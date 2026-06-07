@@ -486,6 +486,18 @@ pub(crate) enum Expr {
     /// shape surfaces this; previously raised
     /// `unsupported node: SplatNode` at AST translation.
     SuperApply { args: Box<SExpr>, block_arg: Option<Box<SExpr>> },
+    /// `super do |...| ... end` / `super(args) { ... }` — super with a
+    /// block LITERAL (distinct from `super(&proc)`, which is
+    /// `SuperApply.block_arg`). `args` is `None` for the bare
+    /// arg-forwarding form (`super do ... end`) or `Some(exprs)` for an
+    /// explicit list. The block is compiled inline and forwarded to the
+    /// parent method via `Op::ApplySuperBlock`. Discovery: P3 Jekyll
+    /// spike — liquid's `Document#parse` does `super do |tag, …| … end`.
+    SuperWithBlock {
+        args: Option<Vec<SExpr>>,
+        block_params: Vec<BlockParam>,
+        block_body: Vec<SExpr>,
+    },
     /// `a || b` — short-circuit: returns `a` if truthy, else `b`.
     Or(Box<SExpr>, Box<SExpr>),
     /// `a && b` — short-circuit: returns `b` if `a` truthy, else `a`.
@@ -701,6 +713,69 @@ fn sp(node: &Node<'_>, e: Expr) -> SExpr {
 /// `.merge(opts)` against the accumulated hash. The final
 /// expression has shape `{...}.merge(opts).merge({...})...`
 /// — same Hash that CRuby would build for the same source.
+/// Translate a Prism `BlockNode` (`{ |params| body }` / `do |params|
+/// body end`) into the rubyrs `(block_params, block_body)` pair.
+/// Shared by the regular `CallWithBlock` path and `super do … end`
+/// (`Expr::SuperWithBlock`). Mirrors the param subset the call path
+/// models: required + destructure + `*rest` + `&blk` + `**kwrest`
+/// (optionals / explicit keywords aren't modelled).
+fn tr_block_node(
+    ctx: &mut TranslationCtx<'_>,
+    bn: &ruby_prism::BlockNode<'_>,
+) -> (Vec<BlockParam>, Vec<SExpr>) {
+    fn parse_one(n: &ruby_prism::Node<'_>) -> Option<BlockParam> {
+        if let Some(rp) = n.as_required_parameter_node() {
+            return Some(BlockParam::Single(cid_to_string(rp.name())));
+        }
+        if let Some(mt) = n.as_multi_target_node() {
+            let inners: Vec<BlockParam> = mt
+                .lefts()
+                .iter()
+                .filter_map(|inner| parse_one(&inner))
+                .collect();
+            return Some(BlockParam::Destructure(inners));
+        }
+        None
+    }
+    let block_params: Vec<BlockParam> = bn
+        .parameters()
+        .and_then(|pn| pn.as_block_parameters_node())
+        .and_then(|bp| bp.parameters())
+        .map(|p| {
+            let mut out: Vec<BlockParam> =
+                p.requireds().iter().filter_map(|r| parse_one(&r)).collect();
+            if let Some(rest) = p.rest()
+                && let Some(rp) = rest.as_rest_parameter_node()
+            {
+                let name = rp.name().map(cid_to_string).unwrap_or_default();
+                out.push(BlockParam::Rest(name));
+            }
+            if let Some(b) = p.block() {
+                let name = b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string());
+                out.push(BlockParam::BlockArg(name));
+            }
+            if let Some(kr) = p.keyword_rest()
+                && let Some(krp) = kr.as_keyword_rest_parameter_node()
+            {
+                let name = krp.name().map(cid_to_string).unwrap_or_default();
+                out.push(BlockParam::KwRest(name));
+            }
+            out
+        })
+        .unwrap_or_default();
+    let block_body: Vec<SExpr> = match bn.body() {
+        Some(b) => {
+            if let Some(stmts) = b.as_statements_node() {
+                stmts.body().iter().map(|c| tr(ctx, &c)).collect()
+            } else {
+                vec![tr(ctx, &b)]
+            }
+        }
+        None => vec![],
+    };
+    (block_params, block_body)
+}
+
 fn tr_kwhash(
     ctx: &mut TranslationCtx<'_>,
     parent: &Node<'_>,
@@ -2621,77 +2696,9 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         }).collect();
         if let Some(bnode) = n.block() {
             if let Some(bn) = bnode.as_block_node() {
-                // Block params. Each top-level param becomes a
-                // `BlockParam`, recursively for nested destructures.
-                // `RequiredParameterNode` → `Single(name)`;
-                // `MultiTargetNode` → `Destructure(inner params)`
-                // where each inner is itself parsed via the same
-                // recursion. Supports `|a, (b, c)|`, `|((a, b), c)|`,
-                // and deeper nestings.
-                fn parse_one(n: &ruby_prism::Node<'_>) -> Option<BlockParam> {
-                    if let Some(rp) = n.as_required_parameter_node() {
-                        return Some(BlockParam::Single(cid_to_string(rp.name())));
-                    }
-                    if let Some(mt) = n.as_multi_target_node() {
-                        let inners: Vec<BlockParam> = mt.lefts().iter()
-                            .filter_map(|inner| parse_one(&inner))
-                            .collect();
-                        return Some(BlockParam::Destructure(inners));
-                    }
-                    None
-                }
-                let block_params: Vec<BlockParam> = bn.parameters()
-                    .and_then(|pn| pn.as_block_parameters_node())
-                    .and_then(|bp| bp.parameters())
-                    .map(|p| {
-                        let mut out: Vec<BlockParam> = p.requireds().iter()
-                            .filter_map(|r| parse_one(&r))
-                            .collect();
-                        // `|*rest|` — Prism reports the rest param
-                        // separately from requireds. Append as a
-                        // Rest BlockParam; the compiler's prologue
-                        // will gather overflow args here.
-                        if let Some(rest) = p.rest()
-                            && let Some(rp) = rest.as_rest_parameter_node() {
-                                let name = rp.name().map(cid_to_string).unwrap_or_default();
-                                out.push(BlockParam::Rest(name));
-                            }
-                        // M27 A1: `|&blk|` named block-arg param.
-                        // Prism returns BlockParameterNode directly
-                        // from `p.block()` (alternation node — no
-                        // `as_*` cast needed). Append as a BlockArg
-                        // BlockParam; compile_block reserves a slot
-                        // and sets proto.block_param so
-                        // invoke_method_with_block's trailing-slot
-                        // binder populates it when the block is
-                        // installed as a method.
-                        if let Some(b) = p.block() {
-                            let name = b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string());
-                            out.push(BlockParam::BlockArg(name));
-                        }
-                        // `|**opts|` keyword-rest param. Prism exposes
-                        // it via `keyword_rest()` (singular Option);
-                        // the `KeywordRestParameterNode` shape is
-                        // `**name` (anonymous `**` has no name). The
-                        // `NoKeywordsParameterNode` (`**nil`) shape is
-                        // skipped — it declares "no kwargs", nothing
-                        // to bind.
-                        if let Some(kr) = p.keyword_rest()
-                            && let Some(krp) = kr.as_keyword_rest_parameter_node() {
-                                let name = krp.name().map(cid_to_string).unwrap_or_default();
-                                out.push(BlockParam::KwRest(name));
-                            }
-                        out
-                    })
-                    .unwrap_or_default();
-                let block_body: Vec<SExpr> = match bn.body() {
-                    Some(b) => {
-                        if let Some(stmts) = b.as_statements_node() {
-                            stmts.body().iter().map(|c| tr(ctx, &c)).collect()
-                        } else { vec![tr(ctx, &b)] }
-                    }
-                    None => vec![],
-                };
+                // Block params + body via the shared translator
+                // (`|a, (b, c)|`, `|*rest|`, `|&blk|`, `|**opts|`).
+                let (block_params, block_body) = tr_block_node(ctx, &bn);
                 return wrap_sn(sp(node, Expr::CallWithBlock { receiver, name, args, block_params, block_body }));
             }
             // `&...` block argument. Two sub-cases:
@@ -3029,11 +3036,16 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         };
         return sp(node, Expr::If { cond, then_body, else_body });
     }
-    if node.as_forwarding_super_node().is_some() {
+    if let Some(fs) = node.as_forwarding_super_node() {
         // Bare `super` — forwards all of the enclosing method's
         // args. The arg list is filled in at compile time by
         // emitting LoadLocal for each param slot, so the AST
-        // just stores `None` here.
+        // just stores `None` here. `super do … end` attaches a block
+        // literal that must be forwarded to the parent method.
+        if let Some(bn) = fs.block() {
+            let (block_params, block_body) = tr_block_node(ctx, &bn);
+            return sp(node, Expr::SuperWithBlock { args: None, block_params, block_body });
+        }
         return sp(node, Expr::Super(None));
     }
     if let Some(n) = node.as_super_node() {
@@ -3082,6 +3094,22 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             }
         };
         let has_splat = arg_nodes.iter().any(|c| c.as_splat_node().is_some());
+        // `super(args) do … end` — a block LITERAL (not `&proc`). The
+        // splat-free arg form is the common shape; a splat combined
+        // with a literal block falls through to the plain paths below.
+        if super_block_arg.is_none()
+            && !has_splat
+            && let Some(bnode) = n.block()
+            && let Some(bn) = bnode.as_block_node()
+        {
+            let (block_params, block_body) = tr_block_node(ctx, &bn);
+            let args: Vec<SExpr> = arg_nodes.iter().map(|c| tr_super_arg(ctx, c)).collect();
+            return sp(node, Expr::SuperWithBlock {
+                args: Some(args),
+                block_params,
+                block_body,
+            });
+        }
         if has_splat {
             let mut chunks: Vec<SExpr> = Vec::new();
             let mut buf: Vec<SExpr> = Vec::new();
