@@ -631,4 +631,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn last_match_named() { run_diff("last_match_named"); }
 #[test] fn file_fnmatch() { run_diff("file_fnmatch"); }
 #[test] fn fileops_write() { run_diff("fileops_write"); }
+#[test] fn errno_rescue() { run_diff("errno_rescue"); }
 #[test] fn scoped_autoload() { run_diff("scoped_autoload"); }

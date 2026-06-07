@@ -287,9 +287,7 @@ impl Vm {
                             Value::new_str_bytes(out.to_vec())
                         }
                     }
-                    Err(e) => return Err(self.trap(RubyError::RuntimeError {
-                        msg: format!("File.read({}): {}", path, e),
-                    })),
+                    Err(e) => return Err(self.trap(io_error(&e, Some(Path::new(&path))))),
                 }
             }
             // `File.write(path, content)` and the keyword-opts form
@@ -309,9 +307,7 @@ impl Vm {
                 };
                 match std::fs::write(&path, &contents) {
                     Ok(()) => Value::Int(contents.len() as i64),
-                    Err(e) => return Err(self.trap(RubyError::RuntimeError {
-                        msg: format!("File.write({}): {}", path, e),
-                    })),
+                    Err(e) => return Err(self.trap(io_error(&e, Some(Path::new(&path))))),
                 }
             }
             // `File.fnmatch?(pattern, path)` / `fnmatch(pattern, path,
@@ -371,9 +367,7 @@ impl Vm {
                 )?;
                 match std::fs::metadata(&path) {
                     Ok(m) => Value::Int(m.len() as i64),
-                    Err(e) => return Err(self.trap(RubyError::RuntimeError {
-                        msg: format!("File.size({}): {}", path, e),
-                    })),
+                    Err(e) => return Err(self.trap(io_error(&e, Some(Path::new(&path))))),
                 }
             }
             ("basename", [p]) => {
@@ -581,9 +575,7 @@ impl Vm {
                         .map(|e| e.file_name().to_string_lossy().into_owned())
                         .collect(),
                     Err(e) => {
-                        return Err(self.trap(RubyError::RuntimeError {
-                            msg: format!("Dir.{}({}): {}", name, path, e),
-                        }));
+                        return Err(self.trap(io_error(&e, Some(Path::new(&path)))));
                     }
                 };
                 names.sort();
@@ -624,9 +616,7 @@ impl Vm {
                 match std::env::set_current_dir(&path) {
                     Ok(()) => Value::new_str(path),
                     Err(e) => {
-                        return Err(self.trap(RubyError::RuntimeError {
-                            msg: format!("Dir.chdir({path}): {e}"),
-                        }));
+                        return Err(self.trap(io_error(&e, Some(Path::new(&path)))));
                     }
                 }
             }
@@ -677,9 +667,7 @@ impl Vm {
                 let ps = paths(self, a)?;
                 for p in &ps {
                     self.check_filesystem_io_allowed("FileUtils.mkdir_p", Some(Path::new(p)))?;
-                    std::fs::create_dir_all(p).map_err(|e| self.trap(RubyError::RuntimeError {
-                        msg: format!("FileUtils.mkdir_p({}): {}", p, e),
-                    }))?;
+                    std::fs::create_dir_all(p).map_err(|e| self.trap(io_error(&e, Some(Path::new(p)))))?;
                 }
                 a.clone()
             }
@@ -688,9 +676,7 @@ impl Vm {
                 let ps = paths(self, a)?;
                 for p in &ps {
                     self.check_filesystem_io_allowed("FileUtils.mkdir", Some(Path::new(p)))?;
-                    std::fs::create_dir(p).map_err(|e| self.trap(RubyError::RuntimeError {
-                        msg: format!("FileUtils.mkdir({}): {}", p, e),
-                    }))?;
+                    std::fs::create_dir(p).map_err(|e| self.trap(io_error(&e, Some(Path::new(p)))))?;
                 }
                 a.clone()
             }
@@ -728,9 +714,7 @@ impl Vm {
                     Path::new(&d).join(Path::new(&s).file_name().unwrap_or_default())
                         .to_string_lossy().into_owned()
                 } else { d };
-                std::fs::copy(&s, &dest).map_err(|e| self.trap(RubyError::RuntimeError {
-                    msg: format!("FileUtils.cp({}, {}): {}", s, dest, e),
-                }))?;
+                std::fs::copy(&s, &dest).map_err(|e| self.trap(io_error(&e, Some(Path::new(&s)))))?;
                 Value::Nil
             }
             ("touch", [a]) => {
@@ -740,15 +724,57 @@ impl Vm {
                     self.check_filesystem_io_allowed("FileUtils.touch", Some(Path::new(p)))?;
                     // Create if absent; leave content untouched otherwise.
                     if !Path::new(p).exists() {
-                        std::fs::write(p, b"").map_err(|e| self.trap(RubyError::RuntimeError {
-                            msg: format!("FileUtils.touch({}): {}", p, e),
-                        }))?;
+                        std::fs::write(p, b"").map_err(|e| self.trap(io_error(&e, Some(Path::new(p)))))?;
                     }
                 }
                 a.clone()
             }
             _ => return Ok(None),
         }))
+    }
+}
+
+/// Map a `std::io::Error` to the matching `Errno::*` exception
+/// (falling back to `SystemCallError`) and wrap it as a
+/// `HostException` so Ruby `rescue Errno::ENOENT` / `rescue
+/// SystemCallError` catches filesystem failures. Previously every
+/// File/Dir/FileUtils failure was raised as a plain `RuntimeError`,
+/// which the pervasive `rescue Errno::ENOENT` idiom silently missed.
+pub(crate) fn io_error(e: &std::io::Error, path: Option<&Path>) -> RubyError {
+    let (class, desc) = io_errno(e);
+    let message = match path {
+        Some(p) => format!("{} - {}", desc, p.display()),
+        None => desc.to_string(),
+    };
+    RubyError::HostException {
+        class_name: class.to_string(),
+        message,
+    }
+}
+
+/// `(Errno::* class name, strerror-like description)` for an io error.
+/// The low POSIX errno numbers (2/13/17/20/21/22/28) are identical on
+/// Linux and macOS, so the `raw_os_error` mapping is portable; the
+/// `ErrorKind` fallback covers the platform-independent cases.
+fn io_errno(e: &std::io::Error) -> (&'static str, &'static str) {
+    use std::io::ErrorKind;
+    if let Some(code) = e.raw_os_error() {
+        match code {
+            2 => return ("Errno::ENOENT", "No such file or directory"),
+            13 => return ("Errno::EACCES", "Permission denied"),
+            17 => return ("Errno::EEXIST", "File exists"),
+            20 => return ("Errno::ENOTDIR", "Not a directory"),
+            21 => return ("Errno::EISDIR", "Is a directory"),
+            22 => return ("Errno::EINVAL", "Invalid argument"),
+            28 => return ("Errno::ENOSPC", "No space left on device"),
+            _ => {}
+        }
+    }
+    match e.kind() {
+        ErrorKind::NotFound => ("Errno::ENOENT", "No such file or directory"),
+        ErrorKind::PermissionDenied => ("Errno::EACCES", "Permission denied"),
+        ErrorKind::AlreadyExists => ("Errno::EEXIST", "File exists"),
+        _ => ("SystemCallError", "Unknown error"),
     }
 }
 
