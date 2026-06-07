@@ -250,19 +250,41 @@ impl Vm {
         let pre_frames = g.vm.frames.len();
         let mut kept: Vec<Value> = Vec::with_capacity(snapshot.len());
         let mut early: Option<Value> = None;
-        for v in snapshot {
-            let r = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
-                BlockStep::MethodReturn => break,
-                BlockStep::Break(r) => { early = Some(r); break; }
-                BlockStep::Value(r) => r,
-            };
-            let keep = if keep_truthy { r.is_truthy() } else { !r.is_truthy() };
-            if keep { kept.push(v); }
+        let mut it = snapshot.into_iter();
+        while let Some(v) = it.next() {
+            match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
+                // A non-local `return` or `break` abandons the iteration,
+                // but CRuby keeps the element that triggered it AND every
+                // not-yet-visited element — the in-place deletions made so
+                // far still stand. Writing back only the filtered prefix
+                // (the old behaviour) silently dropped that tail.
+                BlockStep::MethodReturn => {
+                    kept.push(v);
+                    kept.extend(it.by_ref());
+                    break;
+                }
+                BlockStep::Break(r) => {
+                    early = Some(r);
+                    kept.push(v);
+                    kept.extend(it.by_ref());
+                    break;
+                }
+                BlockStep::Value(r) => {
+                    let keep = if keep_truthy { r.is_truthy() } else { !r.is_truthy() };
+                    if keep {
+                        kept.push(v);
+                    }
+                }
+            }
         }
-        if let Some(e) = early { return Ok(e); }
         let changed = kept.len() != g.vm.heap.array(id).len();
         *g.vm.heap.array_mut(id) = kept;
-        Ok(if bang && !changed { Value::Nil } else { Value::Array(id) })
+        // `break v` short-circuits to its value (CRuby); `return` unwinds
+        // via `method_return` so this result is discarded either way.
+        match early {
+            Some(e) => Ok(e),
+            None => Ok(if bang && !changed { Value::Nil } else { Value::Array(id) }),
+        }
     }
 
     /// Same shape as `iter_array_filter`, but the source is a Hash.
