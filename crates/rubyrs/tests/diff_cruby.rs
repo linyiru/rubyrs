@@ -603,3 +603,4 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn hash_indexed() { run_diff("hash_indexed"); }
 #[test] fn struct_anon_ivars() { run_diff("struct_anon_ivars"); }
 #[test] fn time_parse() { run_diff("time_parse"); }
+#[test] fn file_open_write() { run_diff("file_open_write"); }

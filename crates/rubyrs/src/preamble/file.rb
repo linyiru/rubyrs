@@ -42,13 +42,24 @@
 
 class File
   def self.open(path, mode = "r", **_opts)
-    # Reuse the capability-gated Tier-1 `File.read` primitive for
-    # the actual disk reach. A read failure (missing file,
-    # sandbox denial) surfaces as whatever `File.read` raises —
-    # same error the caller would see from a bare `File.read`.
-    buf = File.read(path)
-    f = allocate
-    f.__io_init(path.to_s, buf)
+    mode_s = mode.to_s
+    writing = mode_s.include?("w") || mode_s.include?("a")
+    if writing
+      # Write/append mode: start from "" (truncate) or the existing
+      # content (append). Buffered in memory; flushed to disk via the
+      # Tier-1 `File.write` primitive on close. A read failure for the
+      # append case (missing file) just starts empty.
+      buf = mode_s.include?("a") ? (File.read(path) rescue "") : ""
+      f = allocate
+      f.__io_init(path.to_s, buf, write: true)
+    else
+      # Reuse the capability-gated Tier-1 `File.read` primitive for
+      # the actual disk reach. A read failure (missing file, sandbox
+      # denial) surfaces as whatever `File.read` raises.
+      buf = File.read(path)
+      f = allocate
+      f.__io_init(path.to_s, buf)
+    end
     if block_given?
       begin
         yield f
@@ -74,12 +85,60 @@ class File
   # --- instance surface (operates on the buffered content) ---
 
   # @!visibility private
-  def __io_init(path, buf)
+  def __io_init(path, buf, write: false)
     @__io_path = path
     @__io_buf = buf
-    @__io_pos = 0
+    @__io_pos = write ? buf.length : 0
     @__io_closed = false
+    @__io_write = write
+    @__io_dirty = false
     self
+  end
+
+  # --- write surface (accumulates in @__io_buf, flushed on close) ---
+
+  def write(*strs)
+    raise IOError, "not opened for writing" unless @__io_write
+    raise IOError, "closed stream" if @__io_closed
+    n = 0
+    strs.each do |s|
+      str = s.to_s
+      @__io_buf << str
+      n += str.length
+    end
+    @__io_dirty = true
+    n
+  end
+
+  def <<(obj)
+    write(obj.to_s)
+    self
+  end
+
+  def print(*args)
+    args.each { |a| write(a.to_s) }
+    nil
+  end
+
+  def puts(*args)
+    if args.empty?
+      write("\n")
+      return nil
+    end
+    args.each do |a|
+      if a.is_a?(Array)
+        a.empty? ? write("\n") : a.each { |e| puts(e) }
+      else
+        s = a.to_s
+        s.end_with?("\n") ? write(s) : write(s, "\n")
+      end
+    end
+    nil
+  end
+
+  def printf(fmt, *args)
+    write(sprintf(fmt, *args))
+    nil
   end
 
   def read(length = nil)
@@ -109,6 +168,16 @@ class File
     line
   end
 
+  # Like #gets but raises EOFError at end of file instead of
+  # returning nil (CRuby IO#readline). Discovery: P3 Jekyll spike —
+  # `utils.rb#has_yaml_header?` does `File.open(f, "rb", &:readline)`
+  # to sniff the first line for a `---` front-matter marker.
+  def readline(sep = "\n")
+    line = gets(sep)
+    raise EOFError, "end of file reached" if line.nil?
+    line
+  end
+
   def each_line(sep = "\n")
     while (line = gets(sep))
       yield line
@@ -129,7 +198,17 @@ class File
     @__io_path
   end
 
+  def flush
+    if @__io_write && @__io_dirty
+      File.write(@__io_path, @__io_buf)
+      @__io_dirty = false
+    end
+    self
+  end
+
   def close
+    return nil if @__io_closed
+    flush
     @__io_closed = true
     nil
   end
