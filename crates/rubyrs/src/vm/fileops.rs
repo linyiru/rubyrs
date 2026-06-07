@@ -984,8 +984,39 @@ fn fnm_match(p: &[char], mut pi: usize, s: &[char], mut si: usize, flags: i64) -
     while pi < p.len() {
         match p[pi] {
             '*' => {
+                let star_start = pi;
                 while pi < p.len() && p[pi] == '*' {
                     pi += 1;
+                }
+                // `**/` under FNM_PATHNAME is the recursive token: it
+                // matches zero or more complete directory components, so
+                // the rest of the pattern can match at any depth. A `**`
+                // that isn't a bounded path segment (`a**`, `**.rb`, a
+                // trailing `**`) falls through to ordinary `*` semantics.
+                if pi - star_start >= 2
+                    && flags & FNM_PATHNAME != 0
+                    && pi < p.len()
+                    && p[pi] == '/'
+                {
+                    let rest = pi + 1; // pattern after the `**/`
+                    // Zero directories consumed.
+                    if fnm_match(p, rest, s, si, flags) {
+                        return true;
+                    }
+                    // Consume one `<segment>/` at a time and retry.
+                    let mut k = si;
+                    loop {
+                        while k < s.len() && s[k] != '/' {
+                            k += 1;
+                        }
+                        if k >= s.len() {
+                            return false;
+                        }
+                        k += 1; // past the `/`
+                        if fnm_match(p, rest, s, k, flags) {
+                            return true;
+                        }
+                    }
                 }
                 if fnm_period_blocked(s, si, flags) {
                     return false;

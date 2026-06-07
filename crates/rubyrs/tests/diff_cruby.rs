@@ -635,4 +635,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn fileutils_cp_array() { run_diff("fileutils_cp_array"); }
 #[test] fn fileutils_cp_r_mv() { run_diff("fileutils_cp_r_mv"); }
 #[test] fn file_write_mode() { run_diff("file_write_mode"); }
+#[test] fn file_fnmatch_globstar() { run_diff("file_fnmatch_globstar"); }
 #[test] fn scoped_autoload() { run_diff("scoped_autoload"); }
