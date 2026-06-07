@@ -618,6 +618,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn digest_hexdigest() { run_diff("digest_hexdigest"); }
 #[test] fn regex_line_anchors() { run_diff("regex_line_anchors"); }
 #[test] fn array_insert() { run_diff("array_insert"); }
+#[test] fn array_insert_too_big() { run_diff("array_insert_too_big"); }
 #[test] fn array_block_mutation() { run_diff("array_block_mutation"); }
 #[test] fn array_filter_break() { run_diff("array_filter_break"); }
 #[test] fn sort_class_spaceship() { run_diff("sort_class_spaceship"); }

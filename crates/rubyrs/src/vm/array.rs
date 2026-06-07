@@ -463,6 +463,19 @@ impl Vm {
                             .len()
                             .max(pos)
                             .saturating_add(rest.len());
+                        // Absolute ceiling independent of the opt-in
+                        // `max_value_bytes` cap: without it a bare
+                        // `insert(huge_index, x)` on a default-config
+                        // interpreter drives `Vec::resize` into an
+                        // allocation that aborts the host process. CRuby
+                        // raises `IndexError: index N too big` past its
+                        // array-size limit; mirror that boundary.
+                        const ARY_MAX: usize = (i64::MAX as usize) / std::mem::size_of::<Value>();
+                        if new_len > ARY_MAX {
+                            return Err(self.trap(RubyError::IndexError {
+                                msg: format!("index {idx} too big"),
+                            }));
+                        }
                         if let Some(max) = self.max_value_bytes
                             && new_len.saturating_mul(std::mem::size_of::<Value>()) > max {
                                 return Err(self.trap(RubyError::ResourceExhausted {
