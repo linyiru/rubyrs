@@ -1321,6 +1321,30 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Hash(id)))
             }
+            (Value::Hash(id), "delete", [k]) => {
+                // `h.delete(key) { |key| default }` — key present: remove
+                // the entry, return its value (block ignored). Key
+                // absent: call the block with the key, return its result.
+                // (The no-block form is in hash_collection_call; rouge's
+                // lexer initializers use `opts.delete(:flag) { default }`.)
+                let id = *id;
+                let k = k.clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                g.pin(k.clone());
+                match g.vm.heap.hash_delete(id, &k) {
+                    Some(v) => Some(v),
+                    None => {
+                        let pre_frames = g.vm.frames.len();
+                        match g.vm.step_block(block, vec![k], pre_frames)? {
+                            BlockStep::MethodReturn => Some(Value::Nil),
+                            BlockStep::Break(r) => Some(r),
+                            BlockStep::Value(r) => Some(r),
+                        }
+                    }
+                }
+            }
             (Value::Hash(id), "each", []) | (Value::Hash(id), "each_pair", []) => {
                 // CRuby yields each pair as a single 2-elem Array
                 // `[k, v]`. Two-param blocks (`|k, v|`) auto-splat
