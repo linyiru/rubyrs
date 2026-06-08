@@ -133,18 +133,27 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             // via `singleton_target`). Both branches collapse
             // to Some(Value::Nil); named non-shell classes
             // return the name.
-            if c.singleton_target.borrow().is_some() || c.name.is_empty() {
+            // Singleton-class shells are always nil. Otherwise the
+            // effective name (structural `name`, or the
+            // `assigned_name` stamped on first const-assignment per
+            // CRuby — `C = Class.new` ⇒ `C.name == "C"`); a still-
+            // anonymous class has neither and reports nil.
+            if c.singleton_target.borrow().is_some() {
                 Some(Value::Nil)
             } else {
-                Some(Value::new_str(c.name.clone()))
+                match c.effective_name() {
+                    Some(n) => Some(Value::new_str(n)),
+                    None => Some(Value::Nil),
+                }
             }
         }
         (Value::Class(c), "to_s", []) | (Value::Class(c), "inspect", []) => {
-            if c.name.is_empty() {
-                let kind = if c.is_module { "Module" } else { "Class" };
-                Some(Value::new_str(format!("#<{}>", kind)))
-            } else {
-                Some(Value::new_str(c.name.clone()))
+            match c.effective_name() {
+                Some(n) => Some(Value::new_str(n)),
+                None => {
+                    let kind = if c.is_module { "Module" } else { "Class" };
+                    Some(Value::new_str(format!("#<{}>", kind)))
+                }
             }
         }
         // Class identity is `Rc::ptr_eq` — two `Value::Class` refer

@@ -663,3 +663,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn scoped_autoload() { run_diff("scoped_autoload"); }
 #[test] fn explicit_recv_block_fastpath() { run_diff("explicit_recv_block_fastpath"); }
 #[test] fn block_locals_pool_reuse() { run_diff("block_locals_pool_reuse"); }
+#[test] fn anon_class_named_const_set() { run_diff("anon_class_named_const_set"); }
+#[test] fn kernel_module_function_call() { run_diff("kernel_module_function_call"); }
+#[test] fn namespaced_builtin_class_redef() { run_diff("namespaced_builtin_class_redef"); }

@@ -1316,6 +1316,21 @@ impl Vm {
                 // the assigned value also remains on the stack as
                 // the expression's result (CRuby semantics).
                 let v = self.stack.pop().expect("ICE: StoreConst stack underflow");
+                // CRuby names an anonymous class/module on its first
+                // const-assignment (`C = Class.new` ⇒ `C.name ==
+                // "C"`). `name_id` is the constant's key — bare at
+                // toplevel, qualified (`Foo::Bar`) when written
+                // inside a class/module body — which is exactly the
+                // name CRuby would stamp. `name_anon_class` is a
+                // no-op for an already-named class (alias rebinds
+                // don't rename) and recursively re-homes the anon
+                // class's nested `const_set` tree into the global
+                // qualified maps so `C::X` / `C::Inner::Leaf` reads
+                // resolve.
+                if let Value::Class(cls) = &v {
+                    let qualified = self.interner.resolve(name_id).to_string();
+                    self.name_anon_class(cls, &qualified);
+                }
                 self.constants.insert(name_id, v);
             }
             Op::LoadConst(name_id) => {
@@ -3153,6 +3168,7 @@ impl Vm {
                     singleton_target: RefCell::new(None),
                     class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
+                    assigned_name: RefCell::new(None),
                     #[cfg(feature = "cext")]
                     cext_alloc_func: std::cell::Cell::new(None),
                 })).clone();

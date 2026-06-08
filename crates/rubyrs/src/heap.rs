@@ -518,6 +518,7 @@ impl Heap {
             singleton_target: RefCell::new(None),
             class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
+            assigned_name: RefCell::new(None),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });

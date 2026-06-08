@@ -72,6 +72,61 @@ impl Vm {
         )
     }
 
+    /// Names that are valid as `Kernel.foo` / `Kernel::foo`
+    /// explicit-receiver module-function calls AND are backed by a
+    /// `builtin_call` arm. CRuby exposes Kernel's methods as
+    /// `module_function`s: each is both a private instance method
+    /// (the bare `foo` form, implicit self) and a public singleton
+    /// method on the Kernel module object (the `Kernel.foo` form).
+    /// rubyrs implements the bare form via `builtin_call`; the
+    /// explicit-receiver dispatch in `do_call` routes a
+    /// Kernel-module receiver back through `builtin_call` for any
+    /// name in this set, so the two call shapes share one impl.
+    ///
+    /// Restricted to names `builtin_call` actually handles (so the
+    /// route never silently falls through to a bogus
+    /// `Some(Ok(nil))`). The rubyrs-internal helpers
+    /// (`__time_now_raw`, `__rubyrs_signal_trap`, the `__defined_*?`
+    /// reflection shims) are deliberately EXCLUDED — they aren't
+    /// real CRuby Kernel methods and `Kernel.__time_now_raw` should
+    /// stay a NoMethodError. Kernel module functions that rubyrs
+    /// implements OUTSIDE `builtin_call` (`rand`, `raise`, `catch`,
+    /// `throw`, ...) are also excluded here; they fall through to
+    /// the normal not-found path as a known gap rather than
+    /// mis-routing.
+    pub(crate) fn is_kernel_module_function(name: &str) -> bool {
+        matches!(
+            name,
+            "puts"
+                | "p"
+                | "pp"
+                | "print"
+                | "require"
+                | "require_relative"
+                | "load"
+                | "eval"
+                | "Integer"
+                | "Float"
+                | "String"
+                | "Array"
+                | "Rational"
+                | "sprintf"
+                | "format"
+                | "sleep"
+                | "exit"
+                | "exit!"
+                | "abort"
+                | "warn"
+                | "at_exit"
+                | "caller"
+                | "autoload"
+                | "autoload?"
+                | "block_given?"
+                | "__method__"
+                | "__callee__"
+        )
+    }
+
     pub(crate) fn builtin_call(&mut self, name: &str, args: &[Value]) -> Option<Result<Value, Trap>> {
         match name {
             "puts" => {
@@ -1594,6 +1649,7 @@ impl Vm {
                                         singleton_target: std::cell::RefCell::new(None),
                                         class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                                         consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                                        assigned_name: std::cell::RefCell::new(None),
                                         ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                                         #[cfg(feature = "cext")]
                                         cext_alloc_func: std::cell::Cell::new(None),

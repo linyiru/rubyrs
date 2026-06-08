@@ -3249,6 +3249,7 @@ impl Vm {
                             singleton_target: std::cell::RefCell::new(Some(std::rc::Rc::downgrade(&cls))),
                             class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            assigned_name: std::cell::RefCell::new(None),
                             #[cfg(feature = "cext")]
                             cext_alloc_func: std::cell::Cell::new(None),
                         });
@@ -3913,6 +3914,7 @@ impl Vm {
             singleton_target: std::cell::RefCell::new(None),
             class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            assigned_name: std::cell::RefCell::new(None),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -4070,6 +4072,7 @@ impl Vm {
             singleton_target: std::cell::RefCell::new(None),
             class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            assigned_name: std::cell::RefCell::new(None),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -6496,6 +6499,32 @@ impl Vm {
                 let target_self = recv.clone();
                 return self.invoke_method(m, target_self, args.into_vec());
             }
+            // `Kernel.foo` / `Kernel::foo` — explicit-receiver
+            // dispatch of a Kernel module-function. CRuby's Kernel
+            // methods (`load`, `require`, `puts`, `p`, `format`,
+            // `Integer`, `rand`, `exit`, `raise`, `eval`, ...) are
+            // `module_function`s: callable bare (private instance
+            // method, implicit self) AND as a public method on the
+            // Kernel module object itself. rubyrs implements the
+            // bare form via `builtin_call`, but the explicit-recv
+            // path lands here with `recv = Value::Class(Kernel)` and,
+            // finding no singleton method, would raise NoMethodError
+            // ("undefined method 'load' for Class"). Route Kernel-
+            // module receivers through `builtin_call` so the two call
+            // shapes share one implementation. A user `def self.foo`
+            // on Kernel still wins (checked above). The `is_module`
+            // gate keeps this from intercepting a same-named method
+            // on an unrelated class; matching `cls.name == "Kernel"`
+            // (same convention as the File / Dir arms below) targets
+            // the Kernel module specifically.
+            if cls.is_module
+                && cls.name.as_str() == "Kernel"
+                && Self::is_kernel_module_function(&name)
+                && let Some(res) = self.builtin_call(&name, &args)
+            {
+                self.stack.push(res?);
+                return Ok(());
+            }
             if cls.name.as_str() == "File"
                 && let Some(v) = self.file_class_dispatch(&name, &args)? {
                     self.stack.push(v);
@@ -6875,34 +6904,42 @@ impl Vm {
                 }));
             }
             let const_id = self.interner.intern(&const_name);
-            if cls.name.is_empty() {
-                // Anonymous receiver — route through the
-                // per-class `consts` table. The qualified-name
-                // scheme (`format!("{}::{}", ...)`) would
-                // collapse `("" + "BAZ")` into a key that
-                // aliases toplevel `BAZ`, and the
-                // `self.classes.insert` below would then
-                // clobber the toplevel class registration as a
-                // side effect. Per-class storage isolates each
-                // anon class's const writes from the global
-                // namespace. resolve_const_path checks this
-                // table first when the start scope is anon.
-                cls.consts.borrow_mut().insert(const_id, value.clone());
-            } else {
-                let qualified = format!("{}::{}", cls.name, const_name);
-                let key = self.interner.intern(&qualified);
-                // If the assigned value IS a Class with an empty /
-                // synthetic name (e.g. one minted by `Class.new(...)`),
-                // also register it under the new qualified path in
-                // `self.classes` so subsequent `Foo::Bar::ClassName.new`
-                // calls find it via the normal class lookup, mirroring
-                // how `class Foo::Bar; class ClassName; end; end`
-                // installs both the constant AND the class. Other
-                // value kinds just go into `constants`.
-                if let Value::Class(installed) = &value {
-                    self.classes.insert(key, installed.clone());
+            // Effective owner name: structural `name`, or the
+            // `assigned_name` an anon owner picked up on its own
+            // first const-assignment. An owner that is STILL
+            // anonymous in both senses keeps its constants in the
+            // per-class `consts` table (the qualified-name scheme
+            // would collapse `("" + "BAZ")` into a toplevel-aliasing
+            // key); a named/assigned owner mirrors into the global
+            // qualified maps so external `Owner::BAZ` reads resolve.
+            match cls.effective_name() {
+                None => {
+                    // Anonymous receiver — route through the
+                    // per-class `consts` table. resolve_const_path /
+                    // const_via_ancestors check this table when the
+                    // start scope is anon. If THIS anon owner is
+                    // later const-assigned, `name_anon_class` will
+                    // promote these entries into the global maps.
+                    cls.consts.borrow_mut().insert(const_id, value.clone());
                 }
-                self.constants.insert(key, value.clone());
+                Some(owner_name) => {
+                    let qualified = format!("{}::{}", owner_name, const_name);
+                    let key = self.interner.intern(&qualified);
+                    // If the assigned value IS an anonymous Class
+                    // (e.g. minted by `Class.new(...)`), name it
+                    // `Owner::Const` and recursively promote its own
+                    // nested `const_set` tree into the global maps —
+                    // so `Owner::Const.new` AND a deep
+                    // `Owner::Const::Leaf` reference both resolve,
+                    // mirroring how `class Owner; class Const; end;
+                    // end` installs the whole nested namespace.
+                    // (rouge's token tree is built exactly this way.)
+                    if let Value::Class(installed) = &value {
+                        self.name_anon_class(installed, &qualified);
+                        self.classes.insert(key, installed.clone());
+                    }
+                    self.constants.insert(key, value.clone());
+                }
             }
             self.stack.push(value);
             return Ok(());
@@ -11437,6 +11474,7 @@ impl Vm {
                 singleton_target: std::cell::RefCell::new(None),
                 class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            assigned_name: std::cell::RefCell::new(None),
                 #[cfg(feature = "cext")]
                 cext_alloc_func: std::cell::Cell::new(None),
             });
@@ -11498,6 +11536,7 @@ impl Vm {
                 singleton_target: std::cell::RefCell::new(None),
                 class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            assigned_name: std::cell::RefCell::new(None),
                 #[cfg(feature = "cext")]
                 cext_alloc_func: std::cell::Cell::new(None),
             });
@@ -12926,6 +12965,88 @@ impl Vm {
         Ok(false)
     }
 
+    /// CRuby names an anonymous class/module on its FIRST
+    /// constant-assignment: `C = Class.new` ⇒ `C.name == "C"`,
+    /// `const_set(:Inner, Class.new)` on a named owner ⇒
+    /// `Owner::Inner`. rubyrs stores anon classes minted by
+    /// `Class.new` with `name == ""` and keeps their nested
+    /// constants in the per-class `consts` table; once such a class
+    /// is assigned to a constant it must become reachable through
+    /// the GLOBAL qualified-key read paths (`Op::LoadConst`,
+    /// `resolve_const_path`, `const_via_ancestors`) that keep named
+    /// classes in `self.classes` / `self.constants` keyed by
+    /// `"Outer::Inner"`.
+    ///
+    /// This stamps `qualified` into `assigned_name` (so
+    /// `Module#name` / `#to_s` report it), registers the class in
+    /// `self.classes[qualified]`, and RECURSIVELY promotes its
+    /// `consts` subtree into the global maps under the qualified
+    /// prefix — naming nested anon classes (`Owner::Inner::Leaf`)
+    /// as it goes. The recursion is what makes rouge's token tree
+    /// (`Class.new(parent){ const_set(:Sub, …) }` nested several
+    /// deep, then referenced as `Name::Variable::Class`) resolve.
+    ///
+    /// Idempotent / first-assignment-wins: a class that ALREADY has
+    /// a structural `name` or a previously-stamped `assigned_name`
+    /// is left untouched (CRuby keeps the first name a constant gets
+    /// — a later `D = C` alias doesn't rename). Singleton-class
+    /// shells (`singleton_target` set) are never stamped.
+    pub(crate) fn name_anon_class(&mut self, cls: &std::rc::Rc<crate::value::Class>, qualified: &str) {
+        // Already named (structurally or via a prior assignment), or
+        // an eigenclass shell — don't re-stamp.
+        if !cls.name.is_empty()
+            || cls.assigned_name.borrow().is_some()
+            || cls.singleton_target.borrow().is_some()
+        {
+            return;
+        }
+        let key = self.interner.intern(qualified);
+        // Don't shadow/clobber a DIFFERENT class already registered
+        // under this name. `Op::StoreConst` passes the BARE const name
+        // (lexical module nesting is not encoded in the name_id), so a
+        // namespaced redefinition collides with a global built-in —
+        // e.g. Liquid's `module Liquid; ArgumentError = Class.new(Error)`
+        // would otherwise overwrite the core `ArgumentError` in
+        // `self.classes`, which `LoadConst` consults BEFORE
+        // `self.constants`. Clobbering it corrupts the exception
+        // hierarchy and breaks `rescue StandardError`, which silently
+        // failed the real Jekyll build. The class is still bound to the
+        // constant (via `self.constants` below at the StoreConst site);
+        // we only decline to globally re-home it under a name a
+        // different class already owns.
+        if self.classes.get(&key).is_some_and(|existing| !std::rc::Rc::ptr_eq(existing, cls)) {
+            return;
+        }
+        *cls.assigned_name.borrow_mut() = Some(qualified.to_string());
+        self.classes.insert(key, cls.clone());
+        // Promote each nested constant into the global maps under
+        // the qualified prefix. Snapshot first so we don't hold the
+        // `consts` borrow across the recursive call (a nested anon
+        // class's own `consts` gets walked too).
+        let nested: Vec<(SymId, Value)> = cls
+            .consts
+            .borrow()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        for (k, v) in nested {
+            let bare = self.interner.resolve(k).to_string();
+            let child_qual = format!("{}::{}", qualified, bare);
+            let child_key = self.interner.intern(&child_qual);
+            if let Value::Class(child) = &v {
+                // Recurse FIRST so the child's own subtree is named
+                // before we register it (name_anon_class registers
+                // the child in self.classes itself; the explicit
+                // insert below covers the already-named-child case
+                // where recursion is a no-op).
+                self.name_anon_class(child, &child_qual);
+                self.classes.insert(child_key, child.clone());
+            } else {
+                self.constants.insert(child_key, v);
+            }
+        }
+    }
+
     pub(crate) fn resolve_const_path(
         &mut self,
         start_cls: &std::rc::Rc<crate::value::Class>,
@@ -13052,7 +13173,7 @@ impl Vm {
                 let seg_id = self.interner.intern(segment);
                 if let Some(v) = start_cls.consts.borrow().get(&seg_id).cloned() {
                     let nm = if let Value::Class(c) = &v {
-                        c.name.clone()
+                        c.effective_name().unwrap_or_default()
                     } else {
                         String::new()
                     };
@@ -13069,7 +13190,7 @@ impl Vm {
                 && let Some(qid) = direct_qid_opt
             {
                 if let Some(c) = self.classes.get(&qid).cloned() {
-                    hit = Some((Value::Class(c.clone()), c.name.clone()));
+                    hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
                 } else if let Some(v) = self.constants.get(&qid).cloned() {
                     hit = Some((v, String::new()));
                 }
@@ -13085,7 +13206,7 @@ impl Vm {
                     }
                     let chain_qid = self.interner.intern(&chain_lookup);
                     if let Some(c) = self.classes.get(&chain_qid).cloned() {
-                        hit = Some((Value::Class(c.clone()), c.name.clone()));
+                        hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
                         break;
                     } else if let Some(v) = self.constants.get(&chain_qid).cloned() {
                         hit = Some((v, String::new()));
@@ -13098,7 +13219,7 @@ impl Vm {
                 if hit.is_none() && self.interner.contains(segment) {
                     let tl_qid = self.interner.intern(segment);
                     if let Some(c) = self.classes.get(&tl_qid).cloned() {
-                        hit = Some((Value::Class(c.clone()), c.name.clone()));
+                        hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
                     } else if let Some(v) = self.constants.get(&tl_qid).cloned() {
                         hit = Some((v, String::new()));
                     }
@@ -13131,7 +13252,7 @@ impl Vm {
                     match self.builtin_call("require", &[Value::new_str(al_path)]) {
                         Some(Ok(_)) => {
                             if let Some(c) = self.classes.get(&lookup_id).cloned() {
-                                hit = Some((Value::Class(c.clone()), c.name.clone()));
+                                hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
                             } else if let Some(v) = self.constants.get(&lookup_id).cloned() {
                                 hit = Some((v, String::new()));
                             }

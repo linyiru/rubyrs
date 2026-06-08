@@ -855,6 +855,21 @@ impl Vm {
                 {
                     return true;
                 }
+                // `Kernel.respond_to?(:load)` and the other Kernel
+                // module functions. CRuby exposes Kernel's methods as
+                // `module_function`s — callable as `Kernel.foo`, so
+                // `Kernel.respond_to?(:foo)` is true. The explicit-
+                // receiver dispatch routes these through
+                // `builtin_call` (see `do_call`); feature detection
+                // has to agree. rouge.rb:43 (`Kernel::load ...`) and
+                // any `Kernel.respond_to?(:require)` guard depend on
+                // this.
+                if cls.is_module
+                    && cls.name.as_str() == "Kernel"
+                    && Self::is_kernel_module_function(name)
+                {
+                    return true;
+                }
                 self.lookup_class_singleton_method(cls, name_id).is_some()
             },
             Value::Object(id) => {
@@ -2023,6 +2038,7 @@ mod tests {
             superclass: RefCell::new(superclass),
             class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
+            assigned_name: RefCell::new(None),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         })

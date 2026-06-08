@@ -385,6 +385,24 @@ pub struct Class {
     /// anon, before falling through to the
     /// inheritance-chain walk.
     pub(crate) consts: RefCell<FxHashMap<SymId, Value>>,
+    /// CRuby names an anonymous class/module on its FIRST
+    /// constant assignment: `C = Class.new` makes `C.name == "C"`,
+    /// `Foo::Bar = Class.new` makes the name `"Foo::Bar"`. The
+    /// structural `name` field above is immutable (set once at
+    /// `Op::DefClass`), so anon classes minted by `Class.new` /
+    /// `Module.new` keep `name == ""` for their lifetime. This
+    /// interior-mutable slot records the name STAMPED on first
+    /// const-assignment (`Op::StoreConst` / `const_set`) without
+    /// reconstructing the `Rc<Class>`. `Module#name` / `#to_s` /
+    /// `#inspect` consult it when `name` is empty, and
+    /// `resolve_const_path` uses it as the continuation scope-name
+    /// so a deep chain (`C::Inner::Leaf`) resolves through a
+    /// promoted anon class. `None` until first const-assignment;
+    /// once `Some`, the matching qualified entries are also mirrored
+    /// into the Vm-level `classes` / `constants` maps so the global
+    /// qualified-key read paths find them. Singleton-class shells
+    /// are never stamped here (they report `nil` for `name`).
+    pub(crate) assigned_name: RefCell<Option<String>>,
     /// L3-F: optional cext-side allocator. When `Klass.new(args)` is
     /// dispatched and this is `Some(fn)`, the host calls `fn(klass)`
     /// to produce the instance handle (typically a
@@ -423,6 +441,19 @@ impl Class {
             target.singleton_methods.borrow_mut().insert(name, m);
         } else {
             self.methods.borrow_mut().insert(name, m);
+        }
+    }
+
+    /// Effective display name: the structural `name` if non-empty,
+    /// otherwise the lazily-stamped `assigned_name` (set on first
+    /// const-assignment per CRuby). Returns `None` for a class that
+    /// is still anonymous in BOTH senses (no structural name and
+    /// never const-assigned) — `Module#name` maps that to `nil`.
+    pub(crate) fn effective_name(&self) -> Option<String> {
+        if !self.name.is_empty() {
+            Some(self.name.clone())
+        } else {
+            self.assigned_name.borrow().clone()
         }
     }
 
