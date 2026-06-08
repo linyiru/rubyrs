@@ -732,6 +732,29 @@ impl Vm {
             }
             return Ok(Some(early.unwrap_or_else(|| recv.clone())));
         }
+        // `s.each_char { |c| ... }` — yield each character (as a 1-char
+        // String) to the block, return the receiver. Same char snapshot
+        // + step_block discipline as `each_byte` above. The no-block form
+        // (`s.each_char.to_a`) returns an Enumerator from
+        // string_collection_call.
+        if let Value::Str(s) = recv
+            && name == "each_char" && args.is_empty()
+        {
+            let chars: Vec<String> = s.to_string_lossy().chars().map(|c| c.to_string()).collect();
+            let mut g = PinGuard::new(self);
+            g.pin(recv.clone());
+            g.pin(Value::Block(block));
+            let pre_frames = g.vm.frames.len();
+            let mut early: Option<Value> = None;
+            for ch in chars {
+                match g.vm.step_block(block, vec![Value::new_str(ch)], pre_frames)? {
+                    BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                    BlockStep::Break(r) => { early = Some(r); break; }
+                    BlockStep::Value(_) => {}
+                }
+            }
+            return Ok(Some(early.unwrap_or_else(|| recv.clone())));
+        }
         // `s.scan(/pat/) { |m| ... }` / `s.scan(string) { |m| ... }`
         // — yield each match to the block (capture-group Array if
         // the regex has groups, the matched substring otherwise).

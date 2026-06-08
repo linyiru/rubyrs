@@ -2373,6 +2373,12 @@ impl Vm {
                         };
                         Some(Value::new_str(out))
                     }
+                    // `s.each_char` with no block → Enumerator (the block
+                    // form is in collection_call_block). `s.each_char.to_a`
+                    // == `s.chars`.
+                    ("each_char", []) => {
+                        return self.make_enum_for(Value::Str(s.clone()), "each_char", vec![]).map(Some);
+                    }
                     #[cfg(feature = "regex")]
                     ("scan", [Value::Regex(re)]) => {
                         // Layer #17: scan (no-block form) not
