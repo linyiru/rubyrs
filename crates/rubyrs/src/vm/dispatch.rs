@@ -4868,6 +4868,12 @@ impl Vm {
         // — the flag would survive and silently bypass the next
         // call's vis check).
         let bypass_visibility = self.take_bypass_visibility();
+        // One-shot primitive-dispatch request from a primitive-alias
+        // forwarder (`Op::ApplyCallPrimitive`). Taken at the boundary
+        // (like `bypass_visibility`) so it applies to THIS dispatch
+        // only and can't leak. When set, a subclassed-primitive's user
+        // override is skipped so the primitive itself runs.
+        let force_primitive = std::mem::take(&mut self.force_primitive_dispatch);
         if no_recv {
             let self_val = self
                 .frames
@@ -6371,7 +6377,8 @@ impl Vm {
         // registry, NOT on `Kernel.methods`, so chain-walking
         // here doesn't re-find them. See `install_kernel_builtins`
         // (vm/lookup.rs) for the rationale.
-        if !matches!(&recv, Value::Object(_) | Value::Class(_))
+        if !force_primitive
+            && !matches!(&recv, Value::Object(_) | Value::Class(_))
             && let Value::Class(cls) = self.class_of(&recv)
             && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
             self.invoke_method(m, recv.clone(), args.into_vec())?;
@@ -7178,7 +7185,8 @@ impl Vm {
         // this and go straight to the primitives below. The no-block
         // path only — block-form overrides flow through
         // `do_call_block`'s own collection bridge.
-        if let Value::Hash(id) = &recv
+        if !force_primitive
+            && let Value::Hash(id) = &recv
             && let Some(tag) = self.heap.hash_class_tag(*id)
             && let Some(m) = self.lookup_method_uncached(&tag, name_id)
         {
@@ -13558,7 +13566,11 @@ impl Vm {
             code: vec![
                 Op::LoadSelf,
                 Op::LoadLocal(0),
-                Op::ApplyCall(orig_id, u16::MAX),
+                // ApplyCallPrimitive (not ApplyCall): forces primitive
+                // dispatch so a later `def keys` override on the same
+                // subclass doesn't capture this forwarder into infinite
+                // recursion — `alias` snapshots the original method.
+                Op::ApplyCallPrimitive(orig_id, u16::MAX),
                 Op::Return,
             ],
             op_spans: vec![Span::ZERO; 4],

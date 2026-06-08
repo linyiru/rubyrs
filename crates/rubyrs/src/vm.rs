@@ -1046,6 +1046,17 @@ pub(crate) struct Vm {
     /// Set by the `Call` op handler, cleared once the dispatch returns
     /// (so it never leaks to the next call).
     pub(crate) trailing_hash_positional: bool,
+    /// One-shot: the next `do_call` must dispatch the PRIMITIVE
+    /// implementation of the method, skipping any user override on a
+    /// subclassed primitive (e.g. a tagged `Hash` subclass that
+    /// redefined `keys`). Set by `Op::ApplyCallPrimitive` — the body of
+    /// a `<primitive-alias-forwarder>` (`alias own_keys keys` where
+    /// `keys` is a primitive) — and taken at `do_call`'s top. Without
+    /// it the forwarder re-dispatched by NAME and hit the user's
+    /// redefinition, recursing forever (rouge/util.rb:33). CRuby's
+    /// `alias` snapshots the original method; this reproduces that for
+    /// the un-snapshottable primitive case.
+    pub(crate) force_primitive_dispatch: bool,
     /// P1c.2 (ADR 0023) — fiber yield signaling slot.
     ///
     /// `Fiber.yield(v)` sets this to `Some(v)` and returns
@@ -1317,6 +1328,7 @@ impl Vm {
             suppress_call_result_push: false,
             bypass_visibility_once: false,
             trailing_hash_positional: false,
+            force_primitive_dispatch: false,
             #[cfg(feature = "_fiber")]
             fiber_yield_pending: None,
             #[cfg(feature = "_fiber")]

@@ -230,6 +230,13 @@ pub(crate) enum Op {
     /// contain a SplatNode at the only position.
     ApplyCall(SymId, u16),
     ApplyCallNoRecv(SymId, u16),
+    /// Like `ApplyCall` (with-recv `self.name(*args)`) but forces
+    /// PRIMITIVE dispatch — sets `force_primitive_dispatch` so `do_call`
+    /// skips a subclass's user override and runs the primitive. Emitted
+    /// ONLY as the body of a `<primitive-alias-forwarder>` so an
+    /// `alias own_keys keys` of a primitive `keys` snapshots the
+    /// primitive instead of late-binding to a later `def keys`.
+    ApplyCallPrimitive(SymId, u16),
     /// `foo(*args, &block)` — splat + explicit block-arg. Stack
     /// layout (bottom→top): `[recv?, block, array]`. Pops the
     /// args Array and expands its elements as positional args,

@@ -1851,7 +1851,15 @@ impl Vm {
             Op::CallKwNoRecv(name_id, argc, cache_id) => {
                 self.do_call_kw(name_id, argc as usize, true, cache_id)?;
             }
-            Op::ApplyCall(name_id, cache_id) | Op::ApplyCallNoRecv(name_id, cache_id) => {
+            Op::ApplyCall(name_id, cache_id)
+            | Op::ApplyCallNoRecv(name_id, cache_id)
+            | Op::ApplyCallPrimitive(name_id, cache_id) => {
+                // `ApplyCallPrimitive` is the with-recv splat shape with
+                // a one-shot "skip the user override, run the primitive"
+                // flag — the body of a primitive-alias forwarder.
+                if matches!(op, Op::ApplyCallPrimitive(_, _)) {
+                    self.force_primitive_dispatch = true;
+                }
                 // Splat-call: pop the args Array, push its
                 // elements back onto the stack as positional args,
                 // then dispatch with that dynamic argc. Receiver
