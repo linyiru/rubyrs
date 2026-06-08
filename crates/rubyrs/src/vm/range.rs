@@ -51,6 +51,21 @@ impl Vm {
                     let hi_ok = if excl { arg < ef } else { arg <= ef };
                     return Ok(Some(Value::Bool(lo_ok && hi_ok)));
                 }
+                // No-block transform/filter/iteration → Enumerator
+                // (CRuby `enum.c`), re-invoking the block form once
+                // driven. Mirrors the Array/Hash no-block wiring; works
+                // for any finite Range (Int- or String-bounded) since
+                // make_enum_for only defers — the block form (direct or
+                // via the Range Enumerable fallback in iter.rs) handles
+                // the bounds when the Enumerator is actually driven.
+                if args.is_empty() && matches!(name,
+                    "each" | "map" | "collect" | "select" | "filter"
+                    | "reject" | "find" | "detect" | "each_with_index"
+                    | "partition" | "group_by" | "min_by" | "max_by"
+                    | "sort_by"
+                ) {
+                    return Ok(Some(self.make_enum_for(Value::Range(id), name, vec![])?));
+                }
                 if begin_int.is_none() || end_int.is_none() {
                     // String-endpoint Range support: `('a'..'z').to_a`,
                     // `.size`, `.include?("c")`, etc. driven by

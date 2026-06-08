@@ -4710,7 +4710,7 @@ impl Vm {
             (Value::Range(id), "none?", []) => self.iter_range_filter(*id, IterMode::NoneM, block)?,
             (Value::Range(id), "one?", []) => self.iter_range_filter(*id, IterMode::One, block)?,
 
-            (Value::Range(id), "map", []) => {
+            (Value::Range(id), "map", []) | (Value::Range(id), "collect", []) => {
                 let (bi, ei, excl) = {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {

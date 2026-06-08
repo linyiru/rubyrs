@@ -681,6 +681,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn transform_noblock() { run_diff("transform_noblock"); }
 #[test] fn enum_argforms() { run_diff("enum_argforms"); }
 #[test] fn enum_next_peek() { run_diff("enum_next_peek"); }
+#[test] fn range_noblock() { run_diff("range_noblock"); }
 #[test] fn to_h() { run_diff("to_h"); }
 #[test] fn thread_current_locals() { run_diff("thread_current_locals"); }
 #[test] fn dynamic_base_const() { run_diff("dynamic_base_const"); }
