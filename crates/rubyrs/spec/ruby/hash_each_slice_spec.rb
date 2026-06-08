@@ -2,9 +2,9 @@
 # each_cons_spec.rb / chunk_while_spec.rb (Enumerable-inherited
 # behaviour) at upstream commit 448cb340 (2026-05).
 # Hand-translated — each_slice / each_cons always take an `n`
-# argument; the no-block (Enumerator) form is covered by the
-# trailing `.to_a` example per group (rubyrs returns the
-# materialised Array directly; see comment at hash.rs:432).
+# argument; the no-block form returns a real Enumerator (via
+# make_enum_for), exercised by the trailing `.to_a` example
+# per group.
 
 describe "Hash#each_slice" do
   it "yields each consecutive group of n [k,v] pair Arrays as one Array" do
@@ -53,14 +53,9 @@ describe "Hash#each_slice" do
     assert_eq(each_slice_with_return, :returned)
   end
 
-  it "no-block form: .to_a yields the same shape as the block form" do
-    # CRuby returns an Enumerator; rubyrs returns the
-    # materialised Array directly (see hash.rs Enumerator
-    # stub). `.to_a` on either is a no-op vs a forced
-    # materialisation respectively — both produce the same
-    # nested-Array shape, so the canonical
-    # `h.each_slice(2).to_a` idiom stays portable.
+  it "no-block form: returns an Enumerator whose .to_a matches the block form" do
     h = {a: 1, b: 2, c: 3, d: 4, e: 5}
+    assert_eq(h.each_slice(2).class.to_s, "Enumerator")
     assert_eq(
       h.each_slice(2).to_a,
       [[[:a, 1], [:b, 2]], [[:c, 3], [:d, 4]], [[:e, 5]]]
@@ -104,11 +99,9 @@ describe "Hash#each_cons" do
     assert_eq(each_cons_with_return, :returned)
   end
 
-  it "no-block form: .to_a yields the same shape as the block form" do
-    # Mirrors the each_slice no-block test — CRuby returns
-    # an Enumerator; rubyrs returns the materialised
-    # windows Array. `.to_a` is portable across both.
+  it "no-block form: returns an Enumerator whose .to_a matches the block form" do
     h = {a: 1, b: 2, c: 3, d: 4}
+    assert_eq(h.each_cons(2).class.to_s, "Enumerator")
     assert_eq(
       h.each_cons(2).to_a,
       [[[:a, 1], [:b, 2]], [[:b, 2], [:c, 3]], [[:c, 3], [:d, 4]]]

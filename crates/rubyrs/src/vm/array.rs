@@ -98,6 +98,12 @@ impl Vm {
                         | "min_by" | "max_by" | "sort_by" | "reverse_each", []) => {
                         return self.make_enum_for(Value::Array(id), name, vec![]).map(Some);
                     }
+                    // NOTE: `chunk` is intentionally excluded — its block
+                    // is a key function, not a collection block, so a plain
+                    // enum_for(:chunk) driven by `to_a` doesn't reproduce
+                    // CRuby's chunk-enumerator (`[1,1,2].chunk.to_a` is a
+                    // quirk that yields `[]`). `chunk { |k| ... }` with a
+                    // block works via collection_call_block.
                     // Arg-bearing no-block forms that still return an
                     // Enumerator carrying the arg: `min_by(n)` / `max_by(n)`
                     // (n smallest/largest by the block key) and
@@ -1842,15 +1848,15 @@ impl Vm {
                     ("take" | "drop", _) => {
                         return Err(self.arity_error_arg1_int(name, args));
                     }
-                    // No-block `each_slice(n)` / `each_cons(n)` —
-                    // CRuby returns an Enumerator we don't model;
-                    // instead, return the Array of slices/windows
-                    // directly. Calling `.to_a` on the result is
-                    // a no-op, so the canonical
-                    // `arr.each_slice(2).to_a` idiom still works.
-                    // Float coerce — CRuby truncates 2.5 → 2.
-                    // Re-dispatch with the converted Int. Same
-                    // pattern across the 5 sibling no-block arms.
+                    // No-block `each_slice(n)` / `each_cons(n)` return an
+                    // Enumerator (CRuby `enum.c`); make_enum_for re-invokes
+                    // the block form (iter.rs) once driven, so
+                    // `arr.each_slice(2).to_a` / `.next` / `.with_index`
+                    // all work and `.class` is Enumerator (was: the
+                    // materialised Array, a pre-Enumerator stopgap). The
+                    // size arg is still validated eagerly — CRuby raises
+                    // here, not when the Enumerator is driven. Float
+                    // coerce truncates 2.9 → 2 (CRuby parity).
                     ("each_slice", [Value::Float(f)]) => {
                         let n = self.float_to_int_arg(*f)?;
                         return self.array_collection_call(id, name, &[Value::Int(n)]);
@@ -1858,23 +1864,10 @@ impl Vm {
                     ("each_slice", [Value::Int(n)]) => {
                         if *n <= 0 {
                             return Err(self.trap(RubyError::ArgumentError {
-                                msg: format!("invalid slice size: {}", n),
+                                msg: "invalid slice size".to_string(),
                             }));
                         }
-                        let n = usize::try_from(*n).unwrap_or(usize::MAX);
-                        let src: Vec<Value> = self.heap.array(id).clone();
-                        let mut g = PinGuard::new(self);
-                        g.pin(Value::Array(id));
-                        let mut chunks: Vec<Value> = Vec::new();
-                        for chunk in src.chunks(n) {
-                            g.vm.maybe_gc();
-                            let cid = g.vm.heap.alloc(HeapObj::Array(chunk.to_vec()));
-                            g.pin(Value::Array(cid));
-                            chunks.push(Value::Array(cid));
-                        }
-                        g.vm.maybe_gc();
-                        let oid = g.vm.heap.alloc(HeapObj::Array(chunks));
-                        Some(Value::Array(oid))
+                        return self.make_enum_for(Value::Array(id), name, vec![Value::Int(*n)]).map(Some);
                     }
                     // Wrong-arity / non-Int for Array#each_slice
                     // no-block form (block-form gap mirrored by
@@ -1889,25 +1882,10 @@ impl Vm {
                     ("each_cons", [Value::Int(n)]) => {
                         if *n <= 0 {
                             return Err(self.trap(RubyError::ArgumentError {
-                                msg: format!("invalid size: {}", n),
+                                msg: "invalid size".to_string(),
                             }));
                         }
-                        let n = usize::try_from(*n).unwrap_or(usize::MAX);
-                        let src: Vec<Value> = self.heap.array(id).clone();
-                        let mut g = PinGuard::new(self);
-                        g.pin(Value::Array(id));
-                        let mut windows: Vec<Value> = Vec::new();
-                        if src.len() >= n {
-                            for win in src.windows(n) {
-                                g.vm.maybe_gc();
-                                let wid = g.vm.heap.alloc(HeapObj::Array(win.to_vec()));
-                                g.pin(Value::Array(wid));
-                                windows.push(Value::Array(wid));
-                            }
-                        }
-                        g.vm.maybe_gc();
-                        let oid = g.vm.heap.alloc(HeapObj::Array(windows));
-                        Some(Value::Array(oid))
+                        return self.make_enum_for(Value::Array(id), name, vec![Value::Int(*n)]).map(Some);
                     }
                     // Wrong-arity / non-Int for Array#each_cons no-block form.
                     ("each_cons", _) => {

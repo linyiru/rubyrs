@@ -492,15 +492,14 @@ impl Vm {
                     ("each_with_object", [_seed]) => {
                         return self.make_enum_for(Value::Hash(id), name, args.to_vec()).map(Some);
                     }
-                    // `h.each_slice(n)` / `h.each_cons(n)` — no-block
-                    // forms. CRuby returns an Enumerator that
-                    // `.to_a`s to the same shape as we return
-                    // directly: an Array of slice/window Arrays,
-                    // each containing `[k, v]` pair Arrays. Same
-                    // Enumerator-stub strategy as Array's no-block
-                    // arms (see array.rs:1260) so the canonical
-                    // `h.each_slice(2).to_a` idiom still works.
-                    // Block forms live in iter.rs.
+                    // `h.each_slice(n)` / `h.each_cons(n)` no-block return
+                    // an Enumerator (CRuby `enum.c`); make_enum_for
+                    // re-invokes the block form (iter.rs) once driven, so
+                    // `h.each_slice(2).to_a` keeps the same shape (Array of
+                    // slice/window Arrays of `[k, v]` pairs) while
+                    // `.class` is now Enumerator. The size arg is validated
+                    // eagerly (CRuby raises here, not on drive). Float
+                    // coerce truncates per CRuby.
                     ("each_slice", [Value::Float(f)]) => {
                         let n = self.float_to_int_arg(*f)?;
                         return self.hash_collection_call(id, name, &[Value::Int(n)]);
@@ -508,33 +507,10 @@ impl Vm {
                     ("each_slice", [Value::Int(n)]) => {
                         if *n <= 0 {
                             return Err(self.trap(crate::error::RubyError::ArgumentError {
-                                msg: format!("invalid slice size: {}", n),
+                                msg: "invalid slice size".to_string(),
                             }));
                         }
-                        let n = usize::try_from(*n).unwrap_or(usize::MAX);
-                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
-                        let mut g = PinGuard::new(self);
-                        g.pin(Value::Hash(id));
-                        let mut chunks: Vec<Value> = Vec::new();
-                        for chunk in pairs.chunks(n) {
-                            let mut pair_ids: Vec<Value> = Vec::with_capacity(chunk.len());
-                            for (k, v) in chunk {
-                                g.vm.maybe_gc();
-                                g.vm.check_alloc()?;
-                                let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
-                                g.pin(Value::Array(pid));
-                                pair_ids.push(Value::Array(pid));
-                            }
-                            g.vm.maybe_gc();
-                            g.vm.check_alloc()?;
-                            let cid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
-                            g.pin(Value::Array(cid));
-                            chunks.push(Value::Array(cid));
-                        }
-                        g.vm.maybe_gc();
-                        g.vm.check_alloc()?;
-                        let oid = g.vm.heap.alloc(HeapObj::Array(chunks));
-                        Some(Value::Array(oid))
+                        return self.make_enum_for(Value::Hash(id), name, vec![Value::Int(*n)]).map(Some);
                     }
                     // Wrong-arity / non-Int for Hash#each_slice no-block form.
                     ("each_slice", _) => {
@@ -547,38 +523,10 @@ impl Vm {
                     ("each_cons", [Value::Int(n)]) => {
                         if *n <= 0 {
                             return Err(self.trap(crate::error::RubyError::ArgumentError {
-                                msg: format!("invalid size: {}", n),
+                                msg: "invalid size".to_string(),
                             }));
                         }
-                        let n = usize::try_from(*n).unwrap_or(usize::MAX);
-                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
-                        let mut g = PinGuard::new(self);
-                        g.pin(Value::Hash(id));
-                        // Pre-materialise pair Arrays once; windows
-                        // then share refs, matching CRuby (same
-                        // Array identity per pair across windows).
-                        let mut pair_vals: Vec<Value> = Vec::with_capacity(pairs.len());
-                        for (k, v) in &pairs {
-                            g.vm.maybe_gc();
-                            g.vm.check_alloc()?;
-                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
-                            g.pin(Value::Array(pid));
-                            pair_vals.push(Value::Array(pid));
-                        }
-                        let mut windows: Vec<Value> = Vec::new();
-                        if pair_vals.len() >= n {
-                            for win in pair_vals.windows(n) {
-                                g.vm.maybe_gc();
-                                g.vm.check_alloc()?;
-                                let wid = g.vm.heap.alloc(HeapObj::Array(win.to_vec()));
-                                g.pin(Value::Array(wid));
-                                windows.push(Value::Array(wid));
-                            }
-                        }
-                        g.vm.maybe_gc();
-                        g.vm.check_alloc()?;
-                        let oid = g.vm.heap.alloc(HeapObj::Array(windows));
-                        Some(Value::Array(oid))
+                        return self.make_enum_for(Value::Hash(id), name, vec![Value::Int(*n)]).map(Some);
                     }
                     // Wrong-arity / non-Int for Hash#each_cons no-block form.
                     ("each_cons", _) => {

@@ -1,9 +1,8 @@
 # Adapted from ruby/spec core/array/each_slice_spec.rb /
 # each_cons_spec.rb (Enumerable-inherited behaviour) at
 # upstream commit 448cb340 (2026-05). Hand-translated — the
-# no-block (Enumerator) form is covered by the trailing
-# `.to_a` example per group (rubyrs returns the materialised
-# Array directly; see comment at array.rs:1254).
+# no-block form returns a real Enumerator (via make_enum_for),
+# exercised by the trailing `.to_a` example per group.
 
 describe "Array#each_slice" do
   it "yields each consecutive group of n elements as one Array" do
@@ -49,9 +48,8 @@ describe "Array#each_slice" do
     assert_eq(each_slice_with_return, :returned)
   end
 
-  it "no-block form: .to_a yields the same shape as the block form" do
-    # CRuby returns an Enumerator; rubyrs returns the
-    # materialised Array directly. `.to_a` is portable.
+  it "no-block form: returns an Enumerator whose .to_a matches the block form" do
+    assert_eq([1, 2, 3, 4, 5].each_slice(2).class.to_s, "Enumerator")
     assert_eq(
       [1, 2, 3, 4, 5].each_slice(2).to_a,
       [[1, 2], [3, 4], [5]]
@@ -95,7 +93,8 @@ describe "Array#each_cons" do
     assert_eq(each_cons_with_return, :returned)
   end
 
-  it "no-block form: .to_a yields the same shape as the block form" do
+  it "no-block form: returns an Enumerator whose .to_a matches the block form" do
+    assert_eq([1, 2, 3, 4].each_cons(2).class.to_s, "Enumerator")
     assert_eq(
       [1, 2, 3, 4].each_cons(2).to_a,
       [[1, 2], [2, 3], [3, 4]]
