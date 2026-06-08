@@ -971,15 +971,19 @@ impl Vm {
             // no-block form (`[[k, v], ...].to_h`) in
             // array_collection_call.
             (Value::Array(id), "to_h", []) => {
-                let snapshot: Vec<Value> = self.heap.array(*id).clone();
-                self.maybe_gc();
-                self.check_alloc()?;
-                let hid = self.heap.alloc(HeapObj::Hash(
-                    crate::heap::HashObj::with_pairs(Vec::new()),
-                ));
+                // Pin the receiver + block BEFORE any GC point: the
+                // first `maybe_gc` would otherwise sweep the receiver
+                // (and the pair Arrays the block returns) since neither
+                // is rooted on the operand stack by this point.
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let hid = g.vm.heap.alloc(HeapObj::Hash(
+                    crate::heap::HashObj::with_pairs(Vec::new()),
+                ));
                 g.pin(Value::Hash(hid));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;

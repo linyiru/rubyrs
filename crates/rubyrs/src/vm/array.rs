@@ -93,14 +93,18 @@ impl Vm {
                     // (`arr.to_h { |x| [k, v] }`) lives in
                     // collection_call_block (iter.rs).
                     ("to_h", []) => {
-                        let src: Vec<Value> = self.heap.array(id).clone();
-                        self.maybe_gc();
-                        self.check_alloc()?;
-                        let hid = self.heap.alloc(HeapObj::Hash(
-                            crate::heap::HashObj::with_pairs(Vec::new()),
-                        ));
+                        // Pin the receiver BEFORE `maybe_gc`: the source
+                        // pair Arrays are reachable only via the receiver
+                        // here (not the operand stack), so an unpinned
+                        // GC would sweep them out from under the loop.
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Array(id));
+                        let src: Vec<Value> = g.vm.heap.array(id).clone();
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let hid = g.vm.heap.alloc(HeapObj::Hash(
+                            crate::heap::HashObj::with_pairs(Vec::new()),
+                        ));
                         g.pin(Value::Hash(hid));
                         for (i, el) in src.into_iter().enumerate() {
                             match el {
