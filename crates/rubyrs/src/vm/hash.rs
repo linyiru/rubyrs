@@ -474,6 +474,18 @@ impl Vm {
                     ("each" | "each_pair" | "each_with_index", []) => {
                         return self.make_enum_for(Value::Hash(id), name, vec![]).map(Some);
                     }
+                    // Transform / filter Enumerable family with no block —
+                    // returns an Enumerator (CRuby `enum.c`), re-invoking
+                    // the block form (collection_call_block) once driven.
+                    // Subset of the Array set: Hash has no min_by/max_by/
+                    // reverse_each block form. Non-Enumerator no-block
+                    // methods (sort_by-less sort, count, sum, …) excluded.
+                    ("map" | "collect" | "select" | "filter" | "reject"
+                        | "flat_map" | "collect_concat" | "filter_map"
+                        | "find" | "detect" | "partition" | "group_by"
+                        | "sort_by", []) => {
+                        return self.make_enum_for(Value::Hash(id), name, vec![]).map(Some);
+                    }
                     // `h.each_slice(n)` / `h.each_cons(n)` — no-block
                     // forms. CRuby returns an Enumerator that
                     // `.to_a`s to the same shape as we return

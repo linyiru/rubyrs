@@ -134,9 +134,14 @@ class Enumerator
     # drop it and restart numbering at 0.
     return enum_for(:with_index, offset) unless block_given?
     i = offset
+    # The block handed to `each` must return the USER block's value, not
+    # the `i += 1` increment — otherwise the underlying method
+    # (`map`/`select`/`sort_by`/…) collects/filters on the counter
+    # instead of the real result (`e.map.with_index { |x, i| ... }`).
     each do |*x|
-      yield(__enum_one(x), i)
+      result = yield(__enum_one(x), i)
       i += 1
+      result
     end
   end
   alias_method :each_with_index, :with_index

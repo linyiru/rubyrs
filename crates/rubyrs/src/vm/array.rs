@@ -84,6 +84,21 @@ impl Vm {
                     ("each" | "each_with_index" | "each_index", []) => {
                         return self.make_enum_for(Value::Array(id), name, vec![]).map(Some);
                     }
+                    // The transform / filter Enumerable family returns an
+                    // Enumerator when called with no block (CRuby `enum.c`):
+                    // `arr.map`, `arr.select.with_index { }`, etc. The
+                    // block forms live in collection_call_block (iter.rs);
+                    // the Enumerator re-invokes them once driven. Only the
+                    // no-arg shape is covered — `min_by(2)` etc. (arg, no
+                    // block) stays a gap. Methods whose no-block form is
+                    // NOT an Enumerator (sort / uniq / min / count / all?
+                    // / inject / …) are deliberately excluded.
+                    ("map" | "collect" | "select" | "filter" | "reject"
+                        | "flat_map" | "collect_concat" | "filter_map"
+                        | "find" | "detect" | "partition" | "group_by"
+                        | "min_by" | "max_by" | "sort_by" | "reverse_each", []) => {
+                        return self.make_enum_for(Value::Array(id), name, vec![]).map(Some);
+                    }
                     // `Array#to_h` (no block) — build a Hash from an
                     // array of `[k, v]` pair Arrays. CRuby raises
                     // TypeError if an element isn't an Array and
@@ -422,23 +437,13 @@ impl Vm {
                             None => Value::Nil,
                         })
                     }
-                    // `arr.find_index` (no arg, no block) returns
-                    // an Enumerator in CRuby. Without this arm
-                    // the dispatcher fell through to
-                    // NoMethodError, contradicting
-                    // `respond_to?(:find_index) == true`. Raise
-                    // RuntimeError with an explicit feature-gate
-                    // message instead — same fallback shape as
-                    // dispatch.rs:4548 (rubyrs doesn't model
-                    // `NotImplementedError` as a RubyError
-                    // variant yet, so RuntimeError is the
-                    // closest catchable fit).
+                    // `arr.find_index` / `arr.index` (no arg, no block)
+                    // returns an Enumerator that yields each element to a
+                    // block and reports the first truthy index. The block
+                    // form lives in iter.rs; the Enumerator re-invokes it
+                    // once driven (e.g. `arr.find_index.each { |x| ... }`).
                     ("find_index" | "index", []) => {
-                        return Err(self.trap(RubyError::RuntimeError {
-                            msg: format!(
-                                "Array#{name} without a block or arg returns an Enumerator, which is not yet implemented in rubyrs"
-                            ),
-                        }));
+                        return self.make_enum_for(Value::Array(id), name, vec![]).map(Some);
                     }
                     ("find_index" | "index", many) if many.len() > 1 => {
                         // CRuby surface says `expected 0..1`
