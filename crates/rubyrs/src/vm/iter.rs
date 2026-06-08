@@ -2228,6 +2228,34 @@ impl Vm {
                         }
                         Some(early.unwrap_or(Value::Range(*id)))
                     }
+                    // Endless range `(a..).each` and infinite-bounded
+                    // `(a..Float::INFINITY).each` — count Ints up from
+                    // `a` forever until the block breaks / returns. The
+                    // caller is responsible for terminating (an explicit
+                    // break, or driving through Enumerator::Lazy#first /
+                    // #take); matches CRuby, where these iterate without
+                    // end. This is the iteration primitive lazy chains
+                    // walk for infinite sources.
+                    (Value::Int(a), end)
+                        if matches!(end, Value::Nil)
+                            || matches!(end, Value::Float(f) if f.is_infinite() && *f > 0.0) =>
+                    {
+                        let mut i = *a;
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Range(*id));
+                        g.pin(Value::Block(block));
+                        let pre_frames = g.vm.frames.len();
+                        let mut early = None;
+                        loop {
+                            match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                                BlockStep::MethodReturn => break,
+                                BlockStep::Break(r) => { early = Some(r); break; }
+                                BlockStep::Value(_) => {}
+                            }
+                            i += 1;
+                        }
+                        Some(early.unwrap_or(Value::Range(*id)))
+                    }
                     _ => return Ok(None),
                 }
             }
