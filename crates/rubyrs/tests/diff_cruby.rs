@@ -692,6 +692,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn gsub_hash() { run_diff("gsub_hash"); }
 #[test] fn hash_delete_block() { run_diff("hash_delete_block"); }
 #[test] fn string_casecmp() { run_diff("string_casecmp"); }
+#[test] fn string_each_char() { run_diff("string_each_char"); }
+#[test] fn set_collect_bang() { run_diff("set_collect_bang"); }
 #[test] fn to_h() { run_diff("to_h"); }
 #[test] fn thread_current_locals() { run_diff("thread_current_locals"); }
 #[test] fn dynamic_base_const() { run_diff("dynamic_base_const"); }

@@ -180,6 +180,17 @@ class Set
   end
   alias_method :collect, :map
 
+  # In-place map: replace every element with the block's result.
+  # Returns self (CRuby Set#collect! / #map!).
+  def collect!
+    return enum_for(:collect!) unless block_given?
+    new_hash = {}
+    to_a.each { |o| new_hash[yield(o)] = true }
+    @hash = new_hash
+    self
+  end
+  alias_method :map!, :collect!
+
   def flat_map(&block)
     to_a.flat_map(&block)
   end
