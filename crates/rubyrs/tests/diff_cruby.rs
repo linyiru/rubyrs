@@ -687,6 +687,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn slice_when() { run_diff("slice_when"); }
 #[test] fn float_constants() { run_diff("float_constants"); }
 #[test] fn endless_range() { run_diff("endless_range"); }
+#[test] fn enumerator_lazy() { run_diff("enumerator_lazy"); }
 #[test] fn to_h() { run_diff("to_h"); }
 #[test] fn thread_current_locals() { run_diff("thread_current_locals"); }
 #[test] fn dynamic_base_const() { run_diff("dynamic_base_const"); }

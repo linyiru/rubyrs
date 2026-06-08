@@ -102,6 +102,11 @@ class Enumerator
   end
   private :__materialize
 
+  # `enum.lazy` — wrap this Enumerator in a lazy chain.
+  def lazy
+    Enumerator::Lazy.new(self)
+  end
+
   # `Enumerator::Yielder` — the object handed to a generator block. `<<`
   # and `yield` forward straight to the consumer's iteration block.
   class Yielder
@@ -116,6 +121,143 @@ class Enumerator
 
     def yield(*args)
       @block.call(*args)
+    end
+  end
+
+  # `Enumerator::Lazy` — a deferred chain of element transforms over a
+  # source that responds to `each`. CRuby drives the source lazily via a
+  # Fiber; rubyrs builds the chain as nested closures (a transducer-style
+  # pipeline) and walks the source ONE element at a time when forced,
+  # short-circuiting with `throw` so `take` / `first` never over-iterate.
+  # This is what makes infinite sources work — `(1..Float::INFINITY)
+  # .lazy.map { ... }.select { ... }.first(5)` — given the endless-range
+  # `each` primitive.
+  #
+  # Each lazy operation returns a NEW Lazy with the op appended; nothing
+  # runs until a forcing method (`first` / `to_a` / `force`, inherited
+  # from Enumerator, which drive `each`). Stateful stages (take / drop /
+  # drop_while / with_index) capture fresh counters per `each` call.
+  class Lazy < Enumerator
+    def initialize(source)
+      @source = source
+      @ops = []
+    end
+
+    # Append an op, returning a fresh Lazy that shares the source.
+    def __chain(op)
+      l = Lazy.new(@source)
+      l.instance_variable_set(:@ops, @ops + [op])
+      l
+    end
+    private :__chain
+
+    def map(&block); __chain([:map, block]); end
+    alias_method :collect, :map
+    def flat_map(&block); __chain([:flat_map, block]); end
+    alias_method :collect_concat, :flat_map
+    def select(&block); __chain([:select, block]); end
+    alias_method :filter, :select
+    def reject(&block); __chain([:reject, block]); end
+    def filter_map(&block); __chain([:filter_map, block]); end
+    def take_while(&block); __chain([:take_while, block]); end
+    def drop_while(&block); __chain([:drop_while, block]); end
+    def take(n); __chain([:take, n]); end
+    def drop(n); __chain([:drop, n]); end
+    def with_index(offset = 0); __chain([:with_index, offset]); end
+
+    # Drive the source through the op pipeline. The pipeline is built
+    # inside-out: the consumer block is the innermost stage, each op
+    # wraps the stage downstream of it (so ops apply in declaration
+    # order). `throw(:__lazy_stop)` from a `take`/`take_while` stage
+    # unwinds out of the source's `each`.
+    def each(&consumer)
+      return self unless consumer
+      pipeline = consumer
+      @ops.reverse_each do |op|
+        pipeline = __stage(op, pipeline)
+      end
+      catch(:__lazy_stop) do
+        @source.each { |*x| pipeline.call(__lazy_one(x)) }
+      end
+      self
+    end
+
+    def __lazy_one(x)
+      x.length == 1 ? x[0] : x
+    end
+    private :__lazy_one
+
+    # Build one pipeline stage: a proc that receives an upstream element
+    # and calls `downstream` zero or more times (filtering, mapping,
+    # flattening, or stopping the whole walk).
+    def __stage(op, downstream)
+      case op[0]
+      when :map
+        f = op[1]
+        proc { |x| downstream.call(f.call(x)) }
+      when :select
+        pred = op[1]
+        proc { |x| downstream.call(x) if pred.call(x) }
+      when :reject
+        pred = op[1]
+        proc { |x| downstream.call(x) unless pred.call(x) }
+      when :filter_map
+        f = op[1]
+        proc { |x| y = f.call(x); downstream.call(y) if y }
+      when :flat_map
+        f = op[1]
+        proc do |x|
+          r = f.call(x)
+          if r.is_a?(Array)
+            r.each { |e| downstream.call(e) }
+          else
+            downstream.call(r)
+          end
+        end
+      when :take_while
+        pred = op[1]
+        proc { |x| pred.call(x) ? downstream.call(x) : throw(:__lazy_stop) }
+      when :drop_while
+        pred = op[1]
+        dropping = true
+        proc do |x|
+          dropping = false if dropping && !pred.call(x)
+          downstream.call(x) unless dropping
+        end
+      when :take
+        n = op[1]
+        count = 0
+        proc do |x|
+          throw(:__lazy_stop) if count >= n
+          downstream.call(x)
+          count += 1
+          throw(:__lazy_stop) if count >= n
+        end
+      when :drop
+        n = op[1]
+        seen = 0
+        proc do |x|
+          if seen >= n
+            downstream.call(x)
+          else
+            seen += 1
+          end
+        end
+      when :with_index
+        i = op[1]
+        proc { |x| downstream.call([x, i]); i += 1 }
+      end
+    end
+    private :__stage
+
+    # `force` is the CRuby alias for `to_a` (inherited from Enumerator,
+    # which drives `each`). `lazy` on a Lazy is a no-op (returns self).
+    def force
+      to_a
+    end
+
+    def lazy
+      self
     end
   end
 
@@ -240,4 +382,19 @@ module Kernel
     Enumerator.new(self, meth, args)
   end
   alias_method :to_enum, :enum_for
+end
+
+# `enum.lazy` lives on Enumerator; the collection types get it by
+# reopening (rubyrs's Enumerable module is a stub, so it can't carry the
+# shared method). Each just wraps `self` — a source that responds to
+# `each` — in a lazy chain. Range's `each` covers endless / infinite
+# bounds, so `(1..).lazy` / `(1..Float::INFINITY).lazy` work.
+class Array
+  def lazy; Enumerator::Lazy.new(self); end
+end
+class Hash
+  def lazy; Enumerator::Lazy.new(self); end
+end
+class Range
+  def lazy; Enumerator::Lazy.new(self); end
 end
