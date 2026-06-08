@@ -2292,6 +2292,73 @@ impl Vm {
                     // appear; without groups the full match is
                     // the element.
                     #[cfg(feature = "regex")]
+                    // `sub`/`gsub` with a Hash replacement: each match
+                    // is looked up (as a String) in the hash and replaced
+                    // with the mapped value (`to_s`), or "" when the key
+                    // is absent — CRuby's table-driven escape form. This
+                    // is what rouge's HTML formatter uses:
+                    // `value.gsub(ESCAPE_REGEX, TABLE_FOR_ESCAPE_HTML)`.
+                    // Needs heap access to read the Hash, so it lives here
+                    // rather than the stateless `string_call`. `sub`
+                    // replaces the first match, `gsub` all.
+                    #[cfg(feature = "regex")]
+                    ("sub" | "gsub", [Value::Regex(re), Value::Hash(hid)]) => {
+                        let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
+                            msg: format!(
+                                "regex op 'String#{name}' with a Hash replacement is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
+                                re.as_str(),
+                            ),
+                        }))?;
+                        let pairs = self.heap.hash(*hid).clone();
+                        let mut table: std::collections::HashMap<String, String> =
+                            std::collections::HashMap::new();
+                        for (k, v) in &pairs {
+                            if let Value::Str(ks) = k {
+                                let vs = match v {
+                                    Value::Str(vstr) => vstr.to_string_lossy(),
+                                    other => other.to_display(&self.heap, &self.interner),
+                                };
+                                table.insert(ks.to_string_lossy(), vs);
+                            }
+                        }
+                        let s_owned = s.to_string_lossy();
+                        let out = if name == "sub" {
+                            native.replace(&s_owned, |caps: &regex::Captures| {
+                                table.get(&caps[0]).cloned().unwrap_or_default()
+                            }).into_owned()
+                        } else {
+                            native.replace_all(&s_owned, |caps: &regex::Captures| {
+                                table.get(&caps[0]).cloned().unwrap_or_default()
+                            }).into_owned()
+                        };
+                        Some(Value::new_str(out))
+                    }
+                    // String-pattern Hash form: the literal pattern is the
+                    // only possible match key, so resolve its replacement
+                    // once and do a plain substring replace.
+                    ("sub" | "gsub", [Value::Str(pat), Value::Hash(hid)]) => {
+                        let pairs = self.heap.hash(*hid).clone();
+                        let pat_s = pat.to_string_lossy();
+                        let mut repl = String::new();
+                        for (k, v) in &pairs {
+                            if let Value::Str(ks) = k
+                                && ks.to_string_lossy() == pat_s
+                            {
+                                repl = match v {
+                                    Value::Str(vstr) => vstr.to_string_lossy(),
+                                    other => other.to_display(&self.heap, &self.interner),
+                                };
+                                break;
+                            }
+                        }
+                        let s_owned = s.to_string_lossy();
+                        let out = if name == "sub" {
+                            s_owned.replacen(pat_s.as_str(), &repl, 1)
+                        } else {
+                            s_owned.replace(pat_s.as_str(), &repl)
+                        };
+                        Some(Value::new_str(out))
+                    }
                     ("scan", [Value::Regex(re)]) => {
                         // Layer #17: scan (no-block form) not
                         // yet dual-engine; trap on fancy.
