@@ -2503,6 +2503,16 @@ RUBYRS = "rubyrs".freeze
             "<rubyrs:preamble:enumerable>",
         )
             .expect("ICE: failed to load Enumerable preamble");
+        // Minimal Enumerator + Kernel#enum_for / #to_enum (the
+        // `enum_for(:meth, *args)` deferred-iteration form). Loaded
+        // after Enumerable so `class Enumerator; include Enumerable`
+        // resolves. Unblocks the `return enum_for(:m) unless
+        // block_given?` iterator idiom (rouge's lexer/formatter).
+        self.eval_inner(
+            include_str!("preamble/enumerator.rb"),
+            "<rubyrs:preamble:enumerator>",
+        )
+            .expect("ICE: failed to load Enumerator preamble");
         // Tier 1 seeded `Random` class. Lives in its own file so
         // the preamble stays focused on exception-hierarchy +
         // class-shell shapes; PRNG logic is meaty enough that
