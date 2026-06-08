@@ -440,9 +440,20 @@ impl Vm {
                         msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
                     })));
                 }
-                let has_block = self.frames.iter().rev()
-                    .find(|f| !f.is_block && !f.is_class_body)
-                    .map(|f| f.block_arg.is_some())
+                // Resolve the enclosing method LEXICALLY — the same
+                // `find_lexical_owner_frame` walk `yield` uses — not by
+                // the call-stack-nearest method frame. They diverge when
+                // the block runs through a user iterator that itself has
+                // a block: `def helper; yield; end; def m; helper {
+                // block_given? }; end` must report m's block, but the
+                // nearest call-stack method is `helper` (which always has
+                // a block). Matching yield's resolution keeps the two
+                // consistent (and unblocks Enumerable methods that branch
+                // on `block_given?` inside their `each { ... }` driver).
+                let has_block = self.frames.last()
+                    .map(|f| f.locals.clone())
+                    .and_then(|seed| self.find_lexical_owner_frame(&seed))
+                    .map(|idx| self.frames[idx].block_arg.is_some())
                     .unwrap_or(false);
                 Some(Ok(Value::Bool(has_block)))
             }
