@@ -121,6 +121,12 @@ module Enumerable
     self
   end
 
+  def reverse_each(&block)
+    return to_enum(:reverse_each) unless block_given?
+    to_a.reverse_each(&block)
+    self
+  end
+
   def each_with_object(memo)
     return to_enum(:each_with_object, memo) unless block_given?
     each { |*x| yield(__enum_elem(x), memo) }

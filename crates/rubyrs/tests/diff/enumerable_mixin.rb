@@ -46,6 +46,7 @@ p c.drop_while { |x| x > 1 }      # [1,2,1]
 p c.uniq                          # [3,1,2]
 p c.tally                         # {3=>1,1=>2,2=>1}
 p c.each_with_index.to_a          # [[3,0],[1,1],[2,2],[1,3]]
+p c.reverse_each.to_a             # [1,2,1,3]
 p c.each_with_object([]) { |x,a| a << x*x }  # [9,1,4,1]
 p c.to_h { |x| [x, x*x] }         # {3=>9,1=>1,2=>4}
 p c.lazy.map { |x| x*2 }.first(2) # [6,2]
