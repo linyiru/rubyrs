@@ -92,6 +92,25 @@ class Enumerator
     result
   end
   alias_method :entries, :to_a
+
+  # `enum.to_h` — collect `[k, v]` pairs into a Hash. Without a block
+  # each yielded value must already be a pair; with a block, the block
+  # maps each element to a pair. Mirrors Array#to_h's error wording.
+  def to_h
+    result = {}
+    has_block = block_given?
+    each do |*x|
+      pair = has_block ? yield(*x) : __enum_one(x)
+      unless pair.is_a?(Array)
+        raise TypeError, "wrong element type #{pair.class} (expected array)"
+      end
+      unless pair.length == 2
+        raise ArgumentError, "element has wrong array length (expected 2, was #{pair.length})"
+      end
+      result[pair[0]] = pair[1]
+    end
+    result
+  end
   alias_method :force, :to_a
 
   def select
@@ -110,7 +129,10 @@ class Enumerator
   end
 
   def with_index(offset = 0)
-    return enum_for(:with_index) unless block_given?
+    # No-block form must carry the offset into the returned Enumerator
+    # (`e.with_index(1).to_a`); a bare `enum_for(:with_index)` would
+    # drop it and restart numbering at 0.
+    return enum_for(:with_index, offset) unless block_given?
     i = offset
     each do |*x|
       yield(__enum_one(x), i)

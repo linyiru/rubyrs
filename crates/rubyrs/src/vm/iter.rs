@@ -429,6 +429,54 @@ impl Vm {
         }))
     }
 
+    /// Build an `enum_for(meth, *args)`-form Enumerator from native
+    /// code. Allocates an Enumerator instance and sets `@obj` / `@meth`
+    /// / `@args` directly (the same end state as the Ruby
+    /// `Enumerator.new(obj, meth, args)` path in the preamble, without
+    /// round-tripping through `initialize`). This is what the no-block
+    /// forms of native iterators return — `arr.each`, `arr.each_with_index`,
+    /// `hash.each_with_index`, etc. — matching CRuby, where a blockless
+    /// iterator yields an Enumerator that re-invokes `recv.meth(*args)`
+    /// once it's finally driven with a block.
+    pub(crate) fn make_enum_for(&mut self, recv: Value, meth: &str, args: Vec<Value>) -> Result<Value, Trap> {
+        let cls_id = self.interner.intern("Enumerator");
+        let cls = match self.classes.get(&cls_id).cloned() {
+            Some(c) => c,
+            None => return Err(self.trap(crate::error::RubyError::RuntimeError {
+                msg: "Enumerator class missing — preamble not loaded".into(),
+            })),
+        };
+        let meth_sym = self.interner.intern(meth);
+        // Pin recv + each arg across the two allocations (args Array,
+        // then the instance) so a GC triggered by the second alloc
+        // can't reclaim values reachable only from the unfinished
+        // instance.
+        let mut g = PinGuard::new(self);
+        g.pin(recv.clone());
+        for a in &args { g.pin(a.clone()); }
+        g.vm.maybe_gc();
+        g.vm.check_alloc()?;
+        let args_id = g.vm.heap.alloc(HeapObj::Array(args));
+        g.pin(Value::Array(args_id));
+        g.vm.maybe_gc();
+        g.vm.check_alloc()?;
+        let inst_id = g.vm.heap.alloc(HeapObj::Instance(crate::value::Instance {
+            class: cls,
+            ivars: crate::intern::FxHashMap::default(),
+            singleton_class: None,
+            frozen: std::cell::Cell::new(false),
+        }));
+        let obj_iv = g.vm.interner.intern("@obj");
+        let meth_iv = g.vm.interner.intern("@meth");
+        let args_iv = g.vm.interner.intern("@args");
+        let inst = g.vm.heap.instance_mut(inst_id);
+        inst.ivars.insert(obj_iv, recv);
+        inst.ivars.insert(meth_iv, Value::Sym(meth_sym));
+        inst.ivars.insert(args_iv, Value::Array(args_id));
+        drop(g);
+        Ok(Value::Object(inst_id))
+    }
+
     pub(crate) fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: ObjId) -> Result<Option<Value>, Trap> {
         // Object#itself with a block — CRuby ignores the block
         // and returns the receiver unchanged. Sits next to the
@@ -915,6 +963,58 @@ impl Vm {
                     g.vm.heap.array_mut(result_id).push(r);
                 }
                 Some(early.unwrap_or(Value::Array(result_id)))
+            }
+            // `Array#to_h { |elem| [k, v] }` — map each element through
+            // the block to a `[k, v]` pair, then build a Hash (dedup:
+            // first position keeps the last value, via hash_insert).
+            // Same pair-shape validation + CRuby error wording as the
+            // no-block form (`[[k, v], ...].to_h`) in
+            // array_collection_call.
+            (Value::Array(id), "to_h", []) => {
+                let snapshot: Vec<Value> = self.heap.array(*id).clone();
+                self.maybe_gc();
+                self.check_alloc()?;
+                let hid = self.heap.alloc(HeapObj::Hash(
+                    crate::heap::HashObj::with_pairs(Vec::new()),
+                ));
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                g.pin(Value::Hash(hid));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (i, v) in snapshot.into_iter().enumerate() {
+                    let pair = match g.vm.step_block(block, vec![v], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    match pair {
+                        Value::Array(pid) => {
+                            let parr = g.vm.heap.array(pid);
+                            if parr.len() != 2 {
+                                let n = parr.len();
+                                return Err(g.vm.trap(crate::error::RubyError::ArgumentError {
+                                    msg: format!(
+                                        "wrong array length at {i} (expected 2, was {n})"
+                                    ),
+                                }));
+                            }
+                            let k = parr[0].clone();
+                            let val = parr[1].clone();
+                            g.vm.heap.hash_insert(hid, k, val);
+                        }
+                        other => {
+                            return Err(g.vm.trap(crate::error::RubyError::TypeError {
+                                msg: format!(
+                                    "wrong element type {} at {i} (expected array)",
+                                    other.type_name()
+                                ),
+                            }));
+                        }
+                    }
+                }
+                Some(early.unwrap_or(Value::Hash(hid)))
             }
             // `Array#map!` / `Array#collect!` — in-place variant.
             // Mutates the receiver, returns self. Block-form only

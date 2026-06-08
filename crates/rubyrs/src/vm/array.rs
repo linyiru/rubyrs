@@ -73,6 +73,64 @@ impl Vm {
                             msg: format!("wrong number of arguments (given {}, expected 0)", many.len()),
                         }));
                     }
+                    // No-block `each` / `each_with_index` / `each_index`
+                    // (no args) returns an Enumerator — CRuby `enum.c`.
+                    // The block forms live in `collection_call_block`
+                    // (iter.rs); now that a real Enumerator is modelled,
+                    // `arr.each.to_a`, `arr.each_with_index.map { }`,
+                    // `arr.each_index.select { }` work via enum_for
+                    // re-invoking the block-form method when the
+                    // Enumerator is finally driven with a block.
+                    ("each" | "each_with_index" | "each_index", []) => {
+                        return self.make_enum_for(Value::Array(id), name, vec![]).map(Some);
+                    }
+                    // `Array#to_h` (no block) — build a Hash from an
+                    // array of `[k, v]` pair Arrays. CRuby raises
+                    // TypeError if an element isn't an Array and
+                    // ArgumentError if a pair isn't length 2. Duplicate
+                    // keys keep the first position with the last value
+                    // (hash_insert semantics). The block form
+                    // (`arr.to_h { |x| [k, v] }`) lives in
+                    // collection_call_block (iter.rs).
+                    ("to_h", []) => {
+                        let src: Vec<Value> = self.heap.array(id).clone();
+                        self.maybe_gc();
+                        self.check_alloc()?;
+                        let hid = self.heap.alloc(HeapObj::Hash(
+                            crate::heap::HashObj::with_pairs(Vec::new()),
+                        ));
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        g.pin(Value::Hash(hid));
+                        for (i, el) in src.into_iter().enumerate() {
+                            match el {
+                                Value::Array(eid) => {
+                                    let pair = g.vm.heap.array(eid);
+                                    if pair.len() != 2 {
+                                        let n = pair.len();
+                                        return Err(g.vm.trap(crate::error::RubyError::ArgumentError {
+                                            msg: format!(
+                                                "wrong array length at {i} (expected 2, was {n})"
+                                            ),
+                                        }));
+                                    }
+                                    let k = pair[0].clone();
+                                    let v = pair[1].clone();
+                                    g.vm.heap.hash_insert(hid, k, v);
+                                }
+                                other => {
+                                    return Err(g.vm.trap(crate::error::RubyError::TypeError {
+                                        msg: format!(
+                                            "wrong element type {} at {i} (expected array)",
+                                            other.type_name()
+                                        ),
+                                    }));
+                                }
+                            }
+                        }
+                        drop(g);
+                        Some(Value::Hash(hid))
+                    }
                     // `Array#shift` — remove and return the first
                     // element; `nil` if empty. In-place mutation.
                     ("shift", []) => {

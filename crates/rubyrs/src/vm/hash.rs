@@ -465,6 +465,15 @@ impl Vm {
                         let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
                         Some(Value::Array(aid))
                     }
+                    // No-block `each` / `each_pair` / `each_with_index`
+                    // (no args) returns an Enumerator — CRuby `enum.c`.
+                    // The block forms live in `collection_call_block`
+                    // (iter.rs); the Enumerator re-invokes them once
+                    // driven, so `h.each_with_index.to_a`,
+                    // `h.map { |k, v| ... }` (via each), etc. work.
+                    ("each" | "each_pair" | "each_with_index", []) => {
+                        return self.make_enum_for(Value::Hash(id), name, vec![]).map(Some);
+                    }
                     // `h.each_slice(n)` / `h.each_cons(n)` — no-block
                     // forms. CRuby returns an Enumerator that
                     // `.to_a`s to the same shape as we return
