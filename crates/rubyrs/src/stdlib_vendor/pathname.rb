@@ -137,4 +137,47 @@ class Pathname
       paths
     end
   end
+
+  # Relative path from `base_directory` to self — CRuby's
+  # `Pathname#relative_path_from`. Path-string only (no filesystem
+  # access): both paths must agree on absolute-vs-relative, the common
+  # leading components are dropped, and one `..` is emitted per leftover
+  # base component. An empty result is `"."`. CRuby raises ArgumentError
+  # on a mismatched prefix or a `..` in the base it can't resolve.
+  # Discovery: rouge's `load_lexers` does
+  # `f.relative_path_from(lexer_dir)` to name each lexer file.
+  def relative_path_from(base_directory)
+    base = base_directory.is_a?(Pathname) ? base_directory : Pathname.new(base_directory.to_s)
+    if absolute? != base.absolute?
+      raise ArgumentError, "different prefix: #{base.to_s.inspect} and #{@path.inspect}"
+    end
+    dest_comps = @path.split("/").reject { |c| c.empty? || c == "." }
+    base_comps = base.to_s.split("/").reject { |c| c.empty? || c == "." }
+    if base_comps.include?("..")
+      raise ArgumentError, "base_directory has ..: #{base.to_s.inspect}"
+    end
+    i = 0
+    i += 1 while i < dest_comps.length && i < base_comps.length && dest_comps[i] == base_comps[i]
+    # `[".."] * n` (Array#* repetition) isn't in the rubyrs subset, so
+    # build the leading `..` run explicitly.
+    rel = []
+    (base_comps.length - i).times { rel << ".." }
+    rel.concat(dest_comps[i..] || [])
+    Pathname.new(rel.empty? ? "." : rel.join("/"))
+  end
+
+  # `Pathname.glob(pattern, flags = 0)` — expand `pattern` via `Dir.glob`
+  # and wrap each match in a Pathname. With a block, yields each and
+  # returns nil; otherwise returns the Array. Matches CRuby. Discovery:
+  # rouge's `load_lexers` does `Pathname.glob(dir / '*.rb').each { … }`.
+  def self.glob(pattern, flags = 0)
+    pat = pattern.is_a?(Pathname) ? pattern.to_s : pattern.to_s
+    results = Dir.glob(pat, flags).map { |p| Pathname.new(p) }
+    if block_given?
+      results.each { |p| yield p }
+      nil
+    else
+      results
+    end
+  end
 end
