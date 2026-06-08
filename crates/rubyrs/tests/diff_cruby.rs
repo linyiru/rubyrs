@@ -675,5 +675,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn include_const_alias_nested() { run_diff("include_const_alias_nested"); }
 #[test] fn enum_for_basic() { run_diff("enum_for_basic"); }
 #[test] fn enumerator_new_yielder() { run_diff("enumerator_new_yielder"); }
+#[test] fn yield_splat() { run_diff("yield_splat"); }
+#[test] fn enum_multivalue() { run_diff("enum_multivalue"); }
 #[test] fn thread_current_locals() { run_diff("thread_current_locals"); }
 #[test] fn dynamic_base_const() { run_diff("dynamic_base_const"); }
