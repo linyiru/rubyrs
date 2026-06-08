@@ -666,3 +666,4 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn anon_class_named_const_set() { run_diff("anon_class_named_const_set"); }
 #[test] fn kernel_module_function_call() { run_diff("kernel_module_function_call"); }
 #[test] fn namespaced_builtin_class_redef() { run_diff("namespaced_builtin_class_redef"); }
+#[test] fn kwargs_brace_hash_positional() { run_diff("kwargs_brace_hash_positional"); }

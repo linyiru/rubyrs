@@ -1031,6 +1031,21 @@ pub(crate) struct Vm {
     /// transitively apply — anything that method itself calls
     /// runs through the normal check.
     pub(crate) bypass_visibility_once: bool,
+    /// True for the duration of a plain `Op::Call` / `Op::CallNoRecv`
+    /// dispatch: the call did NOT use keyword syntax (the compiler emits
+    /// `Op::Call` only when `kwargs_trailing == false`), so an explicit-
+    /// brace trailing Hash (`f({k: v})`) is a POSITIONAL argument, which
+    /// Ruby 3 guarantees. `invoke_method_with_block` consults this to
+    /// SUPPRESS peeling the trailing Hash into keyword bindings — peeling
+    /// it unconditionally was the bug that made
+    /// `merge_data!({ "categories" => … })` (Liquid / Jekyll) raise
+    /// `wrong number of arguments (given 0, …)`. Every OTHER call path
+    /// (keyword `Op::CallKw`, splat `Op::ApplyCall`, `super`, block
+    /// `Op::CallBlock`) leaves this `false`, preserving the prior
+    /// "peel a trailing Hash when the callee has kwparams" behaviour.
+    /// Set by the `Call` op handler, cleared once the dispatch returns
+    /// (so it never leaks to the next call).
+    pub(crate) trailing_hash_positional: bool,
     /// P1c.2 (ADR 0023) — fiber yield signaling slot.
     ///
     /// `Fiber.yield(v)` sets this to `Some(v)` and returns
@@ -1301,6 +1316,7 @@ impl Vm {
             pending_method_break: None,
             suppress_call_result_push: false,
             bypass_visibility_once: false,
+            trailing_hash_positional: false,
             #[cfg(feature = "_fiber")]
             fiber_yield_pending: None,
             #[cfg(feature = "_fiber")]

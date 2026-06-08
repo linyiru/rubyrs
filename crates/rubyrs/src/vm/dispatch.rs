@@ -10274,7 +10274,17 @@ impl Vm {
         // params) — those entries become keyword bindings, not
         // positional args.
         let mut args = args;
-        let kw_hash: Option<Vec<(Value, Value)>> = if kw_count > 0 || has_kw_rest {
+        // Peel the trailing Hash into keyword bindings when the callee
+        // declares kwparams — UNLESS the call was a plain `Op::Call`
+        // whose trailing hash is an explicit-brace POSITIONAL hash
+        // (`f({k: v})`, always positional in Ruby 3). Keyword (`CallKw`),
+        // splat (`ApplyCall`), `super`, and block (`CallBlock`) calls
+        // all leave `trailing_hash_positional == false`, preserving the
+        // prior peel-if-kwparams behaviour. Peeling unconditionally was
+        // the bug that made `merge_data!({ "categories" => … })` (Liquid
+        // / Jekyll) raise `wrong number of arguments (given 0, …)`.
+        let trailing_positional = std::mem::take(&mut self.trailing_hash_positional);
+        let kw_hash: Option<Vec<(Value, Value)>> = if (kw_count > 0 || has_kw_rest) && !trailing_positional {
             if let Some(Value::Hash(hid)) = args.last().cloned() {
                 args.pop();
                 Some(self.heap.hash(hid).clone())

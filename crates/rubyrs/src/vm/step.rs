@@ -1824,10 +1824,21 @@ impl Vm {
                 }
             }
             Op::Call(name_id, argc, cache_id) => {
-                self.do_call(name_id, argc as usize, false, cache_id)?;
+                // Plain call (no keyword syntax): an explicit-brace
+                // trailing Hash is POSITIONAL in Ruby 3. Flag it so
+                // `invoke_method_with_block` doesn't peel it into kwargs.
+                // Cleared after the dispatch (even on error) so it can't
+                // leak into the next call.
+                self.trailing_hash_positional = true;
+                let r = self.do_call(name_id, argc as usize, false, cache_id);
+                self.trailing_hash_positional = false;
+                r?;
             }
             Op::CallNoRecv(name_id, argc, cache_id) => {
-                self.do_call(name_id, argc as usize, true, cache_id)?;
+                self.trailing_hash_positional = true;
+                let r = self.do_call(name_id, argc as usize, true, cache_id);
+                self.trailing_hash_positional = false;
+                r?;
             }
             // Kwarg-trailing variants — argc includes the trailing
             // kwargs Hash. The dispatcher's helper splits the Hash
