@@ -6306,7 +6306,25 @@ impl Vm {
         if self.try_push_string_encoding(&recv, &name, &args) {
             return Ok(());
         }
-        if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes)
+        // A user-defined singleton method overrides the built-in
+        // Module/Class `name` / `to_s` / `inspect` primitives (CRuby
+        // parity — `def self.name`, or an inherited
+        // `class << self; attr_reader :name; end`, must win over the
+        // structural class name). Without this the primitive below
+        // shadows the override; rouge's Token DSL relies on
+        // `Token.name` reading its `@name` ivar, not the class name.
+        // Mirrors the `superclass` arm's override probe in
+        // try_dispatch_class_introspection.
+        let class_intrinsic_overridden = if let Value::Class(c) = &recv {
+            matches!(&*name, "name" | "to_s" | "inspect") && {
+                let c = c.clone();
+                self.lookup_class_singleton_method(&c, name_id).is_some()
+            }
+        } else {
+            false
+        };
+        if !class_intrinsic_overridden
+            && let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes)
             .map_err(|e| self.trap(e))? {
             self.stack.push(v);
             return Ok(());
