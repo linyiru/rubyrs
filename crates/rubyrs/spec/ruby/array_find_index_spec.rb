@@ -2,8 +2,7 @@
 # find_index_spec.rb at upstream commit 448cb340 (2026-05).
 # Hand-translated — Array#index and Array#find_index are
 # aliases (CRuby parity); the no-arg-no-block form returns an
-# Enumerator in CRuby and is skipped here as
-# `method-not-implemented`.
+# Enumerator (modelled via make_enum_for), exercised below.
 
 describe "Array#find_index" do
   it "returns the Int index of the first element == the argument" do
@@ -50,20 +49,14 @@ describe "Array#find_index" do
     assert_raises("ArgumentError") { [1].find_index(1, 2) }
   end
 
-  it "raises (not NoMethodError) when called with no arg and no block" do
-    # CRuby returns an Enumerator. rubyrs raises a RuntimeError
-    # with an explicit "not yet implemented" message instead of
-    # falling through to NoMethodError (which would contradict
-    # `respond_to?(:find_index) == true`). The exact error
-    # class is the rubyrs fallback per dispatch.rs:4548; bare
-    # rescue catches it.
-    caught = nil
-    begin
-      [1, 2, 3].find_index
-    rescue => e
-      caught = e.class.to_s
-    end
-    assert_eq(caught, "RuntimeError")
+  it "returns an Enumerator when called with no arg and no block" do
+    # CRuby (and now rubyrs, via make_enum_for) returns an Enumerator;
+    # driving it with a block reports the first truthy index, exactly
+    # like the direct block form.
+    e = [10, 20, 30].find_index
+    assert_eq(e.class.to_s, "Enumerator")
+    assert_eq(e.each { |x| x == 20 }, 1)
+    assert_eq([10, 20, 30].find_index.each { |x| x > 100 }, nil)
   end
 end
 
