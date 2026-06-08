@@ -693,6 +693,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn hash_delete_block() { run_diff("hash_delete_block"); }
 #[test] fn string_casecmp() { run_diff("string_casecmp"); }
 #[test] fn string_each_char() { run_diff("string_each_char"); }
+// Set's richer surface lives in the stdlib-gated `stdlib_vendor/set.rb`
+// (the default build ships only a minimal Set), so gate this fixture the
+// same way as set_merge / set_enumerable above.
+#[cfg(feature = "stdlib")]
 #[test] fn set_collect_bang() { run_diff("set_collect_bang"); }
 #[test] fn to_h() { run_diff("to_h"); }
 #[test] fn thread_current_locals() { run_diff("thread_current_locals"); }
