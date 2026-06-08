@@ -2381,41 +2381,34 @@ impl Vm {
                     }
                     #[cfg(feature = "regex")]
                     ("scan", [Value::Regex(re)]) => {
-                        // Layer #17: scan (no-block form) not
-                        // yet dual-engine; trap on fancy.
-                        let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
-                            msg: format!(
-                                "regex op 'String#scan' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
-                                re.as_str(),
-                            ),
-                        }))?;
-                        // regex crate is &str-only; lossy view at
-                        // iteration entry (binary input degrades to
-                        // lossy UTF-8 here — regex itself only
-                        // matches UTF-8 anyway).
+                        // Dual-engine (regex + fancy-regex). Iterate
+                        // matches into OWNED capture data first — keeps
+                        // the two engines' incompatible `Captures` types
+                        // out of here and does no heap alloc during the
+                        // scan, so the GC pinning below only guards the
+                        // result-Array build. (binary input degrades to
+                        // lossy UTF-8; the engines only match UTF-8.)
                         let s_owned = s.to_string_lossy();
-                        let has_groups = native.captures_len() > 1;
+                        let has_groups = re.captures_len() > 1;
+                        let matches = re.scan_captures(&s_owned);
                         // GC rooting: under STRESS_GC=1 each per-match
-                        // sub-Array alloc'd in the has_groups branch
-                        // is unreachable until the wrapping result
-                        // Array is built — pin each push so it
-                        // survives subsequent maybe_gc's. The no-
-                        // groups branch alloc's only Strings (which
-                        // are Rc-based, not heap-managed by ObjId),
-                        // so no pin is needed there. See
-                        // `array.rs::combination` for the symmetric
-                        // pattern and `proc_curry_compose` / earlier
-                        // STRESS_GC commit for the broader fix.
+                        // sub-Array alloc'd in the has_groups branch is
+                        // unreachable until the wrapping result Array is
+                        // built — pin each push so it survives subsequent
+                        // maybe_gc's. The no-groups branch alloc's only
+                        // Strings (Rc-based, not heap-managed by ObjId),
+                        // so no pin is needed there.
                         let mut g = PinGuard::new(self);
-                        let mut out: Vec<Value> = Vec::new();
+                        let mut out: Vec<Value> = Vec::with_capacity(matches.len());
                         if has_groups {
-                            for caps in native.captures_iter(&s_owned) {
-                                let mut group_vec: Vec<Value> = Vec::with_capacity(caps.len() - 1);
-                                for i in 1..caps.len() {
-                                    let g_val = caps.get(i)
-                                        .map(|m| Value::new_str(m.as_str()))
-                                        .unwrap_or(Value::Nil);
-                                    group_vec.push(g_val);
+                            for caps in &matches {
+                                let mut group_vec: Vec<Value> = Vec::with_capacity(caps.len().saturating_sub(1));
+                                for grp in caps.iter().skip(1) {
+                                    group_vec.push(
+                                        grp.as_ref()
+                                            .map(|t| Value::new_str(t.clone()))
+                                            .unwrap_or(Value::Nil),
+                                    );
                                 }
                                 g.vm.maybe_gc();
                                 g.vm.check_alloc()?;
@@ -2425,8 +2418,11 @@ impl Vm {
                                 out.push(v);
                             }
                         } else {
-                            for m in native.find_iter(&s_owned) {
-                                out.push(Value::new_str(m.as_str()));
+                            for caps in &matches {
+                                // group 0 = whole match (always present
+                                // on a match).
+                                let whole = caps.first().and_then(|o| o.as_ref());
+                                out.push(Value::new_str(whole.cloned().unwrap_or_default()));
                             }
                         }
                         g.vm.maybe_gc();

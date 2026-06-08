@@ -692,6 +692,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn cvar_lexical_block() { run_diff("cvar_lexical_block"); }
 #[test] fn enumerable_mixin() { run_diff("enumerable_mixin"); }
 #[test] fn block_given_lexical() { run_diff("block_given_lexical"); }
+#[cfg(feature = "regex")]
+#[test] fn scan_fancy_regex() { run_diff("scan_fancy_regex"); }
 #[test] fn gsub_hash() { run_diff("gsub_hash"); }
 #[test] fn hash_delete_block() { run_diff("hash_delete_block"); }
 #[test] fn string_casecmp() { run_diff("string_casecmp"); }
