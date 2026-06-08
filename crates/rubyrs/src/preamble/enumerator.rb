@@ -165,96 +165,115 @@ class Enumerator
     def drop(n); __chain([:drop, n]); end
     def with_index(offset = 0); __chain([:with_index, offset]); end
 
-    # Drive the source through the op pipeline. The pipeline is built
-    # inside-out: the consumer block is the innermost stage, each op
-    # wraps the stage downstream of it (so ops apply in declaration
-    # order). `throw(:__lazy_stop)` from a `take`/`take_while` stage
-    # unwinds out of the source's `each`.
-    def each(&consumer)
-      return self unless consumer
-      pipeline = consumer
-      @ops.reverse_each do |op|
-        pipeline = __stage(op, pipeline)
-      end
-      catch(:__lazy_stop) do
-        @source.each { |*x| pipeline.call(__lazy_one(x)) }
-      end
-      self
-    end
-
     def __lazy_one(x)
       x.length == 1 ? x[0] : x
     end
     private :__lazy_one
 
-    # Build one pipeline stage: a proc that receives an upstream element
-    # and calls `downstream` zero or more times (filtering, mapping,
-    # flattening, or stopping the whole walk).
-    def __stage(op, downstream)
-      case op[0]
-      when :map
-        f = op[1]
-        proc { |x| downstream.call(f.call(x)) }
-      when :select
-        pred = op[1]
-        proc { |x| downstream.call(x) if pred.call(x) }
-      when :reject
-        pred = op[1]
-        proc { |x| downstream.call(x) unless pred.call(x) }
-      when :filter_map
-        f = op[1]
-        proc { |x| y = f.call(x); downstream.call(y) if y }
-      when :flat_map
-        f = op[1]
-        proc do |x|
-          r = f.call(x)
-          if r.is_a?(Array)
-            r.each { |e| downstream.call(e) }
-          else
-            downstream.call(r)
-          end
+    # Drive the source one element at a time through the op chain, feeding
+    # survivors to `consumer`. The chain is walked by METHOD recursion
+    # (`__run`), not nested Proc closures — Proc#call / yield / native
+    # iter drivers each cost one `dispatch_until` level, and the debug
+    # build caps that at 5, so a closure-per-op pipeline overflows on any
+    # multi-op chain. Method recursion keeps the live depth flat
+    # (~catch + source.each + one consumer.call) regardless of chain
+    # length. Per-drive op state (take/drop/drop_while/with_index
+    # counters) is reset here, so a Lazy can be driven more than once.
+    def __drive(consumer)
+      @drive_state = @ops.map do |op|
+        case op[0]
+        when :take, :drop then 0
+        when :with_index then op[1]
+        when :drop_while then true
+        else nil
         end
-      when :take_while
-        pred = op[1]
-        proc { |x| pred.call(x) ? downstream.call(x) : throw(:__lazy_stop) }
-      when :drop_while
-        pred = op[1]
-        dropping = true
-        proc do |x|
-          dropping = false if dropping && !pred.call(x)
-          downstream.call(x) unless dropping
-        end
-      when :take
-        n = op[1]
-        count = 0
-        proc do |x|
-          throw(:__lazy_stop) if count >= n
-          downstream.call(x)
-          count += 1
-          throw(:__lazy_stop) if count >= n
-        end
-      when :drop
-        n = op[1]
-        seen = 0
-        proc do |x|
-          if seen >= n
-            downstream.call(x)
-          else
-            seen += 1
-          end
-        end
-      when :with_index
-        i = op[1]
-        proc { |x| downstream.call([x, i]); i += 1 }
+      end
+      catch(:__lazy_stop) do
+        @source.each { |*x| __run(__lazy_one(x), 0, consumer) }
       end
     end
-    private :__stage
+    private :__drive
 
-    # `force` is the CRuby alias for `to_a` (inherited from Enumerator,
-    # which drives `each`). `lazy` on a Lazy is a no-op (returns self).
-    def force
-      to_a
+    # Apply ops[i..] to `value`, feeding survivors downstream. `throw
+    # :__lazy_stop` (from take / take_while, or the consumer hitting its
+    # limit) unwinds out of the source's `each`.
+    def __run(value, i, consumer)
+      if i >= @ops.length
+        consumer.call(value)
+        return
+      end
+      op = @ops[i]
+      case op[0]
+      when :map
+        __run(op[1].call(value), i + 1, consumer)
+      when :select
+        __run(value, i + 1, consumer) if op[1].call(value)
+      when :reject
+        __run(value, i + 1, consumer) unless op[1].call(value)
+      when :filter_map
+        y = op[1].call(value)
+        __run(y, i + 1, consumer) if y
+      when :flat_map
+        r = op[1].call(value)
+        if r.is_a?(Array)
+          j = 0
+          while j < r.length
+            __run(r[j], i + 1, consumer)
+            j += 1
+          end
+        else
+          __run(r, i + 1, consumer)
+        end
+      when :take_while
+        if op[1].call(value)
+          __run(value, i + 1, consumer)
+        else
+          throw(:__lazy_stop)
+        end
+      when :take
+        throw(:__lazy_stop) if @drive_state[i] >= op[1]
+        __run(value, i + 1, consumer)
+        @drive_state[i] += 1
+        throw(:__lazy_stop) if @drive_state[i] >= op[1]
+      when :drop
+        if @drive_state[i] >= op[1]
+          __run(value, i + 1, consumer)
+        else
+          @drive_state[i] += 1
+        end
+      when :drop_while
+        @drive_state[i] = false if @drive_state[i] && !op[1].call(value)
+        __run(value, i + 1, consumer) unless @drive_state[i]
+      when :with_index
+        __run([value, @drive_state[i]], i + 1, consumer)
+        @drive_state[i] += 1
+      end
     end
+    private :__run
+
+    def each(&consumer)
+      return self unless consumer
+      __drive(consumer)
+      self
+    end
+
+    # Forcing methods drive the chain directly with a single catch (not
+    # `first` → `each` → catch → catch), keeping the dispatch depth low.
+    def first(n = nil)
+      count = n.nil? ? 1 : n
+      result = []
+      if count > 0
+        __drive(proc { |y| result << y; throw(:__lazy_stop) if result.length >= count })
+      end
+      n.nil? ? result[0] : result
+    end
+
+    def to_a
+      result = []
+      __drive(proc { |y| result << y })
+      result
+    end
+    alias_method :force, :to_a
 
     def lazy
       self
