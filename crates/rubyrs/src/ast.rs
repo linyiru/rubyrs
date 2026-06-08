@@ -1869,8 +1869,28 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             let name = crate::const_marker::tag_absolute(joined, is_constant_path_absolute(node));
             return sp(node, Expr::ConstRead(name));
         }
-        // Dynamic path (rare): trailing-name fallback, matches the
-        // existing rescue-clause behaviour at line ~378.
+        // Dynamic path: `expr::CONST` where `expr` is a RUNTIME value
+        // (e.g. `self.class::FOO`, `k::FOO` for a local `k`). CRuby
+        // resolves FOO on the runtime value's own class/ancestry — NOT
+        // in the lexical scope. Desugar to `expr.const_get(:FOO)` so
+        // the dynamic base is honoured. The previous trailing-name-only
+        // `ConstRead(FOO)` discarded the base entirely and resolved FOO
+        // in the surrounding lexical scope, so a `self.class::FOO` from
+        // a base-class method returned the BASE's `FOO` even when the
+        // runtime subclass redefined it (e.g. kramdown-gfm's
+        // `self.class::FENCED_CODEBLOCK_MATCH` resolved to the
+        // tilde-only base constant, breaking ``` ``` ``` code fences).
+        if let Some(parent) = n.parent()
+            && let Some(name_id) = n.name()
+        {
+            return sp(node, Expr::Call {
+                receiver: Some(Box::new(tr(ctx, &parent))),
+                name: "const_get".into(),
+                args: vec![sp(node, Expr::SymbolLit(cid_to_string(name_id)))],
+                kwargs_trailing: false,
+            });
+        }
+        // No parent (shouldn't reach here): trailing-name fallback.
         if let Some(name_id) = n.name() {
             return sp(node, Expr::ConstRead(cid_to_string(name_id)));
         }
