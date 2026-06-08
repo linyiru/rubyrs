@@ -157,7 +157,19 @@
 # binary, lifting baseline RSS ~80-100KB across all workloads (CI showed the
 # 7700 group at 7612-7792, fizzbuzz tipping over). Pure baseline shift, not a
 # per-workload leak — every workload moved up together.
-crates/rubyrs/tests/fixtures/fizzbuzz.rb	7900	0	tiny script; wall is sub-100ms noise floor, disabled
+# Uniform RSS bump 7900 → 8200 (+300) on 2026-06-08 across the seven
+# 7900 workloads. The session's Enumerator finishing work grew the
+# always-on preamble loaded at `Runtime::new`: preamble/float.rb (new
+# file: Float::INFINITY / NAN / ...) and a much larger
+# preamble/enumerator.rb (Enumerator#next/peek/rewind/size/to_h, the
+# no-block→Enumerator helpers, and the ~130-line Enumerator::Lazy
+# transducer class). More parsed bytecode + Proto + class-shell metadata
+# at startup lifts baseline RSS uniformly. CI observed the 7900 group at
+# 7752–7992 (static_bench 7992, fizzbuzz 7928 over). 8200 restores ~200 KB
+# headroom over the observed peak without masking a future regression —
+# a pure baseline shift (every workload moved up together), not a
+# per-workload leak. gc_churn stays 8400 (observed 8216, has headroom).
+crates/rubyrs/tests/fixtures/fizzbuzz.rb	8200	0	tiny script; wall is sub-100ms noise floor, disabled
 # mm_bench WALL bumped 1200 → 1300 on 2026-06-04 — observed
 # CI 1220 ms (+1.7% over) after Track 1 / 2 chain accumulated:
 #   * 0da682b3 (Track 1) — Frame::kw_given_mask: u64, +8 bytes
@@ -186,7 +198,7 @@ crates/rubyrs/tests/fixtures/fizzbuzz.rb	7900	0	tiny script; wall is sub-100ms n
 # each row to ~7-10% above observed peak, leave the ratchet
 # defending future bumps. Bumps recorded per row at the
 # row-specific comment below.
-crates/rubyrs/examples/metaprog_bench/mm_bench.rb	7900	1400	2M method_missing dispatch
+crates/rubyrs/examples/metaprog_bench/mm_bench.rb	8200	1400	2M method_missing dispatch
 # dm_bench RSS bumped 6500 → 6700 on 2026-05-27 — the
 # define_method dispatch benchmark crossed 6500 KB at PR #175
 # (ic-stats baseline workloads added) + PR #178 (step-block
@@ -201,13 +213,13 @@ crates/rubyrs/examples/metaprog_bench/mm_bench.rb	7900	1400	2M method_missing di
 # `ruby_flags`) grew the binary's static + per-regex footprint;
 # CI observed dm_bench RSS 7316 KB, ~16 KB over. Same per-row
 # rationale as the bumps above.
-crates/rubyrs/examples/metaprog_bench/dm_bench.rb	7900	900	2M define_method dispatch (closure-method)
-crates/rubyrs/examples/metaprog_bench/static_bench.rb	7900	1150	2M def+ivar (control for the metaprog comparisons)
+crates/rubyrs/examples/metaprog_bench/dm_bench.rb	8200	900	2M define_method dispatch (closure-method)
+crates/rubyrs/examples/metaprog_bench/static_bench.rb	8200	1150	2M def+ivar (control for the metaprog comparisons)
 # Budgets at ~2× local M-series observed wall to absorb CI's
 # ~1.65× ubuntu-latest slowdown plus per-run jitter — same shape
 # as the metaprog rows above (static_bench: local 390ms / CI 650
 # / budget 1000 = 2.5× local; mm_bench: 1.62× CI ratio observed).
-crates/rubyrs/benches/fizzbuzz_1m.rb	7900	800	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
+crates/rubyrs/benches/fizzbuzz_1m.rb	8200	800	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
 # gc_churn RSS bumped 6500 → 6700 on 2026-05-27 — same
 # direction as dm_bench's per-row bump above. Observed CI
 # RSS 6504 KB (just 4 KB over) after PR #182 / #184 / #186
@@ -225,7 +237,7 @@ crates/rubyrs/benches/fizzbuzz_1m.rb	7900	800	1M fizzbuzz; BinOpInt + IncLocal +
 # 100 KB headroom gives ~60 KB margin over observed CI peak
 # without masking a future per-frame or per-instance bump.
 crates/rubyrs/benches/gc_churn.rb	8400	400	200k short-lived Array+Hash allocs; stresses mark/sweep
-crates/rubyrs/benches/string_interp.rb	7900	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
+crates/rubyrs/benches/string_interp.rb	8200	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
 # hash_mutate WALL bumped 650 → 730 on 2026-05-27 — 3
 # consecutive master CI runs observed 690-710ms (4-9% over
 # 650 budget). Same pattern on dm_bench (700→780) and
@@ -234,4 +246,4 @@ crates/rubyrs/benches/string_interp.rb	7900	700	200k InterpolatedStr; Op::Interp
 # regression (no relevant merges in the affected window).
 # Headroom is ~3% over observed max; future regressions
 # still surface.
-crates/rubyrs/benches/hash_mutate.rb	7900	880	200k Hash[]= overwrites + 1k Hash[] reads
+crates/rubyrs/benches/hash_mutate.rb	8200	880	200k Hash[]= overwrites + 1k Hash[] reads
