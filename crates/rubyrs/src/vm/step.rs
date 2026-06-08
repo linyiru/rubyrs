@@ -344,6 +344,15 @@ impl Vm {
     ///     `Vm.toplevel_cvars` at the call site
     pub(crate) fn surrounding_class(&self) -> Option<Rc<Class>> {
         let frame = self.frames.last()?;
+        // Block frames carry the lexical class captured at the block's
+        // creation. Prefer it so `@@cvar` resolves lexically even when
+        // the block runs with a different `self` (instance_eval /
+        // class_eval) — CRuby resolves cvars through the cref, not self.
+        // Block frames whose lexical class is `None` (created at the top
+        // level) fall through to the self_val rule below.
+        if frame.is_block && frame.lexical_cvar_class.is_some() {
+            return frame.lexical_cvar_class.clone();
+        }
         match &frame.self_val {
             Value::Class(c) => Some(c.clone()),
             Value::Object(id) => Some(self.heap.real_class_of(*id)),
@@ -2024,6 +2033,13 @@ impl Vm {
                     let f = self.frames.last().expect("ICE: CreateBlock no frame");
                     (f.locals.clone(), f.self_val.clone())
                 };
+                // Capture the lexical class for `@@cvar` resolution. For
+                // a block created inside another block this returns the
+                // outer block's captured lexical class (nested blocks
+                // share the enclosing cref); inside a method / class body
+                // it derives from that frame's self. Computed before the
+                // alloc's mutable borrow.
+                let lexical_cvar_class = self.surrounding_class();
                 let rest_slot = if rest_slot_raw == u16::MAX { None } else { Some(rest_slot_raw) };
                 let kw_rest_slot = if kw_rest_slot_raw == u16::MAX { None } else { Some(kw_rest_slot_raw) };
                 self.maybe_gc();
@@ -2032,6 +2048,7 @@ impl Vm {
                     proto_idx: p_idx as usize,
                     captured,
                     self_val,
+                    lexical_cvar_class,
                     param_start,
                     n_params,
                     rest_slot,
@@ -3328,7 +3345,7 @@ impl Vm {
                     locals: Rc::new(RefCell::new(vec_nil(n_locals))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
                     block_writeback: None,
                 });
             }

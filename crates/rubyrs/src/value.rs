@@ -216,6 +216,15 @@ pub struct BlockHandle {
     /// — that's the heap slot's job.
     pub(crate) captured: Rc<RefCell<Vec<Value>>>,
     pub(crate) self_val: Value,
+    /// The lexical class for `@@cvar` resolution — the class whose body
+    /// or method lexically encloses this block at creation time. CRuby
+    /// resolves class variables through the lexical cref, NOT `self`, so
+    /// a block run with a different self (`instance_eval` / `class_eval`)
+    /// must still see the cvars of where it was written. Captured at
+    /// `Op::CreateBlock` and threaded onto the block's frame; `None` for
+    /// blocks created at the top level (cvars fall back to
+    /// `Vm.toplevel_cvars`). See `Vm::surrounding_class`.
+    pub(crate) lexical_cvar_class: Option<std::rc::Rc<Class>>,
     pub(crate) param_start: u16,
     pub(crate) n_params: u16,
     /// `Some(slot)` when the block declares a `*rest` parameter.

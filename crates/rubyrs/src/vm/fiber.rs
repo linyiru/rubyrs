@@ -1893,6 +1893,7 @@ mod tests {
             proto_idx: 0,
             captured: std::rc::Rc::new(std::cell::RefCell::new(vec![])),
             self_val: crate::value::Value::Nil,
+            lexical_cvar_class: None,
             param_start: 0,
             n_params: 0,
             rest_slot: None,

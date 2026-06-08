@@ -100,6 +100,13 @@ pub(crate) struct Frame {
     /// chain). `None` for blocks, toplevel `<main>`, class
     /// bodies; only methods set this.
     pub(crate) defining_class: Option<Rc<Class>>,
+    /// Lexical class for `@@cvar` resolution in a block frame — copied
+    /// from the running block's `BlockHandle::lexical_cvar_class`. CRuby
+    /// resolves class variables through the lexical cref, not `self`, so
+    /// `surrounding_class` prefers this over `self_val` whenever it's
+    /// set (it's only set on block frames; method / class-body /
+    /// toplevel frames leave it `None` and resolve via `self_val`).
+    pub(crate) lexical_cvar_class: Option<Rc<Class>>,
     /// True for frames pushed by `Vm::invoke_block` (the frame
     /// for a `do…end` / `{ … }` body). Used by the non-local
     /// `return`-from-block path: when `Op::ReturnMethod` sets

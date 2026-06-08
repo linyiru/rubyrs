@@ -689,6 +689,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn endless_range() { run_diff("endless_range"); }
 #[test] fn enumerator_lazy() { run_diff("enumerator_lazy"); }
 #[test] fn class_name_override() { run_diff("class_name_override"); }
+#[test] fn cvar_lexical_block() { run_diff("cvar_lexical_block"); }
 #[test] fn gsub_hash() { run_diff("gsub_hash"); }
 #[test] fn hash_delete_block() { run_diff("hash_delete_block"); }
 #[test] fn string_casecmp() { run_diff("string_casecmp"); }

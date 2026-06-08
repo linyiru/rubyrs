@@ -9853,6 +9853,7 @@ impl Vm {
             swap_return: None,
             block_arg: None,
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            lexical_cvar_class: None,
             is_block: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
@@ -9960,6 +9961,7 @@ impl Vm {
             swap_return: None,
             block_arg: Some(block_id),
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            lexical_cvar_class: None,
             is_block: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
@@ -10023,6 +10025,7 @@ impl Vm {
             swap_return: None,
             block_arg: block,
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            lexical_cvar_class: None,
             is_block: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
@@ -10227,7 +10230,7 @@ impl Vm {
                 // the explicit-capture idiom working without polluting
                 // the implicit-yield surface. Setting `block_arg:
                 // None` here is what enforces both.
-                is_class_body: false, swap_return: None, block_arg: None, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), is_block: false,
+                is_class_body: false, swap_return: None, block_arg: None, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), lexical_cvar_class: None, is_block: false,
                 // `define_method` enforces exact arity (no
                 // defaults), so all params are "given".
                 n_given_positional: given as u16,
@@ -10254,6 +10257,7 @@ impl Vm {
                 swap_return: None,
                 block_arg: block,
                 defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+                lexical_cvar_class: None,
                 is_block: false,
                 n_given_positional: fixed.required,
                 kw_given_mask: 0,
@@ -10578,7 +10582,7 @@ impl Vm {
             locals,
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), is_block: false,
+            is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), lexical_cvar_class: None, is_block: false,
             // Drives the body's default-arg prologue. Slots
             // `[0, positional_take)` came from the caller; slots
             // `[positional_take, positional_max)` are left Nil
@@ -10631,9 +10635,9 @@ impl Vm {
         args: Vec<Value>,
     ) -> Result<(), Trap> {
         self.check_frames()?;
-        let (proto_idx, captured, param_start, n_params) = {
+        let (proto_idx, captured, param_start, n_params, bh_lexical_cvar_class) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
+            (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.lexical_cvar_class.clone())
         };
         // Bind args into the block's param slots, same auto-splat
         // shape as `invoke_block`. For instance_eval/class_eval
@@ -10690,6 +10694,12 @@ impl Vm {
             swap_return: None,
             block_arg: None,
             defining_class: None,
+            // instance_eval keeps the block's lexical cref for `@@cvar`
+            // (resolve where the block was written, not on the new self).
+            // class_eval instead re-roots the cref at the eval'd class —
+            // that's `new_self`, which the self_val rule already returns,
+            // so leave this None for the class-body case.
+            lexical_cvar_class: if as_class_body { None } else { bh_lexical_cvar_class },
             // class_eval's frame is BOTH `is_block: true` and
             // `is_class_body: true`. That dual role matters for
             // non-local `return`: per the unwind loop in
@@ -10791,6 +10801,7 @@ impl Vm {
             proto_idx,
             captured,
             self_val: Value::Nil,
+            lexical_cvar_class: None,
             param_start: 0,
             n_params: 0,
             rest_slot: Some(1),
@@ -10868,6 +10879,7 @@ impl Vm {
             proto_idx,
             captured,
             self_val: Value::Nil,
+            lexical_cvar_class: None,
             param_start: 0,
             n_params: 0,
             rest_slot: Some(2),
@@ -10976,10 +10988,10 @@ impl Vm {
         // Snapshot what we need out of the block's heap slot before
         // taking any `&mut self` action. BlockHandle.captured is a
         // shared `Rc<RefCell<Vec<Value>>>` — cheap to clone.
-        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot) = {
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class) = {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
-             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot)
+             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone())
         };
         // `|**opts|` keyword-rest: peel the trailing kwargs Hash off
         // the args BEFORE positional binding (so it doesn't land in
@@ -11164,6 +11176,7 @@ impl Vm {
             self_val,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
+            lexical_cvar_class: bh_lexical_cvar_class,
             is_block: true, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
             block_writeback: Some((captured, param_start)),
         });
