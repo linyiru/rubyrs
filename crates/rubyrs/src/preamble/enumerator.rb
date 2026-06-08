@@ -17,23 +17,64 @@
 class Enumerator
   include Enumerable
 
-  # `args` is the already-collected Array of extra arguments (the
-  # caller passes the Array, not a splat, to avoid local-splat).
-  def initialize(obj = nil, meth = :each, args = [])
-    @obj = obj
-    @meth = meth
-    @args = args
+  # Two construction forms:
+  #   - `Enumerator.new { |y| y << 1; y.yield(a, b) }` — generator/yielder
+  #     block (the optional leading `size` arg is accepted and ignored).
+  #   - `Enumerator.new(obj, meth, args)` — the `enum_for` form (`args`
+  #     is the already-collected Array, passed not splatted to avoid
+  #     local-splat). Distinguished by whether a block was given.
+  def initialize(obj = nil, meth = :each, args = [], &block)
+    if block
+      @gen = block
+    else
+      @obj = obj
+      @meth = meth
+      @args = args
+    end
   end
 
-  # Re-invoke the captured method with the iteration block. Without a
-  # block, an Enumerator is its own enumerator (CRuby returns self).
+  # Drive the enumerator with the iteration block. Without a block, an
+  # Enumerator is its own enumerator (CRuby returns self). The yielder
+  # form runs the generator EAGERLY (each `y << v` / `y.yield(..)` calls
+  # straight through to `block`); the lazy/Fiber-backed `next`/`peek`
+  # surface is NOT modelled.
   def each(&block)
     return self unless block
-    case @args.length
-    when 0 then @obj.__send__(@meth, &block)
-    when 1 then @obj.__send__(@meth, @args[0], &block)
-    when 2 then @obj.__send__(@meth, @args[0], @args[1], &block)
-    else        @obj.__send__(@meth, @args[0], @args[1], @args[2], &block)
+    if @gen
+      @gen.call(Yielder.new(&block))
+      self
+    else
+      case @args.length
+      when 0 then @obj.__send__(@meth, &block)
+      when 1 then @obj.__send__(@meth, @args[0], &block)
+      when 2 then @obj.__send__(@meth, @args[0], @args[1], &block)
+      else        @obj.__send__(@meth, @args[0], @args[1], @args[2], &block)
+      end
+    end
+  end
+
+  # `Enumerator::Yielder` — the object handed to a generator block. `<<`
+  # and `yield` forward straight to the consumer's iteration block.
+  # (`yield` uses small-arity dispatch instead of `block.call(*args)`
+  # because the compiler doesn't yet support local-variable call-splat.)
+  class Yielder
+    def initialize(&block)
+      @block = block
+    end
+
+    def <<(value)
+      @block.call(value)
+      self
+    end
+
+    def yield(*args)
+      case args.length
+      when 0 then @block.call
+      when 1 then @block.call(args[0])
+      when 2 then @block.call(args[0], args[1])
+      when 3 then @block.call(args[0], args[1], args[2])
+      else        @block.call(args[0], args[1], args[2], args[3])
+      end
     end
   end
 
@@ -93,9 +134,17 @@ class Enumerator
   def first(n = nil)
     result = []
     take = n || 1
-    each do |x|
-      break if result.length >= take
-      result << x
+    # `throw`, not `break`: the generator (yielder) form drives `each`
+    # from inside a separate proc, and `break` can't cross that proc
+    # boundary (LocalJumpError). `throw`/`catch` is a non-local exit
+    # that unwinds through it, stopping the eager generator early.
+    if take > 0
+      catch(:__enum_first) do
+        each do |x|
+          result << x
+          throw(:__enum_first) if result.length >= take
+        end
+      end
     end
     n.nil? ? result[0] : result
   end
