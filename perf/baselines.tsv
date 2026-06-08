@@ -236,7 +236,13 @@ crates/rubyrs/benches/fizzbuzz_1m.rb	8200	800	1M fizzbuzz; BinOpInt + IncLocal +
 #     Instance, so this row is dominated by the Frame growth)
 # 100 KB headroom gives ~60 KB margin over observed CI peak
 # without masking a future per-frame or per-instance bump.
-crates/rubyrs/benches/gc_churn.rb	8400	400	200k short-lived Array+Hash allocs; stresses mark/sweep
+# gc_churn RSS bumped 8400 → 8800 on 2026-06-08 — the full Enumerable
+# module (preamble/enumerable.rb, ~40 methods built on #each) adds
+# always-on Proto + class-shell metadata at Runtime::new that mark/sweep
+# walks; CI observed gc_churn 8564 (164 over). The 8200 cohort stayed
+# under (static_bench 7924 was the peak). Per-row bump (gc_churn-specific
+# mark/sweep cost), ~236 KB headroom over the observed peak.
+crates/rubyrs/benches/gc_churn.rb	8800	400	200k short-lived Array+Hash allocs; stresses mark/sweep
 crates/rubyrs/benches/string_interp.rb	8200	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
 # hash_mutate WALL bumped 650 → 730 on 2026-05-27 — 3
 # consecutive master CI runs observed 690-710ms (4-9% over
