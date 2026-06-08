@@ -188,8 +188,12 @@ _sqlite = ["dep:rusqlite", "dep:lru"]
 # promise the menu was sized around. `_sqlite` + `_http_server`
 # are the load-bearing batteries; `stdlib` brings the pure-Ruby
 # canon (json/active_support_lite/…). Total ≤ 40 MB stripped
-# per ADR 0019 v3's binary budget.
-cli-defaults = ["stdlib", "_sqlite", "_http_server", "sass"]
+# per ADR 0019 v3's binary budget. `mimalloc` is in the CLI bundle
+# (not bare `default`) because it's a ~11.5%-faster-Jekyll global
+# allocator win that the `cargo install rubyrs` user should get by
+# default; the minimal `default` tier (embedders) stays allocator-
+# neutral. (Trades ~9% peak RSS for the wall win — fine for a CLI.)
+cli-defaults = ["stdlib", "_sqlite", "_http_server", "sass", "mimalloc"]
 # `everything` — kitchen sink for embedders who want every
 # available battery pre-wired. ADR 0019 v3 line 314's "Bun-
 # class CLI / Edge runtime" target. ≤ 150 MB stripped.
