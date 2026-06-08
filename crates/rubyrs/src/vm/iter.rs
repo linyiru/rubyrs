@@ -2460,7 +2460,11 @@ impl Vm {
             // Str+Str raises RuntimeError to keep `respond_to?`
             // (Vm::responds_to in lookup.rs) consistent with the
             // dispatcher — same fallback as each_slice/each_cons.
-            (Value::Range(id), "chunk_while", []) => {
+            (Value::Range(id), "chunk_while", []) | (Value::Range(id), "slice_when", []) => {
+                // slice_when splits where the predicate is truthy;
+                // chunk_while keeps together while truthy. See the
+                // Array arm for the eager/lazy divergence note.
+                let split_when_true = name == "slice_when";
                 let (bi, ei, excl) = {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {
@@ -2512,7 +2516,8 @@ impl Vm {
                             BlockStep::Break(r) => { early = Some(r); break 'outer; }
                             BlockStep::Value(r) => r,
                         };
-                        if r.is_truthy() {
+                        let boundary = if split_when_true { r.is_truthy() } else { !r.is_truthy() };
+                        if !boundary {
                             current_chunk.push(Value::Int(cur));
                         } else {
                             // Flush current_chunk, start fresh.
@@ -2538,8 +2543,8 @@ impl Vm {
                 }
                 Some(Value::Array(result_id))
             }
-            // Wrong-arity for Range#chunk_while (takes 0 args).
-            (Value::Range(_), "chunk_while", many) => {
+            // Wrong-arity for Range#chunk_while / #slice_when (0 args).
+            (Value::Range(_), "chunk_while", many) | (Value::Range(_), "slice_when", many) => {
                 return Err(self.trap(crate::error::RubyError::ArgumentError {
                     msg: format!(
                         "wrong number of arguments (given {}, expected 0)",
@@ -2875,7 +2880,15 @@ impl Vm {
             // returns truthy for the pair (a=prev, b=current).
             // Falsy starts a new chunk. Empty input → `[]`;
             // single-element → `[[elem]]`.
-            (Value::Array(id), "chunk_while", []) => {
+            (Value::Array(id), "chunk_while", []) | (Value::Array(id), "slice_when", []) => {
+                // `chunk_while { |a, b| pred }` keeps consecutive elements
+                // together while pred is truthy; `slice_when { |a, b| pred }`
+                // is the inverse — it SPLITS where pred is truthy. Same
+                // driver, opposite test. (Both return the Array of runs
+                // here, like rubyrs's other predicate-block grouping
+                // methods; CRuby returns a lazy Enumerator, a documented
+                // eager-model divergence — `.to_a` is portable.)
+                let split_when_true = name == "slice_when";
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
@@ -2920,7 +2933,8 @@ impl Vm {
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
-                    if r.is_truthy() {
+                    let boundary = if split_when_true { r.is_truthy() } else { !r.is_truthy() };
+                    if !boundary {
                         current_chunk.push(pair[1].clone());
                     } else {
                         // Flush current chunk and start a fresh one.
@@ -2941,8 +2955,8 @@ impl Vm {
                 }
                 Some(Value::Array(result_id))
             }
-            // Wrong-arity for Array#chunk_while (takes 0 args).
-            (Value::Array(_), "chunk_while", many) => {
+            // Wrong-arity for Array#chunk_while / #slice_when (0 args).
+            (Value::Array(_), "chunk_while", many) | (Value::Array(_), "slice_when", many) => {
                 return Err(self.trap(crate::error::RubyError::ArgumentError {
                     msg: format!(
                         "wrong number of arguments (given {}, expected 0)",
@@ -4184,7 +4198,11 @@ impl Vm {
             // Falsy starts a new chunk. Result is an Array of
             // chunk Arrays, each chunk containing pair Arrays.
             // Empty hash → `[]`; single-pair hash → `[[[k,v]]]`.
-            (Value::Hash(id), "chunk_while", []) => {
+            (Value::Hash(id), "chunk_while", []) | (Value::Hash(id), "slice_when", []) => {
+                // slice_when splits where the predicate is truthy;
+                // chunk_while keeps together while truthy. See the
+                // Array arm for the eager/lazy divergence note.
+                let split_when_true = name == "slice_when";
                 let id = *id;
                 let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
                 let mut g = PinGuard::new(self);
@@ -4221,7 +4239,8 @@ impl Vm {
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
-                    if r.is_truthy() {
+                    let boundary = if split_when_true { r.is_truthy() } else { !r.is_truthy() };
+                    if !boundary {
                         current_chunk.push(pair[1].clone());
                     } else {
                         g.vm.maybe_gc();
@@ -4240,8 +4259,8 @@ impl Vm {
                 }
                 Some(Value::Array(result_id))
             }
-            // Wrong-arity for Hash#chunk_while (takes 0 args).
-            (Value::Hash(_), "chunk_while", many) => {
+            // Wrong-arity for Hash#chunk_while / #slice_when (0 args).
+            (Value::Hash(_), "chunk_while", many) | (Value::Hash(_), "slice_when", many) => {
                 return Err(self.trap(crate::error::RubyError::ArgumentError {
                     msg: format!(
                         "wrong number of arguments (given {}, expected 0)",

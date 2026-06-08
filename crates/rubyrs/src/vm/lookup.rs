@@ -703,7 +703,7 @@ impl Vm {
                 "any?" | "all?" | "none?" |
                 "each_with_index" | "each_index" | "sort_by" |
                 "min_by" | "max_by" | "group_by" |
-                "each_with_object" | "partition" | "chunk_while" | "bsearch" |
+                "each_with_object" | "partition" | "chunk_while" | "slice_when" | "bsearch" |
                 "take_while" | "drop_while" |
                 "zip" |
                 "sort!" | "uniq!" | "compact!" | "flatten!" | "reverse!" |
@@ -736,7 +736,7 @@ impl Vm {
                 "first" | "min" | "max" | "one?" | "partition" |
                 "take" | "drop" | "take_while" | "drop_while" | "find_index" |
                 "tally" | "uniq" | "zip" |
-                "each_slice" | "each_cons" | "chunk_while" |
+                "each_slice" | "each_cons" | "chunk_while" | "slice_when" |
                 "inspect"
             ),
             Value::Range(_) => matches!(name,
@@ -750,7 +750,7 @@ impl Vm {
                 "each_with_index" | "each_with_object" |
                 "partition" | "min_by" | "max_by" |
                 "group_by" | "sort_by" | "sort" |
-                "each_slice" | "each_cons" | "chunk_while"
+                "each_slice" | "each_cons" | "chunk_while" | "slice_when"
             ),
             Value::Bool(_) | Value::Nil => matches!(name, "to_s" | "inspect" | "dup" | "clone"),
             // Phase C.1 readers + Phase C.2 arithmetic / comparison.

@@ -1891,17 +1891,15 @@ impl Vm {
                     ("each_cons", _) => {
                         return Err(self.arity_error_arg1_int(name, args));
                     }
-                    // `arr.chunk_while(arg)` without a block —
-                    // CRuby returns an Enumerator on the
-                    // no-block call but still raises
-                    // ArgumentError when extra args are
-                    // passed. rubyrs has no Enumerator stub
-                    // for chunk_while; arity validation is the
-                    // only thing left to do here. With block,
-                    // dispatch goes through iter.rs where the
-                    // block-form catch-all already handles
-                    // wrong-arity.
-                    ("chunk_while", many) if !many.is_empty() => {
+                    // `arr.chunk_while(arg)` / `arr.slice_when(arg)`
+                    // without a block — CRuby returns an Enumerator on
+                    // the no-block call but still raises ArgumentError
+                    // when extra args are passed. rubyrs has no
+                    // Enumerator stub for these predicate-block methods;
+                    // arity validation is the only thing left to do
+                    // here. With a block, dispatch goes through iter.rs
+                    // where the block-form catch-all handles wrong-arity.
+                    ("chunk_while" | "slice_when", many) if !many.is_empty() => {
                         return Err(self.trap(RubyError::ArgumentError {
                             msg: format!(
                                 "wrong number of arguments (given {}, expected 0)",
