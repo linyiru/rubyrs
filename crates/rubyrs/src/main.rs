@@ -4,6 +4,14 @@ use std::process;
 
 use rubyrs::{Config, Runtime};
 
+// EXPERIMENT (feature `mimalloc`): replace the system allocator. The
+// VM mints a Frame + locals per call, an Rc per block invocation, and a
+// heap object per Array/Hash/Object/String — a small-object, high-churn
+// pattern the system malloc handles poorly. mimalloc is tuned for it.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Cold-start phase tracer for the `trace-startup` feature.
 ///
 /// Zero-sized struct when the feature is off — every `at()` call is

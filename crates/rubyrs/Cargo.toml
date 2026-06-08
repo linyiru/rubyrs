@@ -42,6 +42,10 @@ categories = ["compilers", "wasm", "command-line-utilities"]
 # and are explicitly out of scope for this PoC.)
 [features]
 default = ["cext", "regex", "bignum", "std-sink"]
+# EXPERIMENT: swap the system allocator for mimalloc (a fast
+# small-object allocator). The VM is allocation-heavy, so the system
+# malloc shows up large in profiles. Opt-in: `--features mimalloc`.
+mimalloc = ["dep:mimalloc"]
 cext = ["dep:rubyrs-cext", "dep:libloading"]
 # `bignum` is the third tier boundary (PoC Phase A per ADR 0018's
 # BigInt placement decision). With this feature off:
@@ -213,6 +217,7 @@ _http_server = [
 
 [dependencies]
 ruby-prism.workspace = true
+mimalloc = { version = "0.1", optional = true, default-features = false }
 regex = { version = "1", optional = true }
 # `fancy-regex` is the lookaround / backreference fallback engine.
 # rubyrs uses `regex` as the primary engine (linear time,
