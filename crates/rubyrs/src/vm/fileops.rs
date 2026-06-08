@@ -205,6 +205,51 @@ fn glob_expand(pattern: &str) -> Vec<String> {
 }
 
 impl Vm {
+    /// Coerce a `File`-path argument to a String the way CRuby does:
+    /// a `String` passes through; any other object is asked for
+    /// `to_path` then `to_str` (a `Pathname` answers `to_path`).
+    /// Returns `Ok(None)` when neither conversion exists, so the caller
+    /// raises the CRuby `no implicit conversion of <Class> into String`
+    /// TypeError; `Ok(None)` likewise when a conversion returned a
+    /// non-String (CRuby then raises the same TypeError).
+    ///
+    /// The `to_path`/`to_str` call re-enters the interpreter
+    /// (`invoke_method` + `dispatch_until`, the `invoke_inherited_hook`
+    /// pattern), so `maybe_gc` can run: `v` and the caller's
+    /// not-yet-processed `also_pin` args are pinned for the duration.
+    fn coerce_path_string(&mut self, v: &Value, also_pin: &[Value]) -> Result<Option<String>, Trap> {
+        if let Value::Str(s) = v {
+            return Ok(Some(s.to_string_lossy()));
+        }
+        let cls = match v {
+            Value::Object(id) => self.heap.class_of(*id),
+            _ => return Ok(None),
+        };
+        for conv in ["to_path", "to_str"] {
+            let sym = self.interner.intern(conv);
+            let m = match self.lookup_method_uncached(&cls, sym) {
+                Some(m) => m,
+                None => continue,
+            };
+            let pre_frames = self.frames.len();
+            let result = {
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(v.clone());
+                for p in also_pin {
+                    g.pin(p.clone());
+                }
+                g.vm.invoke_method(m, v.clone(), Vec::new())?;
+                g.vm.dispatch_until(pre_frames)?;
+                g.vm.stack.pop()
+            };
+            return match result {
+                Some(Value::Str(s)) => Ok(Some(s.to_string_lossy())),
+                _ => Ok(None),
+            };
+        }
+        Ok(None)
+    }
+
     /// File class-method shims. Implements the half-dozen path-
     /// based File operations idiomatic Ruby scripts reach for
     /// (read / write / exist? / size / basename / dirname /
@@ -431,22 +476,39 @@ impl Vm {
                 let mut comps: Vec<String> = Vec::new();
                 let mut work: Vec<Value> = parts.iter().rev().cloned().collect();
                 while let Some(v) = work.pop() {
-                    match v {
+                    match &v {
                         Value::Str(s) => comps.push(s.to_string_lossy()),
                         Value::Array(id) => {
-                            let elems: Vec<Value> = self.heap.array(id).clone();
+                            let elems: Vec<Value> = self.heap.array(*id).clone();
                             for e in elems.into_iter().rev() {
                                 work.push(e);
                             }
                         }
-                        other => {
-                            return Err(self.trap(RubyError::TypeError {
-                                msg: format!(
-                                    "no implicit conversion of {} into String",
-                                    other.type_name()
-                                ),
-                            }));
-                        }
+                        // Pathname (or any object answering to_path/to_str):
+                        // CRuby coerces File.join args via to_path then
+                        // to_str. `coerce_path_string` pins `v` + the
+                        // unprocessed `work` across the re-entrant call.
+                        // rouge's `load_lexer` does
+                        // `File.join(BASE_DIR, pathname)`.
+                        _ => match self.coerce_path_string(&v, &work)? {
+                            Some(s) => comps.push(s),
+                            None => {
+                                // CRuby names the actual class (e.g.
+                                // "NoConv"), not the generic "Object".
+                                let cls_name = match self.class_of(&v) {
+                                    Value::Class(c) => {
+                                        c.effective_name().unwrap_or_else(|| c.name.clone())
+                                    }
+                                    _ => v.type_name().to_string(),
+                                };
+                                return Err(self.trap(RubyError::TypeError {
+                                    msg: format!(
+                                        "no implicit conversion of {} into String",
+                                        cls_name
+                                    ),
+                                }));
+                            }
+                        },
                     }
                 }
                 let mut result = String::new();

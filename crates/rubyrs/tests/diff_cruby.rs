@@ -669,3 +669,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn kwargs_brace_hash_positional() { run_diff("kwargs_brace_hash_positional"); }
 #[cfg(feature = "stdlib")]
 #[test] fn pathname_glob_relpath() { run_diff("pathname_glob_relpath"); }
+#[cfg(feature = "stdlib")]
+#[test] fn file_join_to_path() { run_diff("file_join_to_path"); }
