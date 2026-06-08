@@ -1903,6 +1903,12 @@ pub(crate) fn compile_expr(
             for a in args { compile_expr(b, a, protos, interner, cc); }
             b.emit(Op::Yield(args.len() as u8));
         }
+        Expr::YieldSplat(arr) => {
+            // Push the combined args Array; `Op::ApplyYield` expands it
+            // and drives the block with the dynamic argc.
+            compile_expr(b, arr, protos, interner, cc);
+            b.emit(Op::ApplyYield);
+        }
         Expr::Retry => {
             // `retry` re-executes the surrounding begin block. The
             // target is the inner-most `retry_targets` entry, set

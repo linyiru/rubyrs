@@ -2039,7 +2039,7 @@ impl Vm {
                 }));
                 self.stack.push(Value::Block(id));
             }
-            Op::Yield(argc) => {
+            Op::Yield(_) | Op::ApplyYield => {
                 // `yield` resolves to the block of the enclosing
                 // METHOD, not the current frame. When yield runs
                 // inside a nested block (e.g.
@@ -2131,7 +2131,40 @@ impl Vm {
                         msg: "no block given (yield)".to_string(),
                     })),
                 };
-                let argc = argc as usize;
+                // Static argc for `Op::Yield(n)`; for `Op::ApplyYield`
+                // (`yield(*x)`), pop the combined args Array and expand
+                // its elements onto the stack (mirrors `Op::ApplyCall`),
+                // yielding the dynamic count.
+                let argc = match op {
+                    Op::Yield(n) => n as usize,
+                    Op::ApplyYield => {
+                        let arr_val = match self.stack.pop() {
+                            Some(v) => v,
+                            None => unreachable!("ICE: ApplyYield without args array"),
+                        };
+                        let arr_id = match arr_val {
+                            Value::Array(id) => id,
+                            other => {
+                                return Err(self.trap(RubyError::TypeError {
+                                    msg: format!(
+                                        "no implicit conversion of {} into Array",
+                                        other.type_name()
+                                    ),
+                                }));
+                            }
+                        };
+                        let mut g = crate::vm::PinGuard::new(self);
+                        g.pin(Value::Array(arr_id));
+                        let elems: Vec<Value> = g.vm.heap.array(arr_id).clone();
+                        let n = elems.len();
+                        for e in elems {
+                            g.vm.stack.push(e);
+                        }
+                        drop(g);
+                        n
+                    }
+                    _ => unreachable!("yield arm only matches Yield | ApplyYield"),
+                };
                 let split = self.stack.len() - argc;
                 let args: Vec<Value> = self.stack.drain(split..).collect();
 

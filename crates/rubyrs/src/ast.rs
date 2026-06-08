@@ -424,6 +424,13 @@ pub(crate) enum Expr {
         block_arg: Box<SExpr>,
     },
     Yield(Vec<SExpr>),
+    /// `yield(*arr)` / `yield(a, *b, c)` — yield with a splat. The
+    /// inner expr evaluates to the combined args Array (built by the
+    /// same splat-chunking `collect_multi_return_value` the call/return
+    /// paths use); the compiler emits `Op::ApplyYield`, which expands
+    /// that Array's elements onto the stack and drives the block with
+    /// the dynamic argc — the yield analogue of `Op::ApplyCall`.
+    YieldSplat(Box<SExpr>),
     /// `foo(*arr)` — single-splat call. The compiler emits an
     /// `Op::ApplyCall` / `Op::ApplyCallNoRecv` that takes one
     /// Array on top of the stack and uses its elements as
@@ -3034,6 +3041,17 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         return sp(node, Expr::Lambda { params, body });
     }
     if let Some(n) = node.as_yield_node() {
+        // `yield(*x)` / `yield(a, *b)` — a splat in the args needs the
+        // dynamic-argc path. Reuse the splat-chunking array builder, then
+        // emit `Op::ApplyYield` (expands the Array, yields its elements).
+        let has_splat = n.arguments()
+            .map(|a| a.arguments().iter().any(|c| c.as_splat_node().is_some()))
+            .unwrap_or(false);
+        if has_splat
+            && let Some(arr) = collect_multi_return_value(ctx, n.arguments(), node)
+        {
+            return sp(node, Expr::YieldSplat(arr));
+        }
         let args: Vec<SExpr> = n.arguments()
             .map(|a| a.arguments().iter().map(|c| tr(ctx, &c)).collect())
             .unwrap_or_default();

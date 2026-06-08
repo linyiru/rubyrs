@@ -416,6 +416,10 @@ pub(crate) enum Op {
     CallBlock(SymId, u8, u16),
     CallNoRecvBlock(SymId, u8, u16),
     Yield(u8),
+    /// `yield(*arr)` — like `Yield` but the args come from a popped
+    /// Array (dynamic argc), the yield analogue of `Op::ApplyCall`.
+    /// Stack on entry: `[..., args_array]`.
+    ApplyYield,
     BinOp(BinOpKind),
     /// Fast path for `recv <op> <int_literal>` — fuses the preceding
     /// `LoadConstInt` into the BinOp. Saves one op and one stack
