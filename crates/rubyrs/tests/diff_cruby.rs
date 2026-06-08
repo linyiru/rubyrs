@@ -691,6 +691,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn class_name_override() { run_diff("class_name_override"); }
 #[test] fn gsub_hash() { run_diff("gsub_hash"); }
 #[test] fn hash_delete_block() { run_diff("hash_delete_block"); }
+#[test] fn string_casecmp() { run_diff("string_casecmp"); }
 #[test] fn to_h() { run_diff("to_h"); }
 #[test] fn thread_current_locals() { run_diff("thread_current_locals"); }
 #[test] fn dynamic_base_const() { run_diff("dynamic_base_const"); }

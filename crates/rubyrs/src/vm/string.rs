@@ -1317,6 +1317,21 @@ pub(crate) fn string_call(
         (Value::Str(a), "<=", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() <= *b.borrow())),
         (Value::Str(a), ">", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() > *b.borrow())),
         (Value::Str(a), "<=>", [Value::Str(b)]) => Some(Value::Int(a.borrow().cmp(&*b.borrow()) as i64)),
+        // `casecmp` / `casecmp?` — ASCII case-insensitive compare (CRuby
+        // folds only A-Z↔a-z, not full Unicode). `casecmp` returns
+        // -1/0/1, `casecmp?` a Bool; both return nil for a non-String
+        // argument. (batchfile and other rouge lexers use casecmp.)
+        (Value::Str(a), "casecmp", [Value::Str(b)]) => {
+            let aa = a.to_string_lossy().to_ascii_lowercase();
+            let bb = b.to_string_lossy().to_ascii_lowercase();
+            Some(Value::Int(aa.cmp(&bb) as i64))
+        }
+        (Value::Str(a), "casecmp?", [Value::Str(b)]) => {
+            let aa = a.to_string_lossy().to_ascii_lowercase();
+            let bb = b.to_string_lossy().to_ascii_lowercase();
+            Some(Value::Bool(aa == bb))
+        }
+        (Value::Str(_), "casecmp" | "casecmp?", [_]) => Some(Value::Nil),
         (Value::Str(a), ">=", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() >= *b.borrow())),
         // Regex#match? mirror — same semantics either side.
         #[cfg(feature = "regex")]
