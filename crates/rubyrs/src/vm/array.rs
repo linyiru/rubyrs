@@ -88,16 +88,27 @@ impl Vm {
                     // Enumerator when called with no block (CRuby `enum.c`):
                     // `arr.map`, `arr.select.with_index { }`, etc. The
                     // block forms live in collection_call_block (iter.rs);
-                    // the Enumerator re-invokes them once driven. Only the
-                    // no-arg shape is covered — `min_by(2)` etc. (arg, no
-                    // block) stays a gap. Methods whose no-block form is
-                    // NOT an Enumerator (sort / uniq / min / count / all?
-                    // / inject / …) are deliberately excluded.
+                    // the Enumerator re-invokes them once driven. Methods
+                    // whose no-block form is NOT an Enumerator (sort / uniq
+                    // / min / count / all? / inject / …) are deliberately
+                    // excluded.
                     ("map" | "collect" | "select" | "filter" | "reject"
                         | "flat_map" | "collect_concat" | "filter_map"
                         | "find" | "detect" | "partition" | "group_by"
                         | "min_by" | "max_by" | "sort_by" | "reverse_each", []) => {
                         return self.make_enum_for(Value::Array(id), name, vec![]).map(Some);
+                    }
+                    // Arg-bearing no-block forms that still return an
+                    // Enumerator carrying the arg: `min_by(n)` / `max_by(n)`
+                    // (n smallest/largest by the block key) and
+                    // `each_with_object(memo)` (yields `(elem, memo)`,
+                    // returns memo). The arg is threaded into @args and
+                    // re-applied when the Enumerator is driven.
+                    ("min_by" | "max_by", [Value::Int(_)]) => {
+                        return self.make_enum_for(Value::Array(id), name, args.to_vec()).map(Some);
+                    }
+                    ("each_with_object", [_seed]) => {
+                        return self.make_enum_for(Value::Array(id), name, args.to_vec()).map(Some);
                     }
                     // `Array#to_h` (no block) — build a Hash from an
                     // array of `[k, v]` pair Arrays. CRuby raises

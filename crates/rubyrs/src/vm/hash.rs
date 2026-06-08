@@ -486,6 +486,12 @@ impl Vm {
                         | "sort_by", []) => {
                         return self.make_enum_for(Value::Hash(id), name, vec![]).map(Some);
                     }
+                    // `h.each_with_object(memo)` with no block — Enumerator
+                    // carrying the memo (block form at iter.rs). Hash has no
+                    // min_by(n)/max_by(n) block form, so those stay a gap.
+                    ("each_with_object", [_seed]) => {
+                        return self.make_enum_for(Value::Hash(id), name, args.to_vec()).map(Some);
+                    }
                     // `h.each_slice(n)` / `h.each_cons(n)` — no-block
                     // forms. CRuby returns an Enumerator that
                     // `.to_a`s to the same shape as we return
