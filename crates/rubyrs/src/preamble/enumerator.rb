@@ -36,8 +36,7 @@ class Enumerator
   # Drive the enumerator with the iteration block. Without a block, an
   # Enumerator is its own enumerator (CRuby returns self). The yielder
   # form runs the generator EAGERLY (each `y << v` / `y.yield(..)` calls
-  # straight through to `block`); the lazy/Fiber-backed `next`/`peek`
-  # surface is NOT modelled.
+  # straight through to `block`).
   def each(&block)
     return self unless block
     if @gen
@@ -52,6 +51,43 @@ class Enumerator
       end
     end
   end
+
+  # `next` / `peek` / `rewind` — external iteration. CRuby drives the
+  # source lazily through a Fiber; rubyrs has no lazy Enumerator (the
+  # generator form already runs eagerly), so on first use the whole
+  # enumeration is materialized into a buffer and walked with a cursor.
+  # Finite enumerators behave identically to CRuby (incl. StopIteration
+  # at the end, which `loop` rescues); an infinite generator would hang
+  # here — the same limitation as the eager generator form.
+  def next
+    __materialize
+    raise StopIteration, "iteration reached an end" if @cursor >= @buffer.length
+    value = @buffer[@cursor]
+    @cursor += 1
+    value
+  end
+
+  def peek
+    __materialize
+    raise StopIteration, "iteration reached an end" if @cursor >= @buffer.length
+    @buffer[@cursor]
+  end
+
+  # Restart external iteration. The buffer is dropped so the next
+  # `next`/`peek` re-drives the source from the beginning (matching
+  # CRuby, where rewind re-runs the enumeration).
+  def rewind
+    @buffer = nil
+    @cursor = 0
+    self
+  end
+
+  def __materialize
+    return if @buffer
+    @buffer = to_a
+    @cursor = 0
+  end
+  private :__materialize
 
   # `Enumerator::Yielder` — the object handed to a generator block. `<<`
   # and `yield` forward straight to the consumer's iteration block.
