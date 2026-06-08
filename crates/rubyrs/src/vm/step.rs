@@ -1548,7 +1548,29 @@ impl Vm {
                     {
                         let scope_id = self.interner.intern(scope_name);
                         if let Some(cref) = self.classes.get(&scope_id).cloned() {
-                            found = self.const_via_ancestors(&cref, bare_sym);
+                            if let Some((head, rest)) = bare_str.split_once("::") {
+                                // Multi-segment bare name (`Str::Double`):
+                                // the flat key `<ancestor>::Str::Double`
+                                // doesn't exist when `Str` is a const ALIAS
+                                // (`Str = Literal::String`). Resolve the
+                                // FIRST segment through the ancestor walk,
+                                // then the REST via `resolve_const_path` on
+                                // the resolved class — exactly what the
+                                // qualified `C::Str::Double` LoadConst path
+                                // does. (rouge's lexers do this: `include
+                                // Token::Tokens` then `Str::Double`, where
+                                // `Tokens::Str` aliases `Literal::String`.)
+                                let head_id = self.interner.intern(head);
+                                if let Some(Value::Class(head_cls)) =
+                                    self.const_via_ancestors(&cref, head_id)
+                                    && let crate::vm::dispatch::ConstPathOutcome::Found(v) =
+                                        self.resolve_const_path(&head_cls, rest, true)
+                                {
+                                    found = Some(v);
+                                }
+                            } else {
+                                found = self.const_via_ancestors(&cref, bare_sym);
+                            }
                         }
                     }
                 }

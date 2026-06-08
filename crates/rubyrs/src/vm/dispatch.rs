@@ -13071,6 +13071,17 @@ impl Vm {
         path: &str,
         split_on_double_colon: bool,
     ) -> ConstPathOutcome {
+        // When a path segment resolves to a constant whose VALUE is a
+        // Class (a const alias like `Str = Literal::String`), the
+        // continuation scope-name for the next segment must be that
+        // class's name — NOT empty — or `Str::Double` looks the next
+        // segment up under the wrong (stale) scope and misses.
+        fn const_scope_name(v: &Value) -> String {
+            match v {
+                Value::Class(c) => c.effective_name().unwrap_or_default(),
+                _ => String::new(),
+            }
+        }
         let (mut scope_name, segments): (String, Vec<&str>) =
             if split_on_double_colon && path.starts_with("::") {
                 // Leading `::` rebases to Object's toplevel scope.
@@ -13210,7 +13221,7 @@ impl Vm {
                 if let Some(c) = self.classes.get(&qid).cloned() {
                     hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
                 } else if let Some(v) = self.constants.get(&qid).cloned() {
-                    hit = Some((v, String::new()));
+                    hit = Some((v.clone(), const_scope_name(&v)));
                 }
             }
             // Inheritance-chain fallback: only for the first
@@ -13227,7 +13238,7 @@ impl Vm {
                         hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
                         break;
                     } else if let Some(v) = self.constants.get(&chain_qid).cloned() {
-                        hit = Some((v, String::new()));
+                        hit = Some((v.clone(), const_scope_name(&v)));
                         break;
                     }
                 }
@@ -13239,7 +13250,7 @@ impl Vm {
                     if let Some(c) = self.classes.get(&tl_qid).cloned() {
                         hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
                     } else if let Some(v) = self.constants.get(&tl_qid).cloned() {
-                        hit = Some((v, String::new()));
+                        hit = Some((v.clone(), const_scope_name(&v)));
                     }
                 }
             }
@@ -13272,7 +13283,7 @@ impl Vm {
                             if let Some(c) = self.classes.get(&lookup_id).cloned() {
                                 hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
                             } else if let Some(v) = self.constants.get(&lookup_id).cloned() {
-                                hit = Some((v, String::new()));
+                                hit = Some((v.clone(), const_scope_name(&v)));
                             }
                             // require ran but didn't define `lookup`
                             // → fall through to Missing below.

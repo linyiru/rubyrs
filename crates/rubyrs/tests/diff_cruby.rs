@@ -672,3 +672,4 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "stdlib")]
 #[test] fn file_join_to_path() { run_diff("file_join_to_path"); }
 #[test] fn alias_primitive_snapshot() { run_diff("alias_primitive_snapshot"); }
+#[test] fn include_const_alias_nested() { run_diff("include_const_alias_nested"); }
