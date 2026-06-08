@@ -18,14 +18,16 @@ class Enumerator
   include Enumerable
 
   # Two construction forms:
-  #   - `Enumerator.new { |y| y << 1; y.yield(a, b) }` — generator/yielder
-  #     block (the optional leading `size` arg is accepted and ignored).
+  #   - `Enumerator.new(size = nil) { |y| y << 1; y.yield(a, b) }` —
+  #     generator/yielder block; the optional leading arg is the declared
+  #     `size` (returned by #size; nil when not given).
   #   - `Enumerator.new(obj, meth, args)` — the `enum_for` form (`args`
   #     is the already-collected Array, passed not splatted to avoid
   #     local-splat). Distinguished by whether a block was given.
   def initialize(obj = nil, meth = :each, args = [], &block)
     if block
       @gen = block
+      @size = obj # the optional leading `size` arg (nil if absent)
     else
       @obj = obj
       @meth = meth
@@ -50,6 +52,17 @@ class Enumerator
       else        @obj.__send__(@meth, @args[0], @args[1], @args[2], &block)
       end
     end
+  end
+
+  # `size` — the number of elements without iterating, or nil if not
+  # known. The generator form reports the size declared at construction
+  # (`Enumerator.new(n) { }`), nil otherwise. The enum_for form has no
+  # declared size, so it counts via `to_a` — exact for the finite
+  # collections rubyrs enumerates (each/map/select/each_slice all match
+  # CRuby's result), at the cost of one materialization.
+  def size
+    return @size if @gen
+    to_a.size
   end
 
   # `next` / `peek` / `rewind` — external iteration. CRuby drives the
