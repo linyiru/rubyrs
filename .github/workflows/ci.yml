@@ -669,7 +669,11 @@ jobs:
           # — adds `.expect("ICE: failed to load File preamble")`
           # alongside the other per-preamble expects. Same
           # unrecoverable-preamble-eval invariant.
-          check crates/rubyrs/src/lib.rs       19
+          # Bumped 19 → 20 by the Enumerator veneer
+          # (preamble/enumerator.rb) — one more
+          # `.expect("ICE: failed to load Enumerator preamble")`, same
+          # unrecoverable-preamble-eval invariant as the siblings.
+          check crates/rubyrs/src/lib.rs       20
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
           # never went down, just up here. See docs/PANIC_AUDIT.md.

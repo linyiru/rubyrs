@@ -48,6 +48,38 @@ class Thread
   def self.object_id
     1
   end
+  # `Thread.current` IS the Thread class in the single-threaded model,
+  # so `Thread.current[:k]` lands here; one process-global store is the
+  # correct semantics when there is exactly one thread/fiber.
+  #
+  # CRuby keeps `#[]`/`#[]=` (FIBER-local) and
+  # `#thread_variable_get`/`set` (THREAD-local) in SEPARATE stores, so
+  # they must not alias. (rouge's `Formatter.escape_enabled?` reads
+  # `Thread.current[:'rouge/with-escape']`, the fiber-local form.)
+  def self.[](key)
+    @fiber_locals ||= {}
+    @fiber_locals[key]
+  end
+  def self.[]=(key, val)
+    @fiber_locals ||= {}
+    @fiber_locals[key] = val
+  end
+  def self.key?(key)
+    @fiber_locals ||= {}
+    @fiber_locals.key?(key)
+  end
+  def self.thread_variable_get(key)
+    @thread_vars ||= {}
+    @thread_vars[key]
+  end
+  def self.thread_variable_set(key, val)
+    @thread_vars ||= {}
+    @thread_vars[key] = val
+  end
+  def self.thread_variable?(key)
+    @thread_vars ||= {}
+    @thread_vars.key?(key)
+  end
 end
 
 # ConditionVariable — single-threaded no-op companion to Mutex.

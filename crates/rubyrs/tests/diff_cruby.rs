@@ -674,3 +674,4 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn alias_primitive_snapshot() { run_diff("alias_primitive_snapshot"); }
 #[test] fn include_const_alias_nested() { run_diff("include_const_alias_nested"); }
 #[test] fn enum_for_basic() { run_diff("enum_for_basic"); }
+#[test] fn thread_current_locals() { run_diff("thread_current_locals"); }
