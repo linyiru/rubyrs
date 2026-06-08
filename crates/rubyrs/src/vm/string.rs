@@ -2291,7 +2291,6 @@ impl Vm {
                     // FULL match is dropped and only captures
                     // appear; without groups the full match is
                     // the element.
-                    #[cfg(feature = "regex")]
                     // `sub`/`gsub` with a Hash replacement: each match
                     // is looked up (as a String) in the hash and replaced
                     // with the mapped value (`to_s`), or "" when the key
@@ -2359,6 +2358,7 @@ impl Vm {
                         };
                         Some(Value::new_str(out))
                     }
+                    #[cfg(feature = "regex")]
                     ("scan", [Value::Regex(re)]) => {
                         // Layer #17: scan (no-block form) not
                         // yet dual-engine; trap on fancy.
