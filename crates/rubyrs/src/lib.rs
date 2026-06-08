@@ -2091,6 +2091,14 @@ impl Runtime {
             "<rubyrs:preamble:object>",
         )
             .expect("ICE: failed to load Object preamble");
+        // Float class constants (Float::INFINITY / NAN / MAX / ...).
+        // Loaded right after Object so the constants resolve everywhere,
+        // including in later preambles (e.g. an infinite-range bound).
+        self.eval_inner(
+            include_str!("preamble/float.rb"),
+            "<rubyrs:preamble:float>",
+        )
+            .expect("ICE: failed to load Float preamble");
         // Synthesise builtin Method records on Kernel for the
         // inline-handled primitives (`class`, `nil?`, `respond_to?`,
         // ...). The records carry real arity / parameters /

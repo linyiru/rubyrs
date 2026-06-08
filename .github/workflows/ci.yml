@@ -673,7 +673,11 @@ jobs:
           # (preamble/enumerator.rb) — one more
           # `.expect("ICE: failed to load Enumerator preamble")`, same
           # unrecoverable-preamble-eval invariant as the siblings.
-          check crates/rubyrs/src/lib.rs       20
+          # Bumped 20 → 21 by the Float constants veneer
+          # (preamble/float.rb, Float::INFINITY / NAN / ...) — one more
+          # `.expect("ICE: failed to load Float preamble")`, same
+          # unrecoverable-preamble-eval invariant as the siblings.
+          check crates/rubyrs/src/lib.rs       21
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
           # never went down, just up here. See docs/PANIC_AUDIT.md.
