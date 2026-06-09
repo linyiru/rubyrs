@@ -950,6 +950,51 @@ impl Vm {
             // Used by msgpack/bigint.rb's `from_msgpack_ext` to
             // accumulate the limb chunks back into a single integer
             // (LSB-first storage; reverse_each visits MSB-first).
+            // `arr.cycle { |v| … }` repeats the elements forever (until
+            // break / return / a throw from an enclosing `first`/`take`);
+            // `arr.cycle(n) { … }` repeats n times; n<=0 or empty array
+            // yields nothing. Returns the break value or nil. `?` on
+            // step_block propagates the throw that `Enumerator#first`
+            // uses to stop an otherwise-infinite drive.
+            (Value::Array(id), "cycle", []) | (Value::Array(id), "cycle", [Value::Nil]) => {
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                if !snapshot.is_empty() {
+                    'cyc: loop {
+                        for v in &snapshot {
+                            match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
+                                BlockStep::MethodReturn => break 'cyc,
+                                BlockStep::Break(r) => { early = Some(r); break 'cyc; }
+                                BlockStep::Value(_) => {}
+                            }
+                        }
+                    }
+                }
+                Some(early.unwrap_or(Value::Nil))
+            }
+            (Value::Array(id), "cycle", [Value::Int(n)]) => {
+                let count = *n;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                'cyc: for _ in 0..count.max(0) {
+                    for v in &snapshot {
+                        match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
+                            BlockStep::MethodReturn => break 'cyc,
+                            BlockStep::Break(r) => { early = Some(r); break 'cyc; }
+                            BlockStep::Value(_) => {}
+                        }
+                    }
+                }
+                Some(early.unwrap_or(Value::Nil))
+            }
             (Value::Array(id), "reverse_each", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));

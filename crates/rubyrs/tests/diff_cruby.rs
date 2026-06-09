@@ -381,6 +381,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn float_format() { run_diff("float_format"); }
 // Float#floor(n)/#ceil(n) with ndigits + Float#divmod.
 #[test] fn float_floor_ceil_divmod() { run_diff("float_floor_ceil_divmod"); }
+// Array#cycle: block form (n/∞) + no-block Enumerator (first/take).
+#[test] fn array_cycle() { run_diff("array_cycle"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }

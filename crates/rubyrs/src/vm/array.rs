@@ -118,6 +118,14 @@ impl Vm {
                     ("each" | "each_with_index" | "each_index", []) => {
                         return self.make_enum_for(Value::Array(id), name, vec![]).map(Some);
                     }
+                    // No-block `cycle` / `cycle(n)` / `cycle(nil)` →
+                    // Enumerator (`arr.cycle.first(7)`). When driven with
+                    // a block the block-form (iter.rs) re-runs; `first(n)`
+                    // / `take(n)` short-circuit the otherwise-infinite
+                    // walk via the Enumerator's catch/throw.
+                    ("cycle", []) | ("cycle", [Value::Int(_)]) | ("cycle", [Value::Nil]) => {
+                        return self.make_enum_for(Value::Array(id), name, args.to_vec()).map(Some);
+                    }
                     // The transform / filter Enumerable family returns an
                     // Enumerator when called with no block (CRuby `enum.c`):
                     // `arr.map`, `arr.select.with_index { }`, etc. The
