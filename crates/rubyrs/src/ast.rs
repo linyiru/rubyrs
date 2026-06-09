@@ -4060,11 +4060,13 @@ mod tests {
 
     #[test]
     fn ast_errors_collected_for_unsupported_node() {
-        // `BEGIN { ... }` (pre-execution block) is outside the
-        // subset. The translator should collect a message instead
-        // of panicking.
-        let (_, errs) = translate("BEGIN { puts 1 }");
-        assert!(!errs.is_empty(), "BEGIN should produce AST errors");
+        // `case x; in pat; end` (pattern matching, CaseMatchNode) is
+        // outside the subset. The translator should collect a message
+        // instead of panicking. (Canary moved off `BEGIN { }` once that
+        // gained support — keep this pointed at a still-unsupported
+        // node; pattern matching is the most durable choice.)
+        let (_, errs) = translate("case 1; in 2; end");
+        assert!(!errs.is_empty(), "case/in should produce AST errors");
         assert!(
             errs.iter().any(|e| e.contains("unsupported")),
             "expected 'unsupported' wording, got: {errs:?}"
@@ -4075,7 +4077,7 @@ mod tests {
     fn ast_errors_buffer_resets_between_calls() {
         // First call has unsupported nodes — leaves errors in the
         // buffer (which tr_with_errors drains on the way out).
-        let (_, e1) = translate("BEGIN { puts 1 }");
+        let (_, e1) = translate("case 1; in 2; end");
         assert!(!e1.is_empty());
         // Second call on supported source must see an empty buffer
         // — proves drain works.
