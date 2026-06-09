@@ -755,6 +755,32 @@ impl Vm {
             }
             return Ok(Some(early.unwrap_or_else(|| recv.clone())));
         }
+        // `s.each_line { |line| ... }` / `each_line(sep) { ... }` —
+        // yield each line (separator kept), returns the receiver.
+        if let Value::Str(s) = recv
+            && name == "each_line"
+            && matches!(args, [] | [Value::Str(_)])
+        {
+            let src = s.to_string_lossy();
+            let sep = match args.first() {
+                Some(Value::Str(sp)) => sp.to_string_lossy(),
+                _ => "\n".to_string(),
+            };
+            let lines = crate::vm::string::split_lines_keep_sep(&src, &sep);
+            let mut g = PinGuard::new(self);
+            g.pin(recv.clone());
+            g.pin(Value::Block(block));
+            let pre_frames = g.vm.frames.len();
+            let mut early: Option<Value> = None;
+            for line in lines {
+                match g.vm.step_block(block, vec![Value::new_str(line)], pre_frames)? {
+                    BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                    BlockStep::Break(r) => { early = Some(r); break; }
+                    BlockStep::Value(_) => {}
+                }
+            }
+            return Ok(Some(early.unwrap_or_else(|| recv.clone())));
+        }
         // `s.scan(/pat/) { |m| ... }` / `s.scan(string) { |m| ... }`
         // — yield each match to the block (capture-group Array if
         // the regex has groups, the matched substring otherwise).

@@ -42,6 +42,29 @@ fn strip_ws_or_nul(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\x0B' | '\x0C' | '\r' | '\0')
 }
 
+/// `String#lines` / `#each_line` splitting: break `src` at each `sep`,
+/// KEEPING the separator on the end of every piece — `"a\nb\nc".lines`
+/// → `["a\n", "b\n", "c"]`. A trailing separator yields no empty tail
+/// piece (`"a\n".lines` → `["a\n"]`); an empty string yields `[]`.
+/// An empty separator (CRuby paragraph mode is out of scope) returns
+/// the whole string as a single piece.
+pub(crate) fn split_lines_keep_sep(src: &str, sep: &str) -> Vec<String> {
+    if sep.is_empty() {
+        return if src.is_empty() { Vec::new() } else { vec![src.to_string()] };
+    }
+    let mut out = Vec::new();
+    let mut rest = src;
+    while let Some(pos) = rest.find(sep) {
+        let end = pos + sep.len();
+        out.push(rest[..end].to_string());
+        rest = &rest[end..];
+    }
+    if !rest.is_empty() {
+        out.push(rest.to_string());
+    }
+    out
+}
+
 /// `String#chomp` (no arg) — strip exactly one trailing record
 /// separator. CRuby tries `\r\n` first (so the EOL pair is
 /// removed atomically), then bare `\n`, then bare `\r`.
@@ -2140,6 +2163,30 @@ impl Vm {
                             .filter(|c| setref.contains(c) == negated)
                             .collect();
                         Some(Value::new_str(out))
+                    }
+                    ("lines", []) | ("lines", [Value::Str(_)]) => {
+                        // `String#lines` — split into lines KEEPING the
+                        // separator ("\n" by default). `text.lines`.
+                        let src = s.to_string_lossy();
+                        let sep = match args.first() {
+                            Some(Value::Str(sp)) => sp.to_string_lossy(),
+                            _ => "\n".to_string(),
+                        };
+                        let elems: Vec<Value> = split_lines_keep_sep(&src, &sep)
+                            .into_iter()
+                            .map(Value::new_str)
+                            .collect();
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(id))
+                    }
+                    ("each_line", []) | ("each_line", [Value::Str(_)]) => {
+                        // No-block `each_line` → Enumerator (`s.each_line
+                        // .to_a` == `s.lines`); the block form lives in
+                        // collection_call_block (iter.rs).
+                        return self
+                            .make_enum_for(Value::Str(s.clone()), "each_line", args.to_vec())
+                            .map(Some);
                     }
                     ("split", []) => {
                         // No-arg `split` matches CRuby's `split(nil)`:

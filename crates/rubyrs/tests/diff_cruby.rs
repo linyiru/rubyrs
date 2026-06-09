@@ -385,6 +385,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn array_cycle() { run_diff("array_cycle"); }
 // Array#rotate / #rotate(n) / #rotate! — left-rotate, wraps mod len.
 #[test] fn array_rotate() { run_diff("array_rotate"); }
+// String#lines / #each_line — split keeping the separator.
+#[test] fn string_lines() { run_diff("string_lines"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }
