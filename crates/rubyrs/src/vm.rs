@@ -1002,6 +1002,12 @@ pub(crate) struct Vm {
     /// recursing into a Rust stack overflow. LIFO matches the recursion;
     /// pushed before descending into an element, popped after.
     pub(crate) inspect_stack: Vec<ObjId>,
+    /// Lazily-filled per-builtin-type `Rc<Class>` cache for `class_of`
+    /// (Integer/Float/String/… — index map lives there). Reopens reuse
+    /// the same Rc (DefClass `entry().or_insert_with`), so a cached
+    /// entry never goes stale; only hits are cached, so calls before
+    /// the preamble defines a class stay correct.
+    pub(crate) builtin_class_cache: [Option<Rc<Class>>; 17],
     /// Hit/miss counters for the per-call-site IC. ZST + no-op
     /// when the `ic-stats` cargo feature is off; readable via
     /// `Runtime::ic_stats()` when on.
@@ -1379,6 +1385,7 @@ impl Vm {
             sym_size,
             sym_bang,
             inspect_stack: Vec::new(),
+            builtin_class_cache: Default::default(),
             sym_to_s,
             sym_inspect,
             ic_stats: IcStats::new(),

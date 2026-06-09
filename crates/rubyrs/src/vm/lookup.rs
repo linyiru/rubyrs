@@ -972,36 +972,56 @@ impl Vm {
             && let Some(c) = self.heap.hash_class_tag(*id) {
             return Value::Class(c);
         }
-        let name: &'static str = match recv {
-            Value::Int(_) => "Integer",
+        // Builtin receivers resolve through a per-type Rc<Class> cache
+        // (`builtin_class_cache`) instead of interning the class-name
+        // string on EVERY call — this sits on the dispatch hot path
+        // (sampled at ~2-3% self via Interner::intern in the
+        // rouge/kramdown loops). Safe to cache: class REOPENS reuse the
+        // same Rc (`Op::DefClass` goes through `entry().or_insert_with`),
+        // and `5.class` is the class OBJECT — constant reassignment
+        // doesn't change it (CRuby semantics). The cache fills lazily
+        // (the classes are preamble-defined after Vm::new) and only
+        // caches a hit, so pre-preamble calls stay correct.
+        let idx: usize = match recv {
+            Value::Int(_) => 0,
             #[cfg(feature = "bignum")]
-            Value::BigInt(_) => "Integer", // unified with Fixnum since CRuby 2.4
-            Value::Float(_) => "Float",
-            Value::Str(_) => "String",
-            Value::Sym(_) => "Symbol",
-            Value::Array(_) => "Array",
-            Value::Hash(_) => "Hash",
-            Value::Range(_) => "Range",
-            Value::Bool(true) => "TrueClass",
-            Value::Bool(false) => "FalseClass",
-            Value::Nil => "NilClass",
-            Value::Block(_) => "Proc",
-            Value::Class(c) => if c.is_module { "Module" } else { "Class" },
+            Value::BigInt(_) => 0, // unified with Fixnum since CRuby 2.4
+            Value::Float(_) => 1,
+            Value::Str(_) => 2,
+            Value::Sym(_) => 3,
+            Value::Array(_) => 4,
+            Value::Hash(_) => 5,
+            Value::Range(_) => 6,
+            Value::Bool(true) => 7,
+            Value::Bool(false) => 8,
+            Value::Nil => 9,
+            Value::Block(_) | Value::CurriedProc(_) => 10,
+            Value::Class(c) => if c.is_module { 11 } else { 12 },
             #[cfg(feature = "regex")]
-            Value::Regex(_) => "Regexp",
-            Value::BoundMethod(_) => "Method",
-            Value::UnboundMethod(_) => "UnboundMethod",
-            Value::CurriedProc(_) => "Proc",
-            Value::Rational(_) => "Rational",
+            Value::Regex(_) => 13,
+            Value::BoundMethod(_) => 14,
+            Value::UnboundMethod(_) => 15,
+            Value::Rational(_) => 16,
             // `Object#class` script call: CRuby reports the
             // user-declared class, not the eigenclass. Use
             // `real_class_of` so a `def obj.foo` installation
             // doesn't change what `obj.class` returns.
             Value::Object(id) => return Value::Class(self.heap.real_class_of(*id)),
         };
-        let sym = self.interner.intern(name);
+        if let Some(c) = &self.builtin_class_cache[idx] {
+            return Value::Class(c.clone());
+        }
+        const NAMES: [&str; 17] = [
+            "Integer", "Float", "String", "Symbol", "Array", "Hash", "Range",
+            "TrueClass", "FalseClass", "NilClass", "Proc", "Module", "Class",
+            "Regexp", "Method", "UnboundMethod", "Rational",
+        ];
+        let sym = self.interner.intern(NAMES[idx]);
         match self.classes.get(&sym) {
-            Some(c) => Value::Class(c.clone()),
+            Some(c) => {
+                self.builtin_class_cache[idx] = Some(c.clone());
+                Value::Class(c.clone())
+            }
             None => Value::Nil,
         }
     }
