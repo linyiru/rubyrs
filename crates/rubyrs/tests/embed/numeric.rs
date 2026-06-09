@@ -3671,7 +3671,7 @@ fn numeric_coerce_basic() {
         ("puts (2**64).coerce(2**70).inspect",      "[1180591620717411303424, 18446744073709551616]"),
         // BigInt × Float — promote both to Float.
         #[cfg(feature = "bignum")]
-        ("puts (2**64).coerce(2.5).inspect",        "[2.5, 1.8446744073709552e19]"),
+        ("puts (2**64).coerce(2.5).inspect",        "[2.5, 1.8446744073709552e+19]"),
         // Over-magnitude BigInt × Float — `bigint_to_f64_sign_preserving`
         // saturates to ±Infinity with the original BigInt's sign.
         // Pinned here at the user boundary so a future num-bigint
