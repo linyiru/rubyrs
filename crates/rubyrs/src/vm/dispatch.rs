@@ -5111,6 +5111,21 @@ impl Vm {
                     return Ok(());
                 }
             }
+            // Toplevel `self` is `Value::Nil` in rubyrs; a bare call not
+            // in the toplevel-`def` table (checked above) must still walk
+            // self's ancestry — NilClass → Object → Kernel — so a method
+            // added by reopening `module Kernel` (CRuby's main includes
+            // Kernel) resolves implicitly. Without this, `kmeth("x")`
+            // raised "undefined method for NilClass" even though
+            // `self.kmeth("x")` (explicit Nil receiver, same ancestry)
+            // worked. This is what installs the `Kernel#BigDecimal()`
+            // conversion function on require.
+            if matches!(&self_val, Value::Nil)
+                && let Value::Class(cls) = self.class_of(&self_val)
+                && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
+                self.invoke_method(m, self_val.clone(), args.into_vec())?;
+                return Ok(());
+            }
             // `self` is a Class — inside a class singleton method
             // body (`def self.foo; bar; end` or `class << self; def
             // foo; bar; end; end`), a bare call to `bar` should
@@ -5129,6 +5144,21 @@ impl Vm {
             // identically.
             if let Value::Class(c) = &self_val
                 && let Some(m) = self.lookup_class_singleton_method(c, name_id) {
+                self.invoke_method(m, self_val.clone(), args.into_vec())?;
+                return Ok(());
+            }
+            // Kernel private methods are implicit-self callable from ANY
+            // self — every object's ancestry includes Kernel (via
+            // Object). The arms above resolve self's own class /
+            // singleton methods first; this fallback covers a Kernel
+            // method called bare from a context the specific arms miss —
+            // notably a class-method body / module function (self = a
+            // Class), e.g. liquid's `def self.to_number; BigDecimal(...);
+            // end`, and user `module Kernel; def Foo; end` conversion
+            // functions.
+            if let Some(ksym) = self.kernel_class_sym
+                && let Some(kernel) = self.classes.get(&ksym).cloned()
+                && let Some(m) = self.lookup_method_cached(&kernel, name_id, cache_id) {
                 self.invoke_method(m, self_val.clone(), args.into_vec())?;
                 return Ok(());
             }
