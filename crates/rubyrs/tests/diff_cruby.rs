@@ -426,6 +426,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn method_operator_arity() { run_diff("method_operator_arity"); }
 // sprintf `*` argument-driven width / precision.
 #[test] fn sprintf_star_width() { run_diff("sprintf_star_width"); }
+// Enumerator::Lazy#zip.
+#[test] fn lazy_zip() { run_diff("lazy_zip"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }

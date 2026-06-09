@@ -164,6 +164,12 @@ class Enumerator
     def take(n); __chain([:take, n]); end
     def drop(n); __chain([:drop, n]); end
     def with_index(offset = 0); __chain([:with_index, offset]); end
+    # `lazy.zip(*others)` — pair each element with the same-index
+    # element of the others (nil past their ends). Tier-1: the others
+    # are materialised via to_a at CHAIN-BUILD time, so zipping an
+    # INFINITE enumerable as an argument is out of scope (the lazy
+    # SOURCE may still be infinite — `(1..).lazy.zip(arr).first(3)`).
+    def zip(*others); __chain([:zip, others.map { |o| o.to_a }]); end
 
     def __lazy_one(x)
       x.length == 1 ? x[0] : x
@@ -182,7 +188,7 @@ class Enumerator
     def __drive(consumer)
       @drive_state = @ops.map do |op|
         case op[0]
-        when :take, :drop then 0
+        when :take, :drop, :zip then 0
         when :with_index then op[1]
         when :drop_while then true
         else nil
@@ -247,6 +253,11 @@ class Enumerator
       when :with_index
         __run([value, @drive_state[i]], i + 1, consumer)
         @drive_state[i] += 1
+      when :zip
+        row = [value]
+        op[1].each { |arr| row << arr[@drive_state[i]] }
+        @drive_state[i] += 1
+        __run(row, i + 1, consumer)
       end
     end
     private :__run
