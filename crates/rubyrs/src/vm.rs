@@ -991,6 +991,11 @@ pub(crate) struct Vm {
     pub(crate) sym_size: SymId,
     pub(crate) sym_to_s: SymId,
     pub(crate) sym_inspect: SymId,
+    /// Pre-interned `$!` — read/written on every `begin/rescue` entry &
+    /// exit (and `return` out of a rescue body) for the dynamically
+    /// scoped errinfo, hot paths in exception-heavy code like Liquid
+    /// rendering. Cached so those sites skip re-interning the literal.
+    pub(crate) sym_bang: SymId,
     /// Hit/miss counters for the per-call-site IC. ZST + no-op
     /// when the `ic-stats` cargo feature is off; readable via
     /// `Runtime::ic_stats()` when on.
@@ -1267,6 +1272,7 @@ impl Vm {
         let sym_size = interner.intern("size");
         let sym_to_s = interner.intern("to_s");
         let sym_inspect = interner.intern("inspect");
+        let sym_bang = interner.intern("$!");
         Vm {
             protos,
             interner,
@@ -1365,6 +1371,7 @@ impl Vm {
             method_gen: 0,
             sym_length,
             sym_size,
+            sym_bang,
             sym_to_s,
             sym_inspect,
             ic_stats: IcStats::new(),

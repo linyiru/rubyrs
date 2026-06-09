@@ -291,8 +291,7 @@ impl Vm {
                 // dynamically scoped like CRuby's errinfo: nested
                 // rescues see the right value and a handled exception
                 // stops leaking past its begin region.
-                let bang_sym = self.interner.intern("$!");
-                self.globals.insert(bang_sym, exc);
+                self.globals.insert(self.sym_bang, exc);
                 return Ok(());
             }
             // No matching handler in this frame — pop it and try the caller.

@@ -1309,8 +1309,7 @@ impl Vm {
                         // No-args: consult `$!`. If it's an
                         // Object with a class + message, format
                         // CRuby-style. If nil, no message.
-                        let bang_sym = self.interner.intern("$!");
-                        match self.globals.get(&bang_sym).cloned() {
+                        match self.globals.get(&self.sym_bang).cloned() {
                             Some(Value::Object(id)) => {
                                 let cls_name = self.heap.real_class_of(id).name.clone();
                                 let msg_sym = self.interner.intern("@message");

@@ -3491,9 +3491,8 @@ impl Vm {
                 // rescue body) can revert it — CRuby's errinfo is
                 // dynamically scoped to the rescue/ensure body, not the
                 // whole program. (See `BeginBaseline::saved_dollar_bang`.)
-                let bang = self.interner.intern("$!");
                 let saved_dollar_bang =
-                    self.globals.get(&bang).cloned().unwrap_or(Value::Nil);
+                    self.globals.get(&self.sym_bang).cloned().unwrap_or(Value::Nil);
                 let f = self.frames.last_mut().expect("ICE: EnterBegin no frame");
                 let baseline = crate::vm::BeginBaseline {
                     rescues_len: f.rescues.len(),
@@ -3515,8 +3514,7 @@ impl Vm {
                 // region's rescue/ensure body has completed. A handled
                 // exception is no longer "in flight", so a subsequent
                 // bare `raise` must not resurface it.
-                let bang = self.interner.intern("$!");
-                self.globals.insert(bang, baseline.saved_dollar_bang);
+                self.globals.insert(self.sym_bang, baseline.saved_dollar_bang);
             }
             Op::TruncateRescuesToBeginBaseline => {
                 let f = self.frames.last_mut().expect("ICE: TruncateRescues no frame");
@@ -3562,8 +3560,7 @@ impl Vm {
                 // context behaviour. (The ensure-rethrow path pushes a
                 // real exception object, never nil, so it is unaffected.)
                 if matches!(v, Value::Nil) {
-                    let bang = self.interner.intern("$!");
-                    match self.globals.get(&bang).cloned() {
+                    match self.globals.get(&self.sym_bang).cloned() {
                         Some(cur) if !matches!(cur, Value::Nil) => v = cur,
                         _ => v = Value::new_str("unhandled exception".to_string()),
                     }
@@ -3837,8 +3834,7 @@ impl Vm {
                 if let Some(saved) =
                     f.begin_rescue_depths.first().map(|b| b.saved_dollar_bang.clone())
                 {
-                    let bang = self.interner.intern("$!");
-                    self.globals.insert(bang, saved);
+                    self.globals.insert(self.sym_bang, saved);
                 }
                 // Per-invocation block-locals model: writes to
                 // outer-scope slots (slot < block.param_start)

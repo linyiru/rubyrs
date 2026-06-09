@@ -198,7 +198,16 @@ crates/rubyrs/tests/fixtures/fizzbuzz.rb	8200	0	tiny script; wall is sub-100ms n
 # each row to ~7-10% above observed peak, leave the ratchet
 # defending future bumps. Bumps recorded per row at the
 # row-specific comment below.
-crates/rubyrs/examples/metaprog_bench/mm_bench.rb	8200	1400	2M method_missing dispatch
+# mm_bench WALL bumped 1400 → 1550 on 2026-06-09 — observed CI
+# 1430 ms (cap 1400; +2.1%) after the `$!` dynamic-scope fix
+# (commit 3134717c). Op::Return now does a `begin_rescue_depths`
+# emptiness check on every method return to revert errinfo on a
+# `return` out of a rescue body; mm_bench pops 2M frames, so the
+# per-frame branch accumulates — same tiny-cost-×-2M-frames pattern
+# as the 2026-06-04 / -06-05 bumps above. Within the documented
+# 20-30% wall noise floor; bump to ~8% over observed peak, leave
+# the ratchet defending future regressions.
+crates/rubyrs/examples/metaprog_bench/mm_bench.rb	8200	1550	2M method_missing dispatch
 # dm_bench RSS bumped 6500 → 6700 on 2026-05-27 — the
 # define_method dispatch benchmark crossed 6500 KB at PR #175
 # (ic-stats baseline workloads added) + PR #178 (step-block
