@@ -417,6 +417,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn bool_nil_logical_ops() { run_diff("bool_nil_logical_ops"); }
 // String#tr_s (squeeze translated runs) + #sum (byte checksum).
 #[test] fn string_tr_s_sum() { run_diff("string_tr_s_sum"); }
+// Struct#values_at + #dig.
+#[test] fn struct_values_at_dig() { run_diff("struct_values_at_dig"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }

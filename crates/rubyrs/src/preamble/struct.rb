@@ -104,6 +104,24 @@ class Struct
       name = key.is_a?(Integer) ? members[key] : key
       instance_variable_set("@#{name}".to_sym, val)
     end
+    cls.define_method(:values_at) do |*idxs|
+      # Int indices (negative from end) and Ranges, like Array#values_at.
+      vals = to_a
+      out = []
+      idxs.each do |ix|
+        if ix.is_a?(Range)
+          sub = vals[ix]
+          out.concat(sub) if sub
+        else
+          out << vals[ix]
+        end
+      end
+      out
+    end
+    cls.define_method(:dig) do |key, *rest|
+      v = self[key]
+      rest.empty? || v.nil? ? v : v.dig(*rest)
+    end
     cls.define_method(:==) do |other|
       # CRuby's `Struct#==` requires EXACT class match (`==`),
       # not `is_a?` — otherwise `parent_struct == child_struct`
