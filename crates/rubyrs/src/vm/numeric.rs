@@ -1219,7 +1219,7 @@ pub(crate) fn numeric_call(
         // `Float::NAN.round(0)` didn't). The positive-precision
         // branch returns a Float and propagates NaN/Inf cleanly,
         // matching CRuby — so we only trap n <= 0.
-        (Value::Float(a), "round" | "truncate", [Value::Int(n)])
+        (Value::Float(a), "round" | "truncate" | "floor" | "ceil", [Value::Int(n)])
             if *n <= 0 && (a.is_nan() || a.is_infinite()) =>
         {
             return Err(RubyError::FloatDomainError {
@@ -1238,7 +1238,7 @@ pub(crate) fn numeric_call(
         // immaterial — NaN / ±Infinity have no representable
         // Integer at any precision, so trap unconditionally.
         #[cfg(feature = "bignum")]
-        (Value::Float(a), "round" | "truncate", [Value::BigInt(_)])
+        (Value::Float(a), "round" | "truncate" | "floor" | "ceil", [Value::BigInt(_)])
             if a.is_nan() || a.is_infinite() =>
         {
             return Err(RubyError::FloatDomainError {
@@ -1265,6 +1265,32 @@ pub(crate) fn numeric_call(
             } else {
                 let p = 10f64.powi((-*n).min(18) as i32);
                 Some(Value::Int(((a / p).trunc() * p) as i64))
+            }
+        }
+        // `Float#floor(ndigits)` / `#ceil(ndigits)` — n>0 keeps a Float
+        // rounded toward -∞ / +∞ at that decimal place; n==0 and n<0
+        // return an Integer (CRuby). Same naive scale-round-rescale as
+        // round(n)/truncate(n) above (matching their precision tier).
+        (Value::Float(a), "floor", [Value::Int(n)]) => {
+            if *n == 0 {
+                Some(Value::Int(a.floor() as i64))
+            } else if *n > 0 {
+                let p = 10f64.powi((*n).min(15) as i32);
+                Some(Value::Float((a * p).floor() / p))
+            } else {
+                let p = 10f64.powi((-*n).min(18) as i32);
+                Some(Value::Int(((a / p).floor() * p) as i64))
+            }
+        }
+        (Value::Float(a), "ceil", [Value::Int(n)]) => {
+            if *n == 0 {
+                Some(Value::Int(a.ceil() as i64))
+            } else if *n > 0 {
+                let p = 10f64.powi((*n).min(15) as i32);
+                Some(Value::Float((a * p).ceil() / p))
+            } else {
+                let p = 10f64.powi((-*n).min(18) as i32);
+                Some(Value::Int(((a / p).ceil() * p) as i64))
             }
         }
         // Mixed Int/Float — CRuby's "Float wins" coercion for

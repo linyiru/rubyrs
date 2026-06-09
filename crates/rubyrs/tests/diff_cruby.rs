@@ -379,6 +379,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn nested_inspect_cycle() { run_diff("nested_inspect_cycle"); }
 // Float#to_s/#inspect: CRuby dtoa fixed-vs-scientific notation.
 #[test] fn float_format() { run_diff("float_format"); }
+// Float#floor(n)/#ceil(n) with ndigits + Float#divmod.
+#[test] fn float_floor_ceil_divmod() { run_diff("float_floor_ceil_divmod"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }

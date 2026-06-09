@@ -651,7 +651,7 @@ impl Vm {
                 "zero?" | "positive?" | "negative?" |
                 "nan?" | "infinite?" | "finite?" |
                 "eql?" | "hash" |
-                "floor" | "ceil" | "round" | "truncate" |
+                "floor" | "ceil" | "round" | "truncate" | "divmod" |
                 "-@" | "+@" |
                 "to_r" | "rationalize" |
                 "coerce" |

@@ -8199,6 +8199,81 @@ impl Vm {
             self.stack.push(Value::Array(arr_id));
             return Ok(());
         }
+        // `Float#divmod(n)` — sibling to the Integer path above; lives
+        // here (not numeric.rs) because it allocates the `[q, r]` Array.
+        // q is the Integer-valued floor quotient, r the Float
+        // floored-remainder; NaN/±Infinity recv and NaN divisor raise
+        // FloatDomainError, zero divisor ZeroDivisionError (CRuby).
+        if let Value::Float(a) = &recv
+            && &*name == "divmod"
+        {
+            {
+                if args.len() != 1 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1)",
+                            args.len(),
+                        ),
+                    }));
+                }
+                let a = *a;
+                if a.is_nan() || a.is_infinite() {
+                    return Err(self.trap(RubyError::FloatDomainError {
+                        msg: crate::vm::numeric::float_domain_label(a).to_string(),
+                    }));
+                }
+                let b = match &args[0] {
+                    Value::Int(b) => *b as f64,
+                    Value::Float(b) => {
+                        if b.is_nan() {
+                            return Err(self.trap(RubyError::FloatDomainError {
+                                msg: "NaN".to_string(),
+                            }));
+                        }
+                        *b
+                    }
+                    #[cfg(feature = "bignum")]
+                    Value::BigInt(id) => {
+                        use num_traits::ToPrimitive;
+                        self.heap.bigint(*id).to_f64().unwrap_or(f64::NAN)
+                    }
+                    _ => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "{} can't be coerced into Float",
+                                crate::vm::numeric::type_name_for_coerce(&args[0]),
+                            ),
+                        }));
+                    }
+                };
+                if b == 0.0 {
+                    return Err(self.trap(RubyError::ZeroDivisionError {
+                        msg: "divided by 0".to_string(),
+                    }));
+                }
+                let q_f = (a / b).floor();
+                let r_f = crate::vm::numeric::floor_mod_f64(a, b);
+                let q = if q_f.is_finite()
+                    && q_f >= (i64::MIN as f64)
+                    && q_f < (i64::MAX as f64)
+                {
+                    Value::Int(q_f as i64)
+                } else {
+                    Value::Float(q_f)
+                };
+                let r = Value::Float(r_f);
+                let arr_id = {
+                    let mut g = PinGuard::new(self);
+                    g.pin(q.clone());
+                    g.pin(r.clone());
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    g.vm.heap.alloc(HeapObj::Array(vec![q, r]))
+                };
+                self.stack.push(Value::Array(arr_id));
+                return Ok(());
+            }
+        }
         // `Numeric#coerce(other)` — the Tier-2 Numeric protocol
         // entry point. Returns a 2-element Array `[other_promoted,
         // self_promoted]` so arithmetic operators on heterogeneous
