@@ -102,6 +102,11 @@ pub(crate) fn always_on_stub_extras(name: &str) -> Option<&'static str> {
         "jekyll-sass-converter" => {
             Some(include_str!("stdlib_vendor/jekyll_sass_converter_shim.rb"))
         }
+        // A Rational-backed BigDecimal + the Kernel#BigDecimal()
+        // conversion function. Always-on (not stdlib-gated) so default-
+        // build code that `require "bigdecimal"` — e.g. liquid's numeric
+        // filters via `Utils.to_number` — gets a working decimal type.
+        "bigdecimal" => Some(include_str!("stdlib_vendor/bigdecimal.rb")),
         _ => None,
     }
 }

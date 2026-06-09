@@ -695,6 +695,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "regex")]
 #[test] fn scan_fancy_regex() { run_diff("scan_fancy_regex"); }
 #[test] fn kernel_norecv_method() { run_diff("kernel_norecv_method"); }
+// BigDecimal's parity oracle needs CRuby's real bigdecimal (a bundled
+// gem `ruby --disable=gems` can't load), so use the gem-enabled oracle.
+#[cfg(feature = "stdlib")]
+#[test] fn bigdecimal_basic() { run_diff_gem("bigdecimal_basic", "bigdecimal"); }
 #[test] fn gsub_hash() { run_diff("gsub_hash"); }
 #[test] fn hash_delete_block() { run_diff("hash_delete_block"); }
 #[test] fn string_casecmp() { run_diff("string_casecmp"); }
