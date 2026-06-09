@@ -1356,6 +1356,39 @@ impl Vm {
         }
     }
 
+    /// Last-resort fallback for collection receivers: route a method NOT
+    /// handled by any native arm to the Enumerable MODULE's `each`-based
+    /// implementation, run with `recv` as self. Array / Hash / Range
+    /// DON'T `include Enumerable` in rubyrs's registry on purpose — their
+    /// iterators are native primitives that aren't in the method table,
+    /// so an `include Enumerable` would let `Enumerable#sort` (in the
+    /// table) SHADOW the native sort, and `Enumerable#sort`'s `to_a.sort`
+    /// would recurse forever. Routing here AFTER the native arms keeps
+    /// native precedence while still exposing the Enumerable methods
+    /// CRuby inherits but rubyrs has no primitive for (minmax / minmax_by
+    /// / each_entry / `min(n)` / `max(n)` / `sum`-with-block). Returns
+    /// `Ok(true)` when it dispatched (result on the stack).
+    pub(crate) fn try_enumerable_module_fallback(
+        &mut self,
+        recv: &Value,
+        name_id: SymId,
+        args: Vec<Value>,
+        block: Option<ObjId>,
+    ) -> Result<bool, Trap> {
+        if !matches!(recv, Value::Array(_) | Value::Hash(_) | Value::Range(_)) {
+            return Ok(false);
+        }
+        let enum_sym = self.interner.intern("Enumerable");
+        let Some(enum_mod) = self.classes.get(&enum_sym).cloned() else {
+            return Ok(false);
+        };
+        let Some(m) = self.lookup_method_uncached(&enum_mod, name_id) else {
+            return Ok(false);
+        };
+        self.invoke_method_with_block(m, recv.clone(), args, block)?;
+        Ok(true)
+    }
+
 
 
     /// Invoke a registered host fn (either v1 or v2 slot).
@@ -7289,6 +7322,15 @@ impl Vm {
             self.stack.push(v);
             return Ok(());
         }
+        // Collection receivers → Enumerable module for methods with no
+        // native arm (minmax / minmax_by / each_entry / `min(n)` /
+        // `max(n)`). AFTER primitive_call + collection_call so a native
+        // iterator (sort / map / min / max / sum) always wins — routing
+        // those to Enumerable would recurse (`Enumerable#sort` →
+        // `to_a.sort`).
+        if self.try_enumerable_module_fallback(&recv, name_id, args.to_vec(), None)? {
+            return Ok(());
+        }
         // `obj.methods` / `#public_methods` / `#private_methods` /
         // `#protected_methods` — receiver-side method introspection.
         // All four walk the same ancestor chain on Value::Object
@@ -12756,6 +12798,11 @@ impl Vm {
             && let Some(m) = self.lookup_method_uncached(&cls, name_id)
         {
             self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
+            return Ok(());
+        }
+        // Block-form collection → Enumerable module fallback (e.g.
+        // `array.sum { … }`). Same rationale as the no-block path.
+        if self.try_enumerable_module_fallback(&recv, name_id, args.clone(), Some(block))? {
             return Ok(());
         }
         if self.try_method_missing(&recv, name_id, args, Some(block))? {

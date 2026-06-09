@@ -354,6 +354,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn respond_to_missing() { run_diff("respond_to_missing"); }
 // `def name` evaluates to :name (enables `private def …` modifier idiom).
 #[test] fn def_returns_symbol() { run_diff("def_returns_symbol"); }
+// Array/Hash/Range reach Enumerable methods with no native arm.
+#[test] fn enumerable_fallback() { run_diff("enumerable_fallback"); }
 // Pattern matching: case/in, `=> pat`, `in pat`, deconstruct protocol.
 #[test] fn pattern_matching() { run_diff("pattern_matching"); }
 // Find patterns `[*pre, mâ¦, *post]`.

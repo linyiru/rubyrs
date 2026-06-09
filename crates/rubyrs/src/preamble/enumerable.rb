@@ -181,7 +181,11 @@ module Enumerable
     memo
   end
 
-  def min
+  def min(n = nil)
+    if n
+      sorted = block_given? ? sort { |a, b| yield(a, b) } : sort
+      return sorted.first(n)
+    end
     result = (none = true; nil)
     each do |*x|
       e = __enum_elem(x)
@@ -192,7 +196,11 @@ module Enumerable
     result
   end
 
-  def max
+  def max(n = nil)
+    if n
+      sorted = block_given? ? sort { |a, b| yield(a, b) } : sort
+      return sorted.reverse.first(n)
+    end
     result = (none = true; nil)
     each do |*x|
       e = __enum_elem(x)
@@ -201,6 +209,25 @@ module Enumerable
       elsif (e <=> result) > 0 then result = e end
     end
     result
+  end
+
+  def minmax
+    if block_given?
+      [min { |a, b| yield(a, b) }, max { |a, b| yield(a, b) }]
+    else
+      [min, max]
+    end
+  end
+
+  def minmax_by
+    return to_enum(:minmax_by) unless block_given?
+    [min_by { |e| yield(e) }, max_by { |e| yield(e) }]
+  end
+
+  def each_entry
+    return to_enum(:each_entry) unless block_given?
+    each { |*x| yield(__enum_elem(x)) }
+    self
   end
 
   def min_by
