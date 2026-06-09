@@ -344,6 +344,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn yield_kwargs() { run_diff("yield_kwargs"); }
 // Implicit block/lambda params: numbered `_1`/`_2` and Ruby 3.4 `it`.
 #[test] fn numbered_and_it_params() { run_diff("numbered_and_it_params"); }
+// Multiple at_exit handlers run LIFO — GC-rooting regression guard.
+#[test] fn at_exit_many() { run_diff("at_exit_many"); }
 #[test] fn hash_to_hash() { run_diff("hash_to_hash"); }
 #[test] fn system_stack_error() { run_diff("system_stack_error"); }
 #[test] fn method_missing_on_class() { run_diff("method_missing_on_class"); }

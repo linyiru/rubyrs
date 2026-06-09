@@ -522,6 +522,14 @@ impl Vm {
         // code via the `ENV` constant — pin it so the cache
         // doesn't get swept between LoadConst loads.
         if let Some(id) = self.env_hash { roots.push(Value::Hash(id)); }
+        // `at_exit { }` / `END { }` handlers are GC-heap Block objects
+        // held only by their ObjId in `at_exit_handlers` until the
+        // runtime drains them at program exit. Without rooting, a GC
+        // between registration and exit sweeps the Block bodies and
+        // their ObjIds get reused by later allocations — every handler
+        // then aliases the last-allocated block (observed under
+        // STRESS_GC: five `at_exit` blocks all ran the fifth one's body).
+        for id in &self.at_exit_handlers { roots.push(Value::Block(*id)); }
         // Top-level constants (`FOO = expr`) are reachable from any
         // future LoadConst — root every value so Array/Hash/Object
         // constants don't get swept between assignment and read.
