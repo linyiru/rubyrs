@@ -364,6 +364,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn p_puts_user_inspect() { run_diff("p_puts_user_inspect"); }
 // define_method block with |**kw| binds kwargs.
 #[test] fn define_method_kwrest() { run_diff("define_method_kwrest"); }
+// Refinements: refine/using (Tier-1 global activation).
+#[test] fn refinements() { run_diff("refinements"); }
 // Struct: keyword_init, block form, to_h/[]/each, inspect.
 #[test] fn struct_features() { run_diff("struct_features"); }
 // Ruby 3.2 Data.define — immutable value objects.

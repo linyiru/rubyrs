@@ -571,6 +571,10 @@ pub(crate) struct LastMatch {
     pub(crate) named: Vec<(String, Option<String>)>,
 }
 
+/// Per-defining-module list of `(target_class, refinement_holder)` pairs
+/// recorded by `refine`; see `Vm::module_refinements`.
+pub(crate) type RefinementList = Vec<(std::rc::Rc<Class>, std::rc::Rc<Class>)>;
+
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
     pub(crate) interner: Interner,
@@ -867,6 +871,22 @@ pub(crate) struct Vm {
     /// the "process" — handlers drain at its end. Documented
     /// in `Kernel#at_exit`'s docstring.
     pub(crate) at_exit_handlers: Vec<crate::value::ObjId>,
+    /// Refinements (`refine` / `using`). Tier-1: activation is GLOBAL
+    /// from the `using` point on, not lexically scoped per file/module
+    /// like CRuby — equivalent for the common single-file case (see
+    /// SUBSET.md). All three are empty until a script calls `refine`, so
+    /// programs that never use refinements pay nothing.
+    ///
+    /// `module_refinements`: keyed by `Rc::as_ptr(M) as usize` (the
+    /// defining module), the list of `(target_class, refinement_holder)`
+    /// pairs `refine` recorded; `using M` reads it to activate.
+    pub(crate) module_refinements: crate::intern::FxHashMap<usize, RefinementList>,
+    /// `(target_class_name, method_name)` → the active refined method.
+    pub(crate) active_refinements:
+        crate::intern::FxHashMap<(SymId, SymId), std::rc::Rc<crate::value::Method>>,
+    /// Method names with ANY active refinement — a cheap dispatch gate so
+    /// non-refined calls skip the `active_refinements` lookup entirely.
+    pub(crate) refined_method_names: crate::intern::FxHashSet<SymId>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) heap: Heap,
@@ -1288,6 +1308,9 @@ impl Vm {
             // safe-point check treats None as "unlimited".
             max_yield_recursion: None,
             at_exit_handlers: Vec::new(),
+            module_refinements: crate::intern::FxHashMap::default(),
+            active_refinements: crate::intern::FxHashMap::default(),
+            refined_method_names: crate::intern::FxHashSet::default(),
             stack: Vec::with_capacity(1024),
             frames: vec![],
             heap: Heap::new(),

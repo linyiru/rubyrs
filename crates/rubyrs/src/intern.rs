@@ -56,6 +56,10 @@ impl std::hash::Hasher for FxHasher {
 pub(crate) type FxHashMap<K, V> =
     std::collections::HashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
 
+/// A `HashSet` keyed with [`FxHasher`] — companion to [`FxHashMap`].
+pub(crate) type FxHashSet<T> =
+    std::collections::HashSet<T, std::hash::BuildHasherDefault<FxHasher>>;
+
 /// Opaque token identifying a string in the [`Interner`]. Equality is a
 /// single u32 compare, which is what makes Ruby `Symbol#==`, method-dispatch
 /// hash keys, and IVar lookups O(1).

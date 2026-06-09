@@ -47,6 +47,7 @@ impl Vm {
                 | "Rational"
                 | "sprintf"
                 | "format"
+                | "using"
                 | "__time_now_raw"
                 | "sleep"
                 | "exit"
@@ -680,6 +681,17 @@ impl Vm {
                 }
                 #[cfg(target_os = "wasi")]
                 { let _ = name_sym; }
+                Some(Ok(Value::Nil))
+            }
+            "using" => {
+                // `using M` — activate M's refinements (Tier-1: global
+                // from here on; see Vm::module_refinements). Returns the
+                // caller's self in CRuby; nil is close enough (the value
+                // is essentially never used) for the subset.
+                if let Some(Value::Class(m)) = args.first() {
+                    let m = m.clone();
+                    self.do_using(&m);
+                }
                 Some(Ok(Value::Nil))
             }
             "p" | "pp" => {

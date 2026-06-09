@@ -5006,11 +5006,18 @@ impl Vm {
                 return Ok(());
             }
         }
+        // A name with an active refinement must NOT take the fast paths
+        // (they'd return the original primitive / cached method before
+        // the refinement check below). The gate is the cheap empty-set
+        // test, so no-refinement programs are unaffected; even with
+        // refinements active, only the few refined names detour.
+        let maybe_refined = !self.refined_method_names.is_empty()
+            && self.refined_method_names.contains(&name_id);
         // Primitive-receiver fast-path. Runs after
         // `take_bypass_visibility()` above; the helper's doc
         // comment spells out why that's currently safe and what
         // changes if a non-primitive arm is ever added.
-        if self.try_fast_primitive(name_id, argc, no_recv) {
+        if !maybe_refined && self.try_fast_primitive(name_id, argc, no_recv) {
             return Ok(());
         }
         // Explicit-receiver monomorphic fast path: an `obj.method(args)`
@@ -5020,7 +5027,7 @@ impl Vm {
         // else (private/protected, method_missing, the send-forms,
         // primitives, non-fixed arity) falls through to the path below,
         // which resolves identically (same class_of + lookup_method_cached).
-        if !no_recv && self.try_invoke_explicit_recv_cached(name_id, argc, cache_id)? {
+        if !maybe_refined && !no_recv && self.try_invoke_explicit_recv_cached(name_id, argc, cache_id)? {
             return Ok(());
         }
         let name = self.interner.resolve(name_id).clone();
@@ -5094,6 +5101,24 @@ impl Vm {
 
         if no_recv && self.try_dispatch_no_recv_builtin_or_host(&name, name_id, &args)? {
             return Ok(());
+        }
+        // Refinements: an active `using`'d refinement on the receiver's
+        // class wins over the original method. Gated on the cheap
+        // `refined_method_names` set, so a program that never calls
+        // `using` pays nothing (the set is empty) and every non-refined
+        // call short-circuits before the class_of lookup.
+        if !self.refined_method_names.is_empty()
+            && self.refined_method_names.contains(&name_id)
+            && let Some(r) = &recv
+        {
+            let cls = self.class_of(r);
+            if let Value::Class(c) = &cls {
+                let tname = self.interner.intern(&c.name);
+                if let Some(m) = self.active_refinements.get(&(tname, name_id)).cloned() {
+                    let r = r.clone();
+                    return self.invoke_method(m, r, args.into_vec());
+                }
+            }
         }
         // `__dir__` — Kernel private instance method. CRuby
         // allows two call shapes:
@@ -10853,6 +10878,66 @@ impl Vm {
 
 
 
+    /// `module M; refine(Target) do … end; end` — record a refinement.
+    /// Build an anonymous holder class, run the block on it as a class
+    /// body (so `def`s install on it), and stash `(Target, holder)` under
+    /// the defining module `M` for a later `using M` to activate. Returns
+    /// the holder (CRuby returns the refinement module). Tier-1: see the
+    /// `module_refinements` field doc for the global-activation caveat.
+    pub(crate) fn do_refine(
+        &mut self,
+        target: std::rc::Rc<Class>,
+        module: std::rc::Rc<Class>,
+        block: ObjId,
+    ) -> Result<(), Trap> {
+        let holder = std::rc::Rc::new(Class {
+            name: String::new(),
+            is_module: true,
+            ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            superclass: std::cell::RefCell::new(None),
+            includes: std::cell::RefCell::new(Vec::new()),
+            prepends: std::cell::RefCell::new(Vec::new()),
+            singleton_prepends: std::cell::RefCell::new(Vec::new()),
+            singleton_includes: std::cell::RefCell::new(Vec::new()),
+            singleton_view: std::cell::RefCell::new(None),
+            singleton_target: std::cell::RefCell::new(None),
+            class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            assigned_name: std::cell::RefCell::new(None),
+            #[cfg(feature = "cext")]
+            cext_alloc_func: std::cell::Cell::new(None),
+        });
+        // Run the refine block as a class body on `holder`.
+        let pre = self.frames.len();
+        self.invoke_block_with_self(block, Value::Class(holder.clone()), true, vec![])?;
+        self.dispatch_until(pre)?;
+        let _ = self.stack.pop(); // discard the class-body return value
+        self.module_refinements
+            .entry(std::rc::Rc::as_ptr(&module) as usize)
+            .or_default()
+            .push((target, holder.clone()));
+        self.stack.push(Value::Class(holder));
+        Ok(())
+    }
+
+    /// `using M` — activate `M`'s refinements (Tier-1: globally, from
+    /// here on). Copies every `(Target, holder)` recorded by `refine`
+    /// into the active set keyed by `(Target.name, method_name)`, and
+    /// registers the names in the dispatch gate.
+    pub(crate) fn do_using(&mut self, module: &std::rc::Rc<Class>) {
+        let key = std::rc::Rc::as_ptr(module) as usize;
+        let Some(refs) = self.module_refinements.get(&key).cloned() else { return };
+        for (target, holder) in &refs {
+            let target_name = self.interner.intern(&target.name);
+            for (mname, m) in holder.methods.borrow().iter() {
+                self.active_refinements.insert((target_name, *mname), m.clone());
+                self.refined_method_names.insert(*mname);
+            }
+        }
+    }
+
     /// `obj.instance_eval { |o| ... }` / `cls.class_eval { |c| ... }`
     /// — invoke the block with `self` swapped to `new_self`.
     ///
@@ -12453,6 +12538,15 @@ impl Vm {
                 self.at_exit_handlers.push(block);
                 self.stack.push(Value::Block(block));
                 return Ok(());
+            }
+            // `refine(Target) do … end` inside a module body. self is the
+            // defining module; record the refinement against it.
+            if &*name == "refine" && args.len() == 1
+                && let Value::Class(target) = &args[0]
+                && let Some(Value::Class(module)) = self.frames.last().map(|f| f.self_val.clone()).as_ref()
+            {
+                let (target, module) = (target.clone(), module.clone());
+                return self.do_refine(target, module, block);
             }
             if let Some(res) = self.builtin_call(&name, &args) {
                 let v = res?;
