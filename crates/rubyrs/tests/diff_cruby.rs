@@ -410,6 +410,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn array_new_forms() { run_diff("array_new_forms"); }
 // Array#transpose.
 #[test] fn array_transpose() { run_diff("array_transpose"); }
+// String#start_with?(Regexp, variadic) + #each_byte Enumerator.
+#[cfg(feature = "regex")]
+#[test] fn string_start_with_regex_each_byte() { run_diff("string_start_with_regex_each_byte"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }

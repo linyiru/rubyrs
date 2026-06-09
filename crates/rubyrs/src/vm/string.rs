@@ -1135,6 +1135,25 @@ pub(crate) fn string_call(
         (Value::Str(a), "end_with?", [Value::Str(b)]) => {
             Some(Value::Bool(a.with_str_lossy(|sa| b.with_str_lossy(|sb| sa.ends_with(sb)))))
         }
+        // Variadic `start_with?` — true if ANY argument matches at the
+        // start: a String is a literal prefix; a Regexp must match at
+        // index 0 (`"Hello".start_with?(/[A-Z]/)`). Non-String/Regexp
+        // args are ignored (CRuby raises TypeError; rare). The single-
+        // String fast path above handles the common case.
+        (Value::Str(a), "start_with?", prefixes) => {
+            let src = a.to_string_lossy();
+            let any = prefixes.iter().any(|p| match p {
+                Value::Str(b) => src.starts_with(&*b.to_string_lossy()),
+                #[cfg(feature = "regex")]
+                Value::Regex(re) => re
+                    .captures_owned(&src)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|c| c.m_start == 0),
+                _ => false,
+            });
+            Some(Value::Bool(any))
+        }
         // `String#delete_prefix` / `delete_suffix` — return a copy
         // with the affix stripped (unchanged copy if absent). CRuby.
         // Discovery: P3 Jekyll spike — `page.rb#relative_path` does
@@ -2544,6 +2563,11 @@ impl Vm {
                     // `s.each_char` with no block → Enumerator (the block
                     // form is in collection_call_block). `s.each_char.to_a`
                     // == `s.chars`.
+                    ("each_byte", []) => {
+                        // No-block → Enumerator (`s.each_byte.to_a`); the
+                        // block form lives in collection_call_block.
+                        return self.make_enum_for(Value::Str(s.clone()), "each_byte", vec![]).map(Some);
+                    }
                     ("each_char", []) => {
                         return self.make_enum_for(Value::Str(s.clone()), "each_char", vec![]).map(Some);
                     }

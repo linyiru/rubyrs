@@ -676,7 +676,7 @@ impl Vm {
                 "sub" | "sub!" | "gsub" | "gsub!" |
                 "tr" | "squeeze" |
                 "encode" | "force_encoding" | "valid_encoding?" | "encoding" | "b" |
-                "unpack" | "unpack1" | "bytes" | "getbyte" |
+                "unpack" | "unpack1" | "bytes" | "getbyte" | "each_byte" |
                 "match?" | "match" | "scan" | "index" | "rindex" |
                 "[]" | "slice" |
                 "<<" | "concat" | "prepend" | "replace" |
