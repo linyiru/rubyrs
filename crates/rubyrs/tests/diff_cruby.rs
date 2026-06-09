@@ -413,6 +413,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // String#start_with?(Regexp, variadic) + #each_byte Enumerator.
 #[cfg(feature = "regex")]
 #[test] fn string_start_with_regex_each_byte() { run_diff("string_start_with_regex_each_byte"); }
+// Boolean / NilClass logical methods & | ^.
+#[test] fn bool_nil_logical_ops() { run_diff("bool_nil_logical_ops"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }

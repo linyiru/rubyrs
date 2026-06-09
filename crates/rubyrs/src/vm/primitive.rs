@@ -56,6 +56,17 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             Some(Value::new_str(if *b { "true" } else { "false" }))
         }
         (Value::Nil, "nil?", []) => Some(Value::Bool(true)),
+        // Boolean / NilClass logical METHODS (`true & x`, `nil | x`,
+        // `false ^ x`). Unlike the short-circuiting `&&`/`||` operators,
+        // these always evaluate the argument and test its TRUTHINESS
+        // (any object allowed): `true & 1` → true, `nil | "x"` → true.
+        // nil behaves exactly like false (CRuby defines them on both).
+        (Value::Bool(a), "&", [other]) => Some(Value::Bool(*a && other.is_truthy())),
+        (Value::Bool(a), "|", [other]) => Some(Value::Bool(*a || other.is_truthy())),
+        (Value::Bool(a), "^", [other]) => Some(Value::Bool(*a != other.is_truthy())),
+        (Value::Nil, "&", [_]) => Some(Value::Bool(false)),
+        (Value::Nil, "|", [other]) => Some(Value::Bool(other.is_truthy())),
+        (Value::Nil, "^", [other]) => Some(Value::Bool(other.is_truthy())),
         // Object#nil? is `false` for every non-nil receiver. We
         // implement it here as a generic fallback so e.g.
         // `"abc".nil?` and `5.nil?` work without per-type arms.
