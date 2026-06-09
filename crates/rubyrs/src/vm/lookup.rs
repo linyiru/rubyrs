@@ -676,7 +676,7 @@ impl Vm {
                 "sub" | "sub!" | "gsub" | "gsub!" |
                 "tr" | "squeeze" |
                 "encode" | "force_encoding" | "valid_encoding?" | "encoding" | "b" |
-                "unpack" | "unpack1" | "bytes" |
+                "unpack" | "unpack1" | "bytes" | "getbyte" |
                 "match?" | "match" | "scan" | "index" | "rindex" |
                 "[]" | "slice" |
                 "<<" | "concat" | "prepend" | "replace" |
@@ -753,7 +753,8 @@ impl Vm {
                 "group_by" | "sort_by" | "sort" |
                 "each_slice" | "each_cons" | "chunk_while" | "slice_when"
             ),
-            Value::Bool(_) | Value::Nil => matches!(name, "to_s" | "inspect" | "dup" | "clone"),
+            Value::Nil => matches!(name, "to_s" | "inspect" | "dup" | "clone" | "to_a" | "to_h"),
+            Value::Bool(_) => matches!(name, "to_s" | "inspect" | "dup" | "clone"),
             // Phase C.1 readers + Phase C.2 arithmetic / comparison.
             // `coerce` is included so cross-type promotion (Rational
             // arg with Int/Float receiver) routes through the

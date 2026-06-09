@@ -1619,6 +1619,19 @@ impl Vm {
             {
                 return self.make_enum_for(recv.clone(), name, args.to_vec()).map(Some);
             }
+            // `nil.to_a` → `[]`, `nil.to_h` → `{}` (fresh each call).
+            Value::Nil if matches!((name, args), ("to_a", []) | ("to_h", [])) => {
+                self.maybe_gc();
+                self.check_alloc()?;
+                let v = if name == "to_a" {
+                    Value::Array(self.heap.alloc(crate::heap::HeapObj::Array(Vec::new())))
+                } else {
+                    Value::Hash(self.heap.alloc(crate::heap::HeapObj::Hash(
+                        crate::heap::HashObj::with_pairs(Vec::new()),
+                    )))
+                };
+                return Ok(Some(v));
+            }
             _ => None,
         })
     }

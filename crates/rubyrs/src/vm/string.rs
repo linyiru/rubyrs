@@ -2188,6 +2188,19 @@ impl Vm {
                             .make_enum_for(Value::Str(s.clone()), "each_line", args.to_vec())
                             .map(Some);
                     }
+                    ("getbyte", [Value::Int(idx)]) => {
+                        // Raw byte at a BYTE index (negative counts from
+                        // the end); nil when out of range. CRuby's
+                        // `String#getbyte`.
+                        let bytes = s.borrow();
+                        let len = bytes.len() as i64;
+                        let i = if *idx < 0 { *idx + len } else { *idx };
+                        if i < 0 || i >= len {
+                            Some(Value::Nil)
+                        } else {
+                            Some(Value::Int(bytes[i as usize] as i64))
+                        }
+                    }
                     ("split", []) => {
                         // No-arg `split` matches CRuby's `split(nil)`:
                         // splits on runs of whitespace, drops the
