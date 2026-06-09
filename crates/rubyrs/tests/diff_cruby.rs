@@ -424,6 +424,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn set_xor_disjoint() { run_diff("set_xor_disjoint"); }
 // Method#arity = 1 for primitive-backed binary operators.
 #[test] fn method_operator_arity() { run_diff("method_operator_arity"); }
+// sprintf `*` argument-driven width / precision.
+#[test] fn sprintf_star_width() { run_diff("sprintf_star_width"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }

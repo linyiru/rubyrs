@@ -11,8 +11,9 @@ use crate::value::Value;
 
 /// Minimal printf-style formatter used by `String#%`. Supports the
 /// flag set [- + 0 space #], optional width and precision (decimal
-/// integers only — `*` for argument-driven width is not yet
-/// supported), and conversion specifiers d/i, f, s, x, X, o, b, B,
+/// integers or `*` for argument-driven values — a negative `*` width
+/// left-justifies, a negative `*` precision is ignored), and
+/// conversion specifiers d/i, f, s, x, X, o, b, B,
 /// c, p, plus the literal `%%`. Positional (`%1$d`) and named
 /// (`%<name>s`) directives are out of scope; encountering them
 /// raises ArgumentError so the caller can `rescue`.
@@ -47,23 +48,73 @@ pub(crate) fn ruby_sprintf(
             }
         }
         let mut width: Option<usize> = None;
-        while let Some(&d) = chars.peek() {
-            if d.is_ascii_digit() {
-                width = Some(width.unwrap_or(0) * 10 + (d as usize - '0' as usize));
-                chars.next();
-            } else { break; }
+        if chars.peek() == Some(&'*') {
+            // `%*d` — argument-driven width: the NEXT arg (before the
+            // value) is the width; a negative width left-justifies
+            // (CRuby), folding into the `-` flag.
+            chars.next();
+            let w_arg = args.get(idx).ok_or_else(|| RubyError::ArgumentError {
+                msg: "too few arguments".into(),
+            })?;
+            idx += 1;
+            let w = match w_arg {
+                Value::Int(n) => *n,
+                other => {
+                    return Err(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into Integer",
+                            other.type_name()
+                        ),
+                    });
+                }
+            };
+            if w < 0 {
+                flag_minus = true;
+                width = Some(w.unsigned_abs() as usize);
+            } else {
+                width = Some(w as usize);
+            }
+        } else {
+            while let Some(&d) = chars.peek() {
+                if d.is_ascii_digit() {
+                    width = Some(width.unwrap_or(0) * 10 + (d as usize - '0' as usize));
+                    chars.next();
+                } else { break; }
+            }
         }
         let mut precision: Option<usize> = None;
         if chars.peek() == Some(&'.') {
             chars.next();
-            let mut p: usize = 0;
-            while let Some(&d) = chars.peek() {
-                if d.is_ascii_digit() {
-                    p = p * 10 + (d as usize - '0' as usize);
-                    chars.next();
-                } else { break; }
+            if chars.peek() == Some(&'*') {
+                // `%.*f` — argument-driven precision; a negative value
+                // means "no precision" (CRuby).
+                chars.next();
+                let p_arg = args.get(idx).ok_or_else(|| RubyError::ArgumentError {
+                    msg: "too few arguments".into(),
+                })?;
+                idx += 1;
+                match p_arg {
+                    Value::Int(n) if *n >= 0 => precision = Some(*n as usize),
+                    Value::Int(_) => {} // negative → unset
+                    other => {
+                        return Err(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into Integer",
+                                other.type_name()
+                            ),
+                        });
+                    }
+                }
+            } else {
+                let mut p: usize = 0;
+                while let Some(&d) = chars.peek() {
+                    if d.is_ascii_digit() {
+                        p = p * 10 + (d as usize - '0' as usize);
+                        chars.next();
+                    } else { break; }
+                }
+                precision = Some(p);
             }
-            precision = Some(p);
         }
         let spec = chars.next().ok_or_else(|| RubyError::ArgumentError {
             msg: "malformed format string - %".into(),
