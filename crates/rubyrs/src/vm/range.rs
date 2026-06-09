@@ -51,6 +51,24 @@ impl Vm {
                     let hi_ok = if excl { arg < ef } else { arg <= ef };
                     return Ok(Some(Value::Bool(lo_ok && hi_ok)));
                 }
+                // `Range#step` (no block) with a Float step or Float bound
+                // → an Enumerator that drives the float-aware block form
+                // (iter.rs's `run_numeric_step`). Int+Int+Int keeps the
+                // eager-Array fast path at the strict `("step", [Int])`
+                // arm below.
+                if name == "step"
+                    && args.len() == 1
+                    && (matches!(&args[0], Value::Float(_))
+                        || matches!(&b, Value::Float(_))
+                        || matches!(&e, Value::Float(_)))
+                    && matches!(&args[0], Value::Int(_) | Value::Float(_))
+                    && matches!(&b, Value::Int(_) | Value::Float(_))
+                    && matches!(&e, Value::Int(_) | Value::Float(_))
+                {
+                    return self
+                        .make_enum_for(Value::Range(id), "step", args.to_vec())
+                        .map(Some);
+                }
                 // No-block transform/filter/iteration → Enumerator
                 // (CRuby `enum.c`), re-invoking the block form once
                 // driven. Mirrors the Array/Hash no-block wiring; works

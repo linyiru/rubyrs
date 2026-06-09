@@ -477,18 +477,22 @@ impl Vm {
         Ok(Value::Object(inst_id))
     }
 
-    /// Drive `Numeric#step` for a block. All-Integer (recv, limit, step)
-    /// iterate as Integers; any Float operand switches to a Float
-    /// progression sized by CRuby's element-count formula (so fp drift
-    /// can't over/under-shoot the endpoint). step==0 → ArgumentError; a
-    /// wrong-direction range yields nothing. Returns the receiver (or a
-    /// `break` value); `MethodReturn` surfaces as `Ok(Some(Nil))`.
+    /// Drive `Numeric#step` / `Range#step` for a block. All-Integer
+    /// (recv, limit, step) iterate as Integers; any Float operand
+    /// switches to a Float progression sized by CRuby's element-count
+    /// formula (so fp drift can't over/under-shoot the endpoint).
+    /// `inclusive` is true for `Numeric#step` and `a..b` ranges, false
+    /// for `a...b` ranges (the endpoint is then excluded). step==0 →
+    /// ArgumentError; a wrong-direction range yields nothing. Returns
+    /// the receiver (or a `break` value); `MethodReturn` → `Ok(Some(Nil))`.
     pub(crate) fn run_numeric_step(
         &mut self,
-        recv: Value,
+        start: Value,
         limit: Value,
         by: Value,
         block: ObjId,
+        inclusive: bool,
+        recv_return: Value,
     ) -> Result<Option<Value>, Trap> {
         let num = |v: &Value| -> Option<f64> {
             match v {
@@ -504,7 +508,7 @@ impl Vm {
             }));
         }
         let all_int = matches!(
-            (&recv, &limit, &by),
+            (&start, &limit, &by),
             (Value::Int(_), Value::Int(_), Value::Int(_))
         );
         let mut g = PinGuard::new(self);
@@ -513,14 +517,16 @@ impl Vm {
         let mut early = None;
         if all_int {
             let lit = |v: &Value| if let Value::Int(i) = v { *i } else { 0 };
-            let (s, l, b) = (lit(&recv), lit(&limit), lit(&by));
+            let (s, l, b) = (lit(&start), lit(&limit), lit(&by));
             if b == 0 {
                 return Err(g.vm.trap(crate::error::RubyError::ArgumentError {
                     msg: "step can't be 0".to_string(),
                 }));
             }
             let mut i = s;
-            while if b > 0 { i <= l } else { i >= l } {
+            while if b > 0 {
+                if inclusive { i <= l } else { i < l }
+            } else if inclusive { i >= l } else { i > l } {
                 match g.vm.step_block(block, vec![Value::Int(i)], pre)? {
                     BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                     BlockStep::Break(r) => { early = Some(r); break; }
@@ -532,7 +538,7 @@ impl Vm {
                 }
             }
         } else {
-            let s = num(&recv).unwrap_or(f64::NAN);
+            let s = num(&start).unwrap_or(f64::NAN);
             let l = num(&limit).unwrap_or(f64::NAN);
             let b = num(&by).unwrap_or(f64::NAN);
             if b == 0.0 {
@@ -547,8 +553,15 @@ impl Vm {
                 let err = (((s.abs() + l.abs() + (l - s).abs()) / b.abs())
                     * f64::EPSILON)
                     .min(0.5);
-                let count = (n_raw + err).floor() as i64 + 1;
-                for k in 0..count {
+                // Inclusive: floor(n + err) + 1. Exclusive drops the
+                // endpoint: floor(n - err) + 1 (so an endpoint that lands
+                // exactly on a step boundary is omitted).
+                let count = if inclusive {
+                    (n_raw + err).floor() as i64 + 1
+                } else {
+                    (n_raw - err).floor() as i64 + 1
+                };
+                for k in 0..count.max(0) {
                     let v = s + (k as f64) * b;
                     match g.vm.step_block(block, vec![Value::Float(v)], pre)? {
                         BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
@@ -558,7 +571,7 @@ impl Vm {
                 }
             }
         }
-        Ok(Some(early.unwrap_or(recv)))
+        Ok(Some(early.unwrap_or(recv_return)))
     }
 
     pub(crate) fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: ObjId) -> Result<Option<Value>, Trap> {
@@ -2041,15 +2054,19 @@ impl Vm {
                         msg: "step: no keyword :to".to_string(),
                     }));
                 };
-                return self.run_numeric_step(recv, limit, by, block);
+                return self.run_numeric_step(recv.clone(), limit, by, block, true, recv);
             }
             (Value::Int(_) | Value::Float(_), "step", [limit]) => {
                 let recv = recv.clone();
-                return self.run_numeric_step(recv, limit.clone(), Value::Int(1), block);
+                return self.run_numeric_step(
+                    recv.clone(), limit.clone(), Value::Int(1), block, true, recv,
+                );
             }
             (Value::Int(_) | Value::Float(_), "step", [limit, by]) => {
                 let recv = recv.clone();
-                return self.run_numeric_step(recv, limit.clone(), by.clone(), block);
+                return self.run_numeric_step(
+                    recv.clone(), limit.clone(), by.clone(), block, true, recv,
+                );
             }
             // Mirror image of `upto` with a Float endpoint:
             // CRuby `9.downto(1.3)` yields down to ceil(1.3) == 2.
@@ -2367,39 +2384,58 @@ impl Vm {
                     ),
                 }));
             }
-            // `(b..e).step(n) { |i| ... }` — yields each step value.
-            // Returns the receiver Range, matching CRuby.
-            (Value::Range(id), "step", [Value::Int(n)]) => {
-                if *n <= 0 {
+            // `(b..e).step(n) { |i| ... }` — yields each step value, returns
+            // the receiver Range. Int+Int+Int takes the fast inline loop;
+            // any Float bound/step routes through `run_numeric_step` (fp
+            // count + exclusivity). Non-numeric bounds fall through.
+            (Value::Range(id), "step", [step @ (Value::Int(_) | Value::Float(_))]) => {
+                let positive = match step {
+                    Value::Int(n) => *n > 0,
+                    Value::Float(f) => *f > 0.0,
+                    _ => false,
+                };
+                if !positive {
                     return Err(self.trap(crate::error::RubyError::ArgumentError {
-                        msg: format!("step can't be {}", n),
+                        msg: format!(
+                            "step can't be {}",
+                            step.to_display(&self.heap, &self.interner)
+                        ),
                     }));
                 }
                 let (b, e, excl) = {
                     let r = self.heap.range(*id);
                     (r.begin.clone(), r.end.clone(), r.exclusive)
                 };
-                let (bi, ei) = match (&b, &e) {
-                    (Value::Int(a), Value::Int(c)) => (*a, *c),
-                    _ => return Ok(None),
-                };
-                let mut g = PinGuard::new(self);
-                g.pin(Value::Range(*id));
-                g.pin(Value::Block(block));
-                let pre_frames = g.vm.frames.len();
-                let end_inc = if excl { ei - 1 } else { ei };
-                let mut i = bi;
-                let step = *n;
-                let mut early = None;
-                while i <= end_inc {
-                    match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
-                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(_) => {}
-                    }
-                    i = i.saturating_add(step);
+                if !matches!(b, Value::Int(_) | Value::Float(_))
+                    || !matches!(e, Value::Int(_) | Value::Float(_))
+                {
+                    return Ok(None); // non-numeric range → NoMethodError
                 }
-                Some(early.unwrap_or(Value::Range(*id)))
+                if let (Value::Int(bi), Value::Int(ei), Value::Int(n)) = (&b, &e, step) {
+                    // Fast all-integer path.
+                    let (bi, ei, n) = (*bi, *ei, *n);
+                    let mut g = PinGuard::new(self);
+                    g.pin(Value::Range(*id));
+                    g.pin(Value::Block(block));
+                    let pre_frames = g.vm.frames.len();
+                    let end_inc = if excl { ei - 1 } else { ei };
+                    let mut i = bi;
+                    let mut early = None;
+                    while i <= end_inc {
+                        match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                            BlockStep::Break(r) => { early = Some(r); break; }
+                            BlockStep::Value(_) => {}
+                        }
+                        i = i.saturating_add(n);
+                    }
+                    Some(early.unwrap_or(Value::Range(*id)))
+                } else {
+                    // Float bound or step → numeric progression.
+                    return self.run_numeric_step(
+                        b, e, step.clone(), block, !excl, Value::Range(*id),
+                    );
+                }
             }
             (Value::Range(id), "each", []) => {
                 // Two endpoint shapes drive iteration: Int+Int (the

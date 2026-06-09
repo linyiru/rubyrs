@@ -402,6 +402,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn nil_getbyte_gaps() { run_diff("nil_getbyte_gaps"); }
 // Integer#gcdlcm → [gcd, lcm].
 #[test] fn integer_gcdlcm() { run_diff("integer_gcdlcm"); }
+// Range#step with Float bounds/step, inclusive + exclusive.
+#[test] fn range_step_float() { run_diff("range_step_float"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }
