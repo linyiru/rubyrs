@@ -1821,5 +1821,49 @@ pub(crate) fn format_float(f: f64) -> String {
     if f.is_infinite() {
         return if f > 0.0 { "Infinity".into() } else { "-Infinity".into() };
     }
-    format!("{:?}", f)
+    // CRuby's `Float#to_s` (== inspect): shortest round-trip decimal,
+    // rendered in FIXED notation when the decimal point lands in
+    // `-3..=15` (i.e. CRuby's `decpt > -4 && decpt <= DBL_DIG`), and
+    // SCIENTIFIC (`D.DDDe±EE`) otherwise — mantissa always carries a
+    // fractional digit, the exponent is always signed and ≥2 digits.
+    // Rust's `{:e}` yields the same shortest digit string (Ryū) as
+    // CRuby's dtoa, already in `D.DDDe±exp` form, so we reshape from it.
+    let sign = if f.is_sign_negative() { "-" } else { "" };
+    let abs = f.abs();
+    if abs == 0.0 {
+        return format!("{sign}0.0");
+    }
+    let sci = format!("{abs:e}"); // e.g. "1e20", "1.5e20", "3.14e0"
+    // `{:e}` always contains 'e' and a parseable exponent; the `else`
+    // arms are unreachable in practice but keep this panic-free.
+    let Some((mantissa, exp_str)) = sci.split_once('e') else {
+        return format!("{f:?}");
+    };
+    let Ok(exp) = exp_str.parse::<i32>() else {
+        return format!("{f:?}");
+    };
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let decpt = exp + 1; // # of digits before the decimal point
+    let body = if !(-3..=15).contains(&decpt) {
+        // scientific — reuse `{:e}`'s mantissa (it already split at the
+        // first digit); just guarantee a fractional digit + format exp.
+        let m = if mantissa.contains('.') {
+            mantissa.to_string()
+        } else {
+            format!("{mantissa}.0")
+        };
+        let esign = if exp < 0 { '-' } else { '+' };
+        format!("{m}e{esign}{:02}", exp.abs())
+    } else if decpt <= 0 {
+        // 0.00…digits
+        format!("0.{}{}", "0".repeat((-decpt) as usize), digits)
+    } else if decpt as usize >= digits.len() {
+        // digits then trailing zeros, then ".0"
+        format!("{}{}.0", digits, "0".repeat(decpt as usize - digits.len()))
+    } else {
+        // decimal point falls inside the digit string
+        let (a, b) = digits.split_at(decpt as usize);
+        format!("{a}.{b}")
+    };
+    format!("{sign}{body}")
 }

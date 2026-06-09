@@ -377,6 +377,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Collection inspect dispatches per-element (custom/Exception) and is
 // cycle-safe (`[...]`/`{...}` instead of a native stack overflow).
 #[test] fn nested_inspect_cycle() { run_diff("nested_inspect_cycle"); }
+// Float#to_s/#inspect: CRuby dtoa fixed-vs-scientific notation.
+#[test] fn float_format() { run_diff("float_format"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }
