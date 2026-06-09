@@ -1742,6 +1742,58 @@ impl Vm {
                         }
                         Some(Value::Array(id))
                     }
+                    // `[[1,2],[3,4]].transpose` → `[[1,3],[2,4]]`. Every
+                    // element must be an Array of equal length (else
+                    // IndexError / TypeError, matching CRuby). Empty → [].
+                    ("transpose", []) => {
+                        let rows = self.heap.array(id).clone();
+                        let mut row_slices: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+                        let mut ncols: Option<usize> = None;
+                        for r in &rows {
+                            let Value::Array(rid) = r else {
+                                return Err(self.trap(RubyError::TypeError {
+                                    msg: format!(
+                                        "no implicit conversion of {} into Array",
+                                        r.type_name()
+                                    ),
+                                }));
+                            };
+                            let row = self.heap.array(*rid).clone();
+                            match ncols {
+                                None => ncols = Some(row.len()),
+                                Some(c) if c != row.len() => {
+                                    return Err(self.trap(RubyError::IndexError {
+                                        msg: format!(
+                                            "element size differs ({} should be {})",
+                                            row.len(), c
+                                        ),
+                                    }));
+                                }
+                                _ => {}
+                            }
+                            row_slices.push(row);
+                        }
+                        let cols = ncols.unwrap_or(0);
+                        // Pin the source array (roots the rows + their
+                        // elements, same ObjIds as in row_slices) across
+                        // the per-column allocations.
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let mut out: Vec<Value> = Vec::with_capacity(cols);
+                        for c in 0..cols {
+                            let col: Vec<Value> =
+                                row_slices.iter().map(|r| r[c].clone()).collect();
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let cid = g.vm.heap.alloc(HeapObj::Array(col));
+                            g.pin(Value::Array(cid));
+                            out.push(Value::Array(cid));
+                        }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
                     ("flatten", []) | ("flatten", [Value::Int(_)]) | ("flatten", [Value::Nil]) => {
                         // `flatten` recurses fully (CRuby default); `flatten(n)`
                         // caps the depth at a non-negative Int; nil / negative

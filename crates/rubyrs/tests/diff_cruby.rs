@@ -408,6 +408,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn hash_values_at_each_kv() { run_diff("hash_values_at_each_kv"); }
 // Array.new no-block forms (size / size+fill / Array copy).
 #[test] fn array_new_forms() { run_diff("array_new_forms"); }
+// Array#transpose.
+#[test] fn array_transpose() { run_diff("array_transpose"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }

@@ -711,7 +711,7 @@ impl Vm {
                 "map!" | "collect!" | "sort_by!" |
                 "delete_if" | "reject!" | "keep_if" | "select!" | "filter!" |
                 "flat_map" | "collect_concat" | "chunk" | "filter_map" |
-                "each_slice" | "each_cons" | "cycle" |
+                "each_slice" | "each_cons" | "cycle" | "transpose" |
                 "inspect" |
                 // `dup` / `clone` — shallow copy. Tier-1 Arrays
                 // don't model `freeze` beyond a no-op so the two
