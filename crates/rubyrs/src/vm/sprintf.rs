@@ -184,6 +184,27 @@ pub(crate) fn ruby_sprintf(
                 }
                 body
             }
+            'e' | 'E' => {
+                let f = coerce_float(arg)?;
+                let prec = precision.unwrap_or(6);
+                let mut body = fmt_scientific(f, prec, spec == 'E');
+                if !body.starts_with('-') {
+                    if flag_plus { body.insert(0, '+'); }
+                    else if flag_space { body.insert(0, ' '); }
+                }
+                body
+            }
+            'g' | 'G' => {
+                let f = coerce_float(arg)?;
+                // %g precision is significant digits; default 6, 0 → 1.
+                let prec = precision.unwrap_or(6);
+                let mut body = fmt_general(f, prec, spec == 'G');
+                if !body.starts_with('-') {
+                    if flag_plus { body.insert(0, '+'); }
+                    else if flag_space { body.insert(0, ' '); }
+                }
+                body
+            }
             's' => {
                 let mut body = arg.to_display(heap, interner);
                 if let Some(p) = precision {
@@ -308,6 +329,69 @@ fn coerce_float(v: &Value) -> Result<f64, RubyError> {
             msg: format!("no implicit conversion of {} to Float", v.type_name()),
         }),
     }
+}
+
+/// `%e` / `%E` — C-style scientific notation. Rust's `{:e}` yields
+/// `1.23e4`; reformat the exponent to a sign + at least two digits
+/// (`1.23e+04`), and uppercase the `e` for `%E`. Non-finite values
+/// (`Inf`/`NaN`) pass through Rust's text.
+fn fmt_scientific(f: f64, prec: usize, upper: bool) -> String {
+    if !f.is_finite() {
+        let s = format!("{f}");
+        return if upper { s.to_uppercase() } else { s };
+    }
+    let s = format!("{f:.prec$e}");
+    let Some(epos) = s.find('e') else { return s };
+    let mantissa = &s[..epos];
+    let exp: i32 = s[epos + 1..].parse().unwrap_or(0);
+    let e_char = if upper { 'E' } else { 'e' };
+    let sign = if exp < 0 { '-' } else { '+' };
+    format!("{mantissa}{e_char}{sign}{:02}", exp.abs())
+}
+
+/// `%g` / `%G` — pick `%e` or `%f` by magnitude (`%e` when the decimal
+/// exponent is < -4 or >= the significant-digit precision), then strip
+/// trailing zeros (and a bare `.`). Precision is significant digits
+/// (default 6; 0 treated as 1), per C/Ruby.
+fn fmt_general(f: f64, prec: usize, upper: bool) -> String {
+    if !f.is_finite() {
+        let s = format!("{f}");
+        return if upper { s.to_uppercase() } else { s };
+    }
+    let p = prec.max(1);
+    if f == 0.0 {
+        return "0".to_string();
+    }
+    // True decimal exponent via Rust's scientific formatting.
+    let sci = format!("{f:e}");
+    let exp: i32 = sci.find('e').map(|i| sci[i + 1..].parse().unwrap_or(0)).unwrap_or(0);
+    if exp >= -4 && exp < p as i32 {
+        // %f form with precision (p - 1 - exp); strip trailing zeros.
+        let fprec = (p as i32 - 1 - exp).max(0) as usize;
+        let s = format!("{f:.fprec$}");
+        strip_float_zeros(&s)
+    } else {
+        // %e form with precision (p - 1); strip mantissa trailing zeros.
+        let raw = fmt_scientific(f, p - 1, upper);
+        let e_char = if upper { 'E' } else { 'e' };
+        match raw.find(e_char) {
+            Some(epos) => {
+                let mantissa = strip_float_zeros(&raw[..epos]);
+                format!("{mantissa}{}", &raw[epos..])
+            }
+            None => raw,
+        }
+    }
+}
+
+/// Drop trailing zeros after a decimal point, and a bare trailing `.`.
+/// `"1.230" → "1.23"`, `"100.000" → "100"`, `"12" → "12"`.
+fn strip_float_zeros(s: &str) -> String {
+    if !s.contains('.') {
+        return s.to_string();
+    }
+    let trimmed = s.trim_end_matches('0');
+    trimmed.trim_end_matches('.').to_string()
 }
 
 /// Render `arg` in `radix` (2 / 8 / 16). Dispatches:
