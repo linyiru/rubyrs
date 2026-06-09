@@ -337,6 +337,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn super_splat_block() { run_diff("super_splat_block"); }
 #[test] fn array_splat_coerce() { run_diff("array_splat_coerce"); }
 #[test] fn super_in_block() { run_diff("super_in_block"); }
+// `super` in a block yielded by ANOTHER object's method must resolve to
+// the lexical-owner method's super-chain, not the intervening frame's.
+#[test] fn super_block_foreign_yield() { run_diff("super_block_foreign_yield"); }
 #[test] fn hash_to_hash() { run_diff("hash_to_hash"); }
 #[test] fn system_stack_error() { run_diff("system_stack_error"); }
 #[test] fn method_missing_on_class() { run_diff("method_missing_on_class"); }

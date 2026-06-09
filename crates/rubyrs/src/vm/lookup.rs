@@ -1563,18 +1563,38 @@ impl Vm {
         let frame = self.frames.last().expect("ICE: super with empty frames");
         let self_val = frame.self_val.clone();
         // CRuby allows `super` inside a block — it forwards to the
-        // enclosing METHOD's super-chain. Walk the frame stack
-        // top-down for the first frame that carries a
-        // `defining_class`. The block frames in between inherit
-        // their method_name from the enclosing method proto (set in
-        // compile_block via parent.method_name.clone), so the
+        // enclosing METHOD's super-chain. The block frames in between
+        // inherit their method_name from the enclosing method proto
+        // (set in compile_block via parent.method_name.clone), so the
         // name_id passed in is already correct for the method's
-        // dispatch; only the defining_class lookup needs to skip
-        // block frames. Without this walk,
-        // `def foo; xs.each { |x| super(x) }; end` tripped
-        // "super called outside of method" because the iter block's
-        // own defining_class is None.
-        let defining = match self.frames.iter().rev().find_map(|f| f.defining_class.clone()) {
+        // dispatch; only the defining_class lookup needs to find the
+        // method.
+        //
+        // Resolve that method LEXICALLY — the same
+        // `find_lexical_owner_frame` walk yield / block_given? use —
+        // NOT by the call-stack-nearest frame carrying a
+        // defining_class. They diverge when the block is invoked
+        // through a user method on ANOTHER object, e.g. liquid's
+        // `context.stack { collection.each { result << super } }`:
+        // the nearest defining_class is `Context#stack`'s, which
+        // isn't in self's (the TableRow's) ancestry, so the
+        // post-defining ancestor walk can't find where to resume and
+        // raises a spurious "no superclass method `render'". The
+        // lexical owner is the method that textually contains the
+        // `super` (`TableRow#render`), whose defining_class IS in
+        // self's chain. For `super` directly in a method body the
+        // walk returns that method frame itself (non-block,
+        // ptr_eq on its own locals). The `.or_else` fallback covers
+        // a block that escaped its lexical owner (stored as a Proc,
+        // owner already returned): no live owner frame, so use the
+        // nearest defining_class as before.
+        let lexical_defining = self.frames.last()
+            .map(|f| f.locals.clone())
+            .and_then(|seed| self.find_lexical_owner_frame(&seed))
+            .and_then(|idx| self.frames[idx].defining_class.clone());
+        let defining = match lexical_defining
+            .or_else(|| self.frames.iter().rev().find_map(|f| f.defining_class.clone()))
+        {
             Some(c) => c,
             None => {
                 return Err(self.trap(crate::error::RubyError::NoMethodError {
