@@ -360,6 +360,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn sprintf_zero_pad_float() { run_diff("sprintf_zero_pad_float"); }
 // sprintf `%e`/`%E` scientific + `%g`/`%G` general notation.
 #[test] fn sprintf_scientific() { run_diff("sprintf_scientific"); }
+// p calls user inspect; puts/print call user to_s.
+#[test] fn p_puts_user_inspect() { run_diff("p_puts_user_inspect"); }
 // Struct: keyword_init, block form, to_h/[]/each, inspect.
 #[test] fn struct_features() { run_diff("struct_features"); }
 // Ruby 3.2 Data.define — immutable value objects.

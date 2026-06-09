@@ -1356,6 +1356,52 @@ impl Vm {
         }
     }
 
+    /// Stringify `v` for `p` / `puts` / `print`: if the receiver's class
+    /// defines a user `inspect` (when `inspect`) / `to_s` (otherwise)
+    /// method, invoke it via dispatch and use its String result; else
+    /// fall back to the native `to_inspect` / `to_display`. CRuby's
+    /// p/puts/print call inspect/to_s, so a user override must win — but
+    /// rubyrs's native conversions don't dispatch. Callers MUST pin the
+    /// args first: this runs arbitrary user code (the override) which can
+    /// trigger GC, and the `p`/`puts` arg buffer isn't in the root set.
+    /// (Only the TOP-LEVEL value dispatches; a custom-inspect object
+    /// nested inside an Array/Hash still renders via the native
+    /// collection inspect — a documented follow-up.)
+    pub(crate) fn stringify_for_output(&mut self, v: &Value, inspect: bool) -> Result<String, Trap> {
+        let meth_id = self.interner.intern(if inspect { "inspect" } else { "to_s" });
+        let m = match v {
+            Value::Object(id) => {
+                let cls = self.heap.class_of(*id);
+                self.lookup_method_uncached(&cls, meth_id)
+            }
+            Value::Class(cls) => self.lookup_class_singleton_method(cls, meth_id),
+            _ => match self.class_of(v) {
+                Value::Class(cls) => self.lookup_method_uncached(&cls, meth_id),
+                _ => None,
+            },
+        };
+        let native = |vm: &Self| if inspect {
+            v.to_inspect(&vm.heap, &vm.interner)
+        } else {
+            v.to_display(&vm.heap, &vm.interner)
+        };
+        let Some(m) = m else { return Ok(native(self)) };
+        let pre = self.frames.len();
+        self.invoke_method(m, v.clone(), vec![])?;
+        self.dispatch_until(pre)?;
+        let r = self.stack.pop().unwrap_or(Value::Nil);
+        Ok(match &r {
+            Value::Str(s) => s.to_string_lossy(),
+            // A non-String result (a misbehaving override) — render it
+            // natively rather than erroring, matching the lenient spirit.
+            _ => if inspect {
+                r.to_inspect(&self.heap, &self.interner)
+            } else {
+                r.to_display(&self.heap, &self.interner)
+            },
+        })
+    }
+
     /// Last-resort fallback for collection receivers: route a method NOT
     /// handled by any native arm to the Enumerable MODULE's `each`-based
     /// implementation, run with `recv` as self. Array / Hash / Range

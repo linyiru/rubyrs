@@ -135,14 +135,20 @@ impl Vm {
                 // string still gets a newline (so `puts ""` and
                 // `puts` look identical). Empty array prints
                 // nothing.
-                fn puts_one(vm: &mut Vm, v: &Value) {
+                fn puts_one(vm: &mut Vm, v: &Value) -> Result<(), Trap> {
                     match v {
                         Value::Array(id) => {
                             let snapshot: Vec<Value> = vm.heap.array(*id).clone();
-                            for item in &snapshot { puts_one(vm, item); }
+                            // Pin the snapshot across the recursive
+                            // to_s dispatch (user code → GC).
+                            let mut g = PinGuard::new(vm);
+                            g.pin(Value::Array(*id));
+                            for item in &snapshot { g.pin(item.clone()); }
+                            for item in &snapshot { puts_one(g.vm, item)?; }
                         }
                         _ => {
-                            let s = v.to_display(&vm.heap, &vm.interner);
+                            // Dispatch a user `to_s` override; native otherwise.
+                            let s = vm.stringify_for_output(v, false)?;
                             // CRuby: `puts` skips the trailing
                             // newline if the value already ends in
                             // one. Avoids the double-blank-line
@@ -156,13 +162,18 @@ impl Vm {
                             }
                         }
                     }
+                    Ok(())
                 }
                 if args.is_empty() {
                     let _ = writeln!(self.stdout);
                 } else {
-                    for a in args {
-                        let cloned = a.clone();
-                        puts_one(self, &cloned);
+                    let pinned: Vec<Value> = args.to_vec();
+                    let mut g = PinGuard::new(self);
+                    for a in &pinned { g.pin(a.clone()); }
+                    for a in &pinned {
+                        if let Err(t) = puts_one(g.vm, a) {
+                            return Some(Err(t));
+                        }
                     }
                 }
                 Some(Ok(Value::Nil))
@@ -672,9 +683,20 @@ impl Vm {
                 Some(Ok(Value::Nil))
             }
             "p" | "pp" => {
-                for a in args {
-                    let s = a.to_inspect(&self.heap, &self.interner);
-                    let _ = writeln!(self.stdout, "{}", s);
+                // Pin the args across the inspect dispatch: a user
+                // `inspect` runs arbitrary code (→ GC) and the arg buffer
+                // isn't in the root set.
+                {
+                    let pinned: Vec<Value> = args.to_vec();
+                    let mut g = PinGuard::new(self);
+                    for a in &pinned { g.pin(a.clone()); }
+                    for a in &pinned {
+                        let s = match g.vm.stringify_for_output(a, true) {
+                            Ok(s) => s,
+                            Err(t) => return Some(Err(t)),
+                        };
+                        let _ = writeln!(g.vm.stdout, "{}", s);
+                    }
                 }
                 match args {
                     [] => Some(Ok(Value::Nil)),
@@ -1037,9 +1059,15 @@ impl Vm {
                 }
             }
             "print" => {
-                for a in args {
-                    let s = a.to_display(&self.heap, &self.interner);
-                    let _ = write!(self.stdout, "{}", s);
+                let pinned: Vec<Value> = args.to_vec();
+                let mut g = PinGuard::new(self);
+                for a in &pinned { g.pin(a.clone()); }
+                for a in &pinned {
+                    let s = match g.vm.stringify_for_output(a, false) {
+                        Ok(s) => s,
+                        Err(t) => return Some(Err(t)),
+                    };
+                    let _ = write!(g.vm.stdout, "{}", s);
                 }
                 Some(Ok(Value::Nil))
             }
