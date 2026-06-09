@@ -282,14 +282,15 @@ impl Vm {
                 } else if let Some(slot) = h.bind_slot {
                     f.locals.borrow_mut()[slot as usize] = exc.clone();
                 }
-                // ADR 0025 deferred follow-up: expose the in-flight
-                // exception as `$!` inside the rescue / ensure body.
-                // Tier-1 simplification: no save/restore — `$!`
-                // persists after the body exits (CRuby's
-                // dynamically-scoped behavior would revert it).
-                // The canonical `rescue => e; puts $!.message; end`
-                // pattern works; nested-rescue corner cases are
-                // a documented divergence.
+                // Set `$!` to the in-flight exception for the duration of
+                // the rescue / ensure body. The matching restore happens
+                // at `Op::ExitBegin` (and at `Op::Return` for a `return`
+                // out of the body), which revert `$!` to the value
+                // snapshotted at `Op::EnterBegin` — see
+                // `BeginBaseline::saved_dollar_bang`. This makes `$!`
+                // dynamically scoped like CRuby's errinfo: nested
+                // rescues see the right value and a handled exception
+                // stops leaking past its begin region.
                 let bang_sym = self.interner.intern("$!");
                 self.globals.insert(bang_sym, exc);
                 return Ok(());

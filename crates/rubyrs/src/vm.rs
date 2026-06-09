@@ -320,11 +320,20 @@ impl Drop for PinGuard<'_> {
 /// loop's `EnterLoop` entries leaked into the next iteration of
 /// the begin body. (Code-review #306 round 2 — closes the
 /// nested-loop-in-rescue gap.)
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct BeginBaseline {
     pub(crate) rescues_len: usize,
     pub(crate) loop_rescue_depths_len: usize,
     pub(crate) loop_stack_depths_len: usize,
+    /// Value of `$!` (errinfo) captured at this begin region's
+    /// `Op::EnterBegin`. CRuby's `$!` is dynamically scoped: it holds
+    /// the in-flight exception only WHILE a rescue/ensure body runs,
+    /// then reverts when the begin region is left. `Op::ExitBegin`
+    /// restores `$!` to this snapshot; so does `Op::Return` out of a
+    /// rescue body (which skips `ExitBegin`). Without it, a handled
+    /// exception leaks into `$!` and a later bare `raise` re-raises the
+    /// stale exception. (ADR 0025 deferred follow-up — now implemented.)
+    pub(crate) saved_dollar_bang: Value,
 }
 
 pub(crate) struct RescueHandler {

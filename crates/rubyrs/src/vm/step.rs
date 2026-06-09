@@ -3487,28 +3487,44 @@ impl Vm {
                 self.frames.last_mut().expect("ICE: PopRescue no frame").rescues.pop();
             }
             Op::EnterBegin => {
+                // Snapshot `$!` so `ExitBegin` (or a `return` out of a
+                // rescue body) can revert it — CRuby's errinfo is
+                // dynamically scoped to the rescue/ensure body, not the
+                // whole program. (See `BeginBaseline::saved_dollar_bang`.)
+                let bang = self.interner.intern("$!");
+                let saved_dollar_bang =
+                    self.globals.get(&bang).cloned().unwrap_or(Value::Nil);
                 let f = self.frames.last_mut().expect("ICE: EnterBegin no frame");
                 let baseline = crate::vm::BeginBaseline {
                     rescues_len: f.rescues.len(),
                     loop_rescue_depths_len: f.loop_rescue_depths.len(),
                     loop_stack_depths_len: f.loop_stack_depths.len(),
+                    saved_dollar_bang,
                 };
                 f.begin_rescue_depths.push(baseline);
             }
             Op::ExitBegin => {
-                self.frames
+                let baseline = self
+                    .frames
                     .last_mut()
                     .expect("ICE: ExitBegin no frame")
                     .begin_rescue_depths
                     .pop()
                     .expect("ICE: ExitBegin without matching EnterBegin");
+                // Revert `$!` to its pre-begin value now that this
+                // region's rescue/ensure body has completed. A handled
+                // exception is no longer "in flight", so a subsequent
+                // bare `raise` must not resurface it.
+                let bang = self.interner.intern("$!");
+                self.globals.insert(bang, baseline.saved_dollar_bang);
             }
             Op::TruncateRescuesToBeginBaseline => {
                 let f = self.frames.last_mut().expect("ICE: TruncateRescues no frame");
-                let baseline = *f
+                let baseline = f
                     .begin_rescue_depths
                     .last()
-                    .expect("ICE: retry without matching EnterBegin baseline");
+                    .expect("ICE: retry without matching EnterBegin baseline")
+                    .clone();
                 // Three-stack cleanup so retry stays balanced
                 // whether it fires from a multi-class rescue
                 // (rescues truncation) or from inside a `while`
@@ -3809,6 +3825,20 @@ impl Vm {
                 #[cfg(feature = "regex")]
                 if let Some(saved) = f.saved_last_match {
                     self.last_match = saved;
+                }
+                // `$!` (errinfo) is dynamically scoped: a `return` out
+                // of a rescue body abandons the begin region(s) whose
+                // `Op::ExitBegin` would have reverted `$!`. Restore it to
+                // the value saved at the OUTERMOST still-open begin in
+                // this frame — that snapshot equals `$!` as of method
+                // entry, so the caller's errinfo is unaffected by any
+                // exception this method handled internally. (No open
+                // begin → this method never touched `$!`, nothing to do.)
+                if let Some(saved) =
+                    f.begin_rescue_depths.first().map(|b| b.saved_dollar_bang.clone())
+                {
+                    let bang = self.interner.intern("$!");
+                    self.globals.insert(bang, saved);
                 }
                 // Per-invocation block-locals model: writes to
                 // outer-scope slots (slot < block.param_start)

@@ -368,6 +368,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn refinements() { run_diff("refinements"); }
 // Array#flatten recurses fully; flatten(n) depth; flatten! in place.
 #[test] fn array_flatten() { run_diff("array_flatten"); }
+// `$!` is dynamically scoped: reverts after rescue/ensure body, on
+// nested rescue, and on `return` out of a handler.
+#[test] fn dollar_bang_scope() { run_diff("dollar_bang_scope"); }
 // Struct: keyword_init, block form, to_h/[]/each, inspect.
 #[test] fn struct_features() { run_diff("struct_features"); }
 // Ruby 3.2 Data.define — immutable value objects.
