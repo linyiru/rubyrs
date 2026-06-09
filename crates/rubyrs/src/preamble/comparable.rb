@@ -95,3 +95,15 @@ end
 class Numeric
   include Comparable
 end
+
+## Mix `Comparable` into `String` too — CRuby's
+## `String.include?(Comparable)` is true; `between?` / `clamp`
+## build on String's native `<=>`. As with Numeric, the primitive
+## comparison ops (`Str < Str`, `==`, …) are intercepted by
+## `primitive_call` BEFORE the method-table walk, so the native
+## fast paths still win — Comparable only supplies the otherwise-
+## missing `between?` / `clamp`. (`"abc" == 5` stays `false`
+## rather than raising, because native `==` handles it first.)
+class String
+  include Comparable
+end

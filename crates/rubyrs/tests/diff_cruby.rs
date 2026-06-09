@@ -396,6 +396,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Symbol#to_proc — explicit `:sym.to_proc` conversion (literal &:sym is
 // covered by symbol_to_proc).
 #[test] fn symbol_to_proc_explicit() { run_diff("symbol_to_proc_explicit"); }
+// String includes Comparable → #between? / #clamp.
+#[test] fn string_comparable() { run_diff("string_comparable"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }
