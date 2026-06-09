@@ -744,32 +744,52 @@ fn tr_block_node(
         }
         None
     }
-    let block_params: Vec<BlockParam> = bn
-        .parameters()
-        .and_then(|pn| pn.as_block_parameters_node())
-        .and_then(|bp| bp.parameters())
-        .map(|p| {
-            let mut out: Vec<BlockParam> =
-                p.requireds().iter().filter_map(|r| parse_one(&r)).collect();
-            if let Some(rest) = p.rest()
-                && let Some(rp) = rest.as_rest_parameter_node()
-            {
-                let name = rp.name().map(cid_to_string).unwrap_or_default();
-                out.push(BlockParam::Rest(name));
+    // A block's parameters node is one of three shapes: explicit
+    // `|a, b|` (BlockParametersNode), implicit numbered `_1`/`_2`
+    // (NumberedParametersNode), or the Ruby 3.4 implicit `it`
+    // (ItParametersNode). The latter two carry no named param list —
+    // synthesize the implicit slots so invoke_block binds the yielded
+    // args to them (and auto-splats for `_2`+ just like an explicit
+    // two-param block). Without this they were dropped and `_1` / `it`
+    // read back as nil.
+    let block_params: Vec<BlockParam> = match bn.parameters() {
+        None => Vec::new(),
+        Some(pn) => {
+            if let Some(np) = pn.as_numbered_parameters_node() {
+                // `maximum()` is the highest `_N` used; `_1`..`_N`.
+                (1..=np.maximum())
+                    .map(|i| BlockParam::Single(format!("_{i}")))
+                    .collect()
+            } else if pn.as_it_parameters_node().is_some() {
+                vec![BlockParam::Single("it".to_string())]
+            } else {
+                pn.as_block_parameters_node()
+                    .and_then(|bp| bp.parameters())
+                    .map(|p| {
+                        let mut out: Vec<BlockParam> =
+                            p.requireds().iter().filter_map(|r| parse_one(&r)).collect();
+                        if let Some(rest) = p.rest()
+                            && let Some(rp) = rest.as_rest_parameter_node()
+                        {
+                            let name = rp.name().map(cid_to_string).unwrap_or_default();
+                            out.push(BlockParam::Rest(name));
+                        }
+                        if let Some(b) = p.block() {
+                            let name = b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string());
+                            out.push(BlockParam::BlockArg(name));
+                        }
+                        if let Some(kr) = p.keyword_rest()
+                            && let Some(krp) = kr.as_keyword_rest_parameter_node()
+                        {
+                            let name = krp.name().map(cid_to_string).unwrap_or_default();
+                            out.push(BlockParam::KwRest(name));
+                        }
+                        out
+                    })
+                    .unwrap_or_default()
             }
-            if let Some(b) = p.block() {
-                let name = b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string());
-                out.push(BlockParam::BlockArg(name));
-            }
-            if let Some(kr) = p.keyword_rest()
-                && let Some(krp) = kr.as_keyword_rest_parameter_node()
-            {
-                let name = krp.name().map(cid_to_string).unwrap_or_default();
-                out.push(BlockParam::KwRest(name));
-            }
-            out
-        })
-        .unwrap_or_default();
+        }
+    };
     let block_body: Vec<SExpr> = match bn.body() {
         Some(b) => {
             if let Some(stmts) = b.as_statements_node() {
@@ -1905,6 +1925,12 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_local_variable_read_node() {
         return sp(node, Expr::LVarRead(cid_to_string(n.name())));
     }
+    // Ruby 3.4 implicit `it` block param. `tr_block_node` synthesizes
+    // a `Single("it")` slot for an ItParametersNode block, so the body
+    // reference reads that local exactly like `_1`.
+    if node.as_it_local_variable_read_node().is_some() {
+        return sp(node, Expr::LVarRead("it".to_string()));
+    }
     if let Some(n) = node.as_local_variable_write_node() {
         return sp(node, Expr::LVarWrite(cid_to_string(n.name()), Box::new(tr(ctx, &n.value()))));
     }
@@ -3002,34 +3028,49 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // `->(x, *rest) { body }` — same param shape as block
         // literals: requireds + optional rest. Lambda body is
         // a `Vec<SExpr>` evaluated in the block proto.
-        let params: Vec<BlockParam> = n.parameters()
-            .and_then(|pn| pn.as_block_parameters_node())
-            .and_then(|bp| bp.parameters())
-            .map(|p| {
-                let mut out: Vec<BlockParam> = p.requireds().iter()
-                    .filter_map(|r| r.as_required_parameter_node()
-                        .map(|rp| BlockParam::Single(cid_to_string(rp.name()))))
-                    .collect();
-                if let Some(rest) = p.rest()
-                    && let Some(rp) = rest.as_rest_parameter_node() {
-                        let name = rp.name().map(cid_to_string).unwrap_or_default();
-                        out.push(BlockParam::Rest(name));
-                    }
-                // M27 A1: `|&blk|` capture in lambdas, same as for
-                // blocks (see comment above).
-                if let Some(b) = p.block() {
-                    let name = b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string());
-                    out.push(BlockParam::BlockArg(name));
+        // Lambda literals take implicit `_1`/`it` params too
+        // (`-> { _1 + 1 }`, `-> { it * 3 }`), same three parameter-node
+        // shapes a block has — synthesize the implicit slots.
+        let params: Vec<BlockParam> = match n.parameters() {
+            None => Vec::new(),
+            Some(pn) => {
+                if let Some(np) = pn.as_numbered_parameters_node() {
+                    (1..=np.maximum())
+                        .map(|i| BlockParam::Single(format!("_{i}")))
+                        .collect()
+                } else if pn.as_it_parameters_node().is_some() {
+                    vec![BlockParam::Single("it".to_string())]
+                } else {
+                    pn.as_block_parameters_node()
+                        .and_then(|bp| bp.parameters())
+                        .map(|p| {
+                            let mut out: Vec<BlockParam> = p.requireds().iter()
+                                .filter_map(|r| r.as_required_parameter_node()
+                                    .map(|rp| BlockParam::Single(cid_to_string(rp.name()))))
+                                .collect();
+                            if let Some(rest) = p.rest()
+                                && let Some(rp) = rest.as_rest_parameter_node() {
+                                    let name = rp.name().map(cid_to_string).unwrap_or_default();
+                                    out.push(BlockParam::Rest(name));
+                                }
+                            // M27 A1: `|&blk|` capture in lambdas, same as for
+                            // blocks (see comment above).
+                            if let Some(b) = p.block() {
+                                let name = b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string());
+                                out.push(BlockParam::BlockArg(name));
+                            }
+                            // `->(**opts) { }` keyword-rest, same as block form.
+                            if let Some(kr) = p.keyword_rest()
+                                && let Some(krp) = kr.as_keyword_rest_parameter_node() {
+                                    let name = krp.name().map(cid_to_string).unwrap_or_default();
+                                    out.push(BlockParam::KwRest(name));
+                                }
+                            out
+                        })
+                        .unwrap_or_default()
                 }
-                // `->(**opts) { }` keyword-rest, same as block form.
-                if let Some(kr) = p.keyword_rest()
-                    && let Some(krp) = kr.as_keyword_rest_parameter_node() {
-                        let name = krp.name().map(cid_to_string).unwrap_or_default();
-                        out.push(BlockParam::KwRest(name));
-                    }
-                out
-            })
-            .unwrap_or_default();
+            }
+        };
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {

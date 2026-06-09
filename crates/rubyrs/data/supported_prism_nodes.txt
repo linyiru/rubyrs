@@ -80,6 +80,8 @@ InterpolatedRegularExpressionNode
 InterpolatedStringNode
 InterpolatedSymbolNode
 InterpolatedXStringNode
+ItLocalVariableReadNode
+ItParametersNode
 KeywordRestParameterNode
 KeywordHashNode
 LambdaNode
@@ -94,6 +96,7 @@ MultiTargetNode
 MultiWriteNode
 NextNode
 NilNode
+NumberedParametersNode
 NumberedReferenceReadNode
 OptionalKeywordParameterNode
 OptionalParameterNode
