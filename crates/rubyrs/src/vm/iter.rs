@@ -477,6 +477,90 @@ impl Vm {
         Ok(Value::Object(inst_id))
     }
 
+    /// Drive `Numeric#step` for a block. All-Integer (recv, limit, step)
+    /// iterate as Integers; any Float operand switches to a Float
+    /// progression sized by CRuby's element-count formula (so fp drift
+    /// can't over/under-shoot the endpoint). step==0 → ArgumentError; a
+    /// wrong-direction range yields nothing. Returns the receiver (or a
+    /// `break` value); `MethodReturn` surfaces as `Ok(Some(Nil))`.
+    pub(crate) fn run_numeric_step(
+        &mut self,
+        recv: Value,
+        limit: Value,
+        by: Value,
+        block: ObjId,
+    ) -> Result<Option<Value>, Trap> {
+        let num = |v: &Value| -> Option<f64> {
+            match v {
+                Value::Int(i) => Some(*i as f64),
+                Value::Float(f) => Some(*f),
+                _ => None,
+            }
+        };
+        if num(&limit).is_none() || num(&by).is_none() {
+            let bad = if num(&limit).is_none() { &limit } else { &by };
+            return Err(self.trap(crate::error::RubyError::TypeError {
+                msg: format!("no implicit conversion of {} into Float", bad.type_name()),
+            }));
+        }
+        let all_int = matches!(
+            (&recv, &limit, &by),
+            (Value::Int(_), Value::Int(_), Value::Int(_))
+        );
+        let mut g = PinGuard::new(self);
+        g.pin(Value::Block(block));
+        let pre = g.vm.frames.len();
+        let mut early = None;
+        if all_int {
+            let lit = |v: &Value| if let Value::Int(i) = v { *i } else { 0 };
+            let (s, l, b) = (lit(&recv), lit(&limit), lit(&by));
+            if b == 0 {
+                return Err(g.vm.trap(crate::error::RubyError::ArgumentError {
+                    msg: "step can't be 0".to_string(),
+                }));
+            }
+            let mut i = s;
+            while if b > 0 { i <= l } else { i >= l } {
+                match g.vm.step_block(block, vec![Value::Int(i)], pre)? {
+                    BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                    BlockStep::Break(r) => { early = Some(r); break; }
+                    BlockStep::Value(_) => {}
+                }
+                match i.checked_add(b) {
+                    Some(n) => i = n,
+                    None => break, // saturate at i64 bounds
+                }
+            }
+        } else {
+            let s = num(&recv).unwrap_or(f64::NAN);
+            let l = num(&limit).unwrap_or(f64::NAN);
+            let b = num(&by).unwrap_or(f64::NAN);
+            if b == 0.0 {
+                return Err(g.vm.trap(crate::error::RubyError::ArgumentError {
+                    msg: "step can't be 0".to_string(),
+                }));
+            }
+            let n_raw = (l - s) / b;
+            if n_raw >= 0.0 {
+                // CRuby's ruby_float_step element count: floor(n + err) + 1,
+                // with err a small fp-tolerance capped at 0.5.
+                let err = (((s.abs() + l.abs() + (l - s).abs()) / b.abs())
+                    * f64::EPSILON)
+                    .min(0.5);
+                let count = (n_raw + err).floor() as i64 + 1;
+                for k in 0..count {
+                    let v = s + (k as f64) * b;
+                    match g.vm.step_block(block, vec![Value::Float(v)], pre)? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
+                    }
+                }
+            }
+        }
+        Ok(Some(early.unwrap_or(recv)))
+    }
+
     pub(crate) fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: ObjId) -> Result<Option<Value>, Trap> {
         // Object#itself with a block — CRuby ignores the block
         // and returns the receiver unchanged. Sits next to the
@@ -1934,6 +2018,38 @@ impl Vm {
                     i -= 1;
                 }
                 Some(early.unwrap_or(Value::Int(start)))
+            }
+            // `n.step(limit, by=1) { |i| … }` and the keyword form
+            // `n.step(to:, by:) { … }` (the kwargs arrive as a trailing
+            // Hash). Integer/Float receiver; iteration logic in
+            // `run_numeric_step`. The no-block Enumerator form is in
+            // `collection_call`.
+            (Value::Int(_) | Value::Float(_), "step", [Value::Hash(hid)]) => {
+                let recv = recv.clone();
+                let hid = *hid;
+                let to_sym = self.interner.intern("to");
+                let by_sym = self.interner.intern("by");
+                let (to, by) = {
+                    let h = self.heap.hash(hid);
+                    let get = |sym| h.iter().find_map(|(k, v)| {
+                        if matches!(k, Value::Sym(s) if *s == sym) { Some(v.clone()) } else { None }
+                    });
+                    (get(to_sym), get(by_sym).unwrap_or(Value::Int(1)))
+                };
+                let Some(limit) = to else {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: "step: no keyword :to".to_string(),
+                    }));
+                };
+                return self.run_numeric_step(recv, limit, by, block);
+            }
+            (Value::Int(_) | Value::Float(_), "step", [limit]) => {
+                let recv = recv.clone();
+                return self.run_numeric_step(recv, limit.clone(), Value::Int(1), block);
+            }
+            (Value::Int(_) | Value::Float(_), "step", [limit, by]) => {
+                let recv = recv.clone();
+                return self.run_numeric_step(recv, limit.clone(), by.clone(), block);
             }
             // Mirror image of `upto` with a Float endpoint:
             // CRuby `9.downto(1.3)` yields down to ceil(1.3) == 2.

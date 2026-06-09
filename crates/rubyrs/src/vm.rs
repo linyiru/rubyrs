@@ -1608,7 +1608,14 @@ impl Vm {
                 if matches!(
                     (name, args),
                     ("times", []) | ("upto", [_]) | ("downto", [_])
+                        | ("step", [_]) | ("step", [_, _])
                 ) =>
+            {
+                return self.make_enum_for(recv.clone(), name, args.to_vec()).map(Some);
+            }
+            // `1.5.step(to, by)` without a block → Enumerator too.
+            Value::Float(_)
+                if matches!((name, args), ("step", [_]) | ("step", [_, _])) =>
             {
                 return self.make_enum_for(recv.clone(), name, args.to_vec()).map(Some);
             }

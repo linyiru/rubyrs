@@ -391,6 +391,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn integer_noblock_enum() { run_diff("integer_noblock_enum"); }
 // Enumerable#each_slice/#each_cons (Enumerator, Integer iters, Range).
 #[test] fn enumerator_each_slice_cons() { run_diff("enumerator_each_slice_cons"); }
+// Numeric#step — positional + keyword (to:/by:), Integer + Float.
+#[test] fn numeric_step() { run_diff("numeric_step"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }
