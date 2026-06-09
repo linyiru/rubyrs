@@ -2033,6 +2033,114 @@ impl Vm {
                         let id = self.heap.alloc(HeapObj::Array(elems));
                         Some(Value::Array(id))
                     }
+                    ("partition", [Value::Str(sep)]) => {
+                        // Split at the FIRST occurrence → [before, sep, after];
+                        // no match → [self, "", ""].
+                        let src = s.to_string_lossy();
+                        let sep_s = sep.to_string_lossy();
+                        let parts = match src.find(sep_s.as_str()) {
+                            Some(i) => [
+                                src[..i].to_string(),
+                                sep_s.to_string(),
+                                src[i + sep_s.len()..].to_string(),
+                            ],
+                            None => [src.to_string(), String::new(), String::new()],
+                        };
+                        let elems: Vec<Value> = parts.iter().map(Value::new_str).collect();
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(id))
+                    }
+                    ("rpartition", [Value::Str(sep)]) => {
+                        // Split at the LAST occurrence; no match →
+                        // ["", "", self] (CRuby's rpartition miss shape).
+                        let src = s.to_string_lossy();
+                        let sep_s = sep.to_string_lossy();
+                        let parts = match src.rfind(sep_s.as_str()) {
+                            Some(i) => [
+                                src[..i].to_string(),
+                                sep_s.to_string(),
+                                src[i + sep_s.len()..].to_string(),
+                            ],
+                            None => [String::new(), String::new(), src.to_string()],
+                        };
+                        let elems: Vec<Value> = parts.iter().map(Value::new_str).collect();
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(id))
+                    }
+                    #[cfg(feature = "regex")]
+                    ("partition", [Value::Regex(re)]) => {
+                        let src = s.to_string_lossy();
+                        let parts = match re.captures_owned(&src).ok().flatten() {
+                            Some(c) => [
+                                src[..c.m_start].to_string(),
+                                src[c.m_start..c.m_end].to_string(),
+                                src[c.m_end..].to_string(),
+                            ],
+                            None => [src.to_string(), String::new(), String::new()],
+                        };
+                        let elems: Vec<Value> = parts.iter().map(Value::new_str).collect();
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(id))
+                    }
+                    #[cfg(feature = "regex")]
+                    ("rpartition", [Value::Regex(re)]) => {
+                        let src = s.to_string_lossy();
+                        // Last match → take the final element of all matches.
+                        let parts = match re.captures_iter_owned(&src).ok().and_then(|v| v.into_iter().last()) {
+                            Some(c) => [
+                                src[..c.m_start].to_string(),
+                                src[c.m_start..c.m_end].to_string(),
+                                src[c.m_end..].to_string(),
+                            ],
+                            None => [String::new(), String::new(), src.to_string()],
+                        };
+                        let elems: Vec<Value> = parts.iter().map(Value::new_str).collect();
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(id))
+                    }
+                    ("insert", [Value::Int(idx), Value::Str(ins)]) => {
+                        check_unfrozen(self)?;
+                        // Char-indexed. A non-negative index inserts BEFORE
+                        // that char; a negative index counts from the end and
+                        // inserts AFTER (so -1 appends), matching CRuby.
+                        let src = s.to_string_lossy();
+                        let chars: Vec<char> = src.chars().collect();
+                        let n = chars.len() as i64;
+                        let pos = if *idx < 0 { n + idx + 1 } else { *idx };
+                        if pos < 0 || pos > n {
+                            return Err(self.trap(RubyError::IndexError {
+                                msg: format!("index {} out of string", idx),
+                            }));
+                        }
+                        let pos = pos as usize;
+                        let mut out = String::new();
+                        out.extend(chars[..pos].iter());
+                        out.push_str(&ins.to_string_lossy());
+                        out.extend(chars[pos..].iter());
+                        *s.borrow_mut() = out.into_bytes();
+                        Some(Value::Str(s.clone()))
+                    }
+                    ("delete", [Value::Str(set)]) => {
+                        // Delete chars matching the tr-style set (ranges
+                        // `a-z`, leading `^` negation) — same parser tr uses.
+                        let src = s.to_string_lossy();
+                        let set_s = set.to_string_lossy();
+                        let (set_chars, negated) = match parse_tr_set(&set_s, true) {
+                            Ok(t) => t,
+                            Err(msg) => return Err(self.trap(RubyError::ArgumentError {
+                                msg: msg.to_string(),
+                            })),
+                        };
+                        let setref: std::collections::HashSet<char> = set_chars.into_iter().collect();
+                        let out: String = src.chars()
+                            .filter(|c| setref.contains(c) == negated)
+                            .collect();
+                        Some(Value::new_str(out))
+                    }
                     ("split", []) => {
                         // No-arg `split` matches CRuby's `split(nil)`:
                         // splits on runs of whitespace, drops the
