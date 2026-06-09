@@ -55,6 +55,8 @@ EmbeddedStatementsNode
 EmbeddedVariableNode
 FalseNode
 FloatNode
+ForwardingArgumentsNode
+ForwardingParameterNode
 ForwardingSuperNode
 GlobalVariableAndWriteNode
 GlobalVariableOperatorWriteNode

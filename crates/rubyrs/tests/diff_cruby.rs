@@ -346,6 +346,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn numbered_and_it_params() { run_diff("numbered_and_it_params"); }
 // Multiple at_exit handlers run LIFO — GC-rooting regression guard.
 #[test] fn at_exit_many() { run_diff("at_exit_many"); }
+// Anonymous `*`/`**`/`&` and `...` argument forwarding (empty kwrest drops).
+#[test] fn arg_forwarding() { run_diff("arg_forwarding"); }
 // `END { }` → at_exit, `BEGIN { }` → inline; interleaved LIFO with at_exit.
 #[test] fn begin_end_blocks() { run_diff("begin_end_blocks"); }
 #[test] fn hash_to_hash() { run_diff("hash_to_hash"); }

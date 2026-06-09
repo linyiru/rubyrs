@@ -814,13 +814,23 @@ fn tr_kwhash(
     for el in kh.elements().iter() {
         if let Some(an) = el.as_assoc_node() {
             buf.push((tr(ctx, &an.key()), tr(ctx, &an.value())));
-        } else if let Some(spn) = el.as_assoc_splat_node()
-            && let Some(inner) = spn.value() {
-                if !buf.is_empty() {
-                    chunks.push(sp(kh_anchor, Expr::HashLit(std::mem::take(&mut buf))));
-                }
-                chunks.push(tr(ctx, &inner));
+        } else if let Some(spn) = el.as_assoc_splat_node() {
+            // `**h` keyword splat, OR anonymous `**` forwarding
+            // (Ruby 3.2+: `def m(**); n(**); end`) where the splat
+            // carries no value — read the kwrest slot the enclosing
+            // `def m(**)` bound. The compiler maps an anonymous (empty
+            // name) kwrest to the reserved `__kw_rest_anon` slot
+            // (compiler.rs `slot_name` remap), so read that. `**nil`
+            // has a value (a NilNode), handled by the Some arm.
+            let inner_expr = match spn.value() {
+                Some(inner) => tr(ctx, &inner),
+                None => sp(kh_anchor, Expr::LVarRead("__kw_rest_anon".to_string())),
+            };
+            if !buf.is_empty() {
+                chunks.push(sp(kh_anchor, Expr::HashLit(std::mem::take(&mut buf))));
             }
+            chunks.push(inner_expr);
+        }
     }
     if !buf.is_empty() {
         chunks.push(sp(kh_anchor, Expr::HashLit(buf)));
@@ -834,6 +844,31 @@ fn tr_kwhash(
         receiver: Some(Box::new(lhs)),
         name: "merge".into(),
         args: vec![rhs], kwargs_trailing: false }))
+}
+
+/// Wrap a splat-call's trailing keyword hash so an EMPTY one
+/// contributes nothing. Builds `[hash].reject { |__kws| __kws.empty? }`
+/// — `[]` when the hash is empty (`n(*a, **{})`), `[hash]` otherwise.
+/// The splat path concatenates this chunk, so an empty kwargs hash
+/// never lands as a phantom positional arg (it can't be peeled later —
+/// the assembled args Array is opaque by dispatch time). A non-empty
+/// hash survives and `invoke_method` peels it as kwargs exactly as
+/// before. Mirrors `do_call_kw`'s empty-`**` drop for the non-splat
+/// path.
+fn kwsplat_chunk(anchor: &Node<'_>, kwhash: SExpr) -> SExpr {
+    let arr = sp(anchor, Expr::ArrayLit(vec![kwhash]));
+    sp(anchor, Expr::CallWithBlock {
+        receiver: Some(Box::new(arr)),
+        name: "reject".into(),
+        args: vec![],
+        block_params: vec![BlockParam::Single("__kws".into())],
+        block_body: vec![sp(anchor, Expr::Call {
+            receiver: Some(Box::new(sp(anchor, Expr::LVarRead("__kws".into())))),
+            name: "empty?".into(),
+            args: vec![],
+            kwargs_trailing: false,
+        })],
+    })
 }
 
 /// Extracted body of the `class << recv` (singleton-class) AST
@@ -2632,18 +2667,66 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // any gem we've vendored, and giving them their own arm
         // would duplicate the synthesis code without benefit.
         let early_block_arg: Option<Box<SExpr>> = n.block().and_then(|bnode| {
-            bnode.as_block_argument_node().and_then(|ba| ba.expression()).and_then(|expr| {
+            bnode.as_block_argument_node().and_then(|ba| match ba.expression() {
                 // Skip the symbol-to-proc shape (`&:method`); the
                 // existing CallWithBlock arm has a richer
                 // expansion (synthesises a one-arg block body) we
                 // don't want to bypass.
-                if expr.as_symbol_node().is_some() {
-                    None
-                } else {
-                    Some(Box::new(tr(ctx, &expr)))
-                }
+                Some(expr) if expr.as_symbol_node().is_some() => None,
+                Some(expr) => Some(Box::new(tr(ctx, &expr))),
+                // Anonymous `&` forwarding combined with a splat
+                // (`def m(*, &); n(*, &); end`): read the reserved
+                // `&` block sentinel the enclosing def bound. Without
+                // this the splat path dropped the block (the legacy
+                // non-splat block arm never runs once a splat forces
+                // the Apply path), turning it into "no block given".
+                None => Some(Box::new(sp(node, Expr::LVarRead("&".to_string())))),
             })
         });
+        // `n(...)` / `n(x, ...)` — Ruby 3.0 argument forwarding.
+        // ForwardingArgumentsNode stands in for `*<rest>, **<kw>,
+        // &<blk>` all at once, reading the reserved sentinels the
+        // enclosing `def m(...)` bound (rest `*`, kwrest
+        // `__kw_rest_anon`, block `&`). Desugar to a splat call:
+        // leading positionals + Array(`*`) + the kwsplat chunk (drops
+        // an empty kwrest), with the block forwarded via Apply.block_arg.
+        if arg_nodes.iter().any(|c| c.as_forwarding_arguments_node().is_some()) {
+            let mut chunks: Vec<SExpr> = Vec::new();
+            let mut buf: Vec<SExpr> = Vec::new();
+            for c in &arg_nodes {
+                if c.as_forwarding_arguments_node().is_some() {
+                    if !buf.is_empty() {
+                        chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
+                    }
+                    // positional rest: Array(`*` sentinel)
+                    chunks.push(sp(node, Expr::Call {
+                        receiver: None,
+                        name: "Array".into(),
+                        args: vec![sp(node, Expr::LVarRead("*".to_string()))],
+                        kwargs_trailing: false,
+                    }));
+                    // keyword rest: `[__kw_rest_anon].reject(&:empty?)`
+                    chunks.push(kwsplat_chunk(node, sp(node, Expr::LVarRead("__kw_rest_anon".to_string()))));
+                } else {
+                    buf.push(tr(ctx, c));
+                }
+            }
+            if !buf.is_empty() {
+                chunks.push(sp(node, Expr::ArrayLit(buf)));
+            }
+            let mut it = chunks.into_iter();
+            let first = it.next().unwrap_or_else(|| sp(node, Expr::ArrayLit(vec![])));
+            let acc = it.fold(first, |lhs, rhs| sp(node, Expr::Call {
+                receiver: Some(Box::new(lhs)),
+                name: "+".into(),
+                args: vec![rhs], kwargs_trailing: false }));
+            return wrap_sn(sp(node, Expr::Apply {
+                receiver,
+                name,
+                splat: Box::new(acc),
+                block_arg: Some(Box::new(sp(node, Expr::LVarRead("&".to_string())))),
+            }));
+        }
         if arg_nodes.len() == 1
             && let Some(sn) = arg_nodes[0].as_splat_node()
                 && let Some(splat_expr) = sn.expression() {
@@ -2683,8 +2766,15 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             let mut buf: Vec<SExpr> = Vec::new();
             for c in &arg_nodes {
                 let cn: &ruby_prism::Node<'_> = c;
-                if let Some(sn) = cn.as_splat_node()
-                    && let Some(inner) = sn.expression() {
+                if let Some(sn) = cn.as_splat_node() {
+                        // `*x` splat, OR anonymous `*` forwarding
+                        // (`def m(*); n(*); end`) where the splat has
+                        // no expression — read the reserved `"*"` rest
+                        // sentinel the enclosing `def m(*)` bound.
+                        let inner_expr = match sn.expression() {
+                            Some(inner) => tr(ctx, &inner),
+                            None => sp(node, Expr::LVarRead("*".to_string())),
+                        };
                         if !buf.is_empty() {
                             chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
                         }
@@ -2695,13 +2785,19 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         chunks.push(sp(node, Expr::Call {
                             receiver: None,
                             name: "Array".into(),
-                            args: vec![tr(ctx, &inner)],
+                            args: vec![inner_expr],
                             kwargs_trailing: false,
                         }));
                     } else if let Some(kh) = cn.as_keyword_hash_node() {
-                    // Trailing kwarg-hash retains its sugar shape;
-                    // **opts merges via tr_kwhash's `.merge` chain.
-                    buf.push(tr_kwhash(ctx, node, cn, &kh));
+                    // Trailing kwarg-hash (`**opts` merges via
+                    // tr_kwhash's `.merge` chain). Route it through
+                    // `kwsplat_chunk` so an EMPTY result (`n(*a, **{})`)
+                    // drops instead of landing as a phantom positional.
+                    if !buf.is_empty() {
+                        chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
+                    }
+                    let kwhash = tr_kwhash(ctx, node, cn, &kh);
+                    chunks.push(kwsplat_chunk(node, kwhash));
                 } else {
                     buf.push(tr(ctx, cn));
                 }
@@ -3470,6 +3566,20 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 && let Some(kr) = r.as_keyword_rest_parameter_node() {
                     kw_rest = Some(kr.name().map(cid_to_string).unwrap_or_default());
                 }
+            // `def m(...)` — Ruby 3.0 argument forwarding. Prism puts a
+            // ForwardingParameterNode in the keyword_rest slot; it
+            // stands in for an anonymous rest + kwrest + block all at
+            // once. Bind the same reserved sentinels the standalone
+            // anonymous `*` / `**` / `&` forms use (rest `*`, kwrest
+            // `""` → compiler's `__kw_rest_anon` slot, block `&`); the
+            // matching `inner(...)` call site reads them back.
+            if let Some(r) = p.keyword_rest()
+                && r.as_forwarding_parameter_node().is_some()
+            {
+                rest = Some("*".to_string());
+                kw_rest = Some(String::new());
+                block_param = Some("&".to_string());
+            }
             for kw in p.keywords().iter() {
                 if let Some(rk) = kw.as_required_keyword_parameter_node() {
                     kw_params.push((cid_to_string(rk.name()), None));
