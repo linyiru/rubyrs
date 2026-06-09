@@ -350,6 +350,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn arg_forwarding() { run_diff("arg_forwarding"); }
 // `respond_to?` sees methods reopened onto / included into a core class.
 #[test] fn respond_to_reopened() { run_diff("respond_to_reopened"); }
+// respond_to? consults a user respond_to_missing? on resolution miss.
+#[test] fn respond_to_missing() { run_diff("respond_to_missing"); }
 // Pattern matching: case/in, `=> pat`, `in pat`, deconstruct protocol.
 #[test] fn pattern_matching() { run_diff("pattern_matching"); }
 // Find patterns `[*pre, mâ¦, *post]`.

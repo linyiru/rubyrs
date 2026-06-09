@@ -1318,6 +1318,44 @@ impl Vm {
         Ok(true)
     }
 
+    /// `respond_to?`'s fallback: when normal resolution misses, CRuby
+    /// consults a user-defined `respond_to_missing?(name, include_priv)`
+    /// — the companion to `method_missing` for proxy / DSL objects. If
+    /// the receiver's class defines it, invoke it (its boolean result
+    /// becomes the `respond_to?` result, same as how `try_method_missing`
+    /// lets `method_missing`'s value flow through) and return `Ok(true)`;
+    /// otherwise `Ok(false)` so the caller pushes the default `false`.
+    pub(crate) fn try_respond_to_missing(
+        &mut self,
+        recv: &Value,
+        name_sym: SymId,
+        include_private: bool,
+    ) -> Result<bool, Trap> {
+        let rtm_id = self.interner.intern("respond_to_missing?");
+        let m = match recv {
+            Value::Object(id) => {
+                let cls = self.heap.class_of(*id);
+                self.lookup_method_uncached(&cls, rtm_id)
+            }
+            Value::Class(cls) => self.lookup_class_singleton_method(cls, rtm_id),
+            // Primitives: a `respond_to_missing?` reopened onto the
+            // value's core class (rare, but mirror the reopened-method
+            // path `responds_to` itself now honours).
+            _ => match self.class_of(recv) {
+                Value::Class(cls) => self.lookup_method_uncached(&cls, rtm_id),
+                _ => None,
+            },
+        };
+        match m {
+            Some(m) => {
+                let args = vec![Value::Sym(name_sym), Value::Bool(include_private)];
+                self.invoke_method_with_block(m, recv.clone(), args, None)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
 
 
     /// Invoke a registered host fn (either v1 or v2 slot).
@@ -1918,7 +1956,7 @@ impl Vm {
                         // the receiver actually dispatches this
                         // name, we shouldn't lie via NameError.
                         None => {
-                            if self.responds_to(&recv, *bound_name_id) {
+                            if self.responds_to(&recv, *bound_name_id, true) {
                                 None
                             } else {
                                 // Sentinel — same shape as
@@ -6129,8 +6167,15 @@ impl Vm {
                         ),
                     })),
                 };
-                let yes = self.responds_to(&self_val, lookup_name);
-                self.stack.push(Value::Bool(yes));
+                let include_private = matches!(args.get(1), Some(Value::Bool(true)));
+                if self.responds_to(&self_val, lookup_name, include_private) {
+                    self.stack.push(Value::Bool(true));
+                    return Ok(());
+                }
+                if self.try_respond_to_missing(&self_val, lookup_name, include_private)? {
+                    return Ok(());
+                }
+                self.stack.push(Value::Bool(false));
                 return Ok(());
             }
             // method_missing fallback (PoC #2). For Object self, look
@@ -8349,7 +8394,7 @@ impl Vm {
         // to make the distinction.
         if &*name == "hash" && !args.is_empty() {
             let name_id = self.interner.intern("hash");
-            if self.responds_to(&recv, name_id) {
+            if self.responds_to(&recv, name_id, true) {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!(
                         "wrong number of arguments (given {}, expected 0)",
@@ -9521,8 +9566,16 @@ impl Vm {
                     ),
                 })),
             };
-            let yes = self.responds_to(&recv, lookup_name);
-            self.stack.push(Value::Bool(yes));
+            let include_private = matches!(args.get(1), Some(Value::Bool(true)));
+            if self.responds_to(&recv, lookup_name, include_private) {
+                self.stack.push(Value::Bool(true));
+                return Ok(());
+            }
+            // Normal resolution missed — consult `respond_to_missing?`.
+            if self.try_respond_to_missing(&recv, lookup_name, include_private)? {
+                return Ok(());
+            }
+            self.stack.push(Value::Bool(false));
             return Ok(());
         }
         if self.try_method_missing(&recv, name_id, args.to_vec(), None)? {
@@ -12785,7 +12838,7 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
         _ => None,
     };
     match sentinel {
-        Some(s) => vm.responds_to(&s, sid),
+        Some(s) => vm.responds_to(&s, sid, true),
         // Aggregate / opaque primitives: keep the previously-
         // permissive answer so the gem helper path doesn't trip
         // on Kernel-shared method probes.
@@ -13535,7 +13588,7 @@ impl Vm {
             _ => None,
         };
         match sentinel {
-            Some(s) => self.responds_to(&s, sid),
+            Some(s) => self.responds_to(&s, sid, true),
             None => is_primitive_class_name(class_name),
         }
     }

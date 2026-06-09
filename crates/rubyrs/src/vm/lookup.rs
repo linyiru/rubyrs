@@ -512,7 +512,7 @@ impl Vm {
     /// arms grow. Universal methods (`nil?`, `to_s`,
     /// `respond_to?` itself, `==` / `!=`) are matched first
     /// regardless of receiver.
-    pub(crate) fn responds_to(&self, recv: &Value, name_id: SymId) -> bool {
+    pub(crate) fn responds_to(&self, recv: &Value, name_id: SymId, include_private: bool) -> bool {
         // Host fns (`register_fn(...)` — battery / cext / embed-host
         // wiring) are reachable as bareword calls from any frame. The
         // matching `__defined_method?` arm in `vm/kernel.rs` already
@@ -870,7 +870,9 @@ impl Vm {
                 {
                     return true;
                 }
-                self.lookup_class_singleton_method(cls, name_id).is_some()
+                self.lookup_class_singleton_method(cls, name_id)
+                    .is_some_and(|m| include_private
+                        || m.visibility.get() == crate::value::Visibility::Public)
             },
             Value::Object(id) => {
                 // The universal `dup`/`clone` arm in
@@ -881,7 +883,9 @@ impl Vm {
                     return true;
                 }
                 let cls = self.heap.class_of(*id);
-                self.lookup_method_uncached(&cls, name_id).is_some()
+                self.lookup_method_uncached(&cls, name_id)
+                    .is_some_and(|m| include_private
+                        || m.visibility.get() == crate::value::Visibility::Public)
             }
             Value::Block(_) => matches!(name, "call" | "[]" | "()" | "yield" | "arity" | "curry" | ">>" | "<<"),
             #[cfg(feature = "regex")]
@@ -940,7 +944,9 @@ impl Vm {
             };
             if let Some(sym) = self.interner.get_id(cname)
                 && let Some(cls) = self.classes.get(&sym).cloned()
-                && self.lookup_method_uncached(&cls, name_id).is_some()
+                && self.lookup_method_uncached(&cls, name_id)
+                    .is_some_and(|m| include_private
+                        || m.visibility.get() == crate::value::Visibility::Public)
             {
                 return true;
             }

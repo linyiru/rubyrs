@@ -67,6 +67,15 @@ end
 
 class Object < BasicObject
   include Kernel
+  # Default reflection hook. `respond_to?` consults this only after
+  # normal resolution misses; the base returns false so a user override
+  # can `... || super` to fall back to it. PRIVATE, matching CRuby — so
+  # `obj.respond_to?(:respond_to_missing?)` is false without the
+  # include-private flag.
+  def respond_to_missing?(name, include_private = false)
+    false
+  end
+  private :respond_to_missing?
 end
 
 ## Phase C.1 Numeric / Rational class shells. CRuby's chain is

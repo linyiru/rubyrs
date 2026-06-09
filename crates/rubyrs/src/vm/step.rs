@@ -2667,7 +2667,7 @@ impl Vm {
                         });
                         let shell_class_whitelist_hit = probe_cls
                             .as_ref()
-                            .map(|real| self.responds_to(&Value::Class(real.clone()), old_id))
+                            .map(|real| self.responds_to(&Value::Class(real.clone()), old_id, true))
                             .unwrap_or(false);
                         if let Some(cls) = &cls_ref {
                             // Walk the superclass chain looking for
@@ -2820,7 +2820,7 @@ impl Vm {
                         // someone needs it. PR #229 code-review #3.
                         let cls_ref = self.class_stack.last().cloned();
                         if let Some(cls) = &cls_ref
-                            && self.responds_to(&Value::Class(cls.clone()), old_id) {
+                            && self.responds_to(&Value::Class(cls.clone()), old_id, true) {
                             // Module fence on Class-only builtins.
                             // `responds_to(Value::Class(_), :new)`
                             // returns true unconditionally (lookup.rs
