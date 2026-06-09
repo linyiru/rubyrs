@@ -15,6 +15,40 @@ use crate::value::{ObjId, Value};
 
 use super::{value_cmp_v_heap, PinGuard, Vm};
 
+/// Recursively flatten `src` into `out` to `depth` levels (`None` =
+/// unlimited, the `Array#flatten` default; `Some(0)` = stop). Sets
+/// `*changed` if any nesting was unwrapped. `stack` holds the ObjIds
+/// currently being flattened — returns `false` if a member is already on
+/// it (a self-referential array), which the caller turns into the
+/// ArgumentError CRuby raises ("tried to flatten recursive array").
+fn flatten_rec(
+    heap: &crate::heap::Heap,
+    src: &[Value],
+    depth: Option<i64>,
+    out: &mut Vec<Value>,
+    changed: &mut bool,
+    stack: &mut Vec<ObjId>,
+) -> bool {
+    for v in src {
+        match v {
+            Value::Array(inner) if depth != Some(0) => {
+                *changed = true;
+                if stack.contains(inner) {
+                    return false;
+                }
+                stack.push(*inner);
+                let iv = heap.array(*inner).clone();
+                if !flatten_rec(heap, &iv, depth.map(|d| d - 1), out, changed, stack) {
+                    return false;
+                }
+                stack.pop();
+            }
+            _ => out.push(v.clone()),
+        }
+    }
+    true
+}
+
 impl Vm {
     /// Array#X methods that don't take a block. Returns
     /// `Ok(Some(v))` on a hit; `Ok(None)` on miss so the caller
@@ -1642,17 +1676,21 @@ impl Vm {
                             Some(Value::Array(id))
                         }
                     }
-                    ("flatten!", []) => {
+                    ("flatten!", []) | ("flatten!", [Value::Int(_)]) | ("flatten!", [Value::Nil]) => {
+                        // Default / nil / negative depth → unlimited; a
+                        // non-negative Int caps it.
+                        let depth: Option<i64> = match args {
+                            [Value::Int(n)] if *n >= 0 => Some(*n),
+                            _ => None,
+                        };
                         let src = self.heap.array(id).clone();
                         let mut out: Vec<Value> = Vec::with_capacity(src.len());
                         let mut changed = false;
-                        for v in &src {
-                            if let Value::Array(inner) = v {
-                                changed = true;
-                                for x in self.heap.array(*inner) { out.push(x.clone()); }
-                            } else {
-                                out.push(v.clone());
-                            }
+                        let mut stack = vec![id];
+                        if !flatten_rec(&self.heap, &src, depth, &mut out, &mut changed, &mut stack) {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "tried to flatten recursive array".into(),
+                            }));
                         }
                         if !changed {
                             Some(Value::Nil)
@@ -1665,22 +1703,33 @@ impl Vm {
                         self.heap.array_mut(id).reverse();
                         Some(Value::Array(id))
                     }
-                    ("flatten", []) => {
-                        // Depth-1 flatten — same as CRuby's default `flatten(1)`
-                        // is recursive; ours stops at depth 1 to match the
-                        // CRuby behaviour we exercise in fixtures. Document
-                        // unbounded recursion as a follow-up if needed.
+                    ("flatten", []) | ("flatten", [Value::Int(_)]) | ("flatten", [Value::Nil]) => {
+                        // `flatten` recurses fully (CRuby default); `flatten(n)`
+                        // caps the depth at a non-negative Int; nil / negative
+                        // means unlimited. Cycle-safe (raises ArgumentError on a
+                        // self-referential array instead of overflowing).
+                        let depth: Option<i64> = match args {
+                            [Value::Int(n)] if *n >= 0 => Some(*n),
+                            _ => None,
+                        };
                         let src = self.heap.array(id).clone();
                         let mut out: Vec<Value> = Vec::with_capacity(src.len());
-                        for v in &src {
-                            if let Value::Array(inner) = v {
-                                for x in self.heap.array(*inner) { out.push(x.clone()); }
-                            } else {
-                                out.push(v.clone());
-                            }
+                        let mut changed = false;
+                        let mut stack = vec![id];
+                        if !flatten_rec(&self.heap, &src, depth, &mut out, &mut changed, &mut stack) {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "tried to flatten recursive array".into(),
+                            }));
                         }
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        // `out` holds clones of the receiver's (transitively
+                        // nested) elements; pin the source array so the
+                        // result alloc's maybe_gc can't sweep them (it marks
+                        // every flattened element through the source).
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        drop(g);
                         Some(Value::Array(nid))
                     }
                     ("join", []) => {
