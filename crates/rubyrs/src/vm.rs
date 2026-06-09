@@ -1599,6 +1599,19 @@ impl Vm {
             Value::Hash(id) => return self.hash_collection_call(*id, name, args),
             Value::Str(s) => return self.string_collection_call(s.clone(), name, args),
             Value::Range(id) => return self.range_collection_call(*id, name, args),
+            // No-block Integer iterators return an Enumerator — `5.times
+            // .map { }`, `1.upto(3).to_a`, `5.downto(1).each_slice(2)`.
+            // The block forms live in collection_call_block; this hook
+            // only fires on the no-block dispatch path, so the
+            // Enumerator re-invokes the block form once driven.
+            Value::Int(_)
+                if matches!(
+                    (name, args),
+                    ("times", []) | ("upto", [_]) | ("downto", [_])
+                ) =>
+            {
+                return self.make_enum_for(recv.clone(), name, args.to_vec()).map(Some);
+            }
             _ => None,
         })
     }
