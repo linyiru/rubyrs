@@ -297,6 +297,14 @@ impl Vm {
             // No matching handler in this frame — pop it and try the caller.
             let f = self.frames.pop().expect("ICE: unwind pop empty");
             self.stack.truncate(f.base_sp);
+            // Frame-local `$~`: restore the popped method frame's saved
+            // last-match as the exception propagates past it, so the
+            // eventual rescue body sees the handler-owning method's
+            // `$~`, not the raising callee's (block frames carry `None`).
+            #[cfg(feature = "regex")]
+            if let Some(saved) = f.saved_last_match {
+                self.last_match = saved;
+            }
             if f.is_class_body {
                 self.class_stack.pop();
                 self.class_visibility_stack.pop();
@@ -519,6 +527,14 @@ impl Vm {
                 let popped = self.frames.pop()
                     .expect("ICE: continue_method_break landing with empty frames");
                 self.stack.truncate(popped.base_sp);
+                // Frame-local `$~`: restore the popped method frame's
+                // saved last-match (block frames carry `None`). Mirrors
+                // the Op::Return path so a non-local `return` out of a
+                // method doesn't leak that method's regex match.
+                #[cfg(feature = "regex")]
+                if let Some(saved) = popped.saved_last_match {
+                    self.last_match = saved;
+                }
                 if popped.is_class_body {
                     let cls = self.class_stack.pop()
                         .expect("ICE: class_stack empty unwinding class-body target");
@@ -541,6 +557,13 @@ impl Vm {
             let popped = self.frames.pop()
                 .expect("ICE: continue_method_break intermediate pop with empty frames");
             self.stack.truncate(popped.base_sp);
+            // Frame-local `$~`: restore each intermediate method
+            // frame's saved last-match as we unwind past it (see the
+            // landing pop above).
+            #[cfg(feature = "regex")]
+            if let Some(saved) = popped.saved_last_match {
+                self.last_match = saved;
+            }
             if popped.is_class_body {
                 // Class-body frames carry class_stack /
                 // class_visibility_stack entries; mirror what

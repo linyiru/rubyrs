@@ -49,7 +49,7 @@ impl Vm {
             locals: Rc::new(RefCell::new(vec_nil(n_locals))),
             self_val: Value::Nil,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
             block_writeback: None,
         });
         self.dispatch()?;

@@ -9817,6 +9817,26 @@ impl Vm {
         }
     }
 
+    /// Enter a fresh method-local `$~` scope on the just-pushed top
+    /// frame: stash the caller's `last_match` on the new frame (to be
+    /// restored when it returns — see the pop sites in `Op::Return`,
+    /// `continue_method_break`, and exception unwind) and reset
+    /// `self.last_match` to nil so the method body starts clean. Called
+    /// immediately after each method-frame push. Blocks DON'T call this
+    /// (they transparently share the enclosing method's match data).
+    #[cfg(feature = "regex")]
+    #[inline]
+    fn enter_method_match_scope(&mut self) {
+        let prev = std::mem::take(&mut self.last_match);
+        if let Some(f) = self.frames.last_mut() {
+            f.saved_last_match = Some(prev);
+        }
+    }
+    /// regex-off build: no match state to scope, so this is a no-op.
+    #[cfg(not(feature = "regex"))]
+    #[inline]
+    fn enter_method_match_scope(&mut self) {}
+
     /// Explicit-receiver monomorphic fast path — see the call site in
     /// `do_call`. Resolves via the SAME `class_of` + `lookup_method_cached`
     /// the slow path uses, so method resolution (including the
@@ -9884,6 +9904,7 @@ impl Vm {
             block_arg: None,
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
             lexical_cvar_class: None,
+            #[cfg(feature = "regex")] saved_last_match: None,
             is_block: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
@@ -9894,6 +9915,7 @@ impl Vm {
             begin_rescue_depths: vec![],
             block_writeback: None,
         });
+        self.enter_method_match_scope();
         Ok(true)
     }
 
@@ -9992,6 +10014,7 @@ impl Vm {
             block_arg: Some(block_id),
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
             lexical_cvar_class: None,
+            #[cfg(feature = "regex")] saved_last_match: None,
             is_block: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
@@ -10002,6 +10025,7 @@ impl Vm {
             begin_rescue_depths: vec![],
             block_writeback: None,
         });
+        self.enter_method_match_scope();
         Ok(true)
     }
 
@@ -10056,6 +10080,7 @@ impl Vm {
             block_arg: block,
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
             lexical_cvar_class: None,
+            #[cfg(feature = "regex")] saved_last_match: None,
             is_block: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
@@ -10064,6 +10089,7 @@ impl Vm {
             loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
             block_writeback: None,
         });
+        self.enter_method_match_scope();
         Ok(true)
     }
 
@@ -10260,7 +10286,7 @@ impl Vm {
                 // the explicit-capture idiom working without polluting
                 // the implicit-yield surface. Setting `block_arg:
                 // None` here is what enforces both.
-                is_class_body: false, swap_return: None, block_arg: None, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), lexical_cvar_class: None, is_block: false,
+                is_class_body: false, swap_return: None, block_arg: None, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false,
                 // `define_method` enforces exact arity (no
                 // defaults), so all params are "given".
                 n_given_positional: given as u16,
@@ -10268,6 +10294,7 @@ impl Vm {
                 rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
                 block_writeback: None,
             });
+            self.enter_method_match_scope();
             return Ok(());
         }
         if let Some(fixed) = m.fixed_arity
@@ -10288,6 +10315,7 @@ impl Vm {
                 block_arg: block,
                 defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
                 lexical_cvar_class: None,
+                #[cfg(feature = "regex")] saved_last_match: None,
                 is_block: false,
                 n_given_positional: fixed.required,
                 kw_given_mask: 0,
@@ -10296,6 +10324,7 @@ impl Vm {
                 loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
                 block_writeback: None,
             });
+            self.enter_method_match_scope();
             return Ok(());
         }
         // Default-argument support (literal defaults only): a Proto
@@ -10612,7 +10641,7 @@ impl Vm {
             locals,
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), lexical_cvar_class: None, is_block: false,
+            is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false,
             // Drives the body's default-arg prologue. Slots
             // `[0, positional_take)` came from the caller; slots
             // `[positional_take, positional_max)` are left Nil
@@ -10624,6 +10653,7 @@ impl Vm {
             rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
             block_writeback: None,
         });
+        self.enter_method_match_scope();
         Ok(())
     }
 
@@ -10730,6 +10760,7 @@ impl Vm {
             // that's `new_self`, which the self_val rule already returns,
             // so leave this None for the class-body case.
             lexical_cvar_class: if as_class_body { None } else { bh_lexical_cvar_class },
+            #[cfg(feature = "regex")] saved_last_match: None,
             // class_eval's frame is BOTH `is_block: true` and
             // `is_class_body: true`. That dual role matters for
             // non-local `return`: per the unwind loop in
@@ -11207,6 +11238,7 @@ impl Vm {
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
             lexical_cvar_class: bh_lexical_cvar_class,
+            #[cfg(feature = "regex")] saved_last_match: None,
             is_block: true, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
             block_writeback: Some((captured, param_start)),
         });

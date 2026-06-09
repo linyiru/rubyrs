@@ -3345,7 +3345,7 @@ impl Vm {
                     locals: Rc::new(RefCell::new(vec_nil(n_locals))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
                     block_writeback: None,
                 });
             }
@@ -3792,6 +3792,18 @@ impl Vm {
             }
             Op::Return => {
                 let f = self.frames.pop().expect("ICE: Return no frame");
+                // Frame-local `$~`: a method frame saved its caller's
+                // last-match on entry (block frames carry `None` and
+                // are transparent — they share the enclosing method's
+                // `$~`). Restore it now so the regex match a callee ran
+                // internally doesn't leak back into the caller's `$1`,
+                // `$2`, … (CRuby makes `$~` method-local). The save +
+                // nil-reset happens in `enter_method_match_scope` at
+                // each method-frame push.
+                #[cfg(feature = "regex")]
+                if let Some(saved) = f.saved_last_match {
+                    self.last_match = saved;
+                }
                 // Per-invocation block-locals model: writes to
                 // outer-scope slots (slot < block.param_start)
                 // are propagated AT-WRITE-TIME via the

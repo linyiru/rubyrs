@@ -711,3 +711,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn to_h() { run_diff("to_h"); }
 #[test] fn thread_current_locals() { run_diff("thread_current_locals"); }
 #[test] fn dynamic_base_const() { run_diff("dynamic_base_const"); }
+// `$~` is frame-local: a callee's internal regex match must not leak
+// into the caller's $1.. (uses =~, so regex-gated like scan_fancy_regex).
+#[cfg(feature = "regex")]
+#[test] fn frame_local_match() { run_diff("frame_local_match"); }

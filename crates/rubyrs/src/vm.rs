@@ -107,6 +107,20 @@ pub(crate) struct Frame {
     /// set (it's only set on block frames; method / class-body /
     /// toplevel frames leave it `None` and resolve via `self_val`).
     pub(crate) lexical_cvar_class: Option<Rc<Class>>,
+    /// CRuby's `$~` (and the derived `$1`/`$2`/`` $` ``/`$'`/`$&`) is
+    /// FRAME-LOCAL to a method — a regex match in a callee must not
+    /// clobber the caller's match data. `Some(prev)` on a method frame
+    /// holds the caller's `last_match` to restore when this frame
+    /// returns (the method body starts with `$~` reset to nil); `None`
+    /// on a block / class-body / toplevel frame means "don't touch
+    /// `$~` on pop" (a block shares its enclosing method's match data).
+    /// Without this, liquid's `Condition.new(Expression.parse($1), $2,
+    /// $3)` lost `$2`/`$3` because `Expression.parse` ran a regex that
+    /// overwrote the single global match. Gated on `regex` like
+    /// `Vm::last_match` / `LastMatch` themselves — the wasm/regex-off
+    /// build has no match state to scope.
+    #[cfg(feature = "regex")]
+    pub(crate) saved_last_match: Option<Option<LastMatch>>,
     /// True for frames pushed by `Vm::invoke_block` (the frame
     /// for a `do…end` / `{ … }` body). Used by the non-local
     /// `return`-from-block path: when `Op::ReturnMethod` sets
