@@ -45,6 +45,7 @@ debug = false
 [workspace]
 resolver = "3"
 members = [
+    "crates/carmine",
     "crates/rubyrs",
     "crates/rubyrs-cext",
     "crates/rubund",
