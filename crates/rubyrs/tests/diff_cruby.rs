@@ -383,6 +383,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn float_floor_ceil_divmod() { run_diff("float_floor_ceil_divmod"); }
 // Array#cycle: block form (n/∞) + no-block Enumerator (first/take).
 #[test] fn array_cycle() { run_diff("array_cycle"); }
+// Array#rotate / #rotate(n) / #rotate! — left-rotate, wraps mod len.
+#[test] fn array_rotate() { run_diff("array_rotate"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }

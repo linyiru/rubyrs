@@ -1713,6 +1713,35 @@ impl Vm {
                         self.heap.array_mut(id).reverse();
                         Some(Value::Array(id))
                     }
+                    // `rotate` / `rotate(n)` — left-rotate by n (negative
+                    // rotates right), returning a NEW array; default n=1.
+                    // n wraps modulo length; an empty array is unchanged.
+                    // `rotate!` does the same in place. (Elements stay
+                    // rooted via the unchanged source array, so no pin —
+                    // same as `reverse`.)
+                    ("rotate", []) | ("rotate", [Value::Int(_)]) => {
+                        let arr = self.heap.array(id);
+                        let len = arr.len();
+                        let rotated: Vec<Value> = if len == 0 {
+                            Vec::new()
+                        } else {
+                            let n = if let Some(Value::Int(n)) = args.first() { *n } else { 1 };
+                            let shift = n.rem_euclid(len as i64) as usize;
+                            arr.iter().cycle().skip(shift).take(len).cloned().collect()
+                        };
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(rotated));
+                        Some(Value::Array(nid))
+                    }
+                    ("rotate!", []) | ("rotate!", [Value::Int(_)]) => {
+                        let len = self.heap.array(id).len();
+                        if len > 1 {
+                            let n = if let Some(Value::Int(n)) = args.first() { *n } else { 1 };
+                            let shift = n.rem_euclid(len as i64) as usize;
+                            self.heap.array_mut(id).rotate_left(shift);
+                        }
+                        Some(Value::Array(id))
+                    }
                     ("flatten", []) | ("flatten", [Value::Int(_)]) | ("flatten", [Value::Nil]) => {
                         // `flatten` recurses fully (CRuby default); `flatten(n)`
                         // caps the depth at a non-negative Int; nil / negative
