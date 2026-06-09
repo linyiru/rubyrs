@@ -10309,6 +10309,24 @@ impl Vm {
         // the block. Writes to outer-scope locals from inside the
         // method body propagate back, matching CRuby semantics.
         if let Some(cl) = &m.closure {
+            // `|**kw|` block-method (`define_method(:m) { |**k| … }`):
+            // peel the trailing kwargs Hash BEFORE the positional arity
+            // check — the closure binder otherwise counts it as a
+            // positional and trips "wrong number of arguments" — and bind
+            // it to the kwrest slot below (empty `{}` when none passed).
+            // Mirrors the method path's kw-rest handling, which this
+            // closure path skipped (rest / block-arg were already wired).
+            let has_kw_rest = self.protos[m.proto_idx].kw_rest_param.is_some();
+            let kw_trailing_positional = std::mem::take(&mut self.trailing_hash_positional);
+            let mut args = args;
+            let kw_hash_id: Option<crate::value::ObjId> = if has_kw_rest && !kw_trailing_positional {
+                match args.last() {
+                    Some(Value::Hash(hid)) => { let h = *hid; args.pop(); Some(h) }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let given = args.len();
             let n_params = cl.n_params as usize;
             let proto_idx = m.proto_idx;
@@ -10344,6 +10362,9 @@ impl Vm {
                 .and_then(|bname| self.protos[proto_idx].params.iter()
                     .position(|p| p == bname))
                 .map(|idx| param_start + idx);
+            let kw_rest_slot: Option<usize> = self.protos[proto_idx].kw_rest_param.as_ref()
+                .and_then(|name| self.protos[proto_idx].params.iter().position(|p| p == name))
+                .map(|idx| param_start + idx);
             // Block params live *after* the captured frame's n_locals
             // (block locals layout inherits the parent — see ADR 0004).
             // Resize the shared Vec if a previous invocation hasn't
@@ -10378,6 +10399,11 @@ impl Vm {
                 // `define_method`-defined `initialize` with `*args`.
                 let mut g = crate::vm::PinGuard::new(self);
                 g.pin(self_val.clone());
+                // Pin the peeled kwargs Hash too — it was popped out of
+                // `args`, so without this the rest-Array alloc's maybe_gc
+                // sweeps it and the later kwrest bind hits a dangling slot
+                // (STRESS_GC: "heap slot is not a Hash").
+                if let Some(hid) = kw_hash_id { g.pin(Value::Hash(hid)); }
                 for a in &args {
                     if a.is_gc_heap_ref() { g.pin(a.clone()); }
                 }
@@ -10391,6 +10417,30 @@ impl Vm {
                 (args, Some(id))
             } else {
                 (args, None)
+            };
+            // Resolve the kwrest Hash to bind: the peeled one, or a fresh
+            // empty `{}` when the slot exists but no kwargs were passed
+            // (CRuby's `|**k|` defaults to `{}`, not nil). Allocate the
+            // empty Hash here — before the `caps.borrow_mut()` — pinning
+            // self + the already-built args/rest so the alloc's maybe_gc
+            // can't sweep them.
+            let kw_hash_final: Option<crate::value::ObjId> = if kw_rest_slot.is_some() {
+                match kw_hash_id {
+                    Some(hid) => Some(hid),
+                    None => {
+                        let mut g = crate::vm::PinGuard::new(self);
+                        g.pin(self_val.clone());
+                        if let Some(rid) = rest_arr_id { g.pin(Value::Array(rid)); }
+                        for a in &head_args { if a.is_gc_heap_ref() { g.pin(a.clone()); } }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let id = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
+                        drop(g);
+                        Some(id)
+                    }
+                }
+            } else {
+                None
             };
             let cl = m.closure.as_ref().unwrap();
             {
@@ -10410,6 +10460,9 @@ impl Vm {
                         Some(id) => Value::Block(id),
                         None => Value::Nil,
                     };
+                }
+                if let (Some(slot), Some(hid)) = (kw_rest_slot, kw_hash_final) {
+                    caps[slot] = Value::Hash(hid);
                 }
             }
             self.frames.push(Frame {
