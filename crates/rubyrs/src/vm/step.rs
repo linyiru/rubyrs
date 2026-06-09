@@ -2452,7 +2452,10 @@ impl Vm {
                 if let Some(cls) = self.class_stack.last().cloned() {
                     self.fire_method_lifecycle_hook(&cls, "method_added", name_id)?;
                 }
-                self.stack.push(Value::Nil);
+                // `def foo` evaluates to the method name Symbol (CRuby) —
+                // makes `private def foo` / `module_function def foo` work
+                // (the modifier receives `:foo`).
+                self.stack.push(Value::Sym(name_id));
             }
             Op::DefSingletonMethod(name_id, p_idx) => {
                 // `def self.foo` inside a class body. Installs `foo`
@@ -2507,7 +2510,8 @@ impl Vm {
                         name_id,
                     )?;
                 }
-                self.stack.push(Value::Nil);
+                // `def self.foo` also evaluates to `:foo`.
+                self.stack.push(Value::Sym(name_id));
             }
             Op::DefObjectSingletonMethod(name_id, p_idx) => {
                 // `def obj.name; ...; end` (non-`self` receiver)
@@ -2545,7 +2549,8 @@ impl Vm {
                         "singleton_method_added",
                         name_id,
                     )?;
-                    self.stack.push(Value::Nil);
+                    // `def obj.foo` also evaluates to `:foo`.
+                    self.stack.push(Value::Sym(name_id));
                     return Ok(true);
                 }
                 let obj_id = match recv {
@@ -2596,7 +2601,8 @@ impl Vm {
                     "singleton_method_added",
                     name_id,
                 )?;
-                self.stack.push(Value::Nil);
+                // `def obj.foo` evaluates to `:foo`.
+                self.stack.push(Value::Sym(name_id));
             }
             Op::AliasMethod(new_id, old_id) => {
                 // Resolve `old` along the surrounding class's ancestor

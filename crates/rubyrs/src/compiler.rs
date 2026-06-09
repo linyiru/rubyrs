@@ -529,7 +529,8 @@ fn compile_def_arm(
             b.emit(Op::DefObjectSingletonMethod(name_id, proto_idx as u32));
         }
     }
-    b.emit(Op::LoadNil);
+    // The Def* op already leaves the method-name Symbol on the stack as
+    // the expression value (`def foo` → `:foo`), so no trailing LoadNil.
 }
 
 /// Compile the body of `Expr::Class` — `class Name < Parent ; ... ; end`
