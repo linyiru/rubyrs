@@ -1407,7 +1407,91 @@ impl Vm {
         })
     }
 
+    /// Cycle-safe, dispatch-aware `inspect` renderer for Array / Hash.
+    /// `Value::to_inspect` is a non-dispatching LEAF renderer: it recurses
+    /// in Rust (overflowing the native stack on a self-referential
+    /// collection — `a = []; a << a`) and renders each element via
+    /// `to_inspect` again, so a custom `inspect` override or an
+    /// Exception's message is lost inside a collection. This walks the
+    /// container element-by-element, dispatches each element's real
+    /// `inspect` through `stringify_for_output`, and emits `[...]` /
+    /// `{...}` when it re-enters a container already on `inspect_stack`
+    /// — matching CRuby's recursive-inspect behaviour. Scalars (and
+    /// plain Objects) delegate straight to `stringify_for_output`.
+    pub(crate) fn inspect_value(&mut self, v: &Value) -> Result<String, Trap> {
+        match v {
+            Value::Array(id) => {
+                if self.inspect_stack.contains(id) {
+                    return Ok("[...]".to_string());
+                }
+                // Pin the array so its heap-ref elements stay rooted
+                // across element-inspect dispatch (which may alloc + GC);
+                // marking the array transitively marks its elements.
+                let mut g = PinGuard::new(self);
+                g.pin(v.clone());
+                let elems = g.vm.heap.array(*id).clone();
+                g.vm.inspect_stack.push(*id);
+                let mut parts = Vec::with_capacity(elems.len());
+                for e in &elems {
+                    match g.vm.inspect_value(e) {
+                        Ok(s) => parts.push(s),
+                        Err(t) => { g.vm.inspect_stack.pop(); return Err(t); }
+                    }
+                }
+                g.vm.inspect_stack.pop();
+                Ok(format!("[{}]", parts.join(", ")))
+            }
+            Value::Hash(id) => {
+                if self.inspect_stack.contains(id) {
+                    return Ok("{...}".to_string());
+                }
+                let mut g = PinGuard::new(self);
+                g.pin(v.clone());
+                let entries: Vec<(Value, Value)> = g.vm.heap.hash(*id)
+                    .iter().map(|(k, val)| (k.clone(), val.clone())).collect();
+                g.vm.inspect_stack.push(*id);
+                let mut parts = Vec::with_capacity(entries.len());
+                for (k, val) in &entries {
+                    let vs = match g.vm.inspect_value(val) {
+                        Ok(s) => s,
+                        Err(t) => { g.vm.inspect_stack.pop(); return Err(t); }
+                    };
+                    // CRuby 3.4+: Symbol keys use `name: value` shorthand
+                    // (quoted when not bareword-safe); other keys use the
+                    // `key => value` rocket form.
+                    let part = if let Value::Sym(sid) = k {
+                        let name = g.vm.interner.resolve(*sid).to_string();
+                        if crate::heap::sym_needs_quotes(&name) {
+                            format!("\"{name}\": {vs}")
+                        } else {
+                            format!("{name}: {vs}")
+                        }
+                    } else {
+                        let ks = match g.vm.inspect_value(k) {
+                            Ok(s) => s,
+                            Err(t) => { g.vm.inspect_stack.pop(); return Err(t); }
+                        };
+                        format!("{ks} => {vs}")
+                    };
+                    parts.push(part);
+                }
+                g.vm.inspect_stack.pop();
+                Ok(format!("{{{}}}", parts.join(", ")))
+            }
+            _ => self.stringify_for_output(v, true),
+        }
+    }
+
     pub(crate) fn stringify_for_output(&mut self, v: &Value, inspect: bool) -> Result<String, Trap> {
+        // Collections route through the cycle-safe, per-element
+        // dispatching renderer so `p [exc]` / `p [custom]` keep each
+        // element's real `inspect` and self-referential containers don't
+        // overflow the stack. (`to_s` of a collection — inspect=false —
+        // still uses the leaf renderer below; CRuby's Array#to_s aliases
+        // inspect, but cyclic `to_s` is far rarer and kept as-is.)
+        if inspect && matches!(v, Value::Array(_) | Value::Hash(_)) {
+            return self.inspect_value(v);
+        }
         let meth_id = self.interner.intern(if inspect { "inspect" } else { "to_s" });
         let m = match v {
             Value::Object(id) => {

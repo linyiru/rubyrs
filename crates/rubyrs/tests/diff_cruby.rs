@@ -374,6 +374,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Exception#inspect via `p`/`pp` keeps the message (`#<Class: msg>`),
 // empty message → bare class name; matches explicit `exc.inspect`.
 #[test] fn exception_inspect() { run_diff("exception_inspect"); }
+// Collection inspect dispatches per-element (custom/Exception) and is
+// cycle-safe (`[...]`/`{...}` instead of a native stack overflow).
+#[test] fn nested_inspect_cycle() { run_diff("nested_inspect_cycle"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }

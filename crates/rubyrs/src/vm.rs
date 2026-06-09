@@ -996,6 +996,12 @@ pub(crate) struct Vm {
     /// scoped errinfo, hot paths in exception-heavy code like Liquid
     /// rendering. Cached so those sites skip re-interning the literal.
     pub(crate) sym_bang: SymId,
+    /// Stack of Array/Hash ObjIds currently being rendered by
+    /// `inspect_value`. A re-entry on an id already present is a cycle
+    /// (`a = []; a << a`) and renders as `[...]` / `{...}` instead of
+    /// recursing into a Rust stack overflow. LIFO matches the recursion;
+    /// pushed before descending into an element, popped after.
+    pub(crate) inspect_stack: Vec<ObjId>,
     /// Hit/miss counters for the per-call-site IC. ZST + no-op
     /// when the `ic-stats` cargo feature is off; readable via
     /// `Runtime::ic_stats()` when on.
@@ -1372,6 +1378,7 @@ impl Vm {
             sym_length,
             sym_size,
             sym_bang,
+            inspect_stack: Vec::new(),
             sym_to_s,
             sym_inspect,
             ic_stats: IcStats::new(),

@@ -247,13 +247,13 @@ impl Vm {
                     ("to_hash", []) => Some(Value::Hash(id)),
                     ("inspect", []) | ("to_s", []) => {
                         // M27 C1: CRuby's `Hash#to_s` is an alias of
-                        // `Hash#inspect` (since 1.9). Pre-fix `to_s` fell
-                        // through to the universal `Object#to_s`
-                        // `#<Hash:0xHEX>` fallback; `"#{h}"` interpolation
-                        // and `puts h` rendered the hex form instead of
-                        // `{k: v}` shape. Funnel both arms through
-                        // `to_inspect`.
-                        let s = Value::Hash(id).to_inspect(&self.heap, &self.interner);
+                        // `Hash#inspect` (since 1.9). Both funnel through
+                        // the cycle-safe, per-element `inspect`-dispatching
+                        // renderer (`Vm::inspect_value`) so a self-
+                        // referential hash renders `{...}` instead of
+                        // overflowing the stack and custom / Exception
+                        // values keep their real inspect.
+                        let s = self.inspect_value(&Value::Hash(id))?;
                         Some(Value::new_str(s))
                     }
                     ("to_a", []) | ("sort", []) => {

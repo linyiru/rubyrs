@@ -1534,8 +1534,10 @@ impl Vm {
                         let nid = self.heap.alloc(HeapObj::Array(src));
                         Some(Value::Array(nid))
                     }
-                    ("inspect", []) => {
-                        let s = Value::Array(id).to_inspect(&self.heap, &self.interner);
+                    ("inspect", []) | ("to_s", []) => {
+                        // Cycle-safe + per-element `inspect` dispatch (see
+                        // `Vm::inspect_value`); `to_s` aliases inspect.
+                        let s = self.inspect_value(&Value::Array(id))?;
                         Some(Value::new_str(s))
                     }
                     ("reverse", []) => {
