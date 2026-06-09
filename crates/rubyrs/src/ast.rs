@@ -871,6 +871,243 @@ fn kwsplat_chunk(anchor: &Node<'_>, kwhash: SExpr) -> SExpr {
     })
 }
 
+// ===== Pattern matching (`case/in`, `expr => pat`, `expr in pat`) =====
+//
+// Desugared entirely at AST translation: each pattern compiles to a
+// BOOLEAN expression that, evaluated against a subject already bound to a
+// simple local, returns truthy on a match and binds any pattern variables
+// as a side effect (so a later body / the surrounding scope sees them).
+// Structural patterns call CRuby's `deconstruct` / `deconstruct_keys`
+// protocol; value patterns use `===`. No new opcodes — the desugar is
+// `&&`/`||` short-circuit chains over method calls and assignments.
+
+// `name = value` that always yields truthy, for `&&` chaining.
+fn pm_bind(anchor: &Node<'_>, name: &str, value: SExpr) -> SExpr {
+    sp(anchor, seq_inner(vec![
+        sp(anchor, Expr::LVarWrite(name.to_string(), Box::new(value))),
+        sp(anchor, Expr::BoolLit(true)),
+    ]))
+}
+
+fn pm_lvar(anchor: &Node<'_>, name: &str) -> SExpr {
+    sp(anchor, Expr::LVarRead(name.to_string()))
+}
+
+fn pm_meth(anchor: &Node<'_>, recv: SExpr, name: &str, args: Vec<SExpr>) -> SExpr {
+    sp(anchor, Expr::Call {
+        receiver: Some(Box::new(recv)),
+        name: name.to_string(),
+        args,
+        kwargs_trailing: false,
+    })
+}
+
+fn pm_and(anchor: &Node<'_>, a: SExpr, b: SExpr) -> SExpr {
+    sp(anchor, Expr::And(Box::new(a), Box::new(b)))
+}
+
+// Fold a list of boolean checks into a single short-circuit `&&` chain;
+// an empty list is the literal `true`.
+fn pm_all(anchor: &Node<'_>, checks: Vec<SExpr>) -> SExpr {
+    let mut it = checks.into_iter();
+    match it.next() {
+        Some(first) => it.fold(first, |a, b| pm_and(anchor, a, b)),
+        None => sp(anchor, Expr::BoolLit(true)),
+    }
+}
+
+impl TranslationCtx<'_> {
+    fn fresh_pm(&self) -> String {
+        let c = self.safe_nav_count.get();
+        self.safe_nav_count.set(c + 1);
+        format!("__pm_{c}")
+    }
+}
+
+/// Compile `pat` against the value held in local `subj`. Returns a
+/// boolean SExpr (truthy = match, binds variables as a side effect).
+fn compile_pattern(ctx: &mut TranslationCtx<'_>, subj: &str, pat: &Node<'_>) -> SExpr {
+    // Variable binding: `x` (a lowercase identifier in pattern position
+    // parses as LocalVariableTargetNode). Always matches, binding subj.
+    if let Some(t) = pat.as_local_variable_target_node() {
+        let name = cid_to_string(t.name());
+        // `_` and `_name` bind too (CRuby allows repeated `_`).
+        return pm_bind(pat, &name, pm_lvar(pat, subj));
+    }
+    // `pat => name` — match pat, then bind the whole subject to name.
+    if let Some(cp) = pat.as_capture_pattern_node() {
+        let inner = compile_pattern(ctx, subj, &cp.value());
+        let name = cid_to_string(cp.target().name());
+        return pm_and(pat, inner, pm_bind(pat, &name, pm_lvar(pat, subj)));
+    }
+    // `a | b` — alternation (no binding, per Ruby). Match either side.
+    if let Some(alt) = pat.as_alternation_pattern_node() {
+        let l = compile_pattern(ctx, subj, &alt.left());
+        let r = compile_pattern(ctx, subj, &alt.right());
+        return sp(pat, Expr::Or(Box::new(l), Box::new(r)));
+    }
+    // `^x` / `^(expr)` — pinned value; match by `=== subj` against the
+    // pinned local / expression (evaluated in the surrounding scope).
+    if let Some(pv) = pat.as_pinned_variable_node() {
+        let val = tr(ctx, &pv.variable());
+        return pm_meth(pat, val, "===", vec![pm_lvar(pat, subj)]);
+    }
+    if let Some(pe) = pat.as_pinned_expression_node() {
+        let val = tr(ctx, &pe.expression());
+        return pm_meth(pat, val, "===", vec![pm_lvar(pat, subj)]);
+    }
+    if let Some(ap) = pat.as_array_pattern_node() {
+        return compile_array_pattern(ctx, subj, &ap, pat);
+    }
+    if let Some(hp) = pat.as_hash_pattern_node() {
+        return compile_hash_pattern(ctx, subj, &hp, pat);
+    }
+    if pat.as_find_pattern_node().is_some() {
+        // `[*, x, *]` find patterns are out of subset for now.
+        ctx.errors.push("unsupported node: FindPatternNode (find pattern)".to_string());
+        return sp(pat, Expr::BoolLit(false));
+    }
+    // Everything else is a value pattern: literal, range, regexp, a bare
+    // `Constant` / `nil` / `true` / `false`, etc. Match with `===`.
+    let val = tr(ctx, pat);
+    pm_meth(pat, val, "===", vec![pm_lvar(pat, subj)])
+}
+
+/// `[req…, *rest, post…]` (optionally `Const[…]`). Uses `deconstruct`.
+fn compile_array_pattern(
+    ctx: &mut TranslationCtx<'_>,
+    subj: &str,
+    ap: &ruby_prism::ArrayPatternNode<'_>,
+    anchor: &Node<'_>,
+) -> SExpr {
+    let mut checks: Vec<SExpr> = Vec::new();
+    // `Const[...]` — the value must also be a `Const` (=== check first).
+    if let Some(c) = ap.constant() {
+        let cexpr = tr(ctx, &c);
+        checks.push(pm_meth(anchor, cexpr, "===", vec![pm_lvar(anchor, subj)]));
+    }
+    // Must respond to `deconstruct`; bind its result to a fresh temp.
+    let d = ctx.fresh_pm();
+    checks.push(pm_meth(anchor, pm_lvar(anchor, subj), "respond_to?",
+        vec![sp(anchor, Expr::SymbolLit("deconstruct".into()))]));
+    checks.push(pm_bind(anchor, &d, pm_meth(anchor, pm_lvar(anchor, subj), "deconstruct", vec![])));
+    checks.push(pm_meth(anchor, pm_lvar(anchor, &d), "is_a?",
+        vec![sp(anchor, Expr::ConstRead("Array".into()))]));
+    let reqs: Vec<_> = ap.requireds().iter().collect();
+    let posts: Vec<_> = ap.posts().iter().collect();
+    let has_rest = ap.rest().is_some();
+    let len = pm_meth(anchor, pm_lvar(anchor, &d), "length", vec![]);
+    let min = (reqs.len() + posts.len()) as i64;
+    if has_rest {
+        checks.push(pm_meth(anchor, len, ">=", vec![sp(anchor, Expr::IntLit(min))]));
+    } else {
+        checks.push(pm_meth(anchor, len, "==", vec![sp(anchor, Expr::IntLit(min))]));
+    }
+    // Pre-rest requireds: d[i].
+    for (i, req) in reqs.iter().enumerate() {
+        let e = ctx.fresh_pm();
+        checks.push(pm_bind(anchor, &e,
+            pm_meth(anchor, pm_lvar(anchor, &d), "[]", vec![sp(anchor, Expr::IntLit(i as i64))])));
+        checks.push(compile_pattern(ctx, &e, req));
+    }
+    // Rest: `*name` binds the middle slice `d[reqs.len ... d.length-posts.len]`.
+    if let Some(rest) = ap.rest()
+        && let Some(sn) = rest.as_splat_node()
+        && let Some(expr) = sn.expression()
+        && let Some(t) = expr.as_local_variable_target_node()
+    {
+        let name = cid_to_string(t.name());
+        // d[reqs.len .. -(posts.len+1)] — inclusive end index via a Range.
+        let from = sp(anchor, Expr::IntLit(reqs.len() as i64));
+        // d[from, count] where count = length - reqs - posts.
+        let count = pm_meth(anchor, pm_meth(anchor, pm_lvar(anchor, &d), "length", vec![]),
+            "-", vec![sp(anchor, Expr::IntLit((reqs.len() + posts.len()) as i64))]);
+        let slice = pm_meth(anchor, pm_lvar(anchor, &d), "[]", vec![from, count]);
+        checks.push(pm_bind(anchor, &name, slice));
+    }
+    // Post-rest requireds: indexed from the end, d[-(posts.len-j)].
+    for (j, post) in posts.iter().enumerate() {
+        let idx = -((posts.len() - j) as i64);
+        let e = ctx.fresh_pm();
+        checks.push(pm_bind(anchor, &e,
+            pm_meth(anchor, pm_lvar(anchor, &d), "[]", vec![sp(anchor, Expr::IntLit(idx))])));
+        checks.push(compile_pattern(ctx, &e, post));
+    }
+    pm_all(anchor, checks)
+}
+
+/// `{k:, l: pat, **rest}` (optionally `Const(…)`). Uses `deconstruct_keys`.
+fn compile_hash_pattern(
+    ctx: &mut TranslationCtx<'_>,
+    subj: &str,
+    hp: &ruby_prism::HashPatternNode<'_>,
+    anchor: &Node<'_>,
+) -> SExpr {
+    let mut checks: Vec<SExpr> = Vec::new();
+    if let Some(c) = hp.constant() {
+        let cexpr = tr(ctx, &c);
+        checks.push(pm_meth(anchor, cexpr, "===", vec![pm_lvar(anchor, subj)]));
+    }
+    let h = ctx.fresh_pm();
+    checks.push(pm_meth(anchor, pm_lvar(anchor, subj), "respond_to?",
+        vec![sp(anchor, Expr::SymbolLit("deconstruct_keys".into()))]));
+    checks.push(pm_bind(anchor, &h, pm_meth(anchor, pm_lvar(anchor, subj), "deconstruct_keys",
+        vec![sp(anchor, Expr::Nil)])));
+    checks.push(pm_meth(anchor, pm_lvar(anchor, &h), "is_a?",
+        vec![sp(anchor, Expr::ConstRead("Hash".into()))]));
+    let mut matched_keys: Vec<String> = Vec::new();
+    for el in hp.elements().iter() {
+        if let Some(an) = el.as_assoc_node() {
+            // Key is a SymbolNode (`k:`); extract its name.
+            let key_name = an.key().as_symbol_node()
+                .map(|s| String::from_utf8_lossy(s.unescaped()).into_owned());
+            let Some(key_name) = key_name else {
+                ctx.errors.push("unsupported node: non-symbol hash pattern key".to_string());
+                continue;
+            };
+            matched_keys.push(key_name.clone());
+            let key_sym = sp(anchor, Expr::SymbolLit(key_name.clone()));
+            // Key must be present.
+            checks.push(pm_meth(anchor, pm_lvar(anchor, &h), "key?", vec![key_sym.clone()]));
+            // Bind the value to a temp, then match the sub-pattern.
+            let v = ctx.fresh_pm();
+            checks.push(pm_bind(anchor, &v, pm_meth(anchor, pm_lvar(anchor, &h), "[]", vec![key_sym])));
+            // Shorthand `{k:}` — Prism's AssocNode value is an
+            // ImplicitNode wrapping the binding; bind the key name.
+            if an.value().as_implicit_node().is_some() {
+                checks.push(pm_bind(anchor, &key_name, pm_lvar(anchor, &v)));
+            } else {
+                checks.push(compile_pattern(ctx, &v, &an.value()));
+            }
+        }
+    }
+    // Keyword rest: `**rest` binds the leftover keys; `**nil` asserts none.
+    if let Some(rest) = hp.rest() {
+        if rest.as_no_keywords_parameter_node().is_some() {
+            // `**nil` — the value must have EXACTLY the matched keys.
+            checks.push(pm_meth(anchor, pm_meth(anchor, pm_lvar(anchor, &h), "length", vec![]),
+                "==", vec![sp(anchor, Expr::IntLit(matched_keys.len() as i64))]));
+        } else if let Some(ar) = rest.as_assoc_splat_node()
+            && let Some(val) = ar.value()
+            && let Some(t) = val.as_local_variable_target_node()
+        {
+            // `**rest` — bind a Hash of the unmatched keys: h.reject { |k,_| matched.include?(k) }.
+            let name = cid_to_string(t.name());
+            let key_list = sp(anchor, Expr::ArrayLit(
+                matched_keys.iter().map(|k| sp(anchor, Expr::SymbolLit(k.clone()))).collect()));
+            let rest_hash = sp(anchor, Expr::CallWithBlock {
+                receiver: Some(Box::new(pm_lvar(anchor, &h))),
+                name: "reject".into(),
+                args: vec![],
+                block_params: vec![BlockParam::Single("__pk".into()), BlockParam::Single("__pv".into())],
+                block_body: vec![pm_meth(anchor, key_list, "include?", vec![pm_lvar(anchor, "__pk")])],
+            });
+            checks.push(pm_bind(anchor, &name, rest_hash));
+        }
+    }
+    pm_all(anchor, checks)
+}
+
 /// Extracted body of the `class << recv` (singleton-class) AST
 /// translation. Lives in its own function so its large local set
 /// (the per-body `out` / `then_body` / `else_body` Vecs, the
@@ -4119,6 +4356,107 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             .unwrap_or_default();
         return sp(node, seq_inner(stmts));
     }
+    if let Some(cm) = node.as_case_match_node() {
+        // `case subj; in pat [if guard]; body; ...; [else body]; end`.
+        // Bind the subject to a fresh local (evaluated once), then build
+        // an if/elsif chain: arm N's else-branch is arm N+1's test. With
+        // no `else` and nothing matched, raise NoMatchingPatternError.
+        let subj = ctx.fresh_pm();
+        let subj_expr = cm.predicate().map(|s| tr(ctx, &s)).unwrap_or_else(|| sp(node, Expr::Nil));
+        // Innermost else: the `else` clause body, or the no-match raise.
+        let mut else_body: Vec<SExpr> = match cm.else_clause() {
+            Some(e) => e.statements().map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect()).unwrap_or_default(),
+            None => vec![sp(node, Expr::Call {
+                receiver: None,
+                name: "raise".into(),
+                args: vec![
+                    sp(node, Expr::ConstRead("NoMatchingPatternError".into())),
+                    pm_meth(node, pm_lvar(node, &subj), "inspect", vec![]),
+                ],
+                kwargs_trailing: false,
+            })],
+        };
+        // Fold the `in` arms in reverse so each becomes the else of the
+        // previous If.
+        let arms: Vec<_> = cm.conditions().iter().collect();
+        for arm in arms.iter().rev() {
+            let Some(inn) = arm.as_in_node() else { continue };
+            let pat_node = inn.pattern();
+            // A guard (`in pat if cond` / `unless cond`) parses as an
+            // If/UnlessNode wrapping the real pattern in its statements.
+            // Prism `Node` isn't Clone, so compile inline per branch
+            // rather than extracting a `real_pat` variable.
+            let cond = if let Some(ifn) = pat_node.as_if_node() {
+                let inner = ifn.statements().and_then(|s| s.body().iter().next());
+                let base = match &inner {
+                    Some(p) => compile_pattern(ctx, &subj, p),
+                    None => compile_pattern(ctx, &subj, &pat_node),
+                };
+                pm_and(node, base, tr(ctx, &ifn.predicate()))
+            } else if let Some(un) = pat_node.as_unless_node() {
+                let inner = un.statements().and_then(|s| s.body().iter().next());
+                let base = match &inner {
+                    Some(p) => compile_pattern(ctx, &subj, p),
+                    None => compile_pattern(ctx, &subj, &pat_node),
+                };
+                // `unless cond` — match requires `!cond`.
+                let g = sp(node, Expr::Call {
+                    receiver: Some(Box::new(tr(ctx, &un.predicate()))),
+                    name: "!".into(), args: vec![], kwargs_trailing: false });
+                pm_and(node, base, g)
+            } else {
+                compile_pattern(ctx, &subj, &pat_node)
+            };
+            let body: Vec<SExpr> = inn.statements()
+                .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
+                .unwrap_or_else(|| vec![sp(node, Expr::Nil)]);
+            let if_expr = sp(node, Expr::If {
+                cond: Box::new(cond),
+                then_body: body,
+                else_body: std::mem::take(&mut else_body),
+            });
+            else_body = vec![if_expr];
+        }
+        // `else_body` now holds the head of the chain.
+        let mut seq = vec![sp(node, Expr::LVarWrite(subj.clone(), Box::new(subj_expr)))];
+        seq.extend(else_body);
+        return sp(node, seq_inner(seq));
+    }
+    if let Some(mr) = node.as_match_required_node() {
+        // `value => pattern` — raises NoMatchingPatternError on no match,
+        // binds on success, evaluates to nil.
+        let subj = ctx.fresh_pm();
+        let val = tr(ctx, &mr.value());
+        let cond = compile_pattern(ctx, &subj, &mr.pattern());
+        let raise = sp(node, Expr::Call {
+            receiver: None,
+            name: "raise".into(),
+            args: vec![
+                sp(node, Expr::ConstRead("NoMatchingPatternError".into())),
+                pm_meth(node, pm_lvar(node, &subj), "inspect", vec![]),
+            ],
+            kwargs_trailing: false,
+        });
+        let check = sp(node, Expr::If {
+            cond: Box::new(cond),
+            then_body: vec![sp(node, Expr::Nil)],
+            else_body: vec![raise],
+        });
+        return sp(node, seq_inner(vec![
+            sp(node, Expr::LVarWrite(subj.clone(), Box::new(val))),
+            check,
+        ]));
+    }
+    if let Some(mp) = node.as_match_predicate_node() {
+        // `value in pattern` — true/false, binds on success.
+        let subj = ctx.fresh_pm();
+        let val = tr(ctx, &mp.value());
+        let cond = compile_pattern(ctx, &subj, &mp.pattern());
+        return sp(node, seq_inner(vec![
+            sp(node, Expr::LVarWrite(subj.clone(), Box::new(val))),
+            cond,
+        ]));
+    }
     // Unsupported Prism node — record the message and return a
     // placeholder. The eval entry point checks `ctx.errors` after
     // tr returns and surfaces a SyntaxError Trap, so the
@@ -4170,13 +4508,14 @@ mod tests {
 
     #[test]
     fn ast_errors_collected_for_unsupported_node() {
-        // `case x; in pat; end` (pattern matching, CaseMatchNode) is
-        // outside the subset. The translator should collect a message
-        // instead of panicking. (Canary moved off `BEGIN { }` once that
-        // gained support — keep this pointed at a still-unsupported
-        // node; pattern matching is the most durable choice.)
-        let (_, errs) = translate("case 1; in 2; end");
-        assert!(!errs.is_empty(), "case/in should produce AST errors");
+        // `alias $new $old` (AliasGlobalVariableNode) — global-variable
+        // aliasing, vanishingly rare and outside the subset. The
+        // translator should collect a message instead of panicking.
+        // (Canary keeps moving to a still-unsupported node as the gap
+        // closes — was `BEGIN { }`, then `case/in`; both gained support.
+        // Global-var alias mirrors the embed/error_handling.rs canary.)
+        let (_, errs) = translate("alias $new_g $old_g");
+        assert!(!errs.is_empty(), "alias-gvar should produce AST errors");
         assert!(
             errs.iter().any(|e| e.contains("unsupported")),
             "expected 'unsupported' wording, got: {errs:?}"
@@ -4187,7 +4526,7 @@ mod tests {
     fn ast_errors_buffer_resets_between_calls() {
         // First call has unsupported nodes — leaves errors in the
         // buffer (which tr_with_errors drains on the way out).
-        let (_, e1) = translate("case 1; in 2; end");
+        let (_, e1) = translate("alias $new_g $old_g");
         assert!(!e1.is_empty());
         // Second call on supported source must see an empty buffer
         // — proves drain works.

@@ -115,6 +115,15 @@ class IndexError < StandardError
 end
 class KeyError < IndexError
 end
+## Raised by pattern matching (`case/in`, `expr => pat`) when nothing
+## matches and there's no `else`. `NoMatchingPatternKeyError` is the
+## hash-pattern-specific subclass (a required key is absent / a `**nil`
+## sees extra keys). Both `< StandardError` so a bare `rescue` catches
+## them, matching CRuby.
+class NoMatchingPatternError < StandardError
+end
+class NoMatchingPatternKeyError < NoMatchingPatternError
+end
 ## ADR 0024 Phase A.2: `StopIteration < IndexError`. Raised by
 ## Ruby iterators when an external `Enumerator#next` reaches
 ## the end. CRuby's `loop` catches it and returns the

@@ -15,10 +15,12 @@
 # Format: one CamelCase name per line, sorted, `#` comments OK.
 
 AliasMethodNode
+AlternationPatternNode
 AndNode
 ArrayNode
-AssocSplatNode
+ArrayPatternNode
 AssocNode
+AssocSplatNode
 BackReferenceReadNode
 BeginNode
 BlockArgumentNode
@@ -31,6 +33,8 @@ CallNode
 CallOperatorWriteNode
 CallOrWriteNode
 CallTargetNode
+CapturePatternNode
+CaseMatchNode
 CaseNode
 ClassNode
 ClassVariableAndWriteNode
@@ -54,7 +58,9 @@ ElseNode
 EmbeddedStatementsNode
 EmbeddedVariableNode
 FalseNode
+FindPatternNode
 FloatNode
+ForNode
 ForwardingArgumentsNode
 ForwardingParameterNode
 ForwardingSuperNode
@@ -65,8 +71,11 @@ GlobalVariableReadNode
 GlobalVariableTargetNode
 GlobalVariableWriteNode
 HashNode
+HashPatternNode
 IfNode
+ImplicitNode
 ImplicitRestNode
+InNode
 IndexAndWriteNode
 IndexOperatorWriteNode
 IndexOrWriteNode
@@ -84,8 +93,8 @@ InterpolatedSymbolNode
 InterpolatedXStringNode
 ItLocalVariableReadNode
 ItParametersNode
-KeywordRestParameterNode
 KeywordHashNode
+KeywordRestParameterNode
 LambdaNode
 LocalVariableAndWriteNode
 LocalVariableOperatorWriteNode
@@ -93,17 +102,22 @@ LocalVariableOrWriteNode
 LocalVariableReadNode
 LocalVariableTargetNode
 LocalVariableWriteNode
+MatchPredicateNode
+MatchRequiredNode
 ModuleNode
 MultiTargetNode
 MultiWriteNode
 NextNode
 NilNode
+NoKeywordsParameterNode
 NumberedParametersNode
 NumberedReferenceReadNode
 OptionalKeywordParameterNode
 OptionalParameterNode
 OrNode
 ParenthesesNode
+PinnedExpressionNode
+PinnedVariableNode
 PostExecutionNode
 PreExecutionNode
 ProgramNode
@@ -125,7 +139,6 @@ StatementsNode
 StringNode
 SuperNode
 SymbolNode
-ForNode
 TrueNode
 UndefNode
 UnlessNode

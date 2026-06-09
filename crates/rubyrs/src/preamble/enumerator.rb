@@ -410,9 +410,16 @@ end
 # bounds, so `(1..).lazy` / `(1..Float::INFINITY).lazy` work.
 class Array
   def lazy; Enumerator::Lazy.new(self); end
+  # Pattern-matching protocol: `case ary; in [a, b]` calls `deconstruct`
+  # (CRuby's Array#deconstruct returns self).
+  def deconstruct; self; end
 end
 class Hash
   def lazy; Enumerator::Lazy.new(self); end
+  # Pattern-matching protocol: `case h; in {k:}` calls
+  # `deconstruct_keys` (CRuby's Hash#deconstruct_keys ignores the keys
+  # arg and returns self).
+  def deconstruct_keys(keys = nil); self; end
 end
 class Range
   def lazy; Enumerator::Lazy.new(self); end
