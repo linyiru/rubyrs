@@ -1706,6 +1706,9 @@ impl Vm {
                                     })
                                 });
                             }
+                            // Stub-class registration can change what a
+                            // constant read resolves to.
+                            self.bump_const_gen();
                             // CRuby's `YAML` is literally `Psych` (the
                             // same object). Mirror that: after
                             // `require "yaml"` / `"psych"`, point both
@@ -1727,6 +1730,7 @@ impl Vm {
                                 if let Some(cls) = shared {
                                     self.classes.entry(yaml_id).or_insert_with(|| cls.clone());
                                     self.classes.entry(psych_id).or_insert(cls);
+                                    self.bump_const_gen();
                                 }
                             }
                             // Always-on extras: minimal pure-Ruby shims that

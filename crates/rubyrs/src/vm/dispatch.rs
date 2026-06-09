@@ -6180,6 +6180,10 @@ impl Vm {
                             };
                             chain.insert(0, src.clone());
                             drop(chain);
+                            // include/prepend changes the cref-ancestor
+                            // constant walk (`const_via_ancestors`) —
+                            // invalidate the const ICs.
+                            self.bump_const_gen();
                         }
                         // CRuby fires the `included` / `prepended`
                         // hook on EVERY include/prepend call — even
@@ -7349,6 +7353,9 @@ impl Vm {
                     self.constants.insert(key, value.clone());
                 }
             }
+            // const_set (anon-table OR global-map write) invalidates
+            // the constant ICs.
+            self.bump_const_gen();
             self.stack.push(value);
             return Ok(());
         }
@@ -7402,6 +7409,7 @@ impl Vm {
                 for src in modules {
                     if !super::class_is_a(&sc, &src) {
                         sc.includes.borrow_mut().insert(0, src.clone());
+                        self.bump_const_gen();
                     }
                     // `Module.extended(obj)` fires on every extend
                     // call (CRuby parity — same shape as included /
@@ -7526,6 +7534,9 @@ impl Vm {
                         };
                         chain.insert(0, src.clone());
                         drop(chain);
+                        // include/prepend changes the cref-ancestor
+                        // constant walk — invalidate the const ICs.
+                        self.bump_const_gen();
                     }
                     if is_extend {
                         // Force a method-cache generation bump so any
@@ -13720,6 +13731,11 @@ impl Vm {
             return;
         }
         *cls.assigned_name.borrow_mut() = Some(qualified.to_string());
+        // Re-homing changes global resolution — invalidate the const
+        // ICs once for the whole promotion (covers the nested
+        // `classes`/`constants` inserts in the recursion below too,
+        // since each recursive call re-bumps).
+        self.bump_const_gen();
         self.classes.insert(key, cls.clone());
         // Promote each nested constant into the global maps under
         // the qualified prefix. Snapshot first so we don't hold the

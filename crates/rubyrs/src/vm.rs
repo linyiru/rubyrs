@@ -987,6 +987,25 @@ pub(crate) struct Vm {
     /// lazy on the next call at each site.
     pub(crate) call_caches: Vec<CallCache>,
     pub(crate) method_gen: u32,
+    /// Inline constant caches. `Op::LoadConst` resolution depends only
+    /// on the GLOBAL classes/constants tables, so one entry per SymId
+    /// is valid program-wide; `Op::LoadConstChain` resolution is static
+    /// per (proto, chain) — the lexical scope is compiled into the
+    /// chain — so that pair keys it. Entries carry the `const_gen` they
+    /// were filled at; ANY mutation that can change constant resolution
+    /// (class/module definition, const assignment / const_set,
+    /// name_anon_class re-homing, include/prepend — which alter the
+    /// cref-ancestor walk) bumps `const_gen`, turning every entry stale
+    /// (refilled lazily on the next read). Mirrors the method-IC
+    /// `call_caches`/`method_gen` design.
+    ///
+    /// GC: a FRESH entry's Value is by construction still present in
+    /// the canonical tables (nothing mutated since the fill), so it
+    /// stays rooted through them; STALE entries are never dereferenced
+    /// (gen check) — the caches therefore don't need to be GC roots.
+    pub(crate) const_cache_flat: FxHashMap<SymId, (Value, u32)>,
+    pub(crate) const_cache_chain: FxHashMap<(u32, u32), (Value, u32)>,
+    pub(crate) const_gen: u32,
     pub(crate) sym_length: SymId,
     pub(crate) sym_size: SymId,
     pub(crate) sym_to_s: SymId,
@@ -1381,6 +1400,9 @@ impl Vm {
             max_value_bytes: None,
             call_caches: Vec::new(),
             method_gen: 0,
+            const_cache_flat: FxHashMap::default(),
+            const_cache_chain: FxHashMap::default(),
+            const_gen: 0,
             sym_length,
             sym_size,
             sym_bang,
@@ -1598,6 +1620,17 @@ impl Vm {
         {
             self.last_match = None;
         }
+    }
+
+    /// Invalidate the inline constant caches. Call from EVERY site that
+    /// mutates what a constant read can resolve to: `classes` /
+    /// `constants` table inserts, per-class `consts` writes,
+    /// `name_anon_class` re-homing, and include/prepend (they change
+    /// the cref-ancestor constant walk). Cheap (one add) — definitions
+    /// are rare next to reads.
+    #[inline]
+    pub(crate) fn bump_const_gen(&mut self) {
+        self.const_gen = self.const_gen.wrapping_add(1);
     }
 
     pub(crate) fn collection_call(&mut self, recv: &Value, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {

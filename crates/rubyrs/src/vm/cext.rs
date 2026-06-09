@@ -1040,6 +1040,7 @@ impl Vm {
                     cext_alloc_func: std::cell::Cell::new(None),
                 });
                 self.classes.insert(name_sym, new_class);
+                self.bump_const_gen();
             }
 
             // L3-C: instance methods → per-class dispatch table

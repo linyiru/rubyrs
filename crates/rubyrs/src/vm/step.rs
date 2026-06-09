@@ -1341,8 +1341,20 @@ impl Vm {
                     self.name_anon_class(cls, &qualified);
                 }
                 self.constants.insert(name_id, v);
+                self.bump_const_gen();
             }
             Op::LoadConst(name_id) => {
+                // Inline constant cache — resolution below depends only
+                // on the global tables, so a per-SymId entry tagged with
+                // `const_gen` short-circuits the whole walk. See the
+                // field doc on Vm for the invalidation contract.
+                if let Some((v, g)) = self.const_cache_flat.get(&name_id)
+                    && *g == self.const_gen
+                {
+                    let v = v.clone();
+                    self.stack.push(v);
+                    return Ok(true);
+                }
                 let v = if let Some(c) = self.classes.get(&name_id).cloned() {
                     Value::Class(c)
                 } else if let Some(v) = self.constants.get(&name_id).cloned() {
@@ -1469,6 +1481,11 @@ impl Vm {
                         msg: format!("uninitialized constant {}", name),
                     }));
                 };
+                // Fill the IC on the successful main path (classes /
+                // constants / ENV hits). Autoload + qualified-path
+                // successes return early above and are one-shot — their
+                // NEXT read lands in the fast tables and caches here.
+                self.const_cache_flat.insert(name_id, (v.clone(), self.const_gen));
                 self.stack.push(v);
             }
             Op::LoadConstOrNil(name_id) => {
@@ -1497,6 +1514,19 @@ impl Vm {
                 // `module Foo` resolves to `Foo::Bar` before falling
                 // through to the top-level `Bar`.
                 let proto_idx = self.frames.last().expect("ICE: LoadConstChain no frame").proto_idx;
+                // Inline constant cache — the chain (and thus the
+                // resolution) is static per (proto, chain slot), so the
+                // pair keys an entry tagged with `const_gen`. Skips the
+                // chain clone, the three-phase walk, and the alloc-heavy
+                // `const_via_ancestors` on the steady state.
+                let cache_key = (proto_idx as u32, chain_idx);
+                if let Some((v, g)) = self.const_cache_chain.get(&cache_key)
+                    && *g == self.const_gen
+                {
+                    let v = v.clone();
+                    self.stack.push(v);
+                    return Ok(true);
+                }
                 let chain = self.protos[proto_idx].const_chains[chain_idx as usize].clone();
                 // CRuby bare-constant resolution has three ordered
                 // phases (see `rb_const_search`):
@@ -1670,6 +1700,11 @@ impl Vm {
                         }));
                     }
                 };
+                // Fill the IC. The autoload path may have bumped
+                // `const_gen` mid-op (its require defines constants) —
+                // storing with the CURRENT gen is correct: resolution
+                // is stable from this point until the next mutation.
+                self.const_cache_chain.insert(cache_key, (v.clone(), self.const_gen));
                 self.stack.push(v);
             }
             Op::LoadConstChainOrNil(chain_idx) => {
@@ -2960,6 +2995,7 @@ impl Vm {
                 // recogniser's `class_is_a` gate.
                 if !super::lookup::singleton_chain_contains(&target, &src) {
                     target.singleton_prepends.borrow_mut().insert(0, src);
+                    self.bump_const_gen();
                     self.method_gen = self.method_gen.wrapping_add(1);
                 }
                 self.stack.push(Value::Nil);
@@ -3250,6 +3286,10 @@ impl Vm {
                 // `class B < A` definition, not on reopens.
                 // Snapshot before the entry()-or_insert.
                 let was_fresh = !self.classes.contains_key(&table_key);
+                // A class/module definition (fresh OR reopen — a reopen
+                // can still change what nested bare names resolve to via
+                // its body) invalidates the constant ICs.
+                self.bump_const_gen();
                 let cls = self.classes.entry(table_key).or_insert_with(|| Rc::new(Class {
                     name: name_str,
                     is_module,
