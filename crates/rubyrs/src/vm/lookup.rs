@@ -588,7 +588,7 @@ impl Vm {
         ) {
             return true;
         }
-        match recv {
+        let yes = match recv {
             Value::Int(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" | "**" | "pow" |
                 "<" | "<=" | ">" | ">=" |
@@ -903,7 +903,49 @@ impl Vm {
             Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "bind_call" | "arity" | "parameters" | ">>" | "<<" | "curry" | "to_proc" | "owner" | "receiver" | "name" | "original_name" | "source_location" | "super_method" | "dup" | "clone"),
             Value::UnboundMethod(_) => matches!(name, "bind" | "bind_call" | "arity" | "parameters" | "owner" | "name" | "original_name" | "source_location" | "super_method" | "dup" | "clone"),
             Value::CurriedProc(_) => matches!(name, "call" | "[]" | "()" | "arity"),
+        };
+        if yes {
+            return true;
         }
+        // Fallback: a method REOPENED onto a primitive's class
+        // (`class Array; def deconstruct; … end`) — or inherited from a
+        // module the class `include`s (Enumerable on Array/Hash/Range)
+        // — isn't in the hardcoded builtin lists above. Object / Class
+        // already consulted their full method tables, so restrict this
+        // to the primitive / value arms. Without it
+        // `[].respond_to?(:deconstruct)` (and pattern matching, which
+        // guards array/hash deconstruction on it) reported false even
+        // though `[].deconstruct` dispatches fine.
+        if !matches!(recv, Value::Object(_) | Value::Class(_)) {
+            let cname: &str = match recv {
+                Value::Int(_) => "Integer",
+                #[cfg(feature = "bignum")]
+                Value::BigInt(_) => "Integer",
+                Value::Float(_) => "Float",
+                Value::Str(_) => "String",
+                Value::Sym(_) => "Symbol",
+                Value::Array(_) => "Array",
+                Value::Hash(_) => "Hash",
+                Value::Range(_) => "Range",
+                Value::Bool(true) => "TrueClass",
+                Value::Bool(false) => "FalseClass",
+                Value::Nil => "NilClass",
+                Value::Block(_) | Value::CurriedProc(_) => "Proc",
+                #[cfg(feature = "regex")]
+                Value::Regex(_) => "Regexp",
+                Value::BoundMethod(_) => "Method",
+                Value::UnboundMethod(_) => "UnboundMethod",
+                Value::Rational(_) => "Rational",
+                Value::Object(_) | Value::Class(_) => unreachable!(),
+            };
+            if let Some(sym) = self.interner.get_id(cname)
+                && let Some(cls) = self.classes.get(&sym).cloned()
+                && self.lookup_method_uncached(&cls, name_id).is_some()
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// `Object#class` — returns the Class associated with a value.

@@ -89,6 +89,15 @@ impl Interner {
         &self.vec[id.0 as usize]
     }
 
+    /// `&self` reverse lookup: the SymId for an already-interned
+    /// string, or None if it was never interned. Unlike `intern`
+    /// this never mutates, so reflection paths (`respond_to?`) can
+    /// probe for a class name without a write borrow. Core class
+    /// names are interned at startup, so the lookup hits for them.
+    pub(crate) fn get_id(&self, s: &str) -> Option<SymId> {
+        self.map.get(s).copied()
+    }
+
     /// Current number of interned symbols. The interner ID space is
     /// `[0, len())`. Used by `Vm` to enforce `Config::max_symbols`
     /// before interning a fresh string.

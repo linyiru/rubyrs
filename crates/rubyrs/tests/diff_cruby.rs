@@ -348,6 +348,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn at_exit_many() { run_diff("at_exit_many"); }
 // Anonymous `*`/`**`/`&` and `...` argument forwarding (empty kwrest drops).
 #[test] fn arg_forwarding() { run_diff("arg_forwarding"); }
+// `respond_to?` sees methods reopened onto / included into a core class.
+#[test] fn respond_to_reopened() { run_diff("respond_to_reopened"); }
 // `END { }` → at_exit, `BEGIN { }` → inline; interleaved LIFO with at_exit.
 #[test] fn begin_end_blocks() { run_diff("begin_end_blocks"); }
 #[test] fn hash_to_hash() { run_diff("hash_to_hash"); }
