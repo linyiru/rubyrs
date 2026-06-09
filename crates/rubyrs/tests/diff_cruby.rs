@@ -371,6 +371,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `$!` is dynamically scoped: reverts after rescue/ensure body, on
 // nested rescue, and on `return` out of a handler.
 #[test] fn dollar_bang_scope() { run_diff("dollar_bang_scope"); }
+// Exception#inspect via `p`/`pp` keeps the message (`#<Class: msg>`),
+// empty message → bare class name; matches explicit `exc.inspect`.
+#[test] fn exception_inspect() { run_diff("exception_inspect"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }

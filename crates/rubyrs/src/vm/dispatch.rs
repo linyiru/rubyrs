@@ -1367,6 +1367,46 @@ impl Vm {
     /// (Only the TOP-LEVEL value dispatches; a custom-inspect object
     /// nested inside an Array/Hash still renders via the native
     /// collection inspect — a documented follow-up.)
+    /// CRuby's default `Exception#inspect`: `#<ClassName: message>`, or
+    /// bare `#<ClassName>` when the message is empty. Returns `None` when
+    /// `recv` is not an Exception instance. Shared by the universal
+    /// `inspect` dispatch arm and `stringify_for_output`, so `p exc`
+    /// renders the same string as `exc.inspect` (plain `to_inspect`
+    /// drops the message — `inspect` is a native arm, not a table method,
+    /// so `stringify_for_output`'s method lookup misses it).
+    pub(crate) fn exception_inspect_string(&mut self, recv: &Value) -> Option<String> {
+        let Value::Object(id) = recv else { return None };
+        let cls = match self.class_of(recv) {
+            Value::Class(c) => c,
+            _ => return None,
+        };
+        let exc_id = self.interner.intern("Exception");
+        let exc_cls = self.classes.get(&exc_id).cloned()?;
+        if !super::class_is_a(&cls, &exc_cls) {
+            return None;
+        }
+        let msg_sym = self.interner.intern("@message");
+        let msg = self
+            .heap
+            .instance(*id)
+            .ivars
+            .get(&msg_sym)
+            .cloned()
+            .map(|v| v.to_display(&self.heap, &self.interner))
+            .unwrap_or_default();
+        let cls_name = cls.name.clone();
+        // CRuby's `exc_inspect`: an empty message (e.g.
+        // `RuntimeError.new("")`) renders as the BARE class name —
+        // `"RuntimeError"`, not `"#<RuntimeError>"`. A non-empty message
+        // (including the default `.new`-with-no-args message, which
+        // equals the class name) uses the `#<ClassName: message>` form.
+        Some(if msg.is_empty() {
+            cls_name.to_string()
+        } else {
+            format!("#<{cls_name}: {msg}>")
+        })
+    }
+
     pub(crate) fn stringify_for_output(&mut self, v: &Value, inspect: bool) -> Result<String, Trap> {
         let meth_id = self.interner.intern(if inspect { "inspect" } else { "to_s" });
         let m = match v {
@@ -1385,7 +1425,17 @@ impl Vm {
         } else {
             v.to_display(&vm.heap, &vm.interner)
         };
-        let Some(m) = m else { return Ok(native(self)) };
+        let Some(m) = m else {
+            // No table/override method. `inspect` on an Exception has no
+            // table entry (it's a native dispatch arm), so route it
+            // through the shared renderer to keep the `@message` —
+            // otherwise `p exc` would drop it. Everything else keeps the
+            // native to_inspect / to_display.
+            if inspect && let Some(s) = self.exception_inspect_string(v) {
+                return Ok(s);
+            }
+            return Ok(native(self));
+        };
         let pre = self.frames.len();
         self.invoke_method(m, v.clone(), vec![])?;
         self.dispatch_until(pre)?;
@@ -9439,31 +9489,12 @@ impl Vm {
             // Receiver must be a real heap instance with an
             // `@message` ivar; primitive types fall through to
             // the universal hex form.
-            if let (Some(cls), Value::Object(id)) = (&cls_rc, &recv) {
-                let exc_id = self.interner.intern("Exception");
-                let exc_cls = self.classes.get(&exc_id).cloned();
-                let is_exc = exc_cls.as_ref()
-                    .is_some_and(|ec| super::class_is_a(cls, ec));
-                if is_exc {
-                    let msg_sym = self.interner.intern("@message");
-                    let msg = self.heap.instance(*id).ivars.get(&msg_sym).cloned()
-                        .map(|v| v.to_display(&self.heap, &self.interner))
-                        .unwrap_or_default();
-                    // CRuby always renders Exception subclasses
-                    // as `#<ClassName: message>` — even when the
-                    // message equals the class name (the default
-                    // for `RaiseClass.new` with no args). Only
-                    // the truly-empty-message case (rare;
-                    // requires `RaiseClass.new("")`) drops to
-                    // bare `#<ClassName>`.
-                    let s = if msg.is_empty() {
-                        format!("#<{cls_name}>")
-                    } else {
-                        format!("#<{cls_name}: {msg}>")
-                    };
-                    self.stack.push(Value::new_str(s));
-                    return Ok(());
-                }
+            // Exception subclasses render as `#<ClassName: message>` (or
+            // bare `#<ClassName>` when the message is empty), shared with
+            // `stringify_for_output` so `p exc` and `exc.inspect` agree.
+            if let Some(s) = self.exception_inspect_string(&recv) {
+                self.stack.push(Value::new_str(s));
+                return Ok(());
             }
             let oid = object_id_for(&recv);
             let s = format!("#<{}:0x{:016x}>", cls_name, oid);
