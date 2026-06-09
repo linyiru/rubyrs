@@ -133,6 +133,36 @@ module Enumerable
     memo
   end
 
+  # Generic `each_slice` / `each_cons` for any Enumerable (Enumerator,
+  # user classes). Array/Hash/Range keep their NATIVE forms — those win
+  # on dispatch, so these only fire where there's no primitive.
+  def each_slice(n)
+    raise ArgumentError, "invalid slice size" if n <= 0
+    return to_enum(:each_slice, n) unless block_given?
+    slice = []
+    each do |*x|
+      slice << __enum_elem(x)
+      if slice.length == n
+        yield slice
+        slice = []
+      end
+    end
+    yield slice unless slice.empty?
+    nil
+  end
+
+  def each_cons(n)
+    raise ArgumentError, "invalid size" if n <= 0
+    return to_enum(:each_cons, n) unless block_given?
+    window = []
+    each do |*x|
+      window << __enum_elem(x)
+      window.shift if window.length > n
+      yield window.dup if window.length == n
+    end
+    nil
+  end
+
   def reduce(*args)
     if args.length == 2
       memo = args[0]

@@ -389,6 +389,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_lines() { run_diff("string_lines"); }
 // No-block Integer#times/#upto/#downto return an Enumerator.
 #[test] fn integer_noblock_enum() { run_diff("integer_noblock_enum"); }
+// Enumerable#each_slice/#each_cons (Enumerator, Integer iters, Range).
+#[test] fn enumerator_each_slice_cons() { run_diff("enumerator_each_slice_cons"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }
