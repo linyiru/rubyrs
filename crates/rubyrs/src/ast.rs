@@ -3981,6 +3981,34 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         });
         return sp(node, Expr::Begin { body, rescue, ensure });
     }
+    if let Some(n) = node.as_post_execution_node() {
+        // `END { ... }` — runs the body at program exit, LIFO across
+        // multiple ENDs. That's exactly `at_exit`'s contract (verified
+        // LIFO-equivalent), so desugar to `at_exit { ... }` and reuse
+        // the existing Kernel#at_exit machinery.
+        let block_body: Vec<SExpr> = n.statements()
+            .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
+            .unwrap_or_default();
+        return sp(node, Expr::CallWithBlock {
+            receiver: None,
+            name: "at_exit".to_string(),
+            args: vec![],
+            block_params: vec![],
+            block_body,
+        });
+    }
+    if let Some(n) = node.as_pre_execution_node() {
+        // `BEGIN { ... }` — CRuby hoists it to run before the rest of
+        // the program regardless of textual position. Tier-1 runs the
+        // body inline at this position instead; correct for the
+        // conventional top-of-file placement (the only one CRuby's
+        // grammar really encourages), a documented divergence when a
+        // BEGIN is written after code that should run later.
+        let stmts: Vec<SExpr> = n.statements()
+            .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
+            .unwrap_or_default();
+        return sp(node, seq_inner(stmts));
+    }
     // Unsupported Prism node — record the message and return a
     // placeholder. The eval entry point checks `ctx.errors` after
     // tr returns and surfaces a SyntaxError Trap, so the
