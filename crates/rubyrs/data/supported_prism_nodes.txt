@@ -59,6 +59,7 @@ EmbeddedStatementsNode
 EmbeddedVariableNode
 FalseNode
 FindPatternNode
+FlipFlopNode
 FloatNode
 ForNode
 ForwardingArgumentsNode

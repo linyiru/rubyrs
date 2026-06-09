@@ -924,6 +924,46 @@ impl TranslationCtx<'_> {
     }
 }
 
+/// `a..b` / `a...b` in boolean context — a flip-flop. Stateful: stays
+/// "off" until `a` is truthy (turns on), then "on" until `b` is truthy
+/// (turns off); a 2-dot also checks `b` on the same eval that `a` flips
+/// it on, a 3-dot defers that to the next eval. State is held in a hidden
+/// global `$__pm_N` (initial read = nil = off). A global — not a local —
+/// because CRuby keeps the state across iterations of an enclosing block
+/// (`(1..8).each { print _1 if (_1==2)..(_1==4) }` → `234`), and rubyrs's
+/// per-invocation block locals would reset each time. Tier-1 divergence:
+/// the global isn't reset on method re-entry the way CRuby's scope-local
+/// flip-flop state is — flip-flops in a re-called method keep prior state.
+#[inline(never)]
+fn tr_flip_flop(ctx: &mut TranslationCtx<'_>, node: &Node<'_>, ff: &ruby_prism::FlipFlopNode<'_>) -> SExpr {
+    let g = format!("${}", ctx.fresh_pm());
+    let set = |v: bool| sp(node, Expr::GVarWrite(g.clone(), Box::new(sp(node, Expr::BoolLit(v)))));
+    let a = ff.left().map(|n| tr(ctx, &n)).unwrap_or_else(|| sp(node, Expr::BoolLit(false)));
+    // `if b then $g = false end` — translate `b` fresh at each use site.
+    let off_if_b = |ctx: &mut TranslationCtx<'_>| {
+        let b = ff.right().map(|n| tr(ctx, &n)).unwrap_or_else(|| sp(node, Expr::BoolLit(false)));
+        sp(node, Expr::If { cond: Box::new(b), then_body: vec![set(false)], else_body: vec![] })
+    };
+    // State already on: maybe turn off, but this eval is still true.
+    let on_branch = sp(node, seq_inner(vec![off_if_b(ctx), sp(node, Expr::BoolLit(true))]));
+    // Off → on transition (a truthy): turn on; a 2-dot checks b now.
+    let mut trans = vec![set(true)];
+    if !ff.is_exclude_end() {
+        trans.push(off_if_b(ctx));
+    }
+    trans.push(sp(node, Expr::BoolLit(true)));
+    let transition = sp(node, seq_inner(trans));
+    sp(node, Expr::If {
+        cond: Box::new(sp(node, Expr::GVarRead(g.clone()))),
+        then_body: vec![on_branch],
+        else_body: vec![sp(node, Expr::If {
+            cond: Box::new(a),
+            then_body: vec![transition],
+            else_body: vec![sp(node, Expr::BoolLit(false))],
+        })],
+    })
+}
+
 /// Handle the three pattern-matching node families (`case/in`,
 /// `expr => pat`, `expr in pat`). Returns `None` for any other node so
 /// `tr` falls through. `#[inline(never)]` keeps its large local set off
@@ -1072,10 +1112,8 @@ fn compile_pattern(ctx: &mut TranslationCtx<'_>, subj: &str, pat: &Node<'_>) -> 
     if let Some(hp) = pat.as_hash_pattern_node() {
         return compile_hash_pattern(ctx, subj, &hp, pat);
     }
-    if pat.as_find_pattern_node().is_some() {
-        // `[*, x, *]` find patterns are out of subset for now.
-        ctx.errors.push("unsupported node: FindPatternNode (find pattern)".to_string());
-        return sp(pat, Expr::BoolLit(false));
+    if let Some(fp) = pat.as_find_pattern_node() {
+        return compile_find_pattern(ctx, subj, &fp, pat);
     }
     // Everything else is a value pattern: literal, range, regexp, a bare
     // `Constant` / `nil` / `true` / `false`, etc. Match with `===`.
@@ -1214,6 +1252,92 @@ fn compile_hash_pattern(
             });
             checks.push(pm_bind(anchor, &name, rest_hash));
         }
+    }
+    pm_all(anchor, checks)
+}
+
+/// `[*pre, m…, *post]` — find a consecutive run matching the middle
+/// patterns; `pre`/`post` bind the slices before/after the FIRST such
+/// run. Two-phase to keep bindings in the arm's scope: phase 1 finds the
+/// start index in a `find` block (bindings there are block-local, fine);
+/// phase 2 re-runs the middle matches at that fixed index in the outer
+/// `&&` chain so the variables leak to the arm body, then slices pre/post.
+fn compile_find_pattern(
+    ctx: &mut TranslationCtx<'_>,
+    subj: &str,
+    fp: &ruby_prism::FindPatternNode<'_>,
+    anchor: &Node<'_>,
+) -> SExpr {
+    let mut checks: Vec<SExpr> = Vec::new();
+    if let Some(c) = fp.constant() {
+        let cexpr = tr(ctx, &c);
+        checks.push(pm_meth(anchor, cexpr, "===", vec![pm_lvar(anchor, subj)]));
+    }
+    let d = ctx.fresh_pm();
+    checks.push(pm_meth(anchor, pm_lvar(anchor, subj), "respond_to?",
+        vec![sp(anchor, Expr::SymbolLit("deconstruct".into()))]));
+    checks.push(pm_bind(anchor, &d, pm_meth(anchor, pm_lvar(anchor, subj), "deconstruct", vec![])));
+    checks.push(pm_meth(anchor, pm_lvar(anchor, &d), "is_a?",
+        vec![sp(anchor, Expr::ConstRead("Array".into()))]));
+    let mids: Vec<_> = fp.requireds().iter().collect();
+    let k = mids.len() as i64;
+    let len = pm_meth(anchor, pm_lvar(anchor, &d), "length", vec![]);
+    checks.push(pm_meth(anchor, len, ">=", vec![sp(anchor, Expr::IntLit(k))]));
+    // Phase 1: locate the start index. find over 0..(len-k); the block
+    // tests the middle patterns at d[i+j] (its bindings are block-local).
+    let fi = ctx.fresh_pm();
+    let iparam = ctx.fresh_pm();
+    let mut detect: Vec<SExpr> = Vec::new();
+    for (j, m) in mids.iter().enumerate() {
+        let e = ctx.fresh_pm();
+        let idx = pm_meth(anchor, pm_lvar(anchor, &iparam), "+", vec![sp(anchor, Expr::IntLit(j as i64))]);
+        detect.push(pm_bind(anchor, &e, pm_meth(anchor, pm_lvar(anchor, &d), "[]", vec![idx])));
+        detect.push(compile_pattern(ctx, &e, m));
+    }
+    let upper = pm_meth(anchor, pm_meth(anchor, pm_lvar(anchor, &d), "length", vec![]),
+        "-", vec![sp(anchor, Expr::IntLit(k))]);
+    let range = sp(anchor, Expr::RangeLit {
+        begin: Box::new(sp(anchor, Expr::IntLit(0))),
+        end: Box::new(upper),
+        exclusive: false,
+    });
+    let find_call = sp(anchor, Expr::CallWithBlock {
+        receiver: Some(Box::new(range)),
+        name: "find".into(),
+        args: vec![],
+        block_params: vec![BlockParam::Single(iparam.clone())],
+        block_body: vec![pm_all(anchor, detect)],
+    });
+    checks.push(pm_bind(anchor, &fi, find_call));
+    // `find` returns nil on no match (0 is truthy in Ruby, so a hit at
+    // index 0 still passes); require non-nil explicitly.
+    checks.push(sp(anchor, Expr::Call {
+        receiver: Some(Box::new(pm_meth(anchor, pm_lvar(anchor, &fi), "nil?", vec![]))),
+        name: "!".into(), args: vec![], kwargs_trailing: false,
+    }));
+    // Phase 2: re-run the middle matches at the found index so the
+    // variables bind in the arm's scope.
+    for (j, m) in mids.iter().enumerate() {
+        let e = ctx.fresh_pm();
+        let idx = pm_meth(anchor, pm_lvar(anchor, &fi), "+", vec![sp(anchor, Expr::IntLit(j as i64))]);
+        checks.push(pm_bind(anchor, &e, pm_meth(anchor, pm_lvar(anchor, &d), "[]", vec![idx])));
+        checks.push(compile_pattern(ctx, &e, m));
+    }
+    // `*pre` / `*post` slices (named only).
+    if let Some(t) = fp.left().expression().and_then(|e| e.as_local_variable_target_node()) {
+        let name = cid_to_string(t.name());
+        let slice = pm_meth(anchor, pm_lvar(anchor, &d), "[]",
+            vec![sp(anchor, Expr::IntLit(0)), pm_lvar(anchor, &fi)]);
+        checks.push(pm_bind(anchor, &name, slice));
+    }
+    if let Some(sn) = fp.right().as_splat_node()
+        && let Some(t) = sn.expression().and_then(|e| e.as_local_variable_target_node())
+    {
+        let name = cid_to_string(t.name());
+        let start = pm_meth(anchor, pm_lvar(anchor, &fi), "+", vec![sp(anchor, Expr::IntLit(k))]);
+        let cnt = pm_meth(anchor, pm_lvar(anchor, &d), "length", vec![]);
+        let slice = pm_meth(anchor, pm_lvar(anchor, &d), "[]", vec![start, cnt]);
+        checks.push(pm_bind(anchor, &name, slice));
     }
     pm_all(anchor, checks)
 }
@@ -4476,6 +4600,9 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     // `tr_singleton_class` is extracted).
     if let Some(r) = tr_pattern_construct(ctx, node) {
         return r;
+    }
+    if let Some(ff) = node.as_flip_flop_node() {
+        return tr_flip_flop(ctx, node, &ff);
     }
     // Unsupported Prism node — record the message and return a
     // placeholder. The eval entry point checks `ctx.errors` after

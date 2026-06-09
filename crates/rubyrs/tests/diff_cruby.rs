@@ -352,6 +352,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn respond_to_reopened() { run_diff("respond_to_reopened"); }
 // Pattern matching: case/in, `=> pat`, `in pat`, deconstruct protocol.
 #[test] fn pattern_matching() { run_diff("pattern_matching"); }
+// Find patterns `[*pre, mâ¦, *post]`.
+#[test] fn find_pattern() { run_diff("find_pattern"); }
+// Flip-flop `a..b` / `a...b` in boolean context.
+#[test] fn flip_flop() { run_diff("flip_flop"); }
 // `END { }` → at_exit, `BEGIN { }` → inline; interleaved LIFO with at_exit.
 #[test] fn begin_end_blocks() { run_diff("begin_end_blocks"); }
 #[test] fn hash_to_hash() { run_diff("hash_to_hash"); }
