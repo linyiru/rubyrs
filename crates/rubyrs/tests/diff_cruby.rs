@@ -393,6 +393,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn enumerator_each_slice_cons() { run_diff("enumerator_each_slice_cons"); }
 // Numeric#step — positional + keyword (to:/by:), Integer + Float.
 #[test] fn numeric_step() { run_diff("numeric_step"); }
+// Symbol#to_proc — explicit `:sym.to_proc` conversion (literal &:sym is
+// covered by symbol_to_proc).
+#[test] fn symbol_to_proc_explicit() { run_diff("symbol_to_proc_explicit"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }

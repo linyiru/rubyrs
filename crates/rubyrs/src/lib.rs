@@ -2521,6 +2521,14 @@ RUBYRS = "rubyrs".freeze
             "<rubyrs:preamble:enumerator>",
         )
             .expect("ICE: failed to load Enumerator preamble");
+        // `Symbol#to_proc` — reopens the native Symbol class to add the
+        // explicit `:sym.to_proc` conversion (the literal `&:sym` pass
+        // has its own native path).
+        self.eval_inner(
+            include_str!("preamble/symbol.rb"),
+            "<rubyrs:preamble:symbol>",
+        )
+            .expect("ICE: failed to load Symbol preamble");
         // Tier 1 seeded `Random` class. Lives in its own file so
         // the preamble stays focused on exception-hierarchy +
         // class-shell shapes; PRNG logic is meaty enough that
