@@ -8274,6 +8274,44 @@ impl Vm {
                 return Ok(());
             }
         }
+        // `Integer#gcdlcm(n)` → `[gcd, lcm]` (both non-negative). Lives
+        // here (not numeric.rs) because it allocates the pair Array.
+        // Handles the i64 fast path; the i64::MIN / lcm-overflow edges
+        // fall through (rare, matching where gcd/lcm decline alone).
+        if let Value::Int(a) = &recv
+            && &*name == "gcdlcm"
+        {
+            if args.len() != 1 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        args.len(),
+                    ),
+                }));
+            }
+            let Value::Int(b) = &args[0] else {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "{} can't be coerced into Integer",
+                        crate::vm::numeric::type_name_for_coerce(&args[0]),
+                    ),
+                }));
+            };
+            let (a, b) = (*a, *b);
+            // [Int, Int] has no heap refs → no PinGuard needed.
+            if a != i64::MIN
+                && b != i64::MIN
+                && let Some(l) = crate::vm::numeric::lcm_i64(a, b)
+            {
+                let g = crate::vm::numeric::gcd_i64(a, b);
+                self.maybe_gc();
+                self.check_alloc()?;
+                let arr_id =
+                    self.heap.alloc(HeapObj::Array(vec![Value::Int(g), Value::Int(l)]));
+                self.stack.push(Value::Array(arr_id));
+                return Ok(());
+            }
+        }
         // `Numeric#coerce(other)` — the Tier-2 Numeric protocol
         // entry point. Returns a 2-element Array `[other_promoted,
         // self_promoted]` so arithmetic operators on heterogeneous

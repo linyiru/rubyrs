@@ -600,7 +600,7 @@ impl Vm {
                 "times" | "upto" | "downto" | "step" |
                 "digits" | "bit_length" | "size" | "[]" |
                 "allbits?" | "anybits?" | "nobits?" |
-                "gcd" | "lcm" | "fdiv" | "divmod" |
+                "gcd" | "lcm" | "gcdlcm" | "fdiv" | "divmod" |
                 "ceil" | "floor" | "round" | "truncate" |
                 "chr" | "coerce" |
                 "to_r" | "rationalize" |

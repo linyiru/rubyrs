@@ -400,6 +400,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_comparable() { run_diff("string_comparable"); }
 // Small gaps: NilClass#to_a/#to_h, String#getbyte.
 #[test] fn nil_getbyte_gaps() { run_diff("nil_getbyte_gaps"); }
+// Integer#gcdlcm → [gcd, lcm].
+#[test] fn integer_gcdlcm() { run_diff("integer_gcdlcm"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }
