@@ -4377,6 +4377,58 @@ impl Vm {
         g.vm.stack.push(Value::Hash(hid));
         return Ok(ClassOutcome::Handled);
     }
+    if name_id == new_id
+        && let Value::Class(cls) = &recv
+        && cls.name.as_str() == "Array"
+    {
+        // `Array.new` WITHOUT a block (the block form lives in
+        // do_call_block):
+        //   - 0 args      → []
+        //   - Int n       → [nil] * n
+        //   - Int n, val  → [val] * n   (val is SHARED, not copied)
+        //   - Array a     → a shallow copy of a
+        // n < 0 → ArgumentError; a lone non-Int/non-Array → TypeError.
+        // Without this, no-block `Array.new(...)` fell to the generic
+        // Class#new and produced a bare `#<Array>` instance.
+        let elems: Vec<Value> = match &args[..] {
+            [] => Vec::new(),
+            [Value::Int(n)] | [Value::Int(n), _] => {
+                if *n < 0 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: "negative array size".to_string(),
+                    }));
+                }
+                let fill = args.get(1).cloned().unwrap_or(Value::Nil);
+                vec![fill; *n as usize]
+            }
+            [Value::Array(aid)] => self.heap.array(*aid).clone(),
+            [other] => {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into Integer",
+                        other.type_name()
+                    ),
+                }));
+            }
+            _ => {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0..2)",
+                        args.len()
+                    ),
+                }));
+            }
+        };
+        let mut g = PinGuard::new(self);
+        for e in &elems {
+            if e.is_gc_heap_ref() { g.pin(e.clone()); }
+        }
+        g.vm.maybe_gc();
+        g.vm.check_alloc()?;
+        let aid = g.vm.heap.alloc(HeapObj::Array(elems));
+        g.vm.stack.push(Value::Array(aid));
+        return Ok(ClassOutcome::Handled);
+    }
     // `Regexp.compile(pat)` / `Regexp.new(pat)` — compile a
     // String pattern into a Regexp. Same code path the regex
     // literal `/.../` takes (Op::LoadRegex / Op::CompileRegex),

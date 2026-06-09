@@ -406,6 +406,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn range_step_float() { run_diff("range_step_float"); }
 // Hash#values_at / #each_key / #each_value (block + Enumerator).
 #[test] fn hash_values_at_each_kv() { run_diff("hash_values_at_each_kv"); }
+// Array.new no-block forms (size / size+fill / Array copy).
+#[test] fn array_new_forms() { run_diff("array_new_forms"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }
