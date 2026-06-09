@@ -340,6 +340,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `super` in a block yielded by ANOTHER object's method must resolve to
 // the lexical-owner method's super-chain, not the intervening frame's.
 #[test] fn super_block_foreign_yield() { run_diff("super_block_foreign_yield"); }
+// `yield(a: 1)` keyword sugar — trailing KeywordHashNode yielded as a Hash.
+#[test] fn yield_kwargs() { run_diff("yield_kwargs"); }
 #[test] fn hash_to_hash() { run_diff("hash_to_hash"); }
 #[test] fn system_stack_error() { run_diff("system_stack_error"); }
 #[test] fn method_missing_on_class() { run_diff("method_missing_on_class"); }

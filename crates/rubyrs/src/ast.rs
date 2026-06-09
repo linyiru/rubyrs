@@ -3052,8 +3052,22 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         {
             return sp(node, Expr::YieldSplat(arr));
         }
+        // A trailing `yield(a: 1, b: 2)` / `yield a: 1` reaches Prism
+        // as a `KeywordHashNode` (the same `k: v` sugar as a call
+        // site). CRuby yields it as a single trailing Hash, so route
+        // it through `tr_kwhash` like the call path does — otherwise
+        // `tr` hits the KeywordHashNode unsupported-node arm and the
+        // whole file fails to compile. The block's `|h|` / `|**o|`
+        // binding extracts it from the trailing Hash exactly as it
+        // does for `yield({a: 1})` (which already worked).
         let args: Vec<SExpr> = n.arguments()
-            .map(|a| a.arguments().iter().map(|c| tr(ctx, &c)).collect())
+            .map(|a| a.arguments().iter().map(|c| {
+                if let Some(kh) = c.as_keyword_hash_node() {
+                    tr_kwhash(ctx, node, &c, &kh)
+                } else {
+                    tr(ctx, &c)
+                }
+            }).collect())
             .unwrap_or_default();
         return sp(node, Expr::Yield(args));
     }
