@@ -215,8 +215,17 @@ pub(crate) fn ruby_sprintf(
         if let Some(w) = width
             && body.chars().count() < w {
                 let pad_n = w - body.chars().count();
-                let pad_char = if flag_zero && !flag_minus && precision.is_none()
-                    && matches!(spec, 'd' | 'i' | 'x' | 'X' | 'o' | 'b' | 'B' | 'f') {
+                // The `0` flag zero-pads to width. For FLOAT conversions
+                // it applies even with a precision (`%05.2f` of 3.14 is
+                // `03.14`). For INTEGER conversions a precision overrides
+                // it — CRuby ignores `0` then (`%05.2d` of 1 is `   01`),
+                // because the precision already controls the digit count.
+                // The sign / alt-prefix placement below keeps the zeros
+                // inside the sign (`%+08.2f` → `+0003.14`).
+                let pad_char = if flag_zero && !flag_minus
+                    && (matches!(spec, 'f' | 'e' | 'E' | 'g' | 'G')
+                        || (precision.is_none()
+                            && matches!(spec, 'd' | 'i' | 'x' | 'X' | 'o' | 'b' | 'B'))) {
                     '0'
                 } else {
                     ' '
