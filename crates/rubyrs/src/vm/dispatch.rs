@@ -3099,7 +3099,25 @@ impl Vm {
                         }
                         (arity, params)
                     }
-                    None => (-1i64, vec![("rest", None)]),
+                    // Primitive-backed method with no table entry. The
+                    // generic answer is CRuby's fully-variadic -1 /
+                    // [[:rest]], but the canonical BINARY OPERATORS are
+                    // unambiguously arity 1 on every builtin class
+                    // (`5.method(:+).arity == 1`) — report those
+                    // correctly; everything else keeps the -1 fallback.
+                    None => {
+                        let m_name = self.interner.resolve(m_name_id).clone();
+                        if matches!(
+                            &*m_name,
+                            "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^"
+                                | "<<" | ">>" | "<=>" | "==" | "===" | "!="
+                                | "<" | "<=" | ">" | ">=" | "eql?"
+                        ) {
+                            (1i64, vec![("req", None)])
+                        } else {
+                            (-1i64, vec![("rest", None)])
+                        }
+                    }
                 };
                 if name == "arity" {
                     self.stack.push(Value::Int(arity));

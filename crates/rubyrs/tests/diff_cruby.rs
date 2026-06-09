@@ -422,6 +422,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Set#^ / #disjoint? / #intersect? (stdlib_vendor set.rb).
 #[cfg(feature = "stdlib")]
 #[test] fn set_xor_disjoint() { run_diff("set_xor_disjoint"); }
+// Method#arity = 1 for primitive-backed binary operators.
+#[test] fn method_operator_arity() { run_diff("method_operator_arity"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }
