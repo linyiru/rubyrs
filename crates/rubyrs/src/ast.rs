@@ -924,6 +924,116 @@ impl TranslationCtx<'_> {
     }
 }
 
+/// Handle the three pattern-matching node families (`case/in`,
+/// `expr => pat`, `expr in pat`). Returns `None` for any other node so
+/// `tr` falls through. `#[inline(never)]` keeps its large local set off
+/// `tr`'s recursive frame (see the call site).
+#[inline(never)]
+fn tr_pattern_construct(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> Option<SExpr> {
+    if let Some(cm) = node.as_case_match_node() {
+        // `case subj; in pat [if guard]; body; ...; [else body]; end`.
+        // Bind the subject to a fresh local (evaluated once), then build
+        // an if/elsif chain: arm N's else-branch is arm N+1's test. With
+        // no `else` and nothing matched, raise NoMatchingPatternError.
+        let subj = ctx.fresh_pm();
+        let subj_expr = cm.predicate().map(|s| tr(ctx, &s)).unwrap_or_else(|| sp(node, Expr::Nil));
+        // Innermost else: the `else` clause body, or the no-match raise.
+        let mut else_body: Vec<SExpr> = match cm.else_clause() {
+            Some(e) => e.statements().map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect()).unwrap_or_default(),
+            None => vec![sp(node, Expr::Call {
+                receiver: None,
+                name: "raise".into(),
+                args: vec![
+                    sp(node, Expr::ConstRead("NoMatchingPatternError".into())),
+                    pm_meth(node, pm_lvar(node, &subj), "inspect", vec![]),
+                ],
+                kwargs_trailing: false,
+            })],
+        };
+        // Fold the `in` arms in reverse so each becomes the else of the
+        // previous If.
+        let arms: Vec<_> = cm.conditions().iter().collect();
+        for arm in arms.iter().rev() {
+            let Some(inn) = arm.as_in_node() else { continue };
+            let pat_node = inn.pattern();
+            // A guard (`in pat if cond` / `unless cond`) parses as an
+            // If/UnlessNode wrapping the real pattern in its statements.
+            // Prism `Node` isn't Clone, so compile inline per branch
+            // rather than extracting a `real_pat` variable.
+            let cond = if let Some(ifn) = pat_node.as_if_node() {
+                let inner = ifn.statements().and_then(|s| s.body().iter().next());
+                let base = match &inner {
+                    Some(p) => compile_pattern(ctx, &subj, p),
+                    None => compile_pattern(ctx, &subj, &pat_node),
+                };
+                pm_and(node, base, tr(ctx, &ifn.predicate()))
+            } else if let Some(un) = pat_node.as_unless_node() {
+                let inner = un.statements().and_then(|s| s.body().iter().next());
+                let base = match &inner {
+                    Some(p) => compile_pattern(ctx, &subj, p),
+                    None => compile_pattern(ctx, &subj, &pat_node),
+                };
+                // `unless cond` — match requires `!cond`.
+                let g = sp(node, Expr::Call {
+                    receiver: Some(Box::new(tr(ctx, &un.predicate()))),
+                    name: "!".into(), args: vec![], kwargs_trailing: false });
+                pm_and(node, base, g)
+            } else {
+                compile_pattern(ctx, &subj, &pat_node)
+            };
+            let body: Vec<SExpr> = inn.statements()
+                .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
+                .unwrap_or_else(|| vec![sp(node, Expr::Nil)]);
+            let if_expr = sp(node, Expr::If {
+                cond: Box::new(cond),
+                then_body: body,
+                else_body: std::mem::take(&mut else_body),
+            });
+            else_body = vec![if_expr];
+        }
+        // `else_body` now holds the head of the chain.
+        let mut seq = vec![sp(node, Expr::LVarWrite(subj.clone(), Box::new(subj_expr)))];
+        seq.extend(else_body);
+        return Some(sp(node, seq_inner(seq)));
+    }
+    if let Some(mr) = node.as_match_required_node() {
+        // `value => pattern` — raises NoMatchingPatternError on no match,
+        // binds on success, evaluates to nil.
+        let subj = ctx.fresh_pm();
+        let val = tr(ctx, &mr.value());
+        let cond = compile_pattern(ctx, &subj, &mr.pattern());
+        let raise = sp(node, Expr::Call {
+            receiver: None,
+            name: "raise".into(),
+            args: vec![
+                sp(node, Expr::ConstRead("NoMatchingPatternError".into())),
+                pm_meth(node, pm_lvar(node, &subj), "inspect", vec![]),
+            ],
+            kwargs_trailing: false,
+        });
+        let check = sp(node, Expr::If {
+            cond: Box::new(cond),
+            then_body: vec![sp(node, Expr::Nil)],
+            else_body: vec![raise],
+        });
+        return Some(sp(node, seq_inner(vec![
+            sp(node, Expr::LVarWrite(subj.clone(), Box::new(val))),
+            check,
+        ])));
+    }
+    if let Some(mp) = node.as_match_predicate_node() {
+        // `value in pattern` — true/false, binds on success.
+        let subj = ctx.fresh_pm();
+        let val = tr(ctx, &mp.value());
+        let cond = compile_pattern(ctx, &subj, &mp.pattern());
+        return Some(sp(node, seq_inner(vec![
+            sp(node, Expr::LVarWrite(subj.clone(), Box::new(val))),
+            cond,
+        ])));
+    }
+    None
+}
+
 /// Compile `pat` against the value held in local `subj`. Returns a
 /// boolean SExpr (truthy = match, binds variables as a side effect).
 fn compile_pattern(ctx: &mut TranslationCtx<'_>, subj: &str, pat: &Node<'_>) -> SExpr {
@@ -1107,6 +1217,7 @@ fn compile_hash_pattern(
     }
     pm_all(anchor, checks)
 }
+
 
 /// Extracted body of the `class << recv` (singleton-class) AST
 /// translation. Lives in its own function so its large local set
@@ -4356,106 +4467,15 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             .unwrap_or_default();
         return sp(node, seq_inner(stmts));
     }
-    if let Some(cm) = node.as_case_match_node() {
-        // `case subj; in pat [if guard]; body; ...; [else body]; end`.
-        // Bind the subject to a fresh local (evaluated once), then build
-        // an if/elsif chain: arm N's else-branch is arm N+1's test. With
-        // no `else` and nothing matched, raise NoMatchingPatternError.
-        let subj = ctx.fresh_pm();
-        let subj_expr = cm.predicate().map(|s| tr(ctx, &s)).unwrap_or_else(|| sp(node, Expr::Nil));
-        // Innermost else: the `else` clause body, or the no-match raise.
-        let mut else_body: Vec<SExpr> = match cm.else_clause() {
-            Some(e) => e.statements().map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect()).unwrap_or_default(),
-            None => vec![sp(node, Expr::Call {
-                receiver: None,
-                name: "raise".into(),
-                args: vec![
-                    sp(node, Expr::ConstRead("NoMatchingPatternError".into())),
-                    pm_meth(node, pm_lvar(node, &subj), "inspect", vec![]),
-                ],
-                kwargs_trailing: false,
-            })],
-        };
-        // Fold the `in` arms in reverse so each becomes the else of the
-        // previous If.
-        let arms: Vec<_> = cm.conditions().iter().collect();
-        for arm in arms.iter().rev() {
-            let Some(inn) = arm.as_in_node() else { continue };
-            let pat_node = inn.pattern();
-            // A guard (`in pat if cond` / `unless cond`) parses as an
-            // If/UnlessNode wrapping the real pattern in its statements.
-            // Prism `Node` isn't Clone, so compile inline per branch
-            // rather than extracting a `real_pat` variable.
-            let cond = if let Some(ifn) = pat_node.as_if_node() {
-                let inner = ifn.statements().and_then(|s| s.body().iter().next());
-                let base = match &inner {
-                    Some(p) => compile_pattern(ctx, &subj, p),
-                    None => compile_pattern(ctx, &subj, &pat_node),
-                };
-                pm_and(node, base, tr(ctx, &ifn.predicate()))
-            } else if let Some(un) = pat_node.as_unless_node() {
-                let inner = un.statements().and_then(|s| s.body().iter().next());
-                let base = match &inner {
-                    Some(p) => compile_pattern(ctx, &subj, p),
-                    None => compile_pattern(ctx, &subj, &pat_node),
-                };
-                // `unless cond` — match requires `!cond`.
-                let g = sp(node, Expr::Call {
-                    receiver: Some(Box::new(tr(ctx, &un.predicate()))),
-                    name: "!".into(), args: vec![], kwargs_trailing: false });
-                pm_and(node, base, g)
-            } else {
-                compile_pattern(ctx, &subj, &pat_node)
-            };
-            let body: Vec<SExpr> = inn.statements()
-                .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
-                .unwrap_or_else(|| vec![sp(node, Expr::Nil)]);
-            let if_expr = sp(node, Expr::If {
-                cond: Box::new(cond),
-                then_body: body,
-                else_body: std::mem::take(&mut else_body),
-            });
-            else_body = vec![if_expr];
-        }
-        // `else_body` now holds the head of the chain.
-        let mut seq = vec![sp(node, Expr::LVarWrite(subj.clone(), Box::new(subj_expr)))];
-        seq.extend(else_body);
-        return sp(node, seq_inner(seq));
-    }
-    if let Some(mr) = node.as_match_required_node() {
-        // `value => pattern` — raises NoMatchingPatternError on no match,
-        // binds on success, evaluates to nil.
-        let subj = ctx.fresh_pm();
-        let val = tr(ctx, &mr.value());
-        let cond = compile_pattern(ctx, &subj, &mr.pattern());
-        let raise = sp(node, Expr::Call {
-            receiver: None,
-            name: "raise".into(),
-            args: vec![
-                sp(node, Expr::ConstRead("NoMatchingPatternError".into())),
-                pm_meth(node, pm_lvar(node, &subj), "inspect", vec![]),
-            ],
-            kwargs_trailing: false,
-        });
-        let check = sp(node, Expr::If {
-            cond: Box::new(cond),
-            then_body: vec![sp(node, Expr::Nil)],
-            else_body: vec![raise],
-        });
-        return sp(node, seq_inner(vec![
-            sp(node, Expr::LVarWrite(subj.clone(), Box::new(val))),
-            check,
-        ]));
-    }
-    if let Some(mp) = node.as_match_predicate_node() {
-        // `value in pattern` — true/false, binds on success.
-        let subj = ctx.fresh_pm();
-        let val = tr(ctx, &mp.value());
-        let cond = compile_pattern(ctx, &subj, &mp.pattern());
-        return sp(node, seq_inner(vec![
-            sp(node, Expr::LVarWrite(subj.clone(), Box::new(val))),
-            cond,
-        ]));
+    // Pattern matching (`case/in`, `expr => pat`, `expr in pat`). The
+    // bodies carry a large local set (subject temp, else-chain Vec, the
+    // per-arm guard locals); kept in a separate `#[inline(never)]`
+    // function so they don't inflate the recursive `tr` stack frame —
+    // a bloated `tr` frame overflows the 2 MB test thread on a deeply
+    // nested AST under the debug + llvm-cov Coverage build (same reason
+    // `tr_singleton_class` is extracted).
+    if let Some(r) = tr_pattern_construct(ctx, node) {
+        return r;
     }
     // Unsupported Prism node — record the message and return a
     // placeholder. The eval entry point checks `ctx.errors` after
