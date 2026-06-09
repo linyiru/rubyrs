@@ -358,6 +358,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn enumerable_fallback() { run_diff("enumerable_fallback"); }
 // sprintf `0` flag zero-pads floats even with a precision.
 #[test] fn sprintf_zero_pad_float() { run_diff("sprintf_zero_pad_float"); }
+// Struct: keyword_init, block form, to_h/[]/each, inspect.
+#[test] fn struct_features() { run_diff("struct_features"); }
 // Pattern matching: case/in, `=> pat`, `in pat`, deconstruct protocol.
 #[test] fn pattern_matching() { run_diff("pattern_matching"); }
 // Find patterns `[*pre, mâ¦, *post]`.

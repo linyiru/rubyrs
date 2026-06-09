@@ -35,7 +35,11 @@
 #     shim unblocks doesn't trigger STRESS_GC sweep windows).
 
 class Struct
-  def self.new(*attrs)
+  def self.new(*attrs, &block)
+    # `keyword_init: true/false` arrives as a trailing options Hash in
+    # the splat (Struct.new has no kwparams). Peel it off the attr list.
+    opts = attrs.last.is_a?(Hash) ? attrs.pop : {}
+    kw_init = opts[:keyword_init]
     cls = Class.new
     # Store attrs on the class itself as a class-level ivar
     # so the captured-in-block reference survives GC. Pure
@@ -46,6 +50,7 @@ class Struct
     # `self.class.instance_variable_get(:@__struct_attrs)`
     # keeps the Array rooted via the Class ivars table.
     cls.instance_variable_set(:@__struct_attrs, attrs)
+    cls.instance_variable_set(:@__struct_kw, kw_init)
     cls.define_singleton_method(:members) do
       # Explicit `self.` — bare `instance_variable_get`
       # doesn't reach the universal Object arm under method
@@ -58,8 +63,16 @@ class Struct
       self.class.instance_variable_get(:@__struct_attrs)
     end
     cls.define_method(:initialize) do |*args|
-      members.each_with_index do |attr, i|
-        instance_variable_set("@#{attr}".to_sym, args[i])
+      if self.class.instance_variable_get(:@__struct_kw)
+        # `keyword_init: true` — `S.new(a: 1, b: 2)` passes the kwargs
+        # as a trailing Hash (rubyrs routes them positionally to a
+        # `*args` callee). Read each member out of it; absent → nil.
+        h = args.first.is_a?(Hash) ? args.first : {}
+        members.each { |attr| instance_variable_set("@#{attr}".to_sym, h[attr]) }
+      else
+        members.each_with_index do |attr, i|
+          instance_variable_set("@#{attr}".to_sym, args[i])
+        end
       end
     end
     attrs.each do |attr|
@@ -71,6 +84,26 @@ class Struct
     cls.define_method(:to_a) do
       members.map { |a| instance_variable_get("@#{a}".to_sym) }
     end
+    cls.define_method(:to_h) do
+      h = {}
+      members.each { |a| h[a] = instance_variable_get("@#{a}".to_sym) }
+      h
+    end
+    cls.define_method(:each) do |&blk|
+      to_a.each(&blk)
+    end
+    cls.define_method(:[]) do |key|
+      # `s[:attr]` / `s["attr"]` / `s[index]`.
+      if key.is_a?(Integer)
+        to_a[key]
+      else
+        instance_variable_get("@#{key}".to_sym)
+      end
+    end
+    cls.define_method(:[]=) do |key, val|
+      name = key.is_a?(Integer) ? members[key] : key
+      instance_variable_set("@#{name}".to_sym, val)
+    end
     cls.define_method(:==) do |other|
       # CRuby's `Struct#==` requires EXACT class match (`==`),
       # not `is_a?` — otherwise `parent_struct == child_struct`
@@ -80,6 +113,15 @@ class Struct
       # symmetric across Struct subclass inheritance.
       other.class == self.class && self.to_a == other.to_a
     end
+    cls.define_method(:inspect) do
+      pairs = members.map { |a| "#{a}=#{instance_variable_get("@#{a}".to_sym).inspect}" }
+      nm = self.class.name
+      nm ? "#<struct #{nm} #{pairs.join(', ')}>" : "#<struct #{pairs.join(', ')}>"
+    end
+    cls.define_method(:to_s) { inspect }
+    # Block form: `Struct.new(:a) { def helper; …; end }` — evaluate the
+    # block in the new class so it can define methods / constants.
+    cls.class_eval(&block) if block
     cls
   end
 end
