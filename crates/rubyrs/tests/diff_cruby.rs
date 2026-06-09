@@ -360,6 +360,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn sprintf_zero_pad_float() { run_diff("sprintf_zero_pad_float"); }
 // Struct: keyword_init, block form, to_h/[]/each, inspect.
 #[test] fn struct_features() { run_diff("struct_features"); }
+// Ruby 3.2 Data.define — immutable value objects.
+#[test] fn data_define() { run_diff("data_define"); }
 // `Set[...]` constructor (stdlib-vendored Set surface).
 #[cfg(feature = "stdlib")]
 #[test] fn set_bracket_ctor() { run_diff("set_bracket_ctor"); }

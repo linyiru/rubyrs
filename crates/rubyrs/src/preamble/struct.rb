@@ -125,3 +125,74 @@ class Struct
     cls
   end
 end
+
+# Ruby 3.2 `Data` — immutable value objects. `Data.define(:x, :y)`
+# returns a class whose instances take positional (`D.new(1, 2)`) OR
+# keyword (`D.new(x: 1, y: 2)`) args, expose readers only (no writers —
+# immutable), and support `with` (copy-with-changes), `to_h`, `==`,
+# `members`, pattern-matching (`deconstruct` / `deconstruct_keys`), and
+# `inspect` (`#<data D x=1, y=2>`). Lives here alongside Struct since the
+# two share the value-object-factory shape. (Like Struct, `p data` prints
+# the native `#<...>` until Kernel#p routes to a user `inspect`.)
+class Data
+  def self.define(*members, &block)
+    cls = Class.new
+    cls.instance_variable_set(:@__data_members, members)
+    cls.define_singleton_method(:members) do
+      self.instance_variable_get(:@__data_members)
+    end
+    cls.define_method(:members) do
+      self.class.instance_variable_get(:@__data_members)
+    end
+    cls.define_method(:initialize) do |*args|
+      m = members
+      # Keyword init: a single Hash arg whose keys are all members
+      # (rubyrs routes kwargs to a `*args` callee as a trailing Hash).
+      # Otherwise positional. The all-members-keys test distinguishes
+      # `D1.new(v: 5)` (keyword) from `D1.new({a: 1})` (positional value)
+      # for a 1-member Data.
+      if args.size == 1 && args.first.is_a?(Hash) && !args.first.empty? &&
+         args.first.keys.all? { |k| m.include?(k) }
+        h = args.first
+        m.each { |a| instance_variable_set("@#{a}".to_sym, h[a]) }
+      else
+        m.each_with_index { |a, i| instance_variable_set("@#{a}".to_sym, args[i]) }
+      end
+    end
+    members.each do |a|
+      ivar = "@#{a}".to_sym
+      cls.define_method(a) { instance_variable_get(ivar) } # reader only
+    end
+    cls.define_method(:to_h) do
+      h = {}
+      members.each { |a| h[a] = instance_variable_get("@#{a}".to_sym) }
+      h
+    end
+    cls.define_method(:with) do |*args|
+      changes = args.first.is_a?(Hash) ? args.first : {}
+      # Build positionally (current value, or the change) — avoids the
+      # keyword/positional ambiguity for 1-member Data.
+      vals = members.map do |a|
+        changes.key?(a) ? changes[a] : instance_variable_get("@#{a}".to_sym)
+      end
+      self.class.new(*vals)
+    end
+    cls.define_method(:deconstruct) do
+      members.map { |a| instance_variable_get("@#{a}".to_sym) }
+    end
+    cls.define_method(:deconstruct_keys) do |keys|
+      to_h
+    end
+    cls.define_method(:==) do |other|
+      other.class == self.class && other.to_h == self.to_h
+    end
+    cls.define_method(:inspect) do
+      pairs = members.map { |a| "#{a}=#{instance_variable_get("@#{a}".to_sym).inspect}" }
+      nm = self.class.name
+      nm ? "#<data #{nm} #{pairs.join(', ')}>" : "#<data #{pairs.join(', ')}>"
+    end
+    cls.define_method(:to_s) { inspect }
+    cls.class_eval(&block) if block
+    cls
+  end
+end
