@@ -251,7 +251,11 @@ crates/rubyrs/benches/fizzbuzz_1m.rb	8200	800	1M fizzbuzz; BinOpInt + IncLocal +
 # walks; CI observed gc_churn 8564 (164 over). The 8200 cohort stayed
 # under (static_bench 7924 was the peak). Per-row bump (gc_churn-specific
 # mark/sweep cost), ~236 KB headroom over the observed peak.
-crates/rubyrs/benches/gc_churn.rb	8800	400	200k short-lived Array+Hash allocs; stresses mark/sweep
+# gc_churn RSS bumped 8800 → 9000 on 2026-06-09 — observed CI 8804 KB
+# (cap 8800; +0.05%, ONE 4 KB page over a razor-thin budget) on the
+# carmine-crate commit, which doesn't even link into rubyrs — pure
+# runner noise on an allocation-stress workload. Bump to ~2% headroom.
+crates/rubyrs/benches/gc_churn.rb	9000	400	200k short-lived Array+Hash allocs; stresses mark/sweep
 crates/rubyrs/benches/string_interp.rb	8200	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
 # hash_mutate WALL bumped 650 → 730 on 2026-05-27 — 3
 # consecutive master CI runs observed 690-710ms (4-9% over

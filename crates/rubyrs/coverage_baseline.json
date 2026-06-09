@@ -11,6 +11,10 @@
     "crates/rubyrs/src/vm/fiber.rs": "behind the `_fiber` Cargo feature; the default CI coverage run uses default features (matches the http_server / stdlib pattern above)"
   },
   "files": {
+    "crates/carmine/src/engine.rs": 64,
+    "crates/carmine/src/html.rs": 74,
+    "crates/carmine/src/lib.rs": 0,
+    "crates/carmine/src/table.rs": 81,
     "crates/rubund/src/main.rs": 0,
     "crates/rubund/src/parser.rs": 83,
     "crates/rubyrs-cext/src/lib.rs": 87,
