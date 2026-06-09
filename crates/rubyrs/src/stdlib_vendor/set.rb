@@ -12,6 +12,12 @@
 # Default builds do NOT include this file's behaviour.
 
 class Set
+  # `Set[1, 2, 3]` — class-method constructor, equivalent to
+  # `Set.new([1, 2, 3])`. `Set[]` is the empty set.
+  def self.[](*items)
+    new(items)
+  end
+
   def initialize(enum = nil)
     @hash = {}
     return if enum.nil?

@@ -360,6 +360,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn sprintf_zero_pad_float() { run_diff("sprintf_zero_pad_float"); }
 // Struct: keyword_init, block form, to_h/[]/each, inspect.
 #[test] fn struct_features() { run_diff("struct_features"); }
+// `Set[...]` constructor (stdlib-vendored Set surface).
+#[cfg(feature = "stdlib")]
+#[test] fn set_bracket_ctor() { run_diff("set_bracket_ctor"); }
 // Pattern matching: case/in, `=> pat`, `in pat`, deconstruct protocol.
 #[test] fn pattern_matching() { run_diff("pattern_matching"); }
 // Find patterns `[*pre, mâ¦, *post]`.
