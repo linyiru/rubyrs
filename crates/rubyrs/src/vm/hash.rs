@@ -237,6 +237,29 @@ impl Vm {
                         let nid = self.heap.alloc(HeapObj::Array(vals));
                         Some(Value::Array(nid))
                     }
+                    // `h.values_at(*keys)` → the value for each key (a
+                    // miss yields the hash's scalar default, else nil — a
+                    // default PROC is not fired here, a minor divergence).
+                    ("values_at", keys) => {
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id)
+                            .iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        let dflt = self.heap.hash_default_value(id);
+                        let out: Vec<Value> = keys.iter().map(|key| {
+                            pairs.iter()
+                                .find(|(hk, _)| hk.ruby_eql(key, &self.heap))
+                                .map(|(_, v)| v.clone())
+                                .or_else(|| dflt.clone())
+                                .unwrap_or(Value::Nil)
+                        }).collect();
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
+                    // No-block `each_key` / `each_value` → Enumerator; the
+                    // block forms live in collection_call_block (iter.rs).
+                    ("each_key", []) | ("each_value", []) => {
+                        return self.make_enum_for(Value::Hash(id), name, vec![]).map(Some);
+                    }
                     ("to_h", []) => Some(Value::Hash(id)),
                     // `Hash#to_hash` — explicit-conversion alias.
                     // Mirrors `String#to_str`: gems use
