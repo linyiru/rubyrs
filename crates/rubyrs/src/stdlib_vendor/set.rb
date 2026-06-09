@@ -130,6 +130,28 @@ class Set
   end
   alias_method :intersection, :&
 
+  # Symmetric difference — elements in exactly one of the two sets.
+  # Mirrors CRuby's algorithm (seed from enum, then toggle self's
+  # elements) so the insertion ORDER — visible via inspect/to_a —
+  # matches: `Set[1,2] ^ Set[2,3]` is `#<Set: {3, 1}>`.
+  def ^(enum)
+    n = Set.new
+    enum.each { |o| n.add(o) }
+    each { |o| n.include?(o) ? n.delete(o) : n.add(o) }
+    n
+  end
+
+  # True when the two sets share no element.
+  def disjoint?(other)
+    other.each { |o| return false if include?(o) }
+    true
+  end
+
+  # True when the two sets share at least one element.
+  def intersect?(other)
+    !disjoint?(other)
+  end
+
   def subset?(other)
     return false unless other.is_a?(Set)
     return false if size > other.size

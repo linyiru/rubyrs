@@ -419,6 +419,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_tr_s_sum() { run_diff("string_tr_s_sum"); }
 // Struct#values_at + #dig.
 #[test] fn struct_values_at_dig() { run_diff("struct_values_at_dig"); }
+// Set#^ / #disjoint? / #intersect? (stdlib_vendor set.rb).
+#[cfg(feature = "stdlib")]
+#[test] fn set_xor_disjoint() { run_diff("set_xor_disjoint"); }
 // String#partition/#rpartition (str+regex), #insert, #delete.
 #[cfg(feature = "regex")]
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }
