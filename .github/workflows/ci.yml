@@ -677,7 +677,10 @@ jobs:
           # (preamble/float.rb, Float::INFINITY / NAN / ...) — one more
           # `.expect("ICE: failed to load Float preamble")`, same
           # unrecoverable-preamble-eval invariant as the siblings.
-          check crates/rubyrs/src/lib.rs       21
+          # Bumped 21 → 22 by the Symbol#to_proc preamble
+          # (preamble/symbol.rb) — one more `.expect("ICE: failed to load
+          # Symbol preamble")`, same invariant as the siblings.
+          check crates/rubyrs/src/lib.rs       22
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
           # never went down, just up here. See docs/PANIC_AUDIT.md.
