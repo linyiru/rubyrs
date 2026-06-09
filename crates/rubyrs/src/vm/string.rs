@@ -1008,6 +1008,82 @@ pub(crate) fn string_call(
             check(out.len())?;
             Some(Value::new_str(out))
         }
+        // `String#tr_s(from, to)` — tr, then squeeze runs of identical
+        // chars WITHIN the translated regions only: consecutive equal
+        // output chars collapse iff both were produced by translation
+        // (`"bookkeeper".tr_s("ok", "_") == "b_eeper"`); untranslated
+        // runs are untouched (`"aabb".tr_s("a","b") == "bbb"`) and a
+        // translated char never merges with an equal untranslated
+        // neighbour (`"al".tr_s("l","a") == "aa"`). Empty `to` deletes,
+        // same as tr.
+        (Value::Str(a), "tr_s", [Value::Str(from), Value::Str(to)]) => {
+            let a_ref = a.to_string_lossy();
+            let from_ref = from.to_string_lossy();
+            let to_ref = to.to_string_lossy();
+            let (from_chars, from_negated) = match parse_tr_set(&from_ref, true) {
+                Ok(t) => t,
+                Err(msg) => return Err(crate::error::RubyError::ArgumentError {
+                    msg: msg.to_string(),
+                }),
+            };
+            let (to_chars, _) = match parse_tr_set(&to_ref, false) {
+                Ok(t) => t,
+                Err(msg) => return Err(crate::error::RubyError::ArgumentError {
+                    msg: msg.to_string(),
+                }),
+            };
+            // Same last-occurrence-wins table as `tr`.
+            let mut from_index: std::collections::HashMap<char, usize> =
+                std::collections::HashMap::with_capacity(from_chars.len());
+            for (i, c) in from_chars.iter().enumerate() {
+                from_index.insert(*c, i);
+            }
+            let mut out = String::with_capacity(a_ref.len());
+            // (char, was_translated) of the last char pushed to `out`.
+            let mut last: Option<(char, bool)> = None;
+            for ch in a_ref.chars() {
+                let idx_opt = from_index.get(&ch).copied();
+                let translate = if from_negated { idx_opt.is_none() } else { idx_opt.is_some() };
+                if !translate {
+                    out.push(ch);
+                    last = Some((ch, false));
+                    continue;
+                }
+                if to_chars.is_empty() {
+                    continue; // delete, same as tr
+                }
+                let mapped = if from_negated {
+                    to_chars.last().copied()
+                } else {
+                    idx_opt
+                        .and_then(|i| to_chars.get(i).copied())
+                        .or_else(|| to_chars.last().copied())
+                };
+                let Some(m) = mapped else { continue };
+                if last == Some((m, true)) {
+                    continue; // squeeze within the translated run
+                }
+                out.push(m);
+                last = Some((m, true));
+            }
+            check(out.len())?;
+            Some(Value::new_str(out))
+        }
+        // `String#sum(bits = 16)` — byte checksum: the sum of all bytes,
+        // truncated to the low `bits` bits when bits > 0.
+        (Value::Str(a), "sum", rest @ ([] | [Value::Int(_)])) => {
+            let total: i64 = a.borrow().iter().map(|b| *b as i64).sum();
+            let bits = match rest {
+                [Value::Int(n)] => *n,
+                _ => 16,
+            };
+            let v = if bits > 0 && bits < 63 {
+                total & ((1i64 << bits) - 1)
+            } else {
+                total
+            };
+            Some(Value::Int(v))
+        }
         // `String#tr!` — destructive sibling of `tr`. Runs the
         // same translation logic but mutates the receiver in
         // place, returning self on change and nil when the

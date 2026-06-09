@@ -674,7 +674,7 @@ impl Vm {
                 "to_i" | "to_f" | "chars" | "split" | "lines" | "each_line" | "to_sym" | "intern" |
                 "to_s" | "to_str" | "inspect" |
                 "sub" | "sub!" | "gsub" | "gsub!" |
-                "tr" | "squeeze" |
+                "tr" | "tr_s" | "squeeze" | "sum" |
                 "encode" | "force_encoding" | "valid_encoding?" | "encoding" | "b" |
                 "unpack" | "unpack1" | "bytes" | "getbyte" | "each_byte" |
                 "match?" | "match" | "scan" | "index" | "rindex" |
