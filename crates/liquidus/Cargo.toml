@@ -1,0 +1,14 @@
+[package]
+name = "liquidus"
+description = "A Liquid-compatible template engine targeting byte-identical output with Ruby liquid + Jekyll's filters; liquidus is the temperature line above which an alloy is fully molten"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["liquid", "template", "jekyll", "shopify"]
+categories = ["template-engine", "parser-implementations"]
+
+[dependencies]
