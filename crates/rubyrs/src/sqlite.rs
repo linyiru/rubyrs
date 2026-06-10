@@ -724,10 +724,10 @@ fn collect_rows(
         // Allocate row array on heap. The cells Vec is fresh and rooted via Rust ownership;
         // no Value::Str / Array allocated above survives without being in cells, so no GC
         // root issue.
-        let row_id = vm.heap.alloc(HeapObj::Array(cells));
+        let row_id = vm.heap.alloc(HeapObj::Array(cells.into()));
         out.push(Value::Array(row_id));
     }
-    let arr_id = vm.heap.alloc(HeapObj::Array(out));
+    let arr_id = vm.heap.alloc(HeapObj::Array(out.into()));
     let _ = HashObj::with_pairs; // suppress dead-code warning under one cfg combo
     Ok(Value::Array(arr_id))
 }

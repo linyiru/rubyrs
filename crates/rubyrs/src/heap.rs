@@ -1956,3 +1956,72 @@ pub(crate) fn format_float(f: f64) -> String {
     };
     format!("{sign}{body}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ArrayObj plumbing (ADR 0020 / Array-subclass work): plain
+    /// construction carries no tag, Deref reaches the elems, the
+    /// ivar + tag helpers answer None-shaped defaults on plain
+    /// arrays and round-trip on tagged ones, and the GC walk marks
+    /// subclass ivars (a value reachable ONLY through an Array
+    /// ivar must survive a collect rooted at that array).
+    #[test]
+    fn array_obj_tag_and_ivars() {
+        let mut heap = Heap::new();
+        let plain = heap.alloc(HeapObj::Array(vec![Value::Int(1)].into()));
+        assert!(heap.array_class_tag(plain).is_none());
+        assert!(heap.array_ivar_get(plain, crate::intern::SymId(7)).is_none());
+        assert_eq!(heap.array(plain).len(), 1);
+        assert!(heap.array_ivars_clone(plain).is_empty());
+
+        // Tagged array with an ivar holding the ONLY reference to
+        // another heap value.
+        let inner = heap.alloc(HeapObj::Array(Vec::new().into()));
+        let tagged = heap.alloc(HeapObj::Array(ArrayObj {
+            elems: vec![Value::Int(2)],
+            class_tag: None, // tag is Rc<Class>; None here — tag
+            // round-trip is covered end-to-end by the
+            // array_subclass diff fixture.
+            ivars: {
+                let mut m = crate::intern::FxHashMap::default();
+                m.insert(crate::intern::SymId(3), Value::Array(inner));
+                m
+            },
+        }));
+        assert!(matches!(
+            heap.array_ivar_get(tagged, crate::intern::SymId(3)),
+            Some(Value::Array(id)) if id == inner
+        ));
+        heap.array_ivar_set(tagged, crate::intern::SymId(4), Value::Int(9));
+        assert_eq!(heap.array_ivars_clone(tagged).len(), 2);
+
+        // GC: root only the tagged array — `inner` must survive
+        // through the ivar edge.
+        let _ = heap.collect(&[Value::Array(tagged)]);
+        assert!(matches!(heap.get(inner), HeapObj::Array(_)));
+        // Drop the root: inner becomes garbage.
+        let _ = heap.collect(&[]);
+    }
+
+    /// `from_bytes_binary` tags Binary; `from_bytes`/`new` tag Utf8
+    /// (E1 step-1 contract — semantics consume the tag later).
+    #[test]
+    fn rstr_encoding_tags() {
+        use crate::value::{EncodingTag, RStr};
+        assert_eq!(RStr::new("x".to_string()).encoding.get(), EncodingTag::Utf8);
+        assert_eq!(RStr::from_bytes(vec![0xff]).encoding.get(), EncodingTag::Utf8);
+        assert_eq!(
+            RStr::from_bytes_binary(vec![0xff]).encoding.get(),
+            EncodingTag::Binary
+        );
+        let v = Value::new_str_bytes_binary(vec![1, 2]);
+        if let Value::Str(s) = v {
+            assert_eq!(s.encoding.get(), EncodingTag::Binary);
+            assert_eq!(s.content.borrow().len(), 2);
+        } else {
+            panic!("not a Str");
+        }
+    }
+}

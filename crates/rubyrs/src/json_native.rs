@@ -390,7 +390,7 @@ impl<'a, 'de> serde::de::Visitor<'de> for VmVisitor<'a> {
         while let Some(v) = seq.next_element_seed(VmSeed { vm: &mut *self.vm })? {
             elems.push(v);
         }
-        let id = self.vm.heap.alloc(HeapObj::Array(elems));
+        let id = self.vm.heap.alloc(HeapObj::Array(elems.into()));
         Ok(Value::Array(id))
     }
 
