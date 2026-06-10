@@ -1064,34 +1064,47 @@ impl Heap {
             }
         }
         self.live_count = live;
-        // Post-sweep trigger threshold. Originally `live * 2 max
-        // 1024` — sweeps every ~1k allocs from a small base, which
-        // is fine for one-shot scripts but punishes long-running
-        // alloc-and-discard loops (JSON round-trip, request
-        // handlers re-parsing every POST body, etc.). `live * 4 max
-        // 4096` cuts sweep count ~4× on those workloads; the heap-
-        // memory cost is bounded by the next sweep at 4× the new
-        // live-set size, not unbounded growth. Measured on the
-        // json_bench round_trip: 44 µs/iter → 35 µs/iter, ~70 % of
-        // the GC overhead recovered (the remaining 3 µs is the
-        // sweep itself, which is mark-cost-proportional to the
-        // larger live set and would need generational separation
-        // to fix — out of scope here).
+        // `RUBYRS_GC_STATS=1`: per-sweep heap-shape line on stderr
+        // (debug knob in the `RUBYRS_IC_STATS` shape). Used for RSS
+        // attribution: on the jekyll liquid-1k build this showed the
+        // slot array itself is small (peak 65,536 slots × 120B =
+        // 7.5MB, peak live only ~10k objects) — proving the RSS gap
+        // vs CRuby lived in malloc'd content (regex engines, Vec/
+        // HashMap spill), not in slot-size bloat, and redirecting
+        // the optimisation to lazy regex building instead of a
+        // HeapObj diet.
+        if std::env::var_os("RUBYRS_GC_STATS").is_some() {
+            eprintln!(
+                "gc_stats: live={} slots={} cap={} free={}",
+                live, self.slots.len(), self.slots.capacity(), self.free.len()
+            );
+        }
+        // Post-sweep trigger threshold. History: originally
+        // `live * 2 max 1024` (sweeps every ~1k allocs — punishes
+        // alloc-and-discard loops); bumped to `live * 4 max 4096`
+        // when json_bench round_trip showed 27 % GC overhead
+        // (44 µs/iter → 40, matching Oj). Re-measured 2026-06-10
+        // on the current binary: growth 4 vs 2 is NOISE-level on
+        // both json round_trip (7446 vs 7469 µs/iter, 0.3 %) and
+        // mm_bench (0.62-0.63 s both) — the workloads grew and
+        // per-sweep cost shrank, diluting the old 4× rationale.
+        // Meanwhile growth=4 lets garbage pile to 4× the live set
+        // between sweeps: on the jekyll liquid-1k build that's
+        // +4.7MB peak RSS (90.1 → 85.4MB at growth=2) for zero
+        // wall benefit. So the default is now `live * 2 max 4096`.
+        // growth=1 is NOT viable — every post-sweep allocation
+        // immediately re-crosses the threshold and the build
+        // degenerates to O(n²) sweeping (41 s vs 0.84 s).
         //
-        // Lower-bound tunable via `RUBYRS_GC_MIN_THRESHOLD` for
-        // ratchet investigations (perf budget regressions, memory-
-        // RSS budget regressions); when unset the 4096 default
-        // applies. Embedders running untrusted scripts with tight
-        // RSS budgets can dial back to the historic 1024 / live*2
-        // by setting `RUBYRS_GC_MIN_THRESHOLD=1024` +
-        // `RUBYRS_GC_GROWTH=2` (the env vars stay parse-time-
-        // checked so worst case is a cache miss + atoi on each
-        // sweep — cheap).
+        // Both knobs stay env-tunable (`RUBYRS_GC_GROWTH`,
+        // `RUBYRS_GC_MIN_THRESHOLD`) for perf/RSS ratchet
+        // investigations; the vars are parse-time-checked so the
+        // worst case is a cache miss + atoi per sweep — cheap.
         let growth = std::env::var("RUBYRS_GC_GROWTH")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|n| *n >= 1)
-            .unwrap_or(4);
+            .unwrap_or(2);
         let min_threshold = std::env::var("RUBYRS_GC_MIN_THRESHOLD")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())

@@ -487,7 +487,8 @@ impl Vm {
         // parse+generate iters discarding ~150 short-lived objects
         // each): baseline 44 µs/iter, with disable 32 µs/iter — so
         // ~27 % of round_trip wall is GC. The next_gc growth
-        // factor (heap.rs's `live * 2 max 1024`) is what determines
+        // factor (heap.rs's `live * 2 max 4096`; see the threshold
+        // comment there for the growth-factor history) determines
         // sweep frequency; bumping it cuts sweep count linearly.
         // The env knob below stays in for ongoing perf-regression
         // investigations (mirrors `RUBYRS_IC_STATS` shape).
