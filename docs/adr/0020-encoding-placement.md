@@ -2,9 +2,14 @@
 
 ## Status
 
-Proposed (2026-05-27). Required by ADR 0019 v3, which
-hard-blocks textual batteries (`_csv`, `_yaml`, `_csv_native`,
-`_yaml_native`) until this ADR resolves.
+Proposed (2026-05-27). Amended 2026-06-10 — see the
+"Amendment (2026-06-10)" section at the bottom: the `_yaml*`
+dependency claim is obsolete (those batteries shipped via the
+ADR 0026 blessed-loader route without needing this ADR), the
+transcoding-table sourcing recommendation flips from
+vendor-first to `encoding_rs`-with-differential-probing, and
+the phase estimates are recalibrated against the project's
+measured delivery pace.
 
 ## Context
 
@@ -369,3 +374,60 @@ These batteries can ship in any order once
 - [CRuby `Encoding` class docs](https://docs.ruby-lang.org/en/master/Encoding.html)
   — external reference for the `_encoding_full`
   Ruby-class API
+
+## Amendment (2026-06-10)
+
+Three updates from the Jekyll-era work, superseding the
+corresponding sections above. The core decision (Tier 1
+`EncodingTag` + Tier 2 `_encoding_full`) stands unchanged.
+
+### 1. The `_yaml` dependency claim is obsolete
+
+"Hard-blocked batteries get unblocked" lists `_yaml` /
+`_yaml_native` as depending on `_encoding_full`. Reality took
+the other branch: ADR 0026's blessed-reimpl YAML loader
+(`stdlib_vendor/yaml.rb` + the `_yaml_native` 1:1 translation)
+shipped 2026-06-10 with a decline-on-non-UTF-8 contract and
+needed nothing from this ADR. `_csv` remains genuinely
+encoding-dependent; the block list shrinks to it.
+
+### 2. Transcoding tables: probe `encoding_rs` first, vendor only on evidence
+
+The Tier 2 section recommends vendoring transcoding tables "to
+avoid the WHATWG-specific quirks `encoding_rs` ships". Flip
+that default: depend on `encoding_rs` directly and let the
+project's differential-testing methodology find the actual
+quirk boundary — probe CRuby per (encoding pair × edge input)
+exactly the way the 2026-06-10 regex work probed Onigmo's
+POSIX classes (20 chars × 14 classes, ground truth before
+code), then decline or special-case only the divergent pairs.
+Vendoring is a maintenance treadmill; a probed decline
+boundary is the same right-or-declined contract every other
+battery already uses. Re-evaluate vendoring only if probing
+shows WHATWG-vs-CRuby divergence on pairs that matter.
+
+### 3. Phase estimates against measured pace
+
+Original sizing predates the 585-fixture differential harness
+and the construction-site sweep tooling (compiler-guided
+`.into()` mechanical migration, used for the 2026-06-10
+ArrayObj change: ~190 sites in minutes). Recalibrated:
+
+- **Phase E1** (tag + honest semantics): 2-4 working days.
+  ~205 `Value::new_str` sites default to `Utf8` untouched;
+  only ~15 `from_bytes`/cext/socket/File sites need judgment.
+  The risk is semantic, not mechanical: `==`/hash tag
+  compatibility changes Hash-key behaviour — the three-site
+  byte-identical Jekyll gate must pass before merge.
+- **Phase E2** (`_encoding_full`, 8 encodings via
+  encoding_rs): 1-2 weeks including the CRuby probe tables.
+- **Phase E3** (IO transcoding, default_external, the
+  Regexp interplay's pivot-to-UTF-8-and-map-offsets
+  strategy): 2-3 weeks; the regex part may stay declined
+  permanently per the original ADR's carve-out.
+
+Prior context worth recording: the 2026-06-10 regex ASCII /
+POSIX class work (`\s\d\w\h` rewrites, `[[:alpha:]]` →
+`\p{...}` translation) and the `File.read` BOM handling are
+de-facto E0 groundwork — the Onigmo-vs-Rust semantic seam and
+the IO-BOM seam are already instrumented with diff fixtures.
