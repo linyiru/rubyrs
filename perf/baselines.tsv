@@ -265,4 +265,13 @@ crates/rubyrs/benches/string_interp.rb	8200	700	200k InterpolatedStr; Op::Interp
 # regression (no relevant merges in the affected window).
 # Headroom is ~3% over observed max; future regressions
 # still surface.
-crates/rubyrs/benches/hash_mutate.rb	8200	880	200k Hash[]= overwrites + 1k Hash[] reads
+# hash_mutate RSS bumped 8200 → 8400 on 2026-06-10 — observed CI
+# 8228 KB (28 KB / 0.3% over a razor-thin cap) on the GC
+# growth-default commit (ee98cccc, live*4 → live*2). The next two
+# runs on the same code passed, so this is jitter right at the
+# boundary — but growth=2 sweeps more often and legitimately
+# changes the allocation/capacity rhythm on a 200k-overwrite
+# workload, so the old ceiling no longer has real headroom. Same
+# one-page-over pattern as the 2026-06-09 gc_churn bump. 8400
+# gives ~2% headroom over the observed peak.
+crates/rubyrs/benches/hash_mutate.rb	8400	880	200k Hash[]= overwrites + 1k Hash[] reads
