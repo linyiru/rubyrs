@@ -11,6 +11,14 @@ use rubyrs::{Config, Runtime};
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+// Alternative allocator (feature `jemalloc`): trades 3-4% wall for
+// 8-9% lower peak RSS on the Jekyll benches — see the feature's
+// comment in Cargo.toml for the measured numbers. mimalloc wins
+// when both features are enabled (the cfg below keeps the
+// global_allocator unique).
+#[cfg(all(feature = "jemalloc", not(feature = "mimalloc")))]
+#[global_allocator]
+static GLOBAL_JE: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 /// Cold-start phase tracer for the `trace-startup` feature.
 ///

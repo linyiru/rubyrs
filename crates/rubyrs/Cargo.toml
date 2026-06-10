@@ -46,6 +46,15 @@ default = ["cext", "regex", "bignum", "std-sink"]
 # small-object allocator). The VM is allocation-heavy, so the system
 # malloc shows up large in profiles. Opt-in: `--features mimalloc`.
 mimalloc = ["dep:mimalloc"]
+# Alternative global allocator for RSS-sensitive embedders.
+# Measured 2026-06-10 on the Jekyll 1k benches (ABAB x3 vs
+# mimalloc): wall +3-4% slower, peak RSS −8-9% (liquid-1k
+# 69.3 → 62.8 MB). The CLI keeps mimalloc — wall is the headline
+# there and RSS already beats CRuby — but embedders running many
+# Runtimes under container memory quotas may prefer this trade.
+# Mutually exclusive with `mimalloc` at the global_allocator
+# level (mimalloc wins if both are enabled).
+jemalloc = ["dep:tikv-jemallocator"]
 cext = ["dep:rubyrs-cext", "dep:libloading"]
 # `bignum` is the third tier boundary (PoC Phase A per ADR 0018's
 # BigInt placement decision). With this feature off:
@@ -266,6 +275,7 @@ _http_server = [
 [dependencies]
 ruby-prism.workspace = true
 mimalloc = { version = "0.1", optional = true, default-features = false }
+tikv-jemallocator = { version = "0.6", optional = true }
 # `_encoding_full`'s transcoding backend for the multi-byte + WHATWG
 # single-byte encodings (Windows-1252/-31J, ISO-8859-15, KOI8-R,
 # EUC-JP, GBK, Big5). ISO-8859-1 stays hand-written (identity map;
