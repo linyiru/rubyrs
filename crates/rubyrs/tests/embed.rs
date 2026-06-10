@@ -360,3 +360,37 @@ fn regex_cache_stats_lazy_build() {
     let (total, built) = rt.regex_cache_stats();
     assert_eq!((total, built), (4, 2), "fancy fallback is eager-built");
 }
+
+/// Regression: `reset()` must clear the refinement tables.
+/// `active_refinements` holds Rc<Method>s whose proto_idx indexes
+/// the protos table reset() truncates — pre-fix, evaluating
+/// `refine`/`using` code, resetting, then dispatching any refined
+/// method name handed the VM a stale proto_idx (out-of-bounds ICE
+/// at the step loop / trap backtrace). Found by the first real
+/// fuzz-harness run (its cached-Runtime + reset() shape);
+/// examples/fuzz_repro.rs cycles the whole diff corpus the same way.
+#[test]
+fn reset_clears_refinement_tables() {
+    let mut rt = Runtime::new();
+    rt.eval(
+        r#"
+        module StrExt
+          refine String do
+            def shout; upcase + "!"; end
+          end
+        end
+        using StrExt
+        raise "refinement inert" unless "hi".shout == "HI!"
+        "#,
+        "a.rb",
+    )
+    .unwrap();
+    rt.reset();
+    // Pre-fix this ICE'd (index out of bounds) instead of raising
+    // the NoMethodError the fresh world implies.
+    let r = rt.eval(r#""hi".shout"#, "b.rb");
+    assert!(r.is_err(), "refined method must be gone after reset");
+    // And ordinary dispatch on the receiver class still works.
+    rt.eval(r#"raise "upcase broken" unless "hi".upcase == "HI""#, "c.rb")
+        .unwrap();
+}

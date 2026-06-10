@@ -1747,6 +1747,18 @@ impl Runtime {
         self.vm.class_stack.clear();
         self.vm.class_visibility_stack.clear();
         self.vm.module_function_active_stack.clear();
+        // Refinement tables (`refine`/`using`): `active_refinements`
+        // holds Rc<Method>s whose proto_idx points into the protos
+        // table this reset is about to TRUNCATE — leaving them in
+        // place hands the next eval a stale index the moment any
+        // refined method name is dispatched (ip/proto_idx
+        // out-of-bounds ICE). Found by the first real fuzz run
+        // (fixture pair refinements.rb → reset → anything calling a
+        // refined name). The other two tables only make sense
+        // relative to the same dead world, so all three clear.
+        self.vm.module_refinements.clear();
+        self.vm.active_refinements.clear();
+        self.vm.refined_method_names.clear();
         #[cfg(feature = "regex")]
         {
             self.vm.last_match = None;
@@ -2018,6 +2030,11 @@ impl Runtime {
         self.vm.class_stack.clear();
         self.vm.class_visibility_stack.clear();
         self.vm.module_function_active_stack.clear();
+        // Refinement tables — same stale-proto_idx hazard as
+        // `reset()` (see the comment there).
+        self.vm.module_refinements.clear();
+        self.vm.active_refinements.clear();
+        self.vm.refined_method_names.clear();
         self.vm.globals.clear();
         // The existing helper already covers 5 control-flow
         // fields — reuse it so this method doesn't drift if
