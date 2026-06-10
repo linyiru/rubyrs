@@ -106,3 +106,15 @@ c = Time.at(100, 500_000)
 d = Time.at(100, 500_000)
 puts c.eql?(d)                 # true
 puts c.eql?(Time.at(100))      # false (different usec)
+
+# to_s memo isolation (preamble memoizes the rendered form): each
+# call must return a FRESH string, and mutating a returned string
+# must not pollute later calls. CRuby trivially satisfies this
+# (no memo); the fixture pins the rubyrs memo's dup-out contract.
+e = Time.at(86_400)
+s1 = e.to_s
+s2 = e.to_s
+puts s1.equal?(s2)             # false (fresh object per call)
+s1 << " MUTATED"
+puts e.to_s                    # unpolluted
+puts e.inspect                 # alias shares the memo, same form

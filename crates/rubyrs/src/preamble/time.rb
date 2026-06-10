@@ -347,12 +347,31 @@ class Time
   # time `"YYYY-MM-DD HH:MM:SS ±HHMM"`; Tier 1's UTC-only form is
   # `"YYYY-MM-DD HH:MM:SS UTC"`. `inspect` matches `to_s` (CRuby
   # 3.x parity — inspect used to be different but converged).
+  #
+  # Memoized: Tier-1 Time is immutable (@sec/@nsec/@local never
+  # change after initialize — localtime/utc return COPIES), so the
+  # rendered form is a per-object constant. Jekyll's `merge_data!`
+  # calls `data["date"].to_s` 3-4x per document (merge_date! →
+  # parse_date cache key), which made the full decompose+sprintf
+  # (~3.3µs vs CRuby's 0.5µs C path) a measured read-phase cost.
+  # CRuby returns a FRESH unfrozen string each call (callers may
+  # legitimately mutate it), so the memo is handed out as a `dup`
+  # — still ~50x cheaper than recomputing. No frozen-receiver
+  # guard: rubyrs `freeze` doesn't block ivar writes on user
+  # objects (documented freeze gap, SUBSET.md) — if deep freeze
+  # is ever modelled, the memo writes here and in `decompose`
+  # need a `frozen?` bypass.
   def to_s
+    memo = @__to_s
+    return memo.dup if memo
     d = decompose
-    sprintf(
-      "%04d-%02d-%02d %02d:%02d:%02d #{@local ? "+0000" : "UTC"}",
+    s = sprintf(
+      "%04d-%02d-%02d %02d:%02d:%02d ",
       d[:year], d[:month], d[:day], d[:hour], d[:min], d[:sec],
     )
+    s << (@local ? "+0000" : "UTC")
+    @__to_s = s
+    s.dup
   end
   alias_method :inspect, :to_s
 
@@ -569,6 +588,15 @@ class Time
   # `civil_from_days` variant. Handles negative epochs (pre-1970)
   # via the floor-divide normalisation.
   def decompose
+    # Memoized (Tier-1 Time immutability, see `to_s`): every field
+    # accessor (`year`/`month`/.../`wday`) plus `to_s`/`xmlschema`/
+    # `strftime` re-derived the civil fields per call — Liquid date
+    # filters call `strftime` once per rendered page, and Jekyll's
+    # document sort touches the accessors per comparison. All call
+    # sites read the Hash without mutating it (the shared memo is
+    # safe); the Hash is not handed out by any CRuby-surface API.
+    memo = @__decompose
+    return memo if memo
     secs_in_day = 86_400
     # Floor-divide so pre-1970 timestamps decompose correctly.
     days = @sec / secs_in_day
@@ -598,7 +626,7 @@ class Time
     mm = rem / 60
     ss = rem - mm * 60
 
-    {
+    result = {
       year:  y,
       month: m,
       day:   d,
@@ -607,5 +635,7 @@ class Time
       sec:   ss,
       wday:  wday,
     }
+    @__decompose = result
+    result
   end
 end
