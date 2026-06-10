@@ -1,11 +1,36 @@
 # Subset semantics
 
-rubyrs is **not** trying to be CRuby-compatible at the language level today.
-It targets the same niche as **mruby**: a small, memory-safe, embeddable
-Ruby-flavored runtime — but written in Rust, with the option of compiling
-to WebAssembly.
+rubyrs targets CRuby 3.4 semantics on the surface it covers, and
+pins that surface with differential testing (585 fixtures whose
+oracle is CRuby itself — stdout compared byte-for-byte, including
+under GC stress). This document is the honest catalogue of where
+the boundary lies: what works, what diverges (every divergence
+documented with its trigger and trade-off), and what's absent.
 
-If you need Rails, Sinatra, Bundler, gems, or `eval` today — use CRuby.
+If you need Rails, real Thread concurrency, the Encoding system,
+or Marshal today — use CRuby.
+
+## At a glance
+
+| Area | Status |
+|---|---|
+| **Syntax** | ~Complete: 149/150 Prism AST node kinds translate (incl. pattern matching `case/in`, refinements, `BEGIN/END`, anonymous arg forwarding, numbered/`it` params, flip-flops) |
+| **Core types** | Integer (i64 + BigInt), Float, String (bytes), Symbol, Array, Hash, Range, Regexp, Proc/Lambda/Method, Struct, Set, Time, Comparable/Enumerable/Enumerator (+ Lazy) |
+| **Metaprogramming** | `define_method`, `method_missing`, `send`, singleton classes, `instance_variable_*`, `const_*`, hooks (`inherited`/`included`/…), `alias`, `prepend`/`include`/`extend`, refinements |
+| **Exceptions** | Full begin/rescue/ensure/retry, custom hierarchies, `$!` dynamic scoping, catchable `SystemStackError` |
+| **Regexp** | Dual engine: linear-time `regex` (default, ReDoS-immune) + `fancy-regex` fallback for lookaround/backrefs; Onigmo ASCII classes (`\s\d\w\h`), Unicode `\b`; named captures, `$~` frame-local |
+| **stdlib** | ~35 vendored modules (`json`, `yaml`, `set`, `pathname`, `stringio`, `strscan`, `digest`, `logger`, `cgi`, `bigdecimal`, `active_support`-lite, …) behind `--features stdlib` |
+| **Real gems** | Jekyll 4.4.1 + rouge 4.7.0 + kramdown + Liquid build **byte-identical to CRuby**; msgpack/bcrypt via the C-ext ABI; parts of Sinatra |
+| **Accelerators** | `_json_native`, `_rouge_native`, `_kramdown_native`, `_yaml_native`, `_liquid_native` — Rust engines, byte-identical-or-decline contract |
+| **Embedding** | `Runtime` API: fuel/heap/frame caps, capability sandbox (FS/env gated), host fns, captured stdout, incremental eval, wasm32-wasip1 target |
+| **Concurrency** | Fiber subset (`_fiber` feature); Thread is a **stub** (no OS threads) |
+| **Encoding** | **Absent** — strings are bytes with UTF-8 assumptions; `force_encoding`/`encode` are stubs ([details](#string-encoding-stubs)) |
+| **Object model gaps** | `freeze` doesn't freeze; `private_constant` unenforced; eigenclass is a redirecting shell ([divergences](#divergences-from-cruby)) |
+| **Absent** | Marshal, Binding, ObjectSpace, Ractor, real `eval` caller-scope capture, Complex/Rational |
+
+Every "Status" cell above is expanded in the body of this document;
+the ~25 known behavioural divergences each get their own section
+under [Divergences from CRuby](#divergences-from-cruby).
 
 ## Tier framing — what this document defines
 

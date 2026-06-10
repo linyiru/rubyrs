@@ -17,8 +17,23 @@ dogfooding of the interpreter.
 [![Rust](https://img.shields.io/badge/rust-1.95+-orange.svg)](https://www.rust-lang.org/)
 [![Status: experimental](https://img.shields.io/badge/status-experimental-yellow)](docs/SUBSET.md)
 
-A tiny Ruby-subset interpreter written in Rust, built on
-[Prism](https://github.com/ruby/prism).
+A Ruby implementation in Rust, built on
+[Prism](https://github.com/ruby/prism) (Ruby's official parser),
+that runs **real, unmodified gems** — validated by differential
+testing against CRuby.
+
+The flagship proof: rubyrs builds real [Jekyll](https://jekyllrb.com)
+4.4.1 sites — the actual gem sources, with real
+[rouge](https://github.com/rouge-ruby/rouge) 4.7.0 syntax
+highlighting, kramdown markdown, and Liquid templates — producing
+output **byte-identical to CRuby's**, and faster:
+
+| Jekyll 4.4.1, 1000-post site | rubyrs | CRuby 3.4 |
+|------------------------------|--------|-----------|
+| Build (posts + rouge + kramdown) | **0.59 s** | 0.70 s |
+| Build (with Liquid layouts)      | **0.75 s** | 0.75 s |
+| Peak RSS                         | **68 MB**  | 80 MB |
+| Output                           | byte-identical | (reference) |
 
 ```ruby
 class Greeter
@@ -41,118 +56,135 @@ Hello, Rust!
 Hello, Prism!
 ```
 
+**Honesty up front**: rubyrs is not a complete Ruby. There is no
+Encoding system (strings are bytes + UTF-8 assumptions), `freeze`
+doesn't freeze, Thread is a stub, and ~25 documented divergences
+remain — see [docs/SUBSET.md](docs/SUBSET.md) for the precise
+boundary, starting with its at-a-glance table. The claim we *do*
+make is narrower and verifiable: **for the surface rubyrs covers,
+behaviour is pinned to CRuby 3.4 by 585 differential fixtures**
+(every fixture runs on both engines; stdout must match exactly,
+including under GC stress), and that surface is now wide enough to
+run one of Ruby's most-used real-world applications byte-for-byte.
+
 ## Positioning
 
-rubyrs is **not** a CRuby replacement. It targets the same niche as
-[mruby](https://github.com/mruby/mruby): a small, memory-safe, embeddable
-Ruby-flavored runtime — but written in Rust, with the option of compiling
-to WebAssembly.
+**vs CRuby** — CRuby is the reference implementation and rubyrs
+treats it as ground truth: the test suite's oracle IS CRuby
+(`tests/diff/`, 585 fixtures, stdout compared byte-for-byte). Where
+rubyrs covers a feature, it aims for exact parity — divergences are
+bugs or documented trade-offs, never silent. Where it doesn't
+(Encoding, real threads, Marshal, `ObjectSpace`, …), it says so in
+[docs/SUBSET.md](docs/SUBSET.md). On performance: rubyrs wins on
+real Jekyll builds (table above) thanks to native accelerator
+batteries (rouge/kramdown/YAML/Liquid/JSON engines in Rust behind a
+"byte-identical or decline to pure Ruby" contract); on pure
+VM-dispatch microbenchmarks CRuby is still ~1.4-3× faster — both
+numbers live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-| End-to-end DSL hosting (Brewfile, ~50 lines) | rubyrs | CRuby 3.4 | CRuby + YJIT |
-|----------------------------------------------|--------|-----------|--------------|
-| Time | **1.8 ms** | 74.7 ms | 75.5 ms |
+**vs mruby** — mruby trades the CRuby gem ecosystem away for
+embeddability (its own mrbgems world, no rubygems compatibility).
+rubyrs makes the opposite bet: keep the ecosystem — `require` loads
+real gem sources from a `$LOAD_PATH` (Jekyll, rouge, kramdown,
+Liquid, and parts of Sinatra run today), and a CRuby-shaped C
+extension ABI hosts real native gems (msgpack, bcrypt) — while
+still being a small, memory-safe, embeddable Rust crate with
+capability sandboxing, per-run resource caps, and a
+WebAssembly target.
 
-→ **rubyrs is 42× faster end-to-end** on this shape of workload — the
-actual product-niche benchmark. See
-[`examples/brewfile/`](crates/rubyrs/examples/brewfile/) for the
-simpler tap/brew/cask DSL, or
-[`examples/gemfile/`](crates/rubyrs/examples/gemfile/) for an
-unmodified Rails-style Gemfile (`*splat`, `**kwargs`, multi-symbol
-`group … do … end` blocks, file-scope conditionals — all the
-real-world shapes a Bundler Gemfile uses, running in ~0.4 ms
-end-to-end).
+| | CRuby | mruby | rubyrs |
+|---|---|---|---|
+| Real rubygems sources | ✅ all | ❌ (mrbgems) | ✅ growing (Jekyll-class today) |
+| Embedding | C API | C, mature | Rust crate; caps, sandbox, WASM |
+| Memory safety | C | C | Rust; linear-time regex by default (ReDoS-immune) |
+| Encoding / threads | full | reduced | not yet (documented) |
+| Jekyll 1k-post build | 0.70 s | — | **0.59 s, byte-identical** |
 
-| Cold start | rubyrs (native) | rubyrs.wasm (raw, JIT) | rubyrs.cwasm (AOT + wizer) | CRuby 3.4 |
-|------------|----------------|------------------------|----------------------------|-----------|
-| `puts 1+2` | **1.5 ms** | 12.7 ms | **~7 ms** | 78 ms |
+Where the cold-start + footprint profile matters (CLI tools, DSL
+hosts, sandboxed script execution), rubyrs starts ~50× faster than
+CRuby and holds a fraction of the RSS:
 
-The wasm column is the raw `.wasm` shipping shape under
-`wasmtime run`; `cwasm` adds a one-time `wasmtime compile`
-step plus `wizer` pre-initialization (preamble snapshot)
-— and is what `perf/wasm_check.sh` measures end-to-end. See
-`docs/DEVELOPMENT.md` for the build pipeline.
+| Cold start | rubyrs (native) | rubyrs.cwasm (AOT + wizer) | CRuby 3.4 |
+|------------|----------------|----------------------------|-----------|
+| `puts 1+2` | **1.5 ms** | ~7 ms | 78 ms |
 
-| 1M fizzbuzz | rubyrs | CRuby | CRuby + YJIT |
-|-------------|--------|-------|--------------|
-| Time | 0.33 s (1.76× of CRuby) | 0.19 s | 0.15 s |
-| Peak memory | 2.1 MB | 18.4 MB | 19.1 MB |
-
-| Method-heavy (Counter.inc × 1M) | rubyrs | CRuby (no JIT) |
-|---------------------------------|--------|----------------|
-| Time | 0.15 s (**1.43× of CRuby**) | 0.11 s |
-
-If you need Rails, Sinatra, Bundler, or gems — use CRuby.
+| End-to-end DSL hosting (Brewfile, ~50 lines) | rubyrs | CRuby 3.4 |
+|----------------------------------------------|--------|-----------|
+| Time | **1.8 ms** | 74.7 ms |
 
 ### What works with `require`
 
-By design, rubyrs is **not a Ruby gem host**. The `require`
-mechanism resolves these shapes:
+`require` resolves real gem sources: point `$LOAD_PATH` at unpacked
+gem `lib/` directories (what Bundler does under the hood) and the
+require chain loads them — Jekyll's full chain (jekyll → kramdown →
+liquid → rouge → pathutil → addressable → …) loads and runs today.
+Alongside that:
 
-- `require "/abs/path.rb"` — absolute paths to user `.rb` files
-- `require "relative/path"` — relative to caller's source dir
-- `require "name"` with `$LOAD_PATH << dir` set by the script
-- `require "pathname"` / `set` / `stringio` / `strscan` —
-  the four vendored stdlib modules with real implementations
-- `require "uri"` / `json` / `yaml` / `csv` / `logger` /
-  ~25 other stdlib names — these **succeed silently** as
-  lenient "feature-present" stubs; method calls on the
-  resulting modules raise `NoMethodError`. With
-  `--features stdlib` the vendored modules above behave
-  CRuby-compatibly; everything else stays stub-shaped.
+- `require "json"` / `yaml` / `set` / `pathname` / `stringio` /
+  `strscan` / `digest` / `logger` / `cgi` / `bigdecimal` / ~25 more
+  resolve to **vendored stdlib implementations** (with
+  `--features stdlib`), behaviour pinned by the same differential
+  fixtures.
+- `require "msgpack"` / `bcrypt`-class **native gems** load through
+  the CRuby-shaped C extension ABI (`--features cext`, on by
+  default).
+- Five **accelerator batteries** transparently take over hot paths
+  when enabled (`_json_native`, `_rouge_native`, `_kramdown_native`,
+  `_yaml_native`, `_liquid_native`): each is a Rust engine behind a
+  right-or-decline contract — produce byte-identical output or fall
+  back to the pure-Ruby path. This is how Jekyll gets faster than
+  CRuby without sacrificing the byte-identity guarantee.
+- `autoload`, `Kernel#load`, `require_relative` work; `$LOAD_PATH`
+  starts empty by design (embedders/scripts populate it — CRuby
+  auto-fills stdlib + gem paths, rubyrs does not).
 
-What deliberately does NOT work (all are documented Tier 2 /
-Tier 3 deferrals — see [docs/SUBSET.md](docs/SUBSET.md) line
-"`require / load / autoload`"):
-
-- **`autoload :Foo, "foo"`** — accepts the call as a silent
-  no-op for arity-compat; does not register a real lazy
-  load. Referencing `Foo` later still raises `NameError`.
-- **`Kernel#load`** — not implemented at all
-- **Auto-populated `$LOAD_PATH`** — empty by default.
-  Embedders set it via `Config::load_paths` or script-side
-  `$LOAD_PATH.unshift(dir)`. CRuby auto-fills stdlib + gem
-  paths; rubyrs does not.
-- **Real stdlib coverage beyond the four vendored modules**
-  — `URI.parse`, `JSON.parse`, `YAML.load`, etc. are all
-  Tier 3 batteries (per [ADR 0019](docs/adr/0019-tier2-tier3-boundary.md)),
-  none shipped today.
-
-The shape is `Lua-in-Rust + Ruby grammar + sandbox`, not
-`CRuby with fewer features`. ADR 0017 codifies the boundary
-intentionally — embedders building sandboxed DSL hosts
-benefit from the deterministic-by-default behaviour these
-omissions guarantee.
+What does NOT work yet: anything needing the Encoding system, real
+Thread concurrency, Marshal, or the other gaps catalogued in
+[docs/SUBSET.md](docs/SUBSET.md). Gems relying on those will fail —
+loudly, not silently wrong.
 
 ## Install
 
-### As a library (recommended for v0.1.0)
+### As a library
 
-The canonical v0.1.0 release lives at the
-[`v0.1.0` git tag](https://github.com/linyiru/rubyrs/releases/tag/v0.1.0).
-Depend on it via Cargo's git dependency:
+Depend on the git repository directly — `master` is kept green by
+the full CI gate (differential fixtures, GC-stress, coverage /
+panic / RSS ratchets) on every commit:
 
 ```toml
 [dependencies]
-rubyrs = { git = "https://github.com/linyiru/rubyrs", tag = "v0.1.0" }
+rubyrs = { git = "https://github.com/linyiru/rubyrs" }
 ```
 
-The crates.io entries (`rubyrs@0.1.0`, `rubyrs-cext@0.1.0`)
-were published 2026-05-25 as **name-registration placeholders**
-and predate the substantive v0.1.0 work (the ADR-driven
-architecture work, 263-fixture diff_cruby surface, OutputSink
-trait, untrusted-input cap model). They are intentionally NOT
-the canonical v0.1.0 — they exist only to reserve the names.
-A future `0.1.x` / `0.2.0` release will publish the real
-artifact to crates.io. For now, the git tag is the source of
-truth.
+History note: the crates.io entries (`rubyrs@0.1.0`,
+`rubyrs-cext@0.1.0`, published 2026-05-25) are name-registration
+placeholders from before the Jekyll-era work, and the
+[`v0.1.0` git tag](https://github.com/linyiru/rubyrs/releases/tag/v0.1.0)
+predates it too (263 fixtures vs today's 585). The next tagged
+release will be the first one published to crates.io as a real
+artifact; until then, git `master` is the source of truth. The
+sibling engine crates extracted from this work ARE current on
+crates.io: [carmine](https://crates.io/crates/carmine)
+(rouge-compatible highlighting),
+[rostdown](https://crates.io/crates/rostdown)
+(kramdown-compatible markdown), and
+[liquidus](https://crates.io/crates/liquidus) (Liquid templates).
 
 ### CLI from source
 
 ```bash
-git clone https://github.com/linyiru/rubyrs --branch v0.1.0
+git clone https://github.com/linyiru/rubyrs
 cd rubyrs
 cargo build --release
 ./target/release/rubyrs your_script.rb
+```
+
+For the full Jekyll-capable build (accelerators + stdlib + sass +
+mimalloc — what the benchmark table at the top measures):
+
+```bash
+cargo build --release -p rubyrs \
+  --features stdlib,sass,_rouge_native,_kramdown_native,_yaml_native,_liquid_native,mimalloc
 ```
 
 ## Build
