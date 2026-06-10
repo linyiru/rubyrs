@@ -38,7 +38,10 @@ if defined?(__rubyrs_frontmatter_read) && defined?(Jekyll::Document)
       opts = site.file_read_opts
       return true if opts.nil? || opts.empty?
       return false unless opts.size == 1
-      enc = opts[:encoding] || opts["encoding"]
+      # Symbol key only: CRuby's File.read IGNORES a String "encoding"
+      # key, so a string-keyed opts hash must take the pure path
+      # (where the BOM stays in the content) to match that behaviour.
+      enc = opts[:encoding]
       # Site#initialize already BOM-prefixes the configured encoding,
       # so the default arrives here as "bom|utf-8" (and
       # `merged_file_read_opts` leaves it alone — its `start_with?

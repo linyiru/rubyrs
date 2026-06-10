@@ -267,10 +267,12 @@ impl Vm {
         };
         Ok(Some(match (name, args) {
             // `File.read(path)` plus the optional `length` / `offset`
-            // positionals and a trailing options Hash. The opts Hash
-            // (encoding/mode keywords, e.g. jekyll's
-            // `File.read(f, **Utils.merged_file_read_opts(...))`) is
-            // accepted and ignored — rubyrs always reads raw bytes.
+            // positionals and a trailing options Hash. From the opts
+            // Hash (encoding/mode keywords, e.g. jekyll's
+            // `File.read(f, **Utils.merged_file_read_opts(...))`)
+            // only `encoding: "bom|utf-8"` changes behaviour (BOM
+            // strip, below); everything else is accepted and ignored
+            // — rubyrs reads raw bytes.
             ("read", [p])
             | ("read", [p, _])
             | ("read", [p, _, _]) => {
@@ -318,8 +320,41 @@ impl Vm {
                 // path yet. Adding one is a follow-up so callers
                 // can opt back into the strict-text mode if they
                 // want it.
+                // `encoding: "bom|utf-8"` (Symbol or String key, any
+                // case) strips a leading UTF-8 BOM — the shape
+                // Jekyll's `Utils.merged_file_read_opts` produces for
+                // every document read. CRuby ground truth: with the
+                // bom| prefix a leading EF BB BF disappears from the
+                // returned string; without it the BOM is content.
+                // Discovered by the front-matter differential (a
+                // BOM-prefixed post matched YAML_FRONT_MATTER_REGEXP
+                // on CRuby but not on rubyrs, which kept the BOM).
+                // Other bom| encodings (utf-16/32) would need real
+                // transcoding — rubyrs stays raw-bytes there, same
+                // as before. The `File.open(path, "r:bom|utf-8")`
+                // mode-string spelling is NOT handled yet.
+                let bom_utf8 = args.iter().skip(1).any(|a| {
+                    let Value::Hash(hid) = a else { return false };
+                    self.heap.hash(*hid).iter().any(|(k, v)| {
+                        // Symbol key ONLY — CRuby ignores a String
+                        // "encoding" key in the opts Hash (verified
+                        // in the fixture's string-key row).
+                        matches!(k, Value::Sym(s)
+                            if &**self.interner.resolve(*s) == "encoding")
+                            && matches!(v, Value::Str(s)
+                                if s.to_string_lossy().eq_ignore_ascii_case("bom|utf-8"))
+                    })
+                });
                 match std::fs::read(&path) {
                     Ok(b) => {
+                        // BOM strip happens at the stream head,
+                        // before length/offset slicing — mirroring
+                        // CRuby, where the converter consumes the
+                        // BOM at open time.
+                        let b = match (bom_utf8, b.strip_prefix(b"\xef\xbb\xbf")) {
+                            (true, Some(rest)) => rest.to_vec(),
+                            _ => b,
+                        };
                         if offset == 0 && length.is_none() {
                             Value::new_str_bytes(b)
                         } else {
@@ -342,6 +377,30 @@ impl Vm {
             // append write overwrites prior content. Other opts (perm:,
             // binmode:) are still accepted and ignored. jekyll's
             // page/document writer uses the keyword form.
+            // `File.delete(*paths)` / alias `File.unlink` — removes
+            // each named file, returns the count removed (CRuby
+            // contract). A missing file raises Errno::ENOENT via the
+            // shared io_error mapping, partial work included (files
+            // before the failing one stay deleted — same as CRuby's
+            // left-to-right processing).
+            ("delete" | "unlink", paths) if !paths.is_empty() => {
+                self.check_filesystem_io_allowed("File.delete", None)?;
+                let mut count: i64 = 0;
+                for p in paths {
+                    let path = path_arg(p)?;
+                    self.check_filesystem_io_allowed(
+                        "File.delete",
+                        Some(Path::new(&path)),
+                    )?;
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => count += 1,
+                        Err(e) => {
+                            return Err(self.trap(io_error(&e, Some(Path::new(&path)))));
+                        }
+                    }
+                }
+                Value::Int(count)
+            }
             ("write", [p, body]) | ("write", [p, body, _]) => {
                 self.check_filesystem_io_allowed("File.write", None)?;
                 let path = path_arg(p)?;
