@@ -77,12 +77,18 @@ fn convert_blocks(
                 out.push_str(&format!("{pad}</blockquote>\n"));
             }
             Block::Code { lang, text } => {
-                if let Some(lang) = lang
-                    && let Some(hl_html) = hl.highlight(lang, text)
+                // kramdown resolves a missing fence language to
+                // syntax_highlighter_opts[:default_lang]; the wrapper
+                // class uses the same resolved value.
+                let effective = lang
+                    .clone()
+                    .or_else(|| hl.default_lang().map(str::to_string));
+                if let Some(hl_lang) = &effective
+                    && let Some(hl_html) = hl.highlight(hl_lang, text)
                 {
                     // kramdown convert_codeblock with a syntax highlighter.
                     out.push_str(&format!(
-                        "{pad}<div class=\"language-{lang} highlighter-{}\">{hl_html}{pad}</div>\n",
+                        "{pad}<div class=\"language-{hl_lang} highlighter-{}\">{hl_html}{pad}</div>\n",
                         hl.name()
                     ));
                 } else {

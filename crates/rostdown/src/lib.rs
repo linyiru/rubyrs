@@ -67,6 +67,14 @@ pub trait CodeHighlighter {
     fn codespan_class(&self) -> Option<&str> {
         None
     }
+    /// Language used for fenced blocks WITHOUT an info string —
+    /// kramdown's `syntax_highlighter_opts[:default_lang]` (Jekyll:
+    /// "plaintext", so even plain fences render highlighted inside
+    /// `<div class="language-plaintext highlighter-rouge">`). `None`
+    /// (the default) keeps no-lang fences on the `<pre><code>` path.
+    fn default_lang(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// No highlighting: every block renders as plain `<pre><code>`.

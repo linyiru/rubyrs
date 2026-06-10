@@ -102,3 +102,39 @@ fn declines() {
         );
     }
 }
+
+/// A rouge-shaped highlighter: codespans get Jekyll's class attr and
+/// no-lang fences resolve to `default_lang` (kramdown's
+/// `syntax_highlighter_opts[:default_lang]`), exactly like the real
+/// kramdown+rouge pipeline.
+struct FakeRouge;
+
+impl rostdown::CodeHighlighter for FakeRouge {
+    fn highlight(&mut self, lang: &str, code: &str) -> Option<String> {
+        Some(format!("<HL {lang}:{}>", code.len()))
+    }
+    fn codespan_class(&self) -> Option<&str> {
+        Some("language-plaintext highlighter-rouge")
+    }
+    fn default_lang(&self) -> Option<&str> {
+        Some("plaintext")
+    }
+}
+
+#[test]
+fn rouge_mode_codespan_and_default_lang() {
+    let html = to_html(
+        "Some `code` here.\n\n```\nplain\n```\n\n```python\nx\n```\n",
+        &Options::jekyll(),
+        &mut FakeRouge,
+    )
+    .unwrap();
+    assert_eq!(
+        html,
+        "<p>Some <code class=\"language-plaintext highlighter-rouge\">code</code> here.</p>\n\
+         \n\
+         <div class=\"language-plaintext highlighter-rouge\"><HL plaintext:6></div>\n\
+         \n\
+         <div class=\"language-python highlighter-rouge\"><HL python:2></div>\n"
+    );
+}
