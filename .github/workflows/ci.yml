@@ -680,7 +680,11 @@ jobs:
           # Bumped 21 → 22 by the Symbol#to_proc preamble
           # (preamble/symbol.rb) — one more `.expect("ICE: failed to load
           # Symbol preamble")`, same invariant as the siblings.
-          check crates/rubyrs/src/lib.rs       22
+          # Bumped 22 → 23 in "Liquid-layout require-chain gaps"
+          # (8214739f): the new preamble/string_ext.rb load uses the
+          # same `.expect("ICE: failed to load …")` shape as every
+          # other preamble loader — ICE-class, not user-reachable.
+          check crates/rubyrs/src/lib.rs       23
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
           # never went down, just up here. See docs/PANIC_AUDIT.md.
