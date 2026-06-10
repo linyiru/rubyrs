@@ -2458,6 +2458,19 @@ impl Vm {
                 false,
             )?;
         }
+        // `_kramdown_native` accelerator hook, same shape: Jekyll's
+        // KramdownParser#load_dependencies requires
+        // "kramdown-parser-gfm" AFTER Kramdown::JekyllDocument is
+        // defined, so this is the earliest safe patch point. The shim
+        // is `defined?(...)`-guarded and no-ops outside Jekyll.
+        #[cfg(feature = "_kramdown_native")]
+        if path_str == "kramdown-parser-gfm" && matches!(result, Ok(Value::Bool(true))) {
+            self.eval_string(
+                crate::kramdown_native::SHIM,
+                "<rubyrs:kramdown_native_shim>",
+                false,
+            )?;
+        }
         result
     }
 

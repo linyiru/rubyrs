@@ -43,6 +43,8 @@ mod intern;
 mod json_native;
 #[cfg(feature = "_rouge_native")]
 pub(crate) mod rouge_native;
+#[cfg(feature = "_kramdown_native")]
+pub(crate) mod kramdown_native;
 mod output;
 // `regex_engine` is public because `Value::Regex(Rc<CompiledRegex>)`
 // is reachable from the embedder-visible `Value` enum; an
@@ -103,6 +105,14 @@ pub use json_native::register_host_fns as register_json_native_host_fns;
 /// native engine. See [`rouge_native::register_host_fns`].
 #[cfg(feature = "_rouge_native")]
 pub use rouge_native::register_host_fns as register_rouge_native_host_fns;
+/// Register `_kramdown_native` host fns (`__rubyrs_kd_scan` …) onto a
+/// `Runtime`. The shim that rubyrs injects after
+/// `require "kramdown-parser-gfm"` detects the registration via
+/// `defined?(...)` and routes Jekyll-default kramdown documents
+/// through the rostdown native renderer. See
+/// [`kramdown_native::register_host_fns`].
+#[cfg(feature = "_kramdown_native")]
+pub use kramdown_native::register_host_fns as register_kramdown_native_host_fns;
 /// Register `_sqlite` host fns + the `SQLite3::Database`
 /// preamble. Mirrors the other battery `register_*_host_fns`
 /// shape. See `sqlite::register_host_fns`.

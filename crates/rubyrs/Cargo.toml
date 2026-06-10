@@ -178,6 +178,13 @@ _json_native = ["dep:serde_json", "dep:serde"]
 # (byte-identical output); unsupported lexers / rules fall back to the
 # pure-Ruby gem per lexer or per call. See src/rouge_native.rs.
 _rouge_native = ["dep:carmine"]
+# `_kramdown_native` — rostdown-backed accelerator for kramdown under
+# Jekyll. After `require "kramdown-parser-gfm"` a shim patches
+# `Kramdown::JekyllDocument` to route Jekyll-default-option documents
+# through the native renderer (byte-identical output); out-of-subset
+# documents and non-default options fall back to the pure-Ruby gem per
+# document. See src/kramdown_native.rs.
+_kramdown_native = ["dep:rostdown"]
 # `_sqlite` enables the SQLite battery per ADR 0027.
 # Pulls in `rusqlite` (bundled libsqlite3 — ~2 MB compiled, no
 # system libsqlite3 needed) + `lru` (per-connection prepared-
@@ -243,6 +250,9 @@ fancy-regex = { version = "0.18", optional = true }
 # `_rouge_native` battery: the carmine rouge-compatible highlighting
 # engine (workspace sibling, also published to crates.io).
 carmine = { path = "../carmine", version = "0.2.0", optional = true }
+# `_kramdown_native` battery: the rostdown kramdown-compatible Markdown
+# renderer (workspace sibling).
+rostdown = { path = "../rostdown", version = "0.1.0", optional = true }
 # Optional via the `bignum` feature. With bignum off, num_bigint is not
 # pulled in. ADR 0018 Phase 1 will switch this to `default-features =
 # false` when rubyrs-core extracts (num-bigint's `std` is opt-out).

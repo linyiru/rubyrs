@@ -1629,6 +1629,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "regex",
+ "rostdown",
  "ruby-prism",
  "rubyrs-cext",
  "rusqlite",
