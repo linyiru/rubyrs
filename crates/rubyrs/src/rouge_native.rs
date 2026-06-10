@@ -67,10 +67,61 @@ thread_local! {
     /// Active sessions (slot reuse via the free list).
     static SESSIONS: RefCell<(Vec<Option<Session>>, Vec<usize>)> =
         const { RefCell::new((Vec::new(), Vec::new())) };
+    /// Lazily-compiled STATIC tables (`rouge_tables/*.json`, extracted
+    /// at development time by `tools/dump_rouge_static_tables.rb`).
+    /// `None` in a slot = compile declined, cached so we don't retry.
+    static STATIC_TABLES: RefCell<[Option<Option<&'static carmine::LexerTable>>; 3]> =
+        const { RefCell::new([None, None, None]) };
+}
+
+/// Pre-extracted tables for the languages the jekyll workload rotates.
+/// Index must match the `STATIC_TABLES` slot layout. The kramdown
+/// shim's version gate (`STATIC_HL_ROUGE_VERSION`) pins these to the
+/// rouge release they were extracted from.
+const STATIC_TABLE_SRC: [(&str, &str); 3] = [
+    ("python", include_str!("rouge_tables/python.json")),
+    ("ruby", include_str!("rouge_tables/ruby.json")),
+    ("bash", include_str!("rouge_tables/bash.json")),
+];
+
+thread_local! {
+    /// Lexer-file gate for lazy rouge loading: while raised,
+    /// `Kernel::load` of `…/rouge/lexers/*.rb` is skipped (rouge.rb's
+    /// eager `load_lexers` walk becomes a no-op) and the shim loads
+    /// lexer files on demand, lowering the gate around each real load.
+    /// Raised ONLY by the kramdown shim after its rouge-version check.
+    static LEXER_GATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Queried by the `Kernel::load` builtin (vm/kernel.rs).
+pub(crate) fn lexer_gate_active() -> bool {
+    LEXER_GATE.with(std::cell::Cell::get)
+}
+
+fn static_table_for(lang: &str) -> Option<&'static carmine::LexerTable> {
+    let idx = STATIC_TABLE_SRC
+        .iter()
+        .position(|(name, _)| *name == lang)?;
+    STATIC_TABLES.with(|t| {
+        let mut slots = t.borrow_mut();
+        if slots[idx].is_none() {
+            let compiled = carmine::LexerTable::from_json(STATIC_TABLE_SRC[idx].1)
+                .ok()
+                .filter(|table| !table.rule_emits("Escape"))
+                .map(|table| &*Box::leak(Box::new(table)));
+            slots[idx] = Some(compiled);
+        }
+        slots[idx].unwrap_or(None)
+    })
 }
 
 fn arg_err(msg: &str) -> Trap {
-    Trap { err: RubyError::ArgumentError { msg: msg.to_string() }, backtrace: vec![] }
+    Trap {
+        err: RubyError::ArgumentError {
+            msg: msg.to_string(),
+        },
+        backtrace: vec![],
+    }
 }
 
 /// Register the `__rubyrs_rouge_native_*` host fns on `rt`. Idempotent.
@@ -138,8 +189,13 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         };
         let mut lexer = carmine::Lexer::new(table);
         lexer.begin();
-        let session =
-            Session { lexer, table, text: source, groups: Vec::new(), ops: Vec::new() };
+        let session = Session {
+            lexer,
+            table,
+            text: source,
+            groups: Vec::new(),
+            ops: Vec::new(),
+        };
         let sid = SESSIONS.with(|s| {
             let (slots, free) = &mut *s.borrow_mut();
             match free.pop() {
@@ -172,7 +228,11 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 let html = carmine::html::format(session.table, &toks);
                 SessionReply::Done(html)
             }
-            Ok(carmine::RunStep::Callback { state, rule, groups }) => {
+            Ok(carmine::RunStep::Callback {
+                state,
+                rule,
+                groups,
+            }) => {
                 session.groups = groups;
                 SessionReply::Callback { state, rule }
             }
@@ -190,7 +250,10 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             let (slots, _) = &mut *s.borrow_mut();
             let idx = usize::try_from(sid).ok()?;
             let session = slots.get_mut(idx)?.as_mut()?;
-            usize::try_from(i).ok().and_then(|gi| session.groups.get(gi)).cloned()
+            usize::try_from(i)
+                .ok()
+                .and_then(|gi| session.groups.get(gi))
+                .cloned()
         });
         Ok(match v {
             Some(Some(g)) => Value::new_str(g),
@@ -205,7 +268,13 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             }
             _ => return Err(arg_err("__rubyrs_rouge_native_op_token(sid, qual, val)")),
         };
-        push_op(sid, carmine::CallbackOp::Token { qualname: qual, value: val });
+        push_op(
+            sid,
+            carmine::CallbackOp::Token {
+                qualname: qual,
+                value: val,
+            },
+        );
         Ok(Value::Nil)
     });
 
@@ -244,9 +313,15 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         };
         let ok = SESSIONS.with(|s| {
             let (slots, free) = &mut *s.borrow_mut();
-            let Ok(idx) = usize::try_from(sid) else { return false };
-            let Some(slot) = slots.get_mut(idx) else { return false };
-            let Some(session) = slot.as_mut() else { return false };
+            let Ok(idx) = usize::try_from(sid) else {
+                return false;
+            };
+            let Some(slot) = slots.get_mut(idx) else {
+                return false;
+            };
+            let Some(session) = slot.as_mut() else {
+                return false;
+            };
             let ops = std::mem::take(&mut session.ops);
             match session.lexer.apply_callback_ops(&ops) {
                 Ok(()) => true,
@@ -266,6 +341,53 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         }
         Ok(Value::Nil)
     });
+
+    // Static fast path for the kramdown accelerator: highlight a fenced
+    // block from a PRE-EXTRACTED table without rouge being loaded at
+    // all. Returns the COMPLETE block HTML (the HTMLLegacy/HTMLPygments
+    // wrapper `<div class="highlight"><pre class="highlight"><code>…`
+    // is fixed for Jekyll's whitelisted options, so the host emits it
+    // directly). nil = no table for the language, the table declined,
+    // or a callback rule fired — the shim then requires rouge lazily
+    // and takes the dynamic path. The caller (kramdown shim) gates this
+    // behind a rouge-version check, so a site with a different rouge
+    // never sees a stale table.
+    // Raise/lower the lazy-lexer gate (see LEXER_GATE). The shim
+    // lowers it around demand loads and for the load-everything
+    // fallback; anything unexpected leaves it in the safe state the
+    // caller set.
+    rt.register_fn("__rubyrs_rouge_native_lexer_gate", |args| {
+        let on = match args {
+            [Value::Bool(b)] => *b,
+            _ => return Err(arg_err("__rubyrs_rouge_native_lexer_gate(bool)")),
+        };
+        LEXER_GATE.with(|g| g.set(on));
+        Ok(Value::Nil)
+    });
+
+    rt.register_fn("__rubyrs_rouge_native_static_lex", |args| {
+        let (lang, source) = match args {
+            [Value::Str(l), Value::Str(s)] => (l.to_string_lossy(), s.to_string_lossy()),
+            _ => return Err(arg_err("__rubyrs_rouge_native_static_lex(lang, source)")),
+        };
+        let Some(table) = static_table_for(&lang) else {
+            return Ok(Value::Nil);
+        };
+        let mut lexer = carmine::Lexer::new(table);
+        match lexer.lex(&source, &mut carmine::NoCallbacks) {
+            Ok(toks) => {
+                let inner = carmine::html::format(table, &toks);
+                let mut out = String::with_capacity(inner.len() + 64);
+                out.push_str("<div class=\"highlight\"><pre class=\"highlight\"><code>");
+                out.push_str(&inner);
+                out.push_str("</code></pre></div>");
+                Ok(Value::new_str(out))
+            }
+            // Callback rule (or any engine surprise): decline — the
+            // shim escalates to the rouge-backed dynamic path.
+            Err(_) => Ok(Value::Nil),
+        }
+    });
 }
 
 fn push_op(sid: i64, op: carmine::CallbackOp) {
@@ -280,7 +402,11 @@ fn push_op(sid: i64, op: carmine::CallbackOp) {
 }
 
 fn table_for(id: i64) -> Option<&'static carmine::LexerTable> {
-    TABLES.with(|t| usize::try_from(id).ok().and_then(|i| t.borrow().get(i).copied()))
+    TABLES.with(|t| {
+        usize::try_from(id)
+            .ok()
+            .and_then(|i| t.borrow().get(i).copied())
+    })
 }
 
 /// Reply states for `lex_run`, encoded as a tagged string the shim

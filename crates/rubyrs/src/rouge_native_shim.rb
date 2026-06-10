@@ -409,3 +409,145 @@ if defined?(__rubyrs_rouge_native_table) && defined?(Rouge::RegexLexer)
     end
   end
 end
+
+# ---- lazy lexer loading (lexer-gate) -------------------------------
+# When the kramdown accelerator raised the host lexer-gate BEFORE
+# `require "rouge"` (it does so only after matching the on-disk rouge
+# version against its embedded static tables), rouge.rb's eager
+# `Rouge.load_lexers` walk over all 227 lexer files was skipped by the
+# host. Install demand loading so the registry still resolves every
+# lexer: Lexer.find misses load the one file (alias-mapped), and
+# registry-enumerating APIs load everything first. Without the gate
+# flag this section is inert and rouge behaves exactly as upstream.
+if defined?(__rubyrs_rouge_native_table) && defined?(Rouge::RegexLexer) &&
+   $__rubyrs_rouge_lexer_gate
+  module Rouge
+    module CarmineNative
+      # tag/alias → lexer FILE BASENAME, generated from rouge 4.7.0's
+      # lexers/*.rb `tag`/`aliases` declarations (only non-identity
+      # entries; identical names resolve directly). Regenerate together
+      # with the static tables when bumping rouge.
+      LEXER_ALIAS_FILE = {
+    "Containerfile" => "docker", "Dockerfile" => "docker",
+    "HAML" => "haml", "Isabelle" => "isabelle", "LaTeX" => "tex",
+    "OCL" => "ocl", "R" => "r", "S" => "r", "TeX" => "tex",
+    "abl" => "openedge", "apib" => "apiblueprint",
+    "applescript" => "apple_script", "as" => "actionscript",
+    "as3" => "actionscript", "aug" => "augeas", "bash" => "shell",
+    "bat" => "batchfile", "batch" => "batchfile", "behat" => "gherkin",
+    "bf" => "brainfuck", "bib" => "bibtex", "brs" => "brightscript",
+    "bs" => "brightscript", "bsdmake" => "make", "c#" => "csharp",
+    "c++" => "cpp", "cfc" => "cfscript", "cl" => "common_lisp",
+    "clj" => "clojure", "cljs" => "clojure", "cmm" => "ghc_cmm",
+    "coffee" => "coffeescript", "coffee-script" => "coffeescript",
+    "common-lisp" => "common_lisp", "config" => "conf",
+    "configuration" => "conf", "containerfile" => "docker",
+    "cr" => "crystal", "cs" => "csharp", "cucumber" => "gherkin",
+    "django" => "jinja", "dlang" => "d", "dockerfile" => "docker",
+    "dosbatch" => "batchfile", "e-mail" => "email",
+    "elisp" => "common_lisp", "emacs-lisp" => "common_lisp",
+    "eml" => "email", "eps" => "postscript", "erl" => "erlang",
+    "eruby" => "erb", "esc" => "escape", "ex" => "viml", "exs" => "elixir",
+    "fea" => "opentype_feature_file", "ff" => "freefem", "ftl" => "fluent",
+    "gd" => "gdscript", "ghc-cmm" => "ghc_cmm", "ghc-core" => "ghc_core",
+    "gnumake" => "make", "golang" => "go", "graphviz" => "dot",
+    "hbs" => "handlebars", "heex" => "eex", "hh" => "hack",
+    "hs" => "haskell", "hx" => "haxe", "hy" => "hylang", "idr" => "idris",
+    "isa" => "isabelle", "jdn" => "janet", "jl" => "julia",
+    "js" => "javascript", "json-doc" => "json_doc", "jsonc" => "json_doc",
+    "kdb+" => "q", "ksh" => "shell", "lassoscript" => "lasso",
+    "latex" => "tex", "leex" => "eex", "lhaskell" => "literate_haskell",
+    "lhs" => "literate_haskell", "lisp" => "common_lisp",
+    "litcoffee" => "literate_coffeescript",
+    "lithaskell" => "literate_haskell", "ls" => "livescript",
+    "m" => "matlab", "makefile" => "make", "md" => "markdown",
+    "mf" => "make", "microsoftshell" => "powershell", "mkd" => "markdown",
+    "ml" => "sml", "moon" => "moonscript", "msshell" => "powershell",
+    "mustache" => "handlebars", "nes" => "nesasm", "nextflow" => "groovy",
+    "nf" => "groovy", "nimrod" => "nim", "nixos" => "nix",
+    "obj-c" => "objective_c", "obj-cpp" => "objective_cpp",
+    "obj_c" => "objective_c", "obj_cpp" => "objective_cpp",
+    "objc" => "objective_c", "objcpp" => "objective_cpp",
+    "objective-c" => "objective_c", "objectivec" => "objective_c",
+    "objectivecpp" => "objective_cpp",
+    "opentype" => "opentype_feature_file",
+    "opentypefeature" => "opentype_feature_file", "patch" => "diff",
+    "php3" => "php", "php4" => "php", "php5" => "php", "pl" => "perl",
+    "plaintext" => "plain_text", "posh" => "powershell",
+    "postscr" => "postscript", "pp" => "puppet", "proto" => "protobuf",
+    "pry" => "irb", "ps" => "postscript", "py" => "python",
+    "pyrex" => "cython", "pyx" => "cython", "rb" => "ruby",
+    "react" => "jsx", "realbasic" => "xojo", "rhtml" => "erb",
+    "robot" => "robot_framework", "robot-framework" => "robot_framework",
+    "rs" => "rust", "s" => "r", "sh" => "shell",
+    "shell-session" => "console", "shell_session" => "console",
+    "squeak" => "smalltalk", "st" => "smalltalk", "terminal" => "console",
+    "text" => "plain_text", "tf" => "terraform", "ts" => "typescript",
+    "udiff" => "diff", "unit-file" => "systemd",
+    "varnishconf" => "varnish", "vcl" => "varnish", "vim" => "viml",
+    "vimscript" => "viml", "visualbasic" => "vb", "vuejs" => "vue",
+    "winbatch" => "batchfile", "wl" => "mathematica",
+    "wolfram" => "mathematica", "yml" => "yaml", "zir" => "zig",
+    "zsh" => "shell"
+  }.freeze
+
+      def self.demand_load_lexer(name)
+        dir = ::Rouge::Lexers::BASE_DIR
+        file = "#{LEXER_ALIAS_FILE[name] || name}.rb"
+        return false unless File.exist?(File.join(dir, file))
+        __rubyrs_rouge_native_lexer_gate(false)
+        begin
+          ::Rouge::Lexers.load_lexer(file)
+        ensure
+          __rubyrs_rouge_native_lexer_gate(true)
+        end
+        true
+      end
+
+      # Restore the eager world: lower the gate for good and run the
+      # original full walk (load_lexer dedupes already-loaded files).
+      def self.load_all_lexers
+        return if @all_lexers_loaded
+        @all_lexers_loaded = true
+        $__rubyrs_rouge_lexer_gate = false
+        __rubyrs_rouge_native_lexer_gate(false)
+        ::Rouge.load_lexers
+        nil
+      end
+    end
+
+    class Lexer
+      class << self
+        # NOTE: alias_method, NOT `method(:find)` capture — rubyrs
+        # Method objects re-dispatch by name at call time, so a
+        # captured `find` would resolve to THIS redefinition and
+        # recurse.
+        alias_method :__carmine_orig_find, :find
+        def find(name)
+          found = __carmine_orig_find(name)
+          if !found && $__rubyrs_rouge_lexer_gate && !name.nil?
+            s = name.to_s
+            ::Rouge::CarmineNative.demand_load_lexer(s)
+            found = __carmine_orig_find(s)
+            unless found
+              # Unknown alias / tag-vs-filename mismatch: load the
+              # world so a real miss means the same thing it means
+              # upstream.
+              ::Rouge::CarmineNative.load_all_lexers
+              found = __carmine_orig_find(s)
+            end
+          end
+          found
+        end
+
+        # Registry-enumerating APIs see the full set, exactly as
+        # eager loading would.
+        alias_method :__carmine_orig_all, :all
+        def all
+          ::Rouge::CarmineNative.load_all_lexers if $__rubyrs_rouge_lexer_gate
+          __carmine_orig_all
+        end
+      end
+    end
+  end
+end

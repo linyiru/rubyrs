@@ -51,6 +51,42 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
         true
       end
 
+      # The static tables embedded by `_rouge_native` were extracted
+      # from THIS rouge release; using them with any other version
+      # could silently diverge, so the fast path only engages when the
+      # site's rouge/version.rb matches. (Bump together with
+      # tools/dump_rouge_static_tables.rb regenerations.)
+      STATIC_HL_ROUGE_VERSION = "4.7.0"
+
+      # Static highlight fast path available? Requires the host fn
+      # (a `_rouge_native` build) AND an on-disk rouge whose version
+      # matches the embedded tables — checked by READING version.rb,
+      # not by requiring the gem (avoiding the require is the point:
+      # rouge eager-loads all 227 lexer files, ~200ms). The file check
+      # also proves rouge exists, so highlighting is reproducing what
+      # CRuby would do, not inventing it.
+      def self.static_hl_ok?
+        return @static_hl_ok unless @static_hl_ok.nil?
+        @static_hl_ok =
+          if defined?(__rubyrs_rouge_native_static_lex)
+            begin
+              path = nil
+              $LOAD_PATH.each do |dir|
+                candidate = File.join(dir, "rouge/version.rb")
+                if File.exist?(candidate)
+                  path = candidate
+                  break
+                end
+              end
+              !!(path && File.read(path).include?('"' + STATIC_HL_ROUGE_VERSION + '"'))
+            rescue StandardError
+              false
+            end
+          else
+            false
+          end
+      end
+
       # kramdown's rouge plugin requires rouge lazily at first
       # highlight; the native path bypasses the plugin, so mirror that
       # here (this also fires rubyrs' _rouge_native hook, chaining the
@@ -59,7 +95,19 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
       def self.rouge_available?
         return @rouge_available unless @rouge_available.nil?
         @rouge_available = begin
-          require "rouge" unless defined?(::Rouge::Lexer)
+          unless defined?(::Rouge::Lexer)
+            # With version-matched static tables we KNOW the on-disk
+            # rouge layout: raise the lexer gate so `require "rouge"`
+            # skips the eager 227-file lexer walk (~200ms); the rouge
+            # shim then installs demand loading keyed off the same
+            # flag. Without the version match the gate stays down and
+            # rouge loads exactly as upstream.
+            if static_hl_ok? && defined?(__rubyrs_rouge_native_lexer_gate)
+              $__rubyrs_rouge_lexer_gate = true
+              __rubyrs_rouge_native_lexer_gate(true)
+            end
+            require "rouge"
+          end
           true
         rescue LoadError, SyntaxError
           false
@@ -68,8 +116,13 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
 
       # Render source through rostdown. nil = declined (caller falls
       # back to the pure-Ruby parse).
+      #
+      # `static_hl_ok?` proves rouge EXISTS on disk (version.rb found)
+      # without loading it, so the wholesale rouge_available? require
+      # only happens when the static gate is closed — otherwise rouge
+      # loads lazily on the first block the static path can't serve.
       def self.render(source)
-        return nil unless rouge_available?
+        return nil unless static_hl_ok? || rouge_available?
         sid = __rubyrs_kd_scan(source)
         return nil if sid.nil?
         begin
@@ -97,6 +150,14 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
       # "no highlighting" and the host renders kramdown's plain
       # <pre><code> branch, exactly like the plugin returning nil.
       def self.highlight_block(lang, code)
+        # Static fast path: pre-extracted table + one-shot native lex,
+        # rouge never loaded. nil (no table / callback rule / version
+        # gate closed) escalates to the rouge-backed dynamic path.
+        if static_hl_ok?
+          html = __rubyrs_rouge_native_static_lex(lang, code)
+          return html if html
+        end
+        return nil unless rouge_available?
         lexer = ::Rouge::Lexer.find_fancy(lang, code)
         return nil unless lexer
         formatter = ::Rouge::Formatters::HTMLLegacy.new(

@@ -1951,6 +1951,19 @@ impl Vm {
                 match args {
                 [Value::Str(path)] | [Value::Str(path), _] => {
                     let path_str = path.to_string_lossy().to_string();
+                    // Lazy-lexer gate (`_rouge_native`): while raised,
+                    // rouge.rb's eager per-lexer `Kernel::load` walk is
+                    // skipped wholesale; the rouge shim demand-loads
+                    // lexer files later with the gate lowered. Only the
+                    // kramdown shim raises it, after verifying the
+                    // on-disk rouge version matches the embedded
+                    // static tables.
+                    #[cfg(feature = "_rouge_native")]
+                    if path_str.contains("/rouge/lexers/")
+                        && crate::rouge_native::lexer_gate_active()
+                    {
+                        return Some(Ok(Value::Bool(true)));
+                    }
                     if let Err(t) = self.check_load_allowed("load", None) {
                         return Some(Err(t));
                     }
