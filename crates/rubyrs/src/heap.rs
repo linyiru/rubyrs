@@ -2037,6 +2037,30 @@ mod tests {
         let _ = heap.collect(&[]);
     }
 
+    /// `enc_compat` truth table + `display` names — every branch
+    /// (the coverage ratchet flagged the two rare arms after
+    /// slice 2 landed them production-side only).
+    #[test]
+    fn enc_compat_table() {
+        use crate::value::{enc_compat, EncodingTag as T};
+        // same tag
+        assert_eq!(enc_compat(T::Utf8, b"\xc3\xa9", T::Utf8, b"\xc3\xa9"), Some(T::Utf8));
+        // both ascii → receiver
+        assert_eq!(enc_compat(T::Utf8, b"a", T::Binary, b"b"), Some(T::Utf8));
+        // ascii receiver, non-ascii arg → arg
+        assert_eq!(enc_compat(T::Utf8, b"a", T::Binary, b"\xff"), Some(T::Binary));
+        // non-ascii receiver, ascii arg → receiver
+        assert_eq!(enc_compat(T::Binary, b"\xff", T::Utf8, b"a"), Some(T::Binary));
+        // both non-ascii, different tags → incompatible
+        assert_eq!(enc_compat(T::Utf8, b"\xc3\xa9", T::Binary, b"\xff"), None);
+        // display names (incl. the dual-name BINARY + the Tier 2
+        // placeholder)
+        assert_eq!(T::Utf8.display(), "UTF-8");
+        assert_eq!(T::UsAscii.display(), "US-ASCII");
+        assert_eq!(T::Binary.display(), "BINARY (ASCII-8BIT)");
+        assert_eq!(T::Other(3).display(), "OTHER");
+    }
+
     /// `from_bytes_binary` tags Binary; `from_bytes`/`new` tag Utf8
     /// (E1 step-1 contract — semantics consume the tag later).
     #[test]
