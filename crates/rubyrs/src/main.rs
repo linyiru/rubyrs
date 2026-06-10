@@ -371,6 +371,10 @@ fn main() {
     // stays inert.
     #[cfg(feature = "_kramdown_native")]
     rubyrs::register_kramdown_native_host_fns(&mut rt);
+    // `_yaml_native` accelerator: expose the native translation of the
+    // blessed YAML loader; stdlib_vendor/yaml.rb detects + uses it.
+    #[cfg(feature = "_yaml_native")]
+    rubyrs::register_yaml_native_host_fns(&mut rt);
     // `_sqlite` battery: when built in, expose the
     // SQLite3::Database + 25-class exception hierarchy + 9
     // host fns per ADR 0027 §"Capability host-fns consumed".

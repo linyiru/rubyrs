@@ -45,6 +45,8 @@ mod json_native;
 pub(crate) mod rouge_native;
 #[cfg(feature = "_kramdown_native")]
 pub(crate) mod kramdown_native;
+#[cfg(feature = "_yaml_native")]
+pub(crate) mod yaml_native;
 mod output;
 // `regex_engine` is public because `Value::Regex(Rc<CompiledRegex>)`
 // is reachable from the embedder-visible `Value` enum; an
@@ -113,6 +115,12 @@ pub use rouge_native::register_host_fns as register_rouge_native_host_fns;
 /// [`kramdown_native::register_host_fns`].
 #[cfg(feature = "_kramdown_native")]
 pub use kramdown_native::register_host_fns as register_kramdown_native_host_fns;
+/// Register the `_yaml_native` host fn (`__rubyrs_yaml_parse`) onto a
+/// `Runtime`. `stdlib_vendor/yaml.rb` detects the registration via
+/// `defined?(...)` and routes `parse_document` through the native
+/// translation. See [`yaml_native::register_host_fns`].
+#[cfg(feature = "_yaml_native")]
+pub use yaml_native::register_host_fns as register_yaml_native_host_fns;
 /// Register `_sqlite` host fns + the `SQLite3::Database`
 /// preamble. Mirrors the other battery `register_*_host_fns`
 /// shape. See `sqlite::register_host_fns`.

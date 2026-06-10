@@ -185,6 +185,12 @@ _rouge_native = ["dep:carmine"]
 # documents and non-default options fall back to the pure-Ruby gem per
 # document. See src/kramdown_native.rs.
 _kramdown_native = ["dep:rostdown"]
+# `_yaml_native` — native fast path for the blessed-reimpl YAML
+# front-matter loader (stdlib_vendor/yaml.rb, ADR 0026). A 1:1 Rust
+# translation of the SAME parser; yaml.rb detects the host fn and
+# routes parse_document through it, rescuing back to pure Ruby for
+# inputs the translation declines. Zero new dependencies.
+_yaml_native = []
 # `_sqlite` enables the SQLite battery per ADR 0027.
 # Pulls in `rusqlite` (bundled libsqlite3 — ~2 MB compiled, no
 # system libsqlite3 needed) + `lru` (per-connection prepared-

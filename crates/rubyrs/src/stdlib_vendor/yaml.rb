@@ -70,6 +70,17 @@ module RubyrsYAMLParse
 
   def parse_document(source)
     return nil if source.nil?
+    # Native fast path (_yaml_native): a 1:1 Rust translation of THIS
+    # parser. It raises on the few inputs it can't reproduce exactly
+    # (non-UTF-8 source, integers beyond i64, pathological nesting) —
+    # rescue and fall through to the pure-Ruby path below.
+    if defined?(__rubyrs_yaml_parse)
+      begin
+        return __rubyrs_yaml_parse(source.to_s)
+      rescue StandardError
+        # fall through
+      end
+    end
     lines = preprocess(source.to_s)
     return nil if lines.empty?
     parse_block(lines, [0], 0)
