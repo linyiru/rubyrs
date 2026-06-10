@@ -46,11 +46,22 @@ end
 RUBY
 
 if out="$("$BIN" "$probe" 2>&1)"; then
+  # mimalloc has no Ruby-visible surface, so probe the binary's
+  # symbol table instead (the cargo feature links mi_* statically).
+  # Measurement builds carry it since 2026-06-10 (wall −8.5% on the
+  # Jekyll benches, RSS +1.3% post-lazy-regex); a binary without it
+  # is a clobber suspect just like a missing accelerator.
+  if ! nm -gU "$BIN" 2>/dev/null | grep -q "__mi_arenas"; then
+    echo "jekyll_guard: FEATURE SANITY FAILED — MISSING: mimalloc (no mi_malloc symbol)" >&2
+    echo "jekyll_guard: rebuild with:" >&2
+    echo "  cargo build --release -p rubyrs --features stdlib,sass,_rouge_native,_kramdown_native,_yaml_native,_liquid_native,mimalloc" >&2
+    exit 1
+  fi
   echo "jekyll_guard: $out ($BIN)"
 else
   echo "jekyll_guard: FEATURE SANITY FAILED — $out" >&2
   echo "jekyll_guard: the binary was probably clobbered by a default-feature build/test." >&2
   echo "jekyll_guard: rebuild with:" >&2
-  echo "  cargo build --release -p rubyrs --features stdlib,sass,_rouge_native,_kramdown_native,_yaml_native,_liquid_native" >&2
+  echo "  cargo build --release -p rubyrs --features stdlib,sass,_rouge_native,_kramdown_native,_yaml_native,_liquid_native,mimalloc" >&2
   exit 1
 fi

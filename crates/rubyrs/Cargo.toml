@@ -220,10 +220,14 @@ _sqlite = ["dep:rusqlite", "dep:lru"]
 # are the load-bearing batteries; `stdlib` brings the pure-Ruby
 # canon (json/active_support_lite/…). Total ≤ 40 MB stripped
 # per ADR 0019 v3's binary budget. `mimalloc` is in the CLI bundle
-# (not bare `default`) because it's a ~11.5%-faster-Jekyll global
-# allocator win that the `cargo install rubyrs` user should get by
-# default; the minimal `default` tier (embedders) stays allocator-
-# neutral. (Trades ~9% peak RSS for the wall win — fine for a CLI.)
+# (not bare `default`) because it's a global-allocator wall win the
+# `cargo install rubyrs` user should get by default; the minimal
+# `default` tier (embedders) stays allocator-neutral. Re-measured
+# 2026-06-10 after the lazy-regex RSS work: jekyll liquid-1k wall
+# −8.5% (0.82 → 0.75s, level with CRuby) for +1.3% peak RSS
+# (67.5 → 68.4MB, still under CRuby's 79.7) — the old "~9% RSS"
+# cost shrank because lazy regex removed most of the allocation
+# volume mimalloc's segment cache used to hold.
 cli-defaults = ["stdlib", "_sqlite", "_http_server", "sass", "mimalloc"]
 # `everything` — kitchen sink for embedders who want every
 # available battery pre-wired. ADR 0019 v3 line 314's "Bun-
