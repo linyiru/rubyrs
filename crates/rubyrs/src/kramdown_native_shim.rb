@@ -33,6 +33,9 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
         "syntax_highlighter" => "rouge",
       }.freeze
       HL_OPTS = { "default_lang" => "plaintext", "guess_lang" => true }.freeze
+      # The same options after kramdown's highlighter setup
+      # normalises them (symbol keys) — see eligible?.
+      HL_OPTS_SYM = { default_lang: "plaintext", guess_lang: true }.freeze
       IGNORED = ["toc_levels", "footnote_nr", "show_warnings", "coderay"].freeze
 
       def self.eligible?(options)
@@ -40,7 +43,16 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
         options.each do |k, v|
           next if IGNORED.include?(k)
           if k == "syntax_highlighter_opts"
-            return false unless v == HL_OPTS
+            # Accept BOTH key spellings: Jekyll passes string keys,
+            # but the first document that takes the pure-kramdown
+            # path (any rostdown decline) lets kramdown's
+            # syntax-highlighter setup write a SYMBOL-keyed
+            # normalisation of this hash back into the converter's
+            # shared @config — after which a string-only comparison
+            # declined every subsequent document forever (the
+            # re-render "transition round" pathology: one decline
+            # cascaded into 358 pure-kramdown conversions).
+            return false unless v == HL_OPTS || v == HL_OPTS_SYM
             next
           end
           return false unless REQUIRED.key?(k) && REQUIRED[k] == v
