@@ -152,8 +152,19 @@ jobs:
         # asserting it neither crashes nor saves an artifact —
         # `cargo fuzz run` exits non-zero on crash, which fails
         # this step before the real soak burns a full 5 min.
+        # ASAN_OPTIONS=detect_leaks=0 on both fuzz steps: the Vm's
+        # class graph is Rc-CYCLIC BY DESIGN (superclass links,
+        # constant tables holding classes), so a dropped Runtime
+        # leaves a few KB of unreclaimed cycles — LeakSanitizer
+        # reports exactly that (41 objects / 3.8 KB on the parse
+        # target's first-ever completed run) and exits 77, burying
+        # the signal fuzzing is FOR (crashes, UAF, OOB — ASAN's
+        # memory-safety checks all stay on). Same posture as
+        # fuzzing any GC-managed runtime. The Runtime-drop cycle
+        # debt is tracked separately as a non-fuzz concern.
         run: |
           set -euo pipefail
+          export ASAN_OPTIONS=detect_leaks=0
           cd crates/rubyrs/fuzz
           # Seed: one empty file. libfuzzer will run a few hundred
           # iters mutating it; if the preamble traps on iter 1
@@ -190,6 +201,8 @@ jobs:
         # fails the job — same shape as a panic crash so the artifact
         # upload path catches both.
         run: |
+          # Leak detection off — see the smoke step's rationale.
+          export ASAN_OPTIONS=detect_leaks=0
           cd crates/rubyrs/fuzz
           # No `+nightly` — rustup picks up the pinned channel from
           # `rust-toolchain.toml` in cwd. Forcing the channel here
