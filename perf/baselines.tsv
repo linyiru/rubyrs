@@ -169,7 +169,16 @@
 # headroom over the observed peak without masking a future regression —
 # a pure baseline shift (every workload moved up together), not a
 # per-workload leak. gc_churn stays 8400 (observed 8216, has headroom).
-crates/rubyrs/tests/fixtures/fizzbuzz.rb	8200	0	tiny script; wall is sub-100ms noise floor, disabled
+# fizzbuzz RSS bumped 8200 → 8400 on 2026-06-10 — observed CI
+# 8224 KB (24 KB / 0.3% over) after the ADR 0020 encoding series
+# accumulated (EncodingTag on RStr, the compatibility arms in
+# string.rs/heap.rs, String#byteslice — the cfg-gated
+# _encoding_full code itself doesn't build here, but the always-on
+# E1 surface grows the binary and lifts Runtime::new baseline RSS
+# a few KB across the board). Same uniform-baseline-shift shape as
+# every prior bump in this file; ~2% headroom over the observed
+# peak so future regressions still surface.
+crates/rubyrs/tests/fixtures/fizzbuzz.rb	8400	0	tiny script; wall is sub-100ms noise floor, disabled
 # mm_bench WALL bumped 1200 → 1300 on 2026-06-04 — observed
 # CI 1220 ms (+1.7% over) after Track 1 / 2 chain accumulated:
 #   * 0da682b3 (Track 1) — Frame::kw_given_mask: u64, +8 bytes
