@@ -6,6 +6,7 @@
     "crates/rubyrs/src/_cext_link_keep_alive.rs": "all `#[used] static` declarations \u2014 no executable lines for LCOV to instrument; closes the gap flagged on PR #274",
     "crates/rubyrs/src/http_server.rs": "behind the `_http_server` Cargo feature; the default CI coverage run uses default features",
     "crates/rubyrs/src/json_native.rs": "behind the `_json_native` Cargo feature (serde_json accelerator for the pure JSON canon, ADR 0019 Rule 6); default CI build excludes",
+    "crates/rubyrs/src/rouge_native.rs": "behind the `_rouge_native` Cargo feature (carmine rouge accelerator); default CI build excludes (same shape as json_native above)",
     "crates/rubyrs/src/sqlite.rs": "behind the `_sqlite` Cargo feature (rusqlite + bundled libsqlite3 + SQLite3::Database/Statement surface, ADR 0027); default CI build excludes (same shape as http_server / stdlib / fiber / json_native above)",
     "crates/rubyrs/src/vm/cext_wasi.rs": "cfg(target_os = \"wasi\") gated; only compiled on wasm32-wasip1, not on the Linux coverage runner",
     "crates/rubyrs/src/vm/fiber.rs": "behind the `_fiber` Cargo feature; the default CI coverage run uses default features (matches the http_server / stdlib pattern above)"

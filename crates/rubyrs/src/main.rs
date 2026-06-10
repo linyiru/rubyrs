@@ -360,6 +360,11 @@ fn main() {
     // the reference behaviour for non-accelerator builds.
     #[cfg(feature = "_json_native")]
     rubyrs::register_json_native_host_fns(&mut rt);
+    // `_rouge_native` accelerator: expose the carmine engine host fns;
+    // the require("rouge") hook injects the shim that detects + uses
+    // them. Without this registration the shim stays inert.
+    #[cfg(feature = "_rouge_native")]
+    rubyrs::register_rouge_native_host_fns(&mut rt);
     // `_sqlite` battery: when built in, expose the
     // SQLite3::Database + 25-class exception hierarchy + 9
     // host fns per ADR 0027 §"Capability host-fns consumed".

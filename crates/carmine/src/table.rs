@@ -118,6 +118,13 @@ impl LexerTable {
         self.tok_text
     }
 
+    /// Iterate every token qualname this table can emit. Lets embedders
+    /// apply policy (e.g. decline tables that emit `Escape`, whose
+    /// rouge-side handling depends on formatter options).
+    pub fn token_names(&self) -> impl Iterator<Item = &str> {
+        self.token_names.iter().map(String::as_str)
+    }
+
     /// Parse a rule table from the JSON produced by `tools/extract.rb`.
     pub fn from_json(json: &str) -> Result<Self, Error> {
         let v: J = serde_json::from_str(json).map_err(|e| Error::Table(e.to_string()))?;

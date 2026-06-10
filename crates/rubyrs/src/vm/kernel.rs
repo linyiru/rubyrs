@@ -2440,7 +2440,25 @@ impl Vm {
                 }));
             }
         };
-        self.load_ruby_source_from_canon(canon)
+        let result = self.load_ruby_source_from_canon(canon);
+        // `_rouge_native` accelerator hook: the TOP-LEVEL
+        // `require "rouge"` just finished loading the real gem —
+        // inject the shim that patches RegexLexer#lex + the HTML
+        // formatter to route supported lexers through the carmine
+        // engine. The shim is `defined?(...)`-guarded, so it is
+        // inert unless the host fns were registered. Inner
+        // `rouge/...` requires don't match the bare name, and a
+        // repeat require returns Bool(false), so this fires exactly
+        // once per fresh load.
+        #[cfg(feature = "_rouge_native")]
+        if path_str == "rouge" && matches!(result, Ok(Value::Bool(true))) {
+            self.eval_string(
+                crate::rouge_native::SHIM,
+                "<rubyrs:rouge_native_shim>",
+                false,
+            )?;
+        }
+        result
     }
 
     /// Search-path candidates for `require <path_str>`. First

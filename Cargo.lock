@@ -1609,6 +1609,7 @@ name = "rubyrs"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "carmine",
  "cc",
  "fancy-regex",
  "grass",

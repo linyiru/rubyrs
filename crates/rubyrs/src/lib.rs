@@ -41,6 +41,8 @@ mod http_server;
 mod intern;
 #[cfg(feature = "_json_native")]
 mod json_native;
+#[cfg(feature = "_rouge_native")]
+pub(crate) mod rouge_native;
 mod output;
 // `regex_engine` is public because `Value::Regex(Rc<CompiledRegex>)`
 // is reachable from the embedder-visible `Value` enum; an
@@ -94,6 +96,13 @@ pub use vm::fiber::register_host_fns as register_fiber_host_fns;
 /// hot paths through serde_json. See [`json_native::register_host_fns`].
 #[cfg(feature = "_json_native")]
 pub use json_native::register_host_fns as register_json_native_host_fns;
+/// Register `_rouge_native` host fns (`__rubyrs_rouge_native_table`,
+/// `__rubyrs_rouge_native_lex_html`) onto a `Runtime`. The shim that
+/// rubyrs injects after `require "rouge"` detects the registration via
+/// `defined?(...)` and routes supported lexers through the carmine
+/// native engine. See [`rouge_native::register_host_fns`].
+#[cfg(feature = "_rouge_native")]
+pub use rouge_native::register_host_fns as register_rouge_native_host_fns;
 /// Register `_sqlite` host fns + the `SQLite3::Database`
 /// preamble. Mirrors the other battery `register_*_host_fns`
 /// shape. See `sqlite::register_host_fns`.
