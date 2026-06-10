@@ -50,10 +50,33 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
 
         # Render via the host. nil = decline (caller falls back to
         # pure liquid for this render).
+        #
+        # `site.*` values are immutable for the duration of a build
+        # (the posts list is fixed before rendering starts), so their
+        # resolution — including materializing sliced post fields
+        # through to_liquid — is cached once per (path, slice, fields)
+        # instead of repeated for all N pages.
         def render(entry, payload)
           tid, needs = entry
           values = {}
           needs.each do |path, slice, need_size, fields|
+            if path.start_with?("site.")
+              key = "#{path}|#{slice}|#{fields ? fields.join(",") : ""}"
+              cached = (@site_values ||= {})[key]
+              if cached.nil?
+                resolved = resolve(payload, path, slice, fields)
+                return nil if resolved == :__decline
+                full = nil
+                if need_size
+                  full = resolve_full_size(payload, path)
+                  return nil if full == :__decline
+                end
+                cached = @site_values[key] = [resolved, full]
+              end
+              values[path] = cached[0]
+              values[path + "#size"] = cached[1] if need_size
+              next
+            end
             resolved = resolve(payload, path, slice, fields)
             return nil if resolved == :__decline
             values[path] = resolved
