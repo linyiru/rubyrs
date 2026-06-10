@@ -2496,6 +2496,18 @@ impl Vm {
                 false,
             )?;
         }
+        // `_yaml_native` read-phase hook, same shape: the front-matter
+        // shim patches Document#read_content / Convertible#read_yaml
+        // once Jekyll has defined them. `defined?(...)`-guarded,
+        // inert outside Jekyll.
+        #[cfg(feature = "_yaml_native")]
+        if path_str == "jekyll" && matches!(result, Ok(Value::Bool(true))) {
+            self.eval_string(
+                crate::yaml_native::FRONTMATTER_SHIM,
+                "<rubyrs:yaml_native_frontmatter_shim>",
+                false,
+            )?;
+        }
         result
     }
 

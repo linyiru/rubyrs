@@ -11,13 +11,25 @@
 //! quoted / flow), bugs and all — any intentional divergence would
 //! break the pure-vs-native differential contract.
 //!
-//! Host fn:
+//! Host fns:
 //!   - `__rubyrs_yaml_parse(src) → value` — parse a YAML document into
 //!     VM values directly (same materialization shape as
 //!     `_json_native`'s visitor). Raises on inputs the translation
 //!     cannot reproduce exactly (non-UTF-8 source, integers beyond
 //!     i64, pathological nesting) — `yaml.rb` rescues and falls back
 //!     to the pure-Ruby path, so behaviour is unchanged there.
+//!   - `__rubyrs_frontmatter_read(path) → [content, yaml|nil]` — the
+//!     Jekyll read-phase one-shot: file read + UTF-8 BOM strip +
+//!     front-matter split in a single host call, replacing the
+//!     per-document `File.read` dispatch + Ruby regex match +
+//!     `Regexp.last_match.post_match` copy in `Document#read_content`
+//!     / `Convertible#read_yaml` (×1000 docs on the 1k bench). The
+//!     YAML text itself goes back to Ruby's `SafeYAML.load`, which
+//!     already routes through `__rubyrs_yaml_parse` — so this fn has
+//!     NO YAML semantics of its own and the decline surface stays
+//!     small (non-UTF-8 / IO error → raise → shim falls back to the
+//!     pure path, which re-raises the real error). The shim is
+//!     injected after `require "jekyll"` (kernel.rs hook).
 
 #![cfg(feature = "_yaml_native")]
 
@@ -25,6 +37,11 @@ use crate::error::{RubyError, Trap};
 use crate::heap::{HashObj, HeapObj};
 use crate::value::Value;
 use crate::vm::current_vm_ptr;
+
+/// Jekyll read-phase shim (Document#read_content +
+/// Convertible#read_yaml), injected by kernel.rs after the top-level
+/// `require "jekyll"`. `defined?(...)`-guarded — inert outside Jekyll.
+pub(crate) const FRONTMATTER_SHIM: &str = include_str!("yaml_native_frontmatter_shim.rb");
 
 /// Recursion cap for nested block/flow structures. Front matter is
 /// shallow; anything deeper declines to the pure path (whose VM stack
@@ -74,6 +91,77 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         let vm = unsafe { &mut *ptr };
         parse_document(vm, text)
     });
+    rt.register_fn("__rubyrs_frontmatter_read", |args| {
+        let path = match args {
+            [Value::Str(s)] => s,
+            _ => {
+                return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__rubyrs_frontmatter_read(path: String)".to_string(),
+                    },
+                    backtrace: vec![],
+                });
+            }
+        };
+        let path_bytes = path.borrow();
+        let Ok(path_str) = std::str::from_utf8(&path_bytes) else {
+            return Err(decline("non-UTF-8 path"));
+        };
+        // Any IO error declines: the shim falls back to the pure
+        // `File.read` path, which re-raises the REAL Errno error
+        // with CRuby-shaped message/class. The double read only
+        // happens on the error path.
+        let Ok(raw) = std::fs::read(path_str) else {
+            return Err(decline("io error"));
+        };
+        // `File.read(..., encoding: "bom|utf-8")` semantics: strip a
+        // UTF-8 BOM if present. Other BOMs (UTF-16/32) leave bytes
+        // that fail the UTF-8 check below → decline → pure path.
+        let body: &[u8] = match raw.strip_prefix(b"\xef\xbb\xbf") {
+            Some(rest) => rest,
+            None => &raw,
+        };
+        let Ok(text) = std::str::from_utf8(body) else {
+            return Err(decline("non-UTF-8 source"));
+        };
+        let ptr = current_vm_ptr();
+        if ptr.is_null() {
+            return Err(decline("CURRENT_VM_PTR null"));
+        }
+        // SAFETY: same contract as `__rubyrs_yaml_parse` above.
+        let vm = unsafe { &mut *ptr };
+        let (content, yaml) = match front_matter_split(text) {
+            Some((yaml, rest)) => (
+                Value::new_str(rest.to_string()),
+                Value::new_str(yaml.to_string()),
+            ),
+            None => (Value::new_str(text.to_string()), Value::Nil),
+        };
+        let id = vm.heap.alloc(HeapObj::Array(vec![content, yaml]));
+        Ok(Value::Array(id))
+    });
+}
+
+/// Jekyll `Document::YAML_FRONT_MATTER_REGEXP` =
+/// `%r!\A(---\s*\n.*?\n?)^((---|\.\.\.)\s*$\n?)!m`, translated:
+/// Ruby `/m` (dot-matches-newline) → `(?s)`; Ruby's always-line-
+/// anchored `^`/`$` → `(?m)`; Ruby's ASCII `\s` → an explicit
+/// `[ \t\r\n\f\x0B]` class (Rust `\s` is Unicode whitespace and
+/// would silently accept U+00A0 etc. where CRuby's match fails).
+/// Returns `(yaml_capture_1, post_match)` on match.
+fn front_matter_split(text: &str) -> Option<(&str, &str)> {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?ms)\A(---[ \t\r\n\f\x0B]*\n.*?\n?)^((---|\.\.\.)[ \t\r\n\f\x0B]*$\n?)",
+        )
+        .expect("front-matter regex is a vetted literal")
+    });
+    let caps = re.captures(text)?;
+    let m = caps.get(0)?;
+    let yaml = caps.get(1)?;
+    Some((yaml.as_str(), &text[m.end()..]))
 }
 
 // ---- 1:1 translation of RubyrsYAMLParse --------------------------------

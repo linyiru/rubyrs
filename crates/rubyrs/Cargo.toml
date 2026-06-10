@@ -190,7 +190,12 @@ _kramdown_native = ["dep:rostdown"]
 # translation of the SAME parser; yaml.rb detects the host fn and
 # routes parse_document through it, rescuing back to pure Ruby for
 # inputs the translation declines. Zero new dependencies.
-_yaml_native = []
+# `dep:regex` (not the `regex` VM feature): the front-matter host fn
+# compiles Jekyll's YAML_FRONT_MATTER_REGEXP natively. Pulling the dep
+# alone keeps the `--no-default-features --features _yaml_native`
+# matrix slot compiling without dragging in the whole regex dispatch
+# tier.
+_yaml_native = ["dep:regex"]
 # `_liquid_native` — liquidus-backed accelerator for Liquid rendering
 # under Jekyll. After `require "jekyll"` a shim patches
 # Jekyll::LiquidRenderer::File to compile templates through the native
