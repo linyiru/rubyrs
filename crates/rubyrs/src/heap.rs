@@ -1706,7 +1706,27 @@ impl Value {
                 mix(mix(h, &[4]), &bits.to_le_bytes())
             }
             Value::Sym(s) => mix(mix(h, &[5]), &s.0.to_le_bytes()),
-            Value::Str(rs) => mix(mix(h, &[6]), &rs.content.borrow()),
+            Value::Str(rs) => {
+                // E1 slice 2: equal-by-== strings must hash equal,
+                // and `==` is tag-sensitive only for non-ASCII
+                // bytes — so the tag joins the hash exactly when
+                // the content is non-ASCII. The ascii test is one
+                // extra pass over bytes already being hashed; the
+                // common all-ASCII path mixes nothing extra.
+                let b = rs.content.borrow();
+                let h2 = mix(mix(h, &[6]), &b);
+                if b.iter().all(|&x| x < 0x80) {
+                    h2
+                } else {
+                    let tag = match rs.encoding.get() {
+                        crate::value::EncodingTag::Binary => 0u8,
+                        crate::value::EncodingTag::Utf8 => 1,
+                        crate::value::EncodingTag::UsAscii => 2,
+                        crate::value::EncodingTag::Other(n) => 3u8.wrapping_add(n),
+                    };
+                    mix(h2, &[tag])
+                }
+            }
             Value::Object(id) => mix(mix(h, &[7]), &id.0.to_le_bytes()),
             Value::Class(c) => {
                 mix(mix(h, &[8]), &(Rc::as_ptr(c) as usize as u64).to_le_bytes())
@@ -1778,7 +1798,19 @@ impl Value {
                 crate::vm::int_cmp_float_lossless(*b, *a)
                     == Some(std::cmp::Ordering::Equal)
             }
-            (Value::Str(a), Value::Str(b)) => *a.borrow() == *b.borrow(),
+            // E1 slice 2: byte equality AND tag compatibility.
+            // Equal bytes share ascii-only-ness, so the cross-tag
+            // case reduces to "tags equal OR the (shared) bytes are
+            // pure ASCII" — `"abc" == "abc".b` is true (CRuby),
+            // `"é" == "é".b` is false. The ascii scan only runs on
+            // the rare tag-mismatch path.
+            (Value::Str(a), Value::Str(b)) => {
+                let ab = a.content.borrow();
+                let bb = b.content.borrow();
+                *ab == *bb
+                    && (a.encoding.get() == b.encoding.get()
+                        || ab.iter().all(|&x| x < 0x80))
+            }
             (Value::Sym(a), Value::Sym(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Nil, Value::Nil) => true,

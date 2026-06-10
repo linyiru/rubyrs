@@ -1141,7 +1141,19 @@ pub(crate) fn numeric_call(
                     msg: format!("{} out of char range", n),
                 });
             }
-            Some(Value::new_str_bytes(vec![n as u8]))
+            // CRuby tags no-arg chr US-ASCII for 0..=0x7F and
+            // ASCII-8BIT above — so `200.chr == [200].pack("C")`
+            // holds (both BINARY) while the bytes stay raw. Caught
+            // by integer_chr the moment == became tag-sensitive.
+            let v = Value::new_str_bytes(vec![n as u8]);
+            if let Value::Str(ref rs) = v {
+                rs.encoding.set(if n < 0x80 {
+                    crate::value::EncodingTag::UsAscii
+                } else {
+                    crate::value::EncodingTag::Binary
+                });
+            }
+            Some(v)
         }
         // (The 1-arg `Integer#chr(encoding)` TypeError arm and the
         // 2+-arg ArgumentError arity guard live earlier in this

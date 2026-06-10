@@ -49,6 +49,44 @@ pub enum EncodingTag {
     Other(u8),
 }
 
+impl EncodingTag {
+    /// CRuby's error-message display name (the BINARY dual-name).
+    pub(crate) fn display(self) -> &'static str {
+        match self {
+            EncodingTag::Utf8 => "UTF-8",
+            EncodingTag::UsAscii => "US-ASCII",
+            EncodingTag::Binary => "BINARY (ASCII-8BIT)",
+            EncodingTag::Other(_) => "OTHER",
+        }
+    }
+}
+
+/// CRuby's `rb_enc_compatible` for the E1 tag set: same tag wins;
+/// across tags, an ASCII-only side is compatible with anything and
+/// the result takes the OTHER side's encoding (receiver wins when
+/// both are ASCII-only); two non-ASCII sides with different tags
+/// are incompatible (`None` → Encoding::CompatibilityError at the
+/// call site). Byte slices come in because ascii-only-ness is a
+/// content property, not a tag property.
+pub(crate) fn enc_compat(
+    a_tag: EncodingTag,
+    a_bytes: &[u8],
+    b_tag: EncodingTag,
+    b_bytes: &[u8],
+) -> Option<EncodingTag> {
+    if a_tag == b_tag {
+        return Some(a_tag);
+    }
+    let a_ascii = a_bytes.iter().all(|&x| x < 0x80);
+    let b_ascii = b_bytes.iter().all(|&x| x < 0x80);
+    match (a_ascii, b_ascii) {
+        (true, true) => Some(a_tag),
+        (true, false) => Some(b_tag),
+        (false, true) => Some(a_tag),
+        (false, false) => None,
+    }
+}
+
 impl RStr {
     /// Construct from a Rust `String`. The bytes are consumed
     /// (cheap — no copy) and the `Vec<u8>` becomes the backing

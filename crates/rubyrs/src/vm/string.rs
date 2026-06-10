@@ -256,11 +256,42 @@ pub(crate) fn string_call(
                 RubyError::ArgumentError { msg: "argument too big".to_string() }
             })?;
             check(new_len)?;
+            // E1 slice 2: encoding compatibility decides the result
+            // tag; incompatible operands raise CRuby's
+            // CompatibilityError (string_call can't trap with a
+            // custom class — signal via the RubyError and let the
+            // caller's HostException mapping carry the name).
+            let tag = crate::value::enc_compat(
+                a.encoding.get(), &a.content.borrow(),
+                b.encoding.get(), &b.content.borrow(),
+            )
+            .ok_or_else(|| RubyError::HostException {
+                class_name: "Encoding::CompatibilityError".to_string(),
+                message: format!(
+                    "incompatible character encodings: {} and {}",
+                    a.encoding.get().display(),
+                    b.encoding.get().display()
+                ),
+            })?;
             let mut s = a.borrow().clone();
             s.extend_from_slice(&b.borrow());
-            Some(Value::new_str_bytes(s))
+            let v = Value::new_str_bytes(s);
+            if let Value::Str(ref ns) = v {
+                ns.encoding.set(tag);
+            }
+            Some(v)
         }
-        (Value::Str(a), "==", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() == *b.borrow())),
+        // E1 slice 2: tag-compatible equality — equal bytes share
+        // ascii-only-ness, so cross-tag equality holds iff the bytes
+        // are pure ASCII (same rule as heap.rs's ruby_eq arm).
+        (Value::Str(a), "==", [Value::Str(b)]) => {
+            let ab = a.content.borrow();
+            let bb = b.content.borrow();
+            let eq = *ab == *bb
+                && (a.encoding.get() == b.encoding.get()
+                    || ab.iter().all(|&x| x < 0x80));
+            Some(Value::Bool(eq))
+        }
         (Value::Str(a), "!=", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() != *b.borrow())),
         (Value::Str(a), "to_s", []) => Some(Value::Str(a.clone())),
         // `String#to_str` — explicit-conversion alias. CRuby uses
@@ -327,7 +358,21 @@ pub(crate) fn string_call(
         (Value::Str(a), "hash", []) => {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            a.borrow().hash(&mut h);
+            let b = a.borrow();
+            b.hash(&mut h);
+            // E1 slice 2: same tag-sensitivity rule as the internal
+            // ruby_hash — non-ASCII content folds the encoding in,
+            // so ==-unequal cross-encoding strings hash apart while
+            // ASCII content stays encoding-blind.
+            if !b.iter().all(|&x| x < 0x80) {
+                let tag = match a.encoding.get() {
+                    crate::value::EncodingTag::Binary => 0u8,
+                    crate::value::EncodingTag::Utf8 => 1,
+                    crate::value::EncodingTag::UsAscii => 2,
+                    crate::value::EncodingTag::Other(n) => 3u8.wrapping_add(n),
+                };
+                tag.hash(&mut h);
+            }
             Some(Value::Int(h.finish() as i64))
         }
         (Value::Str(a), "bytesize", []) => Some(Value::Int(a.borrow().len() as i64)),
@@ -1433,7 +1478,29 @@ pub(crate) fn string_call(
         (Value::Str(a), "<", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() < *b.borrow())),
         (Value::Str(a), "<=", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() <= *b.borrow())),
         (Value::Str(a), ">", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() > *b.borrow())),
-        (Value::Str(a), "<=>", [Value::Str(b)]) => Some(Value::Int(a.borrow().cmp(&*b.borrow()) as i64)),
+        (Value::Str(a), "<=>", [Value::Str(b)]) => {
+            let ord = a.borrow().cmp(&*b.borrow());
+            // E1 slice 2: CRuby breaks byte-equal ties by encoding
+            // index when the strings aren't compatible (non-ASCII
+            // bytes, different encodings): "é" <=> "é".b is 1.
+            // CRuby's indices: ASCII-8BIT=0, UTF-8=1, US-ASCII=2 —
+            // mirrored here.
+            let ord = if ord == std::cmp::Ordering::Equal
+                && a.encoding.get() != b.encoding.get()
+                && !a.content.borrow().iter().all(|&x| x < 0x80)
+            {
+                let idx = |t: crate::value::EncodingTag| match t {
+                    crate::value::EncodingTag::Binary => 0u8,
+                    crate::value::EncodingTag::Utf8 => 1,
+                    crate::value::EncodingTag::UsAscii => 2,
+                    crate::value::EncodingTag::Other(n) => 3u8.saturating_add(n),
+                };
+                idx(a.encoding.get()).cmp(&idx(b.encoding.get()))
+            } else {
+                ord
+            };
+            Some(Value::Int(ord as i64))
+        }
         // `casecmp` / `casecmp?` — ASCII case-insensitive compare (CRuby
         // folds only A-Z↔a-z, not full Unicode). `casecmp` returns
         // -1/0/1, `casecmp?` a Bool; both return nil for a non-String
@@ -1764,8 +1831,25 @@ impl Vm {
                     check_unfrozen(self)?;
                     match &args[0] {
                         Value::Str(other) => {
+                            // E1 slice 2: compatibility check; the
+                            // receiver's tag UPGRADES to the result
+                            // encoding (CRuby: `"abc" << bin` turns
+                            // the receiver BINARY).
+                            let tag = crate::value::enc_compat(
+                                s.encoding.get(), &s.content.borrow(),
+                                other.encoding.get(), &other.content.borrow(),
+                            )
+                            .ok_or_else(|| self.trap(RubyError::HostException {
+                                class_name: "Encoding::CompatibilityError".to_string(),
+                                message: format!(
+                                    "incompatible character encodings: {} and {}",
+                                    s.encoding.get().display(),
+                                    other.encoding.get().display()
+                                ),
+                            }))?;
                             let to_push = other.borrow().clone();
                             s.borrow_mut().extend_from_slice(&to_push);
+                            s.encoding.set(tag);
                         }
                         // CRuby's String#<< also accepts Integer
                         // (treated as a codepoint). Support it
@@ -1793,8 +1877,23 @@ impl Vm {
                     for a in args {
                         match a {
                             Value::Str(o) => {
+                                // Same compat + receiver-tag-upgrade
+                                // rule as `<<` above, applied per arg.
+                                let tag = crate::value::enc_compat(
+                                    s.encoding.get(), &s.content.borrow(),
+                                    o.encoding.get(), &o.content.borrow(),
+                                )
+                                .ok_or_else(|| self.trap(RubyError::HostException {
+                                    class_name: "Encoding::CompatibilityError".to_string(),
+                                    message: format!(
+                                        "incompatible character encodings: {} and {}",
+                                        s.encoding.get().display(),
+                                        o.encoding.get().display()
+                                    ),
+                                }))?;
                                 let to_push = o.borrow().clone();
                                 s.borrow_mut().extend_from_slice(&to_push);
+                                s.encoding.set(tag);
                             }
                             _ => return Err(self.trap(RubyError::TypeError {
                                 msg: format!("no implicit conversion of {} into String", a.type_name()),
