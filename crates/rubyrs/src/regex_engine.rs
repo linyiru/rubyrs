@@ -255,6 +255,122 @@ fn rewrite_charclass_octal_escapes(pat: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Rewrite the Perl-style shorthand classes `\s \d \w \h` (and their
+/// negations) to explicit ASCII classes. Ruby/Onigmo defines them as
+/// ASCII-only — `\s` = `[ \t\r\n\f\v]`, `\d` = `[0-9]`, `\w` =
+/// `[0-9A-Za-z_]`, `\h` = `[0-9A-Fa-f]` — while the Rust engines
+/// default them to Unicode (`\s` matches U+00A0, `\d` matches
+/// arabic-indic digits, `\w` matches every Unicode letter). Passing
+/// them through verbatim silently OVER-matched: discovered by the
+/// front-matter differential, where `---\s*\n` with a stray NBSP
+/// after the fence matched on rubyrs but not on CRuby. `\h`/`\H`
+/// are Onigmo-only spellings the Rust engines reject outright, so
+/// rewriting also makes those patterns work at all.
+///
+/// `\b` / `\B` are deliberately NOT touched: Onigmo's word BOUNDARY
+/// is Unicode-aware (an asymmetry with its ASCII `\w` — verified on
+/// CRuby 3.4: `"café" =~ /caf\b/` → nil, `/café\b/` → 0), which is
+/// exactly the Rust default.
+///
+/// Inside a character class the shorthands expand to a NESTED class
+/// (`[\s]` → `[[ \t\r\n\f\x0B]]`, `[\S]` → `[[^ \t\r\n\f\x0B]]` —
+/// regex-crate set notation), which composes correctly under both a
+/// positive and a negated outer class. Nesting (rather than splicing
+/// the member characters inline) also avoids manufacturing RANGES
+/// out of thin air: CRuby rejects a shorthand as a range endpoint
+/// (`/[\d-x]/` → SyntaxError "unmatched range specifier"); inline
+/// splicing would have silently turned that into the range `9-x`,
+/// while the nested form `[[0-9]-x]` reads the `-` as a literal.
+/// (Accepting-with-literal-dash is still WIDER than CRuby's outright
+/// rejection, but no real program carries a pattern its own runtime
+/// can't parse.) POSIX bracket expressions `[[:alpha:]]` are
+/// skipped verbatim so their inner `]` doesn't confuse the class
+/// tracker. (POSIX classes themselves have a separate
+/// Ruby-Unicode-vs-Rust-ASCII divergence — out of scope here,
+/// tracked separately.)
+fn rewrite_ascii_shorthand_classes(pat: &str) -> std::borrow::Cow<'_, str> {
+    if !pat.contains('\\') {
+        return std::borrow::Cow::Borrowed(pat);
+    }
+    const SPACE: &str = " \\t\\r\\n\\f\\x0B";
+    const DIGIT: &str = "0-9";
+    const WORD: &str = "0-9A-Za-z_";
+    const HEX: &str = "0-9A-Fa-f";
+    let chars: Vec<char> = pat.chars().collect();
+    let mut out = String::with_capacity(pat.len() + 16);
+    let mut in_class = false;
+    let mut at_class_start = false;
+    let mut changed = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            let n = chars[i + 1];
+            let body = match n {
+                's' | 'S' => Some(SPACE),
+                'd' | 'D' => Some(DIGIT),
+                'w' | 'W' => Some(WORD),
+                'h' | 'H' => Some(HEX),
+                _ => None,
+            };
+            if let Some(body) = body {
+                // Same spelling in or out of a class: outside it
+                // IS the class; inside it nests as a set-notation
+                // union member, correct under any outer polarity
+                // (see doc).
+                let neg = if n.is_ascii_uppercase() { "^" } else { "" };
+                out.push_str(&format!("[{neg}{body}]"));
+                i += 2;
+                changed = true;
+                at_class_start = false;
+                continue;
+            }
+            // Any other escape pair: copy verbatim.
+            out.push(c);
+            out.push(n);
+            i += 2;
+            at_class_start = false;
+            continue;
+        }
+        if in_class && c == '[' && chars.get(i + 1) == Some(&':') {
+            // POSIX bracket expression — copy through to its `:]`
+            // so its closing `]` isn't taken for the class end.
+            let mut j = i + 2;
+            while j + 1 < chars.len() && !(chars[j] == ':' && chars[j + 1] == ']') {
+                j += 1;
+            }
+            if j + 1 < chars.len() {
+                for &cc in &chars[i..=j + 1] {
+                    out.push(cc);
+                }
+                i = j + 2;
+                at_class_start = false;
+                continue;
+            }
+        }
+        if !in_class {
+            if c == '[' {
+                in_class = true;
+                at_class_start = true;
+            }
+        } else if c == '^' && at_class_start {
+            // Negation right after `[` — still at the start.
+        } else if c == ']' && !at_class_start {
+            in_class = false;
+            at_class_start = false;
+        } else {
+            at_class_start = false;
+        }
+        out.push(c);
+        i += 1;
+    }
+    if changed {
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(pat)
+    }
+}
+
 /// Pattern preparation shared by validation and the (deferred)
 /// engine build: charclass-octal rewrite, then the `(?m)` prefix.
 ///
@@ -272,6 +388,7 @@ fn rewrite_charclass_octal_escapes(pat: &str) -> std::borrow::Cow<'_, str> {
 /// relies on `^`/`$` matching the front-matter delimiter lines.
 fn prepare_pattern(pattern: &str) -> String {
     let pattern = rewrite_charclass_octal_escapes(pattern);
+    let pattern = rewrite_ascii_shorthand_classes(&pattern);
     format!("(?m){pattern}")
 }
 

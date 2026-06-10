@@ -319,6 +319,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn regex_lookaround() { run_diff("regex_lookaround"); }
 #[cfg(feature = "regex")]
 #[test] fn string_split_regex() { run_diff("string_split_regex"); }
+#[cfg(feature = "regex")]
+#[test] fn regex_ascii_shorthand_classes() { run_diff("regex_ascii_shorthand_classes"); }
+#[cfg(feature = "regex")]
+#[test] fn file_read_bom_utf8() { run_diff("file_read_bom_utf8"); }
+#[test] fn file_delete() { run_diff("file_delete"); }
 #[test] fn lifecycle_hook_super() { run_diff("lifecycle_hook_super"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
 #[test] fn user_sort() { run_diff("user_sort"); }
