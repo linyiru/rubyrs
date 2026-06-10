@@ -1567,7 +1567,10 @@ impl Value {
                 // chars).
                 let mut out = String::new();
                 out.push('"');
-                if s.encoding.get() == crate::value::EncodingTag::Binary {
+                if matches!(
+                    s.encoding.get(),
+                    crate::value::EncodingTag::Binary | crate::value::EncodingTag::Other(_)
+                ) {
                     inspect_escape_bytes_into(&s.content.borrow(), &mut out);
                 } else {
                     inspect_escape_into(&s.to_string_lossy(), &mut out);

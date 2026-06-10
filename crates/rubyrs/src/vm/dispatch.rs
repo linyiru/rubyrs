@@ -1132,13 +1132,23 @@ impl Vm {
         // exists; report UTF-8 rather than panicking so a future
         // partial wiring degrades visibly (wrong name) instead of
         // fatally.
-        let const_name = match rs.encoding.get() {
-            crate::value::EncodingTag::Utf8 => "Encoding::UTF_8",
-            crate::value::EncodingTag::UsAscii => "Encoding::US_ASCII",
-            crate::value::EncodingTag::Binary => "Encoding::ASCII_8BIT",
-            crate::value::EncodingTag::Other(_) => "Encoding::UTF_8",
+        let const_name: std::borrow::Cow<'static, str> = match rs.encoding.get() {
+            crate::value::EncodingTag::Utf8 => "Encoding::UTF_8".into(),
+            crate::value::EncodingTag::UsAscii => "Encoding::US_ASCII".into(),
+            crate::value::EncodingTag::Binary => "Encoding::ASCII_8BIT".into(),
+            #[cfg(feature = "_encoding_full")]
+            crate::value::EncodingTag::Other(idx) => {
+                // Registry constant: "ISO-8859-1" → Encoding::ISO_8859_1
+                // (the preamble's encoding_full segment defines them).
+                match crate::encoding_full::name(idx) {
+                    Some(n) => format!("Encoding::{}", n.replace('-', "_")).into(),
+                    None => "Encoding::UTF_8".into(),
+                }
+            }
+            #[cfg(not(feature = "_encoding_full"))]
+            crate::value::EncodingTag::Other(_) => "Encoding::UTF_8".into(),
         };
-        let key = self.interner.intern(const_name);
+        let key = self.interner.intern(&const_name);
         let v = self.constants.get(&key).cloned()
             .expect("ICE: Encoding constant not in table — preamble didn't load");
         self.stack.push(v);
@@ -1184,7 +1194,30 @@ impl Vm {
                 self.stack.push(recv.clone());
                 Ok(true)
             }
-            ("encode", []) | ("encode", [_]) => {
+            ("encode", []) | ("encode", [_]) | ("encode", [_, Value::Hash(_)]) => {
+                // Trailing kwargs Hash: `undef: :replace` (+ optional
+                // `replace: "str"`) opts into replacement instead of
+                // raising on unmappable characters. Other keys are
+                // accepted and ignored (CRuby has more options; the
+                // E2 subset implements the replacement pair).
+                let mut replace: Option<Vec<u8>> = None;
+                if let Some(Value::Hash(hid)) = args.get(1) {
+                    let undef_key = Value::Sym(self.interner.intern("undef"));
+                    let undef_on = matches!(
+                        self.heap.hash_index_lookup(*hid, &undef_key)
+                            .map(|pos| &self.heap.hash(*hid)[pos].1),
+                        Some(Value::Sym(s)) if &**self.interner.resolve(*s) == "replace"
+                    );
+                    if undef_on {
+                        let rep_key = Value::Sym(self.interner.intern("replace"));
+                        replace = Some(match self.heap.hash_index_lookup(*hid, &rep_key)
+                            .map(|pos| self.heap.hash(*hid)[pos].1.clone())
+                        {
+                            Some(Value::Str(r)) => r.content.borrow().clone(),
+                            _ => b"?".to_vec(),
+                        });
+                    }
+                }
                 let target = match args.first() {
                     None => rs.encoding.get(),
                     Some(arg) => match self.resolve_encoding_arg(arg) {
@@ -1200,6 +1233,41 @@ impl Vm {
                         }
                     },
                 };
+                // Real transcoding pairs (Utf8 ↔ registry) — handled
+                // before the ascii-only shortcut so multi-byte text
+                // actually converts.
+                #[cfg(feature = "_encoding_full")]
+                {
+                    use crate::value::EncodingTag;
+                    let src = rs.encoding.get();
+                    if let (EncodingTag::Utf8, EncodingTag::Other(idx)) = (src, target) {
+                        let text = rs.to_string_lossy();
+                        match crate::encoding_full::encode_from_utf8(idx, &text, replace.as_deref()) {
+                            Ok(bytes) => {
+                                let v = Value::new_str_bytes(bytes);
+                                if let Value::Str(ref ns) = v {
+                                    ns.encoding.set(target);
+                                }
+                                self.stack.push(v);
+                                return Ok(true);
+                            }
+                            Err((cp, to)) => {
+                                return Err(self.trap(RubyError::HostException {
+                                    class_name: "Encoding::UndefinedConversionError".to_string(),
+                                    message: format!("U+{cp:04X} from UTF-8 to {to}"),
+                                }));
+                            }
+                        }
+                    }
+                    if let (EncodingTag::Other(idx), EncodingTag::Utf8) = (src, target) {
+                        let bytes = rs.content.borrow().clone();
+                        if let Some(text) = crate::encoding_full::decode_to_utf8(idx, &bytes) {
+                            self.stack.push(Value::new_str(text));
+                            return Ok(true);
+                        }
+                    }
+                }
+                let _ = &replace;
                 let src = rs.encoding.get();
                 let bytes = rs.content.borrow().clone();
                 let ascii_only = bytes.iter().all(|&b| b < 0x80);
@@ -1271,6 +1339,9 @@ impl Vm {
             "UTF-8" => Some(EncodingTag::Utf8),
             "US-ASCII" | "ASCII" => Some(EncodingTag::UsAscii),
             "ASCII-8BIT" | "BINARY" => Some(EncodingTag::Binary),
+            #[cfg(feature = "_encoding_full")]
+            other => crate::encoding_full::find(other),
+            #[cfg(not(feature = "_encoding_full"))]
             _ => None,
         }
     }

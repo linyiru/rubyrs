@@ -50,12 +50,18 @@ pub enum EncodingTag {
 }
 
 impl EncodingTag {
-    /// CRuby's error-message display name (the BINARY dual-name).
+    /// CRuby's error-message display name (the BINARY dual-name;
+    /// registry tags resolve through `encoding_full` when built).
     pub(crate) fn display(self) -> &'static str {
         match self {
             EncodingTag::Utf8 => "UTF-8",
             EncodingTag::UsAscii => "US-ASCII",
             EncodingTag::Binary => "BINARY (ASCII-8BIT)",
+            #[cfg(feature = "_encoding_full")]
+            EncodingTag::Other(idx) => {
+                crate::encoding_full::name(idx).unwrap_or("OTHER")
+            }
+            #[cfg(not(feature = "_encoding_full"))]
             EncodingTag::Other(_) => "OTHER",
         }
     }

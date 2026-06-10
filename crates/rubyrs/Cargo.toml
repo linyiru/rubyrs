@@ -190,6 +190,15 @@ _kramdown_native = ["dep:rostdown"]
 # translation of the SAME parser; yaml.rb detects the host fn and
 # routes parse_document through it, rescuing back to pure Ruby for
 # inputs the translation declines. Zero new dependencies.
+# `_encoding_full` — ADR 0020 Tier 2: the encoding registry behind
+# `EncodingTag::Other(u8)` plus real transcoding for `String#encode`.
+# v1 ships ISO-8859-1 (hand-written — byte↔codepoint is the identity,
+# so no table dependency); the WHATWG-backed encodings (Shift_JIS,
+# EUC-JP, GBK, Big5, KOI8-R, Windows-1252, Latin-9) arrive with the
+# `encoding_rs` dep in a follow-up, gated on CRuby differential
+# probes per the amended ADR. NOT in cli-defaults; `everything`
+# picks it up.
+_encoding_full = []
 # `dep:regex` (not the `regex` VM feature): the front-matter host fn
 # compiles Jekyll's YAML_FRONT_MATTER_REGEXP natively. Pulling the dep
 # alone keeps the `--no-default-features --features _yaml_native`
@@ -232,7 +241,7 @@ cli-defaults = ["stdlib", "_sqlite", "_http_server", "sass", "mimalloc"]
 # `everything` — kitchen sink for embedders who want every
 # available battery pre-wired. ADR 0019 v3 line 314's "Bun-
 # class CLI / Edge runtime" target. ≤ 150 MB stripped.
-everything = ["cli-defaults", "_json_native", "_fiber"]
+everything = ["cli-defaults", "_json_native", "_fiber", "_encoding_full"]
 # `_http_server` enables the inbound HTTP server battery per
 # ADR 0022 v4. Pulls in hyper + tokio (current-thread runtime)
 # + http-body-util + bytes for the wire-protocol side; the

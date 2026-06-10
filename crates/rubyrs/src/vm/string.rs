@@ -338,6 +338,12 @@ pub(crate) fn string_call(
         // `bytesize` (added below); for binary protocol gems the
         // bytesize semantic is the meaningful one.
         (Value::Str(a), "length", []) | (Value::Str(a), "size", []) => {
+            // Registry encodings count per THAT encoding's units —
+            // E2 v1 (ISO-8859-1) is single-byte, so byte count.
+            #[cfg(feature = "_encoding_full")]
+            if let crate::value::EncodingTag::Other(_) = a.encoding.get() {
+                return Ok(Some(Value::Int(a.content.borrow().len() as i64)));
+            }
             Some(Value::Int(a.char_count() as i64))
         }
         // `String#count(sel, ...)` — count chars matching every
@@ -1611,7 +1617,10 @@ pub(crate) fn string_call(
         (Value::Str(s), "inspect", []) => {
             let mut out = String::new();
             out.push('"');
-            if s.encoding.get() == crate::value::EncodingTag::Binary {
+            if matches!(
+                s.encoding.get(),
+                crate::value::EncodingTag::Binary | crate::value::EncodingTag::Other(_)
+            ) {
                 crate::heap::inspect_escape_bytes_into(&s.content.borrow(), &mut out);
             } else {
                 crate::heap::inspect_escape_into(&s.to_string_lossy(), &mut out);
@@ -2306,6 +2315,26 @@ impl Vm {
                 }
                 match (name, args) {
                     ("chars", []) => {
+                        // Registry encodings: per-unit slices keep
+                        // the receiver's tag (E2 v1 is single-byte,
+                        // so one Value per byte — CRuby's
+                        // ["\xE9"]-shaped output for Latin-1).
+                        #[cfg(feature = "_encoding_full")]
+                        if let crate::value::EncodingTag::Other(_) = s.encoding.get() {
+                            let tag = s.encoding.get();
+                            let elems: Vec<Value> = s.content.borrow().iter()
+                                .map(|&b| {
+                                    let v = Value::new_str_bytes(vec![b]);
+                                    if let Value::Str(ref ns) = v {
+                                        ns.encoding.set(tag);
+                                    }
+                                    v
+                                })
+                                .collect();
+                            self.maybe_gc();
+                            let id = self.heap.alloc(HeapObj::Array(elems.into()));
+                            return Ok(Some(Value::Array(id)));
+                        }
                         let elems: Vec<Value> = s.to_string_lossy().chars()
                             .map(|c| Value::new_str(c.to_string()))
                             .collect();

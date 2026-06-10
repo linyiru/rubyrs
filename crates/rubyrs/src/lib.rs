@@ -47,6 +47,8 @@ pub(crate) mod rouge_native;
 pub(crate) mod rouge_ir;
 #[cfg(feature = "_kramdown_native")]
 pub(crate) mod kramdown_native;
+#[cfg(feature = "_encoding_full")]
+pub(crate) mod encoding_full;
 #[cfg(feature = "_yaml_native")]
 pub(crate) mod yaml_native;
 #[cfg(feature = "_liquid_native")]
@@ -2663,6 +2665,16 @@ self.eval_inner(
             "<rubyrs:preamble:signal>",
         )
             .expect("ICE: failed to load Signal preamble");
+        // ADR 0020 Tier 2 (`_encoding_full`): registry constants +
+        // an Encoding.find extension layered over the core
+        // three-name resolver. Same load-tail position as the
+        // accelerator shims — everything it reopens exists by now.
+        #[cfg(feature = "_encoding_full")]
+        self.eval_inner(
+            include_str!("preamble/encoding_full.rb"),
+            "<rubyrs:preamble:encoding_full>",
+        )
+            .expect("ICE: failed to load encoding_full preamble");
     }
 
     /// Replace the runtime's stdout sink.

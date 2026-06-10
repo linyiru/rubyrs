@@ -329,6 +329,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn array_subclass() { run_diff("array_subclass"); }
 #[test] fn string_encoding_e1() { run_diff("string_encoding_e1"); }
 #[test] fn string_encoding_compat() { run_diff("string_encoding_compat"); }
+#[cfg(feature = "_encoding_full")]
+#[test] fn encoding_full_latin1() { run_diff("encoding_full_latin1"); }
 #[test] fn lifecycle_hook_super() { run_diff("lifecycle_hook_super"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
 #[test] fn user_sort() { run_diff("user_sort"); }
