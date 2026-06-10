@@ -1030,6 +1030,26 @@ pub(crate) struct Vm {
     /// scoped errinfo, hot paths in exception-heavy code like Liquid
     /// rendering. Cached so those sites skip re-interning the literal.
     pub(crate) sym_bang: SymId,
+    /// Pre-interned `[]` for the collection-index fast path
+    /// (`try_fast_index`, vm/dispatch.rs).
+    pub(crate) sym_index_op: SymId,
+    /// Collection-index fast-path override guard. The fast path may
+    /// serve `h[k]` / `a[i]` directly ONLY while no user `[]` exists
+    /// anywhere on the Hash / Array ancestor chain (a reopen, an
+    /// `include`d module, or an Object-level `[]` must win — same
+    /// verdict the slow path's primitive-receiver user-method gate
+    /// reaches via `lookup_method_cached`). Recomputing that lookup
+    /// per index call would eat the win, so the verdicts are cached
+    /// here and revalidated lazily whenever `method_gen` moves —
+    /// every method-table mutation path (def / define_method / alias
+    /// / include / prepend / extend) already bumps `method_gen` for
+    /// the inline call caches, so a stale `true` is impossible.
+    /// `Vm::new` starts both gens at 0 with the flags `false` (fast
+    /// path off); the preamble's method definitions bump
+    /// `method_gen`, so the first user-code index call revalidates.
+    pub(crate) fast_index_checked_gen: u32,
+    pub(crate) fast_index_hash_safe: bool,
+    pub(crate) fast_index_array_safe: bool,
     /// Stack of Array/Hash ObjIds currently being rendered by
     /// `inspect_value`. A re-entry on an id already present is a cycle
     /// (`a = []; a << a`) and renders as `[...]` / `{...}` instead of
@@ -1319,6 +1339,7 @@ impl Vm {
         let sym_to_s = interner.intern("to_s");
         let sym_inspect = interner.intern("inspect");
         let sym_bang = interner.intern("$!");
+        let sym_index_op = interner.intern("[]");
         Vm {
             protos,
             interner,
@@ -1421,6 +1442,10 @@ impl Vm {
             sym_length,
             sym_size,
             sym_bang,
+            sym_index_op,
+            fast_index_checked_gen: 0,
+            fast_index_hash_safe: false,
+            fast_index_array_safe: false,
             inspect_stack: Vec::new(),
             builtin_class_cache: Default::default(),
             sym_to_s,

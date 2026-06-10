@@ -2027,6 +2027,106 @@ impl Vm {
         true
     }
 
+    /// Collection-index fast path: `h[key]` / `a[int]` on a PLAIN
+    /// (untagged) Hash / Array short-circuits the full dispatch
+    /// preamble (name resolve + arm probing — ~150ns/call, 8× CRuby's
+    /// `opt_aref`, measured hot in both Jekyll's read phase — data-hash
+    /// probes in `populate_categories` / `merge_data!` — and Liquid's
+    /// render scopes). Soundness gates, in order:
+    ///   - refined `[]` detours before the call site (`maybe_refined`)
+    ///   - a user `[]` anywhere on the Hash/Array ancestor chain turns
+    ///     the path off via the `method_gen`-revalidated flags
+    ///     (`fast_index_revalidate` below)
+    ///   - subclass instances (class_tag set) fall through to the
+    ///     subclass-override gate
+    ///   - Hash misses on a defaulted hash (scalar default or
+    ///     default-block) fall through so the canonical hash.rs arm
+    ///     owns those semantics; Array non-Int args (Range / two-arg
+    ///     slice arrive as other shapes) fall through likewise
+    ///
+    /// Hit semantics mirror the canonical arms byte-for-byte: Hash →
+    /// `hash_index_lookup` + pair clone / Nil; Array → negative-wrap
+    /// index, out-of-range Nil. No allocation on this path, so no
+    /// `maybe_gc` (same as the arms it mirrors).
+    fn try_fast_index(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> bool {
+        if no_recv || argc != 1 || name_id != self.sym_index_op {
+            return false;
+        }
+        let n = self.stack.len();
+        if n < 2 {
+            return false;
+        }
+        if self.fast_index_checked_gen != self.method_gen {
+            self.fast_index_revalidate();
+        }
+        match &self.stack[n - 2] {
+            Value::Hash(id) => {
+                if !self.fast_index_hash_safe {
+                    return false;
+                }
+                let id = *id;
+                if self.heap.hash_class_tag(id).is_some() {
+                    return false;
+                }
+                let v = if let Some(pos) = self.heap.hash_index_lookup(id, &self.stack[n - 1]) {
+                    self.heap.hash(id)[pos].1.clone()
+                } else {
+                    if self.heap.hash_default_value(id).is_some()
+                        || self.heap.hash_default_block(id).is_some()
+                    {
+                        return false;
+                    }
+                    Value::Nil
+                };
+                self.stack.truncate(n - 2);
+                self.stack.push(v);
+                true
+            }
+            Value::Array(id) => {
+                if !self.fast_index_array_safe {
+                    return false;
+                }
+                let id = *id;
+                if self.heap.array_class_tag(id).is_some() {
+                    return false;
+                }
+                let Value::Int(i) = self.stack[n - 1] else {
+                    return false;
+                };
+                let a = self.heap.array(id);
+                let idx = if i < 0 { a.len() as i64 + i } else { i };
+                let v = a.get(idx as usize).cloned().unwrap_or(Value::Nil);
+                self.stack.truncate(n - 2);
+                self.stack.push(v);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Recompute the `try_fast_index` override flags at the current
+    /// `method_gen`. The verdict intentionally uses the same
+    /// `lookup_method_uncached` walk (includes / prepends /
+    /// superclass chain) that the slow path's primitive-receiver
+    /// user-method gate resolves through, on the same class objects
+    /// (`classes["Hash"]` / `classes["Array"]` — the Rcs `class_of`
+    /// caches), so the two paths can't disagree. Missing class (raw
+    /// pre-preamble Vm) → flag stays off → slow path, correct.
+    fn fast_index_revalidate(&mut self) {
+        self.fast_index_checked_gen = self.method_gen;
+        let idx_sym = self.sym_index_op;
+        let hash_sym = self.interner.intern("Hash");
+        self.fast_index_hash_safe = match self.classes.get(&hash_sym).cloned() {
+            Some(c) => self.lookup_method_uncached(&c, idx_sym).is_none(),
+            None => false,
+        };
+        let array_sym = self.interner.intern("Array");
+        self.fast_index_array_safe = match self.classes.get(&array_sym).cloned() {
+            Some(c) => self.lookup_method_uncached(&c, idx_sym).is_none(),
+            None => false,
+        };
+    }
+
     /// `no_recv` builtin-or-host fast path. Tries the host-side
     /// builtin table first (`builtin_call` covers `puts` / `p` /
     /// `sprintf` / `require` / ...), then the
@@ -5527,6 +5627,13 @@ impl Vm {
         // comment spells out why that's currently safe and what
         // changes if a non-primitive arm is ever added.
         if !maybe_refined && self.try_fast_primitive(name_id, argc, no_recv) {
+            return Ok(());
+        }
+        // Collection-index fast path (`h[k]` / `a[i]` on plain
+        // Hash/Array) — same gating contract as `try_fast_primitive`
+        // above; the helper's doc comment spells out the soundness
+        // gates (override flags, subclass tags, default fall-through).
+        if !maybe_refined && self.try_fast_index(name_id, argc, no_recv) {
             return Ok(());
         }
         // Explicit-receiver monomorphic fast path: an `obj.method(args)`
