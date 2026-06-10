@@ -8,12 +8,13 @@
     "crates/rubyrs/src/json_native.rs": "behind the `_json_native` Cargo feature (serde_json accelerator for the pure JSON canon, ADR 0019 Rule 6); default CI build excludes",
     "crates/rubyrs/src/kramdown_native.rs": "behind the `_kramdown_native` Cargo feature (rostdown kramdown accelerator); default CI build excludes (same shape as rouge_native below)",
     "crates/rubyrs/src/liquid_native.rs": "behind the `_liquid_native` Cargo feature (liquidus template accelerator); default CI build excludes (same shape as rouge_native below)",
-    "crates/rubyrs/src/rouge_ir.rs": "behind the `_rouge_native` Cargo feature (Track C AST→IR compiler); default CI build excludes (same shape as rouge_native below)",
+    "crates/rubyrs/src/rouge_ir.rs": "behind the `_rouge_native` Cargo feature (Track C AST\u2192IR compiler); default CI build excludes (same shape as rouge_native below)",
     "crates/rubyrs/src/rouge_native.rs": "behind the `_rouge_native` Cargo feature (carmine rouge accelerator); default CI build excludes (same shape as json_native above)",
     "crates/rubyrs/src/yaml_native.rs": "behind the `_yaml_native` Cargo feature (native translation of the blessed YAML loader); default CI build excludes (same shape as rouge_native above)",
     "crates/rubyrs/src/sqlite.rs": "behind the `_sqlite` Cargo feature (rusqlite + bundled libsqlite3 + SQLite3::Database/Statement surface, ADR 0027); default CI build excludes (same shape as http_server / stdlib / fiber / json_native above)",
     "crates/rubyrs/src/vm/cext_wasi.rs": "cfg(target_os = \"wasi\") gated; only compiled on wasm32-wasip1, not on the Linux coverage runner",
-    "crates/rubyrs/src/vm/fiber.rs": "behind the `_fiber` Cargo feature; the default CI coverage run uses default features (matches the http_server / stdlib pattern above)"
+    "crates/rubyrs/src/vm/fiber.rs": "behind the `_fiber` Cargo feature; the default CI coverage run uses default features (matches the http_server / stdlib pattern above)",
+    "crates/rubyrs/src/encoding_full.rs": "feature-gated (_encoding_full) \u2014 not built on the default CI coverage run; unit tests live in-module and run under the feature"
   },
   "files": {
     "crates/carmine/src/engine.rs": 64,
