@@ -18,6 +18,7 @@
     "crates/carmine/src/html.rs": 74,
     "crates/carmine/src/lib.rs": 0,
     "crates/carmine/src/table.rs": 81,
+    "crates/liquidus/src/lib.rs": 0,
     "crates/rostdown/src/html.rs": 85,
     "crates/rostdown/src/lib.rs": 68,
     "crates/rostdown/src/parse.rs": 91,
