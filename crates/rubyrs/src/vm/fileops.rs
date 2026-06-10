@@ -377,6 +377,58 @@ impl Vm {
             // append write overwrites prior content. Other opts (perm:,
             // binmode:) are still accepted and ignored. jekyll's
             // page/document writer uses the keyword form.
+            // `File.binread(path[, length[, offset]])` — binary-mode
+            // read: same raw-bytes read as File.read (rubyrs never
+            // transcodes) but the result is TAGGED ASCII-8BIT, the
+            // CRuby contract. Closes the "no File.binread" gap noted
+            // back in the P0 review.
+            ("binread", [p]) | ("binread", [p, _]) | ("binread", [p, _, _]) => {
+                self.check_filesystem_io_allowed("File.binread", None)?;
+                let path = path_arg(p)?;
+                self.check_filesystem_io_allowed(
+                    "File.binread",
+                    Some(Path::new(&path)),
+                )?;
+                let length = match args.get(1) {
+                    Some(Value::Int(n)) if *n >= 0 => Some(*n as usize),
+                    _ => None,
+                };
+                let offset = match args.get(2) {
+                    Some(Value::Int(n)) if *n >= 0 => *n as usize,
+                    _ => 0,
+                };
+                match std::fs::read(&path) {
+                    Ok(b) => {
+                        let start = offset.min(b.len());
+                        let slice = &b[start..];
+                        let out = match length {
+                            Some(n) => &slice[..n.min(slice.len())],
+                            None => slice,
+                        };
+                        Value::new_str_bytes_binary(out.to_vec())
+                    }
+                    Err(e) => return Err(self.trap(io_error(&e, Some(Path::new(&path))))),
+                }
+            }
+            // `File.binwrite(path, content)` — rubyrs writes raw
+            // bytes unconditionally, so this is File.write minus the
+            // append-mode opts handling (binwrite has no mode: opt).
+            ("binwrite", [p, body]) => {
+                self.check_filesystem_io_allowed("File.binwrite", None)?;
+                let path = path_arg(p)?;
+                self.check_filesystem_io_allowed(
+                    "File.binwrite",
+                    Some(Path::new(&path)),
+                )?;
+                let contents: Vec<u8> = match body {
+                    Value::Str(s) => s.content.borrow().clone(),
+                    _ => body.to_display(&self.heap, &self.interner).into_bytes(),
+                };
+                match std::fs::write(&path, &contents) {
+                    Ok(()) => Value::Int(contents.len() as i64),
+                    Err(e) => return Err(self.trap(io_error(&e, Some(Path::new(&path))))),
+                }
+            }
             // `File.delete(*paths)` / alias `File.unlink` — removes
             // each named file, returns the count removed (CRuby
             // contract). A missing file raises Errno::ENOENT via the

@@ -164,9 +164,8 @@ groups in the regex make `scan` return Array-of-captures
 per match, no groups → match-string), `tr(from, to)`,
 `sub` / `gsub` (see below), `to_i` / `to_f` / `to_sym`,
 `encode` / `force_encoding` (no-op stubs — the subset has no
-encoding tag; see "String encoding stubs" below),
-`valid_encoding?` (always true), `encoding` (returns the
-String name `"UTF-8"`; see "String encoding stubs" below),
+encoding tag semantics per ADR 0020 E1; see "String
+encoding" below), `valid_encoding?`, `encoding`,
 `unpack(format)` (subset — see "Pack/Unpack"),
 interpolation `"... #{expr} ..."`.
 
@@ -447,32 +446,45 @@ Unsupported directives (`m`, `U`, `w`, `f` / `d` / `e` / `E`
 ships alongside for inspecting packed output without a
 `unpack("C*")` round-trip.
 
-### String encoding stubs
+### String encoding — ADR 0020 Phase E1 (tag semantics, no transcoding)
 
-`String#encode(target)` and `String#force_encoding(target)`
-are no-ops that return the receiver (Rc-shared, no copy).
-The subset stores raw bytes with no per-string encoding tag
-(`Vec<u8>`-backed `RStr`); cross-encoding transliteration is
-explicitly out of scope. The methods exist for compatibility
-with library code that defensively normalises at boundaries
-(`s.force_encoding("UTF-8")`).
+Every `RStr` carries an `EncodingTag` (UTF-8 / US-ASCII /
+ASCII-8BIT a.k.a. BINARY). Within that tag set, behaviour is
+pinned to CRuby 3.4 by the `string_encoding_e1` /
+`string_encoding_compat` diff fixtures:
 
-Query-side stubs:
+- `String#encoding` returns the real `Encoding` singleton
+  (`#<Encoding:BINARY (ASCII-8BIT)>` dual-name inspect included);
+  `force_encoding` flips the tag in place (names case-insensitive
+  with CRuby's fold set, `Encoding` objects accepted,
+  `ArgumentError` on unknown names, `FrozenError` on frozen
+  receivers); `valid_encoding?` judges the bytes against the tag.
+- `==`/`eql?`/`hash` are tag-compatible: pure-ASCII content is
+  encoding-blind, non-ASCII content with different tags compares
+  unequal and hashes apart (Hash keys follow).
+- `+` / `<<` / `concat` / interpolation apply CRuby's
+  compatibility rule (ASCII-only side defers; `<<`/`concat`
+  upgrade the receiver's tag) and raise
+  `Encoding::CompatibilityError` for non-ASCII mixes; `<=>`
+  breaks byte-equal ties by encoding index.
+- `encode` covers the no-conversion subset (same encoding, or
+  ASCII-only bytes across encodings) and raises
+  `Encoding::UndefinedConversionError` (CRuby's class and message
+  shape) where real transcoding would be required — that is
+  Tier 2's `_encoding_full` (per the amended ADR 0020:
+  `encoding_rs` + CRuby differential probing).
+- Producers tag correctly: `String#b`, `Array#pack`,
+  `Integer#chr` (US-ASCII < 0x80, BINARY above), `File.binread`
+  (+ `binwrite`), cext `rb_str_new`, SQLite BLOBs;
+  `dup`/`clone`/`+@`/`-@`/`*`/`strip` family/`chomp` propagate
+  the receiver's tag; BINARY strings `inspect` with CRuby's
+  `\xNN` byte escapes.
 
-- `String#valid_encoding?` — always returns `true`. The
-  receiver is viewed via `String::from_utf8_lossy`, so the
-  observable character stream is well-formed UTF-8 by
-  construction. CRuby can return `false` for malformed
-  byte sequences in encoding-tagged strings; we can't
-  model that.
-- `String#encoding` — returns the encoding NAME as a
-  `String` (`"UTF-8"`). CRuby returns an `Encoding`
-  object. The portable usage shape is `.encoding.to_s`
-  or `.encoding.to_s == "UTF-8"`. Direct
-  `str.encoding == Encoding::UTF_8` does NOT work — even
-  if `Encoding::UTF_8` were added later, the comparison
-  would be String-vs-Encoding-object and diverge from
-  CRuby.
+Remaining E1 boundaries (documented, not silent): other derived
+strings (`slice`/`gsub`/`reverse`/case ops) still produce UTF-8-
+tagged results, and char-level operations on BINARY strings use
+the UTF-8-lossy view rather than CRuby's byte-indexed semantics —
+both queued behind `_encoding_full`.
 
 ### Object reflection
 

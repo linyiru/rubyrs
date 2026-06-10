@@ -32,3 +32,11 @@ t("usascii eq")        { "abc" == "abc".dup.force_encoding("US-ASCII") }
 t("interp bin")        { "x#{"\xff".b}".encoding }
 t("interp incompat")   { "é#{"\xff".b}" }
 t("uniq cross")        { ["abc", "abc".b, "é", "é".b].uniq.size }
+
+t("strip bin tag")    { " \xff ".b.strip.encoding }
+t("strip bin bytes")  { " \xffé ".b.strip.bytes }
+t("repeat tag")       { ("x".b * 2).encoding }
+t("chomp tag")        { "a\n".b.chomp.encoding }
+t("chr tags")         { [65.chr.encoding, 200.chr.encoding] }
+t("bin inspect")      { "\xff\xc3\xa9ab\n".b.inspect }
+t("binread")          { File.binwrite("/tmp/rubyrs_enc_fx", "\xff\x00a"); r = File.binread("/tmp/rubyrs_enc_fx"); File.delete("/tmp/rubyrs_enc_fx"); [r.encoding, r.bytes] }

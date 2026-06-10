@@ -1247,6 +1247,32 @@ impl Heap {
     }
 }
 
+/// Byte-level inspect escape for BINARY-tagged strings: CRuby
+/// renders every non-ASCII byte as `\xNN` (even bytes that would
+/// form valid UTF-8), while ASCII bytes get the same short-escape
+/// treatment as the char path. E1 slice 3.
+pub(crate) fn inspect_escape_bytes_into(bytes: &[u8], out: &mut String) {
+    for &b in bytes {
+        match b {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            0x07 => out.push_str("\\a"),
+            0x08 => out.push_str("\\b"),
+            0x09 => out.push_str("\\t"),
+            0x0A => out.push_str("\\n"),
+            0x0B => out.push_str("\\v"),
+            0x0C => out.push_str("\\f"),
+            0x0D => out.push_str("\\r"),
+            0x1B => out.push_str("\\e"),
+            0x20..=0x7E => out.push(b as char),
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\x{b:02X}");
+            }
+        }
+    }
+}
+
 /// Escape `raw` for inclusion in a Ruby `String#inspect`/`#to_inspect`
 /// representation, appending to `out` (caller wraps in the `"` quotes).
 ///
@@ -1535,12 +1561,17 @@ impl Value {
                 // Both `Array#inspect` (this path, via to_inspect on
                 // each element) and `String#inspect` (the primitive
                 // arm in vm/string.rs) share the same escape rules —
-                // funnel both through the `inspect_escape_into`
-                // helper so they can't drift apart.
-                let raw = s.to_string_lossy();
-                let mut out = String::with_capacity(raw.len() + 2);
+                // funnel both through the shared helpers so they
+                // can't drift apart. BINARY-tagged strings take the
+                // byte-escape route (CRuby shows \xNN, not lossy
+                // chars).
+                let mut out = String::new();
                 out.push('"');
-                inspect_escape_into(&raw, &mut out);
+                if s.encoding.get() == crate::value::EncodingTag::Binary {
+                    inspect_escape_bytes_into(&s.content.borrow(), &mut out);
+                } else {
+                    inspect_escape_into(&s.to_string_lossy(), &mut out);
+                }
                 out.push('"');
                 out
             },

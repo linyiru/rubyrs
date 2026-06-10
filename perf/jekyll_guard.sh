@@ -51,7 +51,11 @@ if out="$("$BIN" "$probe" 2>&1)"; then
   # Measurement builds carry it since 2026-06-10 (wall −8.5% on the
   # Jekyll benches, RSS +1.3% post-lazy-regex); a binary without it
   # is a clobber suspect just like a missing accelerator.
-  if ! nm -gU "$BIN" 2>/dev/null | grep -q "__mi_arenas"; then
+  # Pattern is the broad `_mi_` prefix: the specific __mi_arenas
+  # symbols' external visibility turned out to vary across builds
+  # (one rebuild dropped them from -gU while 80+ other mi_ symbols
+  # stayed), which made the narrow probe a false alarm.
+  if ! nm -gU "$BIN" 2>/dev/null | grep -q "_mi_"; then
     echo "jekyll_guard: FEATURE SANITY FAILED — MISSING: mimalloc (no mi_malloc symbol)" >&2
     echo "jekyll_guard: rebuild with:" >&2
     echo "  cargo build --release -p rubyrs --features stdlib,sass,_rouge_native,_kramdown_native,_yaml_native,_liquid_native,mimalloc" >&2

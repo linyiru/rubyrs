@@ -38,8 +38,39 @@ use super::PinGuard;
 /// Divergence pinned by `tests/fixtures/divergence_string_strip_nul.rb`
 /// (PR #193) is the gap this predicate closes.
 #[inline]
-fn strip_ws_or_nul(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n' | '\x0B' | '\x0C' | '\r' | '\0')
+/// Ruby `String#strip`'s trim set, byte-level. The set is pure
+/// ASCII, and ASCII bytes never appear inside a UTF-8 multi-byte
+/// sequence — so byte-level trimming is exactly equivalent for
+/// valid UTF-8 AND stops mangling binary content (the old
+/// `to_string_lossy` route rewrote invalid sequences to U+FFFD
+/// bytes in the result). E1 slice 3.
+fn strip_b(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | 0x0B | 0x0C | b'\r' | 0)
+}
+
+fn trim_bytes(bytes: &[u8], start: bool, end: bool) -> &[u8] {
+    let mut lo = 0;
+    let mut hi = bytes.len();
+    if start {
+        while lo < hi && strip_b(bytes[lo]) {
+            lo += 1;
+        }
+    }
+    if end {
+        while hi > lo && strip_b(bytes[hi - 1]) {
+            hi -= 1;
+        }
+    }
+    &bytes[lo..hi]
+}
+
+/// Copy `tag` onto a fresh `Value::Str` — the one-liner the
+/// byte-preserving ops use to propagate the receiver's encoding.
+fn with_tag(v: Value, tag: crate::value::EncodingTag) -> Value {
+    if let Value::Str(ref ns) = v {
+        ns.encoding.set(tag);
+    }
+    v
 }
 
 /// `String#lines` / `#each_line` splitting: break `src` at each `sep`,
@@ -601,15 +632,18 @@ pub(crate) fn string_call(
         // `tests/fixtures/divergence_string_strip_nul.rb` (PR
         // #193) until this fix. Use a predicate that matches
         // CRuby's set exactly.
-        (Value::Str(a), "strip", []) => Some(Value::new_str(
-            a.to_string_lossy().trim_matches(strip_ws_or_nul).to_string()
-        )),
-        (Value::Str(a), "lstrip", []) => Some(Value::new_str(
-            a.to_string_lossy().trim_start_matches(strip_ws_or_nul).to_string()
-        )),
-        (Value::Str(a), "rstrip", []) => Some(Value::new_str(
-            a.to_string_lossy().trim_end_matches(strip_ws_or_nul).to_string()
-        )),
+        (Value::Str(a), "strip", []) => {
+            let b = a.borrow();
+            Some(with_tag(Value::new_str_bytes(trim_bytes(&b, true, true).to_vec()), a.encoding.get()))
+        }
+        (Value::Str(a), "lstrip", []) => {
+            let b = a.borrow();
+            Some(with_tag(Value::new_str_bytes(trim_bytes(&b, true, false).to_vec()), a.encoding.get()))
+        }
+        (Value::Str(a), "rstrip", []) => {
+            let b = a.borrow();
+            Some(with_tag(Value::new_str_bytes(trim_bytes(&b, false, true).to_vec()), a.encoding.get()))
+        }
         // Destructive strip siblings — return self on change,
         // nil otherwise. The frozen check + check() guard mirror
         // the other `!` variants in this file.
@@ -619,9 +653,10 @@ pub(crate) fn string_call(
                     msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
                 });
             }
-            let new_bytes = a.with_str_lossy(|s|
-                s.trim_matches(strip_ws_or_nul).as_bytes().to_vec()
-            );
+            let new_bytes = {
+                let b = a.borrow();
+                trim_bytes(&b, true, true).to_vec()
+            };
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
                 check(new_bytes.len())?;
@@ -635,9 +670,10 @@ pub(crate) fn string_call(
                     msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
                 });
             }
-            let new_bytes = a.with_str_lossy(|s|
-                s.trim_start_matches(strip_ws_or_nul).as_bytes().to_vec()
-            );
+            let new_bytes = {
+                let b = a.borrow();
+                trim_bytes(&b, true, false).to_vec()
+            };
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
                 check(new_bytes.len())?;
@@ -672,7 +708,7 @@ pub(crate) fn string_call(
                     msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
                 }),
             };
-            Some(Value::new_str_bytes(trimmed))
+            Some(with_tag(Value::new_str_bytes(trimmed), a.encoding.get()))
         }
         (Value::Str(a), "chomp!", args) => {
             if a.frozen.get() {
@@ -720,9 +756,10 @@ pub(crate) fn string_call(
                     msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
                 });
             }
-            let new_bytes = a.with_str_lossy(|s|
-                s.trim_end_matches(strip_ws_or_nul).as_bytes().to_vec()
-            );
+            let new_bytes = {
+                let b = a.borrow();
+                trim_bytes(&b, false, true).to_vec()
+            };
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
                 check(new_bytes.len())?;
@@ -1473,7 +1510,7 @@ pub(crate) fn string_call(
                 RubyError::ArgumentError { msg: "argument too big".to_string() }
             })?;
             check(new_len)?;
-            Some(Value::new_str_bytes(a.borrow().repeat(n)))
+            Some(with_tag(Value::new_str_bytes(a.borrow().repeat(n)), a.encoding.get()))
         }
         (Value::Str(a), "<", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() < *b.borrow())),
         (Value::Str(a), "<=", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() <= *b.borrow())),
@@ -1572,10 +1609,13 @@ pub(crate) fn string_call(
         // printable ASCII + the standard escape set; exotic
         // Unicode escapes (`\u{...}`) are out of scope.
         (Value::Str(s), "inspect", []) => {
-            let raw = s.to_string_lossy();
-            let mut out = String::with_capacity(raw.len() + 2);
+            let mut out = String::new();
             out.push('"');
-            crate::heap::inspect_escape_into(&raw, &mut out);
+            if s.encoding.get() == crate::value::EncodingTag::Binary {
+                crate::heap::inspect_escape_bytes_into(&s.content.borrow(), &mut out);
+            } else {
+                crate::heap::inspect_escape_into(&s.to_string_lossy(), &mut out);
+            }
             out.push('"');
             Some(Value::new_str(out))
         }
