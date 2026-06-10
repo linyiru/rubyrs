@@ -2484,6 +2484,18 @@ impl Vm {
                 false,
             )?;
         }
+        // `_liquid_native` accelerator hook, same shape: by the time
+        // the TOP-LEVEL `require "jekyll"` finishes,
+        // Jekyll::LiquidRenderer::File is defined and the shim can
+        // patch it. `defined?(...)`-guarded, inert outside Jekyll.
+        #[cfg(feature = "_liquid_native")]
+        if path_str == "jekyll" && matches!(result, Ok(Value::Bool(true))) {
+            self.eval_string(
+                crate::liquid_native::SHIM,
+                "<rubyrs:liquid_native_shim>",
+                false,
+            )?;
+        }
         result
     }
 

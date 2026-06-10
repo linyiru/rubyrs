@@ -375,6 +375,11 @@ fn main() {
     // blessed YAML loader; stdlib_vendor/yaml.rb detects + uses it.
     #[cfg(feature = "_yaml_native")]
     rubyrs::register_yaml_native_host_fns(&mut rt);
+    // `_liquid_native` accelerator: expose the liquidus engine host
+    // fns; the require("jekyll") hook injects the shim that detects +
+    // uses them.
+    #[cfg(feature = "_liquid_native")]
+    rubyrs::register_liquid_native_host_fns(&mut rt);
     // `_sqlite` battery: when built in, expose the
     // SQLite3::Database + 25-class exception hierarchy + 9
     // host fns per ADR 0027 §"Capability host-fns consumed".

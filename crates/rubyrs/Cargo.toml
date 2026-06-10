@@ -191,6 +191,13 @@ _kramdown_native = ["dep:rostdown"]
 # routes parse_document through it, rescuing back to pure Ruby for
 # inputs the translation declines. Zero new dependencies.
 _yaml_native = []
+# `_liquid_native` — liquidus-backed accelerator for Liquid rendering
+# under Jekyll. After `require "jekyll"` a shim patches
+# Jekyll::LiquidRenderer::File to compile templates through the native
+# engine (whole-template decline) and resolve each template's
+# statically-known variable paths once per render. See
+# src/liquid_native.rs.
+_liquid_native = ["dep:liquidus"]
 # `_sqlite` enables the SQLite battery per ADR 0027.
 # Pulls in `rusqlite` (bundled libsqlite3 — ~2 MB compiled, no
 # system libsqlite3 needed) + `lru` (per-connection prepared-
@@ -259,6 +266,9 @@ carmine = { path = "../carmine", version = "0.2.0", optional = true }
 # `_kramdown_native` battery: the rostdown kramdown-compatible Markdown
 # renderer (workspace sibling).
 rostdown = { path = "../rostdown", version = "0.1.0", optional = true }
+# `_liquid_native` battery: the liquidus Liquid-compatible template
+# engine (workspace sibling).
+liquidus = { path = "../liquidus", version = "0.1.0", optional = true }
 # Optional via the `bignum` feature. With bignum off, num_bigint is not
 # pulled in. ADR 0018 Phase 1 will switch this to `default-features =
 # false` when rubyrs-core extracts (num-bigint's `std` is opt-out).

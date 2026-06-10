@@ -47,6 +47,8 @@ pub(crate) mod rouge_native;
 pub(crate) mod kramdown_native;
 #[cfg(feature = "_yaml_native")]
 pub(crate) mod yaml_native;
+#[cfg(feature = "_liquid_native")]
+pub(crate) mod liquid_native;
 mod output;
 // `regex_engine` is public because `Value::Regex(Rc<CompiledRegex>)`
 // is reachable from the embedder-visible `Value` enum; an
@@ -121,6 +123,13 @@ pub use kramdown_native::register_host_fns as register_kramdown_native_host_fns;
 /// translation. See [`yaml_native::register_host_fns`].
 #[cfg(feature = "_yaml_native")]
 pub use yaml_native::register_host_fns as register_yaml_native_host_fns;
+/// Register `_liquid_native` host fns (`__rubyrs_liquid_compile` …)
+/// onto a `Runtime`. The shim that rubyrs injects after
+/// `require "jekyll"` detects the registration via `defined?(...)`
+/// and routes subset templates through the liquidus native engine.
+/// See [`liquid_native::register_host_fns`].
+#[cfg(feature = "_liquid_native")]
+pub use liquid_native::register_host_fns as register_liquid_native_host_fns;
 /// Register `_sqlite` host fns + the `SQLite3::Database`
 /// preamble. Mirrors the other battery `register_*_host_fns`
 /// shape. See `sqlite::register_host_fns`.

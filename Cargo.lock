@@ -1627,6 +1627,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "libloading",
+ "liquidus",
  "lru",
  "mimalloc",
  "num-bigint",

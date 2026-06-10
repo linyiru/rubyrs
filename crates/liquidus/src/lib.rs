@@ -57,6 +57,10 @@ pub struct VarNeed {
     /// length as [`LValue::Int`] under `path + "#size"` when a slice
     /// would hide it; otherwise the supplied array's length is used.
     pub need_size: bool,
+    /// For iterated collections: the loop-variable fields the body
+    /// reads (`post.url` → "url"). The embedder only needs to
+    /// materialize these per item.
+    pub fields: Vec<String>,
 }
 
 /// Resolved values for one render, keyed by [`VarNeed::path`] (plus
@@ -132,6 +136,9 @@ pub fn compile(
                 _ => None,
             };
             b.need_size |= a.need_size;
+            b.fields.append(&mut a.fields);
+            b.fields.sort();
+            b.fields.dedup();
             true
         } else {
             false

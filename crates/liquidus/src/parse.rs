@@ -95,7 +95,9 @@ pub(crate) fn parse_template(
 struct Ctx<'a> {
     include: &'a dyn Fn(&str) -> Option<String>,
     needs: &'a mut Vec<VarNeed>,
-    loop_vars: Vec<String>,
+    /// In-scope loop variables with their collection paths, so field
+    /// reads on a loop var attach to the collection's VarNeed.
+    loop_vars: Vec<(String, String)>,
     depth: usize,
 }
 
@@ -195,7 +197,7 @@ fn parse_nodes(ctx: &mut Ctx<'_>, toks: &mut Toks, stop: Option<&str>) -> Result
                     "for" => {
                         let (var, collection, limit) =
                             parse_for_head(ctx, inner["for".len()..].trim())?;
-                        ctx.loop_vars.push(var.clone());
+                        ctx.loop_vars.push((var.clone(), collection.clone()));
                         let body = parse_nodes(ctx, toks, Some("endfor"));
                         ctx.loop_vars.pop();
                         out.push(Node::For {
@@ -429,13 +431,23 @@ fn parse_var(ctx: &mut Ctx<'_>, src: &str) -> Result<VarRef, Error> {
     if segs[0] == "forloop" {
         return Err(declined("forloop-variable"));
     }
-    if ctx.loop_vars.iter().any(|v| v == segs[0]) {
+    if let Some((_, collection)) = ctx.loop_vars.iter().find(|(v, _)| v == segs[0]) {
         let var = segs[0].to_string();
         let field = match segs.len() {
             1 => None,
             2 => Some(segs[1].to_string()),
             _ => return Err(declined("deep-loop-field")),
         };
+        // Attach the field to the collection's need so the embedder
+        // knows which item fields to materialize.
+        if let Some(f) = &field {
+            let collection = collection.clone();
+            if let Some(need) = ctx.needs.iter_mut().rev().find(|n| n.path == collection)
+                && !need.fields.contains(f)
+            {
+                need.fields.push(f.clone());
+            }
+        }
         return Ok(VarRef::Loop { var, field, size });
     }
     let path = segs.join(".");
@@ -446,6 +458,7 @@ fn parse_var(ctx: &mut Ctx<'_>, src: &str) -> Result<VarRef, Error> {
         path: path.clone(),
         slice: if size { Some(0) } else { None },
         need_size: size,
+        fields: Vec::new(),
     });
     Ok(VarRef::Supplied { path, size })
 }
