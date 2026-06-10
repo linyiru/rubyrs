@@ -548,7 +548,7 @@ pub(crate) fn string_call(
         // the result is independent and unfrozen. We don't tag
         // encodings per-string, so the ASCII-8BIT distinction is
         // a no-op for our subset.
-        (Value::Str(a), "b", []) => Some(Value::new_str_bytes(a.content.borrow().clone())),
+        (Value::Str(a), "b", []) => Some(Value::new_str_bytes_binary(a.content.borrow().clone())),
         // CRuby's strip family treats `\x00` as part of the
         // strippable whitespace set (along with space, tab, NL,
         // CR, FF, VT). Rust's `is_whitespace()` excludes NUL,

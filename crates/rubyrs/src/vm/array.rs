@@ -1169,7 +1169,7 @@ impl Vm {
                         let fmt_str = fmt.to_string_lossy();
                         let bytes = super::string::pack_values(&snapshot, &fmt_str)
                             .map_err(|m| self.trap(RubyError::ArgumentError { msg: m }))?;
-                        Some(Value::new_str_bytes(bytes))
+                        Some(Value::new_str_bytes_binary(bytes))
                     }
                     // `arr.assoc(needle)` — first sub-Array whose
                     // `[0]` equals `needle`; nil if none. Sub-Array

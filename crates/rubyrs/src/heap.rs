@@ -1376,6 +1376,11 @@ impl Value {
         Value::Str(std::rc::Rc::new(crate::value::RStr::new(s.into())))
     }
     /// Binary-safe constructor — preserves bytes verbatim (no UTF-8 check).
+    /// Bytes tagged ASCII-8BIT (CRuby BINARY) — see
+    /// `RStr::from_bytes_binary` for the caller contract.
+    pub fn new_str_bytes_binary(b: Vec<u8>) -> Self {
+        Value::Str(std::rc::Rc::new(crate::value::RStr::from_bytes_binary(b)))
+    }
     pub fn new_str_bytes(b: Vec<u8>) -> Self {
         Value::Str(std::rc::Rc::new(crate::value::RStr::from_bytes(b)))
     }

@@ -211,7 +211,7 @@ fn cext_handle_to_value_d(
             let logical_len = bytes.len().saturating_sub(1);
             let mut v = bytes;
             v.truncate(logical_len);
-            Value::new_str_bytes(v)
+            Value::new_str_bytes_binary(v)
         }
         rubyrs_cext::CValue::Int(n) => Value::Int(n),
         rubyrs_cext::CValue::Float(f) => Value::Float(f),

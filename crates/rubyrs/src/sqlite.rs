@@ -747,7 +747,7 @@ fn sqlite_to_value(
             (Value::new_str(s), len + 24)
         }
         ValueRef::Blob(bytes) => {
-            let v = Value::new_str_bytes(bytes.to_vec());
+            let v = Value::new_str_bytes_binary(bytes.to_vec());
             (v, bytes.len() + 24)
         }
     })

@@ -17,6 +17,33 @@ use crate::intern::{FxHashMap, SymId};
 pub struct RStr {
     pub(crate) content: RefCell<Vec<u8>>,
     pub(crate) frozen: Cell<bool>,
+    /// ADR 0020 Phase E1: the encoding TAG (carried, not yet
+    /// consumed — semantic enforcement of `==`/concat
+    /// compatibility and the `force_encoding`/`encoding`
+    /// reflection land in the E1 follow-up; this step only
+    /// threads the field through every construction site so
+    /// that change is a pure-semantics diff).
+    #[allow(dead_code)] // consumed by the E1 semantics follow-up
+    pub(crate) encoding: Cell<EncodingTag>,
+}
+
+/// ADR 0020's Tier 1 encoding tag. `Other(u8)` indexes the Tier 2
+/// `_encoding_full` registry (absent today — constructing it is
+/// not yet possible; the variant exists so downstream match arms
+/// are written exhaustively from day one).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EncodingTag {
+    /// String literals, interpolation results, text file reads —
+    /// anything the runtime knows (or assumes, per the current
+    /// UTF-8-lossy contract) to be UTF-8.
+    Utf8,
+    /// CRuby's ASCII-8BIT: cext binary input, pack/unpack
+    /// buffers, digest output — opaque bytes, no codepoint
+    /// semantics.
+    Binary,
+    /// A Tier 2 registry index (Latin-1, Shift_JIS, …).
+    #[allow(dead_code)]
+    Other(u8),
 }
 
 impl RStr {
@@ -26,14 +53,34 @@ impl RStr {
     /// content isn't later overwritten with non-UTF-8 bytes by
     /// `borrow_mut()` callers (e.g. cext binary input).
     pub fn new(s: String) -> Self {
-        Self { content: RefCell::new(s.into_bytes()), frozen: Cell::new(false) }
+        Self {
+            content: RefCell::new(s.into_bytes()),
+            frozen: Cell::new(false),
+            encoding: Cell::new(EncodingTag::Utf8),
+        }
     }
 
-    /// Construct from raw bytes (binary-safe path). Used by
-    /// `cext_handle_to_value` when the cext crossed binary data
-    /// — msgpack pack output, etc.
+    /// Construct from raw bytes. Tags UTF-8: the dominant
+    /// callers cross TEXT that merely isn't validated (file
+    /// reads, sliced strings); the byte-oriented producers that
+    /// genuinely mean ASCII-8BIT use `from_bytes_binary`.
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
-        Self { content: RefCell::new(bytes), frozen: Cell::new(false) }
+        Self {
+            content: RefCell::new(bytes),
+            frozen: Cell::new(false),
+            encoding: Cell::new(EncodingTag::Utf8),
+        }
+    }
+
+    /// Construct from raw bytes tagged ASCII-8BIT (CRuby's
+    /// BINARY): cext string input (`rb_str_new` is binary by
+    /// contract), msgpack frames, pack output, raw digests.
+    pub fn from_bytes_binary(bytes: Vec<u8>) -> Self {
+        Self {
+            content: RefCell::new(bytes),
+            frozen: Cell::new(false),
+            encoding: Cell::new(EncodingTag::Binary),
+        }
     }
 
     /// Convenient string view. Lossy on invalid UTF-8 — replaces
