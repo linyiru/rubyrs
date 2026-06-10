@@ -107,3 +107,13 @@ CI prints one of:
 |---|---|---|
 | (initial PR #11) | All four workloads: RSS 8192 KB, no wall gate | First commit; ~2× CI observation as flake margin while we calibrated. |
 | (this PR) | RSS 8192 → 5500 KB; added wall column (mm 1100, dm 700, static 1000, fizzbuzz disabled) | Multiple green CI runs established ubuntu's real ceiling (~4.2-4.3 MB). Wall numbers from same runs, padded ~1.5× for runner variance. |
+
+## Feature sanity guard (`jekyll_guard.sh`)
+
+Run `perf/jekyll_guard.sh` BEFORE timing any Jekyll workload. Any
+`cargo build` / `cargo test --release` without the full feature set
+silently overwrites `target/release/rubyrs` with a default-feature
+binary, and measurements against it are garbage (the classic symptom:
+`Set#include?` NoMethodError aborts the build in ~0.06s and looks like
+a miraculous speedup). The guard probes each feature's fingerprint
+(host fns / stdlib Set) and fails loudly with the rebuild command.
