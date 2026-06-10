@@ -2,15 +2,28 @@
 //!
 //! Targets byte-identical output with Ruby liquid 4.x + Jekyll's
 //! filters for an explicitly-bounded subset; templates using anything
-//! outside the subset return [`Error::Declined`] at compile time so
-//! embedders can fall back to the pure-Ruby gem (right-or-declined,
-//! never silently wrong).
+//! outside the subset return [`Error::Declined`] at compile time, and
+//! renders that meet a value the subset can't reproduce exactly
+//! decline at render time — embedders fall back to the pure-Ruby gem
+//! either way (right-or-declined, never silently wrong).
 //!
-//! Pre-alpha: API reservation release. The compile/render pipeline is
-//! under active development in the rubyrs workspace.
+//! The design exploits the static nature of site templates: a template
+//! compiles into constant segments plus typed variable slots, and the
+//! value paths it needs are known statically ([`Template::variables`]).
+//! Embedders resolve those once per render and pass a [`Values`] map —
+//! no per-node dynamic dispatch.
+
+mod filters;
+mod parse;
+mod render;
+mod strftime;
+
+use std::collections::HashMap;
 
 /// A value supplied to the renderer. Mirrors the Liquid data model
-/// (nil/bool/number/string plus arrays and string-keyed maps).
+/// plus a Time flavour for the date filters (Tier-1 UTC clock with the
+/// local/utc FLAVOUR bit that decides zone rendering, matching the
+/// rubyrs Time model).
 #[derive(Debug, Clone, PartialEq)]
 pub enum LValue {
     Nil,
@@ -20,21 +33,41 @@ pub enum LValue {
     Str(String),
     Array(Vec<LValue>),
     Map(Vec<(String, LValue)>),
+    Time { sec: i64, local: bool },
 }
 
-/// Supplies variable values during a render. A template's required
-/// variable paths are known statically (see [`Template::variables`]),
-/// so embedders can batch-resolve them per render.
-pub trait ValueSource {
-    /// Resolve a dotted variable path (e.g. `"page.title"`).
-    fn get(&mut self, path: &str) -> LValue;
+impl LValue {
+    pub(crate) fn field(&self, name: &str) -> Option<&LValue> {
+        match self {
+            LValue::Map(pairs) => pairs.iter().find(|(k, _)| k == name).map(|(_, v)| v),
+            _ => None,
+        }
+    }
 }
 
-/// Why liquidus refused a template.
+/// One statically-known value requirement of a template.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VarNeed {
+    /// Dotted root path, e.g. `"page.title"` or `"site.posts"`.
+    pub path: String,
+    /// `Some(n)` when the path is only iterated under `limit: n` —
+    /// the embedder may supply just the first `n` items.
+    pub slice: Option<usize>,
+    /// The template asks for this path's `size`. Supply the real
+    /// length as [`LValue::Int`] under `path + "#size"` when a slice
+    /// would hide it; otherwise the supplied array's length is used.
+    pub need_size: bool,
+}
+
+/// Resolved values for one render, keyed by [`VarNeed::path`] (plus
+/// optional `path#size` companions).
+#[derive(Debug, Default)]
+pub struct Values(pub HashMap<String, LValue>);
+
+/// Why liquidus refused a template or a render.
 #[derive(Debug)]
 pub enum Error {
-    /// The template uses a construct outside the implemented subset;
-    /// the payload names it.
+    /// Outside the implemented subset; the payload names the construct.
     Declined(&'static str),
 }
 
@@ -48,24 +81,65 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// A compiled template: constant segments plus typed variable slots.
+/// Site-level constants that Jekyll filters close over (today just
+/// `relative_url`'s baseurl).
+#[derive(Debug, Clone, Default)]
+pub struct SiteConfig {
+    /// Jekyll `baseurl` (default "").
+    pub baseurl: String,
+}
+
+/// A compiled template: constant segments + variable slots + control
+/// flow, with includes expanded at compile time.
 #[derive(Debug)]
 pub struct Template {
-    _private: (),
+    pub(crate) nodes: Vec<parse::Node>,
+    pub(crate) needs: Vec<VarNeed>,
+    pub(crate) config: SiteConfig,
 }
 
 impl Template {
-    /// The dotted variable paths this template reads. Stable across
-    /// renders — compile once, batch-resolve per page.
-    pub fn variables(&self) -> &[String] {
-        &[]
+    /// The value paths this template reads — stable across renders.
+    pub fn variables(&self) -> &[VarNeed] {
+        &self.needs
+    }
+
+    /// Render with resolved `values`. Runtime declines (a value shape
+    /// the subset can't reproduce byte-exactly) return `Err`.
+    pub fn render(&self, values: &Values) -> Result<String, Error> {
+        render::render(self, values)
     }
 }
 
-/// Compile Liquid `source` into a [`Template`].
-///
-/// Pre-alpha: every template currently declines while the engine is
-/// developed (the right-or-declined contract from day one).
-pub fn compile(_source: &str) -> Result<Template, Error> {
-    Err(Error::Declined("liquidus pre-alpha: engine under development"))
+/// Compile Liquid `source`. `include` resolves `{% include name %}`
+/// bodies at compile time (Jekyll's `_includes/<name>`); returning
+/// `None` declines the template.
+pub fn compile(
+    source: &str,
+    config: SiteConfig,
+    include: &dyn Fn(&str) -> Option<String>,
+) -> Result<Template, Error> {
+    let mut needs: Vec<VarNeed> = Vec::new();
+    let nodes = parse::parse_template(source, include, &mut needs)?;
+    needs.sort_by(|a, b| a.path.cmp(&b.path));
+    needs.dedup_by(|a, b| {
+        if a.path == b.path {
+            // Merge duplicates: the widest slice wins (None =
+            // unrestricted), size needs accumulate. dedup_by keeps
+            // `b` (the earlier element) and drops `a`.
+            b.slice = match (a.slice, b.slice) {
+                (Some(x), Some(y)) => Some(x.max(y)),
+                _ => None,
+            };
+            b.need_size |= a.need_size;
+            true
+        } else {
+            false
+        }
+    });
+    Ok(Template {
+        nodes,
+        needs,
+        config,
+    })
 }
