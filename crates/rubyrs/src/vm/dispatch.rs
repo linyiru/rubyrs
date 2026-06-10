@@ -2001,6 +2001,36 @@ impl Vm {
             self.stack.push(Value::Int(arity));
             return Ok(CallableOutcome::Handled);
         }
+        // `Proc#source_location` — `[file, line]` of the block's
+        // body (CRuby points at the `proc {` line; we report the
+        // first op's line, which lands on or just after it — the
+        // callers that matter locate the enclosing block by "line
+        // within block range", e.g. the rouge-native IR compiler).
+        // nil for blocks whose source isn't tracked.
+        if let Value::Block(bid) = &recv
+            && name == "source_location" && args.is_empty() {
+            let proto_idx = self.heap.block(*bid).proto_idx;
+            let proto = &self.protos[proto_idx];
+            let filename = proto.filename.clone();
+            let span = proto.op_spans.first().copied();
+            let line = match (span, self.sources.get(filename.as_ref())) {
+                (Some(sp), Some(src)) => {
+                    crate::error::line_col(src, sp.byte_offset).0 as i64
+                }
+                _ => 0,
+            };
+            if line == 0 {
+                self.stack.push(Value::Nil);
+            } else {
+                let arr = vec![
+                    Value::new_str(filename.to_string()),
+                    Value::Int(line),
+                ];
+                let id = self.heap.alloc(crate::heap::HeapObj::Array(arr));
+                self.stack.push(Value::Array(id));
+            }
+            return Ok(CallableOutcome::Handled);
+        }
         // `CurriedProc#arity` — CRuby returns -1 for any curried
         // proc/lambda regardless of remaining required slots
         // (the curried wrapper accepts a variable number of args

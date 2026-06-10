@@ -277,6 +277,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn class_self_visibility() { run_diff("class_self_visibility"); }
 #[test] fn env_nested_lookup() { run_diff("env_nested_lookup"); }
 #[test] fn time_local_flavour() { run_diff("time_local_flavour"); }
+#[test] fn proc_source_location() { run_diff("proc_source_location"); }
 #[test] fn module_define_method() { run_diff("module_define_method"); }
 #[test] fn singleton_class_class_eval() { run_diff("singleton_class_class_eval"); }
 #[test] fn proc_arity() { run_diff("proc_arity"); }
