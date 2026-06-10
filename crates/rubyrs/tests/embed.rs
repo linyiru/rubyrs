@@ -394,3 +394,27 @@ fn reset_clears_refinement_tables() {
     rt.eval(r#"raise "upcase broken" unless "hi".upcase == "HI""#, "c.rb")
         .unwrap();
 }
+
+/// Regression (fuzz catch #2): `reset()` must invalidate the
+/// constant inline cache. `ENV` resolution caches
+/// `(Value::Hash(id), const_gen)` in `const_cache_flat`; a constant
+/// READ never bumps const_gen, so after reset() truncated the heap
+/// the next `ENV` load was a cache HIT on the freed ObjId —
+/// heap.get out-of-bounds ICE in class_of. reset() now restores
+/// const_gen to snapshot+1 (the method_gen bounded-invalidation
+/// shape) and clears both cache maps.
+#[test]
+fn reset_invalidates_const_cache() {
+    let mut rt = Runtime::new();
+    rt.eval(r#"x = ENV["NOPE"]"#, "a.rb").unwrap();
+    rt.reset();
+    // Pre-fix this ICE'd; post-fix ENV lazily rebuilds.
+    rt.eval(r#"raise "env broken" unless ENV["NOPE"].nil?"#, "b.rb")
+        .unwrap();
+    // And a user constant minted before reset must be GONE, not
+    // served stale from the cache.
+    rt.eval("FOO = 42; raise unless FOO == 42", "c.rb").unwrap();
+    rt.reset();
+    let r = rt.eval("FOO", "d.rb");
+    assert!(r.is_err(), "user constant must not survive reset via the IC");
+}

@@ -846,6 +846,17 @@ struct PostPreambleSnapshot {
     /// to the post-preamble baseline at each reset caps the
     /// counter and rules out the wrap entirely.
     method_gen: u32,
+    /// `vm.const_gen` at preamble completion — same
+    /// bounded-invalidation contract as `method_gen` above.
+    /// `reset()` restores to `snapshot.const_gen + 1` so every
+    /// flat/chain constant-IC entry minted during the evals
+    /// being rolled back goes stale. MISSING this was fuzz
+    /// catch #2: `ENV` resolved during an eval left
+    /// `(Value::Hash(stale ObjId), gen)` in `const_cache_flat`;
+    /// nothing bumps const_gen on a constant READ, so after
+    /// reset() truncated the heap the next `ENV` load was a
+    /// cache HIT on a freed ObjId (heap.get out-of-bounds ICE).
+    const_gen: u32,
     /// `vm.load_path` as of preamble completion (currently
     /// `None` — `$LOAD_PATH` is materialised lazily on first
     /// user access). `reset()` restores this so a stale `ObjId`
@@ -1169,6 +1180,7 @@ impl PostPreambleSnapshot {
             call_caches_len: rt.vm.call_caches.len(),
             cache_counter: rt.vm.cache_counter,
             method_gen: rt.vm.method_gen,
+            const_gen: rt.vm.const_gen,
             load_path: rt.vm.load_path,
             protos_len: rt.vm.protos.len(),
             classes: rt.vm.classes.clone(),
@@ -1857,6 +1869,15 @@ impl Runtime {
         // ~hundreds of method defs — but the explicit annotation
         // documents the intent).
         self.vm.method_gen = snapshot.method_gen.wrapping_add(1);
+        // Constant IC — same shape as method_gen above. The +1
+        // invalidates every entry minted during the rolled-back
+        // evals (their gens are ≥ snapshot.const_gen, and entries
+        // only match on EXACT gen equality). Clearing the maps
+        // too keeps them from accumulating dead entries across
+        // resets.
+        self.vm.const_gen = snapshot.const_gen.wrapping_add(1);
+        self.vm.const_cache_flat.clear();
+        self.vm.const_cache_chain.clear();
     }
 
     /// Set the per-eval fuel counter, optionally re-anchoring
