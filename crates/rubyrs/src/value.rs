@@ -23,7 +23,6 @@ pub struct RStr {
     /// reflection land in the E1 follow-up; this step only
     /// threads the field through every construction site so
     /// that change is a pure-semantics diff).
-    #[allow(dead_code)] // consumed by the E1 semantics follow-up
     pub(crate) encoding: Cell<EncodingTag>,
 }
 
@@ -37,6 +36,10 @@ pub enum EncodingTag {
     /// anything the runtime knows (or assumes, per the current
     /// UTF-8-lossy contract) to be UTF-8.
     Utf8,
+    /// `force_encoding("US-ASCII")` / Encoding::US_ASCII. The
+    /// ASCII subset of UTF-8 — same byte semantics, narrower
+    /// validity (`valid_encoding?` requires all bytes < 0x80).
+    UsAscii,
     /// CRuby's ASCII-8BIT: cext binary input, pack/unpack
     /// buffers, digest output — opaque bytes, no codepoint
     /// semantics.

@@ -327,6 +327,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn file_read_bom_utf8() { run_diff("file_read_bom_utf8"); }
 #[test] fn file_delete() { run_diff("file_delete"); }
 #[test] fn array_subclass() { run_diff("array_subclass"); }
+#[test] fn string_encoding_e1() { run_diff("string_encoding_e1"); }
 #[test] fn lifecycle_hook_super() { run_diff("lifecycle_hook_super"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
 #[test] fn user_sort() { run_diff("user_sort"); }

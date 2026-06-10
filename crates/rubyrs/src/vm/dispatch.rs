@@ -1123,14 +1123,156 @@ impl Vm {
         name: &str,
         args: &[Value],
     ) -> bool {
-        if !matches!(recv, Value::Str(_)) || name != "encoding" || !args.is_empty() {
+        let Value::Str(rs) = recv else { return false };
+        if name != "encoding" || !args.is_empty() {
             return false;
         }
-        let key = self.interner.intern("Encoding::UTF_8");
+        // E1: the tag picks which preamble singleton comes back.
+        // `Other(_)` is unconstructible until the Tier 2 registry
+        // exists; report UTF-8 rather than panicking so a future
+        // partial wiring degrades visibly (wrong name) instead of
+        // fatally.
+        let const_name = match rs.encoding.get() {
+            crate::value::EncodingTag::Utf8 => "Encoding::UTF_8",
+            crate::value::EncodingTag::UsAscii => "Encoding::US_ASCII",
+            crate::value::EncodingTag::Binary => "Encoding::ASCII_8BIT",
+            crate::value::EncodingTag::Other(_) => "Encoding::UTF_8",
+        };
+        let key = self.interner.intern(const_name);
         let v = self.constants.get(&key).cloned()
-            .expect("ICE: Encoding::UTF_8 not in constants table — preamble didn't load");
+            .expect("ICE: Encoding constant not in table — preamble didn't load");
         self.stack.push(v);
         true
+    }
+
+    /// `String#force_encoding(enc)` + `String#encode(...)` — the
+    /// E1 subset (ADR 0020). force_encoding flips the TAG without
+    /// touching bytes (CRuby contract), returns self; frozen
+    /// receivers raise FrozenError. encode returns a NEW string:
+    /// same-encoding → plain copy; cross-encoding with ASCII-only
+    /// bytes → copy with the new tag (the conversion is the
+    /// identity there); anything else needs real transcoding →
+    /// Encoding::UndefinedConversionError, mirroring CRuby's
+    /// error class for the cases E1 declines (Tier 2's
+    /// `_encoding_full` will convert instead). Returns true when
+    /// the call matched and a value was pushed.
+    pub(crate) fn try_string_encoding_ops(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        args: &[Value],
+    ) -> Result<bool, Trap> {
+        use crate::value::EncodingTag;
+        let Value::Str(rs) = recv else { return Ok(false) };
+        match (name, args) {
+            ("force_encoding", [arg]) => {
+                if rs.frozen.get() {
+                    return Err(self.trap(RubyError::FrozenError {
+                        msg: "can't modify frozen String".to_string(),
+                    }));
+                }
+                let Some(tag) = self.resolve_encoding_arg(arg) else {
+                    let shown = match arg {
+                        Value::Str(s) => s.to_string_lossy(),
+                        other => other.type_name().to_string(),
+                    };
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("unknown encoding name - {shown}"),
+                    }));
+                };
+                rs.encoding.set(tag);
+                self.stack.push(recv.clone());
+                Ok(true)
+            }
+            ("encode", []) | ("encode", [_]) => {
+                let target = match args.first() {
+                    None => rs.encoding.get(),
+                    Some(arg) => match self.resolve_encoding_arg(arg) {
+                        Some(t) => t,
+                        None => {
+                            let shown = match &args[0] {
+                                Value::Str(s) => s.to_string_lossy(),
+                                other => other.type_name().to_string(),
+                            };
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("unknown encoding name - {shown}"),
+                            }));
+                        }
+                    },
+                };
+                let src = rs.encoding.get();
+                let bytes = rs.content.borrow().clone();
+                let ascii_only = bytes.iter().all(|&b| b < 0x80);
+                if src != target && !ascii_only {
+                    // Real transcoding territory — E1 declines with
+                    // CRuby's error class AND message shape (Tier 2
+                    // converts instead): the first offending unit is
+                    // shown as `"\xNN"` when the source is
+                    // byte-oriented, or `U+XXXX` when the source is
+                    // UTF-8 (CRuby names the codepoint).
+                    let disp = |t: EncodingTag| match t {
+                        EncodingTag::Utf8 => "UTF-8",
+                        EncodingTag::UsAscii => "US-ASCII",
+                        EncodingTag::Binary => "ASCII-8BIT",
+                        EncodingTag::Other(_) => "OTHER",
+                    };
+                    let (from, to) = (disp(src), disp(target));
+                    let offender = if src == EncodingTag::Utf8 {
+                        std::str::from_utf8(&bytes)
+                            .ok()
+                            .and_then(|t| t.chars().find(|c| !c.is_ascii()))
+                            .map(|c| format!("U+{:04X}", c as u32))
+                    } else {
+                        None
+                    };
+                    let offender = offender.unwrap_or_else(|| {
+                        let b = bytes.iter().copied().find(|&b| b >= 0x80).unwrap_or(0);
+                        format!("\"\\x{b:02X}\"")
+                    });
+                    return Err(self.trap(RubyError::HostException {
+                        class_name: "Encoding::UndefinedConversionError".to_string(),
+                        message: format!("{offender} from {from} to {to}"),
+                    }));
+                }
+                let v = Value::new_str_bytes(bytes);
+                if let Value::Str(ref ns) = v {
+                    ns.encoding.set(target);
+                }
+                self.stack.push(v);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Resolve a `force_encoding` / `encode`-style encoding
+    /// argument — a String name (case-insensitive, CRuby's
+    /// fold set) or a preamble `Encoding` instance (read its
+    /// `@name`) — to an E1 tag. `None` = unknown name (caller
+    /// raises CRuby's ArgumentError shape).
+    pub(crate) fn resolve_encoding_arg(&mut self, arg: &Value) -> Option<crate::value::EncodingTag> {
+        use crate::value::EncodingTag;
+        let name: String = match arg {
+            Value::Str(s) => s.to_string_lossy(),
+            Value::Object(id) => {
+                let inst = self.heap.instance(*id);
+                if inst.class.name != "Encoding" {
+                    return None;
+                }
+                let name_id = self.interner.intern("@name");
+                match inst.ivars.get(&name_id) {
+                    Some(Value::Str(s)) => s.to_string_lossy(),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        match name.to_ascii_uppercase().as_str() {
+            "UTF-8" => Some(EncodingTag::Utf8),
+            "US-ASCII" | "ASCII" => Some(EncodingTag::UsAscii),
+            "ASCII-8BIT" | "BINARY" => Some(EncodingTag::Binary),
+            _ => None,
+        }
     }
 
     /// `Integer#chr(encoding)` — CRuby widens the accepted range and
@@ -6773,6 +6915,9 @@ impl Vm {
         }
 
         if self.try_push_int_chr_encoding(&recv, &name, &args)? {
+            return Ok(());
+        }
+        if self.try_string_encoding_ops(&recv, &name, &args)? {
             return Ok(());
         }
         if self.try_push_string_encoding(&recv, &name, &args) {
@@ -13230,6 +13375,9 @@ impl Vm {
         }
 
         if self.try_push_int_chr_encoding(&recv, &name, &args)? {
+            return Ok(());
+        }
+        if self.try_string_encoding_ops(&recv, &name, &args)? {
             return Ok(());
         }
         if self.try_push_string_encoding(&recv, &name, &args) {

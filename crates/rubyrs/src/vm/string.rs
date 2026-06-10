@@ -510,29 +510,28 @@ pub(crate) fn string_call(
             check(result.len())?;
             Some(Value::new_str(result))
         }
-        // `String#encode(target)` / `#force_encoding(target)` —
-        // the subset stores raw bytes with no per-string encoding
-        // tag, so both are near-no-ops. `encode` returns the
-        // receiver (Rc-shared, no copy) for compatibility with
-        // CRuby's "if source encoding == target encoding,
-        // re-encode is the identity" rule. `force_encoding`
-        // similarly returns the receiver. The argument is
-        // accepted as either a String or any value with a `to_s`
-        // already on the Value (we just don't validate it
-        // against the known encoding list). Documented in
-        // SUBSET.md: cross-encoding conversion isn't modelled.
-        (Value::Str(a), "encode", [_]) | (Value::Str(a), "force_encoding", [_]) => {
-            Some(Value::Str(a.clone()))
+        // `String#encode` / `#force_encoding` are intercepted in
+        // dispatch.rs (try_string_encoding_ops) — resolving the
+        // encoding argument may need to read a preamble Encoding
+        // instance's ivars, which this free-function context
+        // can't reach. (E1: real tag semantics — see ADR 0020.)
+        //
+        // `String#valid_encoding?` — E1: judged against the TAG.
+        // Binary (ASCII-8BIT) accepts any bytes; UTF-8 demands
+        // well-formed UTF-8; US-ASCII demands all bytes < 0x80.
+        (Value::Str(a), "valid_encoding?", []) => {
+            use crate::value::EncodingTag;
+            let b = a.content.borrow();
+            let ok = match a.encoding.get() {
+                EncodingTag::Binary => true,
+                EncodingTag::Utf8 => std::str::from_utf8(&b).is_ok(),
+                EncodingTag::UsAscii => b.iter().all(|&x| x < 0x80),
+                // Unconstructible in E1; Tier 2 will consult the
+                // registry. Permissive until then.
+                EncodingTag::Other(_) => true,
+            };
+            Some(Value::Bool(ok))
         }
-        // `String#valid_encoding?` — rubyrs stores raw bytes
-        // viewed via `String::from_utf8_lossy` (invalid sequences
-        // become U+FFFD), so the effective character stream is
-        // always well-formed UTF-8 by construction. Returning
-        // true matches that observable behaviour. tilt's
-        // template.rb:120 reads this to decide whether to raise
-        // `Encoding::InvalidByteSequenceError`; with `true` the
-        // raise never fires and template loading proceeds.
-        (Value::Str(_), "valid_encoding?", []) => Some(Value::Bool(true)),
         // `String#encoding` is intercepted in dispatch.rs before
         // this function, so it can hand back the
         // `Encoding::UTF_8` instance from the preamble (needs Vm
@@ -1548,11 +1547,30 @@ impl Vm {
                     s.frozen.set(true);
                     return Ok(Some(Value::Str(s)));
                 }
+                if name == "clone" && args.is_empty() {
+                    // `clone` copies content AND keeps the frozen
+                    // bit (dup resets it); the encoding tag travels
+                    // on both. (CRuby's `clone(freeze:)` kwarg is
+                    // not routed — same gap as Object#clone above.)
+                    let copy = s.content.borrow().clone();
+                    let v = Value::new_str_bytes(copy);
+                    if let Value::Str(ref ns) = v {
+                        ns.frozen.set(s.frozen.get());
+                        ns.encoding.set(s.encoding.get());
+                    }
+                    return Ok(Some(v));
+                }
                 if name == "dup" && args.is_empty() {
                     // Fresh Rc, fresh RefCell, NOT frozen — `dup`
                     // copies content but resets the frozen bit.
+                    // The encoding TAG travels (CRuby: `.b.dup`
+                    // stays BINARY).
                     let copy = s.content.borrow().clone();
-                    return Ok(Some(Value::new_str_bytes(copy)));
+                    let v = Value::new_str_bytes(copy);
+                    if let Value::Str(ref ns) = v {
+                        ns.encoding.set(s.encoding.get());
+                    }
+                    return Ok(Some(v));
                 }
                 // `+@` — unfreeze idiom. CRuby 3.x ALWAYS returns
                 // a fresh non-frozen String (the older docs said
@@ -1565,7 +1583,11 @@ impl Vm {
                 // string-literal mode).
                 if name == "+@" && args.is_empty() {
                     let copy = s.content.borrow().clone();
-                    return Ok(Some(Value::new_str_bytes(copy)));
+                    let v = Value::new_str_bytes(copy);
+                    if let Value::Str(ref ns) = v {
+                        ns.encoding.set(s.encoding.get());
+                    }
+                    return Ok(Some(v));
                 }
                 // `-@` — freeze idiom. CRuby: returns the receiver
                 // when already frozen, otherwise a frozen dup. The
@@ -1581,6 +1603,7 @@ impl Vm {
                     let frozen = Value::new_str_bytes(copy);
                     if let Value::Str(ref ns) = frozen {
                         ns.frozen.set(true);
+                        ns.encoding.set(s.encoding.get());
                     }
                     return Ok(Some(frozen));
                 }

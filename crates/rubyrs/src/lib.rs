@@ -2488,7 +2488,15 @@ class Encoding
     # Built with concat — using the quote-then-hash sequence
     # inline would close the outer raw-string delimiter at
     # Rust parse time.
-    '#<Encoding:' + @name + '>'
+    #
+    # ASCII-8BIT renders with CRuby 3.x's dual-name form
+    # (BINARY was promoted to the display name; .name and
+    # .to_s stay "ASCII-8BIT").
+    if @name == 'ASCII-8BIT'
+      '#<Encoding:BINARY (ASCII-8BIT)>'
+    else
+      '#<Encoding:' + @name + '>'
+    end
   end
 
   ## Always false in our subset — we don't model dummy encodings
