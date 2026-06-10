@@ -334,3 +334,29 @@ fn definitions_persist_across_eval() {
 // Tier 1 capability-injection tests (Random / SecureRandom /
 // Time) moved to `tests/embed/tier1_capability.rs`.
 
+
+// ---------- Lazy regex engine building ----------
+
+/// `Runtime::regex_cache_stats` + the lazy-build contract behind it:
+/// CONSTRUCTING a Regexp (the require-chain `FOO = /.../ ` shape)
+/// must not build the NFA/DFA engine; the first operation that
+/// actually matches does. The (total, built) gap is the RSS win that
+/// motivated lazy building (352 constructed / 39 matched on the real
+/// Jekyll chain — see regex_engine.rs).
+#[cfg(feature = "regex")]
+#[test]
+fn regex_cache_stats_lazy_build() {
+    let mut rt = Runtime::new();
+    rt.eval("A = /alpha\\d+/; B = /beta/; C = /gamma/", "t.rb").unwrap();
+    let (total, built) = rt.regex_cache_stats();
+    assert_eq!(total, 3, "three literals constructed");
+    assert_eq!(built, 0, "construction alone must not build engines");
+    rt.eval(r#"raise "no match" unless "alpha42" =~ A"#, "t.rb").unwrap();
+    let (total, built) = rt.regex_cache_stats();
+    assert_eq!((total, built), (3, 1), "first match builds exactly that engine");
+    // The eager fancy-regex path (lookaround) counts as built at
+    // construction — it pre-fills the cell to keep the error point.
+    rt.eval("D = /foo(?=bar)/", "t.rb").unwrap();
+    let (total, built) = rt.regex_cache_stats();
+    assert_eq!((total, built), (4, 2), "fancy fallback is eager-built");
+}
