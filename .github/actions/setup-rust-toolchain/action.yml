@@ -95,7 +95,11 @@ runs:
         # which is technically correct but gnarly. `\1` survives
         # bash double-quote expansion unchanged (it's not on the
         # short list of escape chars bash interprets inside `"`).
-        RAW_CHAN=$(grep -E '^[[:space:]]*channel[[:space:]]*=' "$TOOLCHAIN_FILE" | head -1)
+        # `|| true`: composite-action `shell: bash` runs with
+        # `-e -o pipefail`; a no-match grep fails the pipeline and
+        # kills the script with NO error output. The explicit
+        # emptiness checks below are the intended failure path.
+        RAW_CHAN=$(grep -E '^[[:space:]]*channel[[:space:]]*=' "$TOOLCHAIN_FILE" | head -1 || true)
         CHANNEL=$(printf '%s' "$RAW_CHAN" | sed -E "s/.*channel[[:space:]]*=[[:space:]]*[\"']([^\"']+)[\"'].*/\1/")
         if [ -z "$CHANNEL" ] || [ "$CHANNEL" = "$RAW_CHAN" ]; then
           echo "::error::setup-rust-toolchain: failed to parse channel from $TOOLCHAIN_FILE" >&2
@@ -123,7 +127,13 @@ runs:
         # this composite — TOML allows multiline arrays but no
         # current toolchain file in this repo uses that shape.
         FILE_COMPONENTS=""
-        RAW_COMP=$(grep -E '^[[:space:]]*components[[:space:]]*=' "$TOOLCHAIN_FILE" | head -1)
+        # `|| true` is load-bearing here: the fuzz crate's toolchain
+        # file declares ONLY a channel — under pipefail the no-match
+        # grep silently exit-1'd the whole resolve step, which is
+        # why every scheduled fuzz run went red from the day this
+        # composite was adopted (the workspace-root file has a
+        # components line, so every other job was unaffected).
+        RAW_COMP=$(grep -E '^[[:space:]]*components[[:space:]]*=' "$TOOLCHAIN_FILE" | head -1 || true)
         if [ -n "$RAW_COMP" ]; then
           FILE_COMPONENTS=$(printf '%s' "$RAW_COMP" | sed -E "s/.*=[[:space:]]*\[([^]]*)\].*/\1/" | tr -d '"' | tr -d "'" | tr -d ' ')
           if [[ "$FILE_COMPONENTS" == *=* || "$FILE_COMPONENTS" == *\[* || "$FILE_COMPONENTS" == *\]* ]]; then
