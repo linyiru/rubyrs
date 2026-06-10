@@ -23,7 +23,15 @@ use crate::heap::HeapObj;
 use crate::intern::SymId;
 use crate::value::{Class, Instance, Method, ObjId, Value, Visibility};
 
-#[cfg(any(all(feature = "cext", not(target_os = "wasi")), feature = "_http_server"))]
+#[cfg(any(
+    all(feature = "cext", not(target_os = "wasi")),
+    feature = "_http_server",
+    feature = "_fiber",
+    feature = "_json_native",
+    feature = "_yaml_native",
+    feature = "_liquid_native",
+    feature = "_sqlite",
+))]
 use super::with_vm_ptr_set;
 use super::{
     primitive_call, value_cmp_v_heap, vec_nil, visibility_from_name, Frame, HostFnSlot, PinGuard, Vm,
@@ -1636,6 +1644,8 @@ impl Vm {
                     feature = "_http_server",
                     feature = "_fiber",
                     feature = "_json_native",
+                    feature = "_yaml_native",
+                    feature = "_liquid_native",
                     feature = "_sqlite",
                 ))]
                 {
@@ -1647,6 +1657,8 @@ impl Vm {
                     feature = "_http_server",
                     feature = "_fiber",
                     feature = "_json_native",
+                    feature = "_yaml_native",
+                    feature = "_liquid_native",
                     feature = "_sqlite",
                 )))]
                 { host(args) }

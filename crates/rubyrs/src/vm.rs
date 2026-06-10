@@ -44,6 +44,10 @@ pub(crate) use bignum::bigint_equals_float_lossless;
     all(feature = "cext", not(target_os = "wasi")),
     feature = "_http_server",
     feature = "_fiber",
+    feature = "_json_native",
+    feature = "_yaml_native",
+    feature = "_liquid_native",
+    feature = "_sqlite",
 ))]
 pub(crate) use vm_ptr::with_vm_ptr_set;
 // `current_vm_ptr` is the read-side used by host fn bodies
@@ -53,10 +57,21 @@ pub(crate) use vm_ptr::with_vm_ptr_set;
 // this in production code path (handle_request_with_app).
 // Also used by `Runtime::reset_between_requests` for a
 // cext-invariant debug_assert.
+//
+// The native-accelerator host fns (_json_native / _yaml_native /
+// _liquid_native / _sqlite) read it too — they're listed here so a
+// `--no-default-features --features <accel>` build compiles. In that
+// configuration the ptr is never set (the with_vm_ptr_set wrap lives
+// on the cext dispatch path), so the host fns see null and decline
+// to their pure-Ruby fallbacks — degraded but correct.
 #[cfg(any(
     all(feature = "cext", not(target_os = "wasi")),
     feature = "_http_server",
     feature = "_fiber",
+    feature = "_json_native",
+    feature = "_yaml_native",
+    feature = "_liquid_native",
+    feature = "_sqlite",
 ))]
 pub(crate) use vm_ptr::current_vm_ptr;
 
