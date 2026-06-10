@@ -177,7 +177,7 @@ _json_native = ["dep:serde_json", "dep:serde"]
 # formatter to route supported lexers through the native engine
 # (byte-identical output); unsupported lexers / rules fall back to the
 # pure-Ruby gem per lexer or per call. See src/rouge_native.rs.
-_rouge_native = ["dep:carmine"]
+_rouge_native = ["dep:carmine", "dep:serde_json"]
 # `_kramdown_native` — rostdown-backed accelerator for kramdown under
 # Jekyll. After `require "kramdown-parser-gfm"` a shim patches
 # `Kramdown::JekyllDocument` to route Jekyll-default-option documents

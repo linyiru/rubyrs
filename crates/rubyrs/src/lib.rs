@@ -43,6 +43,8 @@ mod intern;
 mod json_native;
 #[cfg(feature = "_rouge_native")]
 pub(crate) mod rouge_native;
+#[cfg(feature = "_rouge_native")]
+pub(crate) mod rouge_ir;
 #[cfg(feature = "_kramdown_native")]
 pub(crate) mod kramdown_native;
 #[cfg(feature = "_yaml_native")]

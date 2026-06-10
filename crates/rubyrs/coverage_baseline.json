@@ -8,6 +8,7 @@
     "crates/rubyrs/src/json_native.rs": "behind the `_json_native` Cargo feature (serde_json accelerator for the pure JSON canon, ADR 0019 Rule 6); default CI build excludes",
     "crates/rubyrs/src/kramdown_native.rs": "behind the `_kramdown_native` Cargo feature (rostdown kramdown accelerator); default CI build excludes (same shape as rouge_native below)",
     "crates/rubyrs/src/liquid_native.rs": "behind the `_liquid_native` Cargo feature (liquidus template accelerator); default CI build excludes (same shape as rouge_native below)",
+    "crates/rubyrs/src/rouge_ir.rs": "behind the `_rouge_native` Cargo feature (Track C AST→IR compiler); default CI build excludes (same shape as rouge_native below)",
     "crates/rubyrs/src/rouge_native.rs": "behind the `_rouge_native` Cargo feature (carmine rouge accelerator); default CI build excludes (same shape as json_native above)",
     "crates/rubyrs/src/yaml_native.rs": "behind the `_yaml_native` Cargo feature (native translation of the blessed YAML loader); default CI build excludes (same shape as rouge_native above)",
     "crates/rubyrs/src/sqlite.rs": "behind the `_sqlite` Cargo feature (rusqlite + bundled libsqlite3 + SQLite3::Database/Statement surface, ADR 0027); default CI build excludes (same shape as http_server / stdlib / fiber / json_native above)",

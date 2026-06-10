@@ -365,6 +365,30 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         Ok(Value::Nil)
     });
 
+    // Track C-1b: AST→IR compilation of a rule proc. The shim passes
+    // the proc's source_location; the host parses the FILE with prism,
+    // finds the smallest block containing that line and translates it
+    // into carmine IR (constant PATHS for tokens — the shim resolves
+    // them to qualnames through the live rouge token tree). nil = the
+    // block is outside the compiler's whitelist; the rule stays a
+    // callback (session protocol).
+    rt.register_fn("__rubyrs_rouge_native_compile_proc", |args| {
+        let (path, line) = match args {
+            [Value::Str(p), Value::Int(l)] => (p.to_string_lossy(), *l),
+            _ => return Err(arg_err("__rubyrs_rouge_native_compile_proc(path, line)")),
+        };
+        let Ok(line) = u32::try_from(line) else {
+            return Ok(Value::Nil);
+        };
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            return Ok(Value::Nil);
+        };
+        match crate::rouge_ir::compile_block_at(&source, line) {
+            Some(ops_json) => Ok(Value::new_str(ops_json)),
+            None => Ok(Value::Nil),
+        }
+    });
+
     rt.register_fn("__rubyrs_rouge_native_static_lex", |args| {
         let (lang, source) = match args {
             [Value::Str(l), Value::Str(s)] => (l.to_string_lossy(), s.to_string_lossy()),

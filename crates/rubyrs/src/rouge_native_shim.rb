@@ -99,6 +99,16 @@ if defined?(__rubyrs_rouge_native_table) && defined?(Rouge::RegexLexer)
               @rules << spec.merge("re" => re.source, "opts" => re.options)
               return
             end
+            # Track C: AST→IR compilation. The host parses the lexer
+            # FILE (via the proc's source_location), whitelists the
+            # block's AST and returns carmine IR ops — or nil, and the
+            # rule falls through to trace/callback exactly as before.
+            if defined?(__rubyrs_rouge_native_compile_proc) &&
+               (ir = Recorder.compile_block_ir(blk))
+              @rules << { "kind" => "ir", "re" => re.source,
+                          "opts" => re.options, "ops" => ir }
+              return
+            end
             unless @trust_blocks
               @procs[@rules.length] = blk
               @rules << { "kind" => "callback", "re" => re.source, "opts" => re.options }
@@ -125,6 +135,59 @@ if defined?(__rubyrs_rouge_native_table) && defined?(Rouge::RegexLexer)
         end
         def mixin(name)
           @rules << { "kind" => "mixin", "state" => name.to_s }
+        end
+
+        # AST→IR for one rule block: host compiles, then token
+        # CONSTANT PATHS resolve to qualnames through the live token
+        # tree (rouge constants alias — `Str` IS `Literal::String`,
+        # so paths cannot be resolved offline). Any failure → nil and the
+        # caller keeps the callback path.
+        def self.compile_block_ir(blk)
+          # NOTE: direct call, not respond_to? — builtin dispatch arms
+          # aren't visible to respond_to? (VM gap); the rescue below
+          # covers runtimes without the method.
+          loc = begin
+            blk.source_location
+          rescue NoMethodError
+            nil
+          end
+          return nil unless loc && loc[0] && loc[1]
+          json = __rubyrs_rouge_native_compile_proc(loc[0], loc[1])
+          return nil unless json
+          ops = JSON.parse(json)
+          resolve_ir_tokens!(ops) ? ops : nil
+        rescue StandardError
+          nil
+        end
+
+        def self.resolve_ir_tokens!(ops)
+          ops.each do |op|
+            case op[0]
+            when "token"
+              q = ir_qualname(op[1])
+              return false unless q
+              op[1] = q
+            when "groups"
+              op[1].map! do |n|
+                q = ir_qualname(n)
+                return false unless q
+                q
+              end
+            when "if"
+              return false unless resolve_ir_tokens!(op[2])
+              return false if op[3] && !resolve_ir_tokens!(op[3])
+            end
+          end
+          true
+        end
+
+        def self.ir_qualname(path)
+          t = path.split("::").inject(Rouge::Token::Tokens) do |mod_, c|
+            mod_.const_get(c)
+          end
+          t.respond_to?(:qualname) ? t.qualname : nil
+        rescue StandardError
+          nil
         end
       end
 
