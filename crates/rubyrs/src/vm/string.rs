@@ -2148,7 +2148,7 @@ impl Vm {
                             .map(|c| Value::new_str(c.to_string()))
                             .collect();
                         self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     ("partition", [Value::Str(sep)]) => {
@@ -2166,7 +2166,7 @@ impl Vm {
                         };
                         let elems: Vec<Value> = parts.iter().map(Value::new_str).collect();
                         self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     ("rpartition", [Value::Str(sep)]) => {
@@ -2184,7 +2184,7 @@ impl Vm {
                         };
                         let elems: Vec<Value> = parts.iter().map(Value::new_str).collect();
                         self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     #[cfg(feature = "regex")]
@@ -2200,7 +2200,7 @@ impl Vm {
                         };
                         let elems: Vec<Value> = parts.iter().map(Value::new_str).collect();
                         self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     #[cfg(feature = "regex")]
@@ -2217,7 +2217,7 @@ impl Vm {
                         };
                         let elems: Vec<Value> = parts.iter().map(Value::new_str).collect();
                         self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     ("insert", [Value::Int(idx), Value::Str(ins)]) => {
@@ -2272,7 +2272,7 @@ impl Vm {
                             .map(Value::new_str)
                             .collect();
                         self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     ("each_line", []) | ("each_line", [Value::Str(_)]) => {
@@ -2305,7 +2305,7 @@ impl Vm {
                             .map(Value::new_str)
                             .collect();
                         self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     ("split", [Value::Str(sep)]) => {
@@ -2331,7 +2331,7 @@ impl Vm {
                             parts.into_iter().map(Value::new_str).collect()
                         };
                         self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     // `split(regex)` / `split(regex, limit)` —
@@ -2386,7 +2386,7 @@ impl Vm {
                             regex_split_into_values(re, src, 0)
                         });
                         self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     #[cfg(feature = "regex")]
@@ -2395,7 +2395,7 @@ impl Vm {
                             regex_split_into_values(re, src, *limit)
                         });
                         self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     ("split", [Value::Str(sep), Value::Int(limit)]) => {
@@ -2523,7 +2523,7 @@ impl Vm {
                             parts.into_iter().map(Value::new_str).collect()
                         };
                         self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     ("%", [single_arg]) => {
@@ -2680,7 +2680,7 @@ impl Vm {
                                 }
                                 g.vm.maybe_gc();
                                 g.vm.check_alloc()?;
-                                let gid = g.vm.heap.alloc(HeapObj::Array(group_vec));
+                                let gid = g.vm.heap.alloc(HeapObj::Array(group_vec.into()));
                                 let v = Value::Array(gid);
                                 g.pin(v.clone());
                                 out.push(v);
@@ -2695,7 +2695,7 @@ impl Vm {
                         }
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let id = g.vm.heap.alloc(HeapObj::Array(out));
+                        let id = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(id))
                     }
                     ("scan", [Value::Str(pat)]) => {
@@ -2722,7 +2722,7 @@ impl Vm {
                             out
                         };
                         self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(parts));
+                        let id = self.heap.alloc(HeapObj::Array(parts.into()));
                         Some(Value::Array(id))
                     }
                     // `String#bytes` — Array of byte values (Int
@@ -2735,7 +2735,7 @@ impl Vm {
                             .map(|b| Value::Int(*b as i64))
                             .collect();
                         self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     // `String#unpack(format)` — binary unpacking
@@ -2756,7 +2756,7 @@ impl Vm {
                         let result = unpack_bytes(&bytes, &fmt_str)
                             .map_err(|m| self.trap(RubyError::ArgumentError { msg: m }))?;
                         self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(result));
+                        let id = self.heap.alloc(HeapObj::Array(result.into()));
                         Some(Value::Array(id))
                     }
                     // `String#unpack1(fmt)` — same engine as `#unpack`

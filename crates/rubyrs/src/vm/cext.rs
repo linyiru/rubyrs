@@ -260,7 +260,7 @@ fn cext_handle_to_value_d(
             // Heap-cap exhaustion now propagates the original
             // ResourceExhausted Trap up to Ruby (review #26).
             g.vm.check_alloc()?;
-            let id = g.vm.heap.alloc(HeapObj::Array(elements));
+            let id = g.vm.heap.alloc(HeapObj::Array(elements.into()));
             Value::Array(id)
         }
         rubyrs_cext::CValue::Hash(pairs) => {
@@ -1185,7 +1185,7 @@ mod miri_tests {
                 // in production: heap, classes, interner, stack,
                 // pinned. If any of these triggers Stacked
                 // Borrows UB it'll surface under Miri here.
-                let id = inner_vm.heap.alloc(HeapObj::Array(vec![Value::Int(1)]));
+                let id = inner_vm.heap.alloc(HeapObj::Array(vec![Value::Int(1)].into()));
                 let name = inner_vm.interner.intern("synthetic");
                 inner_vm.stack.push(Value::Array(id));
                 inner_vm.pinned.push(Value::Sym(name));

@@ -7,7 +7,7 @@ use crate::value::{BlockHandle, Class, Instance, ObjId, Value};
 
 pub(crate) enum HeapObj {
     Instance(Instance),
-    Array(Vec<Value>),
+    Array(ArrayObj),
     Hash(HashObj),
     Range(RangeObj),
     /// Arbitrary-precision integer (the heap-side of `Value::BigInt`).
@@ -263,6 +263,54 @@ pub(crate) struct RangeObj {
     pub(crate) end: Value,
     pub(crate) exclusive: bool,
 }
+
+/// Heap-side of `Value::Array`. Mirrors `HashObj`'s subclass
+/// support: `class StringRegister < Array` (rouge's python lexer)
+/// allocates a REAL Array — so every Array primitive dispatches on
+/// its instances — carrying the actual class in `class_tag` for
+/// `obj.class` / `is_a?` / user-override lookup, plus `ivars` for
+/// `@foo` set in subclass methods. Plain `[]` literals pay one
+/// `None` + one empty-map (no allocation) over the previous bare
+/// `Vec<Value>`; the enum's size is already set by the larger
+/// `HashObj` variant, so the layout cost is zero. `Deref` to
+/// `Vec<Value>` keeps the ~200 existing element-access sites
+/// compiling unchanged.
+pub(crate) struct ArrayObj {
+    pub(crate) elems: Vec<Value>,
+    /// `Some(c)` for instances of a user subclass of Array;
+    /// `None` for plain literals. `Rc<Class>` is not GC-managed,
+    /// so no marking needed.
+    pub(crate) class_tag: Option<Rc<Class>>,
+    /// Instance variables for subclass instances. Values are
+    /// GC-marked alongside `elems`.
+    pub(crate) ivars: crate::intern::FxHashMap<crate::intern::SymId, Value>,
+}
+
+impl ArrayObj {
+    pub(crate) fn plain(elems: Vec<Value>) -> Self {
+        Self { elems, class_tag: None, ivars: crate::intern::FxHashMap::default() }
+    }
+}
+
+impl From<Vec<Value>> for ArrayObj {
+    fn from(elems: Vec<Value>) -> Self {
+        Self::plain(elems)
+    }
+}
+
+impl std::ops::Deref for ArrayObj {
+    type Target = Vec<Value>;
+    fn deref(&self) -> &Vec<Value> {
+        &self.elems
+    }
+}
+
+impl std::ops::DerefMut for ArrayObj {
+    fn deref_mut(&mut self) -> &mut Vec<Value> {
+        &mut self.elems
+    }
+}
+
 
 /// Heap representation of a Hash. Carries the key/value pairs,
 /// an optional default-block ObjId for `Hash.new { |h, k| ... }`-
@@ -529,10 +577,15 @@ impl Heap {
         if let HeapObj::Instance(i) = self.get_mut(id) { i } else { panic!("ICE: heap slot is not an Instance") }
     }
     pub(crate) fn array(&self, id: ObjId) -> &Vec<Value> {
-        if let HeapObj::Array(a) = self.get(id) { a } else { panic!("ICE: heap slot is not an Array") }
+        if let HeapObj::Array(a) = self.get(id) { &a.elems } else { panic!("ICE: heap slot is not an Array") }
     }
     pub(crate) fn array_mut(&mut self, id: ObjId) -> &mut Vec<Value> {
-        if let HeapObj::Array(a) = self.get_mut(id) { a } else { panic!("ICE: heap slot is not an Array") }
+        if let HeapObj::Array(a) = self.get_mut(id) { &mut a.elems } else { panic!("ICE: heap slot is not an Array") }
+    }
+    /// Subclass tag for an Array instance (`None` for plain arrays) —
+    /// the Array twin of `hash_class_tag`.
+    pub(crate) fn array_class_tag(&self, id: ObjId) -> Option<Rc<Class>> {
+        if let HeapObj::Array(a) = self.get(id) { a.class_tag.clone() } else { None }
     }
     pub(crate) fn hash(&self, id: ObjId) -> &Vec<(Value, Value)> {
         if let HeapObj::Hash(h) = self.get(id) { &h.pairs } else { panic!("ICE: heap slot is not a Hash") }
@@ -665,6 +718,15 @@ impl Heap {
         if let HeapObj::Hash(h) = self.get(id) { h.class_tag.clone() } else { None }
     }
     /// Read `@name` ivar off a (subclass) Hash; `None` if unset.
+    /// Array twin of `hash_ivar_get` / `hash_ivar_set`.
+    pub(crate) fn array_ivar_get(&self, id: ObjId, name: crate::intern::SymId) -> Option<Value> {
+        if let HeapObj::Array(a) = self.get(id) { a.ivars.get(&name).cloned() } else { None }
+    }
+    pub(crate) fn array_ivar_set(&mut self, id: ObjId, name: crate::intern::SymId, v: Value) {
+        if let HeapObj::Array(a) = self.get_mut(id) {
+            a.ivars.insert(name, v);
+        }
+    }
     pub(crate) fn hash_ivar_get(&self, id: ObjId, name: crate::intern::SymId) -> Option<Value> {
         if let HeapObj::Hash(h) = self.get(id) { h.ivars.get(&name).cloned() } else { None }
     }
@@ -673,6 +735,10 @@ impl Heap {
         if let HeapObj::Hash(h) = self.get_mut(id) { h.ivars.insert(name, v); }
     }
     /// Clone a (subclass) Hash's full ivar table — used by dup/clone.
+    /// Array twin of `hash_ivars_clone`.
+    pub(crate) fn array_ivars_clone(&self, id: ObjId) -> crate::intern::FxHashMap<crate::intern::SymId, Value> {
+        if let HeapObj::Array(a) = self.get(id) { a.ivars.clone() } else { crate::intern::FxHashMap::default() }
+    }
     pub(crate) fn hash_ivars_clone(&self, id: ObjId) -> crate::intern::FxHashMap<crate::intern::SymId, Value> {
         if let HeapObj::Hash(h) = self.get(id) { h.ivars.clone() } else { crate::intern::FxHashMap::default() }
     }
@@ -887,7 +953,12 @@ impl Heap {
                     }
                 }
                 Slot::Live(HeapObj::Array(a)) => {
-                    for v in a {
+                    for v in &a.elems {
+                        Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
+                    // Subclass instance variables hold Values too;
+                    // empty (no iteration) for plain arrays.
+                    for v in a.ivars.values() {
                         Heap::visit_value(v, &mut self.marks, &mut worklist);
                     }
                 }

@@ -1467,7 +1467,7 @@ impl Vm {
         }
         guard.vm.maybe_gc();
         guard.vm.check_alloc()?;
-        let arr_id = guard.vm.heap.alloc(crate::heap::HeapObj::Array(digits));
+        let arr_id = guard.vm.heap.alloc(crate::heap::HeapObj::Array(digits.into()));
         // `guard` drops here, unpinning the digits — but the
         // Array now holds them as roots, so the next GC walk
         // still sees them as reachable.

@@ -414,7 +414,7 @@ impl Vm {
                 if let Err(t) = self.check_alloc() {
                     return Some(Err(t));
                 }
-                let id = self.heap.alloc(crate::heap::HeapObj::Array(out));
+                let id = self.heap.alloc(crate::heap::HeapObj::Array(out.into()));
                 Some(Ok(Value::Array(id)))
             }
             "__method__" | "__callee__" => {
@@ -727,7 +727,7 @@ impl Vm {
                         for v in &elems { g.pin(v.clone()); }
                         g.vm.maybe_gc();
                         if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
-                        let id = g.vm.heap.alloc(HeapObj::Array(elems));
+                        let id = g.vm.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Ok(Value::Array(id)))
                     }
                 }
@@ -1006,7 +1006,7 @@ impl Vm {
                     Value::Nil => {
                         self.maybe_gc(); // allow: gc-rooting — allocates an empty Array (`Vec::new()`); no Value held across the alloc window.
                         if let Err(t) = self.check_alloc() { return Some(Err(t)); }
-                        let id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::new()));
+                        let id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::new().into()));
                         Some(Ok(Value::Array(id)))
                     }
                     Value::Array(_) => Some(Ok(args[0].clone())),
@@ -1035,14 +1035,14 @@ impl Vm {
                         for (k, v) in pairs {
                             g.vm.maybe_gc();
                             if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
-                            let pair_id = g.vm.heap.alloc(crate::heap::HeapObj::Array(vec![k, v]));
+                            let pair_id = g.vm.heap.alloc(crate::heap::HeapObj::Array(vec![k, v].into()));
                             let pair_val = Value::Array(pair_id);
                             g.pin(pair_val.clone());
                             entries.push(pair_val);
                         }
                         g.vm.maybe_gc();
                         if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
-                        let id = g.vm.heap.alloc(crate::heap::HeapObj::Array(entries));
+                        let id = g.vm.heap.alloc(crate::heap::HeapObj::Array(entries.into()));
                         Some(Ok(Value::Array(id)))
                     }
                     _ => {
@@ -1065,7 +1065,7 @@ impl Vm {
                         g.pin(elt.clone());
                         g.vm.maybe_gc();
                         if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
-                        let id = g.vm.heap.alloc(crate::heap::HeapObj::Array(vec![elt]));
+                        let id = g.vm.heap.alloc(crate::heap::HeapObj::Array(vec![elt].into()));
                         Some(Ok(Value::Array(id)))
                     }
                 }
@@ -1121,7 +1121,7 @@ impl Vm {
                     return Some(Err(e));
                 }
                 let arr = vec![Value::Int(sec), Value::Int(nsec as i64)];
-                let id = self.heap.alloc(HeapObj::Array(arr));
+                let id = self.heap.alloc(HeapObj::Array(arr.into()));
                 Some(Ok(Value::Array(id)))
             }
             // `Kernel#sleep(seconds)` — host-injected via

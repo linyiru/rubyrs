@@ -42,7 +42,7 @@ impl Vm {
     ) -> Result<Value, Trap> {
         self.maybe_gc();
         self.check_alloc()?;
-        let caps_arr = self.heap.alloc(HeapObj::Array(caps));
+        let caps_arr = self.heap.alloc(HeapObj::Array(caps.into()));
         let cls_id = self.interner.intern("MatchData");
         let cls = match self.classes.get(&cls_id).cloned() {
             Some(c) => c,

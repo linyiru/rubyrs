@@ -707,7 +707,7 @@ impl Vm {
                 let elems: Vec<Value> = paths.into_iter().map(Value::new_str).collect();
                 self.maybe_gc();
                 self.check_alloc()?;
-                Value::Array(self.heap.alloc(HeapObj::Array(elems)))
+                Value::Array(self.heap.alloc(HeapObj::Array(elems.into())))
             }
             // `Dir.entries(path)` — names in the directory, INCLUDING
             // "." and ".." (CRuby). `Dir.children(path)` — same but
@@ -733,7 +733,7 @@ impl Vm {
                 let elems: Vec<Value> = names.into_iter().map(Value::new_str).collect();
                 self.maybe_gc();
                 self.check_alloc()?;
-                Value::Array(self.heap.alloc(HeapObj::Array(elems)))
+                Value::Array(self.heap.alloc(HeapObj::Array(elems.into())))
             }
             ("exist?", [p]) | ("exists?", [p]) | ("directory?", [p]) => {
                 self.check_filesystem_io_allowed("Dir.exist?", None)?;

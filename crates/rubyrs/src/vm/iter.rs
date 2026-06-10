@@ -181,7 +181,7 @@ impl Vm {
         let acc_id = if matches!(mode, IterMode::Select | IterMode::Reject) {
             g.vm.maybe_gc();
             g.vm.check_alloc()?;
-            let rid = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+            let rid = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
             g.pin(Value::Array(rid));
             Some(rid)
         } else { None };
@@ -328,7 +328,7 @@ impl Vm {
             let (block_args, pair_id) = if is_pair_yield {
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()].into()));
                 g.vm.pinned.push(Value::Array(pid));
                 (vec![Value::Array(pid)], Some(pid))
             } else {
@@ -388,7 +388,7 @@ impl Vm {
         let acc_id = if matches!(mode, IterMode::Select | IterMode::Reject) {
             g.vm.maybe_gc();
             g.vm.check_alloc()?;
-            let rid = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+            let rid = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
             g.pin(Value::Array(rid));
             Some(rid)
         } else { None };
@@ -456,7 +456,7 @@ impl Vm {
         for a in &args { g.pin(a.clone()); }
         g.vm.maybe_gc();
         g.vm.check_alloc()?;
-        let args_id = g.vm.heap.alloc(HeapObj::Array(args));
+        let args_id = g.vm.heap.alloc(HeapObj::Array(args.into()));
         g.pin(Value::Array(args_id));
         g.vm.maybe_gc();
         g.vm.check_alloc()?;
@@ -929,7 +929,7 @@ impl Vm {
                             }
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let gid = g.vm.heap.alloc(HeapObj::Array(group_vec));
+                            let gid = g.vm.heap.alloc(HeapObj::Array(group_vec.into()));
                             // Pin the freshly-allocated capture-
                             // groups Array for the duration of the
                             // step_block call only. `invoke_block`
@@ -1141,7 +1141,7 @@ impl Vm {
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len()).into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
@@ -1306,7 +1306,7 @@ impl Vm {
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
@@ -1329,7 +1329,7 @@ impl Vm {
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len()).into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
@@ -1477,13 +1477,13 @@ impl Vm {
                 g.vm.check_alloc()?;
                 let mut out: Vec<Value> = Vec::with_capacity(groups.len());
                 for (key, items) in groups {
-                    let items_id = g.vm.heap.alloc(HeapObj::Array(items));
+                    let items_id = g.vm.heap.alloc(HeapObj::Array(items.into()));
                     g.pin(Value::Array(items_id));
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![key, Value::Array(items_id)]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![key, Value::Array(items_id)].into()));
                     g.pin(Value::Array(pair_id));
                     out.push(Value::Array(pair_id));
                 }
-                let oid = g.vm.heap.alloc(HeapObj::Array(out));
+                let oid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                 Some(Value::Array(oid))
             }
             // `Hash#each_key { |k| ... }` / `Hash#each_value { |v| ... }`
@@ -1571,7 +1571,7 @@ impl Vm {
                 for (k, v) in snapshot {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     // Scoped pin: step_block's args→locals copy can
                     // call maybe_gc (block with rest param has to
                     // alloc a rest Array), and pair_id is only
@@ -1615,7 +1615,7 @@ impl Vm {
                 for (i, (k, v)) in snapshot.into_iter().enumerate() {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     // Scoped pin for the freshly-allocated pair
                     // Array — only reachable via this Rust local
                     // until step_block copies it to the block's
@@ -1657,14 +1657,14 @@ impl Vm {
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len()).into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step_result = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
@@ -1697,14 +1697,14 @@ impl Vm {
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step_result = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
@@ -2605,7 +2605,7 @@ impl Vm {
                         let step_result: Result<BlockStep, Trap> = (|| {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let slice_id = g.vm.heap.alloc(HeapObj::Array(chunk));
+                            let slice_id = g.vm.heap.alloc(HeapObj::Array(chunk.into()));
                             g.vm.pinned.push(Value::Array(slice_id));
                             g.vm.step_block(block, vec![Value::Array(slice_id)], pre_frames)
                         })();
@@ -2628,7 +2628,7 @@ impl Vm {
                     let step_result: Result<BlockStep, Trap> = (|| {
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let slice_id = g.vm.heap.alloc(HeapObj::Array(chunk));
+                        let slice_id = g.vm.heap.alloc(HeapObj::Array(chunk.into()));
                         g.vm.pinned.push(Value::Array(slice_id));
                         g.vm.step_block(block, vec![Value::Array(slice_id)], pre_frames)
                     })();
@@ -2727,7 +2727,7 @@ impl Vm {
                         let step_result: Result<BlockStep, Trap> = (|| {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let wid = g.vm.heap.alloc(HeapObj::Array(win_vec));
+                            let wid = g.vm.heap.alloc(HeapObj::Array(win_vec.into()));
                             g.vm.pinned.push(Value::Array(wid));
                             g.vm.step_block(block, vec![Value::Array(wid)], pre_frames)
                         })();
@@ -2780,7 +2780,7 @@ impl Vm {
                 g.pin(Value::Block(block));
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(result_id));
                 // Exclusive end at i64::MIN means empty range —
                 // see each_slice arm for the checked_sub
@@ -2821,7 +2821,7 @@ impl Vm {
                             // Flush current_chunk, start fresh.
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let chunk_id = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current_chunk)));
+                            let chunk_id = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current_chunk).into()));
                             g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
                             current_chunk.push(Value::Int(cur));
                         }
@@ -2836,7 +2836,7 @@ impl Vm {
                 if !current_chunk.is_empty() {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let chunk_id = g.vm.heap.alloc(HeapObj::Array(current_chunk));
+                    let chunk_id = g.vm.heap.alloc(HeapObj::Array(current_chunk.into()));
                     g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
                 }
                 Some(Value::Array(result_id))
@@ -2931,11 +2931,11 @@ impl Vm {
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let yes_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                let yes_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(yes_id));
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let no_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                let no_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(no_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
@@ -2956,7 +2956,7 @@ impl Vm {
                 g.vm.check_alloc()?;
                 let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![
                     Value::Array(yes_id), Value::Array(no_id),
-                ]));
+                ].into()));
                 Some(Value::Array(pair_id))
             }
             // `arr.take_while { |x| ... }` / `#drop_while` — prefix
@@ -2973,7 +2973,7 @@ impl Vm {
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early: Option<Value> = None;
@@ -3102,7 +3102,7 @@ impl Vm {
                     let step_result: Result<BlockStep, Trap> = (|| {
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let slice_id = g.vm.heap.alloc(HeapObj::Array(chunk.to_vec()));
+                        let slice_id = g.vm.heap.alloc(HeapObj::Array(chunk.to_vec().into()));
                         g.vm.pinned.push(Value::Array(slice_id));
                         g.vm.step_block(block, vec![Value::Array(slice_id)], pre_frames)
                     })();
@@ -3155,7 +3155,7 @@ impl Vm {
                         let step_result: Result<BlockStep, Trap> = (|| {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let wid = g.vm.heap.alloc(HeapObj::Array(win.to_vec()));
+                            let wid = g.vm.heap.alloc(HeapObj::Array(win.to_vec().into()));
                             g.vm.pinned.push(Value::Array(wid));
                             g.vm.step_block(block, vec![Value::Array(wid)], pre_frames)
                         })();
@@ -3217,7 +3217,7 @@ impl Vm {
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(result_id));
                 if snapshot.is_empty() {
                     return Ok(Some(Value::Array(result_id)));
@@ -3238,7 +3238,7 @@ impl Vm {
                         // Flush current chunk and start a fresh one.
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let chunk_id = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current_chunk)));
+                        let chunk_id = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current_chunk).into()));
                         g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
                         current_chunk.push(pair[1].clone());
                     }
@@ -3248,7 +3248,7 @@ impl Vm {
                 if !current_chunk.is_empty() {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let chunk_id = g.vm.heap.alloc(HeapObj::Array(current_chunk));
+                    let chunk_id = g.vm.heap.alloc(HeapObj::Array(current_chunk.into()));
                     g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
                 }
                 Some(Value::Array(result_id))
@@ -3284,7 +3284,7 @@ impl Vm {
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(result_id));
                 if n_take == 0 || snapshot.is_empty() {
                     return Ok(Some(Value::Array(result_id)));
@@ -3467,7 +3467,7 @@ impl Vm {
                         g.vm.maybe_gc();
                         if pin_key { g.vm.pinned.pop(); }
                         g.vm.check_alloc()?;
-                        let arr_id = g.vm.heap.alloc(HeapObj::Array(vec![v]));
+                        let arr_id = g.vm.heap.alloc(HeapObj::Array(vec![v].into()));
                         g.vm.heap.hash_mut(result_id).push((key, Value::Array(arr_id)));
                     }
                 }
@@ -3614,7 +3614,7 @@ impl Vm {
                 } else {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let nid = g.vm.heap.alloc(HeapObj::Array(copy));
+                    let nid = g.vm.heap.alloc(HeapObj::Array(copy.into()));
                     Some(Value::Array(nid))
                 }
             }
@@ -3685,7 +3685,7 @@ impl Vm {
                 } else {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let nid = g.vm.heap.alloc(HeapObj::Array(sorted));
+                    let nid = g.vm.heap.alloc(HeapObj::Array(sorted.into()));
                     Some(Value::Array(nid))
                 }
             }
@@ -3990,7 +3990,7 @@ impl Vm {
                     for (k, v) in pairs {
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                        let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()].into()));
                         g.vm.pinned.push(Value::Array(pair_id));
                         let step_result = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                         g.vm.pinned.pop();
@@ -4028,7 +4028,7 @@ impl Vm {
                     g.pin(k.clone());
                     g.pin(v.clone());
                     g.vm.maybe_gc();
-                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     Some(Value::Array(pid))
                 } else {
                     Some(Value::Nil)
@@ -4060,7 +4060,7 @@ impl Vm {
                 for (k, v) in pairs_in {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step_result = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
@@ -4095,12 +4095,12 @@ impl Vm {
                 g.vm.maybe_gc();
                 let mut out: Vec<Value> = Vec::with_capacity(keyed.len());
                 for (_, k, v) in keyed {
-                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     let pv = Value::Array(pid);
                     g.pin(pv.clone());
                     out.push(pv);
                 }
-                let oid = g.vm.heap.alloc(HeapObj::Array(out));
+                let oid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                 Some(Value::Array(oid))
             }
 
@@ -4133,7 +4133,7 @@ impl Vm {
                     // pinning needs to span the entire window.
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     let pair = Value::Array(pid);
                     g.pin(pair.clone());
                     let step_result = g.vm.step_block(block, vec![pair.clone()], pre_frames);
@@ -4153,7 +4153,7 @@ impl Vm {
                 g.vm.maybe_gc();
                 let mut hash_pairs: Vec<(Value, Value)> = Vec::with_capacity(buckets.len());
                 for (gk, vs) in buckets {
-                    let aid = g.vm.heap.alloc(HeapObj::Array(vs));
+                    let aid = g.vm.heap.alloc(HeapObj::Array(vs.into()));
                     let av = Value::Array(aid);
                     g.pin(av.clone());
                     hash_pairs.push((gk, av));
@@ -4210,7 +4210,7 @@ impl Vm {
                 for (k, v) in snapshot {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
@@ -4246,18 +4246,18 @@ impl Vm {
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let yes_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                let yes_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(yes_id));
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let no_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                let no_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(no_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
@@ -4274,7 +4274,7 @@ impl Vm {
                 g.vm.check_alloc()?;
                 let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![
                     Value::Array(yes_id), Value::Array(no_id),
-                ]));
+                ].into()));
                 Some(Value::Array(pair_id))
             }
             // `h.take_while { |pair| ... }` / `{ |k, v| ... }`
@@ -4298,7 +4298,7 @@ impl Vm {
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
@@ -4309,13 +4309,13 @@ impl Vm {
                         // remaining pairs without invoking block.
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                        let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                         g.vm.heap.array_mut(result_id).push(Value::Array(pair_id));
                         continue;
                     }
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
@@ -4389,13 +4389,13 @@ impl Vm {
                         for (k, v) in chunk {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()].into()));
                             g.vm.pinned.push(Value::Array(pid));
                             pair_ids.push(Value::Array(pid));
                         }
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let slice_id = g.vm.heap.alloc(HeapObj::Array(pair_ids));
+                        let slice_id = g.vm.heap.alloc(HeapObj::Array(pair_ids.into()));
                         g.vm.pinned.push(Value::Array(slice_id));
                         g.vm.step_block(block, vec![Value::Array(slice_id)], pre_frames)
                     })();
@@ -4449,7 +4449,7 @@ impl Vm {
                 for (k, v) in &snapshot {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()].into()));
                     g.pin(Value::Array(pid));
                     pair_vals.push(Value::Array(pid));
                 }
@@ -4469,7 +4469,7 @@ impl Vm {
                         let step_result: Result<BlockStep, Trap> = (|| {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let wid = g.vm.heap.alloc(HeapObj::Array(win.to_vec()));
+                            let wid = g.vm.heap.alloc(HeapObj::Array(win.to_vec().into()));
                             g.vm.pinned.push(Value::Array(wid));
                             g.vm.step_block(block, vec![Value::Array(wid)], pre_frames)
                         })();
@@ -4517,13 +4517,13 @@ impl Vm {
                 for (k, v) in &snapshot {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()].into()));
                     g.pin(Value::Array(pid));
                     pair_vals.push(Value::Array(pid));
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(result_id));
                 if pair_vals.is_empty() {
                     return Ok(Some(Value::Array(result_id)));
@@ -4543,7 +4543,7 @@ impl Vm {
                     } else {
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let chunk_id = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current_chunk)));
+                        let chunk_id = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current_chunk).into()));
                         g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
                         current_chunk.push(pair[1].clone());
                     }
@@ -4552,7 +4552,7 @@ impl Vm {
                 if !current_chunk.is_empty() {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let chunk_id = g.vm.heap.alloc(HeapObj::Array(current_chunk));
+                    let chunk_id = g.vm.heap.alloc(HeapObj::Array(current_chunk.into()));
                     g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
                 }
                 Some(Value::Array(result_id))
@@ -4586,7 +4586,7 @@ impl Vm {
                 for (i, (k, v)) in snapshot.into_iter().enumerate() {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
@@ -4655,14 +4655,14 @@ impl Vm {
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(result_id));
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
                 // Heap-backed seen-keys list (same pattern as
                 // Hash#uniq block-form to prevent UAF on
                 // swept block-return values).
-                let seen_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
+                let seen_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len()).into()));
                 g.pin(Value::Array(seen_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
@@ -4700,7 +4700,7 @@ impl Vm {
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
                 // `seen_id` is a heap-backed Array of block
@@ -4713,13 +4713,13 @@ impl Vm {
                 // root via the GC walker.
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let seen_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
+                let seen_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len()).into()));
                 g.pin(Value::Array(seen_id));
                 let mut early = None;
                 for (k, v) in snapshot {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
@@ -4769,7 +4769,7 @@ impl Vm {
                 for (k, v) in snapshot {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step_result = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
@@ -4805,14 +4805,14 @@ impl Vm {
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len()).into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
@@ -4850,7 +4850,7 @@ impl Vm {
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let first_id = g.vm.heap.alloc(HeapObj::Array(vec![snapshot[0].0.clone(), snapshot[0].1.clone()]));
+                let first_id = g.vm.heap.alloc(HeapObj::Array(vec![snapshot[0].0.clone(), snapshot[0].1.clone()].into()));
                 g.pin(Value::Array(first_id));
                 let pre_frames = g.vm.frames.len();
                 let mut acc = Value::Array(first_id);
@@ -4870,7 +4870,7 @@ impl Vm {
                     if acc_heap { g.vm.pinned.push(acc.clone()); }
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step = g.vm.step_block(block, vec![acc.clone(), Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
@@ -4906,7 +4906,7 @@ impl Vm {
                     if acc_heap { g.vm.pinned.push(acc.clone()); }
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step = g.vm.step_block(block, vec![acc.clone(), Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
@@ -4958,7 +4958,7 @@ impl Vm {
                     if acc_heap { g.vm.pinned.push(acc.clone()); }
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
@@ -5006,7 +5006,7 @@ impl Vm {
                 for (k, v) in snapshot {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step_result = g.vm.step_block(block, vec![Value::Array(pair_id), seed.clone()], pre_frames);
                     g.vm.pinned.pop();
@@ -5057,7 +5057,7 @@ impl Vm {
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
                 let count = if excl { (ei - bi).max(0) } else { (ei - bi + 1).max(0) };
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(count as usize)));
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(count as usize).into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
@@ -5134,7 +5134,7 @@ impl Vm {
                 for a in args { g.pin(a.clone()); }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let arr_id = g.vm.heap.alloc(HeapObj::Array(elems));
+                let arr_id = g.vm.heap.alloc(HeapObj::Array(elems.into()));
                 g.pin(Value::Array(arr_id));
                 let arr_val = Value::Array(arr_id);
                 return g.vm.collection_call_block(&arr_val, name, args, block);

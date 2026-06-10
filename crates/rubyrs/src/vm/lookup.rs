@@ -972,6 +972,12 @@ impl Vm {
             && let Some(c) = self.heap.hash_class_tag(*id) {
             return Value::Class(c);
         }
+        // Array twin (`class StringRegister < Array` — rouge's
+        // python lexer).
+        if let Value::Array(id) = recv
+            && let Some(c) = self.heap.array_class_tag(*id) {
+            return Value::Class(c);
+        }
         // Builtin receivers resolve through a per-type Rc<Class> cache
         // (`builtin_class_cache`) instead of interning the class-name
         // string on EVERY call — this sits on the dispatch hot path
@@ -1923,6 +1929,23 @@ impl Vm {
                         // no-op), so it falls through to nil.
                         (_, Some(Value::Hash(id))) if self.heap.hash_class_tag(id).is_some() => {
                             let recv = Value::Hash(id);
+                            if let Some(v) = self.collection_call(&recv, &nm, &args)? {
+                                self.stack.push(v);
+                                return Ok(());
+                            }
+                            if nm == "initialize" {
+                                self.stack.push(Value::Nil);
+                                return Ok(());
+                            }
+                        }
+                        // Array twin: `super` from an Array-subclass
+                        // method routes to the Array primitives the
+                        // same way. (Array#initialize DOES have
+                        // semantics — `super(n, fill)` — but the
+                        // collection_call arm covers it; the nil
+                        // fallback mirrors the Hash shape.)
+                        (_, Some(Value::Array(id))) if self.heap.array_class_tag(id).is_some() => {
+                            let recv = Value::Array(id);
                             if let Some(v) = self.collection_call(&recv, &nm, &args)? {
                                 self.stack.push(v);
                                 return Ok(());

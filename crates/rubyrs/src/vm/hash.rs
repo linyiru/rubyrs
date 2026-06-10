@@ -228,13 +228,13 @@ impl Vm {
                         // so we skip the cap check here. Embedders should set
                         // max_live with a small slack to account for these
                         // derived allocations.
-                        let nid = self.heap.alloc(HeapObj::Array(keys));
+                        let nid = self.heap.alloc(HeapObj::Array(keys.into()));
                         Some(Value::Array(nid))
                     }
                     ("values", []) => {
                         let vals: Vec<Value> = self.heap.hash(id).iter().map(|(_, v)| v.clone()).collect();
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(vals));
+                        let nid = self.heap.alloc(HeapObj::Array(vals.into()));
                         Some(Value::Array(nid))
                     }
                     // `h.values_at(*keys)` → the value for each key (a
@@ -252,7 +252,7 @@ impl Vm {
                                 .unwrap_or(Value::Nil)
                         }).collect();
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        let nid = self.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
                     // No-block `each_key` / `each_value` → Enumerator; the
@@ -322,12 +322,12 @@ impl Vm {
                             let mut pair_ids: Vec<Value> = Vec::with_capacity(pairs.len());
                             for (k, v) in pairs {
                                 g.vm.maybe_gc();
-                                let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                                let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                                 g.pin(Value::Array(pid));
                                 pair_ids.push(Value::Array(pid));
                             }
                             g.vm.maybe_gc();
-                            g.vm.heap.alloc(HeapObj::Array(pair_ids))
+                            g.vm.heap.alloc(HeapObj::Array(pair_ids.into()))
                         };
                         Some(Value::Array(nid))
                     }
@@ -358,7 +358,7 @@ impl Vm {
                         if v.is_gc_heap_ref() { g.pin(v.clone()); }
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                        let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                         Some(Value::Array(pid))
                     }
                     // BigInt arg → RangeError, mirroring
@@ -392,13 +392,13 @@ impl Vm {
                         for (k, v) in pairs {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                             g.pin(Value::Array(pid));
                             pair_ids.push(Value::Array(pid));
                         }
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
+                        let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids.into()));
                         Some(Value::Array(aid))
                     }
                     // Float coerce — CRuby truncates `first(2.5)` to
@@ -449,13 +449,13 @@ impl Vm {
                         for (k, v) in pairs {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                             g.pin(Value::Array(pid));
                             pair_ids.push(Value::Array(pid));
                         }
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
+                        let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids.into()));
                         Some(Value::Array(aid))
                     }
                     // `h.drop(n)` — returns entries AFTER the first n
@@ -479,13 +479,13 @@ impl Vm {
                         for (k, v) in pairs {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                             g.pin(Value::Array(pid));
                             pair_ids.push(Value::Array(pid));
                         }
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
+                        let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids.into()));
                         Some(Value::Array(aid))
                     }
                     // No-block `each` / `each_pair` / `each_with_index`
@@ -583,7 +583,7 @@ impl Vm {
                             // happens implicitly because we
                             // never call maybe_gc inside the
                             // loop (ruby_eq is read-only).
-                            let pid = self.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                            let pid = self.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()].into()));
                             let pair = Value::Array(pid);
                             if pair.ruby_eq(&target, &self.heap) {
                                 return Ok(Some(Value::Int(i as i64)));
@@ -613,7 +613,7 @@ impl Vm {
                         for (k, v) in pairs {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                             // Each pair Array is unique per
                             // iteration (Hash keys eql?-unique
                             // by definition), so we always push
@@ -646,12 +646,12 @@ impl Vm {
                         // stays O(1) instead of O(n).
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let aid = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(pairs.len())));
+                        let aid = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(pairs.len()).into()));
                         g.pin(Value::Array(aid));
                         for (k, v) in pairs {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                             g.vm.heap.array_mut(aid).push(Value::Array(pid));
                         }
                         Some(Value::Array(aid))
@@ -692,14 +692,14 @@ impl Vm {
                         // O(n) per receiver entry.
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let aid = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(receiver_pairs.len())));
+                        let aid = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(receiver_pairs.len()).into()));
                         g.pin(Value::Array(aid));
                         for (i, (k, v)) in receiver_pairs.into_iter().enumerate() {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
                             // Build the per-entry tuple:
                             // [[k, v], arg1[i] || nil, arg2[i] || nil, ...]
-                            let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                             // pair_id needs a brief pin only
                             // while we're allocating the
                             // tuple Array (one more maybe_gc
@@ -712,7 +712,7 @@ impl Vm {
                             }
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let tid = g.vm.heap.alloc(HeapObj::Array(tuple));
+                            let tid = g.vm.heap.alloc(HeapObj::Array(tuple.into()));
                             g.vm.pinned.pop();
                             // tid is now reachable via aid; no
                             // per-iter pin needed for either.
@@ -828,7 +828,7 @@ impl Vm {
                         if v.is_gc_heap_ref() { g.pin(v.clone()); }
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                        let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                         Some(Value::Array(pid))
                     }
                     ("dup", []) | ("clone", []) => {

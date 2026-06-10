@@ -137,7 +137,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             ),
             None => (Value::new_str(text.to_string()), Value::Nil),
         };
-        let id = vm.heap.alloc(HeapObj::Array(vec![content, yaml]));
+        let id = vm.heap.alloc(HeapObj::Array(vec![content, yaml].into()));
         Ok(Value::Array(id))
     });
 }
@@ -348,7 +348,7 @@ fn parse_sequence(
             seq.push(scalar(vm, item, depth)?);
         }
     }
-    let id = vm.heap.alloc(HeapObj::Array(seq));
+    let id = vm.heap.alloc(HeapObj::Array(seq.into()));
     Ok(Value::Array(id))
 }
 
@@ -520,7 +520,7 @@ fn parse_flow_seq(vm: &mut crate::vm::Vm, s: &str, depth: usize) -> Result<Value
             elems.push(scalar(vm, part, depth + 1)?);
         }
     }
-    let id = vm.heap.alloc(HeapObj::Array(elems));
+    let id = vm.heap.alloc(HeapObj::Array(elems.into()));
     Ok(Value::Array(id))
 }
 

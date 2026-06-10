@@ -192,7 +192,7 @@ impl Vm {
                     for s in &bt_strings { self.pinned.push(s.clone()); }
                     let n_pinned = bt_strings.len() + 1;
                     self.maybe_gc();
-                    let bt_arr_id = self.heap.alloc(HeapObj::Array(bt_strings));
+                    let bt_arr_id = self.heap.alloc(HeapObj::Array(bt_strings.into()));
                     for _ in 0..n_pinned { self.pinned.pop(); }
                     self.heap.instance_mut(*exc_id).ivars
                         .insert(bt_sym, Value::Array(bt_arr_id));

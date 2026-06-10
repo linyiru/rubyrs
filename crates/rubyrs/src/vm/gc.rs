@@ -780,7 +780,7 @@ mod tests {
         // array. Globals must be in the root set.
         let mut vm = mk_vm();
         vm.stress_gc = true;
-        let arr_id = vm.heap.alloc(crate::heap::HeapObj::Array(Vec::new()));
+        let arr_id = vm.heap.alloc(crate::heap::HeapObj::Array(Vec::new().into()));
         let name_id = vm.interner.intern("$g");
         vm.globals.insert(name_id, Value::Array(arr_id));
         let before = vm.heap.live_count;

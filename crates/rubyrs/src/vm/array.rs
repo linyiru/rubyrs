@@ -251,7 +251,7 @@ impl Vm {
                         g.pin(Value::Array(id));
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let nid = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(take)));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(take).into()));
                         let drained: Vec<Value> = g.vm.heap.array_mut(id).drain(0..take).collect();
                         g.vm.heap.array_mut(nid).extend(drained);
                         Some(Value::Array(nid))
@@ -312,7 +312,7 @@ impl Vm {
                         g.pin(Value::Array(id));
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let nid = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(take)));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(take).into()));
                         let drained: Vec<Value> = g.vm.heap.array_mut(id).drain(split_at..).collect();
                         g.vm.heap.array_mut(nid).extend(drained);
                         Some(Value::Array(nid))
@@ -618,6 +618,36 @@ impl Vm {
                         }
                         Some(Value::Array(id))
                     }
+                    // `initialize` reached on a TAGGED array — either
+                    // `Subclass.new(n, fill)` via the generic
+                    // allocate+initialize path (no user initialize
+                    // defined), or `super(n, fill)` from a subclass
+                    // initialize (lookup's Array super arm routes
+                    // here). Fills self in place with Array.new
+                    // semantics; plain literals never dispatch
+                    // `initialize`.
+                    ("initialize", init_args) => {
+                        let elems: Vec<Value> = match init_args {
+                            [] => Vec::new(),
+                            [Value::Int(n)] | [Value::Int(n), _] => {
+                                if *n < 0 {
+                                    return Err(self.trap(RubyError::ArgumentError {
+                                        msg: "negative array size".to_string(),
+                                    }));
+                                }
+                                let fill = init_args.get(1).cloned().unwrap_or(Value::Nil);
+                                vec![fill; *n as usize]
+                            }
+                            [Value::Array(src)] => self.heap.array(*src).clone(),
+                            _ => {
+                                return Err(self.trap(RubyError::TypeError {
+                                    msg: "no implicit conversion into Integer".to_string(),
+                                }));
+                            }
+                        };
+                        *self.heap.array_mut(id) = elems;
+                        Some(Value::Array(id))
+                    }
                     ("push", [v]) | ("<<", [v]) => {
                         // P2-14c: refuse a push that would make this
                         // Array's storage exceed the per-value byte
@@ -667,7 +697,7 @@ impl Vm {
                             let slice: Vec<Value> = a[s as usize..end_idx].to_vec();
                             self.maybe_gc();
                             self.check_alloc()?;
-                            let nid = self.heap.alloc(HeapObj::Array(slice));
+                            let nid = self.heap.alloc(HeapObj::Array(slice.into()));
                             Some(Value::Array(nid))
                         }
                     }
@@ -722,7 +752,7 @@ impl Vm {
                         } else if begin == len {
                             self.maybe_gc();
                             self.check_alloc()?;
-                            let nid = self.heap.alloc(HeapObj::Array(Vec::new()));
+                            let nid = self.heap.alloc(HeapObj::Array(Vec::new().into()));
                             Some(Value::Array(nid))
                         } else {
                             let last = end_idx.min(len - 1);
@@ -733,7 +763,7 @@ impl Vm {
                             };
                             self.maybe_gc();
                             self.check_alloc()?;
-                            let nid = self.heap.alloc(HeapObj::Array(slice));
+                            let nid = self.heap.alloc(HeapObj::Array(slice.into()));
                             Some(Value::Array(nid))
                         }
                     }
@@ -765,7 +795,7 @@ impl Vm {
                                 }));
                             }
                         self.maybe_gc();
-                        let new_id = self.heap.alloc(HeapObj::Array(slice));
+                        let new_id = self.heap.alloc(HeapObj::Array(slice.into()));
                         Some(Value::Array(new_id))
                     }
                     // `__mw_post(j, pre_count, post_count)` —
@@ -1014,7 +1044,7 @@ impl Vm {
                         g.pin(Value::Array(id));
                         let out: Vec<Value> = g.vm.heap.array(id).iter().take(n).cloned().collect();
                         g.vm.maybe_gc();
-                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
                     // BigInt count → RangeError. CRuby's wording:
@@ -1077,7 +1107,7 @@ impl Vm {
                         let start = arr.len().saturating_sub(n);
                         let out: Vec<Value> = arr[start..].to_vec();
                         g.vm.maybe_gc();
-                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
                     // BigInt count → RangeError. Same shape as the
@@ -1199,7 +1229,7 @@ impl Vm {
                         let mut out: Vec<Value> = Vec::new();
                         if n_take == 0 {
                             g.vm.maybe_gc();
-                            let empty_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                            let empty_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                             let v = Value::Array(empty_id);
                             g.pin(v.clone());
                             out.push(v);
@@ -1209,7 +1239,7 @@ impl Vm {
                             loop {
                                 let pick: Vec<Value> = idx.iter().map(|&i| snapshot[i].clone()).collect();
                                 g.vm.maybe_gc();
-                                let pid = g.vm.heap.alloc(HeapObj::Array(pick));
+                                let pid = g.vm.heap.alloc(HeapObj::Array(pick.into()));
                                 let v = Value::Array(pid);
                                 g.pin(v.clone());
                                 out.push(v);
@@ -1230,7 +1260,7 @@ impl Vm {
                             }
                         }
                         g.vm.maybe_gc();
-                        let result_id = g.vm.heap.alloc(HeapObj::Array(out));
+                        let result_id = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(result_id))
                     }
                     // `arr.permutation` / `arr.permutation(n)` — every
@@ -1252,7 +1282,7 @@ impl Vm {
                         let mut out: Vec<Value> = Vec::new();
                         if n_take == 0 {
                             g.vm.maybe_gc();
-                            let empty_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                            let empty_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                             let v = Value::Array(empty_id);
                             g.pin(v.clone());
                             out.push(v);
@@ -1292,14 +1322,14 @@ impl Vm {
                             for p in perms {
                                 let pick: Vec<Value> = p.into_iter().map(|i| snapshot[i].clone()).collect();
                                 g.vm.maybe_gc();
-                                let pid = g.vm.heap.alloc(HeapObj::Array(pick));
+                                let pid = g.vm.heap.alloc(HeapObj::Array(pick.into()));
                                 let v = Value::Array(pid);
                                 g.pin(v.clone());
                                 out.push(v);
                             }
                         }
                         g.vm.maybe_gc();
-                        let result_id = g.vm.heap.alloc(HeapObj::Array(out));
+                        let result_id = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(result_id))
                     }
                     // `arr.tally` — count occurrences into a Hash
@@ -1440,7 +1470,7 @@ impl Vm {
                             }
                         }
                         g.vm.maybe_gc();
-                        let nid = g.vm.heap.alloc(HeapObj::Array(copy));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(copy.into()));
                         Some(Value::Array(nid))
                     }
                     ("inject", [Value::Sym(op_sym)]) | ("reduce", [Value::Sym(op_sym)]) => {
@@ -1538,8 +1568,18 @@ impl Vm {
                     // it raised NoMethodError.
                     ("dup", []) | ("clone", []) => {
                         let src = self.heap.array(id).clone();
+                        // Preserve the Array-subclass tag + ivars so
+                        // `StringRegister.new.dup` stays a
+                        // StringRegister with its state (CRuby copies
+                        // both) — mirrors the Hash dup arm.
+                        let class_tag = self.heap.array_class_tag(id);
+                        let ivars = self.heap.array_ivars_clone(id);
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(src));
+                        let nid = self.heap.alloc(HeapObj::Array(crate::heap::ArrayObj {
+                            elems: src,
+                            class_tag,
+                            ivars,
+                        }));
                         Some(Value::Array(nid))
                     }
                     ("inspect", []) | ("to_s", []) => {
@@ -1551,7 +1591,7 @@ impl Vm {
                     ("reverse", []) => {
                         let rev: Vec<Value> = self.heap.array(id).iter().rev().cloned().collect();
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(rev));
+                        let nid = self.heap.alloc(HeapObj::Array(rev.into()));
                         Some(Value::Array(nid))
                     }
                     ("uniq", []) => {
@@ -1582,7 +1622,7 @@ impl Vm {
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Array(id));
                         g.vm.maybe_gc();
-                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
                     // Wrong-arity guard for uniq — CRuby's
@@ -1605,7 +1645,7 @@ impl Vm {
                             .cloned()
                             .collect();
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        let nid = self.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
                     // In-place bang variants. Mutate the receiver
@@ -1730,7 +1770,7 @@ impl Vm {
                             arr.iter().cycle().skip(shift).take(len).cloned().collect()
                         };
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(rotated));
+                        let nid = self.heap.alloc(HeapObj::Array(rotated.into()));
                         Some(Value::Array(nid))
                     }
                     ("rotate!", []) | ("rotate!", [Value::Int(_)]) => {
@@ -1785,13 +1825,13 @@ impl Vm {
                                 row_slices.iter().map(|r| r[c].clone()).collect();
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let cid = g.vm.heap.alloc(HeapObj::Array(col));
+                            let cid = g.vm.heap.alloc(HeapObj::Array(col.into()));
                             g.pin(Value::Array(cid));
                             out.push(Value::Array(cid));
                         }
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
                     ("flatten", []) | ("flatten", [Value::Int(_)]) | ("flatten", [Value::Nil]) => {
@@ -1819,7 +1859,7 @@ impl Vm {
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Array(id));
                         g.vm.maybe_gc();
-                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         drop(g);
                         Some(Value::Array(nid))
                     }
@@ -1856,7 +1896,7 @@ impl Vm {
                         let extra: Vec<Value> = g.vm.heap.array(*other).clone();
                         out.extend(extra);
                         g.vm.maybe_gc();
-                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
                     ("-", [Value::Array(other)]) => {
@@ -1871,7 +1911,7 @@ impl Vm {
                             .filter(|v| !exclude.iter().any(|x| x.ruby_eq(v, &g.vm.heap)))
                             .collect();
                         g.vm.maybe_gc();
-                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
                     // Array#& — set intersection. CRuby: returns
@@ -1896,7 +1936,7 @@ impl Vm {
                             }
                         }
                         g.vm.maybe_gc();
-                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
                     // Array#| — set union. CRuby: receiver's
@@ -1915,7 +1955,7 @@ impl Vm {
                             }
                         }
                         g.vm.maybe_gc();
-                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
                     ("concat", [Value::Array(other)]) => {
@@ -1964,7 +2004,7 @@ impl Vm {
                         g.pin(Value::Array(id));
                         let out: Vec<Value> = g.vm.heap.array(id).iter().take(n).cloned().collect();
                         g.vm.maybe_gc();
-                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
                     ("drop", [Value::Int(n)]) => {
@@ -1978,7 +2018,7 @@ impl Vm {
                         g.pin(Value::Array(id));
                         let out: Vec<Value> = g.vm.heap.array(id).iter().skip(n).cloned().collect();
                         g.vm.maybe_gc();
-                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
                     // Wrong-arity / non-Int for take/drop. Catches
@@ -2095,13 +2135,13 @@ impl Vm {
                                 for o in &others {
                                     row.push(o.get(i).cloned().unwrap_or(Value::Nil));
                                 }
-                                let rid = g.vm.heap.alloc(HeapObj::Array(row));
+                                let rid = g.vm.heap.alloc(HeapObj::Array(row.into()));
                                 let rv = Value::Array(rid);
                                 g.pin(rv.clone());
                                 out.push(rv);
                             }
                             g.vm.maybe_gc();
-                            g.vm.heap.alloc(HeapObj::Array(out))
+                            g.vm.heap.alloc(HeapObj::Array(out.into()))
                         };
                         Some(Value::Array(nid))
                     }
@@ -2131,7 +2171,7 @@ impl Vm {
                             }
                         }
                         if factors.iter().any(|f| f.is_empty()) {
-                            let nid = self.heap.alloc(HeapObj::Array(Vec::new()));
+                            let nid = self.heap.alloc(HeapObj::Array(Vec::new().into()));
                             return Ok(Some(Value::Array(nid)));
                         }
                         let row_width = factors.len();
@@ -2168,7 +2208,7 @@ impl Vm {
                                 for (i, idx) in indices.iter().enumerate() {
                                     row.push(factors[i][*idx].clone());
                                 }
-                                let rid = g.vm.heap.alloc(HeapObj::Array(row));
+                                let rid = g.vm.heap.alloc(HeapObj::Array(row.into()));
                                 let rv = Value::Array(rid);
                                 g.pin(rv.clone());
                                 out.push(rv);
@@ -2190,7 +2230,7 @@ impl Vm {
                                 if carried { break; }
                             }
                             g.vm.maybe_gc();
-                            g.vm.heap.alloc(HeapObj::Array(out))
+                            g.vm.heap.alloc(HeapObj::Array(out.into()))
                         };
                         Some(Value::Array(nid))
                     }

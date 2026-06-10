@@ -1679,7 +1679,7 @@ impl Vm {
                 self.maybe_gc();
                 self.check_alloc()?;
                 let v = if name == "to_a" {
-                    Value::Array(self.heap.alloc(crate::heap::HeapObj::Array(Vec::new())))
+                    Value::Array(self.heap.alloc(crate::heap::HeapObj::Array(Vec::new().into())))
                 } else {
                     Value::Hash(self.heap.alloc(crate::heap::HeapObj::Hash(
                         crate::heap::HashObj::with_pairs(Vec::new()),
@@ -1855,7 +1855,7 @@ impl Vm {
         }
         self.maybe_gc();
         self.check_alloc()?;
-        Ok(Value::Array(self.heap.alloc(crate::heap::HeapObj::Array(vec![v]))))
+        Ok(Value::Array(self.heap.alloc(crate::heap::HeapObj::Array(vec![v].into()))))
     }
 
 }

@@ -328,7 +328,7 @@ impl Vm {
         }
         self.maybe_gc();
         self.check_alloc()?;
-        let id = self.heap.alloc(HeapObj::Array(Vec::new()));
+        let id = self.heap.alloc(HeapObj::Array(Vec::new().into()));
         self.load_path = Some(id);
         Ok(id)
     }
@@ -1200,6 +1200,8 @@ impl Vm {
                     Value::Class(c) => c.ivars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
                     // Hash-subclass instances carry their own ivar table.
                     Value::Hash(id) => self.heap.hash_ivar_get(*id, name_id).unwrap_or(Value::Nil),
+                    // Array-subclass instances likewise.
+                    Value::Array(id) => self.heap.array_ivar_get(*id, name_id).unwrap_or(Value::Nil),
                     _ => Value::Nil,
                 };
                 self.stack.push(v);
@@ -1212,6 +1214,8 @@ impl Vm {
                     Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v); }
                     // Hash-subclass instances carry their own ivar table.
                     Value::Hash(id) => { self.heap.hash_ivar_set(*id, name_id, v); }
+                    // Array-subclass instances likewise.
+                    Value::Array(id) => { self.heap.array_ivar_set(*id, name_id, v); }
                     _ => { /* drop — CRuby raises but the toplevel/primitive cases are rare */ }
                 }
             }
@@ -3401,7 +3405,7 @@ impl Vm {
                 let n = n as usize;
                 let split = self.stack.len() - n;
                 let elems: Vec<Value> = self.stack.drain(split..).collect();
-                let id = self.heap.alloc(HeapObj::Array(elems));
+                let id = self.heap.alloc(HeapObj::Array(elems.into()));
                 self.stack.push(Value::Array(id));
             }
             Op::NewRange(excl) => {

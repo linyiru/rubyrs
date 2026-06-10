@@ -106,7 +106,7 @@ impl Vm {
                                     cur = next;
                                 }
                                 self.maybe_gc();
-                                let nid = self.heap.alloc(HeapObj::Array(out));
+                                let nid = self.heap.alloc(HeapObj::Array(out.into()));
                                 return Ok(Some(Value::Array(nid)));
                             }
                             // CRuby Range#size is nil for non-numeric
@@ -247,7 +247,7 @@ impl Vm {
                                     v = v.saturating_add(1);
                                 }
                                 self.maybe_gc();
-                                let nid = self.heap.alloc(HeapObj::Array(out));
+                                let nid = self.heap.alloc(HeapObj::Array(out.into()));
                                 return Ok(Some(Value::Array(nid)));
                             }
                             // Case 3: non-Int non-Nil begin (e.g.
@@ -376,7 +376,7 @@ impl Vm {
                             v = v.saturating_add(1);
                         }
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(elems));
+                        let nid = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(nid))
                     }
                     ("last", [Value::Int(n)]) => {
@@ -408,7 +408,7 @@ impl Vm {
                         let n_safe = usize::try_from(n_taken).unwrap_or(usize::MAX);
                         let mut elems: Vec<Value> = Vec::with_capacity(n_safe);
                         if count == 0 {
-                            let nid = self.heap.alloc(HeapObj::Array(elems));
+                            let nid = self.heap.alloc(HeapObj::Array(elems.into()));
                             return Ok(Some(Value::Array(nid)));
                         }
                         let start = bi.saturating_add(count.saturating_sub(n_taken));
@@ -418,7 +418,7 @@ impl Vm {
                             v = v.saturating_add(1);
                         }
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(elems));
+                        let nid = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(nid))
                     }
                     // BigInt arg — CRuby raises RangeError (the
@@ -530,7 +530,7 @@ impl Vm {
                         let end_inclusive = if excl { ei - 1 } else { ei };
                         for v in bi..=end_inclusive { elems.push(Value::Int(v)); }
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(elems));
+                        let nid = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(nid))
                     }
                     // `r.each_slice(n)` / `r.each_cons(n)` —
@@ -564,7 +564,7 @@ impl Vm {
                                 None => {
                                     self.maybe_gc();
                                     self.check_alloc()?;
-                                    let oid = self.heap.alloc(HeapObj::Array(Vec::new()));
+                                    let oid = self.heap.alloc(HeapObj::Array(Vec::new().into()));
                                     return Ok(Some(Value::Array(oid)));
                                 }
                             }
@@ -585,7 +585,7 @@ impl Vm {
                             if current.len() == n_usz {
                                 g.vm.maybe_gc();
                                 g.vm.check_alloc()?;
-                                let cid = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current)));
+                                let cid = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current).into()));
                                 g.pin(Value::Array(cid));
                                 chunks.push(Value::Array(cid));
                                 current = Vec::with_capacity(n_usz.min(64));
@@ -596,13 +596,13 @@ impl Vm {
                         if !current.is_empty() {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
-                            let cid = g.vm.heap.alloc(HeapObj::Array(current));
+                            let cid = g.vm.heap.alloc(HeapObj::Array(current.into()));
                             g.pin(Value::Array(cid));
                             chunks.push(Value::Array(cid));
                         }
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let oid = g.vm.heap.alloc(HeapObj::Array(chunks));
+                        let oid = g.vm.heap.alloc(HeapObj::Array(chunks.into()));
                         Some(Value::Array(oid))
                     }
                     // Wrong-arity / non-Int for Range#each_slice no-block form.
@@ -628,7 +628,7 @@ impl Vm {
                                 None => {
                                     self.maybe_gc();
                                     self.check_alloc()?;
-                                    let oid = self.heap.alloc(HeapObj::Array(Vec::new()));
+                                    let oid = self.heap.alloc(HeapObj::Array(Vec::new().into()));
                                     return Ok(Some(Value::Array(oid)));
                                 }
                             }
@@ -649,7 +649,7 @@ impl Vm {
                         if too_short {
                             self.maybe_gc();
                             self.check_alloc()?;
-                            let oid = self.heap.alloc(HeapObj::Array(Vec::new()));
+                            let oid = self.heap.alloc(HeapObj::Array(Vec::new().into()));
                             return Ok(Some(Value::Array(oid)));
                         }
                         let mut g = PinGuard::new(self);
@@ -664,7 +664,7 @@ impl Vm {
                                 g.vm.maybe_gc();
                                 g.vm.check_alloc()?;
                                 let win: Vec<Value> = buf.iter().cloned().collect();
-                                let wid = g.vm.heap.alloc(HeapObj::Array(win));
+                                let wid = g.vm.heap.alloc(HeapObj::Array(win.into()));
                                 g.pin(Value::Array(wid));
                                 windows.push(Value::Array(wid));
                             }
@@ -673,7 +673,7 @@ impl Vm {
                         }
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let oid = g.vm.heap.alloc(HeapObj::Array(windows));
+                        let oid = g.vm.heap.alloc(HeapObj::Array(windows.into()));
                         Some(Value::Array(oid))
                     }
                     // Wrong-arity / non-Int for Range#each_cons no-block form.
@@ -708,7 +708,7 @@ impl Vm {
                             v = v.saturating_add(*n);
                         }
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(elems));
+                        let nid = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(nid))
                     }
                     ("sum", []) | ("sum", [Value::Int(_)]) => {

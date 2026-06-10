@@ -2038,7 +2038,7 @@ impl Vm {
                     Value::new_str(filename.to_string()),
                     Value::Int(line),
                 ];
-                let id = self.heap.alloc(crate::heap::HeapObj::Array(arr));
+                let id = self.heap.alloc(crate::heap::HeapObj::Array(arr.into()));
                 self.stack.push(Value::Array(id));
             }
             return Ok(CallableOutcome::Handled);
@@ -2807,7 +2807,7 @@ impl Vm {
                     let filename_str = Value::new_str(label.to_string());
                     self.maybe_gc();
                     self.check_alloc()?;
-                    let id = self.heap.alloc(HeapObj::Array(vec![filename_str, Value::Int(meta.source_line)]));
+                    let id = self.heap.alloc(HeapObj::Array(vec![filename_str, Value::Int(meta.source_line)].into()));
                     self.stack.push(Value::Array(id));
                     return Ok(CallableOutcome::Handled);
                 }
@@ -2820,7 +2820,7 @@ impl Vm {
                 let filename_str = Value::new_str(filename.to_string());
                 self.maybe_gc();
                 self.check_alloc()?;
-                let id = self.heap.alloc(HeapObj::Array(vec![filename_str, Value::Int(line as i64)]));
+                let id = self.heap.alloc(HeapObj::Array(vec![filename_str, Value::Int(line as i64)].into()));
                 self.stack.push(Value::Array(id));
                 return Ok(CallableOutcome::Handled);
             }
@@ -3188,13 +3188,13 @@ impl Vm {
                     }
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    let pid = g.vm.heap.alloc(HeapObj::Array(pair));
+                    let pid = g.vm.heap.alloc(HeapObj::Array(pair.into()));
                     g.pin(Value::Array(pid));
                     outer.push(Value::Array(pid));
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let aid = g.vm.heap.alloc(HeapObj::Array(outer));
+                let aid = g.vm.heap.alloc(HeapObj::Array(outer.into()));
                 g.vm.stack.push(Value::Array(aid));
                 return Ok(CallableOutcome::Handled);
             }
@@ -3386,7 +3386,7 @@ impl Vm {
                     .collect();
                 self.maybe_gc();
                 self.check_alloc()?;
-                let id = self.heap.alloc(HeapObj::Array(chain));
+                let id = self.heap.alloc(HeapObj::Array(chain.into()));
                 self.stack.push(Value::Array(id));
                 Ok(true)
             }
@@ -3625,7 +3625,7 @@ impl Vm {
                 let elems: Vec<Value> = sids.into_iter().map(Value::Sym).collect();
                 self.maybe_gc();
                 self.check_alloc()?;
-                let id = self.heap.alloc(HeapObj::Array(elems));
+                let id = self.heap.alloc(HeapObj::Array(elems.into()));
                 self.stack.push(Value::Array(id));
                 Ok(true)
             }
@@ -3679,7 +3679,7 @@ impl Vm {
                     .collect();
                 self.maybe_gc();
                 self.check_alloc()?;
-                let id = self.heap.alloc(HeapObj::Array(elems));
+                let id = self.heap.alloc(HeapObj::Array(elems.into()));
                 self.stack.push(Value::Array(id));
                 Ok(true)
             }
@@ -4437,6 +4437,33 @@ impl Vm {
         g.vm.stack.push(Value::Hash(hid));
         return Ok(ClassOutcome::Handled);
     }
+    // `Array[1, 2]` / `Subclass[1, 2]` — the literal-ish class
+    // constructor (mirrors the Hash[] intercept above). A subclass
+    // constructs a TAGGED instance of itself; the literal Array
+    // class tags None.
+    if name == "[]"
+        && let Value::Class(cls) = &recv
+        && (cls.name.as_str() == "Array" || class_inherits_named(cls, "Array"))
+    {
+        let class_tag = if cls.name.as_str() == "Array" {
+            None
+        } else {
+            Some(cls.clone())
+        };
+        let mut g = PinGuard::new(self);
+        for a in &args {
+            if a.is_gc_heap_ref() { g.pin(a.clone()); }
+        }
+        g.vm.maybe_gc();
+        g.vm.check_alloc()?;
+        let aid = g.vm.heap.alloc(HeapObj::Array(crate::heap::ArrayObj {
+            elems: args.to_vec(),
+            class_tag,
+            ivars: crate::intern::FxHashMap::default(),
+        }));
+        g.vm.stack.push(Value::Array(aid));
+        return Ok(ClassOutcome::Handled);
+    }
     if name_id == new_id
         && let Value::Class(cls) = &recv
         && cls.name.as_str() == "Array"
@@ -4485,7 +4512,7 @@ impl Vm {
         }
         g.vm.maybe_gc();
         g.vm.check_alloc()?;
-        let aid = g.vm.heap.alloc(HeapObj::Array(elems));
+        let aid = g.vm.heap.alloc(HeapObj::Array(elems.into()));
         g.vm.stack.push(Value::Array(aid));
         return Ok(ClassOutcome::Handled);
     }
@@ -4943,6 +4970,22 @@ impl Vm {
                 drop(g);
                 self.invoke_method(m, obj.clone(), args.into_vec())?;
                 self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
+            } else if let Value::Array(aid) = &obj
+                && !args.is_empty()
+            {
+                // Array subclass with NO user initialize:
+                // `Subclass.new(n, fill)` must still honour
+                // Array#initialize semantics (CRuby: SR.new(3, :x)
+                // → [:x, :x, :x] tagged SR). The collection_call
+                // "initialize" arm fills the tagged instance in
+                // place. Zero-arg new skips this — the allocator's
+                // empty elems already ARE Array#initialize().
+                let aid = *aid;
+                drop(g);
+                let recv = Value::Array(aid);
+                self.collection_call(&recv, "initialize", &args)?;
+                self.stack.push(recv);
+                return Ok(ClassOutcome::Handled);
             } else {
                 // L3-F + L3-H: cext-defined initialize (registered
                 // via rb_define_method) lives in
@@ -6416,7 +6459,7 @@ impl Vm {
                 } else {
                     let id = self
                         .heap
-                        .alloc(crate::heap::HeapObj::Array(args.to_vec()));
+                        .alloc(crate::heap::HeapObj::Array(args.to_vec().into()));
                     Value::Array(id)
                 };
                 self.stack.push(ret);
@@ -7063,7 +7106,7 @@ impl Vm {
                 }
                 self.maybe_gc();
                 self.check_alloc()?;
-                let id = self.heap.alloc(HeapObj::Array(items));
+                let id = self.heap.alloc(HeapObj::Array(items.into()));
                 self.stack.push(Value::Array(id));
                 return Ok(());
             }
@@ -7323,7 +7366,7 @@ impl Vm {
             }
             self.maybe_gc();
             self.check_alloc()?;
-            let id = self.heap.alloc(HeapObj::Array(created));
+            let id = self.heap.alloc(HeapObj::Array(created.into()));
             self.stack.push(Value::Array(id));
             return Ok(());
         }
@@ -7646,6 +7689,14 @@ impl Vm {
         {
             return self.invoke_method(m, recv.clone(), args.into_vec());
         }
+        // Array twin of the Hash-subclass override gate above.
+        if !force_primitive
+            && let Value::Array(id) = &recv
+            && let Some(tag) = self.heap.array_class_tag(*id)
+            && let Some(m) = self.lookup_method_uncached(&tag, name_id)
+        {
+            return self.invoke_method(m, recv.clone(), args.into_vec());
+        }
         if let Some(v) = self.collection_call(&recv, &name, &args)? {
             self.stack.push(v);
             return Ok(());
@@ -7781,7 +7832,7 @@ impl Vm {
             let elems: Vec<Value> = names.into_iter().map(Value::Sym).collect();
             self.maybe_gc();
             self.check_alloc()?;
-            let id = self.heap.alloc(HeapObj::Array(elems));
+            let id = self.heap.alloc(HeapObj::Array(elems.into()));
             self.stack.push(Value::Array(id));
             return Ok(());
         }
@@ -7846,7 +7897,7 @@ impl Vm {
             let elems: Vec<Value> = names.into_iter().map(Value::Sym).collect();
             self.maybe_gc();
             self.check_alloc()?;
-            let id = self.heap.alloc(HeapObj::Array(elems));
+            let id = self.heap.alloc(HeapObj::Array(elems.into()));
             self.stack.push(Value::Array(id));
             return Ok(());
         }
@@ -7889,7 +7940,7 @@ impl Vm {
             }
             self.maybe_gc();
             self.check_alloc()?;
-            let id = self.heap.alloc(HeapObj::Array(names));
+            let id = self.heap.alloc(HeapObj::Array(names.into()));
             self.stack.push(Value::Array(id));
             return Ok(());
         }
@@ -8317,7 +8368,7 @@ impl Vm {
                 g.pin(r.clone());
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                g.vm.heap.alloc(HeapObj::Array(vec![q, r]))
+                g.vm.heap.alloc(HeapObj::Array(vec![q, r].into()))
             };
             self.stack.push(Value::Array(arr_id));
             return Ok(());
@@ -8391,7 +8442,7 @@ impl Vm {
                     g.pin(r.clone());
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    g.vm.heap.alloc(HeapObj::Array(vec![q, r]))
+                    g.vm.heap.alloc(HeapObj::Array(vec![q, r].into()))
                 };
                 self.stack.push(Value::Array(arr_id));
                 return Ok(());
@@ -8430,7 +8481,7 @@ impl Vm {
                 self.maybe_gc();
                 self.check_alloc()?;
                 let arr_id =
-                    self.heap.alloc(HeapObj::Array(vec![Value::Int(g), Value::Int(l)]));
+                    self.heap.alloc(HeapObj::Array(vec![Value::Int(g), Value::Int(l)].into()));
                 self.stack.push(Value::Array(arr_id));
                 return Ok(());
             }
@@ -8526,7 +8577,7 @@ impl Vm {
                 g.pin(self_v.clone());
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                g.vm.heap.alloc(HeapObj::Array(vec![other_v, self_v]))
+                g.vm.heap.alloc(HeapObj::Array(vec![other_v, self_v].into()))
             };
             self.stack.push(Value::Array(arr_id));
             return Ok(());
@@ -8714,7 +8765,7 @@ impl Vm {
                     }
                     self.maybe_gc();
                     self.check_alloc()?;
-                    let id = self.heap.alloc(HeapObj::Array(vec![Value::Int(*n)]));
+                    let id = self.heap.alloc(HeapObj::Array(vec![Value::Int(*n)].into()));
                     self.stack.push(Value::Array(id));
                     return Ok(());
                 }
@@ -8757,7 +8808,7 @@ impl Vm {
             }
             self.maybe_gc();
             self.check_alloc()?;
-            let id = self.heap.alloc(HeapObj::Array(elems));
+            let id = self.heap.alloc(HeapObj::Array(elems.into()));
             self.stack.push(Value::Array(id));
             return Ok(());
         }
@@ -10788,7 +10839,7 @@ impl Vm {
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let id = g.vm.heap.alloc(HeapObj::Array(rest_vec));
+                let id = g.vm.heap.alloc(HeapObj::Array(rest_vec.into()));
                 drop(g);
                 (args, Some(id))
             } else {
@@ -11070,7 +11121,7 @@ impl Vm {
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                g.vm.heap.alloc(HeapObj::Array(rest_vec))
+                g.vm.heap.alloc(HeapObj::Array(rest_vec.into()))
             };
             locals[rest_slot] = Value::Array(arr_id);
         }
@@ -11763,7 +11814,7 @@ impl Vm {
                 for a in &rest_args { g.pin(a.clone()); }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let id = g.vm.heap.alloc(HeapObj::Array(rest_args));
+                let id = g.vm.heap.alloc(HeapObj::Array(rest_args.into()));
                 Some((slot, Value::Array(id)))
             } else {
                 None
@@ -12756,7 +12807,7 @@ impl Vm {
             }
             g.vm.maybe_gc();
             g.vm.check_alloc()?;
-            let aid = g.vm.heap.alloc(HeapObj::Array(elems));
+            let aid = g.vm.heap.alloc(HeapObj::Array(elems.into()));
             g.vm.stack.push(Value::Array(aid));
             return Ok(());
         }
@@ -14153,6 +14204,16 @@ impl Vm {
                 index: None,
             }));
             return Ok(Value::Hash(id));
+        }
+        // Array twin (rouge's python lexer: `StringRegister < Array`).
+        // String subclasses remain the documented follow-up.
+        if class_inherits_named(cls, "Array") {
+            let id = self.heap.alloc(HeapObj::Array(crate::heap::ArrayObj {
+                elems: Vec::new(),
+                class_tag: Some(cls.clone()),
+                ivars: crate::intern::FxHashMap::default(),
+            }));
+            return Ok(Value::Array(id));
         }
         let id = self.heap.alloc(HeapObj::Instance(Instance {
             class: cls.clone(),

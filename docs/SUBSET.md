@@ -714,92 +714,34 @@ end
 - Test: `rescue_with_unresolved_class_does_not_catch` in
   `crates/rubyrs/tests/embed.rs`.
 
-### `class MyHash < Hash` returns Value::Object, not Value::Hash
+### Hash / Array subclasses are supported; String subclasses are not (yet)
 
 ```ruby
-class MyHash < Hash
-end
-h = MyHash.new
-h[:k] = 1  # NoMethodError in rubyrs; works in CRuby
+class Conf < Hash; end
+Conf.new[:k] = 1            # works — tagged Value::Hash
+class StringRegister < Array; end
+StringRegister.new << "x"   # works — tagged Value::Array
+class MyStr < String; end
+MyStr.new("hi").upcase      # NoMethodError — still a bare Instance
 ```
 
-- The `Hash.new` intercept (`vm/dispatch.rs`) matches solely on
-  `cls.name == "Hash"`, so user subclasses fall through to the
-  generic `Class.new` allocator and return a bare
-  `Value::Object` instance whose methods table doesn't include
-  the Hash primitives (`[]`, `keys`, `each`, ...).
-- Switching the intercept to a `Hash`-in-`cls.ancestors` walk
-  would fix the primitive-method side but BREAK any custom
-  instance methods defined on the subclass: `Value::Hash`
-  dispatches only the hardcoded primitives, so
-  `class MyHash < Hash; def my_helper; ...; end; end` would
-  see `my_helper` become NoMethodError too.
-- The proper fix is a structural one: give `Value::Hash` a
-  class-of slot AND route primitive Hash methods through that
-  slot rather than the fixed primitive table. Sizeable
-  refactor; deferred until a real caller needs Hash
-  subclassing.
-- Related symptom — `super` from a subclass `[]=`/`[]`:
-
-  ```ruby
-  class Headers < Hash
-    def []=(key, val); super(key.downcase, val); end
-  end
-  Headers.new["X"] = 1
-  # rubyrs: super: no superclass method `[]=' for an instance of Headers
-  # CRuby: stores "x" => 1
-  ```
-
-  Even when MyHash.new IS Value::Hash (e.g. via the
-  `Hash[*pairs]` factory rather than `MyHash.new`), `super`
-  from an overridden `[]=` can't reach `Hash#[]=` because the
-  primitive arm dispatches by checking `Value::Hash` directly
-  and doesn't consult an MRO. Same root cause as the bare-
-  `.new` divergence above; the structural fix unblocks both.
-  Workaround for the Rack 3 case-insensitive-headers pattern:
-  store lowercase keys at write time in every writer (see
-  `tests/diff_framework/fixtures/sinatra_hello/vendor/sinatra_lite.rb`
-  + the vendored sinatra-cors plugin).
-- No test pin (would lock in divergence); this entry is the
-  contract.
-
-### Bare-call dispatch on `nil` self inside a block body
-
-```ruby
-class NilClass; def helper; "h"; end; end
-class Object; def run; [1].each { helper }; end; end   # block self == nil
-nil.run   # rubyrs: NoMethodError; CRuby: "h"
-```
-
-- Bare (implicit-self) calls to a user-defined `NilClass` method
-  now resolve correctly from inside a *method* body — e.g.
-  ActiveSupport's `Object#present?` calling `blank?` on a nil
-  receiver (`vm/dispatch.rs`, the Nil arms in `do_call` /
-  `do_call_block`). The fix is gated on `frame.defining_class
-  .is_some()`, which is false for block frames, so the same bare
-  call from inside a *block* whose self is nil still misses.
-- Why the guard: rubyrs uses `Value::Nil` as the toplevel `<main>`
-  self, and a block at the toplevel runs with that same nil self
-  and `defining_class == None` — indistinguishable from a block
-  whose self is a genuine nil receiver without tracking self
-  provenance. The guard keeps `<main>`'s bare calls on the
-  toplevel-method path; the block-self-nil case is the rare
-  residual. Workaround: explicit `self.helper`.
-- The proper fix is the same structural one noted above — give
-  `<main>` its own identity distinct from `Value::Nil`.
-
-### Reopening a primitive to OVERRIDE a built-in method
-
-- Adding a *new* method to a core class (`class Hash; def
-  deep_merge; ...; end`) works in all call forms — bare,
-  explicit-receiver, with or without a block (`vm/dispatch.rs`
-  primitive bare-call / block-form bridges). But *overriding* an
-  existing built-in (`class String; def upcase; "no"; end`) still
-  loses to the built-in: primitive arms (`primitive_call` /
-  `collection_call_block` / numeric) get first refusal, and the
-  user-method lookup is only a fallback. Documented divergence;
-  the structural fix is the same class-of-slot routing noted in
-  the `MyHash < Hash` entry.
+- A user subclass of Hash or Array allocates a REAL tagged
+  primitive (`HashObj.class_tag` / `ArrayObj.class_tag` carry the
+  subclass), so every primitive method dispatches on instances,
+  user overrides win over the primitives (`def push(x); super(...)
+  ; end` works), instance variables / `dup` / `clone` / `class` /
+  `is_a?` all see the subclass, and `Subclass[...]` /
+  `Subclass.new(n, fill)` construct tagged instances. CRuby
+  semantics pinned by the `hash_subclass` / `array_subclass`
+  diff fixtures (derived results like `map` are plain Array,
+  `==` compares content across the boundary).
+- The Array side was driven by rouge's python lexer
+  (`StringRegister < Array`) — its official sample now renders
+  byte-identical to CRuby+rouge.
+- `class MyStr < String` (and Integer/Float/Symbol, which CRuby
+  forbids subclass instantiation of anyway) still falls through
+  to a bare `Value::Object` Instance without the String
+  primitives — the remaining documented gap of this family.
 
 ### `Hash#transform_keys!` / `transform_values!` on `break` leave the receiver untouched
 
