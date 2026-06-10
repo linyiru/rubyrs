@@ -43,24 +43,38 @@
 class File
   def self.open(path, mode = "r", **_opts)
     mode_s = mode.to_s
-    writing = mode_s.include?("w") || mode_s.include?("a")
+    # Split a mode-string encoding suffix ("r:bom|utf-8" →
+    # flags "r", encoding "bom|utf-8"). Two fixes in one:
+    # (1) flag detection must look at the FLAGS part only —
+    # matching on the whole string misread "r:windows-31j" as a
+    # WRITE mode (the 'w' in "windows"); (2) the encoding part
+    # forwards to the Tier-1 `File.read` primitive, whose
+    # "bom|utf-8" handling strips a leading UTF-8 BOM exactly
+    # like CRuby's open-time BOM consumption. Other encodings
+    # pass through and are ignored there (raw-bytes read), the
+    # pre-existing behaviour.
+    flags, enc = mode_s.split(":", 2)
+    writing = flags.include?("w") || flags.include?("a")
     # Readable unless the mode is write/append-only ("w"/"a" without
     # "+"). A pure write handle must reject reads (CRuby IOError),
     # rather than silently returning "".
-    reading = mode_s.include?("r") || mode_s.include?("+")
+    reading = flags.include?("r") || flags.include?("+")
+    read_now = lambda do
+      enc ? File.read(path, :encoding => enc) : File.read(path)
+    end
     if writing
       # Write/append mode: start from "" (truncate) or the existing
       # content (append). Buffered in memory; flushed to disk via the
       # Tier-1 `File.write` primitive on close. A read failure for the
       # append case (missing file) just starts empty.
-      buf = mode_s.include?("a") ? (File.read(path) rescue "") : ""
+      buf = flags.include?("a") ? (read_now.call rescue "") : ""
       f = allocate
       f.__io_init(path.to_s, buf, write: true, read: reading)
     else
       # Reuse the capability-gated Tier-1 `File.read` primitive for
       # the actual disk reach. A read failure (missing file, sandbox
       # denial) surfaces as whatever `File.read` raises.
-      buf = File.read(path)
+      buf = read_now.call
       f = allocate
       f.__io_init(path.to_s, buf, read: reading)
     end

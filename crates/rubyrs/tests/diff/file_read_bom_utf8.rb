@@ -29,4 +29,15 @@ File.open(PLAIN_PATH, "wb") { |f| f.write("---\na: 1\n---\nbody\n") }
   puts "#{kind}: front-matter match=#{!!fm}"
 end
 
+# File.open mode-string spelling of the same encoding — plus the
+# flag-detection trap: "r:windows-31j" contains a 'w' but is NOT a
+# write mode (rubyrs's File.open veneer once matched flags against
+# the whole mode string).
+om = File.open(BOM_PATH, "r:bom|utf-8") { |f| f.read }
+puts "open r:bom|utf-8 starts_dash=#{om.start_with?("---")} bytes=#{om.bytesize}"
+or_ = File.open(BOM_PATH, "r") { |f| f.read }
+puts "open r          starts_dash=#{or_.start_with?("---")} bytes=#{or_.bytesize}"
+wj = File.open(BOM_PATH, "r:windows-31j") { |f| f.read }
+puts "open r:windows-31j reads=#{wj.bytesize > 0}"
+
 File.delete(BOM_PATH, PLAIN_PATH)
