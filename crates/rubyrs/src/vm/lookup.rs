@@ -314,7 +314,7 @@ impl Vm {
         fn walk_module(
             m: &Rc<Class>,
             name_id: SymId,
-            visited: &mut std::collections::HashSet<*const Class>,
+            visited: &mut crate::intern::FxHashSet<*const Class>,
         ) -> Option<Rc<Method>> {
             if !visited.insert(Rc::as_ptr(m)) { return None; }
             for pre in m.prepends.borrow().iter() {
@@ -332,11 +332,11 @@ impl Vm {
             }
             None
         }
-        let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+        let mut sc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
         let mut current = cls.clone();
         loop {
             if !sc_visited.insert(Rc::as_ptr(&current)) { return None; }
-            let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+            let mut inc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
             for pre in current.singleton_prepends.borrow().iter() {
                 if let Some(found) = walk_module(pre, name_id, &mut inc_visited) {
                     return Some(found);
@@ -388,7 +388,7 @@ impl Vm {
         fn walk_module(
             m: &Rc<Class>,
             name_id: SymId,
-            visited: &mut std::collections::HashSet<*const Class>,
+            visited: &mut crate::intern::FxHashSet<*const Class>,
         ) -> Option<Rc<Method>> {
             if !visited.insert(Rc::as_ptr(m)) {
                 return None;
@@ -415,13 +415,13 @@ impl Vm {
         //   ONE level. We can't share one set: a module
         //   transitively included at multiple superclass levels
         //   (rare but legal) needs to be walked at each level.
-        let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+        let mut sc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
         let mut current = cls.clone();
         loop {
             if !sc_visited.insert(Rc::as_ptr(&current)) {
                 return None;
             }
-            let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+            let mut inc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
             if let Some(m) = walk_module(&current, name_id, &mut inc_visited) {
                 return Some(m);
             }
@@ -455,7 +455,7 @@ impl Vm {
             name_id: SymId,
             anchor: *const Class,
             past_anchor: &mut bool,
-            visited: &mut std::collections::HashSet<*const Class>,
+            visited: &mut crate::intern::FxHashSet<*const Class>,
         ) -> Option<(Rc<Class>, Rc<Method>)> {
             if !visited.insert(Rc::as_ptr(m)) {
                 return None;
@@ -480,13 +480,13 @@ impl Vm {
             None
         }
         let mut past_anchor = false;
-        let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+        let mut sc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
         let mut current = cls.clone();
         loop {
             if !sc_visited.insert(Rc::as_ptr(&current)) {
                 return None;
             }
-            let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+            let mut inc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
             if let Some(r) = walk_module(&current, name_id, anchor, &mut past_anchor, &mut inc_visited) {
                 return Some(r);
             }
@@ -1059,7 +1059,7 @@ pub(crate) fn class_reaches_via_chain(
     fn walks_through(
         node: &Rc<Class>,
         target: &Rc<Class>,
-        visited: &mut std::collections::HashSet<*const Class>,
+        visited: &mut crate::intern::FxHashSet<*const Class>,
     ) -> bool {
         if Rc::ptr_eq(node, target) { return true; }
         if !visited.insert(Rc::as_ptr(node)) { return false; }
@@ -1079,7 +1079,7 @@ pub(crate) fn class_reaches_via_chain(
     // set — the first iteration sets up the cycle before visited
     // sees the node).
     if Rc::ptr_eq(child, target) { return true; }
-    let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+    let mut sc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
     let mut current = child.clone();
     loop {
         if !sc_visited.insert(Rc::as_ptr(&current)) { return false; }
@@ -1087,7 +1087,7 @@ pub(crate) fn class_reaches_via_chain(
         // counts as reachable — same consistency rule as
         // `class_is_a` enforces inside its inner walker.
         if Rc::ptr_eq(&current, target) { return true; }
-        let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+        let mut inc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
         // Seed visited with `current` so any cyclic include/prepend
         // graph (`A includes B; B includes A`) that walks back into
         // `current` short-circuits instead of re-borrowing
@@ -1128,7 +1128,7 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
     fn walks_through(
         node: &Rc<Class>,
         target: &Rc<Class>,
-        visited: &mut std::collections::HashSet<*const Class>,
+        visited: &mut crate::intern::FxHashSet<*const Class>,
     ) -> bool {
         if Rc::ptr_eq(node, target) { return true; }
         if !visited.insert(Rc::as_ptr(node)) {
@@ -1154,11 +1154,11 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
     // Two separate visited sets — same rationale as
     // `lookup_method_uncached`: superclass-chain cycles vs.
     // include/prepend-graph cycles need independent protection.
-    let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+    let mut sc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
     let mut current = child.clone();
     loop {
         if !sc_visited.insert(Rc::as_ptr(&current)) { return false; }
-        let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+        let mut inc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
         if walks_through(&current, ancestor, &mut inc_visited) { return true; }
         let parent = current.superclass.borrow().clone();
         match parent {
@@ -1195,7 +1195,7 @@ pub(crate) fn singleton_chain_contains(cls: &Rc<Class>, target: &Rc<Class>) -> b
     fn walks_through(
         node: &Rc<Class>,
         target: &Rc<Class>,
-        visited: &mut std::collections::HashSet<*const Class>,
+        visited: &mut crate::intern::FxHashSet<*const Class>,
     ) -> bool {
         if Rc::ptr_eq(node, target) { return true; }
         if !visited.insert(Rc::as_ptr(node)) { return false; }
@@ -1207,7 +1207,7 @@ pub(crate) fn singleton_chain_contains(cls: &Rc<Class>, target: &Rc<Class>) -> b
         }
         false
     }
-    let mut visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+    let mut visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
     for pre in cls.singleton_prepends.borrow().iter() {
         if walks_through(pre, target, &mut visited) { return true; }
     }
@@ -1235,7 +1235,7 @@ pub(crate) fn flatten_ancestors(cls: &Rc<Class>) -> Vec<Rc<Class>> {
     fn flatten_module(
         m: &Rc<Class>,
         out: &mut Vec<Rc<Class>>,
-        visited: &mut std::collections::HashSet<*const Class>,
+        visited: &mut crate::intern::FxHashSet<*const Class>,
     ) {
         if !visited.insert(Rc::as_ptr(m)) {
             return;
@@ -1249,7 +1249,7 @@ pub(crate) fn flatten_ancestors(cls: &Rc<Class>) -> Vec<Rc<Class>> {
         }
     }
     let mut out: Vec<Rc<Class>> = Vec::new();
-    let mut visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+    let mut visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
     let mut current = cls.clone();
     loop {
         if !visited.insert(Rc::as_ptr(&current)) {
@@ -1692,14 +1692,14 @@ impl Vm {
             // stores singleton methods in `singleton_methods`.
             // Cycle defensiveness mirrors `flatten_ancestors`.
             let mut chain: Vec<(Rc<Class>, bool /* is_module */)> = Vec::new();
-            let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+            let mut sc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
             // Flatten a singleton-prepended module into the chain,
             // walking its own prepends/includes transitively (so a
             // module's own `prepend`/`include` ancestry is honoured).
             fn flatten_prepended_module(
                 m: &Rc<Class>,
                 out: &mut Vec<(Rc<Class>, bool)>,
-                visited: &mut std::collections::HashSet<*const Class>,
+                visited: &mut crate::intern::FxHashSet<*const Class>,
             ) {
                 if !visited.insert(Rc::as_ptr(m)) { return; }
                 for pre in m.prepends.borrow().iter() {
@@ -1721,7 +1721,7 @@ impl Vm {
             // back to the same module method (or otherwise pick
             // the wrong "next" implementation), so we need full-
             // chain dedup like `flatten_ancestors`.
-            let mut inc_visited = std::collections::HashSet::new();
+            let mut inc_visited = crate::intern::FxHashSet::default();
             let mut cur = cls.clone();
             loop {
                 if !sc_visited.insert(Rc::as_ptr(&cur)) { break; }

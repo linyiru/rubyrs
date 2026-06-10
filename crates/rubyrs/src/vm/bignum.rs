@@ -1539,6 +1539,20 @@ impl Vm {
         // promotion shape), place it BEFORE the
         // `recv_is_bigint || arg_is_bigint` guard below.
         //
+        // FAST BAIL — this hook sits on do_call's slow path for
+        // EVERY explicit-recv call, so non-numeric receivers
+        // (String/Hash/Drop/...) must exit before any name-string
+        // comparison. Every entry condition below requires the recv
+        // or an arg to be Int/BigInt (conditions 1-4 fire only for
+        // Integer receivers; 5-6 need a BigInt somewhere), so a call
+        // with no integer-flavoured operand can never match.
+        // Measured: ~3% of the jekyll liquid-render profile was this
+        // function's entry checks before the bail.
+        if !matches!(recv, Value::Int(_) | Value::BigInt(_))
+            && !args.iter().any(|a| matches!(a, Value::BigInt(_)))
+        {
+            return Ok(None);
+        }
         // Fall through to the rest of bigint_primitive when
         // `try_bigint_pow` declines. Decline cases narrow to
         // Int recv × Int (positive) exp where `numeric_call`
