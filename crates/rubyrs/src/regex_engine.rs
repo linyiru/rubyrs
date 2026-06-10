@@ -297,7 +297,14 @@ fn rewrite_ascii_shorthand_classes(pat: &str) -> std::borrow::Cow<'_, str> {
     if !pat.contains('\\') && !pat.contains("[:") {
         return std::borrow::Cow::Borrowed(pat);
     }
-    const SPACE: &str = " \\t\\r\\n\\f\\x0B";
+    // `\x20`, not a literal space: under `(?x)` the Rust engines
+    // ignore whitespace INSIDE character classes too (Onigmo keeps
+    // it), so a literal space spliced into a class silently vanishes
+    // from extended-mode patterns. Caught by rouge's ruby lexer:
+    // its x-mode `(module)(\s+)(...)` rule stopped matching the
+    // space after `module` once \s became a class with a bare
+    // space in it.
+    const SPACE: &str = "\\x20\\t\\r\\n\\f\\x0B";
     const DIGIT: &str = "0-9";
     const WORD: &str = "0-9A-Za-z_";
     const HEX: &str = "0-9A-Fa-f";

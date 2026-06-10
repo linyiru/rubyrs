@@ -55,6 +55,22 @@ puts "scan:  #{"a1 b2#{NBSP}c3".scan(/\w\d/).inspect}"
 puts "split: #{"x y#{NBSP}z".split(/\s/).inspect}"
 puts "gsub:  #{"a1#{ARABIC_THREE}".gsub(/\d/, "#").inspect}"
 
+puts "== extended mode (the carmine-discovered trap) =="
+# Under /x the Rust engines ignore whitespace INSIDE character
+# classes too (Onigmo keeps it) — so the ASCII rewrite must emit
+# \x20, not a literal space, or x-mode patterns using \s stop
+# matching spaces entirely. Discovered via rouge's ruby lexer
+# (its x-mode module rule), pinned here on the rubyrs side.
+xre = /
+  (module)
+  (\s+)
+  (\w+)
+/x
+m = "module Foo".match(xre)
+puts "x-mode \\s+: #{m ? [m[1], m[2].length, m[3]].inspect : "NO MATCH"}"
+puts "x-mode [\\s]: #{!!(" " =~ /[\s]/x)}"
+puts "x-mode [\\sa]: #{!!(" " =~ /[\sa]/x)} #{!!("a" =~ /[\sa]/x)}"
+
 puts "== front-matter shape (the discovering case) =="
 fm_ok  = "---\na: 1\n---\nbody\n"
 fm_nbsp = "---#{NBSP}\na: 1\n---\nbody\n"
