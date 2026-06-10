@@ -289,7 +289,12 @@ fn rewrite_charclass_octal_escapes(pat: &str) -> std::borrow::Cow<'_, str> {
 /// Ruby-Unicode-vs-Rust-ASCII divergence — out of scope here,
 /// tracked separately.)
 fn rewrite_ascii_shorthand_classes(pat: &str) -> std::borrow::Cow<'_, str> {
-    if !pat.contains('\\') {
+    // Two rewrite triggers: backslash shorthands and POSIX bracket
+    // expressions. `[[:alnum:]]` has no backslash at all — gating on
+    // '\\' alone silently skipped the POSIX translation (caught by
+    // the regex_posix_unicode_classes fixture's scan row, whose
+    // pattern was the only one without a \A anchor).
+    if !pat.contains('\\') && !pat.contains("[:") {
         return std::borrow::Cow::Borrowed(pat);
     }
     const SPACE: &str = " \\t\\r\\n\\f\\x0B";
@@ -333,15 +338,79 @@ fn rewrite_ascii_shorthand_classes(pat: &str) -> std::borrow::Cow<'_, str> {
             continue;
         }
         if in_class && c == '[' && chars.get(i + 1) == Some(&':') {
-            // POSIX bracket expression — copy through to its `:]`
-            // so its closing `]` isn't taken for the class end.
+            // POSIX bracket expression. Onigmo's POSIX classes are
+            // UNICODE-aware on UTF-8 strings (the mirror image of
+            // the \s\d\w situation: there RUBY is the ASCII side) —
+            // CRuby's [[:alpha:]] matches é/日/Ⅷ while Rust's
+            // [[:alpha:]] is ASCII-only. Translate each name to the
+            // Unicode property set CRuby ground-truth probing
+            // produced (probe chars per class are in the
+            // regex_posix_unicode_classes fixture):
+            //   alpha  → \p{Alphabetic}            (é 日 Ⅷ ʰ, not ́ )
+            //   digit  → \p{Nd}                    (٣ matches)
+            //   upper/lower → \p{Upper/Lowercase}  (Ⅷ / ʰ match)
+            //   space  → \p{White_Space}           (NBSP, NEL)
+            //   blank  → tab + \p{Zs}
+            //   word   → Alphabetic+M+Nd+Pc+Join_Control (= Rust's
+            //            Unicode \w; spelled out so this pass's own
+            //            ASCII \w rewrite can't interfere)
+            //   punct  → P + Sm + Sc + Sk           (NOT So: © is
+            //            graph-only in Onigmo)
+            //   cntrl  → \p{Cc}                    (includes NEL)
+            //   graph  → not(White_Space|Cc|Cn|Cs)  (Cf like the
+            //            soft hyphen DOES match, mirroring Onigmo)
+            //   print  → graph ∪ \p{Zs}
+            //   xdigit / ascii → kept verbatim (Onigmo is ASCII-only
+            //            for these two — fullwidth ｆ is NOT xdigit)
+            // `[[:^name:]]` negation maps to a nested [^...] class.
             let mut j = i + 2;
+            let neg = chars.get(i + 2) == Some(&'^');
+            let name_start = if neg { i + 3 } else { i + 2 };
             while j + 1 < chars.len() && !(chars[j] == ':' && chars[j + 1] == ']') {
                 j += 1;
             }
             if j + 1 < chars.len() {
-                for &cc in &chars[i..=j + 1] {
-                    out.push(cc);
+                let name: String = chars[name_start..j].iter().collect();
+                let body: Option<&str> = match name.as_str() {
+                    "alpha" => Some(r"\p{Alphabetic}"),
+                    "alnum" => Some(r"\p{Alphabetic}\p{Nd}"),
+                    "digit" => Some(r"\p{Nd}"),
+                    "upper" => Some(r"\p{Uppercase}"),
+                    "lower" => Some(r"\p{Lowercase}"),
+                    "space" => Some(r"\p{White_Space}"),
+                    "blank" => Some(r"	\p{Zs}"),
+                    "word" => Some(r"\p{Alphabetic}\p{M}\p{Nd}\p{Pc}\p{Join_Control}"),
+                    "punct" => Some(r"\p{P}\p{Sm}\p{Sc}\p{Sk}"),
+                    "cntrl" => Some(r"\p{Cc}"),
+                    // graph/print need a negated base — handled below.
+                    _ => None,
+                };
+                let translated: Option<String> = match name.as_str() {
+                    "graph" => Some(if neg {
+                        r"[\p{White_Space}\p{Cc}\p{Cn}\p{Cs}]".to_string()
+                    } else {
+                        r"[^\p{White_Space}\p{Cc}\p{Cn}\p{Cs}]".to_string()
+                    }),
+                    "print" => Some(if neg {
+                        // not(graph ∪ Zs) = White_Space|Cc|Cn|Cs minus Zs
+                        // — expressible as a difference set.
+                        r"[[\p{White_Space}\p{Cc}\p{Cn}\p{Cs}]--\p{Zs}]".to_string()
+                    } else {
+                        r"[[^\p{White_Space}\p{Cc}\p{Cn}\p{Cs}]\p{Zs}]".to_string()
+                    }),
+                    _ => body.map(|b| format!("[{}{b}]", if neg { "^" } else { "" })),
+                };
+                if let Some(t) = translated {
+                    out.push_str(&t);
+                    changed = true;
+                } else {
+                    // xdigit / ascii (already ASCII in Onigmo) or an
+                    // unknown name — copy verbatim; the Rust parser
+                    // gives unknown names a construction-time error,
+                    // same as CRuby.
+                    for &cc in &chars[i..=j + 1] {
+                        out.push(cc);
+                    }
                 }
                 i = j + 2;
                 at_class_start = false;

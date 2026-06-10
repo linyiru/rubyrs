@@ -322,6 +322,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "regex")]
 #[test] fn regex_ascii_shorthand_classes() { run_diff("regex_ascii_shorthand_classes"); }
 #[cfg(feature = "regex")]
+#[test] fn regex_posix_unicode_classes() { run_diff("regex_posix_unicode_classes"); }
+#[cfg(feature = "regex")]
 #[test] fn file_read_bom_utf8() { run_diff("file_read_bom_utf8"); }
 #[test] fn file_delete() { run_diff("file_delete"); }
 #[test] fn lifecycle_hook_super() { run_diff("lifecycle_hook_super"); }
