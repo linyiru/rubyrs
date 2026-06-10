@@ -1875,3 +1875,100 @@ impl Vm {
 // -D warnings green.)
 
 
+
+/// Break the `Rc<Class>` reference cycles when the Vm goes away.
+///
+/// The class graph is cyclic BY DESIGN: `consts` tables hold
+/// `Value::Class` edges (Object's table holds every top-level
+/// class, including itself), `superclass` chains lead back into
+/// those same classes, and `includes`/`prepends`/`singleton_view`
+/// add more edges. `singleton_target` is already `Weak` (the one
+/// back-edge someone broke at design time), but the rest keep
+/// every class alive after the Vm drops — LeakSanitizer's
+/// first-ever completed pass over the fuzz targets measured the
+/// residue at a few KB per Runtime (41 objects on the parse
+/// target). Harmless for the CLI's run-once-then-exit shape;
+/// a slow leak for embedders that construct/drop many Runtimes.
+///
+/// On drop, walk every class reachable from the `classes` and
+/// `constants` tables (and transitively through class `consts`)
+/// and empty the cycle-bearing fields; the ordinary field drops
+/// then free the whole graph. `try_borrow_mut` everywhere: a
+/// Drop during panic-unwind may find a RefCell mid-borrow, and
+/// leaking a little on that path beats a double-panic abort.
+/// Zero panics — vm.rs has a panic budget of 0.
+impl Drop for Vm {
+    fn drop(&mut self) {
+        // Collect reachable classes first (the clearing below
+        // removes the edges we'd be traversing).
+        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut stack: Vec<Rc<Class>> = Vec::new();
+        let mut all: Vec<Rc<Class>> = Vec::new();
+        for c in self.classes.values() {
+            stack.push(c.clone());
+        }
+        for v in self.constants.values() {
+            if let Value::Class(c) = v {
+                stack.push(c.clone());
+            }
+        }
+        while let Some(c) = stack.pop() {
+            if !seen.insert(Rc::as_ptr(&c) as usize) {
+                continue;
+            }
+            if let Ok(consts) = c.consts.try_borrow() {
+                for v in consts.values() {
+                    if let Value::Class(inner) = v {
+                        stack.push(inner.clone());
+                    }
+                }
+            }
+            if let Ok(sup) = c.superclass.try_borrow()
+                && let Some(s) = sup.as_ref()
+            {
+                stack.push(s.clone());
+            }
+            if let Ok(sv) = c.singleton_view.try_borrow()
+                && let Some(s) = sv.as_ref()
+            {
+                stack.push(s.clone());
+            }
+            all.push(c);
+        }
+        for c in &all {
+            if let Ok(mut m) = c.methods.try_borrow_mut() {
+                m.clear();
+            }
+            if let Ok(mut m) = c.singleton_methods.try_borrow_mut() {
+                m.clear();
+            }
+            if let Ok(mut s) = c.superclass.try_borrow_mut() {
+                *s = None;
+            }
+            if let Ok(mut i) = c.includes.try_borrow_mut() {
+                i.clear();
+            }
+            if let Ok(mut p) = c.prepends.try_borrow_mut() {
+                p.clear();
+            }
+            if let Ok(mut p) = c.singleton_prepends.try_borrow_mut() {
+                p.clear();
+            }
+            if let Ok(mut i) = c.singleton_includes.try_borrow_mut() {
+                i.clear();
+            }
+            if let Ok(mut v) = c.singleton_view.try_borrow_mut() {
+                *v = None;
+            }
+            if let Ok(mut k) = c.consts.try_borrow_mut() {
+                k.clear();
+            }
+            if let Ok(mut iv) = c.ivars.try_borrow_mut() {
+                iv.clear();
+            }
+            if let Ok(mut cv) = c.class_vars.try_borrow_mut() {
+                cv.clear();
+            }
+        }
+    }
+}
