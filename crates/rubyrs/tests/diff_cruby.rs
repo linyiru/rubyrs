@@ -39,14 +39,20 @@ fn run_diff(name: &str) {
     let rb_abs = dir.join(format!("{name}.rb"));
     assert!(rb_abs.exists(), "missing diff fixture: {}", rb_abs.display());
 
+    // TZ pinned to UTC on BOTH sides: rubyrs Time is Tier-1 UTC-only
+    // (with a local/utc FLAVOUR bit matching TZ=UTC CRuby), so a
+    // host-local CRuby would render different zone suffixes and make
+    // time fixtures host-dependent.
     let ours = Command::new(rubyrs_bin())
         .current_dir(manifest_dir())
+        .env("TZ", "UTC")
         .arg(&rb_rel)
         .output()
         .expect("failed to spawn rubyrs");
     let theirs = Command::new("ruby")
         .arg("--disable=gems")
         .current_dir(manifest_dir())
+        .env("TZ", "UTC")
         .arg(&rb_rel)
         .output()
         .expect("failed to spawn ruby");
@@ -270,6 +276,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn class_self_alias_builtin() { run_diff("class_self_alias_builtin"); }
 #[test] fn class_self_visibility() { run_diff("class_self_visibility"); }
 #[test] fn env_nested_lookup() { run_diff("env_nested_lookup"); }
+#[test] fn time_local_flavour() { run_diff("time_local_flavour"); }
 #[test] fn module_define_method() { run_diff("module_define_method"); }
 #[test] fn singleton_class_class_eval() { run_diff("singleton_class_class_eval"); }
 #[test] fn proc_arity() { run_diff("proc_arity"); }

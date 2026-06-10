@@ -41,6 +41,12 @@ class Time
     end
     @sec = sec
     @nsec = nsec
+    # CRuby's Time.at / Time.now / Time.parse return LOCAL-flavoured
+    # times (under TZ=UTC: `to_s` "+0000", `utc?` false); only
+    # explicit `.utc` / `Time.utc` carry the UTC flavour. Tier 1 has
+    # one clock (UTC) but tracks the FLAVOUR so formatting matches
+    # TZ=UTC CRuby byte-for-byte. See `localtime` / `utc`.
+    @local = true
   end
 
   # Class methods. `Time.now` calls into the host-injected
@@ -180,8 +186,28 @@ class Time
   # zone to convert into, so they return self (the time value is
   # unchanged; only the would-be zone label differs, and we don't
   # model zones). Accept and ignore an explicit-offset argument.
+  # Tier 1 has no local timezone, so "converting" can't change the
+  # clock value — but CRuby distinguishes the LOCAL flavour from the
+  # UTC flavour even when TZ=UTC (utc? flips false, to_s renders
+  # "+0000", xmlschema renders "+00:00" instead of "Z"). Jekyll's
+  # date filters route every time through `.localtime`, so matching
+  # the flavour is what keeps TZ=UTC CRuby builds byte-identical.
+  # Explicit copy constructors: jekyll's date filters call
+  # `time.dup.localtime` / `input.clone` on every render. (Object#dup
+  # doesn't dispatch for preamble-class instances — VM gap; explicit
+  # defs sidestep it.)
+  def dup
+    t = self.class.new(@sec, @nsec)
+    t.instance_variable_set(:@local, @local)
+    t
+  end
+  alias_method :clone, :dup
+
   def localtime(*)
-    self
+    return self if @local
+    t = self.class.new(@sec, @nsec)
+    t.instance_variable_set(:@local, true)
+    t
   end
   alias_method :getlocal, :localtime
 
@@ -271,8 +297,8 @@ class Time
   end
 
   # Identity helpers.
-  def utc?; true; end          # Tier 1 is UTC-only
-  def gmt?; true; end
+  def utc?; !@local; end       # Tier 1 is UTC-only; see localtime
+  def gmt?; !@local; end
   def zone; "UTC"; end
   def utc_offset; 0; end
   alias_method :gmt_offset, :utc_offset
@@ -284,10 +310,38 @@ class Time
   # so these are no-ops that return `self`. Lets diff_cruby
   # fixtures call `t.utc.to_s` and get byte-identical output
   # across rubyrs / CRuby without writing tz-aware assertions.
-  def utc; self; end
+  def utc
+    return self unless @local
+    t = self.class.new(@sec, @nsec)
+    t.instance_variable_set(:@local, false)
+    t
+  end
   alias_method :getutc, :utc
   alias_method :gmtime, :utc
   alias_method :getgm, :utc
+
+  # CRuby `Time#to_time` returns self (it exists so Date/DateTime/
+  # Time share a coercion protocol — Liquid's `to_date` and Jekyll's
+  # date filters duck-type on it).
+  def to_time; self; end
+
+  # RFC 3339 / ISO 8601 timestamp. CRuby renders the UTC zone as
+  # "Z" (local zones as "+HH:MM"); Tier 1 is UTC-only so the zone
+  # suffix is always "Z". `fraction_digits` appends ".%N"-style
+  # subsecond digits, exactly as CRuby does.
+  def xmlschema(fraction_digits = 0)
+    d = decompose
+    out = sprintf(
+      "%04d-%02d-%02dT%02d:%02d:%02d",
+      d[:year], d[:month], d[:day], d[:hour], d[:min], d[:sec],
+    )
+    if fraction_digits > 0
+      frac = sprintf("%09d", @nsec)[0, fraction_digits]
+      out << "." << frac
+    end
+    out << (@local ? "+00:00" : "Z")
+  end
+  alias_method :iso8601, :xmlschema
 
   # Stringification. CRuby's `Time#to_s` default format is local-
   # time `"YYYY-MM-DD HH:MM:SS ±HHMM"`; Tier 1's UTC-only form is
@@ -296,7 +350,7 @@ class Time
   def to_s
     d = decompose
     sprintf(
-      "%04d-%02d-%02d %02d:%02d:%02d UTC",
+      "%04d-%02d-%02d %02d:%02d:%02d #{@local ? "+0000" : "UTC"}",
       d[:year], d[:month], d[:day], d[:hour], d[:min], d[:sec],
     )
   end

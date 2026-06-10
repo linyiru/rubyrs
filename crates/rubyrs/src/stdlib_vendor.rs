@@ -107,6 +107,11 @@ pub(crate) fn always_on_stub_extras(name: &str) -> Option<&'static str> {
         // build code that `require "bigdecimal"` — e.g. liquid's numeric
         // filters via `Utils.to_number` — gets a working decimal type.
         "bigdecimal" => Some(include_str!("stdlib_vendor/bigdecimal.rb")),
+        // `cgi`: the escape/unescape surface liquid's standard filters
+        // call (escape → CGI.escapeHTML, url_encode → CGI.escape).
+        // Always-on for the same reason as bigdecimal: liquid is a
+        // default-build consumer.
+        "cgi" | "cgi/util" | "cgi/escape" => Some(include_str!("stdlib_vendor/cgi.rb")),
         _ => None,
     }
 }

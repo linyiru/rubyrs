@@ -2556,6 +2556,14 @@ RUBYRS = "rubyrs".freeze
             "<rubyrs:preamble:symbol>",
         )
             .expect("ICE: failed to load Symbol preamble");
+        // ASCII-exact String extensions (unicode_normalize & co) —
+        // methods whose full semantics need Unicode tables but whose
+        // ASCII subset is exact; non-ASCII declines loudly.
+self.eval_inner(
+            include_str!("preamble/string_ext.rb"),
+            "<rubyrs:preamble:string_ext>",
+        )
+            .expect("ICE: failed to load String-ext preamble");
         // Tier 1 seeded `Random` class. Lives in its own file so
         // the preamble stays focused on exception-hierarchy +
         // class-shell shapes; PRNG logic is meaty enough that
