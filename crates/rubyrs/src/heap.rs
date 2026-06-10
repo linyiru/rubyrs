@@ -1251,6 +1251,27 @@ impl Heap {
 /// renders every non-ASCII byte as `\xNN` (even bytes that would
 /// form valid UTF-8), while ASCII bytes get the same short-escape
 /// treatment as the char path. E1 slice 3.
+/// Inspect escape for REGISTRY-tagged strings: CRuby renders each
+/// valid character of a non-UTF-8 multi-byte encoding as
+/// `\x{HEXBYTES}` (single-byte encodings keep the plain `\xNN`
+/// form), ASCII printables verbatim. Broken sequences fall back to
+/// per-byte escapes via the caller.
+#[cfg(feature = "_encoding_full")]
+pub(crate) fn inspect_escape_chunks_into(chunks: &[Vec<u8>], out: &mut String) {
+    for chunk in chunks {
+        if chunk.len() == 1 {
+            inspect_escape_bytes_into(chunk, out);
+        } else {
+            use std::fmt::Write as _;
+            out.push_str("\\x{");
+            for b in chunk {
+                let _ = write!(out, "{b:02X}");
+            }
+            out.push('}');
+        }
+    }
+}
+
 pub(crate) fn inspect_escape_bytes_into(bytes: &[u8], out: &mut String) {
     for &b in bytes {
         match b {
@@ -1567,13 +1588,23 @@ impl Value {
                 // chars).
                 let mut out = String::new();
                 out.push('"');
-                if matches!(
-                    s.encoding.get(),
-                    crate::value::EncodingTag::Binary | crate::value::EncodingTag::Other(_)
-                ) {
-                    inspect_escape_bytes_into(&s.content.borrow(), &mut out);
-                } else {
-                    inspect_escape_into(&s.to_string_lossy(), &mut out);
+                match s.encoding.get() {
+                    crate::value::EncodingTag::Binary => {
+                        inspect_escape_bytes_into(&s.content.borrow(), &mut out);
+                    }
+                    #[cfg(feature = "_encoding_full")]
+                    crate::value::EncodingTag::Other(idx) => {
+                        let b = s.content.borrow();
+                        match crate::encoding_full::char_chunks(idx, &b) {
+                            Some(chunks) => inspect_escape_chunks_into(&chunks, &mut out),
+                            None => inspect_escape_bytes_into(&b, &mut out),
+                        }
+                    }
+                    #[cfg(not(feature = "_encoding_full"))]
+                    crate::value::EncodingTag::Other(_) => {
+                        inspect_escape_bytes_into(&s.content.borrow(), &mut out);
+                    }
+                    _ => inspect_escape_into(&s.to_string_lossy(), &mut out),
                 }
                 out.push('"');
                 out
@@ -2109,7 +2140,11 @@ mod tests {
         assert_eq!(T::Utf8.display(), "UTF-8");
         assert_eq!(T::UsAscii.display(), "US-ASCII");
         assert_eq!(T::Binary.display(), "BINARY (ASCII-8BIT)");
-        assert_eq!(T::Other(3).display(), "OTHER");
+        // Index 200 is unregistered in every build; with
+        // _encoding_full, low indices resolve registry names.
+        assert_eq!(T::Other(200).display(), "OTHER");
+        #[cfg(feature = "_encoding_full")]
+        assert_eq!(T::Other(3).display(), "KOI8-R");
     }
 
     /// `from_bytes_binary` tags Binary; `from_bytes`/`new` tag Utf8

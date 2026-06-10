@@ -198,7 +198,7 @@ _kramdown_native = ["dep:rostdown"]
 # `encoding_rs` dep in a follow-up, gated on CRuby differential
 # probes per the amended ADR. NOT in cli-defaults; `everything`
 # picks it up.
-_encoding_full = []
+_encoding_full = ["dep:encoding_rs"]
 # `dep:regex` (not the `regex` VM feature): the front-matter host fn
 # compiles Jekyll's YAML_FRONT_MATTER_REGEXP natively. Pulling the dep
 # alone keeps the `--no-default-features --features _yaml_native`
@@ -266,6 +266,15 @@ _http_server = [
 [dependencies]
 ruby-prism.workspace = true
 mimalloc = { version = "0.1", optional = true, default-features = false }
+# `_encoding_full`'s transcoding backend for the multi-byte + WHATWG
+# single-byte encodings (Windows-1252/-31J, ISO-8859-15, KOI8-R,
+# EUC-JP, GBK, Big5). ISO-8859-1 stays hand-written (identity map;
+# the WHATWG world maps the latin1 LABEL to windows-1252 — exactly
+# the trap the amended ADR 0020 says to route around). Where WHATWG
+# and CRuby disagree (strict Shift_JIS vs windows-31j semantics),
+# the registry ships the CRuby encoding that MATCHES the WHATWG
+# table (Windows-31J) and declines the other (documented).
+encoding_rs = { version = "0.8", optional = true }
 regex = { version = "1", optional = true }
 # `regex-syntax` is already in the tree as `regex`'s own parser —
 # depending on it directly (same 0.8 line, so it dedupes to one

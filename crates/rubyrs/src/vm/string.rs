@@ -338,11 +338,14 @@ pub(crate) fn string_call(
         // `bytesize` (added below); for binary protocol gems the
         // bytesize semantic is the meaningful one.
         (Value::Str(a), "length", []) | (Value::Str(a), "size", []) => {
-            // Registry encodings count per THAT encoding's units —
-            // E2 v1 (ISO-8859-1) is single-byte, so byte count.
+            // Registry encodings count per THAT encoding's units
+            // (multi-byte aware via the registry; broken sequences
+            // fall back to byte length, CRuby's lenient shape).
             #[cfg(feature = "_encoding_full")]
-            if let crate::value::EncodingTag::Other(_) = a.encoding.get() {
-                return Ok(Some(Value::Int(a.content.borrow().len() as i64)));
+            if let crate::value::EncodingTag::Other(idx) = a.encoding.get() {
+                let b = a.content.borrow();
+                let n = crate::encoding_full::char_count(idx, &b).unwrap_or(b.len());
+                return Ok(Some(Value::Int(n as i64)));
             }
             Some(Value::Int(a.char_count() as i64))
         }
@@ -413,6 +416,52 @@ pub(crate) fn string_call(
             Some(Value::Int(h.finish() as i64))
         }
         (Value::Str(a), "bytesize", []) => Some(Value::Int(a.borrow().len() as i64)),
+        // `String#byteslice(start[, len])` — byte-level substring,
+        // encoding preserved (CRuby contract; the result may be
+        // broken in that encoding — that's the caller's business,
+        // mirrored by valid_encoding?). Negative start counts from
+        // the end; out-of-range → nil.
+        (Value::Str(a), "byteslice", [Value::Int(st)])
+        | (Value::Str(a), "byteslice", [Value::Int(st), _]) => {
+            let b = a.borrow();
+            let len_total = b.len() as i64;
+            let start = if *st < 0 { len_total + *st } else { *st };
+            if start < 0 || start > len_total {
+                return Ok(Some(Value::Nil));
+            }
+            let take = match args.get(1) {
+                // One-arg form returns a SINGLE byte (CRuby), not
+                // the rest of the string — and nil at the very end
+                // (start == bytesize is only valid for the two-arg
+                // form, where it yields "").
+                None => {
+                    if start >= len_total {
+                        return Ok(Some(Value::Nil));
+                    }
+                    1
+                }
+                Some(Value::Int(n)) => {
+                    if *n < 0 {
+                        return Ok(Some(Value::Nil));
+                    }
+                    *n
+                }
+                Some(other) => {
+                    return Err(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into Integer",
+                            other.type_name()
+                        ),
+                    });
+                }
+            };
+            let start = start as usize;
+            let end = (start + take as usize).min(b.len());
+            Some(with_tag(
+                Value::new_str_bytes(b[start..end].to_vec()),
+                a.encoding.get(),
+            ))
+        }
         (Value::Str(a), "empty?", []) => Some(Value::Bool(a.borrow().is_empty())),
         (Value::Str(a), "upcase", []) => Some(Value::new_str(a.to_string_lossy().to_uppercase())),
         (Value::Str(a), "downcase", []) => Some(Value::new_str(a.to_string_lossy().to_lowercase())),
@@ -608,8 +657,9 @@ pub(crate) fn string_call(
                 EncodingTag::Binary => true,
                 EncodingTag::Utf8 => std::str::from_utf8(&b).is_ok(),
                 EncodingTag::UsAscii => b.iter().all(|&x| x < 0x80),
-                // Unconstructible in E1; Tier 2 will consult the
-                // registry. Permissive until then.
+                #[cfg(feature = "_encoding_full")]
+                EncodingTag::Other(idx) => crate::encoding_full::valid(idx, &b),
+                #[cfg(not(feature = "_encoding_full"))]
                 EncodingTag::Other(_) => true,
             };
             Some(Value::Bool(ok))
@@ -1617,13 +1667,23 @@ pub(crate) fn string_call(
         (Value::Str(s), "inspect", []) => {
             let mut out = String::new();
             out.push('"');
-            if matches!(
-                s.encoding.get(),
-                crate::value::EncodingTag::Binary | crate::value::EncodingTag::Other(_)
-            ) {
-                crate::heap::inspect_escape_bytes_into(&s.content.borrow(), &mut out);
-            } else {
-                crate::heap::inspect_escape_into(&s.to_string_lossy(), &mut out);
+            match s.encoding.get() {
+                crate::value::EncodingTag::Binary => {
+                    crate::heap::inspect_escape_bytes_into(&s.content.borrow(), &mut out);
+                }
+                #[cfg(feature = "_encoding_full")]
+                crate::value::EncodingTag::Other(idx) => {
+                    let b = s.content.borrow();
+                    match crate::encoding_full::char_chunks(idx, &b) {
+                        Some(chunks) => crate::heap::inspect_escape_chunks_into(&chunks, &mut out),
+                        None => crate::heap::inspect_escape_bytes_into(&b, &mut out),
+                    }
+                }
+                #[cfg(not(feature = "_encoding_full"))]
+                crate::value::EncodingTag::Other(_) => {
+                    crate::heap::inspect_escape_bytes_into(&s.content.borrow(), &mut out);
+                }
+                _ => crate::heap::inspect_escape_into(&s.to_string_lossy(), &mut out),
             }
             out.push('"');
             Some(Value::new_str(out))
@@ -2315,25 +2375,33 @@ impl Vm {
                 }
                 match (name, args) {
                     ("chars", []) => {
-                        // Registry encodings: per-unit slices keep
-                        // the receiver's tag (E2 v1 is single-byte,
-                        // so one Value per byte — CRuby's
-                        // ["\xE9"]-shaped output for Latin-1).
+                        // Registry encodings: per-character byte
+                        // chunks under THAT encoding, each keeping
+                        // the receiver's tag (multi-byte aware —
+                        // SJIS "日本語".chars is three 2-byte
+                        // strings). Broken sequences fall back to
+                        // the lossy char route below.
                         #[cfg(feature = "_encoding_full")]
-                        if let crate::value::EncodingTag::Other(_) = s.encoding.get() {
-                            let tag = s.encoding.get();
-                            let elems: Vec<Value> = s.content.borrow().iter()
-                                .map(|&b| {
-                                    let v = Value::new_str_bytes(vec![b]);
-                                    if let Value::Str(ref ns) = v {
-                                        ns.encoding.set(tag);
-                                    }
-                                    v
-                                })
-                                .collect();
-                            self.maybe_gc();
-                            let id = self.heap.alloc(HeapObj::Array(elems.into()));
-                            return Ok(Some(Value::Array(id)));
+                        if let crate::value::EncodingTag::Other(idx) = s.encoding.get() {
+                            let chunks = {
+                                let b = s.content.borrow();
+                                crate::encoding_full::char_chunks(idx, &b)
+                            };
+                            if let Some(chunks) = chunks {
+                                let tag = s.encoding.get();
+                                let elems: Vec<Value> = chunks.into_iter()
+                                    .map(|chunk| {
+                                        let v = Value::new_str_bytes(chunk);
+                                        if let Value::Str(ref ns) = v {
+                                            ns.encoding.set(tag);
+                                        }
+                                        v
+                                    })
+                                    .collect();
+                                self.maybe_gc();
+                                let id = self.heap.alloc(HeapObj::Array(elems.into()));
+                                return Ok(Some(Value::Array(id)));
+                            }
                         }
                         let elems: Vec<Value> = s.to_string_lossy().chars()
                             .map(|c| Value::new_str(c.to_string()))

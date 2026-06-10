@@ -2006,6 +2006,13 @@ impl Vm {
                 .expect("ICE: stack underflow before do_call receiver");
             match recv {
                 Value::Str(a) if name_id == self.sym_length || name_id == self.sym_size => {
+                    // Registry-tagged strings count under their own
+                    // encoding — fall to the slow path (the
+                    // string_call arm consults the registry).
+                    #[cfg(feature = "_encoding_full")]
+                    if matches!(a.encoding.get(), crate::value::EncodingTag::Other(_)) {
+                        return false;
+                    }
                     Value::Int(a.char_count() as i64)
                 }
                 Value::Str(a) if name_id == self.sym_to_s => Value::Str(a.clone()),

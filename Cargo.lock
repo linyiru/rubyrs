@@ -1619,6 +1619,7 @@ dependencies = [
  "bytes",
  "carmine",
  "cc",
+ "encoding_rs",
  "fancy-regex",
  "grass",
  "http",
