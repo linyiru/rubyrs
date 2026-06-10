@@ -60,6 +60,58 @@ fn lexer_is_reusable() {
 }
 
 #[test]
+fn session_callback_roundtrip() {
+    // Drive the session API the way an embedder bridging to Ruby would:
+    // run() pauses on the string-start callback rule; we replay the DSL
+    // effects the original rouge block would produce (Str.Affix +
+    // Str.Heredoc groups, push :generic_string) and resume. The
+    // generic_string state then hits more callback rules; verify the
+    // pause/apply/resume mechanics and the emitted prefix tokens.
+    use carmine::{CallbackOp, RunStep};
+    let table = table();
+    let mut lexer = Lexer::new(&table);
+    lexer.begin();
+    let text = "x = 'hi'\n";
+    let step = lexer.run(text).expect("runs to the string-start callback");
+    let (state, groups) = match step {
+        RunStep::Callback { state, groups, .. } => (state, groups),
+        other => panic!("expected a callback pause, got {other:?}"),
+    };
+    assert_eq!(state, "root");
+    assert_eq!(groups[0].as_deref(), Some("'"));
+    // Replay what rouge's block does: groups Str::Affix, Str::Heredoc
+    // (affix group is empty here → skipped by yield_token), then push.
+    lexer
+        .apply_callback_ops(&[
+            CallbackOp::Token { qualname: "Literal.String.Heredoc".into(), value: "'".into() },
+            CallbackOp::Push(Some("generic_string".into())),
+        ])
+        .expect("ops apply");
+    // Resume — the next pause (or completion) must come at a LATER
+    // position, proving the pending match was consumed.
+    match lexer.run(text) {
+        Ok(RunStep::Callback { state, .. }) => assert_eq!(state, "generic_string"),
+        Ok(RunStep::Done) => {}
+        Err(e) => panic!("resume failed: {e}"),
+    }
+    let toks = lexer.take_tokens();
+    let names: Vec<&str> = toks.iter().map(|(t, _)| table.token_name(*t)).collect();
+    assert!(names.contains(&"Literal.String.Heredoc"), "heredoc emitted: {names:?}");
+}
+
+#[test]
+fn registry_tokens_resolvable_for_callbacks() {
+    // The full shortname registry is interned, so a callback can emit a
+    // token no rule references; rule_emits stays scoped to rules.
+    let table = table();
+    assert!(table.token_id("Keyword.Type").is_some());
+    assert!(!table.rule_emits("Keyword.Type"));
+    assert!(table.rule_emits("Keyword"));
+    // The Escape-policy probe: python's rules never emit it.
+    assert!(!table.rule_emits("Escape"));
+}
+
+#[test]
 fn error_fallback_consumes_unmatchable_input() {
     // U+0000 matches no python rule at the start of an expression
     // context → rouge emits an Error token per char and continues.

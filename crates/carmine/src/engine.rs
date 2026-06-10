@@ -1,12 +1,22 @@
 //! The lexer engine — rouge `RegexLexer` semantics over a [`LexerTable`].
+//!
+//! Two driving styles share one core:
+//!
+//! - **One-shot**: [`Lexer::lex`] runs to completion, routing rules rouge
+//!   defines with match-dependent blocks through a [`Callback`]
+//!   implementation ([`NoCallbacks`] declines, surfacing
+//!   [`Error::CallbackRequired`]).
+//! - **Session** (for embedders bridging to a live Ruby rouge lexer):
+//!   [`Lexer::begin`] + [`Lexer::run`] until [`RunStep::Done`]; when
+//!   [`RunStep::Callback`] pauses the lex, execute the original Ruby block
+//!   out-of-band, replay its DSL effects via [`Lexer::apply_callback_ops`],
+//!   and call [`Lexer::run`] again.
 
 use crate::table::{Action, Kind, LexerTable, NextState, Rule, TokenId};
 use crate::Error;
 
 /// Handler for rules rouge defines with match-dependent Ruby blocks
-/// (`kind: "callback"` in the table). An embedder bridging back to a live
-/// rouge lexer implements this by invoking the original block and replaying
-/// its DSL calls onto [`EngineOps`].
+/// (`kind: "callback"` in the table), used by the one-shot [`Lexer::lex`].
 pub trait Callback {
     /// Called when a callback rule's regex matched. `groups[0]` is the
     /// whole match; `groups[i]` the i-th capture (None when unmatched).
@@ -53,12 +63,7 @@ impl EngineOps<'_, '_> {
     /// Look up a token id by qualified name (`"Keyword"`,
     /// `"Literal.String"`). Returns `None` for names absent from the table.
     pub fn token_id(&self, qualname: &str) -> Option<TokenId> {
-        self.lexer
-            .table
-            .token_names
-            .iter()
-            .position(|n| n == qualname)
-            .map(|i| TokenId(i as u32))
+        self.lexer.table.token_id(qualname)
     }
 
     /// rouge `push :state` / bare `push`.
@@ -92,22 +97,76 @@ impl EngineOps<'_, '_> {
     }
 }
 
+/// One replayed DSL effect from an out-of-band callback execution, for
+/// [`Lexer::apply_callback_ops`]. Token values are explicit strings (the
+/// Ruby side captured them from the live match).
+#[derive(Debug)]
+pub enum CallbackOp {
+    /// rouge `token Tok, val` / each `groups` element.
+    Token { qualname: String, value: String },
+    /// rouge `push :state`; `None` = bare `push` (re-push current).
+    Push(Option<String>),
+    /// rouge `pop! n`.
+    Pop(usize),
+    /// rouge `goto :state`.
+    Goto(String),
+}
+
+/// What [`Lexer::run`] paused on.
+#[derive(Debug)]
+pub enum RunStep {
+    /// End of input — collect with [`Lexer::take_tokens`].
+    Done,
+    /// A callback rule matched. Execute the original block out-of-band,
+    /// then [`Lexer::apply_callback_ops`] and [`Lexer::run`] again.
+    Callback {
+        /// State name the rule lives in.
+        state: String,
+        /// Index of the rule within that state (mixin entries count).
+        rule: usize,
+        /// `groups[0]` is the whole match; `groups[i]` capture i.
+        groups: Vec<Option<String>>,
+    },
+}
+
 /// rouge permits at most this many consecutive zero-width matches before
 /// declaring the rule failed (`RegexLexer::MAX_NULL_SCANS`).
 const MAX_NULL_SCANS: u32 = 5;
 
-/// A lexer run over a [`LexerTable`]. Holds the state stack and the
-/// consolidated token output; reusable across inputs.
+/// A pending (paused) callback-rule match.
+struct Pending {
+    size: usize,
+}
+
+/// What `step` found at the current position.
+enum StepHit {
+    /// A non-callback rule ran; advance to this position.
+    Advance(usize),
+    /// A callback rule matched (recorded in `self.pending`).
+    NeedCallback { state: u32, rule: usize, groups: Vec<Option<String>> },
+}
+
+/// A lexer run over a [`LexerTable`]. Holds the state stack, position and
+/// the consolidated token output; reusable across inputs.
 pub struct Lexer<'t> {
     table: &'t LexerTable,
     stack: Vec<u32>,
+    pos: usize,
     null_steps: u32,
+    pending: Option<Pending>,
     toks: Vec<(TokenId, String)>,
 }
 
 impl<'t> Lexer<'t> {
     pub fn new(table: &'t LexerTable) -> Self {
-        Lexer { table, stack: Vec::new(), null_steps: 0, toks: Vec::new() }
+        Lexer {
+            table,
+            stack: Vec::new(),
+            pos: 0,
+            null_steps: 0,
+            pending: None,
+            toks: Vec::new(),
+        }
     }
 
     fn state_id(&self, name: &str) -> Result<u32, Error> {
@@ -135,23 +194,17 @@ impl<'t> Lexer<'t> {
         self.toks.push((tok, val.to_string()));
     }
 
-    /// Try one state's rules at `pos` (rouge `RegexLexer#step`). Returns
-    /// `Ok(Some(new_pos))` when a rule matched, `Ok(None)` otherwise.
-    fn step(
-        &mut self,
-        state: u32,
-        text: &str,
-        pos: usize,
-        cb: &mut dyn Callback,
-    ) -> Result<Option<usize>, Error> {
-        // Index-based loop: the rules borrow lives only across each probe
-        // so the action arms can mutate self.
+    /// Try one state's rules at `self.pos` (rouge `RegexLexer#step`).
+    /// Non-callback rules execute fully; a callback rule records a
+    /// `Pending` and surfaces `NeedCallback` without executing.
+    fn step(&mut self, state: u32, text: &str) -> Result<Option<StepHit>, Error> {
+        let pos = self.pos;
         let n_rules = self.table.states[state as usize].len();
         for ri in 0..n_rules {
             // mixin recursion first (no regex on those entries).
             if let Kind::Mixin(other) = self.table.states[state as usize][ri].kind {
-                if let Some(np) = self.step(other, text, pos, cb)? {
-                    return Ok(Some(np));
+                if let Some(hit) = self.step(other, text)? {
+                    return Ok(Some(hit));
                 }
                 continue;
             }
@@ -241,26 +294,33 @@ impl<'t> Lexer<'t> {
                     }
                 }
                 Kind::Callback => {
-                    let groups: Vec<Option<&str>> =
-                        (0..caps.len()).map(|i| caps.get(i).map(|m| m.as_str())).collect();
-                    let state_name = self.table.state_names[state as usize].clone();
-                    let mut ops = EngineOps { lexer: self };
-                    cb.invoke(&mut ops, &state_name, ri, &groups)?;
+                    let groups: Vec<Option<String>> = (0..caps.len())
+                        .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                        .collect();
+                    self.pending = Some(Pending { size });
+                    return Ok(Some(StepHit::NeedCallback { state, rule: ri, groups }));
                 }
                 Kind::Mixin(_) => unreachable!("handled above"),
             }
 
-            if size == 0 {
-                self.null_steps += 1;
-                if self.null_steps > MAX_NULL_SCANS {
-                    return Ok(None);
-                }
-            } else {
-                self.null_steps = 0;
-            }
-            return Ok(Some(pos + size));
+            return Ok(Some(StepHit::Advance(self.bump_null_guard(size, pos)?)));
         }
         Ok(None)
+    }
+
+    /// rouge's null-scan accounting after a successful rule. Returns the
+    /// new position, or `Err`-free `pos` sentinel handling is done by the
+    /// caller via `Option` — here a guard overflow is reported as the
+    /// SAME position with `null_steps` saturated; the caller treats the
+    /// overflow as a failed step (Error-token fallback), matching rouge's
+    /// `return false` after MAX_NULL_SCANS.
+    fn bump_null_guard(&mut self, size: usize, pos: usize) -> Result<usize, Error> {
+        if size == 0 {
+            self.null_steps += 1;
+        } else {
+            self.null_steps = 0;
+        }
+        Ok(pos + size)
     }
 
     fn apply_next(&mut self, next: &[NextState]) -> Result<(), Error> {
@@ -279,33 +339,123 @@ impl<'t> Lexer<'t> {
         Ok(())
     }
 
+    /// Reset for a fresh input (session style). Pair with [`Lexer::run`].
+    pub fn begin(&mut self) {
+        self.stack.clear();
+        self.stack.push(self.table.root);
+        self.pos = 0;
+        self.null_steps = 0;
+        self.pending = None;
+        self.toks.clear();
+    }
+
+    /// Drive the lex from the current position until end of input or a
+    /// callback rule pauses it.
+    pub fn run(&mut self, text: &str) -> Result<RunStep, Error> {
+        if self.pending.is_some() {
+            return Err(Error::Table(
+                "run() called with a pending callback — apply_callback_ops first".into(),
+            ));
+        }
+        while self.pos < text.len() {
+            if self.null_steps > MAX_NULL_SCANS {
+                // rouge: the over-limit step "fails" → Error + one char.
+                self.null_steps = 0;
+                self.error_getch(text);
+                continue;
+            }
+            let top = *self.stack.last().ok_or(Error::EmptyStack)?;
+            match self.step(top, text)? {
+                Some(StepHit::Advance(np)) => self.pos = np,
+                Some(StepHit::NeedCallback { state, rule, groups }) => {
+                    return Ok(RunStep::Callback {
+                        state: self.table.state_names[state as usize].clone(),
+                        rule,
+                        groups,
+                    });
+                }
+                None => self.error_getch(text),
+            }
+        }
+        Ok(RunStep::Done)
+    }
+
+    fn error_getch(&mut self, text: &str) {
+        let ch_len = text[self.pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        let err_tok = self.table.tok_error;
+        let piece = text[self.pos..self.pos + ch_len].to_string();
+        self.emit(err_tok, &piece);
+        self.pos += ch_len;
+    }
+
+    /// Replay the DSL effects of an out-of-band callback execution and
+    /// consume the pending match. Unknown token names / states error —
+    /// the embedder should abort the session and fall back.
+    pub fn apply_callback_ops(&mut self, ops: &[CallbackOp]) -> Result<(), Error> {
+        let pending = self.pending.take().ok_or(Error::EmptyStack)?;
+        for op in ops {
+            match op {
+                CallbackOp::Token { qualname, value } => {
+                    let tok = self
+                        .table
+                        .token_id(qualname)
+                        .ok_or_else(|| Error::Table(format!("unknown token {qualname:?}")))?;
+                    self.emit(tok, value);
+                }
+                CallbackOp::Push(None) => {
+                    let top = *self.stack.last().ok_or(Error::EmptyStack)?;
+                    self.stack.push(top);
+                }
+                CallbackOp::Push(Some(name)) => {
+                    let id = self.state_id(name)?;
+                    self.stack.push(id);
+                }
+                CallbackOp::Pop(n) => {
+                    for _ in 0..*n {
+                        self.stack.pop().ok_or(Error::EmptyStack)?;
+                    }
+                }
+                CallbackOp::Goto(name) => {
+                    let id = self.state_id(name)?;
+                    *self.stack.last_mut().ok_or(Error::EmptyStack)? = id;
+                }
+            }
+        }
+        let pos = self.pos;
+        self.pos = self.bump_null_guard(pending.size, pos)?;
+        Ok(())
+    }
+
+    /// Take the consolidated tokens accumulated since [`Lexer::begin`].
+    pub fn take_tokens(&mut self) -> Vec<(TokenId, String)> {
+        std::mem::take(&mut self.toks)
+    }
+
     /// Lex `text` from a fresh `[:root]` stack, returning the consolidated
     /// `(token, value)` stream (rouge `Lexer#lex` semantics, including the
     /// `Error`-token-plus-one-char fallback when no rule matches).
+    /// Callback rules are routed through `cb` immediately.
     pub fn lex(
         &mut self,
         text: &str,
         cb: &mut dyn Callback,
     ) -> Result<Vec<(TokenId, String)>, Error> {
-        self.stack.clear();
-        self.stack.push(self.table.root);
-        self.null_steps = 0;
-        self.toks.clear();
-
-        let mut pos = 0;
-        while pos < text.len() {
-            let top = *self.stack.last().ok_or(Error::EmptyStack)?;
-            match self.step(top, text, pos, cb)? {
-                Some(np) => pos = np,
-                None => {
-                    let ch_len =
-                        text[pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-                    let err_tok = self.table.tok_error;
-                    self.emit(err_tok, &text[pos..pos + ch_len]);
-                    pos += ch_len;
+        self.begin();
+        loop {
+            match self.run(text)? {
+                RunStep::Done => return Ok(self.take_tokens()),
+                RunStep::Callback { state, rule, groups } => {
+                    let group_refs: Vec<Option<&str>> =
+                        groups.iter().map(|g| g.as_deref()).collect();
+                    {
+                        let mut ops = EngineOps { lexer: self };
+                        cb.invoke(&mut ops, &state, rule, &group_refs)?;
+                    }
+                    // The trait mutated us directly; consume the pending
+                    // match (advance + null guard) with no extra ops.
+                    self.apply_callback_ops(&[])?;
                 }
             }
         }
-        Ok(std::mem::take(&mut self.toks))
     }
 }

@@ -95,6 +95,11 @@ pub struct LexerTable {
     pub(crate) root: u32,
     pub(crate) token_names: Vec<String>,
     pub(crate) token_shortnames: Vec<String>,
+    pub(crate) token_ids: HashMap<String, TokenId>,
+    /// Token ids referenced by the RULES themselves (tok / actions /
+    /// wordlist) — as opposed to the full registry, which also interns
+    /// every shortname so out-of-band callbacks can emit any token.
+    pub(crate) rule_token_ids: Vec<TokenId>,
     /// `Token::Tokens::Text` — rendered bare (no span) by the HTML
     /// formatter, exactly like rouge.
     pub(crate) tok_text: TokenId,
@@ -118,11 +123,27 @@ impl LexerTable {
         self.tok_text
     }
 
-    /// Iterate every token qualname this table can emit. Lets embedders
-    /// apply policy (e.g. decline tables that emit `Escape`, whose
-    /// rouge-side handling depends on formatter options).
+    /// Iterate every token qualname registered in this table (the full
+    /// shortname registry — includes tokens only out-of-band callbacks
+    /// could emit).
     pub fn token_names(&self) -> impl Iterator<Item = &str> {
         self.token_names.iter().map(String::as_str)
+    }
+
+    /// Look up a token id by qualified name.
+    pub fn token_id(&self, qualname: &str) -> Option<TokenId> {
+        self.token_ids.get(qualname).copied()
+    }
+
+    /// True when one of the table's RULES (tok / actions / wordlist) can
+    /// emit `qualname`. Lets embedders apply policy (e.g. decline tables
+    /// whose rules emit `Escape`, whose rouge-side handling depends on
+    /// formatter options) without tripping on registry-only tokens.
+    pub fn rule_emits(&self, qualname: &str) -> bool {
+        match self.token_id(qualname) {
+            Some(id) => self.rule_token_ids.contains(&id),
+            None => false,
+        }
     }
 
     /// Parse a rule table from the JSON produced by `tools/extract.rb`.
@@ -193,10 +214,20 @@ impl Builder {
             .get("root")
             .ok_or_else(|| Error::Table("no \"root\" state".into()))?;
 
+        // Everything interned so far came from the rules (plus the
+        // Text/Error pre-registrations) — snapshot it for `rule_emits`.
+        let rule_token_ids: Vec<TokenId> =
+            (0..self.token_names.len() as u32).map(TokenId).collect();
+
         let shortnames_obj = v
             .get("shortnames")
             .and_then(J::as_object)
             .ok_or_else(|| Error::Table("missing \"shortnames\" object".into()))?;
+        // Intern the FULL shortname registry so out-of-band callbacks can
+        // emit tokens no rule references.
+        for name in shortnames_obj.keys() {
+            self.tok(name);
+        }
         let mut token_shortnames = vec![String::new(); self.token_names.len()];
         for (i, name) in self.token_names.iter().enumerate() {
             match shortnames_obj.get(name).and_then(J::as_str) {
@@ -217,6 +248,8 @@ impl Builder {
             root,
             token_names: self.token_names,
             token_shortnames,
+            token_ids: self.token_ids,
+            rule_token_ids,
             tok_text,
             tok_error,
         })
@@ -370,11 +403,25 @@ impl Builder {
 }
 
 /// Compile a Ruby/Onigmo regex source + `Regexp#options` bits into a
-/// [`fancy_regex::Regex`]. Ruby bits: 1 = `i`, 2 = `x`, 4 = Ruby `m`
-/// (dot-matches-newline — Rust's `s`). The only Onigmo syntax fixup
-/// needed so far is `{,n}` → `{0,n}`.
+/// [`fancy_regex::Regex`].
+///
+/// Semantics mapping (the classic Ruby-vs-Rust traps):
+/// - Ruby's `^` / `$` are ALWAYS line anchors → Rust `m` enabled
+///   unconditionally (without it a mid-text `#.*$` comment rule silently
+///   fails — caught by a jekyll byte-diff).
+/// - rouge matches through StringScanner, whose `^` ALSO matches at the
+///   current scan position (ruby-lang bug #7092 — rouge's own source
+///   carries an "XXX HACK" comment about it). Rules like
+///   `(^[ \t]*)(match|case)…` rely on it mid-line. Since the engine
+///   anchors every match at the current position anyway, a `^` in
+///   LEADING position (start of pattern, possibly nested in group
+///   openers / x-mode whitespace / alternation roots) is equivalent to
+///   "true" — strip it. Non-leading `^` keeps line-anchor semantics.
+/// - Ruby's `m` option (bit 4) means dot-matches-newline → Rust `s`.
+/// - bits: 1 = `i`, 2 = `x`.
+/// - Onigmo `{,n}` → `{0,n}`.
 fn compile_ruby_regex(src: &str, opts: u64) -> Result<Regex, Error> {
-    let mut flags = String::new();
+    let mut flags = String::from("m");
     if opts & 1 != 0 {
         flags.push('i');
     }
@@ -384,7 +431,136 @@ fn compile_ruby_regex(src: &str, opts: u64) -> Result<Regex, Error> {
     if opts & 4 != 0 {
         flags.push('s');
     }
-    let fixed = src.replace("{,", "{0,");
-    let pat = if flags.is_empty() { fixed } else { format!("(?{flags}){fixed}") };
+    let extended = opts & 2 != 0;
+    let fixed = strip_leading_carets(src, extended).replace("{,", "{0,");
+    let pat = format!("(?{flags}){fixed}");
     Regex::new(&pat).map_err(|e| Error::Regex { pattern: src.to_string(), message: e.to_string() })
+}
+
+/// Remove `^` anchors that sit in LEADING position — i.e. every char
+/// before them is "transparent" at match start: group openers (`(`,
+/// `(?:`, `(?<name>`, `(?flags:` / `(?flags)`), alternation bars at the
+/// top of those groups, and (in x-mode) whitespace and `#` comments.
+/// Char classes (`[^…]`) and escapes are respected. This reproduces
+/// StringScanner's pos-matching `^` under carmine's anchored-at-pos
+/// search (see `compile_ruby_regex`).
+fn strip_leading_carets(src: &str, extended: bool) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    let mut leading = true;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if leading {
+            match c {
+                '^' => {
+                    // The pos-anchor quirk: drop it.
+                    i += 1;
+                    continue;
+                }
+                '|' => {
+                    out.push(c);
+                    i += 1;
+                    continue; // a new alternation root is leading again
+                }
+                '(' => {
+                    // Copy the group opener; stay leading for `(`,
+                    // `(?:`, `(?<name>`, `(?flags:`, `(?flags)`.
+                    let rest = &src[i..];
+                    let opener_len = group_opener_len(rest);
+                    out.push_str(&rest[..opener_len]);
+                    i += opener_len;
+                    continue;
+                }
+                _ if extended && c.is_whitespace() => {
+                    out.push(c);
+                    i += 1;
+                    continue;
+                }
+                _ if extended && c == '#' => {
+                    // x-mode comment runs to end of line.
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        out.push(bytes[i] as char);
+                        i += 1;
+                    }
+                    continue;
+                }
+                _ => leading = false,
+            }
+        }
+        // Non-leading copy, tracking escapes and char classes so a later
+        // `|` at group top can't be confused with one inside `[...]`.
+        match c {
+            '\\' if i + 1 < bytes.len() => {
+                out.push(c);
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            '[' => {
+                // Copy the whole char class verbatim.
+                out.push(c);
+                i += 1;
+                if i < bytes.len() && bytes[i] == b'^' {
+                    out.push('^');
+                    i += 1;
+                }
+                if i < bytes.len() && bytes[i] == b']' {
+                    out.push(']');
+                    i += 1;
+                }
+                while i < bytes.len() && bytes[i] != b']' {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        out.push(bytes[i] as char);
+                        out.push(bytes[i + 1] as char);
+                        i += 2;
+                    } else {
+                        out.push(bytes[i] as char);
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            _ => {}
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// Length of a group opener at the start of `rest` (which begins with
+/// `(`): `(`, `(?:`, `(?<name>`, `(?'name'`, `(?flags)` or `(?flags:`.
+/// Lookarounds (`(?=`, `(?!`, `(?<=`, `(?<!`) are NOT leading-
+/// transparent — return 1 so the caret inside them is preserved.
+fn group_opener_len(rest: &str) -> usize {
+    let b = rest.as_bytes();
+    if b.len() < 2 || b[1] != b'?' {
+        return 1; // plain `(`
+    }
+    if b.len() >= 3 && (b[2] == b'=' || b[2] == b'!') {
+        return 1; // lookahead — treat `(` alone, inside is non-leading
+    }
+    if b.len() >= 3 && b[2] == b'<' {
+        if b.len() >= 4 && (b[3] == b'=' || b[3] == b'!') {
+            return 1; // lookbehind
+        }
+        // named group `(?<name>`
+        if let Some(end) = rest.find('>') {
+            return end + 1;
+        }
+        return 1;
+    }
+    if b.len() >= 3 && b[2] == b':' {
+        return 3; // `(?:`
+    }
+    // `(?flags:` or `(?flags)`
+    for (j, ch) in rest.char_indices().skip(2) {
+        match ch {
+            ':' | ')' => return j + 1,
+            'a'..='z' | 'A'..='Z' | '-' => continue,
+            _ => return 1,
+        }
+    }
+    1
 }

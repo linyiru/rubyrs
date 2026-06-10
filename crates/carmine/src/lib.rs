@@ -29,7 +29,7 @@ mod table;
 
 pub mod html;
 
-pub use engine::{Callback, EngineOps, Lexer, NoCallbacks};
+pub use engine::{Callback, CallbackOp, EngineOps, Lexer, NoCallbacks, RunStep};
 pub use table::{LexerTable, TokenId};
 
 /// Errors surfaced by table loading and lexing.
