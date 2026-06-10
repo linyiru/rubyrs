@@ -160,7 +160,14 @@ jobs:
           # this step exits with the ICE panic.
           smoke_corpus="$(mktemp -d)"
           : > "$smoke_corpus/empty"
-          cargo fuzz run ${{ matrix.target }} "$smoke_corpus" -- \
+          # Explicit --target: cargo-fuzz defaults to its OWN
+          # compile-time triple, and taiki-e/install-action ships a
+          # MUSL-static cargo-fuzz binary — so the default became
+          # x86_64-unknown-linux-musl, where ASAN is incompatible
+          # with the statically-linked libc ("sanitizer is
+          # incompatible with statically linked libc"). Pin the
+          # build to the gnu triple the runner actually is.
+          cargo fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} "$smoke_corpus" -- \
             -max_total_time=5 \
             -runs=200 \
             -rss_limit_mb=2048 \
@@ -188,7 +195,8 @@ jobs:
           # `rust-toolchain.toml` in cwd. Forcing the channel here
           # would override the pin and reintroduce upstream-nightly
           # flakiness.
-          cargo fuzz run ${{ matrix.target }} -- \
+          # --target: same musl-default pitfall as the smoke step.
+          cargo fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} -- \
             -max_total_time=${{ github.event.inputs.duration_seconds || '300' }} \
             -rss_limit_mb=2048 \
             -timeout=5
