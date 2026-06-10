@@ -56,12 +56,33 @@ fn typography() {
     assert_eq!(render("em --- dash\n"), "<p>em \u{2014} dash</p>\n");
 }
 
-/// Heading ids: kramdown slug rules + duplicate suffixes.
+/// Heading ids — kramdown-parser-gfm's `generate_gfm_header_id`, NOT
+/// the core converter algorithm. Expectations captured from CRuby
+/// (kramdown 2.5.2 + kramdown-parser-gfm 1.1.0): leading digits kept,
+/// `_` kept, typography applied then deleted (spaces around `--` give
+/// TWO hyphens), link text included, duplicates suffixed.
 #[test]
 fn heading_ids() {
     assert_eq!(
         render("## A B!\n\n## A B!\n\n### 9 lives\n"),
-        "<h2 id=\"a-b\">A B!</h2>\n\n<h2 id=\"a-b-1\">A B!</h2>\n\n<h3 id=\"lives\">9 lives</h3>\n"
+        "<h2 id=\"a-b\">A B!</h2>\n\n<h2 id=\"a-b-1\">A B!</h2>\n\n<h3 id=\"9-lives\">9 lives</h3>\n"
+    );
+    let html = render(
+        "## It's a -- b\n\n## See [link text](https://x.com) here\n\n## with `code span`\n\n## under_score\n",
+    );
+    let ids: Vec<&str> = html
+        .split("id=\"")
+        .skip(1)
+        .map(|s| s.split('"').next().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "its-a--b",
+            "see-link-text-here",
+            "with-code-span",
+            "under_score"
+        ]
     );
 }
 

@@ -9,11 +9,14 @@ use crate::{Error, Options, typography};
 pub(crate) enum Block {
     /// A run of blank lines between blocks (renders as one `\n`).
     Blank,
-    /// `raw` is the unparsed heading text — kramdown derives `auto_ids`
-    /// slugs from it (markup characters get deleted by the slug rules).
+    /// `raw` is the unparsed heading text — kramdown CORE derives
+    /// `auto_ids` slugs from it. `span_text` is the parsed-tree text
+    /// (typography applied, link text included, markup gone) — the GFM
+    /// parser's `generate_gfm_header_id` input.
     Heading {
         level: u8,
         raw: String,
+        span_text: String,
         spans: Vec<Span>,
     },
     Para(Vec<Span>),
@@ -88,10 +91,20 @@ fn parse_blocks(lines: &[&str], opts: &Options) -> Result<Vec<Block>, Error> {
                 // kramdown strips optional trailing hashes.
                 let text = text.trim_end();
                 let text = text.trim_end_matches('#').trim_end();
+                let spans = parse_spans(text)?;
+                let mut span_text = String::new();
+                spans_raw_text(&spans, &mut span_text);
+                // GFM slugs we can't reproduce exactly (Unicode word
+                // classes outside our supported set, empty results)
+                // decline rather than risk a wrong id.
+                if opts.gfm && opts.auto_ids && crate::html::gfm_slug(&span_text).is_none() {
+                    return Err(declined("heading-gfm-slug"));
+                }
                 out.push(Block::Heading {
                     level,
                     raw: text.to_string(),
-                    spans: parse_spans(text)?,
+                    span_text,
+                    spans,
                 });
                 i += 1;
                 continue;
@@ -196,6 +209,10 @@ fn parse_blocks(lines: &[&str], opts: &Options) -> Result<Vec<Block>, Error> {
                 }
                 if list_marker(l) == Some(ordered) {
                     let content = strip_marker(l, ordered);
+                    // Item content is block-level in kramdown — tables,
+                    // EOB markers, IALs etc. inside an item are out of
+                    // subset, same as at the top level.
+                    decline_block_scan(content)?;
                     // Trailing whitespace carries hard-break semantics.
                     if content.trim_end() != content {
                         return Err(declined("list-trailing-ws"));
@@ -208,6 +225,7 @@ fn parse_blocks(lines: &[&str], opts: &Options) -> Result<Vec<Block>, Error> {
                     return Err(declined("mixed-list-markers"));
                 } else {
                     // Lazy continuation line appended to the last item.
+                    decline_block_scan(l)?;
                     if l.trim_end() != l || l.starts_with(' ') {
                         return Err(declined("list-continuation-ws"));
                     }
@@ -232,23 +250,40 @@ fn parse_blocks(lines: &[&str], opts: &Options) -> Result<Vec<Block>, Error> {
             return Err(declined("opt-space-block"));
         }
 
-        // Paragraph: gather until blank / next block opener. Lines are
-        // kept VERBATIM (kramdown preserves interior trailing spaces);
-        // only the first line loses its OPT_SPACE indent and the final
-        // line is right-stripped.
+        // Paragraph: gather lines. What ends a paragraph differs by
+        // flavor: core kramdown's PARAGRAPH_END is only blank lines
+        // (plus IAL/EOB/HTML/deflist starts, all declined); GFM's
+        // `paragraph_end` quirk (Jekyll's default) adds LIST_START,
+        // ATX_HEADER_START, BLOCKQUOTE_START and FENCED_CODEBLOCK_START
+        // — but NOT horizontal rules. Opener-looking lines that don't
+        // end the paragraph are literal paragraph text in kramdown.
+        // Lines are kept VERBATIM (kramdown preserves interior trailing
+        // spaces); only the first line loses its OPT_SPACE indent and
+        // the final line is right-stripped.
         let mut text = String::new();
         let mut first = true;
         while i < lines.len() {
             let l = lines[i];
-            if l.trim().is_empty()
-                || l.starts_with('#')
-                || l.starts_with('>')
-                || is_hr(l)
-                || list_marker(l).is_some()
-                || (opts.gfm && l.starts_with("```"))
-                || l.starts_with("~~~")
+            if l.trim().is_empty() {
+                break;
+            }
+            if opts.gfm
+                && !first
+                && (l.starts_with('#')
+                    || l.starts_with('>')
+                    || list_marker(l).is_some()
+                    || l.starts_with("```")
+                    || l.starts_with("~~~"))
             {
                 break;
+            }
+            // A swallowed opener-looking line renders as literal text in
+            // kramdown; our spans handle `#`/`>` fine, but hr runs would
+            // mis-render (`***` → emphasis decline already; `___`/`---`
+            // runs likewise) — anything else opener-shaped is rare
+            // enough to decline rather than risk divergence.
+            if !first && !opts.gfm && (l.starts_with('>') || list_marker(l).is_some()) {
+                return Err(declined("core-paragraph-swallow"));
             }
             if !first && opt_space_opener(l, opts) {
                 return Err(declined("opt-space-block"));
@@ -408,15 +443,80 @@ fn strip_marker(line: &str, ordered: bool) -> &str {
 
 // ---- span parsing -------------------------------------------------------
 
+/// Span element kinds — kramdown blocks same-type nesting (an `em`
+/// anywhere inside an `em` stays literal) and gates the strong→em
+/// retry on the immediate parent.
+#[derive(Clone, Copy, PartialEq)]
+enum Elem {
+    Em,
+    Strong,
+    Link,
+}
+
+/// The emphasis close being searched for by a `parse_spans_until`
+/// invocation (kramdown's `stop_re` + its acceptance conditions).
+struct Stop<'a> {
+    delim: &'a str,
+    type_char: u8,
+    elem: Elem,
+}
+
+/// Ruby `/\s/` is ASCII-only — `char::is_whitespace` would also match
+/// U+00A0 etc. and silently diverge.
+fn ruby_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c')
+}
+
 pub(crate) fn parse_spans(text: &str) -> Result<Vec<Span>, Error> {
+    let (spans, _) = parse_spans_until(text, None, false, false, None)?;
+    Ok(spans)
+}
+
+/// Recursive-descent span parser mirroring kramdown's `parse_spans` +
+/// `parse_emphasis`: scans `text`, optionally watching for an emphasis
+/// `stop` delimiter. Returns the spans plus `Some(pos)` where the
+/// accepted close begins, or `None` if the text ran out (the caller
+/// then reverts to literal delimiters, like kramdown's `revert_pos`).
+fn parse_spans_until(
+    text: &str,
+    stop: Option<&Stop<'_>>,
+    in_em: bool,
+    in_strong: bool,
+    parent: Option<Elem>,
+) -> Result<(Vec<Span>, Option<usize>), Error> {
     let mut out = Vec::new();
     let mut buf = String::new();
     let bytes = text.as_bytes();
     let mut i = 0;
     // Last logical character, across span boundaries — smart-quote
-    // open/close classification needs it (kramdown sees the raw source).
+    // open/close classification and emphasis-close pre-checks need it
+    // (kramdown sees the raw source via pre_match).
     let mut prev: Option<char> = None;
     while i < bytes.len() {
+        // Emphasis close? kramdown checks the stop_re before running
+        // span parsers, with these acceptance conditions; a rejected
+        // candidate falls through to normal parsing (where it may OPEN
+        // a nested span of a different type).
+        if let Some(stop) = stop
+            && text[i..].starts_with(stop.delim)
+        {
+            let content_nonempty = !out.is_empty() || !buf.is_empty();
+            let prev_ok = prev.is_some_and(|c| !ruby_space(c));
+            // An em close can't sit on a clean strong delimiter
+            // (`**` not followed by a third `*`) — that position
+            // belongs to a nested strong.
+            let em_ok = stop.elem != Elem::Em || run_len(bytes, i, stop.type_char) != 2;
+            // `_` closes don't bind into a following word.
+            let underscore_ok = stop.type_char != b'_'
+                || !text[i + stop.delim.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_alphanumeric);
+            if content_nonempty && prev_ok && em_ok && underscore_ok {
+                flush(&mut out, &mut buf);
+                return Ok((out, Some(i)));
+            }
+        }
         let c = bytes[i];
         match c {
             b'\\' if i + 1 < bytes.len() => {
@@ -472,50 +572,90 @@ pub(crate) fn parse_spans(text: &str) -> Result<Vec<Span>, Error> {
                 i += open + close_rel + open;
             }
             b'*' | b'_' => {
-                let run = run_len(bytes, i, c);
-                if run > 2 {
-                    return Err(declined("triple-emphasis"));
-                }
-                // Intra-word underscores are literal in kramdown.
-                if c == b'_' && prev_is_alnum(bytes, i) && next_is_alnum(bytes, i + run) {
-                    buf.push('_');
-                    if run == 2 {
+                // kramdown EMPHASIS_START takes at most two delimiter
+                // chars; a longer run leaves the rest as content.
+                let take = run_len(bytes, i, c).min(2);
+                // Intra-word underscore bail:
+                // pre_match =~ /[[:alpha:]]-?[[:alpha:]]*_*\z/.
+                if c == b'_' && underscore_intraword(&text[..i], prev) {
+                    for _ in 0..take {
                         buf.push('_');
                     }
                     prev = Some('_');
-                    i += run;
+                    i += take;
                     continue;
                 }
-                // Opening delimiter must be followed by non-space.
-                let after = bytes.get(i + run).copied();
-                if after.is_none() || after == Some(b' ') {
-                    // Not an opener: literal.
-                    for _ in 0..run {
+                let elem = if take == 2 { Elem::Strong } else { Elem::Em };
+                let same_type = (elem == Elem::Em && in_em) || (elem == Elem::Strong && in_strong);
+                let opens_on_space = text[i + take..].chars().next().is_some_and(ruby_space);
+                if same_type || opens_on_space {
+                    for _ in 0..take {
                         buf.push(c as char);
                     }
                     prev = Some(c as char);
-                    i += run;
+                    i += take;
                     continue;
                 }
-                flush(&mut out, &mut buf);
-                let delim = (c as char).to_string().repeat(run);
-                let rest = &text[i + run..];
-                let Some(close_rel) = find_emph_close(rest, &delim) else {
-                    return Err(declined("unbalanced-emphasis"));
+                let delim_buf = (c as char).to_string().repeat(take);
+                let attempt = Stop {
+                    delim: &delim_buf,
+                    type_char: c,
+                    elem,
                 };
-                let inner = parse_spans(&rest[..close_rel])?;
-                out.push(if run == 2 {
-                    Span::Strong(inner)
-                } else {
-                    Span::Em(inner)
-                });
+                let (inner, close) = parse_spans_until(
+                    &text[i + take..],
+                    Some(&attempt),
+                    in_em || elem == Elem::Em,
+                    in_strong || elem == Elem::Strong,
+                    Some(elem),
+                )?;
+                if let Some(close) = close {
+                    flush(&mut out, &mut buf);
+                    out.push(if take == 2 {
+                        Span::Strong(inner)
+                    } else {
+                        Span::Em(inner)
+                    });
+                    prev = Some(c as char);
+                    i += take + close + take;
+                    continue;
+                }
+                // Unclosed strong retries from pos+1 as a single-char
+                // em, unless the immediate parent is an em.
+                if elem == Elem::Strong && parent != Some(Elem::Em) {
+                    let delim1 = (c as char).to_string();
+                    let retry = Stop {
+                        delim: &delim1,
+                        type_char: c,
+                        elem: Elem::Em,
+                    };
+                    let (inner, close) = parse_spans_until(
+                        &text[i + 1..],
+                        Some(&retry),
+                        true,
+                        in_strong,
+                        Some(Elem::Em),
+                    )?;
+                    if let Some(close) = close {
+                        flush(&mut out, &mut buf);
+                        out.push(Span::Em(inner));
+                        prev = Some(c as char);
+                        i += 1 + close + 1;
+                        continue;
+                    }
+                }
+                // No close anywhere: kramdown reverts and emits the
+                // delimiter run as literal text.
+                for _ in 0..take {
+                    buf.push(c as char);
+                }
                 prev = Some(c as char);
-                i += run + close_rel + run;
+                i += take;
             }
             b'[' => {
                 flush(&mut out, &mut buf);
                 let rest = &text[i..];
-                let Some((spans, href, len)) = parse_link(rest)? else {
+                let Some((spans, href, len)) = parse_link(rest, in_em, in_strong)? else {
                     return Err(declined("bracket-not-link"));
                 };
                 out.push(Span::Link { spans, href });
@@ -620,7 +760,30 @@ pub(crate) fn parse_spans(text: &str) -> Result<Vec<Span>, Error> {
         }
     }
     flush(&mut out, &mut buf);
-    Ok(out)
+    Ok((out, None))
+}
+
+/// kramdown's intra-word underscore bail:
+/// `pre_match =~ /[[:alpha:]]-?[[:alpha:]]*_*\z/`. `pre` is the local
+/// slice before the delimiter; at a recursion boundary (`pre` empty)
+/// the cross-span `prev` char approximates the lookback.
+fn underscore_intraword(pre: &str, prev: Option<char>) -> bool {
+    if pre.is_empty() {
+        return prev.is_some_and(|c| c.is_alphabetic());
+    }
+    let s = pre.trim_end_matches('_');
+    let s2 = s.trim_end_matches(|c: char| c.is_alphabetic());
+    if s2.len() < s.len() {
+        return true; // …alpha(_*)\z
+    }
+    if let Some(before_dash) = s2.strip_suffix('-') {
+        // …alpha-\z (the optional hyphen with empty trailing alphas)
+        return before_dash
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphabetic());
+    }
+    false
 }
 
 fn flush(out: &mut Vec<Span>, buf: &mut String) {
@@ -629,39 +792,35 @@ fn flush(out: &mut Vec<Span>, buf: &mut String) {
     }
 }
 
+/// Parsed-tree text the way kramdown-parser-gfm's `update_raw_text`
+/// collects it: text and codespan values verbatim (typography already
+/// applied in our Text spans), other elements contribute their
+/// children's text (so link TEXT counts, the href doesn't).
+pub(crate) fn spans_raw_text(spans: &[Span], out: &mut String) {
+    for span in spans {
+        match span {
+            Span::Text(t) | Span::Code(t) => out.push_str(t),
+            Span::Em(inner) | Span::Strong(inner) | Span::Link { spans: inner, .. } => {
+                spans_raw_text(inner, out);
+            }
+        }
+    }
+}
+
 fn run_len(bytes: &[u8], i: usize, c: u8) -> usize {
     bytes[i..].iter().take_while(|b| **b == c).count()
 }
 
-fn prev_is_alnum(bytes: &[u8], i: usize) -> bool {
-    i > 0 && (bytes[i - 1].is_ascii_alphanumeric())
-}
-
-fn next_is_alnum(bytes: &[u8], i: usize) -> bool {
-    bytes.get(i).is_some_and(|c| c.is_ascii_alphanumeric())
-}
-
-/// Find the closing delimiter for an emphasis run: same delimiter,
-/// preceded by non-space, not part of a longer run.
-fn find_emph_close(rest: &str, delim: &str) -> Option<usize> {
-    let mut from = 0;
-    while let Some(pos) = rest[from..].find(delim) {
-        let abs = from + pos;
-        let before_ok = abs > 0 && !rest[..abs].ends_with(' ');
-        let after = rest[abs + delim.len()..].chars().next();
-        let not_longer_run = after != Some(delim.chars().next().expect("non-empty delim"));
-        if before_ok && not_longer_run && abs > 0 {
-            return Some(abs);
-        }
-        from = abs + delim.len();
-    }
-    None
-}
-
 /// Parse `[text](href)` at the start of `rest`. Titles, references and
-/// nested brackets decline.
+/// nested brackets decline. The enclosing-emphasis flags thread through
+/// so same-type nesting stays blocked inside link text (kramdown's
+/// `@stack` check spans the link boundary).
 #[allow(clippy::type_complexity)]
-fn parse_link(rest: &str) -> Result<Option<(Vec<Span>, String, usize)>, Error> {
+fn parse_link(
+    rest: &str,
+    in_em: bool,
+    in_strong: bool,
+) -> Result<Option<(Vec<Span>, String, usize)>, Error> {
     let bytes = rest.as_bytes();
     debug_assert_eq!(bytes[0], b'[');
     let mut depth = 1;
@@ -693,6 +852,6 @@ fn parse_link(rest: &str) -> Result<Option<(Vec<Span>, String, usize)>, Error> {
     if href.contains(' ') || href.contains('"') {
         return Err(declined("link-title-or-space"));
     }
-    let spans = parse_spans(&rest[1..close])?;
+    let (spans, _) = parse_spans_until(&rest[1..close], None, in_em, in_strong, Some(Elem::Link))?;
     Ok(Some((spans, href.to_string(), close + 2 + paren_rel + 1)))
 }

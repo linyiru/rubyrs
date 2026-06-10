@@ -58,6 +58,15 @@ pub trait CodeHighlighter {
     fn name(&self) -> &str {
         "rouge"
     }
+    /// `class` attribute for inline code spans. kramdown with an active
+    /// rouge highlighter (Jekyll's setup: `default_lang: plaintext`,
+    /// `guess_lang: true`) renders every codespan as
+    /// `<code class="language-plaintext highlighter-rouge">`; the
+    /// escaping is byte-identical to the plain path, only the attribute
+    /// differs. `None` (the default) renders a bare `<code>`.
+    fn codespan_class(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// No highlighting: every block renders as plain `<pre><code>`.
