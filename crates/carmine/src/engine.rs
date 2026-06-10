@@ -12,8 +12,8 @@
 //!   out-of-band, replay its DSL effects via [`Lexer::apply_callback_ops`],
 //!   and call [`Lexer::run`] again.
 
-use crate::table::{Action, Kind, LexerTable, NextState, Rule, TokenId};
 use crate::Error;
+use crate::table::{Action, Kind, LexerTable, NextState, Rule, TokenId};
 
 /// Handler for rules rouge defines with match-dependent Ruby blocks
 /// (`kind: "callback"` in the table), used by the one-shot [`Lexer::lex`].
@@ -43,7 +43,10 @@ impl Callback for NoCallbacks {
         rule_index: usize,
         _groups: &[Option<&str>],
     ) -> Result<(), Error> {
-        Err(Error::CallbackRequired { state: state.to_string(), rule: rule_index })
+        Err(Error::CallbackRequired {
+            state: state.to_string(),
+            rule: rule_index,
+        })
     }
 }
 
@@ -143,7 +146,11 @@ enum StepHit {
     /// A non-callback rule ran; advance to this position.
     Advance(usize),
     /// A callback rule matched (recorded in `self.pending`).
-    NeedCallback { state: u32, rule: usize, groups: Vec<Option<String>> },
+    NeedCallback {
+        state: u32,
+        rule: usize,
+        groups: Vec<Option<String>>,
+    },
 }
 
 /// A lexer run over a [`LexerTable`]. Holds the state stack, position and
@@ -151,6 +158,9 @@ enum StepHit {
 pub struct Lexer<'t> {
     table: &'t LexerTable,
     stack: Vec<u32>,
+    /// Native lexer instance state for IR rules (rouge rule procs
+    /// read/write a tiny ivar vocabulary — see crate::ir).
+    ivars: crate::ir::Ivars,
     pos: usize,
     null_steps: u32,
     pending: Option<Pending>,
@@ -162,6 +172,7 @@ impl<'t> Lexer<'t> {
         Lexer {
             table,
             stack: Vec::new(),
+            ivars: crate::ir::Ivars::new(),
             pos: 0,
             null_steps: 0,
             pending: None,
@@ -181,6 +192,99 @@ impl<'t> Lexer<'t> {
     /// Emit with rouge's consolidation: consecutive same-token chunks
     /// merge; nil/empty values are skipped (`yield_token` + the merge
     /// loop in `Lexer#continue_lex`).
+    /// Execute a compiled rule block (Conditional Action IR). `groups`
+    /// is the full capture snapshot with `groups[0]` = whole match.
+    fn run_ir_ops(
+        &mut self,
+        ops: &[crate::ir::IrOp],
+        groups: &[Option<String>],
+    ) -> Result<(), Error> {
+        use crate::ir::{EvalVal, IrOp, IvarVal, eval_cond, eval_expr};
+        for op in ops {
+            match op {
+                IrOp::Token { token, value } => match value {
+                    None => {
+                        if let Some(Some(w)) = groups.first() {
+                            let w = w.clone();
+                            self.emit(*token, &w);
+                        }
+                    }
+                    Some(e) => {
+                        // nil token value emits nothing (rouge's
+                        // yield_token guard). Non-string values can't
+                        // be produced for token positions by the
+                        // compiler.
+                        if let Some(EvalVal::Str(sv)) = eval_expr(e, groups) {
+                            self.emit(*token, &sv);
+                        }
+                    }
+                },
+                IrOp::Groups(toks) => {
+                    for (i, t) in toks.iter().enumerate() {
+                        if let Some(Some(v)) = groups.get(i + 1) {
+                            let v = v.clone();
+                            self.emit(*t, &v);
+                        }
+                    }
+                }
+                IrOp::Push(Some(st)) => self.stack.push(*st),
+                IrOp::Push(None) => {
+                    let top = *self.stack.last().ok_or(Error::EmptyStack)?;
+                    self.stack.push(top);
+                }
+                IrOp::Pop(n) => {
+                    for _ in 0..*n {
+                        self.stack.pop().ok_or(Error::EmptyStack)?;
+                    }
+                }
+                IrOp::Goto(st) => {
+                    *self.stack.last_mut().ok_or(Error::EmptyStack)? = *st;
+                }
+                IrOp::IvarSet(name, e) => {
+                    let v = eval_expr(e, groups)
+                        .map(EvalVal::into_ivar)
+                        .unwrap_or(IvarVal::Nil);
+                    self.ivars.insert(name.clone(), v);
+                }
+                IrOp::ListPush(name, exprs) => {
+                    let mut tuple = Vec::with_capacity(exprs.len());
+                    for e in exprs {
+                        tuple.push(
+                            eval_expr(e, groups)
+                                .map(EvalVal::into_ivar)
+                                .unwrap_or(IvarVal::Nil),
+                        );
+                    }
+                    // An untouched ivar starts as an empty list — the
+                    // observed rouge initializers (`start { @q = [] }`)
+                    // are equivalent.
+                    match self
+                        .ivars
+                        .entry(name.clone())
+                        .or_insert_with(|| IvarVal::List(Vec::new()))
+                    {
+                        IvarVal::List(items) => items.push(tuple),
+                        other => *other = IvarVal::List(vec![tuple]),
+                    }
+                }
+                IrOp::If {
+                    cond,
+                    then_ops,
+                    else_ops,
+                } => {
+                    let current = *self.stack.last().ok_or(Error::EmptyStack)?;
+                    let branch = if eval_cond(cond, groups, &self.ivars, current) {
+                        then_ops
+                    } else {
+                        else_ops
+                    };
+                    self.run_ir_ops(branch, groups)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn emit(&mut self, tok: TokenId, val: &str) {
         if val.is_empty() {
             return;
@@ -293,12 +397,29 @@ impl<'t> Lexer<'t> {
                         }
                     }
                 }
+                Kind::Ir(_) => {
+                    // `self.table` is an independent `&'t` borrow, so
+                    // re-reading the ops through it leaves `self` free
+                    // to mutate (emit / stack / ivars).
+                    let table = self.table;
+                    let Kind::Ir(ops) = &table.states[state as usize][ri].kind else {
+                        unreachable!()
+                    };
+                    let groups: Vec<Option<String>> = (0..caps.len())
+                        .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                        .collect();
+                    self.run_ir_ops(ops, &groups)?;
+                }
                 Kind::Callback => {
                     let groups: Vec<Option<String>> = (0..caps.len())
                         .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
                         .collect();
                     self.pending = Some(Pending { size });
-                    return Ok(Some(StepHit::NeedCallback { state, rule: ri, groups }));
+                    return Ok(Some(StepHit::NeedCallback {
+                        state,
+                        rule: ri,
+                        groups,
+                    }));
                 }
                 Kind::Mixin(_) => unreachable!("handled above"),
             }
@@ -367,7 +488,11 @@ impl<'t> Lexer<'t> {
             let top = *self.stack.last().ok_or(Error::EmptyStack)?;
             match self.step(top, text)? {
                 Some(StepHit::Advance(np)) => self.pos = np,
-                Some(StepHit::NeedCallback { state, rule, groups }) => {
+                Some(StepHit::NeedCallback {
+                    state,
+                    rule,
+                    groups,
+                }) => {
                     return Ok(RunStep::Callback {
                         state: self.table.state_names[state as usize].clone(),
                         rule,
@@ -381,7 +506,11 @@ impl<'t> Lexer<'t> {
     }
 
     fn error_getch(&mut self, text: &str) {
-        let ch_len = text[self.pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        let ch_len = text[self.pos..]
+            .chars()
+            .next()
+            .map(|c| c.len_utf8())
+            .unwrap_or(1);
         let err_tok = self.table.tok_error;
         let piece = text[self.pos..self.pos + ch_len].to_string();
         self.emit(err_tok, &piece);
@@ -444,7 +573,11 @@ impl<'t> Lexer<'t> {
         loop {
             match self.run(text)? {
                 RunStep::Done => return Ok(self.take_tokens()),
-                RunStep::Callback { state, rule, groups } => {
+                RunStep::Callback {
+                    state,
+                    rule,
+                    groups,
+                } => {
                     let group_refs: Vec<Option<&str>> =
                         groups.iter().map(|g| g.as_deref()).collect();
                     {

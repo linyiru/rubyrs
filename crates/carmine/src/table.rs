@@ -72,7 +72,13 @@ pub(crate) enum Kind {
     Actions(Vec<Action>),
     /// Classify the match by membership in word sets (the universal
     /// identifier-classification idiom in rouge lexers).
-    Wordlist { sets: Vec<(TokenId, HashMap<String, ()>)>, default: TokenId },
+    Wordlist {
+        sets: Vec<(TokenId, HashMap<String, ()>)>,
+        default: TokenId,
+    },
+    /// A rule block AST-compiled to the Conditional Action IR
+    /// (Track C) — executed natively, no callback round trip.
+    Ir(Vec<crate::ir::IrOp>),
     /// A match-dependent rule block — delegated to [`crate::Callback`].
     Callback,
     /// Try another state's rules in place (`mixin :state`).
@@ -159,6 +165,15 @@ struct Builder {
     token_names: Vec<String>,
     state_ids: HashMap<String, u32>,
     state_names: Vec<String>,
+}
+
+impl crate::ir::IrInterner for Builder {
+    fn ir_tok(&mut self, name: &str) -> TokenId {
+        self.tok(name)
+    }
+    fn ir_state(&mut self, name: &str) -> u32 {
+        self.state(name)
+    }
 }
 
 impl Builder {
@@ -266,7 +281,11 @@ impl Builder {
                 .get("state")
                 .and_then(J::as_str)
                 .ok_or_else(|| Error::Table("mixin missing \"state\"".into()))?;
-            return Ok(Rule { re: None, bol: false, kind: Kind::Mixin(self.state(target)) });
+            return Ok(Rule {
+                re: None,
+                bol: false,
+                kind: Kind::Mixin(self.state(target)),
+            });
         }
 
         let src = r
@@ -332,10 +351,21 @@ impl Builder {
                 let default = self.tok(default);
                 Kind::Wordlist { sets, default }
             }
+            "ir" => {
+                let ops = r
+                    .get("ops")
+                    .and_then(J::as_array)
+                    .ok_or_else(|| Error::Table("ir rule missing \"ops\"".into()))?;
+                Kind::Ir(crate::ir::parse_ops(ops, self)?)
+            }
             "callback" => Kind::Callback,
             other => return Err(Error::Table(format!("unknown rule kind {other:?}"))),
         };
-        Ok(Rule { re: Some(re), bol, kind })
+        Ok(Rule {
+            re: Some(re),
+            bol,
+            kind,
+        })
     }
 
     fn next_states(&mut self, next: &J) -> Result<Vec<NextState>, Error> {
@@ -434,7 +464,10 @@ fn compile_ruby_regex(src: &str, opts: u64) -> Result<Regex, Error> {
     let extended = opts & 2 != 0;
     let fixed = strip_leading_carets(src, extended).replace("{,", "{0,");
     let pat = format!("(?{flags}){fixed}");
-    Regex::new(&pat).map_err(|e| Error::Regex { pattern: src.to_string(), message: e.to_string() })
+    Regex::new(&pat).map_err(|e| Error::Regex {
+        pattern: src.to_string(),
+        message: e.to_string(),
+    })
 }
 
 /// Remove `^` anchors that sit in LEADING position — i.e. every char

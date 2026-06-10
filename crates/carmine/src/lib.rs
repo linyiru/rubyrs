@@ -25,6 +25,7 @@
 //! to rouge's MIT license (© Jeanine Adkisson and contributors).
 
 mod engine;
+pub(crate) mod ir;
 mod table;
 
 pub mod html;

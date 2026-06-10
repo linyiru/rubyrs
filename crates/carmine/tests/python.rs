@@ -4,7 +4,7 @@
 //! over `Rouge::Lexers::Python` — see `tools/extract.rb`'s header for the
 //! regeneration procedure).
 
-use carmine::{html, Lexer, LexerTable, NoCallbacks};
+use carmine::{Lexer, LexerTable, NoCallbacks, html};
 
 fn table() -> LexerTable {
     let json = include_str!("fixtures/python.json");
@@ -14,7 +14,9 @@ fn table() -> LexerTable {
 fn assert_golden(snippet: &str, expected: &str) {
     let table = table();
     let mut lexer = Lexer::new(&table);
-    let toks = lexer.lex(snippet, &mut NoCallbacks).expect("lex succeeds without callbacks");
+    let toks = lexer
+        .lex(snippet, &mut NoCallbacks)
+        .expect("lex succeeds without callbacks");
     let got = html::format(&table, &toks);
     assert_eq!(got, expected, "HTML must be byte-identical to rouge");
 }
@@ -54,8 +56,12 @@ fn callback_rules_decline_cleanly() {
 fn lexer_is_reusable() {
     let table = table();
     let mut lexer = Lexer::new(&table);
-    let a = lexer.lex("def f():\n", &mut NoCallbacks).expect("first lex");
-    let b = lexer.lex("def f():\n", &mut NoCallbacks).expect("second lex");
+    let a = lexer
+        .lex("def f():\n", &mut NoCallbacks)
+        .expect("first lex");
+    let b = lexer
+        .lex("def f():\n", &mut NoCallbacks)
+        .expect("second lex");
     assert_eq!(a, b);
 }
 
@@ -83,7 +89,10 @@ fn session_callback_roundtrip() {
     // (affix group is empty here → skipped by yield_token), then push.
     lexer
         .apply_callback_ops(&[
-            CallbackOp::Token { qualname: "Literal.String.Heredoc".into(), value: "'".into() },
+            CallbackOp::Token {
+                qualname: "Literal.String.Heredoc".into(),
+                value: "'".into(),
+            },
             CallbackOp::Push(Some("generic_string".into())),
         ])
         .expect("ops apply");
@@ -96,7 +105,10 @@ fn session_callback_roundtrip() {
     }
     let toks = lexer.take_tokens();
     let names: Vec<&str> = toks.iter().map(|(t, _)| table.token_name(*t)).collect();
-    assert!(names.contains(&"Literal.String.Heredoc"), "heredoc emitted: {names:?}");
+    assert!(
+        names.contains(&"Literal.String.Heredoc"),
+        "heredoc emitted: {names:?}"
+    );
 }
 
 #[test]
@@ -119,5 +131,53 @@ fn error_fallback_consumes_unmatchable_input() {
     let mut lexer = Lexer::new(&table);
     let toks = lexer.lex("\u{0}\u{0}x\n", &mut NoCallbacks).expect("lex");
     let names: Vec<&str> = toks.iter().map(|(t, _)| table.token_name(*t)).collect();
-    assert!(names.contains(&"Error"), "expected an Error token, got {names:?}");
+    assert!(
+        names.contains(&"Error"),
+        "expected an Error token, got {names:?}"
+    );
+}
+
+/// Conditional Action IR — a hand-written table exercising the op/
+/// expr/cond vocabulary end to end (Track C-1 engine side).
+#[test]
+fn ir_rule_execution() {
+    let json = r##"{
+      "lexer": "irdemo",
+      "states": {
+        "root": [
+          {"kind": "ir", "re": "(<<[-~]?)([A-Z]+)", "opts": 0, "ops": [
+            ["token", "Operator", ["g", 1]],
+            ["token", "Name.Constant", ["cat", ["g", 2], ["lit", "!"]]],
+            ["lpush", "queue", [["gin", 1, ["<<-", "<<~"]], ["g", 2]]],
+            ["if", ["not", ["instate", "heredoc"]], [["push", "heredoc"]], []]
+          ]},
+          {"kind": "tok", "re": "\\s+", "opts": 0, "tok": "Text", "next": null}
+        ],
+        "heredoc": [
+          {"kind": "ir", "re": "x", "opts": 0, "ops": [
+            ["if", ["ivar", "queue"], [["token", "Keyword"], ["pop", 1]], [["token", "Error"]]]
+          ]},
+          {"kind": "tok", "re": "\\s+", "opts": 0, "tok": "Text", "next": null}
+        ]
+      },
+      "shortnames": {"Operator": "o", "Name.Constant": "no", "Text": "", "Keyword": "k", "Error": "err"}
+    }"##;
+    let table = LexerTable::from_json(json).expect("ir table compiles");
+    let mut lexer = Lexer::new(&table);
+    let toks = lexer.lex("<<~EOF x", &mut NoCallbacks).expect("ir lex");
+    let names: Vec<&str> = table.token_names().collect();
+    let rendered: Vec<(String, String)> = toks
+        .iter()
+        .map(|(t, v)| (names[t.0 as usize].to_string(), v.clone()))
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![
+            ("Operator".to_string(), "<<~".to_string()),
+            ("Name.Constant".to_string(), "EOF!".to_string()),
+            ("Text".to_string(), " ".to_string()),
+            // inside :heredoc, queue ivar is truthy → Keyword + pop
+            ("Keyword".to_string(), "x".to_string()),
+        ]
+    );
 }
