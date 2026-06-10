@@ -187,6 +187,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn class_public_methods() { run_diff("class_public_methods"); }
 #[test] fn runtime_attr_accessor() { run_diff("runtime_attr_accessor"); }
 #[test] fn file_join() { run_diff("file_join"); }
+#[test] fn file_basename_suffix() { run_diff("file_basename_suffix"); }
 #[test] fn dir_glob() { run_diff("dir_glob"); }
 #[test] fn symbol_basics() { run_diff("symbol_basics"); }
 #[test] fn symbol_methods() { run_diff("symbol_methods"); }

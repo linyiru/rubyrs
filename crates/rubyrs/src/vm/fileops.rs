@@ -559,6 +559,44 @@ impl Vm {
                     .unwrap_or_default();
                 Value::new_str(name)
             }
+            // Two-arg form: strip `suffix` off the basename. `".*"`
+            // strips the last extension — the final `.` and what
+            // follows, unless that `.` is the name's first byte
+            // (dotfiles: `basename(".hidden", ".*")` → ".hidden");
+            // any other suffix strips on exact tail match only when
+            // it isn't the whole name (`basename("c.md", "c.md")` →
+            // "c.md"). Ground-truth probed vs ruby 3.4
+            // (file_basename_suffix fixture). Discovery: Jekyll's
+            // `Document#basename_without_ext` uses
+            // `File.basename(path, ".*")` — was NoMethodError.
+            ("basename", [p, suffix]) => {
+                let path = path_arg(p)?;
+                let sfx = match suffix {
+                    Value::Str(s) => s.to_string_lossy(),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into String",
+                                other.type_name()
+                            ),
+                        }))
+                    }
+                };
+                let name = Path::new(&path).file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let stripped = if sfx == ".*" {
+                    match name.rfind('.') {
+                        Some(i) if i > 0 => name[..i].to_string(),
+                        _ => name,
+                    }
+                } else if name.len() > sfx.len() && name.ends_with(sfx.as_str()) {
+                    name[..name.len() - sfx.len()].to_string()
+                } else {
+                    name
+                };
+                Value::new_str(stripped)
+            }
             ("dirname", [p]) => {
                 let path = path_arg(p)?;
                 let dir = Path::new(&path).parent()
