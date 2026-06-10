@@ -2068,6 +2068,23 @@ mod tests {
         let _ = heap.collect(&[]);
     }
 
+    /// `inspect_escape_bytes_into` — every escape arm (the byte
+    /// route only runs for BINARY-tagged strings, so the rarer
+    /// control escapes need a unit caller for the coverage
+    /// ratchet — and deserve one anyway).
+    #[test]
+    fn inspect_escape_bytes_all_arms() {
+        let mut out = String::new();
+        inspect_escape_bytes_into(
+            b"\\\"\x07\x08\t\n\x0B\x0C\r\x1B a~\x00\x7F\xFF",
+            &mut out,
+        );
+        assert_eq!(
+            out,
+            "\\\\\\\"\\a\\b\\t\\n\\v\\f\\r\\e a~\\x00\\x7F\\xFF"
+        );
+    }
+
     /// `enc_compat` truth table + `display` names — every branch
     /// (the coverage ratchet flagged the two rare arms after
     /// slice 2 landed them production-side only).
