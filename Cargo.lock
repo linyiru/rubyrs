@@ -1634,6 +1634,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "regex",
+ "regex-syntax",
  "rostdown",
  "ruby-prism",
  "rubyrs-cext",

@@ -2654,6 +2654,19 @@ self.eval_inner(
         self.vm.ic_stats.clone()
     }
 
+    /// Regex-cache occupancy: (total constructed, engines built).
+    /// The gap is the win from lazy engine building — patterns
+    /// constructed (typically top-level `FOO = /.../ ` constants
+    /// on the require chain) whose NFA/DFA never got built because
+    /// nothing ever matched against them. Surfaced by the CLI's
+    /// `RUBYRS_REGEX_STATS=1` (mirrors `RUBYRS_IC_STATS`).
+    #[cfg(feature = "regex")]
+    pub fn regex_cache_stats(&self) -> (usize, usize) {
+        let total = self.vm.regex_cache.len();
+        let built = self.vm.regex_cache.values().filter(|r| r.is_built()).count();
+        (total, built)
+    }
+
     /// Register a host function callable from Ruby code with `name(args)`.
     /// The function receives evaluated argument values and returns either
     /// a `Value` or a `Trap`.

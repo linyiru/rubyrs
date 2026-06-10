@@ -83,7 +83,7 @@ bignum = ["dep:num-bigint", "dep:num-integer", "dep:num-traits"]
 # Per ADR 0017's Rule 3, regex belongs in Tier 2 (this feature).
 # The default keeps it on so today's CLI / embedder behaviour
 # stays identical to pre-PoC.
-regex = ["dep:regex", "dep:fancy-regex"]
+regex = ["dep:regex", "dep:fancy-regex", "dep:regex-syntax"]
 # Tier 3 stdlib vendor bridge (per ADR 0017 row 125). With this
 # feature off, the lenient stdlib stub path (`is_stdlib_stub_name`)
 # stays a pure "feature-absent surface": `require 'pathname'`
@@ -249,6 +249,14 @@ _http_server = [
 ruby-prism.workspace = true
 mimalloc = { version = "0.1", optional = true, default-features = false }
 regex = { version = "1", optional = true }
+# `regex-syntax` is already in the tree as `regex`'s own parser —
+# depending on it directly (same 0.8 line, so it dedupes to one
+# build) lets `compile_with_flags` VALIDATE patterns at Regexp
+# construction time without building the engine. The engine build
+# (NFA + lazy-DFA setup, ~30-100KB per pattern) is deferred to
+# first use: on the Jekyll require chain only ~11% of constructed
+# regexes are ever matched, so eager building wasted ~16MB RSS.
+regex-syntax = { version = "0.8", optional = true }
 # `fancy-regex` is the lookaround / backreference fallback engine.
 # rubyrs uses `regex` as the primary engine (linear time,
 # ReDoS-immune by construction); fancy-regex is only consulted

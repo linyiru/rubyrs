@@ -400,6 +400,16 @@ fn main() {
     // counters are ZST/no-op and printing them is a noisy no-op
     // — guarded behind the env var either way so production
     // invocations stay silent.
+    // `RUBYRS_REGEX_STATS=1`: dump regex-cache occupancy (total
+    // constructed vs engines actually built — the gap is the lazy-
+    // build win). Debug knob in the `RUBYRS_IC_STATS` shape; used
+    // to size the RSS impact of eager regex building (352 built /
+    // 39 used on the Jekyll chain → lazy building landed).
+    #[cfg(feature = "regex")]
+    if std::env::var_os("RUBYRS_REGEX_STATS").is_some() {
+        let (total, built) = rt.regex_cache_stats();
+        eprintln!("regex-stats\ttotal={}\tbuilt={}", total, built);
+    }
     #[cfg(feature = "ic-stats")]
     if env_lookup("RUBYRS_IC_STATS").is_some() {
         let s = rt.ic_stats();

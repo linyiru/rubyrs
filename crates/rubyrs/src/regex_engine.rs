@@ -81,7 +81,29 @@ pub(crate) const RB_MULTILINE: u8 = 4;
 /// Ruby flag bitmask + the bare source travel with it without
 /// touching any `Value::Regex(_)` match arm.
 pub struct CompiledRegex {
-    engine: Engine,
+    /// The engine, built LAZILY on first use. Construction
+    /// (`compile_with_flags`) only VALIDATES the pattern via
+    /// `regex_syntax` — full engine building (NFA, meta-strategy,
+    /// DFA scaffolding; ~30-100KB live memory per pattern) is
+    /// deferred until the first operation that actually matches.
+    /// Motivation: on the real-Jekyll require chain, 352 regexes
+    /// get constructed (top-level `FOO = /.../ ` constants across
+    /// jekyll/kramdown/liquid/rouge) but only 39 are ever matched
+    /// during a full site build — eager building wasted ~16MB of
+    /// RSS (~half the require-phase footprint) plus the build
+    /// time of 313 unused patterns.
+    ///
+    /// Patterns that the linear engine REJECTS at validation
+    /// (lookaround/backrefs) still build their fancy-regex
+    /// fallback eagerly — the fancy build is cheap (backtracking
+    /// program, no DFA) and pre-filling keeps the error point at
+    /// Regexp construction, same as before.
+    engine: std::cell::OnceCell<Engine>,
+    /// The fully-prepared engine pattern (charclass-octal
+    /// rewrite + `(?m)` prefix + any inline `(?is)` Ruby-flag
+    /// prefix already applied) fed to `regex::Regex::new` at
+    /// first use. Empty when `engine` was pre-filled (fancy path).
+    engine_pattern: Box<str>,
     /// Ruby flag bitmask (`RB_IGNORECASE | RB_EXTENDED |
     /// RB_MULTILINE`). `Regexp#options` returns this verbatim.
     ruby_flags: u8,
@@ -92,14 +114,11 @@ pub struct CompiledRegex {
     source: Box<str>,
 }
 
-/// Builds either engine. Tries `regex` first; falls back to
-/// `fancy-regex` ONLY when the linear engine's error is a
-/// genuine syntax problem. Resource-limit failures
-/// (`regex::Error::CompiledTooBig`) are NOT bypassed — they're
-/// the linear engine's safety guard against pathological
-/// pattern sizes, and routing such patterns into the
-/// backtracking engine would defeat the guard. The
-/// CompiledTooBig error surfaces as-is for the caller to trap.
+/// Validates the pattern and constructs a `CompiledRegex` whose
+/// linear engine is built lazily on first use (see the `engine`
+/// field doc). Patterns the linear syntax rejects fall back to
+/// an EAGER `fancy-regex` build — lookaround/backrefs are
+/// exactly what fancy-regex exists for.
 ///
 /// If fancy-regex also rejects, the combined error mentions
 /// both engines' messages so a pattern that's malformed (not
@@ -118,8 +137,46 @@ pub(crate) fn compile_with_flags(
     ruby_flags: u8,
     bare_source: &str,
 ) -> Result<CompiledRegex, String> {
-    let engine = build_engine(engine_pattern)?;
-    Ok(CompiledRegex { engine, ruby_flags, source: bare_source.into() })
+    let prepared = prepare_pattern(engine_pattern);
+    // Validation-only parse: same syntax surface as
+    // `regex::Regex::new` (AST parse + HIR translation) but the
+    // HIR is dropped immediately — no NFA/DFA is built. A pattern
+    // that validates here can only fail the real build on
+    // resource limits (`CompiledTooBig`), which `engine()` below
+    // surfaces at first use; the Jekyll/kramdown/liquid/rouge
+    // corpus has zero such patterns (they all eager-built fine
+    // before this change).
+    match regex_syntax::Parser::new().parse(&prepared) {
+        Ok(_) => Ok(CompiledRegex {
+            engine: std::cell::OnceCell::new(),
+            engine_pattern: prepared.into(),
+            ruby_flags,
+            source: bare_source.into(),
+        }),
+        // Syntax the linear engine rejects (lookaround,
+        // backrefs) → eager fancy-regex build, pre-filling the
+        // OnceCell. Keeps the construction-time error point for
+        // genuinely malformed patterns.
+        Err(syntax_err) => match fancy_regex::Regex::new(&prepared) {
+            Ok(re) => {
+                let cell = std::cell::OnceCell::new();
+                let _ = cell.set(Engine::Fancy(re));
+                Ok(CompiledRegex {
+                    engine: cell,
+                    engine_pattern: "".into(),
+                    ruby_flags,
+                    source: bare_source.into(),
+                })
+            }
+            Err(fancy_err) => {
+                // Both engines rejected. Prefer the fancy-regex
+                // error message (covers the wider surface) but
+                // mention the linear-engine failure too — same
+                // shape as the pre-lazy error.
+                Err(format!("{} (also rejected by regex: {})", fancy_err, syntax_err))
+            }
+        },
+    }
 }
 
 /// Rewrite octal escapes (`\NNN`) that appear INSIDE a character
@@ -198,56 +255,53 @@ fn rewrite_charclass_octal_escapes(pat: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Engine selection without the `CompiledRegex` wrapper — shared
-/// by `compile` and `compile_with_flags`. Tries `regex` first,
-/// falls back to `fancy-regex` only on a genuine syntax error
-/// (CompiledTooBig surfaces as-is; see the `compile` doc above).
-fn build_engine(pattern: &str) -> Result<Engine, String> {
+/// Pattern preparation shared by validation and the (deferred)
+/// engine build: charclass-octal rewrite, then the `(?m)` prefix.
+///
+/// Ruby's `^` / `$` are ALWAYS line anchors (they match at every
+/// line boundary, not just the string ends — `\A` / `\z` / `\Z`
+/// are the string anchors). The regex / fancy-regex crates default
+/// `^` / `$` to string-only anchoring, switching to line anchors
+/// only under engine `(?m)` (multi-line). So every Ruby pattern
+/// gets a `(?m)` engine prefix. This is ORTHOGONAL to Ruby's `/m`
+/// literal flag, which means dot-matches-newline → engine `(?s)`
+/// (applied separately in `apply_ruby_flags`). The bare `source`
+/// stored on `CompiledRegex` is untouched, so `#source` / `#inspect`
+/// never see this prefix. Discovery: P3 Jekyll spike — jekyll's
+/// `YAML_FRONT_MATTER_REGEXP` (`\A(...)^((---|\.\.\.)\s*$...)/m`)
+/// relies on `^`/`$` matching the front-matter delimiter lines.
+fn prepare_pattern(pattern: &str) -> String {
     let pattern = rewrite_charclass_octal_escapes(pattern);
-    // Ruby's `^` / `$` are ALWAYS line anchors (they match at every
-    // line boundary, not just the string ends — `\A` / `\z` / `\Z`
-    // are the string anchors). The regex / fancy-regex crates default
-    // `^` / `$` to string-only anchoring, switching to line anchors
-    // only under engine `(?m)` (multi-line). So every Ruby pattern
-    // gets a `(?m)` engine prefix. This is ORTHOGONAL to Ruby's `/m`
-    // literal flag, which means dot-matches-newline → engine `(?s)`
-    // (applied separately in `apply_ruby_flags`). The bare `source`
-    // stored on `CompiledRegex` is untouched, so `#source` / `#inspect`
-    // never see this prefix. Discovery: P3 Jekyll spike — jekyll's
-    // `YAML_FRONT_MATTER_REGEXP` (`\A(...)^((---|\.\.\.)\s*$...)/m`)
-    // relies on `^`/`$` matching the front-matter delimiter lines.
-    let prefixed = format!("(?m){pattern}");
-    let pattern: &str = &prefixed;
-    match regex::Regex::new(pattern) {
-        Ok(re) => Ok(Engine::Native(re)),
-        Err(native_err) => match &native_err {
-            // Syntax error → try fancy-regex. The wider syntax
-            // surface (lookaround, backrefs) is exactly what
-            // fancy-regex exists for.
-            regex::Error::Syntax(_) => match fancy_regex::Regex::new(pattern) {
-                Ok(re) => Ok(Engine::Fancy(re)),
-                Err(fancy_err) => {
-                    // Both engines rejected. Prefer the
-                    // fancy-regex error message (covers the
-                    // wider surface) but mention the native
-                    // failure too — useful when a pattern is
-                    // genuinely malformed rather than just
-                    // lookaround-shaped.
-                    Err(format!("{} (also rejected by regex: {})", fancy_err, native_err))
-                }
-            },
-            // CompiledTooBig (or any future non-syntax
-            // variant) is a real safety/resource signal from
-            // the linear engine. Surface it as-is — don't
-            // route around the guard by handing the pattern
-            // to fancy-regex's backtracker, which has no
-            // equivalent size limit. (Code-review #353 round 1.)
-            _ => Err(native_err.to_string()),
-        },
-    }
+    format!("(?m){pattern}")
 }
 
 impl CompiledRegex {
+    /// The engine, building it on first access. The pattern was
+    /// already validated by `regex_syntax` at construction, so
+    /// `regex::Regex::new` can only fail here on resource limits
+    /// (`CompiledTooBig` — the linear engine's guard against
+    /// pathological pattern sizes). That failure panics; the
+    /// `Runtime::eval` boundary catches unwinding panics and
+    /// converts them to a RuntimeError trap with the message
+    /// preserved, so Ruby code sees a raise at the first match
+    /// rather than a process abort. (Pre-lazy behaviour trapped at
+    /// Regexp construction instead — acceptable shift: CRuby has
+    /// no size limit at all, and the corpus has zero such
+    /// patterns.)
+    fn engine(&self) -> &Engine {
+        self.engine.get_or_init(|| match regex::Regex::new(&self.engine_pattern) {
+            Ok(re) => Engine::Native(re),
+            Err(e) => panic!("regex build failed at first use for /{}/: {}", self.source, e),
+        })
+    }
+
+    /// True once the engine has been built (first match) — or
+    /// immediately for the eager fancy-regex path. `RUBYRS_REGEX_STATS=1`
+    /// uses this to report how many cached regexes were ever used.
+    pub(crate) fn is_built(&self) -> bool {
+        self.engine.get().is_some()
+    }
+
     /// The BARE source pattern as written (NO inline `(?is)` flag
     /// prefix — that only lives in the engine's compiled pattern).
     /// Used by `Regexp#source` / `#to_s` / `#inspect` and trap
@@ -304,7 +358,7 @@ impl CompiledRegex {
     /// as a `RubyError` variant). New operations are written
     /// to dispatch through the enum from the start.
     pub(crate) fn as_native(&self) -> Option<&regex::Regex> {
-        match &self.engine {
+        match self.engine() {
             Engine::Native(r) => Some(r),
             Engine::Fancy(_) => None,
         }
@@ -313,7 +367,7 @@ impl CompiledRegex {
     /// Number of capture groups + 1 (group 0 = whole match), across
     /// both engines.
     pub(crate) fn captures_len(&self) -> usize {
-        match &self.engine {
+        match self.engine() {
             Engine::Native(r) => r.captures_len(),
             Engine::Fancy(r) => r.captures_len(),
         }
@@ -330,7 +384,7 @@ impl CompiledRegex {
     /// same error-suppression the dual-engine `is_match` documents.)
     pub(crate) fn scan_captures(&self, text: &str) -> Vec<Vec<Option<String>>> {
         let mut out: Vec<Vec<Option<String>>> = Vec::new();
-        match &self.engine {
+        match self.engine() {
             Engine::Native(r) => {
                 for caps in r.captures_iter(text) {
                     out.push(
@@ -361,9 +415,12 @@ impl CompiledRegex {
     /// third engine or routes traps through a builder, this
     /// helper is the right place to centralise the label.
     pub(crate) fn engine_name(&self) -> &'static str {
-        match &self.engine {
-            Engine::Native(_) => "regex",
-            Engine::Fancy(_) => "fancy-regex",
+        // Reflection only (Debug impl) — must NOT force the lazy
+        // build. An unbuilt cell is always the native engine:
+        // the fancy fallback is pre-filled at construction.
+        match self.engine.get() {
+            Some(Engine::Native(_)) | None => "regex",
+            Some(Engine::Fancy(_)) => "fancy-regex",
         }
     }
 
@@ -389,7 +446,7 @@ impl CompiledRegex {
     /// #353 round 1 flagged this; documenting the trade-off
     /// is the adopted resolution.
     pub(crate) fn is_match(&self, haystack: &str) -> bool {
-        match &self.engine {
+        match self.engine() {
             Engine::Native(r) => r.is_match(haystack),
             Engine::Fancy(r) => r.is_match(haystack).unwrap_or(false),
         }
@@ -403,7 +460,7 @@ impl CompiledRegex {
     /// no match — rubyrs's `sub!` path uses that as the
     /// no-match signal.
     pub(crate) fn replace<'h>(&self, haystack: &'h str, replacement: &str) -> std::borrow::Cow<'h, str> {
-        match &self.engine {
+        match self.engine() {
             Engine::Native(r) => r.replace(haystack, replacement),
             Engine::Fancy(r) => r.replace(haystack, replacement),
         }
@@ -412,7 +469,7 @@ impl CompiledRegex {
     /// `String#gsub` — replace all. Same Cow discipline as
     /// `replace`.
     pub(crate) fn replace_all<'h>(&self, haystack: &'h str, replacement: &str) -> std::borrow::Cow<'h, str> {
-        match &self.engine {
+        match self.engine() {
             Engine::Native(r) => r.replace_all(haystack, replacement),
             Engine::Fancy(r) => r.replace_all(haystack, replacement),
         }
@@ -465,7 +522,7 @@ impl CompiledRegex {
         // unbounded for the \`None\` case. Code-review #357
         // round 6.
         let bound = max_matches.unwrap_or(usize::MAX);
-        match &self.engine {
+        match self.engine() {
             Engine::Native(r) => {
                 for caps in r.captures_iter(haystack).take(bound) {
                     if let Some(m0) = caps.get(0) {
@@ -515,7 +572,7 @@ impl CompiledRegex {
         &self,
         haystack: &str,
     ) -> Result<Option<OwnedCaptures>, String> {
-        match &self.engine {
+        match self.engine() {
             Engine::Native(r) => match r.captures(haystack) {
                 None => Ok(None),
                 Some(caps) => {
@@ -588,7 +645,7 @@ impl CompiledRegex {
         haystack: &str,
     ) -> Result<Vec<OwnedCaptures>, String> {
         let mut out = Vec::new();
-        match &self.engine {
+        match self.engine() {
             Engine::Native(r) => {
                 for caps in r.captures_iter(haystack) {
                     let m0 = match caps.get(0) {
