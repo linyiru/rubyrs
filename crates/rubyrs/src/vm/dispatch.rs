@@ -2043,6 +2043,17 @@ impl Vm {
                 {
                     Value::Bool(true)
                 }
+                // `nil?` — same universal-constant shape as `frozen?`,
+                // same mask gate ("nil?" is in the universal arm-name
+                // list, so any primitive-class reopen flips the mask).
+                Value::Str(_) | Value::Int(_) | Value::Sym(_) | Value::Float(_) | Value::Bool(_)
+                    if name_id == self.sym_nil_q && self.prim_reopen_mask == 0 =>
+                {
+                    Value::Bool(false)
+                }
+                Value::Nil if name_id == self.sym_nil_q && self.prim_reopen_mask == 0 => {
+                    Value::Bool(true)
+                }
                 _ if matches!(recv, Value::Str(_)) && !self.fast_prim_str_safe => return false,
                 _ if matches!(recv, Value::Int(_)) && !self.fast_prim_int_safe => return false,
                 Value::Str(a) if name_id == self.sym_length || name_id == self.sym_size => {
@@ -2056,6 +2067,14 @@ impl Vm {
                     Value::Int(a.char_count() as i64)
                 }
                 Value::Str(a) if name_id == self.sym_to_s => Value::Str(a.clone()),
+                // Mirrors string.rs's canonical arm byte-for-byte:
+                // `(Value::Str(a), "empty?", []) => a.borrow().is_empty()`
+                // (byte-emptiness is encoding-independent). Reopen-gated
+                // via fast_prim_str_safe — `empty?` is in the
+                // revalidate name list.
+                Value::Str(a) if name_id == self.sym_empty_q => {
+                    Value::Bool(a.borrow().is_empty())
+                }
                 Value::Int(n) if name_id == self.sym_to_s || name_id == self.sym_inspect => {
                     crate::vm::numeric::integer_to_s_value(*n)
                 }
@@ -2238,6 +2257,7 @@ impl Vm {
                 self.lookup_method_uncached(&c, self.sym_length).is_none()
                     && self.lookup_method_uncached(&c, self.sym_size).is_none()
                     && self.lookup_method_uncached(&c, self.sym_to_s).is_none()
+                    && self.lookup_method_uncached(&c, self.sym_empty_q).is_none()
             }
             None => false,
         };
@@ -3734,6 +3754,58 @@ impl Vm {
     ///
     /// `bypass_visibility` is the `send` / `__send__` one-shot
     /// override consumed by `do_call` before this call.
+
+    /// Apply `private_class_method` / `public_class_method`: flip the
+    /// visibility of the named singleton methods on `target`. Own-
+    /// table entries flip their Cell in place; chain-inherited
+    /// (superclass-singleton / extended-module) methods get an own-
+    /// table COPY carrying the new visibility — flipping the shared
+    /// record would leak the change to the parent. A name with no
+    /// singleton method anywhere raises NameError (CRuby shape).
+    /// Bumps method_gen: the class-singleton inline cache stores the
+    /// `Rc<Method>` whose visibility gate is checked at call time,
+    /// but the own-table copy path INSERTS a new record that cached
+    /// entries would otherwise never see.
+    fn apply_class_method_visibility(
+        &mut self,
+        target: &Rc<crate::value::Class>,
+        args: &[Value],
+        vis: Visibility,
+    ) -> Result<(), Trap> {
+        for a in args {
+            let mid: SymId = match a {
+                Value::Sym(s) => *s,
+                Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                _ => continue,
+            };
+            let own = target.singleton_methods.borrow().get(&mid).cloned();
+            if let Some(m) = own {
+                m.visibility.set(vis);
+            } else if let Some(m) = self.lookup_class_singleton_method(target, mid) {
+                let copy = std::rc::Rc::new(crate::value::Method {
+                    params: m.params.clone(),
+                    proto_idx: m.proto_idx,
+                    fixed_arity: m.fixed_arity,
+                    defining_class: Some(std::rc::Rc::downgrade(target)),
+                    visibility: std::cell::Cell::new(vis),
+                    closure: m.closure.clone(),
+                    original_name: m.original_name,
+                    builtin: m.builtin.clone(),
+                });
+                target.singleton_methods.borrow_mut().insert(mid, copy);
+            }
+            // No singleton-method record (e.g. the builtin `new` /
+            // `allocate` constructor arms — kramdown's Parser::Base
+            // does `private_class_method(:new, :allocate)`): keep
+            // the historical no-op for that name. Privatising a
+            // BUILTIN class method stays a documented gap; raising
+            // NameError here would break real gems whose builtin
+            // privatisation we can't yet honour.
+        }
+        self.method_gen = self.method_gen.wrapping_add(1);
+        Ok(())
+    }
+
     fn check_method_visibility(
         &self,
         m: &Method,
@@ -3742,9 +3814,17 @@ impl Vm {
         bypass_visibility: bool,
     ) -> Result<(), Trap> {
         let vis = m.visibility.get();
+        // Literal-`self` receiver exemption (private methods are
+        // callable as `self.foo`). Object identity for instance
+        // receivers; Rc identity for Class receivers (`self.helper`
+        // inside a class body / `class << self` context, where the
+        // method is a private class method via private_class_method).
         let self_recv = matches!(
             (recv, self.frames.last().map(|f| &f.self_val)),
             (Value::Object(rid), Some(Value::Object(sid))) if rid == sid
+        ) || matches!(
+            (recv, self.frames.last().map(|f| &f.self_val)),
+            (Value::Class(rc), Some(Value::Class(sc))) if Rc::ptr_eq(rc, sc)
         );
         if vis == Visibility::Private && !bypass_visibility && !self_recv {
             return Err(self.trap(RubyError::NoMethodError {
@@ -5794,6 +5874,17 @@ impl Vm {
         if !maybe_refined && !no_recv && self.try_invoke_explicit_recv_cached(name_id, argc, cache_id)? {
             return Ok(());
         }
+        // Class/Module-receiver sibling (`X.class_method`): resolves
+        // via the same singleton walk the canonical Class-recv arm
+        // below uses, gated by `class_singleton_deny` so no earlier
+        // name-keyed arm is bypassed. See the helper's doc comment.
+        if !maybe_refined
+            && !no_recv
+            && !force_primitive
+            && self.try_invoke_class_singleton_cached(name_id, argc, cache_id)?
+        {
+            return Ok(());
+        }
         let name = self.interner.resolve(name_id).clone();
         // Universal-Object bare-call routing. Several universal
         // `Object` methods are implemented only in the explicit-recv
@@ -6660,15 +6751,19 @@ impl Vm {
             }
             // `private_class_method` / `public_class_method` accept
             // any number of method-name args (Symbol or String) and
-            // return the receiver. rubyrs doesn't model singleton-
-            // method visibility, so these are no-ops — the same
-            // trade-off as the `private_constant` stub above. The
-            // documented gap is that a "privatised" class method
-            // stays publicly callable. Motivating use: rubygems,
-            // fileutils, and forwardable-extended all call
-            // `klass.private_class_method(...)` during their require.
+            // return the receiver. Flips the named singleton
+            // methods' visibility (rubygems, fileutils and
+            // forwardable-extended all call this during require;
+            // the explicit-receiver twin lives in the recv arm).
             if matches!(&*name, "private_class_method" | "public_class_method")
-                && let Value::Class(_) = &self_val {
+                && let Value::Class(target) = &self_val {
+                let vis = if &*name == "private_class_method" {
+                    Visibility::Private
+                } else {
+                    Visibility::Public
+                };
+                let target = target.clone();
+                self.apply_class_method_visibility(&target, &args, vis)?;
                 self.stack.push(self_val);
                 return Ok(());
             }
@@ -7524,6 +7619,19 @@ impl Vm {
             // Class) so `self.bar` and bare `bar` stay in sync.
             let user_singleton = self.lookup_class_singleton_method(cls, name_id);
             if let Some(m) = user_singleton {
+                // `private_class_method` visibility — same check (and
+                // same literal-`self` / `send` exemptions) the
+                // instance explicit-recv path applies. PRIVATE only:
+                // protected class methods (`class << self; protected`
+                // — rouge's `Lexer.register` cross-subclass pattern)
+                // stay permissive, because honouring them needs the
+                // metaclass `is_a?` walk rubyrs doesn't model. The
+                // class-singleton fast path rejects non-Public and
+                // falls through to here, so the error shape stays in
+                // one place.
+                if m.visibility.get() == Visibility::Private {
+                    self.check_method_visibility(&m, &recv, &name, bypass_visibility)?;
+                }
                 let target_self = recv.clone();
                 return self.invoke_method(m, target_self, args.into_vec());
             }
@@ -7850,14 +7958,20 @@ impl Vm {
         }
         // `Foo.private_class_method :m` / `Foo.public_class_method :m`
         // — explicit-receiver parallel of the no_recv arm in
-        // `do_call`. No-op (returns the receiver): rubyrs doesn't
-        // model singleton-method visibility, so a "privatised" class
-        // method stays publicly callable (same trade-off as the
-        // `private_constant` stub above). forwardable-extended's
+        // `do_call`. Flips the named singleton methods' visibility
+        // (enforced by `check_method_visibility` at the singleton
+        // dispatch arms). forwardable-extended's
         // `klass.private_class_method(method)` and rubygems both
         // hit this during their require.
         if matches!(&*name, "private_class_method" | "public_class_method")
-            && let Value::Class(_) = &recv {
+            && let Value::Class(target) = &recv {
+            let vis = if &*name == "private_class_method" {
+                Visibility::Private
+            } else {
+                Visibility::Public
+            };
+            let target = target.clone();
+            self.apply_class_method_visibility(&target, &args, vis)?;
             self.stack.push(recv);
             return Ok(());
         }
@@ -11308,6 +11422,101 @@ impl Vm {
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
         // the first last_match write inside this method scope.
+        Ok(true)
+    }
+
+    /// Class/Module-receiver monomorphic fast path — the
+    /// `X.class_method(args)` sibling of `try_invoke_explicit_recv_cached`.
+    /// Jekyll-style code dispatches module functions constantly
+    /// (`PathManager.join`, `Utils.*`, `Jekyll.logger`), and without
+    /// this every such call walked `do_call`'s full arm chain
+    /// (~240ns vs ~60ns measured on a 2-arg module fn).
+    ///
+    /// Soundness:
+    /// - `class_singleton_deny` gates out every name a pre-singleton
+    ///   `do_call` arm can intercept for a Class receiver (Class.new,
+    ///   const_get, include, respond_to?, …) — for any other name the
+    ///   chain provably falls through to the canonical
+    ///   `lookup_class_singleton_method` arm this path mirrors.
+    /// - resolution uses `lookup_class_singleton_cached` (same walk,
+    ///   method_gen-validated, `ptr|1`-tagged cache entries so a
+    ///   polymorphic site can't cross-serve instance entries).
+    /// - only PUBLIC, fixed-arity, non-closure, non-builtin methods
+    ///   invoke stack-direct; everything else falls through unchanged
+    ///   (private class methods keep their NoMethodError shape,
+    ///   `define_singleton_method` closures keep captured locals).
+    fn try_invoke_class_singleton_cached(
+        &mut self,
+        name_id: SymId,
+        argc: usize,
+        cache_id: u16,
+    ) -> Result<bool, Trap> {
+        // Explicit-recv stack layout: [..., recv, a1, ..., aN].
+        let recv_idx = match self.stack.len().checked_sub(argc + 1) {
+            Some(i) => i,
+            None => return Ok(false),
+        };
+        let cls = match self.stack.get(recv_idx) {
+            Some(Value::Class(cls)) => cls.clone(),
+            _ => return Ok(false),
+        };
+        if self.class_singleton_deny.contains(&name_id) {
+            return Ok(false);
+        }
+        let Some(m) = self.lookup_class_singleton_cached(&cls, name_id, cache_id) else {
+            return Ok(false);
+        };
+        if m.visibility.get() != Visibility::Public
+            || m.closure.is_some()
+            || m.builtin.is_some()
+        {
+            return Ok(false);
+        }
+        let fixed = match m.fixed_arity {
+            Some(f) if f.required as usize == argc => f,
+            _ => return Ok(false),
+        };
+        self.check_frames()?;
+        let n_locals = fixed.n_locals as usize;
+        let locals = if fixed.stack_eligible {
+            let base = self.arena_push_args(argc, n_locals);
+            crate::vm::Locals::Stack(base)
+        } else {
+            let cell = self.locals_cell_nil(n_locals);
+            {
+                let mut l = cell.borrow_mut();
+                for slot in (0..argc).rev() {
+                    l[slot] = self
+                        .stack
+                        .pop()
+                        .expect("ICE: class-singleton fast path arg underflow");
+                }
+            }
+            crate::vm::Locals::Shared(cell)
+        };
+        let recv = self
+            .stack
+            .pop()
+            .expect("ICE: class-singleton fast path recv underflow");
+        self.frames.push(Frame {
+            proto_idx: m.proto_idx,
+            ip: 0,
+            locals,
+            self_val: recv,
+            base_sp: self.stack.len(),
+            is_class_body: false,
+            swap_return: None,
+            block_arg: None,
+            defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            lexical_cvar_class: None,
+            #[cfg(feature = "regex")] saved_last_match: None,
+            is_block: false,
+            n_given_positional: fixed.required,
+            kw_given_mask: 0,
+            aux: None,
+            pending_yield: false,
+            block_writeback: None,
+        });
         Ok(true)
     }
 

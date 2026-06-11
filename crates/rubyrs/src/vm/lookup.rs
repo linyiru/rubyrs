@@ -220,6 +220,51 @@ impl Vm {
         m
     }
 
+    /// Per-call-site cached CLASS-SINGLETON lookup — the
+    /// `X.class_method` sibling of `lookup_method_cached`. Same
+    /// CallCache slots and generation validation; entries are keyed
+    /// `Rc::as_ptr(cls) | 1` so a call site that alternates between
+    /// an instance receiver (caches the INSTANCE method under the
+    /// class's untagged pointer) and the class itself as receiver
+    /// (caches the SINGLETON method) can never serve one lookup's
+    /// entry for the other. Bit 0 is free (Class allocations are
+    /// word-aligned) and can't collide with the toplevel sentinel
+    /// (`usize::MAX` is not a valid allocation address).
+    #[inline]
+    pub(crate) fn lookup_class_singleton_cached(
+        &mut self,
+        cls: &Rc<Class>,
+        name_id: SymId,
+        cache_id: u16,
+    ) -> Option<Rc<Method>> {
+        let class_ptr = Rc::as_ptr(cls) as usize | 1;
+        let idx = cache_id as usize;
+        if idx < self.call_caches.len() {
+            let cc = &self.call_caches[idx];
+            let cur_gen = self.method_gen;
+            for w in &cc.ways {
+                if w.class_ptr == class_ptr && w.generation == cur_gen {
+                    self.ic_stats.record_hit();
+                    return w.method.clone();
+                }
+            }
+        }
+        self.ic_stats.record_miss();
+        let m = self.lookup_class_singleton_method(cls, name_id);
+        if idx < self.call_caches.len() {
+            let cur_gen = self.method_gen;
+            let cc = &mut self.call_caches[idx];
+            let slot = (cc.next_way as usize) % IC_WAYS;
+            cc.ways[slot] = CallCacheEntry {
+                class_ptr,
+                generation: cur_gen,
+                method: m.clone(),
+            };
+            cc.next_way = ((slot + 1) % IC_WAYS) as u8;
+        }
+        m
+    }
+
     pub(crate) fn lookup_toplevel_method_cached(
         &mut self,
         name_id: SymId,

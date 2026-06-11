@@ -1091,6 +1091,18 @@ pub(crate) struct Vm {
     pub(crate) sym_size: SymId,
     pub(crate) sym_to_s: SymId,
     pub(crate) sym_inspect: SymId,
+    /// Method names the `X.class_method` fast path must NOT take
+    /// (`try_invoke_class_singleton_cached`): every name-keyed arm in
+    /// `do_call` that can intercept a `Value::Class` receiver BEFORE
+    /// the user-singleton lookup at the canonical Class-recv arm. For
+    /// any name outside this set, the pre-arm chain provably falls
+    /// through to that lookup, so resolving it early via the inline
+    /// cache is semantics-identical. Over-inclusion is safe (those
+    /// names just keep the slow path); UNDER-inclusion would let a
+    /// user `def self.send`-style name bypass an intercepting arm —
+    /// when adding a new Class-recv name arm to `do_call`, add the
+    /// name here.
+    pub(crate) class_singleton_deny: crate::intern::FxHashSet<SymId>,
     /// Pre-interned `$!` — read/written on every `begin/rescue` entry &
     /// exit (and `return` out of a rescue body) for the dynamically
     /// scoped errinfo, hot paths in exception-heavy code like Liquid
@@ -1104,6 +1116,10 @@ pub(crate) struct Vm {
     /// (Jekyll's `Utils.duplicate_frozen_values` probes it on every
     /// value of every document data hash, 4x per doc).
     pub(crate) sym_frozen_q: SymId,
+    /// Pre-interned `nil?` / `empty?` for the zero-arg primitive fast
+    /// path (PathManager.join-style guards probe both per call).
+    pub(crate) sym_nil_q: SymId,
+    pub(crate) sym_empty_q: SymId,
     /// Collection-index fast-path override guard. The fast path may
     /// serve `h[k]` / `a[i]` directly ONLY while no user `[]` exists
     /// anywhere on the Hash / Array ancestor chain (a reopen, an
@@ -1474,6 +1490,42 @@ impl Vm {
         let sym_index_op = interner.intern("[]");
         let sym_index_set_op = interner.intern("[]=");
         let sym_frozen_q = interner.intern("frozen?");
+        let sym_nil_q = interner.intern("nil?");
+        let sym_empty_q = interner.intern("empty?");
+        // See the `class_singleton_deny` field doc. Union of every
+        // name-keyed `do_call` arm that can fire for a Value::Class
+        // receiver before the canonical user-singleton lookup, plus
+        // the universal-Object names handled in the shared arms —
+        // over-inclusion is harmless (slow path), under-inclusion is
+        // a dispatch-precedence bug.
+        let class_singleton_deny: crate::intern::FxHashSet<SymId> = [
+            "__dir__", "__send__", "send", "public_send", "method",
+            "methods", "define_method", "define_singleton_method",
+            "alias_method", "allocate", "new", "autoload", "autoload?",
+            "const_defined?", "const_get", "const_set", "constants",
+            "private_constant", "public_constant", "deprecate_constant",
+            "private_class_method", "public_class_method", "include",
+            "extend", "prepend", "include?", "module_function",
+            "respond_to?", "respond_to_missing?", "class_eval",
+            "module_eval", "instance_eval", "instance_exec",
+            "instance_method", "instance_methods",
+            "private_instance_methods", "public_instance_methods",
+            "protected_instance_methods", "private_methods",
+            "public_methods", "protected_methods", "method_defined?",
+            "remove_method", "undef_method", "name", "to_s", "inspect",
+            "ancestors", "superclass", "singleton_class",
+            "singleton_methods", "instance_variable_get",
+            "instance_variable_set", "instance_variable_defined?",
+            "instance_variables", "is_a?", "kind_of?", "instance_of?",
+            "class", "==", "!=", "!", "===", "=~", "equal?", "eql?",
+            "nil?", "hash", "object_id", "frozen?", "freeze", "dup",
+            "clone", "tap", "itself", "then", "yield_self", "display",
+            "path", "private", "public", "protected", "attr_accessor",
+            "attr_reader", "attr_writer", "attr",
+        ]
+        .into_iter()
+        .map(|n| interner.intern(n))
+        .collect();
         Vm {
             protos,
             interner,
@@ -1574,11 +1626,14 @@ impl Vm {
             const_cache_chain: FxHashMap::default(),
             const_gen: 0,
             sym_length,
+            class_singleton_deny,
             sym_size,
             sym_bang,
             sym_index_op,
             sym_index_set_op,
             sym_frozen_q,
+            sym_nil_q,
+            sym_empty_q,
             fast_index_checked_gen: 0,
             fast_index_hash_safe: false,
             fast_index_array_safe: false,
