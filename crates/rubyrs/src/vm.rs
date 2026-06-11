@@ -1250,6 +1250,21 @@ pub(crate) struct Vm {
     /// cfg(_fiber)-gated.
     #[cfg(feature = "_fiber")]
     pub(crate) current_fiber_id: Option<ObjId>,
+    /// GC visibility for the SUSPENDED-side state during a fiber
+    /// resume. `FiberStashGuard::install` swaps the main program's
+    /// live state (frames with all their locals, the operand stack,
+    /// the pinned set, ...) out of the Vm — pre-fix it sat in a
+    /// guard-owned Rust local where the GC could not see it, so ANY
+    /// collection inside a fiber body swept every heap object
+    /// reachable only from the suspended main program (observed as
+    /// the `fiber_current_is_nil...` class_of ICE once allocation
+    /// drift pushed a maybe_gc inside the body). The guard now
+    /// PUSHES the outgoing snapshot here (and pops it on Drop);
+    /// `gc.rs`'s root gather walks every stacked snapshot exactly
+    /// like the heap-side `HeapObj::Fiber` mark arm walks suspended
+    /// fibers. Nested resumes (A resumes B) stack naturally.
+    #[cfg(feature = "_fiber")]
+    pub(crate) fiber_stash_stack: Vec<crate::vm::fiber::FiberSnapshot>,
     /// P1d.2 (ADR 0023 v2 §"Mechanics — cext re-entrancy guard"):
     /// counter tracking depth of cext-style Vm re-entry. Each
     /// increment marks "we're inside a C extension's host fn
@@ -1514,6 +1529,8 @@ impl Vm {
             fiber_yield_pending: None,
             #[cfg(feature = "_fiber")]
             current_fiber_id: None,
+            #[cfg(feature = "_fiber")]
+            fiber_stash_stack: Vec::new(),
             cext_depth: 0,
             #[cfg(feature = "_fiber")]
             max_live_fibers: None,

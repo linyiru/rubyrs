@@ -368,9 +368,11 @@ pub(crate) struct FiberStashGuard<'a> {
     /// is the load-bearing borrow that enforces "only one
     /// guard per Vm at a time."
     vm: &'a mut crate::vm::Vm,
-    /// The Vm's pre-install state, stashed here. `Drop`
-    /// swaps this back into the Vm.
-    vm_stash: FiberSnapshot,
+    /// The Vm's pre-install state lives on
+    /// `vm.fiber_stash_stack` (pushed by `install`, popped by
+    /// `Drop`) so the GC root gather can walk it — NOT in a
+    /// guard field, which would hide the whole suspended main
+    /// program from the collector.
     /// The fiber's snapshot, currently held by the guard
     /// (the FiberObject's RefCell slot has a placeholder).
     /// `Drop` captures the current Vm state into this and
@@ -423,9 +425,15 @@ impl<'a> FiberStashGuard<'a> {
         // Vm slots. After this, `vm.*` is the fiber's state
         // and `fiber_snap` is empty.
         fiber_snap.swap_with_vm(vm);
+        // GC visibility (the `fiber_current_is_nil...` UAF): park
+        // the suspended main-program state on the Vm itself so the
+        // root gather can walk it — a guard-owned Rust local is
+        // invisible to GC, and any collection inside the fiber body
+        // would sweep every heap object reachable only from the
+        // suspended frames/stack/pinned set. Drop pops it back.
+        vm.fiber_stash_stack.push(vm_stash);
         Self {
             vm,
-            vm_stash,
             fiber_snap_holder: fiber_snap,
             fiber_id,
         }
@@ -452,10 +460,16 @@ impl Drop for FiberStashGuard<'_> {
         //    holder carries the post-execution state and
         //    `vm.*` is empty.
         self.fiber_snap_holder.swap_with_vm(self.vm);
-        // 2. Restore Vm from the pre-install stash. After
-        //    this, `vm.*` is back to its original state
-        //    and `vm_stash` is empty.
-        self.vm_stash.swap_with_vm(self.vm);
+        // 2. Restore Vm from the pre-install stash (parked on
+        //    the Vm's fiber_stash_stack for GC visibility —
+        //    see install). After this, `vm.*` is back to its
+        //    original state.
+        let mut vm_stash = self
+            .vm
+            .fiber_stash_stack
+            .pop()
+            .expect("ICE: FiberStashGuard drop with empty fiber_stash_stack");
+        vm_stash.swap_with_vm(self.vm);
         // 3. Write the post-execution state back into the
         //    FiberObject's RefCell. Fresh heap lookup;
         //    the slot is still alive because the guard
@@ -1018,6 +1032,45 @@ mod tests {
     }
 
     // ===== P1c.2c: end-to-end resume + yield via Ruby =====
+
+    /// GC-rooting regression for the suspended MAIN program during
+    /// a fiber resume: `FiberStashGuard::install` swaps the main
+    /// state out of the Vm — pre-fix it sat in a guard-owned Rust
+    /// local invisible to GC, so a collection inside the fiber body
+    /// swept every heap object reachable only from the suspended
+    /// frames (`keep` below). The stash now parks on
+    /// `Vm::fiber_stash_stack`, which the root gather walks. The
+    /// body's alloc churn forces multiple collections regardless of
+    /// STRESS_GC.
+    #[test]
+    fn gc_inside_fiber_body_keeps_suspended_main_state_alive() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            # `keep` must live in a frame the fiber body does NOT
+            # capture: the proc's `captured` Rc is the TOPLEVEL
+            # locals (rooted through the body block's BlockHandle),
+            # so a toplevel `keep` would survive even without the
+            # stash rooting. A dedicated method frame between
+            # toplevel and the resume is only reachable through the
+            # stashed frames themselves.
+            def hold_and_resume(fib)
+              keep = Object.new
+              __rubyrs_fiber_resume(fib, nil)
+              keep.class.name
+            end
+            body = proc {
+              20_000.times { [1, 2, 3].map { |x| x.to_s } }
+              __rubyrs_fiber_yield(:ok)
+            }
+            fib = __rubyrs_fiber_new(body)
+            hold_and_resume(fib)
+        "##, "fiber_stash_gc.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => assert_eq!(s.to_string_lossy(), "Object"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
 
     /// P1c.2c: minimal round-trip — body yields once, then
     /// returns. Asserts both values arrive through their

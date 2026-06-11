@@ -585,6 +585,35 @@ impl Vm {
                 }
             }
         }
+        // During a fiber resume, the SUSPENDED main program's state
+        // (its frames, operand stack, pinned set) lives on
+        // `fiber_stash_stack` (FiberStashGuard::install) — without
+        // walking it, any GC inside a fiber body sweeps every heap
+        // object reachable only from the suspended side (the
+        // `fiber_current_is_nil...` class_of ICE). Mirrors the
+        // heap-side `HeapObj::Fiber` mark arm's snapshot walk.
+        #[cfg(feature = "_fiber")]
+        for snap in &self.fiber_stash_stack {
+            for f in &snap.frames {
+                roots.push(f.self_val.clone());
+                for v in f.locals.borrow().iter() { roots.push(v.clone()); }
+                if let Some(v) = &f.swap_return { roots.push(v.clone()); }
+                if let Some(id) = f.block_arg { roots.push(Value::Block(id)); }
+                if let Some(aux) = &f.aux {
+                    for b in &aux.begin_rescue_depths {
+                        roots.push(b.saved_dollar_bang.clone());
+                    }
+                }
+            }
+            for v in &snap.stack { roots.push(v.clone()); }
+            for v in &snap.pinned { roots.push(v.clone()); }
+            if let Some(v) = &snap.method_return { roots.push(v.clone()); }
+            if let Some(t) = &snap.pending_loop_transfer
+                && let crate::vm::LoopTransferKind::Break { value } = &t.kind
+            {
+                roots.push(value.clone());
+            }
+        }
         // `define_method`-installed methods carry captured-locals
         // Rcs that aren't reachable from any Frame once the lexical
         // scope has popped. Walk every class's method table (plus

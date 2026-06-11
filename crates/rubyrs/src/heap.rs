@@ -508,6 +508,23 @@ impl Heap {
             _ => panic!("ICE: class_of called on non-Object slot"),
         }
     }
+    /// Non-panicking `class_of` for the dispatch entry paths: a
+    /// `Value::Object` can wrap a heap slot with no Ruby class
+    /// behind it (`HeapObj::Fiber` — `__rubyrs_fiber_current` /
+    /// `__rubyrs_fiber_new` hand these out). Dispatch falls through
+    /// to the universal primitive arms (`nil?` / `==` / `to_s`)
+    /// instead of ICE-ing in the user-method lookup; methods with
+    /// no universal arm surface NoMethodError (decline-loudly).
+    pub(crate) fn try_class_of(&self, id: ObjId) -> Option<Rc<crate::value::Class>> {
+        match self.get(id) {
+            HeapObj::Instance(i) => Some(match &i.singleton_class {
+                Some(sc) => sc.clone(),
+                None => i.class.clone(),
+            }),
+            HeapObj::TypedData(d) => Some(d.class.clone()),
+            _ => None,
+        }
+    }
     /// Original class — what `Object#class` returns to script code
     /// (CRuby skips the eigenclass when reporting). Same shape as
     /// `class_of` but doesn't substitute the singleton class.

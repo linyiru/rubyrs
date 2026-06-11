@@ -7307,8 +7307,13 @@ impl Vm {
             self.invoke_method(m, recv.clone(), args.into_vec())?;
             return Ok(());
         }
-        if let Value::Object(id) = &recv {
-            let cls = self.heap.class_of(*id);
+        // `try_class_of`: a class-less Object slot (HeapObj::Fiber)
+        // skips the user-method lookup and falls through to the
+        // universal primitive arms below (nil? / == / to_s) instead
+        // of ICE-ing in class_of.
+        if let Value::Object(id) = &recv
+            && let Some(cls) = self.heap.try_class_of(*id)
+        {
             if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
                 self.check_method_visibility(&m, &recv, &name, bypass_visibility)?;
                 self.invoke_method(m, recv.clone(), args.into_vec())?;
@@ -10861,7 +10866,9 @@ impl Vm {
             Some(Value::Object(id)) => *id,
             _ => return Ok(false),
         };
-        let cls = self.heap.class_of(id);
+        let Some(cls) = self.heap.try_class_of(id) else {
+            return Ok(false); // class-less slot (HeapObj::Fiber) -> universal arms
+        };
         let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) else {
             return Ok(false);
         };
@@ -10960,7 +10967,9 @@ impl Vm {
             Some(Value::Block(bid)) => *bid,
             _ => return Ok(false),
         };
-        let cls = self.heap.class_of(id);
+        let Some(cls) = self.heap.try_class_of(id) else {
+            return Ok(false); // class-less slot (HeapObj::Fiber) -> universal arms
+        };
         let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) else {
             return Ok(false);
         };
@@ -13852,12 +13861,14 @@ impl Vm {
                 }
                 return Ok(());
             }
-        if let Value::Object(id) = &recv {
-            let cls = self.heap.class_of(*id);
-            if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
-                self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
-                return Ok(());
-            }
+        // `try_class_of` — same class-less-slot (HeapObj::Fiber)
+        // fall-through as do_call's Object arm.
+        if let Value::Object(id) = &recv
+            && let Some(cls) = self.heap.try_class_of(*id)
+            && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id)
+        {
+            self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
+            return Ok(());
         }
         // User-defined method reopened on a primitive's class —
         // explicit receiver, WITH a block. The builtin primitive arms
