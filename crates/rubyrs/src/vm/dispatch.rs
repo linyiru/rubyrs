@@ -43,6 +43,13 @@ use crate::HostCtx;
 /// [`Vm::invoke_block`] (see the combined `PinGuard` block there).
 type SlotBinding = Option<(u16, Value)>;
 
+/// A frame's locals storage cell — the shared `Rc<RefCell<Vec<Value>>>`
+/// used by `Locals::Shared` frames and the block-locals helpers.
+type LocalsCell = Rc<RefCell<Vec<Value>>>;
+/// A block frame's `block_writeback`: the outer-scope cell plus the
+/// `param_start` boundary. `None` on the share-direct path.
+type BlockWriteback = Option<(LocalsCell, u16)>;
+
 /// Inline capacity of [`ArgsBuf`]'s stack-resident array. Sized at
 /// 3 because the overwhelming majority of method calls in real Ruby
 /// pass 0–3 positional args (`arr.push(x)`, `h[k] = v`, `a.insert(i,
@@ -11069,7 +11076,7 @@ impl Vm {
         needed: usize,
         param_start: u16,
         captured_is_method_scope: bool,
-    ) -> (Rc<RefCell<Vec<Value>>>, Option<(Rc<RefCell<Vec<Value>>>, u16)>) {
+    ) -> (LocalsCell, BlockWriteback) {
         // Share-direct requires ALL of:
         //  - `captured` is a genuine method / class-body / toplevel
         //    scope, not an enclosing block's per-invocation COPY —

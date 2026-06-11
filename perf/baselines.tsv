@@ -239,7 +239,15 @@ crates/rubyrs/examples/metaprog_bench/mm_bench.rb	8400	1550	2M method_missing di
 # `ruby_flags`) grew the binary's static + per-regex footprint;
 # CI observed dm_bench RSS 7316 KB, ~16 KB over. Same per-row
 # rationale as the bumps above.
-crates/rubyrs/examples/metaprog_bench/dm_bench.rb	8200	900	2M define_method dispatch (closure-method)
+# dm_bench RSS bumped 8200 → 8400 on 2026-06-11 — observed CI 8216 KB
+# (16 KB / 0.2% over) after the block-locals share-direct change
+# (6b9c1fba) added a `captured_is_method_scope: bool` field to every
+# BlockHandle. dm_bench is define_method-heavy (closure methods own a
+# BlockHandle each), so the per-block byte + the wider dispatch.rs
+# binary lift its startup/alloc RSS a hair over the razor-thin cap.
+# Joins the 8400 cohort (fizzbuzz / mm_bench / hash_mutate); ~2%
+# headroom over the observed peak.
+crates/rubyrs/examples/metaprog_bench/dm_bench.rb	8400	900	2M define_method dispatch (closure-method)
 crates/rubyrs/examples/metaprog_bench/static_bench.rb	8200	1150	2M def+ivar (control for the metaprog comparisons)
 # Budgets at ~2× local M-series observed wall to absorb CI's
 # ~1.65× ubuntu-latest slowdown plus per-run jitter — same shape
