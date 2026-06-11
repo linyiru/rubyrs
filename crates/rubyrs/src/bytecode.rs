@@ -91,6 +91,16 @@ pub(crate) enum Op {
     /// per part. The u16 is the call-site cache id for the dispatch
     /// path (same slot a Call would carry).
     InterpToS(u16),
+    /// Assignment-syntax dispatch (`recv.attr = v` / `recv[k] = v`):
+    /// identical to `Op::Call` EXCEPT the expression result is the
+    /// final positional argument (the RHS), never the method's
+    /// return value (CRuby rule — purely syntactic, `send(:attr=)`
+    /// keeps the return). The handler snapshots the RHS (stack top)
+    /// before dispatch; an inline completion gets its pushed result
+    /// replaced, a frame-based user method gets `Frame.swap_return`
+    /// (the Class.new mechanism, already a GC root). Emitted by
+    /// `Expr::AssignCall`.
+    CallAset(SymId, u8, u16),
     LoadSymbol(SymId),
     LoadNil,
     LoadTrue,

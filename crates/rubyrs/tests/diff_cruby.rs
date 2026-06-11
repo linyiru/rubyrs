@@ -159,6 +159,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn hash_basics() { run_diff("hash_basics"); }
 #[test] fn index_fast_path() { run_diff("index_fast_path"); }
 #[test] fn string_to_s_passthrough() { run_diff("string_to_s_passthrough"); }
+#[test] fn assign_expr_value() { run_diff("assign_expr_value"); }
 #[test] fn hash_clear() { run_diff("hash_clear"); }
 #[test] fn hash_key_clone() { run_diff("hash_key_clone"); }
 #[test] fn hash_default_proc_set() { run_diff("hash_default_proc_set"); }

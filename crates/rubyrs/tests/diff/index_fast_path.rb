@@ -105,11 +105,9 @@ class Hash
     "hash-set-reopen"
   end
 end
-# NOTE: deliberately NOT pinning the assignment-expression value
-# here — rubyrs has a pre-existing divergence where a user
-# `[]=` override's return value leaks as the expression value
-# (CRuby always evaluates `x[k] = v` to the RHS).
-hw["zzz"] = 9
+p (hw["zzz"] = 9)  # assignment EXPRESSION value is the RHS
+                   # (Op::CallAset), even though the override
+                   # returns "hash-set-reopen"
 p hw.key?("zzz")   # the override didn't insert -> false
 p hw["a"]          # reads still canonical
 class Array

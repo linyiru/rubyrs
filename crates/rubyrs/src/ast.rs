@@ -272,6 +272,21 @@ pub(crate) enum Expr {
         /// in ast.rs sets it `true`.
         kwargs_trailing: bool,
     },
+    /// Assignment-SYNTAX method call: `recv.attr = v` / `recv[k] = v`
+    /// (and the write half of the `||=` / `&&=` / op-assign
+    /// desugars). CRuby evaluates the EXPRESSION to the final
+    /// positional argument (the RHS) and discards the method's
+    /// return value — `send(:foo=, v)` keeps the return value, so
+    /// the marker is purely syntactic (prism `is_attribute_write`).
+    /// Compiles to `Op::CallAset`, which swaps the dispatch result
+    /// for the RHS. Always has a receiver, never a block; splat /
+    /// kwargs-trailing shapes stay on the plain `Call` path
+    /// (documented leak for those exotic forms).
+    AssignCall {
+        receiver: Box<SExpr>,
+        name: String,
+        args: Vec<SExpr>,
+    },
     If {
         cond: Box<SExpr>,
         then_body: Vec<SExpr>,
@@ -2673,10 +2688,10 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             receiver: Some(Box::new(recv.clone())),
             name: read_name,
             args: vec![], kwargs_trailing: false });
-        let write = sp(node, Expr::Call {
-            receiver: Some(Box::new(recv)),
+        let write = sp(node, Expr::AssignCall {
+            receiver: Box::new(recv),
             name: write_name,
-            args: vec![tr(ctx, &n.value())], kwargs_trailing: false });
+            args: vec![tr(ctx, &n.value())] });
         return sp(node, Expr::Or(Box::new(read), Box::new(write)));
     }
     if let Some(n) = node.as_call_and_write_node() {
@@ -2693,10 +2708,10 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             receiver: Some(Box::new(recv.clone())),
             name: read_name,
             args: vec![], kwargs_trailing: false });
-        let write = sp(node, Expr::Call {
-            receiver: Some(Box::new(recv)),
+        let write = sp(node, Expr::AssignCall {
+            receiver: Box::new(recv),
             name: write_name,
-            args: vec![tr(ctx, &n.value())], kwargs_trailing: false });
+            args: vec![tr(ctx, &n.value())] });
         return sp(node, Expr::And(Box::new(read), Box::new(write)));
     }
     if let Some(n) = node.as_call_operator_write_node() {
@@ -2719,10 +2734,10 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             receiver: Some(Box::new(read)),
             name: op,
             args: vec![tr(ctx, &n.value())], kwargs_trailing: false });
-        let write = sp(node, Expr::Call {
-            receiver: Some(Box::new(recv)),
+        let write = sp(node, Expr::AssignCall {
+            receiver: Box::new(recv),
             name: write_name,
-            args: vec![new_val], kwargs_trailing: false });
+            args: vec![new_val] });
         return write;
     }
     if let Some(n) = node.as_index_or_write_node() {
@@ -2739,10 +2754,10 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             args: idx_args.clone(), kwargs_trailing: false });
         let mut write_args = idx_args;
         write_args.push(tr(ctx, &n.value()));
-        let write = sp(node, Expr::Call {
-            receiver: Some(Box::new(recv)),
+        let write = sp(node, Expr::AssignCall {
+            receiver: Box::new(recv),
             name: "[]=".into(),
-            args: write_args, kwargs_trailing: false });
+            args: write_args });
         return sp(node, Expr::Or(Box::new(read), Box::new(write)));
     }
     if let Some(n) = node.as_index_and_write_node() {
@@ -2759,10 +2774,10 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             args: idx_args.clone(), kwargs_trailing: false });
         let mut write_args = idx_args;
         write_args.push(tr(ctx, &n.value()));
-        let write = sp(node, Expr::Call {
-            receiver: Some(Box::new(recv)),
+        let write = sp(node, Expr::AssignCall {
+            receiver: Box::new(recv),
             name: "[]=".into(),
-            args: write_args, kwargs_trailing: false });
+            args: write_args });
         return sp(node, Expr::And(Box::new(read), Box::new(write)));
     }
     if let Some(n) = node.as_index_operator_write_node() {
@@ -2790,10 +2805,10 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             args: vec![tr(ctx, &n.value())], kwargs_trailing: false });
         let mut write_args = idx_args;
         write_args.push(new_val);
-        return sp(node, Expr::Call {
-            receiver: Some(Box::new(recv)),
+        return sp(node, Expr::AssignCall {
+            receiver: Box::new(recv),
             name: "[]=".into(),
-            args: write_args, kwargs_trailing: false });
+            args: write_args });
     }
     // Global-variable op-writes — same desugar pattern as IVar.
     // Unknown globals read as nil (Op::LoadGlobal default), so
@@ -3381,7 +3396,22 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     }));
                 }
         }
-        return wrap_sn(sp(node, Expr::Call { receiver, name, args, kwargs_trailing }));
+        // Assignment-syntax call (`recv.attr = v` / `recv[k] = v` —
+        // prism marks these CallNodes ATTRIBUTE_WRITE): route to
+        // AssignCall so the expression evaluates to the RHS even
+        // when a user writer's return value differs (CRuby rule;
+        // `send(:attr=, v)` is NOT flagged and keeps the return).
+        // kwargs-trailing shapes stay on the plain path — the CallKw
+        // kwargs split doesn't apply to assignment args. Safe-nav
+        // (`recv&.attr = v`) composes through wrap_sn unchanged.
+        return match (n.is_attribute_write() && !kwargs_trailing, receiver) {
+            (true, Some(recv)) => {
+                wrap_sn(sp(node, Expr::AssignCall { receiver: recv, name, args }))
+            }
+            (_, receiver) => {
+                wrap_sn(sp(node, Expr::Call { receiver, name, args, kwargs_trailing }))
+            }
+        };
     }
     // `return`, `next`, `break` all collapse multi-arg forms
     // into a single value the same way CRuby does:

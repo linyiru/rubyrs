@@ -1617,6 +1617,20 @@ pub(crate) fn compile_expr(
         Expr::Call { receiver, name, args, kwargs_trailing } => {
             compile_call_arm(b, receiver, name, args, *kwargs_trailing, protos, interner, cc);
         }
+        Expr::AssignCall { receiver, name, args } => {
+            // Assignment-syntax dispatch — same stack shape as a
+            // plain explicit-recv call, but routed through
+            // Op::CallAset so the expression value is the RHS (the
+            // last compiled arg). No block / splat / kwargs forms
+            // reach here (ast.rs routes those to the plain Call
+            // path).
+            let name_id = interner.intern(name);
+            compile_expr(b, receiver, protos, interner, cc);
+            for a in args { compile_expr(b, a, protos, interner, cc); }
+            let cid = *cc as u16;
+            *cc += 1;
+            b.emit(Op::CallAset(name_id, args.len() as u8, cid));
+        }
         Expr::Def { name, params, defaults, rest, n_required_post, kw_params, kw_rest, block_param, receiver, body } => {
             compile_def_arm(
                 b, name, params, defaults, rest, *n_required_post, kw_params, kw_rest, block_param, receiver, body,

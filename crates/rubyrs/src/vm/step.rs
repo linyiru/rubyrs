@@ -1913,6 +1913,33 @@ impl Vm {
                     self.do_call(to_s, 0, false, cache_id)?;
                 }
             }
+            Op::CallAset(name_id, argc, cache_id) => {
+                // Assignment-syntax dispatch: expression value is the
+                // RHS (stack top = last positional arg), never the
+                // method's return (CRuby rule, syntactic only). The
+                // RHS snapshot stays alive across the dispatch — for
+                // the frame path it lands in `swap_return` (a GC
+                // root, gc.rs); for the inline path no allocation
+                // happens between dispatch return and the replace.
+                let rhs = self.stack.last().cloned().unwrap_or(Value::Nil);
+                let pre_frames = self.frames.len();
+                self.trailing_hash_positional = true;
+                let r = self.do_call(name_id, argc as usize, false, cache_id);
+                self.trailing_hash_positional = false;
+                r?;
+                if self.frames.len() > pre_frames {
+                    // User-method frame pushed — its eventual return
+                    // value is discarded in favour of the RHS (same
+                    // mechanism Class.new uses for initialize).
+                    if let Some(f) = self.frames.last_mut() {
+                        f.swap_return = Some(rhs);
+                    }
+                } else if let Some(top) = self.stack.last_mut() {
+                    // Dispatch completed inline (primitive arm / fast
+                    // path / host fn) — replace its pushed result.
+                    *top = rhs;
+                }
+            }
             Op::CallNoRecv(name_id, argc, cache_id) => {
                 self.trailing_hash_positional = true;
                 let r = self.do_call(name_id, argc as usize, true, cache_id);
