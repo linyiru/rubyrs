@@ -463,9 +463,8 @@ impl Vm {
                 // a block). Matching yield's resolution keeps the two
                 // consistent (and unblocks Enumerable methods that branch
                 // on `block_given?` inside their `each { ... }` driver).
-                let has_block = self.frames.last()
-                    .map(|f| f.locals.clone())
-                    .and_then(|seed| self.find_lexical_owner_frame(&seed))
+                let has_block = self
+                    .lexical_owner_of_top()
                     .map(|idx| self.frames[idx].block_arg.is_some())
                     .unwrap_or(false);
                 Some(Ok(Value::Bool(has_block)))
@@ -2737,9 +2736,9 @@ impl Vm {
         self.frames.push(super::Frame {
             proto_idx: entry,
             ip: 0,
-            locals: std::rc::Rc::new(std::cell::RefCell::new(
+            locals: crate::vm::Locals::Shared(std::rc::Rc::new(std::cell::RefCell::new(
                 super::vec_nil(self.protos[entry].n_locals as usize)
-            )),
+            ))),
             self_val: Value::Nil,
             base_sp: self.stack.len(),
             is_class_body: false,
@@ -2817,7 +2816,10 @@ impl Vm {
                 }
                 let f_ref = self.frames.last().unwrap();
                 let is_owner = !f_ref.is_block && match &owner_rc {
-                    Some(rc) => std::rc::Rc::ptr_eq(&f_ref.locals, rc),
+                    Some(rc) => f_ref
+                        .locals
+                        .as_shared()
+                        .is_some_and(|l| std::rc::Rc::ptr_eq(l, rc)),
                     None => true,  // legacy fallback
                 };
                 let f = self.frames.pop().unwrap();
@@ -2837,6 +2839,7 @@ impl Vm {
                         self.stack.push(val.clone());
                     }
                 }
+                self.release_frame_locals(f.locals);
                 if is_owner { break; }
             }
             if escaped {
@@ -3027,9 +3030,9 @@ impl Vm {
         self.frames.push(super::Frame {
             proto_idx: entry,
             ip: 0,
-            locals: std::rc::Rc::new(std::cell::RefCell::new(
+            locals: crate::vm::Locals::Shared(std::rc::Rc::new(std::cell::RefCell::new(
                 super::vec_nil(self.protos[entry].n_locals as usize)
-            )),
+            ))),
             self_val: Value::Nil,
             base_sp: self.stack.len(),
             is_class_body: false,
@@ -3099,6 +3102,7 @@ impl Vm {
                     self.class_visibility_stack.pop();
                     self.module_function_active_stack.pop();
                 }
+                self.release_frame_locals(f.locals);
             }
             if self.frames.len() <= depth_before + 1 {
                 self.method_return = Some(val);
@@ -3117,6 +3121,7 @@ impl Vm {
             } else {
                 self.stack.push(val);
             }
+            self.release_frame_locals(f.locals);
         }
         // Method-return escaping out of the eval — let outer
         // dispatch finish the unwind.

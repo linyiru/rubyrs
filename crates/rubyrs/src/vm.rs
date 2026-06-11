@@ -93,10 +93,47 @@ pub(crate) use util::{value_cmp_v, value_cmp_v_heap, vec_nil, visibility_from_na
 
 
 
+/// Where a frame's local-variable slots live.
+///
+/// `Shared` is the historical representation — an `Rc<RefCell<Vec>>`
+/// cell that blocks capture (`Op::CreateBlock` clones the Rc into the
+/// `BlockHandle`), `define_method` closures share, and the writeback /
+/// lexical-owner machinery identifies frames by (`Rc::ptr_eq`).
+///
+/// `Stack(base)` is the escape-analysed fast representation: the
+/// method's `n_locals` slots live contiguously in `Vm::locals_arena`
+/// starting at `base`. Eligibility is decided at compile time —
+/// `Proto::creates_block == false` for a method proto means nothing in
+/// the body can ever observe the locals cell (no block capture, and
+/// rubyrs has no `Binding`/`local_variables` reflection), so reads and
+/// writes skip the Rc deref + RefCell borrow flag entirely and frame
+/// push/pop is an arena bump/truncate. Block frames, closures, class
+/// bodies, toplevel and eval frames are always `Shared`; every
+/// `Rc::ptr_eq`-based identity walk (writeback chain, lexical owner,
+/// non-local return target) therefore only ever needs the `Shared` arm
+/// — a `Stack` frame can never be a block's lexical owner.
+pub(crate) enum Locals {
+    Shared(Rc<RefCell<Vec<Value>>>),
+    Stack(u32),
+}
+
+impl Locals {
+    /// The `Shared` cell, or `None` for a `Stack` frame. Identity
+    /// walks (`Rc::ptr_eq` against a captured cell) use this so the
+    /// `Stack` arm uniformly reads as "not this frame".
+    #[inline]
+    pub(crate) fn as_shared(&self) -> Option<&Rc<RefCell<Vec<Value>>>> {
+        match self {
+            Locals::Shared(rc) => Some(rc),
+            Locals::Stack(_) => None,
+        }
+    }
+}
+
 pub(crate) struct Frame {
     pub(crate) proto_idx: usize,
     pub(crate) ip: usize,
-    pub(crate) locals: Rc<RefCell<Vec<Value>>>,
+    pub(crate) locals: Locals,
     pub(crate) self_val: Value,
     pub(crate) base_sp: usize,
     pub(crate) is_class_body: bool,
@@ -1167,6 +1204,18 @@ pub(crate) struct Vm {
     /// allocation instead of minting a fresh one. Bounded so a deep
     /// recursion that unwinds doesn't park an unbounded pool.
     pub(crate) locals_pool: Vec<Rc<RefCell<Vec<Value>>>>,
+    /// Contiguous slot storage for `Locals::Stack` frames (the
+    /// escape-analysed method-call fast path). Grows like a stack in
+    /// lock-step with `frames`: a Stack frame's push appends its
+    /// `n_locals` slots at the tail and records the base index; its
+    /// pop truncates back to that base (LIFO holds even through
+    /// exception unwind — frames pop one at a time, bases are
+    /// monotonic). The WHOLE live prefix is a GC root (`gc.rs` walks
+    /// it directly), which also makes values arena-resident-but-not-
+    /// yet-framed (mid method-call setup) safely rooted. Fiber
+    /// switches swap this Vec into `FiberSnapshot` together with
+    /// `frames` — each fiber owns its own arena contents.
+    pub(crate) locals_arena: Vec<Value>,
     /// In-flight `break`/`next` through `ensure` chain. Set by
     /// `Op::BreakLoop`/`Op::NextLoop` when an `is_ensure` handler
     /// sits between the source and the target; cleared once the
@@ -1402,6 +1451,7 @@ impl Vm {
         Some(FixedArity {
             required: proto.n_required_positional,
             n_locals: proto.n_locals,
+            stack_eligible: !proto.creates_block,
         })
     }
 
@@ -1540,6 +1590,7 @@ impl Vm {
             dispatch_until_depths: Vec::new(),
             method_return_locals: None,
             locals_pool: Vec::new(),
+            locals_arena: Vec::new(),
             pending_loop_transfer: None,
             pending_method_break: None,
             suppress_call_result_push: false,
@@ -1733,6 +1784,7 @@ impl Vm {
     pub(crate) fn reset_between_requests_inner(&mut self) {
         self.stack.clear();
         self.frames.clear();
+        self.locals_arena.clear();
         self.pinned.clear();
         self.class_stack.clear();
         self.class_visibility_stack.clear();

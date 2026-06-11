@@ -1094,12 +1094,18 @@ impl Heap {
                         &mut worklist,
                     );
                     let snap = fiber.snapshot.borrow();
+                    // `Locals::Stack` frame slots live in the
+                    // snapshot's swapped-out arena.
+                    for v in snap.locals_arena.iter() {
+                        Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
                     for frame in &snap.frames {
-                        let locals = frame.locals.borrow();
-                        for v in locals.iter() {
-                            Heap::visit_value(v, &mut self.marks, &mut worklist);
+                        if let Some(rc) = frame.locals.as_shared() {
+                            let locals = rc.borrow();
+                            for v in locals.iter() {
+                                Heap::visit_value(v, &mut self.marks, &mut worklist);
+                            }
                         }
-                        drop(locals);
                         Heap::visit_value(&frame.self_val, &mut self.marks, &mut worklist);
                         if let Some(v) = &frame.swap_return {
                             Heap::visit_value(v, &mut self.marks, &mut worklist);

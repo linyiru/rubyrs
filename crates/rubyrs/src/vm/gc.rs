@@ -46,7 +46,7 @@ impl Vm {
         self.frames.push(Frame {
             proto_idx: entry,
             ip: 0,
-            locals: Rc::new(RefCell::new(vec_nil(n_locals))),
+            locals: crate::vm::Locals::Shared(Rc::new(RefCell::new(vec_nil(n_locals)))),
             self_val: Value::Nil,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
@@ -559,9 +559,16 @@ impl Vm {
         // (replacing the earlier constant/global-only special case;
         // found via /code-review — the special case missed sibling
         // container paths and the Struct `@__struct_attrs` UAF).
+        // The whole live arena prefix is a root — covers every
+        // `Locals::Stack` frame's slots in one pass, INCLUDING values
+        // parked there mid call-setup before their frame is pushed.
+        for v in &self.locals_arena { roots.push(v.clone()); }
         for f in &self.frames {
             roots.push(f.self_val.clone());
-            for v in f.locals.borrow().iter() { roots.push(v.clone()); }
+            // Stack frames' slots were covered by the arena walk above.
+            if let Some(rc) = f.locals.as_shared() {
+                for v in rc.borrow().iter() { roots.push(v.clone()); }
+            }
             if let Some(v) = &f.swap_return { roots.push(v.clone()); }
             if let Some(id) = f.block_arg {
                 // Block lives in the GC heap now (P2-13). Pushing
@@ -594,9 +601,14 @@ impl Vm {
         // heap-side `HeapObj::Fiber` mark arm's snapshot walk.
         #[cfg(feature = "_fiber")]
         for snap in &self.fiber_stash_stack {
+            // The suspended side's Stack-frame slots live in ITS
+            // swapped-out arena.
+            for v in &snap.locals_arena { roots.push(v.clone()); }
             for f in &snap.frames {
                 roots.push(f.self_val.clone());
-                for v in f.locals.borrow().iter() { roots.push(v.clone()); }
+                if let Some(rc) = f.locals.as_shared() {
+                    for v in rc.borrow().iter() { roots.push(v.clone()); }
+                }
                 if let Some(v) = &f.swap_return { roots.push(v.clone()); }
                 if let Some(id) = f.block_arg { roots.push(Value::Block(id)); }
                 if let Some(aux) = &f.aux {

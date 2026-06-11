@@ -200,6 +200,12 @@ pub(crate) enum FiberState {
 #[allow(dead_code)] // P1b consumes these via swap
 pub(crate) struct FiberSnapshot {
     pub(crate) frames: Vec<Frame>,
+    /// Slot storage for the suspended side's `Locals::Stack` frames —
+    /// swapped together with `frames` (a Stack frame's `base` indexes
+    /// into the arena that was live when the frame was pushed). GC
+    /// walks this both via the root gather (`fiber_stash_stack`) and
+    /// the heap mark phase (suspended `FiberObject.snapshot`).
+    pub(crate) locals_arena: Vec<Value>,
     pub(crate) stack: Vec<Value>,
     pub(crate) pinned: Vec<Value>,
     pub(crate) class_stack: Vec<Rc<crate::value::Class>>,
@@ -230,6 +236,7 @@ impl FiberSnapshot {
     /// prompt for the first.
     pub(crate) fn swap_with_vm(&mut self, vm: &mut crate::vm::Vm) {
         std::mem::swap(&mut vm.frames, &mut self.frames);
+        std::mem::swap(&mut vm.locals_arena, &mut self.locals_arena);
         std::mem::swap(&mut vm.stack, &mut self.stack);
         std::mem::swap(&mut vm.pinned, &mut self.pinned);
         std::mem::swap(&mut vm.class_stack, &mut self.class_stack);
@@ -264,6 +271,7 @@ impl FiberSnapshot {
     pub(crate) fn empty() -> Self {
         Self {
             frames: Vec::new(),
+            locals_arena: Vec::new(),
             stack: Vec::new(),
             pinned: Vec::new(),
             class_stack: Vec::new(),

@@ -280,7 +280,15 @@ impl Vm {
                     // has run.
                     self.stack.push(exc.clone());
                 } else if let Some(slot) = h.bind_slot {
-                    f.locals.borrow_mut()[slot as usize] = exc.clone();
+                    match &f.locals {
+                        crate::vm::Locals::Stack(base) => {
+                            let idx = *base as usize + slot as usize;
+                            self.locals_arena[idx] = exc.clone();
+                        }
+                        crate::vm::Locals::Shared(rc) => {
+                            rc.borrow_mut()[slot as usize] = exc.clone();
+                        }
+                    }
                 }
                 // Set `$!` to the in-flight exception for the duration of
                 // the rescue / ensure body. The matching restore happens
@@ -310,6 +318,10 @@ impl Vm {
                 self.class_visibility_stack.pop();
                 self.module_function_active_stack.pop();
             }
+            // Release the popped frame's locals storage (arena
+            // truncate for Stack frames, recycle for Shared) — every
+            // frame-pop site must do this.
+            self.release_frame_locals(f.locals);
             if self.frames.is_empty() {
                 // No rescue clause anywhere — surface the exception
                 // to the host as a Trap instead of terminating the
@@ -548,6 +560,7 @@ impl Vm {
                 } else {
                     self.stack.push(mb.value);
                 }
+                self.release_frame_locals(popped.locals);
                 return Ok(());
             }
             // Phase A.5: above the target. Pop this intermediate
@@ -574,6 +587,7 @@ impl Vm {
                 self.class_visibility_stack.pop();
                 self.module_function_active_stack.pop();
             }
+            self.release_frame_locals(popped.locals);
         }
     }
 }

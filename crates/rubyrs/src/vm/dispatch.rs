@@ -10942,6 +10942,101 @@ impl Vm {
         }
     }
 
+    /// Release a popped frame's locals storage — the one call EVERY
+    /// frame-pop site must make. A `Shared` cell goes back to the
+    /// recycle pool (guarded by `strong_count` inside
+    /// `recycle_frame_locals`); a `Stack` frame's arena segment is
+    /// truncated away (dropping the `Value`s releases their refs).
+    /// Frame pops are LIFO even through exception unwind, so
+    /// truncating to this frame's base can never cut a live deeper
+    /// frame's slots.
+    #[inline]
+    pub(crate) fn release_frame_locals(&mut self, locals: crate::vm::Locals) {
+        match locals {
+            crate::vm::Locals::Shared(rc) => self.recycle_frame_locals(rc),
+            crate::vm::Locals::Stack(base) => self.locals_arena.truncate(base as usize),
+        }
+    }
+
+    /// Move the top `argc` operand-stack values (already in slot
+    /// order) into the locals arena and pad with Nil up to `n_locals`;
+    /// returns the new frame's arena base. The manual move loop
+    /// (swap-out + truncate) replaces an earlier
+    /// `extend(stack.drain(..))` — the drain/extend iterator machinery
+    /// refused to inline and dominated the tight-call-loop profile.
+    /// The Nil left in the vacated stack slot makes the truncate's
+    /// drop a no-op without cloning the value (no refcount churn).
+    #[inline(always)]
+    fn arena_push_args(&mut self, argc: usize, n_locals: usize) -> u32 {
+        debug_assert!(n_locals >= argc);
+        let base = self.locals_arena.len();
+        let split = self.stack.len() - argc;
+        self.locals_arena.reserve(n_locals);
+        for i in 0..argc {
+            let v = std::mem::replace(&mut self.stack[split + i], Value::Nil);
+            self.locals_arena.push(v);
+        }
+        self.stack.truncate(split);
+        for _ in argc..n_locals {
+            self.locals_arena.push(Value::Nil);
+        }
+        base as u32
+    }
+
+    /// Read a slot of the TOP frame's locals, representation-agnostic.
+    /// Cold-path convenience — the hot ops (`LoadLocal` & co) inline
+    /// the match themselves.
+    #[inline]
+    pub(crate) fn get_local_top(&self, slot: usize) -> Value {
+        let frame = self.frames.last().expect("ICE: get_local_top no frame");
+        match &frame.locals {
+            crate::vm::Locals::Stack(base) => {
+                self.locals_arena[*base as usize + slot].clone()
+            }
+            crate::vm::Locals::Shared(rc) => rc.borrow()[slot].clone(),
+        }
+    }
+
+    /// Write a slot of the TOP frame's locals, representation-agnostic.
+    /// NOTE: does NOT run the block-writeback propagation — callers
+    /// that can be a block frame writing an outer-scope slot must use
+    /// the `Op::StoreLocal` machinery instead.
+    #[inline]
+    pub(crate) fn set_local_top(&mut self, slot: usize, v: Value) {
+        let frame = self.frames.last().expect("ICE: set_local_top no frame");
+        match &frame.locals {
+            crate::vm::Locals::Stack(base) => {
+                let idx = *base as usize + slot;
+                self.locals_arena[idx] = v;
+            }
+            crate::vm::Locals::Shared(rc) => rc.borrow_mut()[slot] = v,
+        }
+    }
+
+    /// Lexical-owner frame index for the TOP frame — the shared
+    /// resolution used by `yield`, `block_given?`, `super`'s
+    /// defining-class walk and `Op::ReturnMethod`. A non-block top
+    /// frame is its own lexical owner (the old seed walk found it
+    /// via `Rc::ptr_eq` on its own cell; `Locals::Stack` frames have
+    /// no cell, hence this explicit shortcut). A block top frame
+    /// always carries `Shared` locals, so the writeback-chain walk
+    /// applies unchanged.
+    pub(crate) fn lexical_owner_of_top(&self) -> Option<usize> {
+        let f = self.frames.last()?;
+        if !f.is_block {
+            return Some(self.frames.len() - 1);
+        }
+        match &f.locals {
+            crate::vm::Locals::Shared(rc) => {
+                let seed = rc.clone();
+                self.find_lexical_owner_frame(&seed)
+            }
+            // Unreachable by construction (block frames are always
+            // Shared) — treat as "owner not on stack".
+            crate::vm::Locals::Stack(_) => None,
+        }
+    }
+
     /// Enter a fresh method-local `$~` scope on the just-pushed top
     /// frame: stash the caller's `last_match` on the new frame (to be
     /// restored when it returns — see the pop sites in `Op::Return`,
@@ -11049,17 +11144,26 @@ impl Vm {
         };
         self.check_frames()?;
         // Bind the argc args (stack top) into the locals, then drop the recv.
+        // Args sit on the stack in slot order (a1..aN), so the arena
+        // path moves them in one drain — no per-value refcount churn,
+        // no Rc/RefCell cell at all.
         let n_locals = fixed.n_locals as usize;
-        let locals = self.locals_cell_nil(n_locals);
-        {
-            let mut l = locals.borrow_mut();
-            for slot in (0..argc).rev() {
-                l[slot] = self
-                    .stack
-                    .pop()
-                    .expect("ICE: explicit-recv fast path arg underflow");
+        let locals = if fixed.stack_eligible {
+            let base = self.arena_push_args(argc, n_locals);
+            crate::vm::Locals::Stack(base)
+        } else {
+            let cell = self.locals_cell_nil(n_locals);
+            {
+                let mut l = cell.borrow_mut();
+                for slot in (0..argc).rev() {
+                    l[slot] = self
+                        .stack
+                        .pop()
+                        .expect("ICE: explicit-recv fast path arg underflow");
+                }
             }
-        }
+            crate::vm::Locals::Shared(cell)
+        };
         let recv = self
             .stack
             .pop()
@@ -11156,16 +11260,22 @@ impl Vm {
         // `unreachable!` (which the panic budget does not count)
         // documents the invariant without an `.expect`.
         let n_locals = fixed.n_locals as usize;
-        let locals = self.locals_cell_nil(n_locals);
-        {
-            let mut l = locals.borrow_mut();
-            for slot in (0..argc).rev() {
-                l[slot] = match self.stack.pop() {
-                    Some(v) => v,
-                    None => unreachable!("ICE: explicit-recv block fast path arg underflow"),
-                };
+        let locals = if fixed.stack_eligible {
+            let base = self.arena_push_args(argc, n_locals);
+            crate::vm::Locals::Stack(base)
+        } else {
+            let cell = self.locals_cell_nil(n_locals);
+            {
+                let mut l = cell.borrow_mut();
+                for slot in (0..argc).rev() {
+                    l[slot] = match self.stack.pop() {
+                        Some(v) => v,
+                        None => unreachable!("ICE: explicit-recv block fast path arg underflow"),
+                    };
+                }
             }
-        }
+            crate::vm::Locals::Shared(cell)
+        };
         // Drop the block value (the ObjId is already captured in
         // `block_id`); it becomes the frame's `block_arg`.
         match self.stack.pop() {
@@ -11216,20 +11326,27 @@ impl Vm {
         };
         self.check_frames()?;
         let n_locals = fixed.n_locals as usize;
-        // One pooled cell for every arity shape (the old
+        // Stack-eligible protos go straight to the arena; the rest
+        // use one pooled cell for every arity shape (the old
         // special-cases built a fresh Vec that intern_locals then
         // swapped into the cell, freeing the cell's buffer — see
         // locals_cell_nil).
-        let locals = self.locals_cell_nil(n_locals);
-        {
-            let mut l = locals.borrow_mut();
-            for slot in (0..argc).rev() {
-                l[slot] = self
-                    .stack
-                    .pop()
-                    .expect("ICE: fixed method fast path arg underflow");
+        let locals = if fixed.stack_eligible {
+            let base = self.arena_push_args(argc, n_locals);
+            crate::vm::Locals::Stack(base)
+        } else {
+            let cell = self.locals_cell_nil(n_locals);
+            {
+                let mut l = cell.borrow_mut();
+                for slot in (0..argc).rev() {
+                    l[slot] = self
+                        .stack
+                        .pop()
+                        .expect("ICE: fixed method fast path arg underflow");
+                }
             }
-        }
+            crate::vm::Locals::Shared(cell)
+        };
         self.frames.push(Frame {
             proto_idx: m.proto_idx,
             ip: 0,
@@ -11488,7 +11605,7 @@ impl Vm {
             self.frames.push(Frame {
                 proto_idx,
                 ip: 0,
-                locals: cl.captured.clone(),
+                locals: crate::vm::Locals::Shared(cl.captured.clone()),
                 self_val,
                 base_sp: self.stack.len(),
                 // M27 A2/A3: `define_method`'d method bodies don't
@@ -11518,7 +11635,13 @@ impl Vm {
             self.check_frames()?;
             let mut locals = args;
             locals.resize(fixed.n_locals as usize, Value::Nil);
-            let locals = self.intern_locals(locals);
+            let locals = if !self.protos[m.proto_idx].creates_block {
+                let base = self.locals_arena.len();
+                self.locals_arena.extend(locals);
+                crate::vm::Locals::Stack(base as u32)
+            } else {
+                crate::vm::Locals::Shared(self.intern_locals(locals))
+            };
             self.frames.push(Frame {
                 proto_idx: m.proto_idx,
                 ip: 0,
@@ -11849,7 +11972,15 @@ impl Vm {
                 None => Value::Nil,
             };
         }
-        let locals = self.intern_locals(locals);
+        let locals = if !self.protos[m.proto_idx].creates_block {
+            // Full-binder path (optionals / rest / kwargs / &blk):
+            // the bound Vec moves into the arena wholesale.
+            let base = self.locals_arena.len();
+            self.locals_arena.extend(locals);
+            crate::vm::Locals::Stack(base as u32)
+        } else {
+            crate::vm::Locals::Shared(self.intern_locals(locals))
+        };
         self.frames.push(Frame {
             proto_idx: m.proto_idx,
             ip: 0,
@@ -12023,7 +12154,7 @@ impl Vm {
         self.frames.push(Frame {
             proto_idx,
             ip: 0,
-            locals: captured,
+            locals: crate::vm::Locals::Shared(captured),
             self_val: new_self,
             base_sp: self.stack.len(),
             is_class_body: as_class_body,
@@ -12094,6 +12225,11 @@ impl Vm {
                 kw_rest_param: None,
                 block_param: None,
                 n_locals: 2,
+                // Not literally true (no Op::CreateBlock in the body),
+                // but this proto runs as a closure whose locals ARE a
+                // shared captured cell — it must never be considered
+                // for the Locals::Stack representation.
+                creates_block: true,
                 code: vec![
                     Op::LoadLocal(0),
                     Op::LoadLocal(1),
@@ -12181,6 +12317,10 @@ impl Vm {
                 kw_rest_param: None,
                 block_param: None,
                 n_locals: 3,
+                // Same as the callable-forwarder: closure-run proto,
+                // locals live in a shared captured cell — never
+                // Stack-eligible.
+                creates_block: true,
                 code: vec![
                     Op::LoadLocal(0),                   // [outer]
                     Op::LoadLocal(1),                   // [outer, inner]
@@ -12261,7 +12401,12 @@ impl Vm {
             let outer = self
                 .frames
                 .iter()
-                .rposition(|f| f.is_block && Rc::ptr_eq(&f.locals, &target));
+                .rposition(|f| {
+                    f.is_block
+                        && f.locals
+                            .as_shared()
+                            .is_some_and(|l| Rc::ptr_eq(l, &target))
+                });
             match outer {
                 Some(idx) => match &self.frames[idx].block_writeback {
                     Some((parent, ps)) if slot < *ps as usize => {
@@ -12299,7 +12444,12 @@ impl Vm {
             if let Some(idx) = self
                 .frames
                 .iter()
-                .rposition(|f| !f.is_block && Rc::ptr_eq(&f.locals, &target))
+                .rposition(|f| {
+                    !f.is_block
+                        && f.locals
+                            .as_shared()
+                            .is_some_and(|l| Rc::ptr_eq(l, &target))
+                })
             {
                 return Some(idx);
             }
@@ -12309,7 +12459,12 @@ impl Vm {
             let outer_idx = self
                 .frames
                 .iter()
-                .rposition(|f| f.is_block && Rc::ptr_eq(&f.locals, &target));
+                .rposition(|f| {
+                    f.is_block
+                        && f.locals
+                            .as_shared()
+                            .is_some_and(|l| Rc::ptr_eq(l, &target))
+                });
             match outer_idx {
                 Some(idx) => match &self.frames[idx].block_writeback {
                     Some((parent, _)) => target = parent.clone(),
@@ -12357,7 +12512,7 @@ impl Vm {
         self.frames.push(Frame {
             proto_idx,
             ip: 0,
-            locals: fresh_locals,
+            locals: crate::vm::Locals::Shared(fresh_locals),
             self_val,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
@@ -12404,7 +12559,7 @@ impl Vm {
         self.frames.push(Frame {
             proto_idx,
             ip: 0,
-            locals: fresh_locals,
+            locals: crate::vm::Locals::Shared(fresh_locals),
             self_val,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
@@ -12612,7 +12767,7 @@ impl Vm {
         self.frames.push(Frame {
             proto_idx,
             ip: 0,
-            locals: fresh_locals,
+            locals: crate::vm::Locals::Shared(fresh_locals),
             self_val,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
@@ -15029,6 +15184,7 @@ impl Vm {
                 kw_rest_param: None,
                 block_param: None,
                 n_locals: 0,
+                creates_block: false,
                 code: vec![Op::LoadIvar(ivar_id), Op::Return],
                 op_spans: vec![Span::ZERO; 2],
                 filename: "<attr_accessor>".into(),
@@ -15065,6 +15221,7 @@ impl Vm {
                 kw_rest_param: None,
                 block_param: None,
                 n_locals: 1,
+                creates_block: false,
                 code: vec![Op::LoadLocal(0), Op::Dup, Op::StoreIvar(ivar_id), Op::Return],
                 op_spans: vec![Span::ZERO; 4],
                 filename: "<attr_accessor>".into(),
@@ -15119,6 +15276,7 @@ impl Vm {
             kw_rest_param: None,
             block_param: None,
             n_locals: 1,
+            creates_block: false,
             code: vec![
                 Op::LoadSelf,
                 Op::LoadLocal(0),

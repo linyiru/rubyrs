@@ -2854,6 +2854,7 @@ self.eval_inner(
         let handlers: Vec<crate::value::ObjId> = self.vm.at_exit_handlers.drain(..).rev().collect();
         for block_id in handlers {
             let pre_frames = self.vm.frames.len();
+            let pre_arena = self.vm.locals_arena.len();
             // Round-3 safety finding: a panic in `invoke_block`
             // or the nested `dispatch_until` bypasses the Result
             // path — `catch_unwind` ensures the LIFO drain
@@ -2880,6 +2881,11 @@ self.eval_inner(
             // handler ran.
             if self.vm.frames.len() > pre_frames {
                 self.vm.frames.truncate(pre_frames);
+            }
+            // Frames discarded wholesale above never ran their pop
+            // sites — restore the Stack-locals arena watermark too.
+            if self.vm.locals_arena.len() > pre_arena {
+                self.vm.locals_arena.truncate(pre_arena);
             }
             self.vm.clear_control_flow_signals();
             match handler_result {

@@ -1662,6 +1662,8 @@ impl Vm {
             Some(crate::value::FixedArity {
                 required: meta.arity as u16,
                 n_locals: params_strings.len() as u16,
+                // Placeholder proto_idx — never Stack-eligible.
+                stack_eligible: false,
             })
         } else {
             None
@@ -1723,9 +1725,8 @@ impl Vm {
         // a block that escaped its lexical owner (stored as a Proc,
         // owner already returned): no live owner frame, so use the
         // nearest defining_class as before.
-        let lexical_defining = self.frames.last()
-            .map(|f| f.locals.clone())
-            .and_then(|seed| self.find_lexical_owner_frame(&seed))
+        let lexical_defining = self
+            .lexical_owner_of_top()
             .and_then(|idx| self.frames[idx].defining_class.clone());
         let defining = match lexical_defining
             .or_else(|| self.frames.iter().rev().find_map(|f| f.defining_class.clone()))

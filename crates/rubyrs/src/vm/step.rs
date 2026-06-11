@@ -455,9 +455,12 @@ impl Vm {
                 // a separate future layer. (Copilot review #285
                 // round 1.)
                 let target_idx: Option<usize> = match &owner_rc {
-                    Some(rc) => self.frames.iter().rposition(
-                        |f| !f.is_block && std::rc::Rc::ptr_eq(&f.locals, rc),
-                    ),
+                    Some(rc) => self.frames.iter().rposition(|f| {
+                        !f.is_block
+                            && f.locals
+                                .as_shared()
+                                .is_some_and(|l| std::rc::Rc::ptr_eq(l, rc))
+                    }),
                     None => None,
                 };
                 if let Some(owner_idx) = target_idx {
@@ -642,9 +645,12 @@ impl Vm {
             //    just below.
             if self.method_return.is_some() {
                 let owner_idx: Option<usize> = match &self.method_return_locals {
-                    Some(rc) => self.frames.iter().rposition(
-                        |f| !f.is_block && std::rc::Rc::ptr_eq(&f.locals, rc),
-                    ),
+                    Some(rc) => self.frames.iter().rposition(|f| {
+                        !f.is_block
+                            && f.locals
+                                .as_shared()
+                                .is_some_and(|l| std::rc::Rc::ptr_eq(l, rc))
+                    }),
                     None => None,
                 };
                 match owner_idx {
@@ -1077,45 +1083,74 @@ impl Vm {
                 self.stack.push(v);
             }
             Op::LoadLocal(s) => {
-                let v = self.frames.last().expect("ICE: LoadLocal no frame").locals.borrow()[s as usize].clone();
+                let f = self.frames.last().expect("ICE: LoadLocal no frame");
+                let v = match &f.locals {
+                    // Arena slots: direct index, no Rc deref / borrow flag.
+                    crate::vm::Locals::Stack(base) => {
+                        self.locals_arena[*base as usize + s as usize].clone()
+                    }
+                    crate::vm::Locals::Shared(rc) => rc.borrow()[s as usize].clone(),
+                };
                 self.stack.push(v);
             }
             Op::StoreLocal(s) => {
                 let v = self.stack.pop().expect("ICE: StoreLocal stack underflow");
                 let slot = s as usize;
                 let frame = self.frames.last().expect("ICE: StoreLocal no frame");
-                frame.locals.borrow_mut()[slot] = v.clone();
-                // Per-invocation block-locals model: outer-scope
-                // writes (slot < block.param_start) propagate
-                // through every enclosing fresh-Vec back to the
-                // lexical method's locals. `propagate_outer_write`
-                // walks the writeback chain. Without this,
-                // `counter = 0; arr.each { counter += 1 }`
-                // would update only the block frame's fresh Vec
-                // and the method would still see 0 after the
-                // loop. The propagation is a no-op when frame
-                // has no `block_writeback` (method / class-body
-                // / toplevel frames), or when the slot sits in
-                // the current block's own param/body range.
-                let in_outer_scope = frame
-                    .block_writeback
-                    .as_ref()
-                    .is_some_and(|(_, ps)| slot < *ps as usize);
-                if in_outer_scope {
-                    self.propagate_outer_write(slot, &v);
+                match &frame.locals {
+                    // Stack frames are method frames by construction —
+                    // never a block, so no writeback propagation.
+                    crate::vm::Locals::Stack(base) => {
+                        let idx = *base as usize + slot;
+                        self.locals_arena[idx] = v;
+                    }
+                    crate::vm::Locals::Shared(rc) => {
+                        rc.borrow_mut()[slot] = v.clone();
+                        // Per-invocation block-locals model: outer-scope
+                        // writes (slot < block.param_start) propagate
+                        // through every enclosing fresh-Vec back to the
+                        // lexical method's locals. `propagate_outer_write`
+                        // walks the writeback chain. Without this,
+                        // `counter = 0; arr.each { counter += 1 }`
+                        // would update only the block frame's fresh Vec
+                        // and the method would still see 0 after the
+                        // loop. The propagation is a no-op when frame
+                        // has no `block_writeback` (method / class-body
+                        // / toplevel frames), or when the slot sits in
+                        // the current block's own param/body range.
+                        let in_outer_scope = frame
+                            .block_writeback
+                            .as_ref()
+                            .is_some_and(|(_, ps)| slot < *ps as usize);
+                        if in_outer_scope {
+                            self.propagate_outer_write(slot, &v);
+                        }
+                    }
                 }
             }
             Op::IncLocalNoPush(s) => {
                 let slot = s as usize;
                 let frame = self.frames.last().expect("ICE: IncLocalNoPush no frame");
-                let slow_cur = {
-                    let mut locals = frame.locals.borrow_mut();
-                    match &mut locals[slot] {
-                        Value::Int(n) => {
-                            *n = (*n).wrapping_add(1);
-                            None
+                let slow_cur = match &frame.locals {
+                    crate::vm::Locals::Stack(base) => {
+                        let idx = *base as usize + slot;
+                        match &mut self.locals_arena[idx] {
+                            Value::Int(n) => {
+                                *n = (*n).wrapping_add(1);
+                                None
+                            }
+                            cur => Some(cur.clone()),
                         }
-                        cur => Some(cur.clone()),
+                    }
+                    crate::vm::Locals::Shared(rc) => {
+                        let mut locals = rc.borrow_mut();
+                        match &mut locals[slot] {
+                            Value::Int(n) => {
+                                *n = (*n).wrapping_add(1);
+                                None
+                            }
+                            cur => Some(cur.clone()),
+                        }
                     }
                 };
                 if let Some(cur) = slow_cur {
@@ -1125,38 +1160,53 @@ impl Vm {
                     let plus_id = self.interner.intern("+");
                     self.do_call(plus_id, 1, false, u16::MAX)?;
                     let v = self.stack.pop().unwrap_or(Value::Nil);
-                    self.frames.last().expect("ICE").locals.borrow_mut()[slot] = v;
+                    self.set_local_top(slot, v);
                 }
                 // Per-invocation block-locals propagation — see
-                // Op::StoreLocal.
+                // Op::StoreLocal. (Stack frames are never blocks —
+                // block_writeback is None by construction, so the
+                // get_local_top read only ever fires on Shared.)
                 let frame = self.frames.last().expect("ICE: IncLocalNoPush no frame");
                 let in_outer = frame
                     .block_writeback
                     .as_ref()
                     .is_some_and(|(_, ps)| slot < *ps as usize);
                 if in_outer {
-                    let v = frame.locals.borrow()[slot].clone();
+                    let v = self.get_local_top(slot);
                     self.propagate_outer_write(slot, &v);
                 }
             }
             Op::IncLocal(s) => {
                 let slot = s as usize;
                 let frame = self.frames.last().expect("ICE: IncLocal no frame");
-                let fast_new_n = {
-                    let mut locals = frame.locals.borrow_mut();
-                    match &mut locals[slot] {
-                        Value::Int(n) => {
-                            let new_n = (*n).wrapping_add(1);
-                            *n = new_n;
-                            Some(new_n)
+                let fast_new_n = match &frame.locals {
+                    crate::vm::Locals::Stack(base) => {
+                        let idx = *base as usize + slot;
+                        match &mut self.locals_arena[idx] {
+                            Value::Int(n) => {
+                                let new_n = (*n).wrapping_add(1);
+                                *n = new_n;
+                                Some(new_n)
+                            }
+                            _ => None,
                         }
-                        _ => None,
+                    }
+                    crate::vm::Locals::Shared(rc) => {
+                        let mut locals = rc.borrow_mut();
+                        match &mut locals[slot] {
+                            Value::Int(n) => {
+                                let new_n = (*n).wrapping_add(1);
+                                *n = new_n;
+                                Some(new_n)
+                            }
+                            _ => None,
+                        }
                     }
                 };
                 if let Some(new_n) = fast_new_n {
                     self.stack.push(Value::Int(new_n));
                 } else {
-                    let cur = frame.locals.borrow()[slot].clone();
+                    let cur = self.get_local_top(slot);
                     // Slow path: replicate `slot = slot + 1` via BinOp semantics,
                     // including user-defined `+` on the receiver type.
                     self.stack.push(cur);
@@ -1164,7 +1214,7 @@ impl Vm {
                     let plus_id = self.interner.intern("+");
                     self.do_call(plus_id, 1, false, u16::MAX)?;
                     let new_val = self.stack.last().expect("ICE: IncLocal slow path no result").clone();
-                    self.frames.last().expect("ICE").locals.borrow_mut()[slot] = new_val;
+                    self.set_local_top(slot, new_val);
                 }
                 // Per-invocation block-locals propagation — see
                 // Op::StoreLocal.
@@ -1174,7 +1224,7 @@ impl Vm {
                     .as_ref()
                     .is_some_and(|(_, ps)| slot < *ps as usize);
                 if in_outer {
-                    let v = frame.locals.borrow()[slot].clone();
+                    let v = self.get_local_top(slot);
                     self.propagate_outer_write(slot, &v);
                 }
             }
@@ -2112,7 +2162,17 @@ impl Vm {
                 // from subsequent iterations.
                 let (captured, self_val) = {
                     let f = self.frames.last().expect("ICE: CreateBlock no frame");
-                    (f.locals.clone(), f.self_val.clone())
+                    let captured = match &f.locals {
+                        crate::vm::Locals::Shared(rc) => rc.clone(),
+                        // A proto containing Op::CreateBlock is never
+                        // Stack-eligible (compile-time escape analysis)
+                        // — reaching here would mean the analysis and
+                        // the frame disagree.
+                        crate::vm::Locals::Stack(_) => {
+                            unreachable!("ICE: CreateBlock in a Locals::Stack frame")
+                        }
+                    };
+                    (captured, f.self_val.clone())
                 };
                 // Capture the lexical class for `@@cvar` resolution. For
                 // a block created inside another block this returns the
@@ -2207,15 +2267,10 @@ impl Vm {
                 // the writeback chain to bridge that — each
                 // block frame's writeback points one scope
                 // outward until a method frame is found.
-                let yielding_idx = {
-                    let seed = self
-                        .frames
-                        .last()
-                        .expect("ICE: Op::Yield with empty frames")
-                        .locals
-                        .clone();
-                    self.find_lexical_owner_frame(&seed)
-                };
+                // (`lexical_owner_of_top` shortcuts a non-block top
+                // frame to itself — required for Locals::Stack method
+                // frames, identical behaviour for Shared ones.)
+                let yielding_idx = self.lexical_owner_of_top();
                 let yielding_idx = match yielding_idx {
                     Some(idx) => idx,
                     None => return Err(self.trap(RubyError::RuntimeError {
@@ -3434,7 +3489,7 @@ impl Vm {
                 let n_locals = proto.n_locals as usize;
                 self.frames.push(Frame {
                     proto_idx: p_idx as usize, ip: 0,
-                    locals: Rc::new(RefCell::new(vec_nil(n_locals))),
+                    locals: crate::vm::Locals::Shared(Rc::new(RefCell::new(vec_nil(n_locals)))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
                     is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
@@ -3857,10 +3912,19 @@ impl Vm {
                 // non-empty frame stack), so the `None` arm is unreachable
                 // rather than a panic — keeps this off the panic budget.
                 let (a, b) = match self.frames.last() {
-                    Some(frame) => {
-                        let locals = frame.locals.borrow();
-                        (locals[a_slot as usize].clone(), locals[b_slot as usize].clone())
-                    }
+                    Some(frame) => match &frame.locals {
+                        crate::vm::Locals::Stack(base) => {
+                            let base = *base as usize;
+                            (
+                                self.locals_arena[base + a_slot as usize].clone(),
+                                self.locals_arena[base + b_slot as usize].clone(),
+                            )
+                        }
+                        crate::vm::Locals::Shared(rc) => {
+                            let locals = rc.borrow();
+                            (locals[a_slot as usize].clone(), locals[b_slot as usize].clone())
+                        }
+                    },
                     None => unreachable!("BinOpLocalLocal with empty frame stack"),
                 };
                 if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
@@ -3962,8 +4026,9 @@ impl Vm {
                 let done = self.frames.is_empty();
                 // Recycle this frame's locals cell for the next call
                 // (skipped automatically when a closure still shares it —
-                // see `recycle_frame_locals`'s strong_count guard).
-                self.recycle_frame_locals(f.locals);
+                // see `recycle_frame_locals`'s strong_count guard), or
+                // truncate its arena segment for a Stack frame.
+                self.release_frame_locals(f.locals);
                 if done {
                     return Ok(false);
                 }
@@ -4001,23 +4066,38 @@ impl Vm {
                 // unwind walker's `Rc::ptr_eq(&f.locals, &rc)`
                 // hits the method frame directly without needing
                 // to repeat the walk.
+                // Locals-enum aware version of the seed walk. Every
+                // frame this can touch is `Shared` by construction:
+                // the top frame is a block / class body / toplevel
+                // (method bodies emit Op::Return, not ReturnMethod),
+                // and a found owner lexically contains the block →
+                // its proto has Op::CreateBlock → never Stack.
                 let owner_locals = {
-                    let seed = self.frames.last()
-                        .expect("ICE: ReturnMethod with empty frame stack")
-                        .locals.clone();
-                    match self.find_lexical_owner_frame(&seed) {
-                        Some(idx) => self.frames[idx].locals.clone(),
-                        // Block escaped its scope (e.g. saved as
-                        // a Proc and called after its lexical
-                        // method returned) — leave the seed and
-                        // let the unwind walker's None-branch
-                        // fall back to first-non-block legacy
-                        // behaviour (LocalJumpError surfaced by
-                        // Tier-1's missing model).
-                        None => seed,
+                    let top = self
+                        .frames
+                        .last()
+                        .expect("ICE: ReturnMethod with empty frame stack");
+                    match top.locals.as_shared() {
+                        Some(rc) => {
+                            let seed = rc.clone();
+                            match self.find_lexical_owner_frame(&seed) {
+                                Some(idx) => self.frames[idx].locals.as_shared().cloned(),
+                                // Block escaped its scope (e.g. saved as
+                                // a Proc and called after its lexical
+                                // method returned) — keep the seed so
+                                // the unwind walker's no-match branch
+                                // falls back to the legacy behaviour
+                                // (LocalJumpError surfaced by Tier-1's
+                                // missing model), exactly as before.
+                                None => Some(seed),
+                            }
+                        }
+                        // Unreachable by construction (see above) —
+                        // degrade to the walkers' None fallback.
+                        None => None,
                     }
                 };
-                self.method_return_locals = Some(owner_locals);
+                self.method_return_locals = owner_locals;
             }
         }
         Ok(true)

@@ -550,6 +550,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn method_call_block() { run_diff("method_call_block"); }
 #[test] fn yield_through_nested_block() { run_diff("yield_through_nested_block"); }
 #[test] fn frame_locals_pool() { run_diff("frame_locals_pool"); }
+#[test] fn locals_stack_arena() { run_diff("locals_stack_arena"); }
 #[test] fn fxhash_internal_maps() { run_diff("fxhash_internal_maps"); }
 #[test] fn fxhash_vm_maps() { run_diff("fxhash_vm_maps"); }
 #[test] fn inline_cache_dispatch() { run_diff("inline_cache_dispatch"); }

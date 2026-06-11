@@ -1111,6 +1111,15 @@ impl ProtoBuilder {
         }
     }
     pub(crate) fn build(self, name: String, params: Vec<String>, n_required_positional: u16, lexical_scope: Vec<crate::intern::SymId>) -> Proto {
+        // Escape analysis for `Locals::Stack` eligibility: one linear
+        // scan of the finished body. Any `Op::CreateBlock` can clone
+        // the frame's locals cell into a BlockHandle — that's the only
+        // bytecode-level escape (eval compiles a fresh toplevel proto;
+        // rubyrs has no Binding / local_variables reflection).
+        let creates_block = self
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::CreateBlock(..)));
         Proto {
             name, params, n_required_positional,
             n_required_post: 0,
@@ -1120,6 +1129,7 @@ impl ProtoBuilder {
             kw_rest_param: None,
             block_param: None,
             n_locals: self.n_locals,
+            creates_block,
             code: self.code,
             op_spans: self.op_spans,
             filename: self.filename,

@@ -703,6 +703,13 @@ pub struct BuiltinMeta {
 pub(crate) struct FixedArity {
     pub(crate) required: u16,
     pub(crate) n_locals: u16,
+    /// Cached `!proto.creates_block` — `Locals::Stack` eligibility for
+    /// the dispatch fast paths. Lives here (not read from the Proto at
+    /// call time) so the hot paths don't take a ~320-byte-stride
+    /// `protos[idx]` cache miss per call; the Method (and its
+    /// fixed_arity) is already in hand. Builtin-synthesised methods
+    /// set `false` defensively (their `proto_idx` is a placeholder).
+    pub(crate) stack_eligible: bool,
 }
 
 #[derive(Debug, Clone)]

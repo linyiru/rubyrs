@@ -729,6 +729,17 @@ pub(crate) struct Proto {
     /// rest/kw layout stays contiguous.
     pub(crate) block_param: Option<String>,
     pub(crate) n_locals: u16,
+    /// `true` when `code` contains an `Op::CreateBlock` — i.e. running
+    /// this proto can capture the frame's locals cell into a
+    /// `BlockHandle` (block literal, `proc`/`lambda`/`->`,
+    /// `define_method`'s body, …). Method-call sites consult this for
+    /// the `Locals::Stack` escape analysis: a method proto with
+    /// `creates_block == false` can never leak its locals, so its
+    /// slots may live in the contiguous `Vm::locals_arena` instead of
+    /// an `Rc<RefCell<Vec>>` cell. Set by `finish_proto` after the
+    /// body is emitted; conservatively `true` would only cost
+    /// performance, never correctness.
+    pub(crate) creates_block: bool,
     pub(crate) code: Vec<Op>,
     /// Parallel to `code`: op_spans[i] is the source span where code[i] was emitted.
     pub(crate) op_spans: Vec<Span>,
