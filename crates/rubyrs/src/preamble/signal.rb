@@ -56,20 +56,21 @@ module Signal
 end
 
 module Signal
-  # Signal name → number table, POSIX values (the same subset the
-  # trap plumbing accepts). CRuby's table is platform-derived; this
-  # static map covers the names real gems consult (minitest probes
-  # SIGNALS["INFO"], rack handlers probe INT/TERM).
+  # Signal name → number table. EXACTLY the set
+  # `signals::parse_signal_name` (the trap plumbing) accepts, plus
+  # EXIT — gems use this table as the capability probe before
+  # calling trap (minitest checks SIGNALS["INFO"] and skips its
+  # info handler when absent), so listing more than trap supports
+  # turns the probe into a trap-time ArgumentError. Numbers are
+  # Linux-flavored POSIX, same as the parser.
   def self.list
     {
       "EXIT" => 0, "HUP" => 1, "INT" => 2, "QUIT" => 3, "ILL" => 4,
-      "TRAP" => 5, "ABRT" => 6, "FPE" => 8, "KILL" => 9, "BUS" => 10,
-      "SEGV" => 11, "SYS" => 12, "PIPE" => 13, "ALRM" => 14,
-      "TERM" => 15, "URG" => 16, "STOP" => 17, "TSTP" => 18,
-      "CONT" => 19, "CHLD" => 20, "TTIN" => 21, "TTOU" => 22,
-      "IO" => 23, "XCPU" => 24, "XFSZ" => 25, "VTALRM" => 26,
-      "PROF" => 27, "WINCH" => 28, "INFO" => 29, "USR1" => 30,
-      "USR2" => 31,
+      "TRAP" => 5, "ABRT" => 6, "FPE" => 8, "KILL" => 9,
+      "USR1" => 10, "SEGV" => 11, "USR2" => 12, "PIPE" => 13,
+      "ALRM" => 14, "TERM" => 15, "CHLD" => 17, "CONT" => 18,
+      "STOP" => 19, "TSTP" => 20, "TTIN" => 21, "TTOU" => 22,
+      "URG" => 23, "WINCH" => 28,
     }
   end
 end

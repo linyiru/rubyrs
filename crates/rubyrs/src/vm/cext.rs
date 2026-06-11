@@ -1034,6 +1034,7 @@ impl Vm {
                     singleton_includes: RefCell::new(Vec::new()),
                     singleton_view: RefCell::new(None),
                     singleton_target: RefCell::new(None),
+                    undefed: RefCell::new(crate::intern::FxHashSet::default()),
                     class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
                     assigned_name: RefCell::new(None),

@@ -1437,6 +1437,11 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 None
             }
         };
+        let body_ends_with_self = body_nodes
+            .last()
+            .map(|n| n.as_self_node().is_some())
+            .unwrap_or(false);
+        let recv_is_self_outer = matches!(&recv_expr.node, Expr::SelfExpr);
         for bn in &body_nodes {
             if bn.as_def_node().is_some() {
                 let translated = tr(ctx, bn);
@@ -2063,6 +2068,23 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 out.push(tr(ctx, bn));
                 continue;
             }
+            // Bare `self` in the body — the metaclass-expression
+            // idiom `(class << self; self; end)`, whose VALUE is
+            // the eigenclass (minitest's cattr_accessor, mock.rb's
+            // `metaclass = class << self; self; end`). The runtime
+            // already reifies eigenclass shells via
+            // `singleton_class`, so the statement desugars to
+            // `self.singleton_class` — as the last body statement
+            // it becomes the construct's value, matching CRuby.
+            if recv_is_self && bn.as_self_node().is_some() {
+                out.push(sp(bn, Expr::Call {
+                    receiver: Some(Box::new(sp(bn, Expr::SelfExpr))),
+                    name: "singleton_class".into(),
+                    args: vec![],
+                    kwargs_trailing: false,
+                }));
+                continue;
+            }
             if recv_is_self {
                 let msg = "class << self body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, `prepend Mod` (single Module arg, with `self` receiver), constant assignment (`FOO = expr`), and class variable assignment (`@@cvar = expr`) are supported in the spike subset";
                 out.push(sp(bn, Expr::Call {
@@ -2115,7 +2137,22 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         }
         outer.push(sp(node, Expr::PushClassVisibilityPublic));
         outer.push(inner_begin);
-        outer.push(sp(node, Expr::Nil));
+        if recv_is_self_outer && body_ends_with_self {
+            // Metaclass-expression idiom: the construct's value is
+            // the eigenclass when the body's LAST statement is the
+            // bare `self` (CRuby: `class << self` evaluates to its
+            // last body expression). The inner Begin's per-statement
+            // values are discarded by the wrapper, so re-derive the
+            // eigenclass here as the outer value.
+            outer.push(sp(node, Expr::Call {
+                receiver: Some(Box::new(sp(node, Expr::SelfExpr))),
+                name: "singleton_class".into(),
+                args: vec![],
+                kwargs_trailing: false,
+            }));
+        } else {
+            outer.push(sp(node, Expr::Nil));
+        }
         sp(node, Expr::Begin {
             body: outer,
             rescue: vec![],

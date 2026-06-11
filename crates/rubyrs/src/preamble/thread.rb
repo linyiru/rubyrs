@@ -37,10 +37,80 @@
 #   them.
 # Will revisit if/when Tier 2 ever introduces real concurrency.
 
+# Raised by Thread.new-without-block (and CRuby's other
+# thread-state errors). Standard hierarchy position.
+class ThreadError < StandardError
+end
+
 class Thread
-  def self.new(*args)
-    raise NotImplementedError,
-      "Thread.new is not supported in single-threaded rubyrs (ADR 0017 Tier 1 Rule 4)"
+  # DEFERRED-EXECUTION green thread (ADR 0017 Rule 4: no OS
+  # threads). `Thread.new { ... }` captures the block; it runs — to
+  # completion, inline — at the first `join` / `value` call. This
+  # gives fork-join shapes (spawn workers, enqueue work, join) the
+  # CORRECT RESULTS with zero concurrency:
+  #
+  #   minitest's Parallel::Executor is the motivating consumer —
+  #   its workers loop `while job = queue.pop`; jobs are enqueued
+  #   after spawn and the nil terminators before join, so the
+  #   drain happens entirely at join time and every test runs.
+  #
+  # DIVERGENCES (documented, deliberate):
+  #   - No preemption/overlap: producer code that BLOCKS waiting
+  #     for a worker's progress would deadlock in CRuby terms; the
+  #     single-threaded Queue#pop-returns-nil rule (below) is what
+  #     keeps the standard pool pattern terminating instead.
+  #   - A thread that is never joined never runs.
+  #   - Exceptions surface at join (CRuby with
+  #     abort_on_exception=false re-raises at join too, so this
+  #     edge actually matches).
+  def self.new(*args, &block)
+    raise ThreadError, "must be called with a block" unless block
+    t = allocate
+    t.__deferred_init(args, block)
+    t
+  end
+
+  def __deferred_init(args, block)
+    @args = args
+    @block = block
+    @done = false
+    @value = nil
+    self
+  end
+
+  def __run_deferred
+    return if @done
+    @done = true
+    @value = @block.call(*@args)
+  end
+
+  def join(*_limit)
+    __run_deferred
+    self
+  end
+
+  def value
+    __run_deferred
+    @value
+  end
+
+  def alive?
+    !@done
+  end
+
+  def status
+    @done ? false : "run"
+  end
+
+  # Worker bodies set `Thread.current.abort_on_exception = true`;
+  # Thread.current is the Thread class in this model, so accept the
+  # write at class level (and instance level for completeness).
+  def self.abort_on_exception=(v)
+    v
+  end
+
+  def abort_on_exception=(v)
+    v
   end
   def self.current
     self

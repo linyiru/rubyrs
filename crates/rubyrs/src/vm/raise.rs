@@ -653,7 +653,8 @@ mod tests {
             singleton_view: RefCell::new(None),
             singleton_target: RefCell::new(None),
             superclass: RefCell::new(superclass),
-            class_vars: RefCell::new(crate::intern::FxHashMap::default()),
+            undefed: RefCell::new(crate::intern::FxHashSet::default()),
+                    class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
             #[cfg(feature = "cext")]

@@ -1177,6 +1177,10 @@ pub(crate) struct Vm {
     /// `include`d modules must NOT beat builtin arms (String
     /// includes Comparable; its Ruby `<` would otherwise shadow
     /// the native compare).
+    /// True once ANY `undef_method` has run — gates the per-call
+    /// tombstone walk in `do_call` so programs that never undef
+    /// pay a single bool test (same pattern as `prim_reopen_mask`).
+    pub(crate) any_undefs: bool,
     pub(crate) prim_reopen_mask: u8,
     /// Stack of Array/Hash ObjIds currently being rendered by
     /// `inspect_value`. A re-entry on an id already present is a cycle
@@ -1668,6 +1672,7 @@ impl Vm {
             fast_index_hash_key_safe: false,
             fast_prim_str_safe: false,
             fast_prim_int_safe: false,
+            any_undefs: false,
             prim_reopen_mask: 0,
             inspect_stack: Vec::new(),
             builtin_class_cache: Default::default(),

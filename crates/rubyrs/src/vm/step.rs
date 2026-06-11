@@ -2862,7 +2862,14 @@ impl Vm {
                             //     alias_method :to_params_hash, :to_h
                             //   end
                             // (TRY_RUNS pass-10 layer #11.)
-                            let mut primitive_hit = false;
+                            // Universal arms (respond_to? / == /
+                            // inspect / ...) answer on EVERY
+                            // receiver, so aliasing one from any
+                            // user class synthesises the same
+                            // forwarder (mock.rb's
+                            // `alias __respond_to? respond_to?`).
+                            let mut primitive_hit =
+                                crate::vm::Vm::universal_arm_name(&self.interner.resolve(old_id).clone());
                             // Rc-pointer visited set defends the
                             // walker against an adversarial cyclic
                             // superclass graph (`A.superclass = B;
@@ -3437,6 +3444,7 @@ impl Vm {
                     singleton_includes: RefCell::new(Vec::new()),
                     singleton_view: RefCell::new(None),
                     singleton_target: RefCell::new(None),
+                    undefed: RefCell::new(crate::intern::FxHashSet::default()),
                     class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
                     assigned_name: RefCell::new(None),

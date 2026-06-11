@@ -470,6 +470,16 @@ impl Vm {
             if let Some(m) = walk_module(&current, name_id, &mut inc_visited) {
                 return Some(m);
             }
+            // `undef_method` tombstone: the name is dead from this
+            // class DOWN — the walk must not continue to ancestors
+            // (CRuby: undef blocks inherited methods too; dispatch
+            // then falls to method_missing via the do_call gate).
+            // Checked AFTER walk_module so a method re-defined on
+            // the same class after an undef wins, and prepends keep
+            // their priority.
+            if current.undefed.borrow().contains(&name_id) {
+                return None;
+            }
             let parent = current.superclass.borrow().clone();
             match parent {
                 Some(p) => current = p,
@@ -553,18 +563,28 @@ impl Vm {
     /// primitive-receiver user-method gate matter here — Array /
     /// Hash / Range route through `collection_call` AFTER that
     /// gate, so their reopens already win.
-    pub(crate) fn primitive_arm_name_for_class(class_name: &str, name: &str) -> bool {
-        // Universal arms (`nil?` / `to_s` / `==` / `inspect` / ...)
-        // answer on every receiver shape; a user reopen of one on a
-        // primitive class needs the early gate just like a
-        // shape-specific arm.
-        if matches!(name,
+    /// Names answered by the UNIVERSAL dispatch arms — they work on
+    /// every receiver shape. Split out of
+    /// `primitive_arm_name_for_class` so `alias new <universal>`
+    /// inside any user class can recognise the source and
+    /// synthesise a forwarder (mock.rb's
+    /// `alias __respond_to? respond_to?` shape).
+    pub(crate) fn universal_arm_name(name: &str) -> bool {
+        matches!(name,
             "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?" | "eql?"
             | "send" | "__send__" | "object_id" | "__id__" | "hash" | "frozen?" | "inspect"
             | "instance_variables" | "instance_variable_get" | "instance_variable_set"
             | "instance_variable_defined?" | "instance_exec"
             | "method" | "singleton_method" | "public_method"
-        ) {
+        )
+    }
+
+    pub(crate) fn primitive_arm_name_for_class(class_name: &str, name: &str) -> bool {
+        // Universal arms (`nil?` / `to_s` / `==` / `inspect` / ...)
+        // answer on every receiver shape; a user reopen of one on a
+        // primitive class needs the early gate just like a
+        // shape-specific arm.
+        if Self::universal_arm_name(name) {
             return true;
         }
         match class_name {
@@ -2254,7 +2274,8 @@ mod tests {
             singleton_view: RefCell::new(None),
             singleton_target: RefCell::new(None),
             superclass: RefCell::new(superclass),
-            class_vars: RefCell::new(crate::intern::FxHashMap::default()),
+            undefed: RefCell::new(crate::intern::FxHashSet::default()),
+                    class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
             #[cfg(feature = "cext")]

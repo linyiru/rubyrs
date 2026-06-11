@@ -4219,6 +4219,7 @@ impl Vm {
                         let v = std::rc::Rc::new(crate::value::Class {
                             name: format!("#<Class:{}>", cls.name),
                             is_module: false,
+                            undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
                             ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                             methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                             singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -4368,11 +4369,14 @@ impl Vm {
                 Ok(true)
             }
             ("undef_method", args) => {
-                // Removal itself is a Tier 1 no-op (see docs/SUBSET.md),
-                // but the `method_undefined(name)` hook still fires
-                // for every Symbol/String arg — Rails-style code
-                // observes the call regardless of whether the
-                // method dispatch table actually changes.
+                // REAL undef since the minitest-substrate work: each
+                // name gets a tombstone on THIS class (see
+                // `Class::undefed`) — lookup stops there and the
+                // do_call gate suppresses the builtin/universal
+                // arms, so dispatch falls to method_missing
+                // (mock.rb's proxy pattern). The
+                // `method_undefined(name)` hook keeps firing per
+                // name, as before.
                 //
                 // Per-arg validation mirrors `remove_method`:
                 //   - Symbol: use sid directly.
@@ -4382,6 +4386,15 @@ impl Vm {
                 //     must not grow the interner past the cap).
                 //   - Anything else: raise TypeError (CRuby parity
                 //     and consistency with remove_method).
+                //
+                // CRuby raises NameError for a name that isn't
+                // callable to begin with; we mirror that when we
+                // can PROVE absence (no user method on the chain,
+                // not a universal arm, no primitive ancestor that
+                // responds). cext-backed classes keep the lenient
+                // path — their ext-installed methods aren't
+                // enumerable from here (msgpack's Buffer undefs
+                // :dup/:clone that live in the ext).
                 for arg in args {
                     let sid: SymId = match arg {
                         Value::Sym(sid) => *sid,
@@ -4403,8 +4416,71 @@ impl Vm {
                             }));
                         }
                     };
+                    #[cfg(feature = "cext")]
+                    let cext_backed = cls.cext_alloc_func.get().is_some();
+                    #[cfg(not(feature = "cext"))]
+                    let cext_backed = false;
+                    let nm_owned = self.interner.resolve(sid).clone();
+                    // Eigenclass shells route their methods through
+                    // the TARGET's singleton chain (minitest's
+                    // `Time.stub` undefs :now on
+                    // Time.singleton_class) — probe there too. The
+                    // tombstone still lands on the shell; singleton
+                    // LOOKUP doesn't consult tombstones yet (the
+                    // stub teardown re-defines before anything
+                    // re-dispatches, so the gap is unobservable in
+                    // the motivating flow — documented divergence).
+                    let shell_target = cls
+                        .singleton_target
+                        .borrow()
+                        .as_ref()
+                        .and_then(std::rc::Weak::upgrade);
+                    let singleton_hit = shell_target
+                        .as_ref()
+                        .map(|real| self.lookup_class_singleton_method(real, sid).is_some())
+                        .unwrap_or(false);
+                    let resolvable = cext_backed
+                        || singleton_hit
+                        || self.lookup_method_uncached(&cls, sid).is_some()
+                        || Self::universal_arm_name(&nm_owned)
+                        // Universal-for-instances arms that live
+                        // outside `universal_arm_name` (which gates
+                        // reopen precedence) — the same set the
+                        // respond_to? whitelist in lookup.rs calls
+                        // "universal dispatch arms": every instance
+                        // answers these, so they're undef-able on
+                        // any class. Evidence: msgpack's Buffer
+                        // undefs dup/clone; concurrent-ruby's Map
+                        // undefs freeze (the Jekyll require chain).
+                        || matches!(&*nm_owned,
+                            "dup" | "clone" | "freeze"
+                            | "itself" | "tap" | "then" | "yield_self"
+                            | "methods" | "public_methods" | "private_methods"
+                            | "protected_methods" | "singleton_methods"
+                            | "instance_eval" | "display")
+                        || {
+                            let mut hit = false;
+                            let mut visited: std::collections::HashSet<*const crate::value::Class> =
+                                std::collections::HashSet::new();
+                            let mut walker = Some(cls.clone());
+                            while let Some(c) = walker {
+                                if !visited.insert(Rc::as_ptr(&c)) { break; }
+                                if self.primitive_class_responds_to(&c.name, sid) { hit = true; break; }
+                                walker = c.superclass.borrow().clone();
+                            }
+                            hit
+                        };
+                    if !resolvable {
+                        let nm = self.interner.resolve(sid).to_string();
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("undefined method `{}' for class `{}'", nm, cls.name),
+                        }));
+                    }
+                    cls.undefed.borrow_mut().insert(sid);
+                    self.any_undefs = true;
                     self.fire_method_lifecycle_hook(&cls, "method_undefined", sid)?;
                 }
+                self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Class(cls));
                 Ok(true)
             }
@@ -4884,6 +4960,7 @@ impl Vm {
         let m = std::rc::Rc::new(Class {
             name: String::new(),
             is_module: true,
+            undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
             ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -5042,6 +5119,7 @@ impl Vm {
         let new_cls = Rc::new(Class {
             name: String::new(),
             is_module: false,
+            undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
             ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -7354,6 +7432,42 @@ impl Vm {
 
         let recv = recv.expect("ICE: receiver missing");
 
+        // `undef_method` tombstone gate — when the receiver's class
+        // chain has the name undef'd, EVERY arm below (user lookup
+        // already stops in lookup.rs; this gate covers the builtin /
+        // universal / primitive arms) is suppressed and dispatch
+        // goes straight to method_missing, CRuby's undef contract.
+        // `any_undefs` keeps the cost at one bool for programs that
+        // never undef.
+        if self.any_undefs {
+            let chain_root = match &recv {
+                Value::Object(oid) => Some(self.heap.class_of(*oid)),
+                _ => None,
+            };
+            if let Some(root) = chain_root {
+                let mut undefed = false;
+                let mut visited: std::collections::HashSet<*const crate::value::Class> =
+                    std::collections::HashSet::new();
+                let mut walker = Some(root);
+                while let Some(c) = walker {
+                    if !visited.insert(Rc::as_ptr(&c)) { break; }
+                    if c.undefed.borrow().contains(&name_id) { undefed = true; break; }
+                    if c.methods.borrow().contains_key(&name_id) { break; }
+                    walker = c.superclass.borrow().clone();
+                }
+                if undefed {
+                    if self.try_method_missing(&recv, name_id, args.to_vec(), None)? {
+                        return Ok(());
+                    }
+                    return Err(self.trap(RubyError::NoMethodError {
+                        kind: crate::error::NoMethodErrorKind::Missing,
+                        method: name.to_string(),
+                        recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
+                    }));
+                }
+            }
+        }
+
         // `cls.class_eval(source_string [, file, line])` — runtime
         // parse + compile + run of a Ruby source string. Tier 1
         // divergence (documented in docs/SUBSET.md): does NOT
@@ -8326,6 +8440,38 @@ impl Vm {
                 _ => None,
             };
             if let (Some(new_id), Some(old_id)) = (new_id_opt, old_id_opt) {
+                // Eigenclass-shell receiver: resolve the source
+                // through the TARGET's singleton chain and install
+                // back into its singleton table (mirrors
+                // Op::AliasMethod's shell redirect). minitest's
+                // `Time.stub` does
+                // `singleton_class.send(:alias_method, save, :now)`
+                // — without the redirect the source lookup misses
+                // and stubbing any class method NameErrors.
+                if let Some(real) = target
+                    .singleton_target
+                    .borrow()
+                    .as_ref()
+                    .and_then(std::rc::Weak::upgrade)
+                {
+                    match self.lookup_class_singleton_method(&real, old_id) {
+                        Some(method) => {
+                            real.singleton_methods.borrow_mut().insert(new_id, method);
+                            self.method_gen = self.method_gen.wrapping_add(1);
+                            self.stack.push(Value::Sym(new_id));
+                            return Ok(());
+                        }
+                        None => {
+                            let old_name = self.interner.resolve(old_id).to_string();
+                            return Err(self.trap(RubyError::NameError {
+                                msg: format!(
+                                    "undefined method '{}' for class '{}'",
+                                    old_name, target.name,
+                                ),
+                            }));
+                        }
+                    }
+                }
                 let m = self.lookup_method_uncached(target, old_id);
                 match m {
                     Some(method) => {
@@ -12485,6 +12631,7 @@ impl Vm {
         let holder = std::rc::Rc::new(Class {
             name: String::new(),
             is_module: true,
+            undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
             ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -13621,6 +13768,7 @@ impl Vm {
             let new_cls = std::rc::Rc::new(Class {
                 name: String::new(),
                 is_module: false,
+                undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
                 ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -13683,6 +13831,7 @@ impl Vm {
             let new_mod = std::rc::Rc::new(Class {
                 name: String::new(),
                 is_module: true,
+                undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
                 ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),

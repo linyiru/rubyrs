@@ -545,6 +545,16 @@ pub struct Class {
     /// dry-struct caches, etc.) keep class vars on a single
     /// class anyway. Documented divergence — recorded in
     /// SUBSET.md when this lands.
+    /// Names removed via `undef_method` / the `undef` keyword.
+    /// A tombstone TERMINATES lookup for that name at this class
+    /// (the walk must not continue to ancestors) and suppresses the
+    /// builtin/universal arms — dispatch goes straight to
+    /// method_missing, CRuby's undef semantics. Kept as a separate
+    /// set (not a sentinel Method) so the `methods` RefCell's value
+    /// type stays untouched. The Vm-level `any_undefs` flag gates
+    /// every dispatch-side check, so programs that never undef pay
+    /// one bool test.
+    pub(crate) undefed: RefCell<crate::intern::FxHashSet<crate::intern::SymId>>,
     pub(crate) class_vars: RefCell<FxHashMap<SymId, Value>>,
     /// Per-class constant storage for ANONYMOUS classes
     /// (cls.name == ""). Named classes still keep their

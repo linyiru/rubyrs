@@ -1738,6 +1738,7 @@ impl Vm {
                                     std::rc::Rc::new(crate::value::Class {
                                         name: cname.to_string(),
                                         is_module,
+                                        undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
                                         methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                                         singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                                         superclass: std::cell::RefCell::new(None),
