@@ -883,14 +883,14 @@ mod preamble_cache_serde_tests {
     #[test]
     fn utf8_string_rebuilds_via_new_str() {
         let v = Value::new_str("héllo");
-        assert!(matches!(roundtrip(&v), Value::Str(s) if &*s.borrow() == "héllo".as_bytes()));
+        assert!(matches!(roundtrip(&v), Value::Str(s) if s.borrow().as_slice() == "héllo".as_bytes()));
     }
 
     #[test]
     fn binary_string_rebuilds_via_new_str_bytes() {
         // Invalid UTF-8 — the compiler's `Expr::StrLitBytes` shape.
         let v = Value::new_str_bytes(vec![0xFF, 0xFE, 0x00]);
-        assert!(matches!(roundtrip(&v), Value::Str(s) if &*s.borrow() == &[0xFF, 0xFE, 0x00]));
+        assert!(matches!(roundtrip(&v), Value::Str(s) if s.borrow().as_slice() == b"\xFF\xFE\x00"));
     }
 
     #[test]
