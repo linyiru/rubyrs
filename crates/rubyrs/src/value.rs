@@ -14,8 +14,70 @@ use crate::intern::{FxHashMap, SymId};
 /// views via `from_utf8_lossy` for code paths that need text;
 /// the byte path is the cheap one (zero copy).
 #[derive(Debug)]
+/// The byte storage of an `RStr`, bundling the content cell with a
+/// cached `ruby_hash` value so string Hash keys don't re-hash their
+/// bytes on every probe (Jekyll's data hashes probe long string keys
+/// constantly; FNV over a ~30-byte key was ~3× CRuby's per-lookup
+/// cost).
+///
+/// INVALIDATION CONTRACT: every mutation acquires the buffer through
+/// `borrow_mut()`, which clears the cache unconditionally
+/// (invalidate-on-acquire — conservative for read-modify cycles that
+/// end up not writing, but it makes the cache impossible to leave
+/// stale: there is NO other way to get `&mut` at the bytes). The
+/// cache stores only hashes of all-ASCII content, where `ruby_hash`
+/// is encoding-tag-independent — so `force_encoding` & co. (which
+/// flip `RStr.encoding` without touching content) never need to know
+/// the cache exists. `0` is the "empty" sentinel; a computed hash of
+/// 0 is remapped to 1 (FNV never produces 0 for non-empty input in
+/// practice, and correctness only needs *some* stable non-zero
+/// value).
+pub struct StrCell {
+    bytes: RefCell<Vec<u8>>,
+    hash_cache: Cell<u64>,
+}
+
+impl StrCell {
+    #[inline]
+    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes: RefCell::new(bytes),
+            hash_cache: Cell::new(0),
+        }
+    }
+
+    /// Read access — passthrough to the inner `RefCell`.
+    #[inline]
+    pub fn borrow(&self) -> std::cell::Ref<'_, Vec<u8>> {
+        self.bytes.borrow()
+    }
+
+    /// Write access — clears the cached hash BEFORE handing out the
+    /// guard (see the invalidation contract above).
+    #[inline]
+    pub fn borrow_mut(&self) -> std::cell::RefMut<'_, Vec<u8>> {
+        self.hash_cache.set(0);
+        self.bytes.borrow_mut()
+    }
+
+    /// Cached `ruby_hash` for the current content, or 0 if not
+    /// computed / not cacheable (non-ASCII content hashes are
+    /// encoding-tag-dependent and stay uncached).
+    #[inline]
+    pub(crate) fn cached_hash(&self) -> u64 {
+        self.hash_cache.get()
+    }
+
+    /// Store a freshly computed all-ASCII content hash.
+    #[inline]
+    pub(crate) fn set_cached_hash(&self, h: u64) {
+        self.hash_cache.set(if h == 0 { 1 } else { h });
+    }
+}
+
+#[derive(Debug)]
 pub struct RStr {
-    pub(crate) content: RefCell<Vec<u8>>,
+    pub(crate) content: StrCell,
     pub(crate) frozen: Cell<bool>,
     /// ADR 0020 Phase E1: the encoding TAG (carried, not yet
     /// consumed — semantic enforcement of `==`/concat
@@ -101,7 +163,7 @@ impl RStr {
     /// `borrow_mut()` callers (e.g. cext binary input).
     pub fn new(s: String) -> Self {
         Self {
-            content: RefCell::new(s.into_bytes()),
+            content: StrCell::new(s.into_bytes()),
             frozen: Cell::new(false),
             encoding: Cell::new(EncodingTag::Utf8),
         }
@@ -113,7 +175,7 @@ impl RStr {
     /// genuinely mean ASCII-8BIT use `from_bytes_binary`.
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
         Self {
-            content: RefCell::new(bytes),
+            content: StrCell::new(bytes),
             frozen: Cell::new(false),
             encoding: Cell::new(EncodingTag::Utf8),
         }
@@ -124,7 +186,7 @@ impl RStr {
     /// contract), msgpack frames, pack output, raw digests.
     pub fn from_bytes_binary(bytes: Vec<u8>) -> Self {
         Self {
-            content: RefCell::new(bytes),
+            content: StrCell::new(bytes),
             frozen: Cell::new(false),
             encoding: Cell::new(EncodingTag::Binary),
         }
@@ -165,7 +227,7 @@ impl RStr {
 }
 
 impl std::ops::Deref for RStr {
-    type Target = RefCell<Vec<u8>>;
+    type Target = StrCell;
     fn deref(&self) -> &Self::Target { &self.content }
 }
 

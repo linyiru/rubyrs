@@ -1795,6 +1795,17 @@ impl Value {
             }
             Value::Sym(s) => mix(mix(h, &[5]), &s.0.to_le_bytes()),
             Value::Str(rs) => {
+                // Cached-hash fast path: `StrCell` stores the
+                // last-computed all-ASCII content hash and clears it
+                // on every `borrow_mut()` (the only mutation door).
+                // Only ASCII content caches — see below, the
+                // non-ASCII hash mixes the encoding tag, which can
+                // change without a content mutation
+                // (`force_encoding`).
+                let cached = rs.content.cached_hash();
+                if cached != 0 {
+                    return cached;
+                }
                 // E1 slice 2: equal-by-== strings must hash equal,
                 // and `==` is tag-sensitive only for non-ASCII
                 // bytes — so the tag joins the hash exactly when
@@ -1804,7 +1815,10 @@ impl Value {
                 let b = rs.content.borrow();
                 let h2 = mix(mix(h, &[6]), &b);
                 if b.iter().all(|&x| x < 0x80) {
-                    h2
+                    rs.content.set_cached_hash(h2);
+                    // Read back through the setter's 0→1 remap so
+                    // cached and uncached probes agree on the value.
+                    rs.content.cached_hash()
                 } else {
                     let tag = match rs.encoding.get() {
                         crate::value::EncodingTag::Binary => 0u8,
