@@ -1904,6 +1904,15 @@ impl Vm {
                 self.trailing_hash_positional = false;
                 r?;
             }
+            Op::InterpToS(cache_id) => {
+                // Interpolation part: a String stays as-is (CRuby's
+                // rb_obj_as_string — user String#to_s NOT consulted);
+                // anything else dispatches to_s like a plain call.
+                if !matches!(self.stack.last(), Some(Value::Str(_))) {
+                    let to_s = self.sym_to_s;
+                    self.do_call(to_s, 0, false, cache_id)?;
+                }
+            }
             Op::CallNoRecv(name_id, argc, cache_id) => {
                 self.trailing_hash_positional = true;
                 let r = self.do_call(name_id, argc as usize, true, cache_id);

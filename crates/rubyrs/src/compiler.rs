@@ -1365,13 +1365,18 @@ pub(crate) fn compile_expr(
                 let id = interner.intern("");
                 b.emit(Op::LoadConstStr(id));
             } else {
-                let to_s = interner.intern("to_s");
                 for (idx, p) in parts.iter().enumerate() {
                     match &p.node {
                         Expr::StrLit(_) => compile_expr(b, p, protos, interner, cc),
                         _ => {
                             compile_expr(b, p, protos, interner, cc);
-                            emit_method_call(b, to_s, 0, true, false, false, cc);
+                            // CRuby rb_obj_as_string semantics — a
+                            // String part skips to_s entirely; see
+                            // Op::InterpToS. Consumes a cache id for
+                            // the non-String dispatch path.
+                            let cid = *cc as u16;
+                            *cc += 1;
+                            b.emit(Op::InterpToS(cid));
                         }
                     }
                     if idx > 0 {
@@ -1391,13 +1396,16 @@ pub(crate) fn compile_expr(
                 let id = interner.intern("");
                 b.emit(Op::LoadConstStr(id));
             } else {
-                let to_s = interner.intern("to_s");
                 for (idx, p) in parts.iter().enumerate() {
                     match &p.node {
                         Expr::StrLit(_) => compile_expr(b, p, protos, interner, cc),
                         _ => {
                             compile_expr(b, p, protos, interner, cc);
-                            emit_method_call(b, to_s, 0, true, false, false, cc);
+                            // Same InterpToS contract as
+                            // InterpolatedStr above.
+                            let cid = *cc as u16;
+                            *cc += 1;
+                            b.emit(Op::InterpToS(cid));
                         }
                     }
                     if idx > 0 {

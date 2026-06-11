@@ -1053,6 +1053,13 @@ pub(crate) struct Vm {
     pub(crate) fast_index_array_safe: bool,
     pub(crate) fast_index_hash_set_safe: bool,
     pub(crate) fast_index_array_set_safe: bool,
+    /// `try_fast_primitive` twins (same revalidation pass): no user
+    /// `length`/`size`/`to_s` on String, no user `to_s`/`inspect` on
+    /// Integer. Lumped per class — a user override of ANY watched
+    /// name turns that class's zero-arg fast arms off (costs only
+    /// perf in that exotic program, never correctness).
+    pub(crate) fast_prim_str_safe: bool,
+    pub(crate) fast_prim_int_safe: bool,
     /// Stack of Array/Hash ObjIds currently being rendered by
     /// `inspect_value`. A re-entry on an id already present is a cycle
     /// (`a = []; a << a`) and renders as `[...]` / `{...}` instead of
@@ -1453,6 +1460,8 @@ impl Vm {
             fast_index_array_safe: false,
             fast_index_hash_set_safe: false,
             fast_index_array_set_safe: false,
+            fast_prim_str_safe: false,
+            fast_prim_int_safe: false,
             inspect_stack: Vec::new(),
             builtin_class_cache: Default::default(),
             sym_to_s,

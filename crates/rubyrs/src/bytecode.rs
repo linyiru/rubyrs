@@ -80,6 +80,17 @@ pub(crate) enum Op {
     /// interpolated pattern (same encoding as `LoadRegex`).
     #[cfg(feature = "regex")]
     CompileRegex(u8),
+    /// String-interpolation part conversion (`"#{x}"`): if the
+    /// top-of-stack is already a String, leave it (CRuby's
+    /// `rb_obj_as_string` returns T_STRING values as-is — a user
+    /// `String#to_s` override is NOT consulted); otherwise dispatch
+    /// `to_s` through `do_call` (user overrides honored, e.g.
+    /// `"#{5}"` sees a reopened `Integer#to_s`). Replaces the plain
+    /// `Op::Call(to_s)` the interpolation compiler used to emit —
+    /// which both diverged on String parts and paid a full dispatch
+    /// per part. The u16 is the call-site cache id for the dispatch
+    /// path (same slot a Call would carry).
+    InterpToS(u16),
     LoadSymbol(SymId),
     LoadNil,
     LoadTrue,

@@ -1713,6 +1713,13 @@ impl Vm {
         if inspect && matches!(v, Value::Array(_) | Value::Hash(_)) {
             return self.inspect_value(v);
         }
+        // CRuby `puts` / `print` write String args directly
+        // (rb_io_puts: T_STRING short-circuits before any to_s
+        // dispatch) — a user `String#to_s` override is NOT consulted.
+        // `p` (inspect=true) still dispatches a user String#inspect.
+        if !inspect && let Value::Str(_) = v {
+            return Ok(v.to_display(&self.heap, &self.interner));
+        }
         let meth_id = self.interner.intern(if inspect { "inspect" } else { "to_s" });
         let m = match v {
             Value::Object(id) => {
@@ -1995,9 +2002,19 @@ impl Vm {
     /// model). Adding an arm for a receiver with a user-Class
     /// method table requires threading the bypass flag through —
     /// see the comment at the call site in `do_call`.
+    ///
+    /// Reopen soundness: each arm is gated on the
+    /// `fast_prim_str_safe` / `fast_prim_int_safe` flags (same
+    /// `method_gen`-revalidated pass as `try_fast_index`), so a
+    /// user `String#length` / `Integer#to_s` reopen wins through
+    /// the slow path's primitive-receiver user-method gate. Before
+    /// the flags existed these arms silently shadowed reopens.
     fn try_fast_primitive(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> bool {
         if no_recv || argc != 0 {
             return false;
+        }
+        if self.fast_index_checked_gen != self.method_gen {
+            self.fast_index_revalidate();
         }
         let v = {
             let recv = self
@@ -2005,6 +2022,8 @@ impl Vm {
                 .last()
                 .expect("ICE: stack underflow before do_call receiver");
             match recv {
+                _ if matches!(recv, Value::Str(_)) && !self.fast_prim_str_safe => return false,
+                _ if matches!(recv, Value::Int(_)) && !self.fast_prim_int_safe => return false,
                 Value::Str(a) if name_id == self.sym_length || name_id == self.sym_size => {
                     // Registry-tagged strings count under their own
                     // encoding — fall to the slow path (the
@@ -2191,6 +2210,24 @@ impl Vm {
                 ),
                 None => (false, false),
             };
+        // `try_fast_primitive` twins — same gen, same walk.
+        let str_sym = self.interner.intern("String");
+        self.fast_prim_str_safe = match self.classes.get(&str_sym).cloned() {
+            Some(c) => {
+                self.lookup_method_uncached(&c, self.sym_length).is_none()
+                    && self.lookup_method_uncached(&c, self.sym_size).is_none()
+                    && self.lookup_method_uncached(&c, self.sym_to_s).is_none()
+            }
+            None => false,
+        };
+        let int_sym = self.interner.intern("Integer");
+        self.fast_prim_int_safe = match self.classes.get(&int_sym).cloned() {
+            Some(c) => {
+                self.lookup_method_uncached(&c, self.sym_to_s).is_none()
+                    && self.lookup_method_uncached(&c, self.sym_inspect).is_none()
+            }
+            None => false,
+        };
     }
 
     /// `no_recv` builtin-or-host fast path. Tries the host-side
