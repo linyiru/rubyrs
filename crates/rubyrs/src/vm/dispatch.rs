@@ -2022,6 +2022,27 @@ impl Vm {
                 .last()
                 .expect("ICE: stack underflow before do_call receiver");
             match recv {
+                // `frozen?` on shapes whose answer is a constant of
+                // the shape (or the RStr flag). Gated on the GLOBAL
+                // prim_reopen_mask — any user reopen anywhere on the
+                // primitive classes turns these off and the
+                // reopen-precedence gate in do_call takes over.
+                // Jekyll's Utils.duplicate_frozen_values probes
+                // frozen? per data-hash value per merge (~60k probes
+                // per 1k-site build; measured ~100ns through full
+                // dispatch vs 4ns in CRuby). Array/Hash deliberately
+                // NOT here: their (no-op freeze) answer stays with
+                // the canonical collection arms.
+                Value::Str(a)
+                    if name_id == self.sym_frozen_q && self.prim_reopen_mask == 0 =>
+                {
+                    Value::Bool(a.frozen.get())
+                }
+                Value::Int(_) | Value::Sym(_) | Value::Float(_) | Value::Bool(_) | Value::Nil
+                    if name_id == self.sym_frozen_q && self.prim_reopen_mask == 0 =>
+                {
+                    Value::Bool(true)
+                }
                 _ if matches!(recv, Value::Str(_)) && !self.fast_prim_str_safe => return false,
                 _ if matches!(recv, Value::Int(_)) && !self.fast_prim_int_safe => return false,
                 Value::Str(a) if name_id == self.sym_length || name_id == self.sym_size => {
@@ -12263,6 +12284,53 @@ impl Vm {
             if n_params == 1 {
                 locals[param_start as usize] = arg;
             }
+        }
+        self.frames.push(Frame {
+            proto_idx,
+            ip: 0,
+            locals: fresh_locals,
+            self_val,
+            base_sp: self.stack.len(),
+            is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
+            lexical_cvar_class: bh_lexical_cvar_class,
+            #[cfg(feature = "regex")] saved_last_match: None,
+            is_block: true, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
+            block_writeback: Some((captured, param_start)),
+        });
+        Ok(())
+    }
+
+    /// Two-positional-args twin of `invoke_block1`, for the
+    /// `|k, v|` iter drivers (Hash#each / reduce / sort blocks /
+    /// each_with_index). A 2-param plain block binds both args
+    /// directly — no per-iteration args Vec, and the caller can
+    /// skip materializing a pair Array + the auto-splat re-clone
+    /// (Hash#each paid three allocations per pair). Anything else
+    /// (rest / kw-rest / n_params != 2) falls back to the general
+    /// path with the exact Vec the old call sites built.
+    pub(crate) fn invoke_block2(&mut self, block_id: ObjId, a: Value, b: Value) -> Result<(), Trap> {
+        self.check_frames()?;
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
+             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone())
+        };
+        if rest_slot.is_some() || kw_rest_slot.is_some() || n_params != 2 {
+            return self.invoke_block(block_id, vec![a, b]);
+        }
+        let proto = &self.protos[proto_idx];
+        let needed = proto.n_locals as usize;
+        let body_local_start = proto.block_body_local_start;
+        let fresh_locals = self.block_locals_from_captured(&captured, needed);
+        {
+            let mut locals = fresh_locals.borrow_mut();
+            if (body_local_start as usize) < needed {
+                for slot in body_local_start as usize..needed {
+                    locals[slot] = Value::Nil;
+                }
+            }
+            locals[param_start as usize] = a;
+            locals[param_start as usize + 1] = b;
         }
         self.frames.push(Frame {
             proto_idx,

@@ -1063,6 +1063,10 @@ pub(crate) struct Vm {
     /// (`try_fast_index`, vm/dispatch.rs).
     pub(crate) sym_index_op: SymId,
     pub(crate) sym_index_set_op: SymId,
+    /// Pre-interned `frozen?` for the zero-arg primitive fast path
+    /// (Jekyll's `Utils.duplicate_frozen_values` probes it on every
+    /// value of every document data hash, 4x per doc).
+    pub(crate) sym_frozen_q: SymId,
     /// Collection-index fast-path override guard. The fast path may
     /// serve `h[k]` / `a[i]` directly ONLY while no user `[]` exists
     /// anywhere on the Hash / Array ancestor chain (a reopen, an
@@ -1409,6 +1413,7 @@ impl Vm {
         let sym_bang = interner.intern("$!");
         let sym_index_op = interner.intern("[]");
         let sym_index_set_op = interner.intern("[]=");
+        let sym_frozen_q = interner.intern("frozen?");
         Vm {
             protos,
             interner,
@@ -1513,6 +1518,7 @@ impl Vm {
             sym_bang,
             sym_index_op,
             sym_index_set_op,
+            sym_frozen_q,
             fast_index_checked_gen: 0,
             fast_index_hash_safe: false,
             fast_index_array_safe: false,

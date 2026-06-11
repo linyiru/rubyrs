@@ -141,6 +141,32 @@ impl Vm {
         Ok(BlockStep::Value(r))
     }
 
+    /// `step_block` for the two-positional-args shape — routes
+    /// through `invoke_block2`. Same contract as `step_block1`.
+    pub(crate) fn step_block2(
+        &mut self,
+        block: ObjId,
+        a: Value,
+        b: Value,
+        pre_frames: usize,
+    ) -> Result<BlockStep, Trap> {
+        #[cfg(feature = "_fiber")]
+        if self.fiber_yield_pending.is_some() {
+            return Ok(BlockStep::Value(Value::Nil));
+        }
+        self.invoke_block2(block, a, b)?;
+        self.dispatch_until(pre_frames)?;
+        if self.method_return.is_some() {
+            return Ok(BlockStep::MethodReturn);
+        }
+        let r = self.stack.pop().unwrap_or(Value::Nil);
+        if self.break_signaled {
+            self.break_signaled = false;
+            return Ok(BlockStep::Break(r));
+        }
+        Ok(BlockStep::Value(r))
+    }
+
     /// `step_block` for the single-positional-arg shape — routes
     /// through `invoke_block1` (no per-iteration args-Vec). Same
     /// PIN-INVOKE-DISPATCH-CHECK contract as `step_block`; the
@@ -1595,19 +1621,37 @@ impl Vm {
                 }
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
+                // Plain `|k, v|` blocks (the overwhelmingly common
+                // shape) take the zero-allocation two-arg path:
+                // CRuby's "yield one pair Array, auto-splat into
+                // k/v" is observationally identical to binding the
+                // two directly, and skips the per-pair pair-Array
+                // alloc + args Vec + auto-splat re-clone. Blocks
+                // with any other shape (single param wants the pair
+                // Array, destructure `|(k, v)|`, rest/kw-rest) keep
+                // the canonical pair path below.
+                let two_arg_fast = {
+                    let bh = g.vm.heap.block(block);
+                    bh.n_params == 2 && bh.rest_slot.is_none() && bh.kw_rest_slot.is_none()
+                };
                 for (k, v) in snapshot {
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
-                    // Scoped pin: step_block's args→locals copy can
-                    // call maybe_gc (block with rest param has to
-                    // alloc a rest Array), and pair_id is only
-                    // reachable via this Rust-local Vec until then.
-                    // Push/pop around the single call so we don't
-                    // accumulate pins across iterations.
-                    g.vm.pinned.push(Value::Array(pair_id));
-                    let step_result = g.vm.step_block1(block, Value::Array(pair_id), pre_frames);
-                    g.vm.pinned.pop();
+                    let step_result = if two_arg_fast {
+                        g.vm.step_block2(block, k, v, pre_frames)
+                    } else {
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
+                        // Scoped pin: step_block's args→locals copy can
+                        // call maybe_gc (block with rest param has to
+                        // alloc a rest Array), and pair_id is only
+                        // reachable via this Rust-local Vec until then.
+                        // Push/pop around the single call so we don't
+                        // accumulate pins across iterations.
+                        g.vm.pinned.push(Value::Array(pair_id));
+                        let r = g.vm.step_block1(block, Value::Array(pair_id), pre_frames);
+                        g.vm.pinned.pop();
+                        r
+                    };
                     match step_result? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
@@ -1648,7 +1692,7 @@ impl Vm {
                     // until step_block copies it to the block's
                     // slot.
                     g.vm.pinned.push(Value::Array(pair_id));
-                    let step_result = g.vm.step_block(block, vec![Value::Array(pair_id), Value::Int(i as i64)], pre_frames);
+                    let step_result = g.vm.step_block2(block, Value::Array(pair_id), Value::Int(i as i64), pre_frames);
                     g.vm.pinned.pop();
                     match step_result? {
                         BlockStep::MethodReturn => break,
@@ -2836,7 +2880,7 @@ impl Vm {
                         // are Int Values, not heap-ref) — call
                         // step_block directly, matching the
                         // Array/Hash chunk_while arms.
-                        let r = match g.vm.step_block(block, vec![Value::Int(prev), Value::Int(cur)], pre_frames)? {
+                        let r = match g.vm.step_block2(block, Value::Int(prev), Value::Int(cur), pre_frames)? {
                             BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                             BlockStep::Break(r) => { early = Some(r); break 'outer; }
                             BlockStep::Value(r) => r,
@@ -2885,7 +2929,7 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (i, v) in snapshot.into_iter().enumerate() {
-                    match g.vm.step_block(block, vec![v, Value::Int(i as i64)], pre_frames)? {
+                    match g.vm.step_block2(block, v, Value::Int(i as i64), pre_frames)? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(_) => {}
@@ -2940,7 +2984,7 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for v in snapshot {
-                    match g.vm.step_block(block, vec![v, seed.clone()], pre_frames)? {
+                    match g.vm.step_block2(block, v, seed.clone(), pre_frames)? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(_) => {}
@@ -3253,7 +3297,7 @@ impl Vm {
                 let mut current_chunk: Vec<Value> = vec![snapshot[0].clone()];
                 let mut early: Option<Value> = None;
                 for pair in snapshot.windows(2) {
-                    let r = match g.vm.step_block(block, vec![pair[0].clone(), pair[1].clone()], pre_frames)? {
+                    let r = match g.vm.step_block2(block, pair[0].clone(), pair[1].clone(), pre_frames)? {
                         BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
@@ -3559,7 +3603,7 @@ impl Vm {
                         // Empirically verified vs CRuby:
                         // `def foo; [3,1,2].sort!{return :x};
                         // :unreached; end; foo` → `:x`.
-                        let result = match g.vm.step_block(block, vec![a, b], pre_frames)? {
+                        let result = match g.vm.step_block2(block, a, b, pre_frames)? {
                             BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                             BlockStep::Break(r) => { early = Some(r); break 'outer; }
                             BlockStep::Value(r) => r,
@@ -3732,7 +3776,7 @@ impl Vm {
                 let mut acc = snapshot[0].clone();
                 let mut early = None;
                 for v in &snapshot[1..] {
-                    match g.vm.step_block(block, vec![acc.clone(), v.clone()], pre_frames)? {
+                    match g.vm.step_block2(block, acc.clone(), v.clone(), pre_frames)? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => { acc = r; }
@@ -3752,7 +3796,7 @@ impl Vm {
                 let mut acc = init.clone();
                 let mut early = None;
                 for v in &snapshot {
-                    match g.vm.step_block(block, vec![acc.clone(), v.clone()], pre_frames)? {
+                    match g.vm.step_block2(block, acc.clone(), v.clone(), pre_frames)? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => { acc = r; }
@@ -3812,7 +3856,7 @@ impl Vm {
                 let mut early = None;
                 let mut i = bi + 1;
                 while i <= end_inc {
-                    match g.vm.step_block(block, vec![acc.clone(), Value::Int(i)], pre_frames)? {
+                    match g.vm.step_block2(block, acc.clone(), Value::Int(i), pre_frames)? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => { acc = r; }
@@ -3854,7 +3898,7 @@ impl Vm {
                 let mut early = None;
                 let mut i = bi;
                 while i <= end_inc {
-                    match g.vm.step_block(block, vec![acc.clone(), Value::Int(i)], pre_frames)? {
+                    match g.vm.step_block2(block, acc.clone(), Value::Int(i), pre_frames)? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => { acc = r; }
@@ -4559,7 +4603,7 @@ impl Vm {
                 let mut current_chunk: Vec<Value> = vec![pair_vals[0].clone()];
                 let mut early: Option<Value> = None;
                 for pair in pair_vals.windows(2) {
-                    let r = match g.vm.step_block(block, vec![pair[0].clone(), pair[1].clone()], pre_frames)? {
+                    let r = match g.vm.step_block2(block, pair[0].clone(), pair[1].clone(), pre_frames)? {
                         BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
@@ -4899,7 +4943,7 @@ impl Vm {
                     g.vm.check_alloc()?;
                     let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
-                    let step = g.vm.step_block(block, vec![acc.clone(), Value::Array(pair_id)], pre_frames);
+                    let step = g.vm.step_block2(block, acc.clone(), Value::Array(pair_id), pre_frames);
                     g.vm.pinned.pop();
                     if acc_heap { g.vm.pinned.pop(); }
                     match step? {
@@ -4935,7 +4979,7 @@ impl Vm {
                     g.vm.check_alloc()?;
                     let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
-                    let step = g.vm.step_block(block, vec![acc.clone(), Value::Array(pair_id)], pre_frames);
+                    let step = g.vm.step_block2(block, acc.clone(), Value::Array(pair_id), pre_frames);
                     g.vm.pinned.pop();
                     if acc_heap { g.vm.pinned.pop(); }
                     match step? {
@@ -5035,7 +5079,7 @@ impl Vm {
                     g.vm.check_alloc()?;
                     let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                     g.vm.pinned.push(Value::Array(pair_id));
-                    let step_result = g.vm.step_block(block, vec![Value::Array(pair_id), seed.clone()], pre_frames);
+                    let step_result = g.vm.step_block2(block, Value::Array(pair_id), seed.clone(), pre_frames);
                     g.vm.pinned.pop();
                     match step_result? {
                         BlockStep::MethodReturn => break,
