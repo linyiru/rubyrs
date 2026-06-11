@@ -3564,10 +3564,10 @@ impl Vm {
                 // `rb_cmpint` coerces any numeric to an integer cmp
                 // axis; we replicate that for the types we model.
                 //
-                // Same insertion-sort shape as the no-block arms
-                // in `array_collection_call`, but each comparison
-                // routes through the block. PinGuard wraps the
-                // whole impl: the `copy` Vec holds element ObjIds
+                // Merge sort (vm/sort.rs), same engine as the
+                // no-block arms in `array_collection_call`, but each
+                // comparison routes through the block. PinGuard wraps
+                // the whole impl: the `copy` Vec holds element ObjIds
                 // with no other GC root once the receiver is no
                 // longer on the stack, AND each block invocation
                 // may trigger maybe_gc.
@@ -3591,103 +3591,100 @@ impl Vm {
                 // without ICE'ing.
                 for v in &copy { g.pin(v.clone()); }
                 let pre_frames = g.vm.frames.len();
-                let n = copy.len();
-                let mut early: Option<Value> = None;
-                'outer: for i in 1..n {
-                    let mut j = i;
-                    while j > 0 {
-                        // Compare copy[j-1] vs copy[j] via the block.
-                        // Block result: Int — negative → prev < curr
-                        // (already in order); zero → equal (in order);
-                        // positive → prev > curr (swap).
-                        let a = copy[j - 1].clone();
-                        let b = copy[j].clone();
-                        // Non-local `return` from the comparator:
-                        // `Ok(Some(Value::Nil))` marks the primitive
-                        // as matched so the outer dispatch loop
-                        // unwinds via `method_return`. `Ok(None)`
-                        // would route through do_call_block to
-                        // NoMethodError, because this arm IS the
-                        // block-form sort!/sort primitive.
-                        // Empirically verified vs CRuby:
-                        // `def foo; [3,1,2].sort!{return :x};
-                        // :unreached; end; foo` → `:x`.
-                        let result = match g.vm.step_block2(block, a, b, pre_frames)? {
-                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
-                            BlockStep::Break(r) => { early = Some(r); break 'outer; }
-                            BlockStep::Value(r) => r,
-                        };
-                        // Non-Integer block result mirrors CRuby's
-                        // `comparison of X with 0 failed`
-                        // (ArgumentError, NOT TypeError — CRuby
-                        // routes the result through `<=>`-style
-                        // comparison against the integer 0 to
-                        // determine ordering, and the failure
-                        // surfaces from Comparable#>). The class
-                        // name in the message is the block-return
-                        // type, not the operand types — those are
-                        // both Integer in the common probe.
-                        //
-                        // BigInt path: with `bignum` enabled, a
-                        // comparator that subtracts large-magnitude
-                        // operands legitimately returns a BigInt —
-                        // e.g. `(a * 2**100) - (b * 2**100)` yields
-                        // a BigInt result that's still semantically
-                        // a sign-bearing integer. CRuby's `<=>`
-                        // itself returns small -1/0/1, but `<=>`
-                        // isn't the only valid comparator return;
-                        // the `(a-b)` shape (idiomatic for floats
-                        // and ints alike) is what produces BigInt.
-                        // Sort by sign, same as Int.
-                        let ord = match &result {
-                            Value::Int(n) if *n > 0 => std::cmp::Ordering::Greater,
-                            Value::Int(n) if *n < 0 => std::cmp::Ordering::Less,
-                            Value::Int(_) => std::cmp::Ordering::Equal,
-                            // Float comparator results — CRuby's
-                            // `rb_cmpint` accepts any numeric that
-                            // compares against 0 (common shape:
-                            // `arr.sort { |a, b| a - b }` on floats).
-                            // Sort by sign; NaN treated as Equal
-                            // (CRuby is also undefined-ish there).
-                            Value::Float(f) if *f > 0.0 => std::cmp::Ordering::Greater,
-                            Value::Float(f) if *f < 0.0 => std::cmp::Ordering::Less,
-                            Value::Float(_) => std::cmp::Ordering::Equal,
-                            #[cfg(feature = "bignum")]
-                            Value::BigInt(id) => {
-                                // O(n²) sort — avoid allocating
-                                // BigInt::from(0) per comparison. The
-                                // heap-stored bigint exposes
-                                // `.sign()` directly (num_bigint API).
-                                use num_bigint::Sign;
-                                match g.vm.heap.bigint(*id).sign() {
-                                    Sign::Plus => std::cmp::Ordering::Greater,
-                                    Sign::Minus => std::cmp::Ordering::Less,
-                                    Sign::NoSign => std::cmp::Ordering::Equal,
-                                }
+                let sort_result = super::sort::merge_sort_by(&mut copy, |a, b| {
+                    // Block result: Int — negative → a < b (in
+                    // order); zero → equal; positive → a > b.
+                    let result = match g.vm.step_block2(block, a.clone(), b.clone(), pre_frames) {
+                        Ok(BlockStep::MethodReturn) => return Err(super::sort::SortStop::MethodReturn),
+                        Ok(BlockStep::Break(r)) => return Err(super::sort::SortStop::Break(r)),
+                        Ok(BlockStep::Value(r)) => r,
+                        Err(t) => return Err(super::sort::SortStop::Trap(t)),
+                    };
+                    // Non-Integer block result mirrors CRuby's
+                    // `comparison of X with 0 failed`
+                    // (ArgumentError, NOT TypeError — CRuby
+                    // routes the result through `<=>`-style
+                    // comparison against the integer 0 to
+                    // determine ordering, and the failure
+                    // surfaces from Comparable#>). The class
+                    // name in the message is the block-return
+                    // type, not the operand types — those are
+                    // both Integer in the common probe.
+                    //
+                    // BigInt path: with `bignum` enabled, a
+                    // comparator that subtracts large-magnitude
+                    // operands legitimately returns a BigInt —
+                    // e.g. `(a * 2**100) - (b * 2**100)` yields
+                    // a BigInt result that's still semantically
+                    // a sign-bearing integer. CRuby's `<=>`
+                    // itself returns small -1/0/1, but `<=>`
+                    // isn't the only valid comparator return;
+                    // the `(a-b)` shape (idiomatic for floats
+                    // and ints alike) is what produces BigInt.
+                    // Sort by sign, same as Int.
+                    Ok(match &result {
+                        Value::Int(n) if *n > 0 => std::cmp::Ordering::Greater,
+                        Value::Int(n) if *n < 0 => std::cmp::Ordering::Less,
+                        Value::Int(_) => std::cmp::Ordering::Equal,
+                        // Float comparator results — CRuby's
+                        // `rb_cmpint` accepts any numeric that
+                        // compares against 0 (common shape:
+                        // `arr.sort { |a, b| a - b }` on floats).
+                        // Sort by sign; NaN treated as Equal
+                        // (CRuby is also undefined-ish there).
+                        Value::Float(f) if *f > 0.0 => std::cmp::Ordering::Greater,
+                        Value::Float(f) if *f < 0.0 => std::cmp::Ordering::Less,
+                        Value::Float(_) => std::cmp::Ordering::Equal,
+                        #[cfg(feature = "bignum")]
+                        Value::BigInt(id) => {
+                            // Avoid allocating BigInt::from(0) per
+                            // comparison. The heap-stored bigint
+                            // exposes `.sign()` directly
+                            // (num_bigint API).
+                            use num_bigint::Sign;
+                            match g.vm.heap.bigint(*id).sign() {
+                                Sign::Plus => std::cmp::Ordering::Greater,
+                                Sign::Minus => std::cmp::Ordering::Less,
+                                Sign::NoSign => std::cmp::Ordering::Equal,
                             }
-                            _ => {
-                                let result_class = match g.vm.class_of(&result) {
-                                    Value::Class(c) => c.name.clone(),
-                                    _ => result.type_name().to_string(),
-                                };
-                                return Err(g.vm.trap(crate::error::RubyError::ArgumentError {
+                        }
+                        _ => {
+                            let result_class = match g.vm.class_of(&result) {
+                                Value::Class(c) => c.name.clone(),
+                                _ => result.type_name().to_string(),
+                            };
+                            return Err(super::sort::SortStop::Trap(g.vm.trap(
+                                crate::error::RubyError::ArgumentError {
                                     msg: format!(
                                         "comparison of {} with 0 failed",
                                         result_class,
                                     ),
-                                }));
-                            }
-                        };
-                        match ord {
-                            std::cmp::Ordering::Greater => {
-                                copy.swap(j - 1, j);
-                                j -= 1;
-                            }
-                            _ => break,
+                                },
+                            )));
                         }
-                    }
+                    })
+                });
+                match sort_result {
+                    Ok(()) => {}
+                    // Non-local `return` from the comparator:
+                    // `Ok(Some(Value::Nil))` marks the primitive
+                    // as matched so the outer dispatch loop
+                    // unwinds via `method_return`. `Ok(None)`
+                    // would route through do_call_block to
+                    // NoMethodError, because this arm IS the
+                    // block-form sort!/sort primitive.
+                    // Empirically verified vs CRuby:
+                    // `def foo; [3,1,2].sort!{return :x};
+                    // :unreached; end; foo` → `:x`.
+                    Err(super::sort::SortStop::MethodReturn) => return Ok(Some(Value::Nil)),
+                    // `break` from the comparator: the break value is
+                    // the expression result and the receiver stays
+                    // unmodified (merge_sort_by leaves `copy`
+                    // untouched on Err, and we skip the writeback).
+                    Err(super::sort::SortStop::Break(r)) => return Ok(Some(r)),
+                    Err(super::sort::SortStop::Trap(t)) => return Err(t),
+                    Err(super::sort::SortStop::Decline) => unreachable!("block sort never declines"),
                 }
-                if let Some(e) = early { return Ok(Some(e)); }
                 if is_bang {
                     *g.vm.heap.array_mut(*id) = copy;
                     Some(Value::Array(*id))
@@ -3731,31 +3728,15 @@ impl Vm {
                     pairs.push((key, v));
                 }
                 if let Some(e) = early { return Ok(Some(e)); }
-                let n = pairs.len();
-                for i in 1..n {
-                    let mut j = i;
-                    while j > 0 {
-                        let (k_prev, k_curr) = {
-                            let (a, b) = pairs.split_at(j);
-                            (a[j - 1].0.clone(), b[0].0.clone())
-                        };
-                        let ord = g.vm.user_cmp(&k_prev, &k_curr)?;
-                        match ord {
-                            // Incomparable keys raise ArgumentError, as
-                            // CRuby does — not the NoMethodError the old
-                            // `Ok(None)` bail produced.
-                            None => {
-                                let t = g.vm.cmp_failed(&k_prev, &k_curr);
-                                return Err(t);
-                            }
-                            Some(std::cmp::Ordering::Greater) => {
-                                pairs.swap(j - 1, j);
-                                j -= 1;
-                            }
-                            _ => break,
-                        }
+                super::sort::merge_sort_by(&mut pairs, |a, b| {
+                    match g.vm.user_cmp(&a.0, &b.0)? {
+                        Some(ord) => Ok(ord),
+                        // Incomparable keys raise ArgumentError, as
+                        // CRuby does — not the NoMethodError the old
+                        // `Ok(None)` bail produced.
+                        None => Err(g.vm.cmp_failed(&a.0, &b.0)),
                     }
-                }
+                })?;
                 let sorted: Vec<Value> = pairs.into_iter().map(|(_, v)| v).collect();
                 // `sort_by!` writes the order back into the receiver and
                 // returns self; `sort_by` allocates a fresh Array.
@@ -4117,7 +4098,7 @@ impl Vm {
 
             // Hash#sort_by — yield (k, v), use returned key as the
             // sort key, return an Array of [k, v] pairs in key
-            // order. Stability preserved via insertion sort.
+            // order. Stability preserved via the stable merge sort.
             (Value::Hash(id), "sort_by", []) => {
                 // PinGuard wraps the *entire* impl, not just the
                 // block-invocation phase. Previously the guard
@@ -4153,24 +4134,21 @@ impl Vm {
                     keyed.push((key, k, v));
                 }
                 if let Some(e) = early { return Ok(Some(e)); }
-                let n = keyed.len();
-                for i in 1..n {
-                    let mut j = i;
-                    while j > 0 {
-                        let ord = {
-                            let a = keyed[j - 1].0.clone();
-                            let b = keyed[j].0.clone();
-                            g.vm.user_cmp(&a, &b)?
-                        };
-                        match ord {
-                            None => return Ok(None),
-                            Some(std::cmp::Ordering::Greater) => {
-                                keyed.swap(j - 1, j);
-                                j -= 1;
-                            }
-                            _ => break,
-                        }
+                match super::sort::merge_sort_by(&mut keyed, |a, b| {
+                    match g.vm.user_cmp(&a.0, &b.0) {
+                        Ok(Some(ord)) => Ok(ord),
+                        // Legacy decline: incomparable keys fall
+                        // through to generic dispatch (NOT the
+                        // cmp_failed ArgumentError the Array arms
+                        // raise) — preserved as-is.
+                        Ok(None) => Err(super::sort::SortStop::Decline),
+                        Err(t) => Err(super::sort::SortStop::Trap(t)),
                     }
+                }) {
+                    Ok(()) => {}
+                    Err(super::sort::SortStop::Decline) => return Ok(None),
+                    Err(super::sort::SortStop::Trap(t)) => return Err(t),
+                    Err(_) => unreachable!("no comparator block in Hash#sort_by key sort"),
                 }
                 g.vm.maybe_gc();
                 let mut out: Vec<Value> = Vec::with_capacity(keyed.len());

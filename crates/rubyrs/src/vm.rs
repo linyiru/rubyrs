@@ -30,6 +30,7 @@ mod numeric;
 mod primitive;
 mod raise;
 mod range;
+mod sort;
 mod sprintf;
 mod step;
 mod string;

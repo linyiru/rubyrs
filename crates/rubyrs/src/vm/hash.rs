@@ -291,29 +291,24 @@ impl Vm {
                         //
                         // Hash#sort (no block) is just to_a sorted by
                         // key using <=> — handled below with an
-                        // insertion sort over the pair list. We share
+                        // merge sort over the pair list. We share
                         // the build path because both produce an
                         // Array<[k, v]>.
                         let mut pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
                         if name == "sort" {
-                            let n = pairs.len();
-                            for i in 1..n {
-                                let mut j = i;
-                                while j > 0 {
-                                    let ord = {
-                                        let a = pairs[j - 1].0.clone();
-                                        let b = pairs[j].0.clone();
-                                        self.user_cmp(&a, &b)?
-                                    };
-                                    match ord {
-                                        None => return Ok(None),
-                                        Some(std::cmp::Ordering::Greater) => {
-                                            pairs.swap(j - 1, j);
-                                            j -= 1;
-                                        }
-                                        _ => break,
-                                    }
+                            match super::sort::merge_sort_by(&mut pairs, |a, b| {
+                                match self.user_cmp(&a.0, &b.0) {
+                                    Ok(Some(ord)) => Ok(ord),
+                                    // Legacy decline on incomparable
+                                    // keys — preserved as-is.
+                                    Ok(None) => Err(super::sort::SortStop::Decline),
+                                    Err(t) => Err(super::sort::SortStop::Trap(t)),
                                 }
+                            }) {
+                                Ok(()) => {}
+                                Err(super::sort::SortStop::Decline) => return Ok(None),
+                                Err(super::sort::SortStop::Trap(t)) => return Err(t),
+                                Err(_) => unreachable!("no comparator block in Hash#sort key sort"),
                             }
                         }
                         let nid = {

@@ -1425,15 +1425,15 @@ impl Vm {
                         Some(best)
                     }
                     ("sort", []) => {
-                        // Insertion sort with synchronous dispatch
-                        // through `user_cmp`. O(n²) but correctness-
-                        // critical: we can't use Rust's sort_by here
-                        // because invoking a user method during the
-                        // comparison closure would alias `&mut Vm`
-                        // while the Vec borrow is live. For arrays
-                        // of built-in types the fast path stays
-                        // value_cmp_v; user-classed elements go
-                        // through their `<=>` method via user_cmp.
+                        // Merge sort (vm/sort.rs) with synchronous
+                        // dispatch through `user_cmp`. We can't use
+                        // Rust's sort_by here because invoking a user
+                        // method during the comparison closure would
+                        // alias `&mut Vm` while the Vec borrow is
+                        // live. For arrays of built-in types the fast
+                        // path stays value_cmp_v; user-classed
+                        // elements go through their `<=>` method via
+                        // user_cmp.
                         //
                         // PinGuard wraps the entire impl: `copy` is
                         // a Rust local with the receiver's element
@@ -1443,32 +1443,21 @@ impl Vm {
                         // copy's contents → next access panics with
                         // ICE use-after-free. Pin the receiver Array
                         // so its children stay reachable via the GC
-                        // mark walk.
+                        // mark walk (the sort engine's scratch buffers
+                        // hold the same ObjIds, covered by that pin).
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Array(id));
                         let mut copy: Vec<Value> = g.vm.heap.array(id).clone();
-                        let n = copy.len();
-                        for i in 1..n {
-                            let mut j = i;
-                            while j > 0 {
-                                let ord = g.vm.user_cmp(&copy[j - 1], &copy[j])?;
-                                match ord {
-                                    // Incomparable pair (no usable `<=>`):
-                                    // CRuby raises ArgumentError, not the
-                                    // NoMethodError the old `Ok(None)` bail
-                                    // produced.
-                                    None => {
-                                        let t = g.vm.cmp_failed(&copy[j - 1], &copy[j]);
-                                        return Err(t);
-                                    }
-                                    Some(std::cmp::Ordering::Greater) => {
-                                        copy.swap(j - 1, j);
-                                        j -= 1;
-                                    }
-                                    _ => break,
-                                }
+                        super::sort::merge_sort_by(&mut copy, |a, b| {
+                            match g.vm.user_cmp(a, b)? {
+                                Some(ord) => Ok(ord),
+                                // Incomparable pair (no usable `<=>`):
+                                // CRuby raises ArgumentError, not the
+                                // NoMethodError the old `Ok(None)` bail
+                                // produced.
+                                None => Err(g.vm.cmp_failed(a, b)),
                             }
-                        }
+                        })?;
                         g.vm.maybe_gc();
                         let nid = g.vm.heap.alloc(HeapObj::Array(copy.into()));
                         Some(Value::Array(nid))
@@ -1663,24 +1652,12 @@ impl Vm {
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Array(id));
                         let mut copy = g.vm.heap.array(id).clone();
-                        let n = copy.len();
-                        for i in 1..n {
-                            let mut j = i;
-                            while j > 0 {
-                                let ord = g.vm.user_cmp(&copy[j - 1], &copy[j])?;
-                                match ord {
-                                    None => {
-                                        let t = g.vm.cmp_failed(&copy[j - 1], &copy[j]);
-                                        return Err(t);
-                                    }
-                                    Some(std::cmp::Ordering::Greater) => {
-                                        copy.swap(j - 1, j);
-                                        j -= 1;
-                                    }
-                                    _ => break,
-                                }
+                        super::sort::merge_sort_by(&mut copy, |a, b| {
+                            match g.vm.user_cmp(a, b)? {
+                                Some(ord) => Ok(ord),
+                                None => Err(g.vm.cmp_failed(a, b)),
                             }
-                        }
+                        })?;
                         *g.vm.heap.array_mut(id) = copy;
                         Some(Value::Array(id))
                     }
