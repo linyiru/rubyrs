@@ -442,7 +442,12 @@ jobs:
           # carry an ICE-class `.expect("ICE: ... no frame")` (one
           # survives the strip net of removed sites). Mirrors the
           # neighbouring top-frame expects; not user-reachable.
-          check crates/rubyrs/src/vm/dispatch.rs     56
+          # Bumped 56 → 58 (+2) by the class-singleton dispatch fast
+          # path (try_invoke_class_singleton_cached): the arg/recv
+          # underflow `.expect("ICE: ...")` pair, mirroring the
+          # Object-recv fast path's stack-direct expects byte-for-
+          # byte. ICE-class; not user-reachable.
+          check crates/rubyrs/src/vm/dispatch.rs     58
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /
