@@ -30,9 +30,10 @@ output **byte-identical to CRuby's**, and faster:
 
 | Jekyll 4.4.1, 1000-post site | rubyrs | CRuby 3.4 |
 |------------------------------|--------|-----------|
-| Build (posts + rouge + kramdown) | **0.59 s** | 0.70 s |
-| Build (with Liquid layouts)      | **0.75 s** | 0.75 s |
-| Peak RSS                         | **68 MB**  | 80 MB |
+| Build (posts + rouge + kramdown) | **0.51 s** | 0.66 s |
+| Build (with Liquid layouts)      | **0.55 s** | 0.72 s |
+| Instructions retired             | **−8–11%** | (reference) |
+| Peak RSS (layout build)          | **69 MB**  | 70 MB |
 | Output                           | byte-identical | (reference) |
 
 ```ruby
@@ -78,9 +79,11 @@ bugs or documented trade-offs, never silent. Where it doesn't
 [docs/SUBSET.md](docs/SUBSET.md). On performance: rubyrs wins on
 real Jekyll builds (table above) thanks to native accelerator
 batteries (rouge/kramdown/YAML/Liquid/JSON engines in Rust behind a
-"byte-identical or decline to pure Ruby" contract); on pure
-VM-dispatch microbenchmarks CRuby is still ~1.4-3× faster — both
-numbers live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+"byte-identical or decline to pure Ruby" contract); rubyrs
+also retires 8–11% fewer CPU instructions end-to-end since the
+O(n log n) sort + dispatch fast-path work; on pure VM-dispatch
+microbenchmarks CRuby is still ~1.4-3× faster — both numbers live
+in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 **vs mruby** — mruby trades the CRuby gem ecosystem away for
 embeddability (its own mrbgems world, no rubygems compatibility).
@@ -98,19 +101,20 @@ WebAssembly target.
 | Embedding | C API | C, mature | Rust crate; caps, sandbox, WASM |
 | Memory safety | C | C | Rust; linear-time regex by default (ReDoS-immune) |
 | Encoding / threads | full | reduced | not yet (documented) |
-| Jekyll 1k-post build | 0.70 s | — | **0.59 s, byte-identical** |
+| Jekyll 1k-post build | 0.66 s | — | **0.51 s, byte-identical** |
 
 Where the cold-start + footprint profile matters (CLI tools, DSL
-hosts, sandboxed script execution), rubyrs starts ~50× faster than
-CRuby and holds a fraction of the RSS:
+hosts, sandboxed script execution), rubyrs starts ~13× faster than
+CRuby (~9× even against `ruby --disable=gems`) at roughly half the
+RSS (4.6 MB vs 10.2 MB on `puts 1+2`):
 
-| Cold start | rubyrs (native) | rubyrs.cwasm (AOT + wizer) | CRuby 3.4 |
-|------------|----------------|----------------------------|-----------|
-| `puts 1+2` | **1.5 ms** | ~7 ms | 78 ms |
+| Cold start | rubyrs (native) | CRuby 3.4 | CRuby `--disable=gems` |
+|------------|----------------|-----------|------------------------|
+| `puts 1+2` | **5.9 ms** | 74.8 ms | 51.1 ms |
 
 | End-to-end DSL hosting (Brewfile, ~50 lines) | rubyrs | CRuby 3.4 |
 |----------------------------------------------|--------|-----------|
-| Time | **1.8 ms** | 74.7 ms |
+| Time | **5.7 ms** | 73.7 ms |
 
 ### What works with `require`
 

@@ -9,7 +9,7 @@ and intentional bumps require an explicit comment in the file.
 
 | Metric | Why it matters | Noise floor |
 |---|---|---|
-| Peak RSS (KB) | The headline "rubyrs is ~5× lighter than CRuby" claim ([SUBSET.md](../docs/SUBSET.md), [ADR 0010](../docs/adr/0010-metaprogramming-poc.md)). Root `README.md` shows fizzbuzz at 2.1 MB vs CRuby's 18.4 MB. | ≤5% on the same machine |
+| Peak RSS (KB) | The headline "rubyrs is ~2× lighter than CRuby" claim ([SUBSET.md](../docs/SUBSET.md), [ADR 0010](../docs/adr/0010-metaprogramming-poc.md)). docs/BENCHMARKS.md "Memory" shows fizzbuzz at 4.7 MB vs CRuby 3.4.1's 10.3 MB (2026-06-11; was 2.1 vs 18.4 on the pre-Jekyll-era binary and an older CRuby build). | ≤5% on the same machine |
 | Wall time (ms) | Dispatch-loop overhead; the second-most-visible cost. ADR 0010's bench shows we're currently 3× CRuby per iteration — `static_bench` etc. lock that gap in. | ~20-30% across CI runs |
 
 RSS is the tighter gate (≤5% noise tolerates a snug budget); wall has

@@ -13,17 +13,72 @@ host code.
 
 | Runtime | Time (incl. process start) |
 |---------|---:|
-| rubyrs (embedded via Runtime API) | **1.8 ms** |
-| CRuby 3.4 (no YJIT) | 74.7 ms |
-| CRuby 3.4 + YJIT | 75.5 ms |
+| rubyrs (embedded via Runtime API) | **5.7 ms** |
+| CRuby 3.4 (no YJIT) | 73.7 ms |
+| CRuby 3.4 + YJIT | 75.7 ms |
 
-**rubyrs is 42.5× faster end-to-end** for this shape of workload.
+**rubyrs is ~13× faster end-to-end** for this shape of workload.
 YJIT doesn't help because almost all of CRuby's wall-time goes to
 process startup and the gem loader, not arithmetic.
+
+(Re-measured 2026-06-11. The earlier 1.8 ms / 42.5× figure was real
+on the pre-Jekyll-era binary; `Runtime::new` now parses a much
+larger always-on preamble — exceptions/enumerable/time/set/… plus
+the accelerator plumbing — which costs ~4 ms at startup. A
+wizer-style pre-initialized snapshot is the known fix if the niche
+demands the old floor back.)
 
 This is what rubyrs is built for: a host Rust app embedding a Ruby
 DSL where script execution time is dwarfed by per-invocation
 overhead.
+
+## Jekyll end-to-end (the flagship)
+
+Real Jekyll 4.4.1 building 1000-post sites from the actual gem
+sources, output byte-identical to CRuby's. Three site shapes, all
+measured 2026-06-11 (commit `2a2c6c5d`) on Apple M-series, ABAB
+interleaved with CRuby 3.4.1, `TZ=UTC`, steady-state (first run
+discarded as FS-cache warmup):
+
+| 1000-post site | rubyrs wall | CRuby wall | rubyrs instr | CRuby instr |
+|----------------|------------:|-----------:|-------------:|------------:|
+| Markdown posts, no layouts            | **0.35 s** | 0.48 s | **4.71 B** | 5.29 B |
+| + Liquid layouts & includes           | **0.55 s** | 0.71 s | **7.18 B** | 7.95 B |
+| + rouge 4.7.0 highlighting, GFM input | **0.51 s** | 0.66 s | **6.81 B** | 7.31 B |
+
+rubyrs wins wall time by 23-27% and retires 8-11% fewer CPU
+instructions. Peak RSS is at parity on these builds (layout build:
+69 MB vs 70 MB; the ~5x RSS advantage shown under "Memory" below is
+a small-script property, not a Jekyll one).
+
+Two changes flipped the instruction count from +17% (2026-06-10) to
+a lead:
+
+  * `f57031a8` — `Array#sort`/`sort_by`/`Hash#sort` were O(n²)
+    insertion sorts; Jekyll's `SiteDrop#posts` reverse-sorts 1000
+    already-ascending documents (insertion sort's worst case),
+    burning 1.84 B instructions per build. Now a stable merge sort
+    with an O(n) sorted-input pre-pass.
+  * `2a2c6c5d` — Hash key-probe fast path (`key?` / `include?` /
+    `has_key?` / `member?`), feeding Liquid `Drop#invokable?`'s
+    Set probes and Jekyll's data-hash merges.
+
+Methodology notes:
+
+  * Wall via `/usr/bin/time -l`; instructions retired is the
+    primary metric (±0.5% run-to-run vs ±5-15% for wall).
+  * Measurement binaries are full-feature builds
+    (`stdlib,sass,_rouge_native,_kramdown_native,_yaml_native,_liquid_native,mimalloc`)
+    verified by `perf/jekyll_guard.sh` and copied aside so cargo
+    rebuilds can't clobber them mid-measurement.
+  * The harness sites/gems live outside the repo (vendored gem
+    sources + generated post corpora) and aren't checked in yet.
+    Posts in the corpus are future-dated across a month, so
+    Jekyll's future-post filter renders ~400 of the 1000 on the
+    measurement date — both engines see the identical set, and
+    cross-day comparisons require regenerating the corpus.
+  * Byte-identity is asserted with `diff -r` against CRuby's
+    `_site` on every measured configuration.
 
 ## Cold start
 
@@ -31,13 +86,21 @@ Trivial program: `puts 1 + 2`. Time to first output.
 
 | Implementation | Wall time |
 |----------------|-----------|
-| rubyrs (native) | **1.5 ms** |
-| rubyrs.wasm via wasmtime (raw, JIT each run) | 12.7 ms |
-| rubyrs.cwasm via wasmtime (AOT, `--allow-precompiled`) | **~7 ms** |
-| CRuby 3.4 (no YJIT) | 77 ms |
-| CRuby 3.4 + YJIT | 78 ms |
+| rubyrs (native) | **5.9 ms** |
+| rubyrs.wasm via wasmtime (raw, JIT each run) | 12.7 ms † |
+| rubyrs.cwasm via wasmtime (AOT, `--allow-precompiled`) | **~7 ms** † |
+| CRuby 3.4 (no YJIT) | 74.8 ms |
+| CRuby 3.4 + YJIT | 73.5 ms |
+| CRuby 3.4 `--disable=gems` | 51.1 ms |
 
-rubyrs is ~50× faster cold-start than CRuby. The two wasm rows
+† wasm rows are from the pre-Jekyll-era lean binary (2026-06-04)
+and pending re-measurement; the native row and both CRuby rows were
+re-measured 2026-06-11.
+
+rubyrs is ~13× faster cold-start than CRuby as users invoke it, and
+~9× faster than the best-tuned `--disable=gems` invocation. (The
+earlier 1.5 ms / ~50× figure predates the Jekyll-era preamble
+growth — see the note in the DSL section above.) The two wasm rows
 reflect different deployment shapes:
   * raw `.wasm` (12.7 ms) — what you ship to embedders, includes
     wasmtime's per-run JIT.
@@ -194,12 +257,16 @@ sooner per page load.
 
 | Implementation | Time | Peak RSS |
 |----------------|------|---------|
-| rubyrs (current: bytecode + IC + Inc*+ BinOpInt + stmt-pos elision) | **0.33 s** | 2.1 MB |
-| rubyrs.wasm via wasmtime | ~0.86 s | ~16.7 MB |
-| CRuby 3.4 (no YJIT) | 0.19 s | 18.4 MB |
-| CRuby 3.4 + YJIT | 0.15 s | 19.1 MB |
+| rubyrs (re-measured 2026-06-11, default features) | **0.26 s** | 4.7 MB |
+| rubyrs.wasm via wasmtime | ~0.86 s † | ~16.7 MB † |
+| CRuby 3.4.1 (no YJIT) | 0.20 s | 10.3 MB |
+| CRuby 3.4.1 + YJIT | 0.14 s | ~10 MB |
 
-rubyrs is **1.76× of CRuby's interpreter** on fizzbuzz, ~2.2× of CRuby+YJIT.
+† pre-Jekyll-era lean binary, pending re-measurement.
+
+rubyrs is **1.31× of CRuby's interpreter** on fizzbuzz, ~1.84× of
+CRuby+YJIT (was 1.76× / 2.2× before the 2026-06 dispatch fast-path
+work).
 
 Method-dispatch-heavy workloads close the gap further. `Counter.inc × 1M`
 (every iteration is a method call into `@count = @count + 1`):
@@ -232,12 +299,16 @@ work), each commit verified against the 10-fixture CRuby diff harness:
 
 ## Memory
 
+Re-measured 2026-06-11 (default-feature build; CRuby 3.4.1 via
+rbenv). Both sides moved since the original measurement: rubyrs's
+always-on preamble grew through the Jekyll-era work, and this
+CRuby build idles lighter than the one measured earlier:
+
 | Workload | rubyrs RSS | CRuby RSS |
 |----------|-----------|-----------|
-| Trivial `puts 1+2` | 2.1 MB | 18.4 MB |
-| 1M fizzbuzz | 2.1 MB | 18.4 MB |
-| 200k cycle-allocations (with our mark-sweep GC) | 2.4 MB | 18.3 MB |
-| 2M cycle-allocations | 2.4 MB | n/a |
+| Trivial `puts 1+2` | 4.6 MB | 10.2 MB |
+| 1M fizzbuzz | 4.7 MB | 10.3 MB |
+| 200k cycle-allocations (with our mark-sweep GC) | 5.6 MB | 10.7 MB |
 
 GC works: heap stays flat even when the Ruby program allocates millions of
 short-lived objects with cycles. See [ADR 0003](adr/0003-rc-plus-mark-sweep-hybrid-gc.md).
@@ -246,7 +317,7 @@ short-lived objects with cycles. See [ADR 0003](adr/0003-rc-plus-mark-sweep-hybr
 
 | Target | Size |
 |--------|-----:|
-| Native (aarch64-apple-darwin, stripped) | 3.5 MB |
+| Native (aarch64-apple-darwin, stripped, default features) | 5.0 MB |
 | `wasm32-wasip1` (stripped) | 1.3 MB |
 | `wasm32-wasip1` (stripped + `wasm-opt -Oz`) | 1.2 MB |
 

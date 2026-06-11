@@ -590,9 +590,13 @@ they're handled as universal arms in `primitive_call` /
   for the rationale). Fix is a single shared piece of context
   tracking for all four; treated as a follow-up so the existing
   `attr_*` semantics aren't changed in isolation.
-- Per-iteration dispatch is ~3× CRuby's. See
+- Per-iteration dispatch is ~1.3-3× CRuby's depending on shape
+  (fizzbuzz 1.31× as of 2026-06-11; metaprog shapes nearer 3×). See
   [`examples/metaprog_bench/README.md`](../crates/rubyrs/examples/metaprog_bench/README.md)
-  — peak memory is still ~5× lighter than CRuby on the same workload.
+  — peak memory is still ~2× lighter than CRuby on the same
+  workload (the earlier ~5× predates rubyrs's Jekyll-era preamble
+  growth and a leaner current CRuby build; see docs/BENCHMARKS.md
+  "Memory").
 
 ### Runtime
 - Mark-sweep GC over `Instance`, `Array`, `Hash` (cycle-safe). See
