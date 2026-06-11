@@ -3741,20 +3741,6 @@ impl Vm {
     /// `_name_id` / `_cache_id` are unused today (arms match
     /// on `name: &str`); kept in the signature for forward
     /// compat with future arms that may need them.
-    /// Enforce private/protected access rules for an Object
-    /// receiver dispatch (explicit-receiver path).
-    ///
-    /// Private: cannot be invoked with an explicit receiver,
-    /// except the modern (CRuby 3.x) `self.foo` form where
-    /// `self == recv` by ObjId.
-    ///
-    /// Protected: caller's `self` class must be an instance of
-    /// (or descendant of) the method's *defining* class — CRuby's
-    /// rule, not the receiver's class.
-    ///
-    /// `bypass_visibility` is the `send` / `__send__` one-shot
-    /// override consumed by `do_call` before this call.
-
     /// Apply `private_class_method` / `public_class_method`: flip the
     /// visibility of the named singleton methods on `target`. Own-
     /// table entries flip their Cell in place; chain-inherited
@@ -3806,6 +3792,19 @@ impl Vm {
         Ok(())
     }
 
+    /// Enforce private/protected access rules for an Object
+    /// receiver dispatch (explicit-receiver path).
+    ///
+    /// Private: cannot be invoked with an explicit receiver,
+    /// except the modern (CRuby 3.x) `self.foo` form where
+    /// `self == recv` by ObjId.
+    ///
+    /// Protected: caller's `self` class must be an instance of
+    /// (or descendant of) the method's *defining* class — CRuby's
+    /// rule, not the receiver's class.
+    ///
+    /// `bypass_visibility` is the `send` / `__send__` one-shot
+    /// override consumed by `do_call` before this call.
     fn check_method_visibility(
         &self,
         m: &Method,
