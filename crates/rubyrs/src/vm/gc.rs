@@ -49,7 +49,7 @@ impl Vm {
             locals: Rc::new(RefCell::new(vec_nil(n_locals))),
             self_val: Value::Nil,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: None,
         });
         self.dispatch()?;
@@ -579,8 +579,10 @@ impl Vm {
             // rescue + alloc churn inside the inner rescue →
             // `$!.message` ICEs with "class_of called on non-Object
             // slot" (begin_dollar_bang_snapshot_gc fixture).
-            for b in &f.begin_rescue_depths {
-                roots.push(b.saved_dollar_bang.clone());
+            if let Some(aux) = &f.aux {
+                for b in &aux.begin_rescue_depths {
+                    roots.push(b.saved_dollar_bang.clone());
+                }
             }
         }
         // `define_method`-installed methods carry captured-locals

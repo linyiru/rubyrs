@@ -221,7 +221,7 @@ impl Vm {
             let chosen = {
                 let f = self.frames.last_mut().expect("ICE: unwind with empty frames");
                 let mut chosen = None;
-                while let Some(h) = f.rescues.pop() {
+                while let Some(h) = f.pop_rescue() {
                     let matches = if h.is_ensure {
                         // ensure is unconditional — always runs.
                         true
@@ -253,8 +253,8 @@ impl Vm {
                 // entry and pops the wrong handler depth. Parallel
                 // truncate on `loop_stack_depths` keeps the two
                 // stacks in lock-step.
-                f.loop_rescue_depths.truncate(h.loop_depth_at_push);
-                f.loop_stack_depths.truncate(h.loop_depth_at_push);
+                f.aux_mut().loop_rescue_depths.truncate(h.loop_depth_at_push);
+                f.aux_mut().loop_stack_depths.truncate(h.loop_depth_at_push);
                 // Same shape as loop_rescue_depths truncation but
                 // for the begin/rescue baseline stack: any inner
                 // `EnterBegin` entries the exception is escaping
@@ -272,7 +272,7 @@ impl Vm {
                 // — captured at its `EnterBegin`; truncating by
                 // count is enough since outer entries are still
                 // valid).
-                f.begin_rescue_depths.truncate(h.begin_depth_at_push);
+                f.aux_mut().begin_rescue_depths.truncate(h.begin_depth_at_push);
                 if h.is_ensure {
                     // ensure handler: push the exception onto the operand
                     // stack; the handler's compiled code ends in `Op::Raise`
@@ -361,7 +361,7 @@ impl Vm {
         // so the eventual landing can truncate `loop_rescue_depths`
         // (entries pushed by lexically-inner whiles the transfer is
         // escaping out of get discarded along the way).
-        let target_loop_depth = f.loop_rescue_depths.len() - 1;
+        let target_loop_depth = f.loop_depth() - 1;
         // Capture the operand-stack depth at the matching EnterLoop's
         // time. The landing path truncates to this depth so any
         // residue accumulated in the body (most importantly the
@@ -369,7 +369,8 @@ impl Vm {
         // entering an ensure handler, in scenarios like
         // `while; begin; raise; ensure; break; end; end`) is
         // flushed before the break value lands.
-        let target_stack_depth = *f.loop_stack_depths.last()
+        let target_stack_depth = *f.aux.as_ref()
+            .and_then(|a| a.loop_stack_depths.last())
             .expect("ICE: loop_stack_depths empty at begin_loop_transfer");
         self.pending_loop_transfer = Some(LoopTransfer {
             kind, target_ip, target_rescues_len, target_loop_depth,
@@ -394,8 +395,8 @@ impl Vm {
         // walk happens on the next EndEnsure.
         loop {
             let f = self.frames.last_mut().expect("ICE: continue_loop_transfer no frame");
-            if f.rescues.len() <= target_rescues_len { break; }
-            let h = f.rescues.pop().expect("ICE: rescues non-empty by length check");
+            if f.rescues_len() <= target_rescues_len { break; }
+            let h = f.pop_rescue().expect("ICE: rescues non-empty by length check");
             if h.is_ensure {
                 // Suspend the transfer here. Restore the operand
                 // stack to PushEnsure depth (matching the
@@ -423,8 +424,8 @@ impl Vm {
         // Truncate loop_rescue_depths (+ parallel loop_stack_depths)
         // to the entry we're targeting (drops EnterLoop entries from
         // nested whiles the transfer is escaping out of).
-        f.loop_rescue_depths.truncate(target_loop_depth + 1);
-        f.loop_stack_depths.truncate(target_loop_depth + 1);
+        f.aux_mut().loop_rescue_depths.truncate(target_loop_depth + 1);
+        f.aux_mut().loop_stack_depths.truncate(target_loop_depth + 1);
         f.ip = target_ip;
         if let LoopTransferKind::Break { value } = transfer.kind {
             // Push the break value so the loop's join sees it as
@@ -486,7 +487,7 @@ impl Vm {
             let f = self.frames.last_mut()
                 .expect("ICE: continue_method_break: empty frames");
             let mut found_ensure = None;
-            while let Some(h) = f.rescues.pop() {
+            while let Some(h) = f.pop_rescue() {
                 if h.is_ensure {
                     found_ensure = Some(h);
                     break;

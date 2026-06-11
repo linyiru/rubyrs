@@ -10909,11 +10909,8 @@ impl Vm {
             is_block: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
-            rescues: vec![],
-            loop_rescue_depths: vec![],
-            loop_stack_depths: vec![],
+            aux: None,
             pending_yield: false,
-            begin_rescue_depths: vec![],
             block_writeback: None,
         });
         self.enter_method_match_scope();
@@ -11019,11 +11016,8 @@ impl Vm {
             is_block: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
-            rescues: vec![],
-            loop_rescue_depths: vec![],
-            loop_stack_depths: vec![],
+            aux: None,
             pending_yield: false,
-            begin_rescue_depths: vec![],
             block_writeback: None,
         });
         self.enter_method_match_scope();
@@ -11085,9 +11079,8 @@ impl Vm {
             is_block: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
-            rescues: vec![],
-            loop_rescue_depths: vec![],
-            loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            aux: None,
+            pending_yield: false,
             block_writeback: None,
         });
         self.enter_method_match_scope();
@@ -11345,7 +11338,7 @@ impl Vm {
                 // defaults), so all params are "given".
                 n_given_positional: given as u16,
                 kw_given_mask: 0,
-                rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+                aux: None, pending_yield: false,
                 block_writeback: None,
             });
             self.enter_method_match_scope();
@@ -11373,9 +11366,8 @@ impl Vm {
                 is_block: false,
                 n_given_positional: fixed.required,
                 kw_given_mask: 0,
-                rescues: vec![],
-                loop_rescue_depths: vec![],
-                loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+                aux: None,
+                pending_yield: false,
                 block_writeback: None,
             });
             self.enter_method_match_scope();
@@ -11704,7 +11696,7 @@ impl Vm {
             // the latter.
             n_given_positional: positional_take as u16,
             kw_given_mask,
-            rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            aux: None, pending_yield: false,
             block_writeback: None,
         });
         self.enter_method_match_scope();
@@ -11891,7 +11883,7 @@ impl Vm {
             is_block: true,
             n_given_positional: 0,
             kw_given_mask: 0,
-            rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            aux: None, pending_yield: false,
             block_writeback: None,
         });
         Ok(())
@@ -12201,7 +12193,7 @@ impl Vm {
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
             lexical_cvar_class: bh_lexical_cvar_class,
             #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: true, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            is_block: true, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: Some((captured, param_start)),
         });
         Ok(())
@@ -12409,7 +12401,7 @@ impl Vm {
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
             lexical_cvar_class: bh_lexical_cvar_class,
             #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: true, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            is_block: true, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: Some((captured, param_start)),
         });
         Ok(())

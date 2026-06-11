@@ -161,27 +161,17 @@ pub(crate) struct Frame {
     /// prologue would consult). 64-bit caps non-literal-default
     /// kwargs per method at 64 — far above any real signature.
     pub(crate) kw_given_mask: u64,
-    pub(crate) rescues: Vec<RescueHandler>,
-    /// Stack of `rescues.len()` snapshots, one per enclosing
-    /// `while` loop currently active in this frame. `Op::EnterLoop`
-    /// pushes; `Op::ExitLoop` pops. `Op::BreakLoop` reads the top
-    /// to know how many handler entries to discard before jumping
-    /// to the loop's end label. Empty for frames with no active
-    /// loop and for frames where `break` instead signals an
-    /// iteration-driver / block return (the existing `Op::Break`
-    /// path stays untouched).
-    pub(crate) loop_rescue_depths: Vec<usize>,
-    /// Parallel stack to `loop_rescue_depths`: `stack.len()` at the
-    /// moment each enclosing `while`'s `Op::EnterLoop` ran. Used by
-    /// `continue_loop_transfer`'s landing path to truncate any
-    /// operand-stack residue accumulated inside the body — most
-    /// importantly the exception value `unwind_with_exception`
-    /// pushes when entering an ensure handler (which `break`/`next`
-    /// from inside that handler would otherwise leave stranded).
-    /// Kept in lock-step with `loop_rescue_depths`: same push site
-    /// (EnterLoop), pop site (ExitLoop), and truncate site
-    /// (rescue/ensure match in `unwind_with_exception`).
-    pub(crate) loop_stack_depths: Vec<usize>,
+    /// Exception / loop bookkeeping, boxed out of the hot struct.
+    /// Most frames (every block invocation in a tight iterator
+    /// loop, most method calls) never enter a `begin`, install a
+    /// rescue, or run a `while` — for them this stays `None`: no
+    /// allocation, and `Frame`'s push/pop memmove shrinks by the
+    /// four inline `Vec` headers (328 → 240 bytes measured). The
+    /// box is created lazily by `aux_mut()` at the first
+    /// EnterBegin / PushRescue / EnterLoop. GC: `gc.rs`'s root
+    /// gather walks `begin_rescue_depths[].saved_dollar_bang`
+    /// through here (the `e0c664ab` rooting fix).
+    pub(crate) aux: Option<Box<FrameAux>>,
     /// ADR 0024 Phase A: `Op::Yield` synchronous-wrapper
     /// "yield in progress" flag. Set by `Op::Yield`'s match
     /// arm BEFORE `invoke_block`, cleared after the nested
@@ -194,18 +184,6 @@ pub(crate) struct Frame {
     /// yields each track their own pending state.
     #[allow(dead_code)] // wired in Phase A.1
     pub(crate) pending_yield: bool,
-    /// Stack of `rescues.len()` snapshots taken at the start
-    /// of each enclosing `begin / rescue` block, used by
-    /// `retry`'s rescue-stack truncation. `Op::EnterBegin`
-    /// pushes the current depth; `Op::ExitBegin` pops it. On
-    /// retry, `Op::TruncateRescuesToBeginBaseline` reads the
-    /// top and shrinks `rescues` back to that depth so a
-    /// partial-unwind stale handler (multi-class /
-    /// multi-clause cases where the unwinder consumed only
-    /// some entries) doesn't survive the retry to catch a
-    /// later exception outside the begin block.
-    /// (Code-review #306 round 1.)
-    pub(crate) begin_rescue_depths: Vec<BeginBaseline>,
     /// Set on block frames whose `locals` is a FRESH per-invocation
     /// Vec cloned from the BlockHandle's `captured` at
     /// `invoke_block`. Holds the original `captured` Rc + the
@@ -221,6 +199,57 @@ pub(crate) struct Frame {
     /// invokes from non-iterating callers — currently unused, but
     /// the field allows future opt-in).
     pub(crate) block_writeback: Option<(Rc<RefCell<Vec<Value>>>, u16)>,
+}
+
+/// The cold half of `Frame` — exception-handling and `while`-loop
+/// bookkeeping, lazily boxed (see `Frame::aux`). Field semantics are
+/// unchanged from when these lived inline on `Frame`:
+///
+/// - `rescues`: active handlers, pushed by `Op::PushRescue` /
+///   `Op::PushEnsure`, consumed by the unwinder.
+/// - `loop_rescue_depths`: one `rescues.len()` snapshot per enclosing
+///   active `while` (`Op::EnterLoop` pushes, `Op::ExitLoop` pops;
+///   `Op::BreakLoop` reads the top to discard handler entries before
+///   jumping to the loop end).
+/// - `loop_stack_depths`: parallel stack of `stack.len()` snapshots
+///   at each `Op::EnterLoop`, used by `continue_loop_transfer` to
+///   truncate operand-stack residue (kept in lock-step with
+///   `loop_rescue_depths`: same push / pop / truncate sites).
+/// - `begin_rescue_depths`: per-`begin` baselines for `retry`'s
+///   rescue-stack truncation and the `$!` snapshot restore
+///   (code-review #306 round 1 / the `3134717c` dynamic scoping).
+#[derive(Default)]
+pub(crate) struct FrameAux {
+    pub(crate) rescues: Vec<RescueHandler>,
+    pub(crate) loop_rescue_depths: Vec<usize>,
+    pub(crate) loop_stack_depths: Vec<usize>,
+    pub(crate) begin_rescue_depths: Vec<BeginBaseline>,
+}
+
+impl Frame {
+    /// Get-or-create the aux box. Call sites that only READ should
+    /// prefer `aux.as_ref()` / the `..._len` style probes so an
+    /// aux-less frame stays allocation-free.
+    #[inline]
+    pub(crate) fn aux_mut(&mut self) -> &mut FrameAux {
+        self.aux.get_or_insert_with(Default::default)
+    }
+    #[inline]
+    pub(crate) fn rescues_len(&self) -> usize {
+        self.aux.as_ref().map_or(0, |a| a.rescues.len())
+    }
+    #[inline]
+    pub(crate) fn pop_rescue(&mut self) -> Option<RescueHandler> {
+        self.aux.as_mut().and_then(|a| a.rescues.pop())
+    }
+    #[inline]
+    pub(crate) fn loop_depth(&self) -> usize {
+        self.aux.as_ref().map_or(0, |a| a.loop_rescue_depths.len())
+    }
+    #[inline]
+    pub(crate) fn begin_depth(&self) -> usize {
+        self.aux.as_ref().map_or(0, |a| a.begin_rescue_depths.len())
+    }
 }
 
 /// In-flight structured `break`/`next` walking through an

@@ -2751,8 +2751,8 @@ impl Vm {
             is_block: false,
             n_given_positional: 0,
             kw_given_mask: 0,
-            rescues: vec![],
-            loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            aux: None,
+            pending_yield: false,
             block_writeback: None,
         });
         // Dispatch loop. We can't just call `dispatch_until` and
@@ -3041,8 +3041,8 @@ impl Vm {
             is_block: false,
             n_given_positional: 0,
             kw_given_mask: 0,
-            rescues: vec![],
-            loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            aux: None,
+            pending_yield: false,
             block_writeback: None,
         });
         // Same dispatch-loop shape as compile_and_run_source;

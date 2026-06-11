@@ -3431,7 +3431,7 @@ impl Vm {
                     locals: Rc::new(RefCell::new(vec_nil(n_locals))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
                     block_writeback: None,
                 });
             }
@@ -3483,8 +3483,8 @@ impl Vm {
             Op::PushRescue(off, slot, bind, filter_sym) => {
                 let f = self.frames.last().expect("ICE: PushRescue no frame");
                 let ip = f.ip;
-                let loop_depth = f.loop_rescue_depths.len();
-                let begin_depth = f.begin_rescue_depths.len();
+                let loop_depth = f.loop_depth();
+                let begin_depth = f.begin_depth();
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
                 let bind_slot = if bind != 0 { Some(slot) } else { None };
@@ -3557,14 +3557,14 @@ impl Vm {
                             })
                     }
                 };
-                self.frames.last_mut().expect("ICE: PushRescue no frame").rescues.push(RescueHandler {
+                self.frames.last_mut().expect("ICE: PushRescue no frame").aux_mut().rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
                     filter_class: filter, loop_depth_at_push: loop_depth,
                     begin_depth_at_push: begin_depth,
                 });
             }
             Op::PopRescue => {
-                self.frames.last_mut().expect("ICE: PopRescue no frame").rescues.pop();
+                self.frames.last_mut().expect("ICE: PopRescue no frame").pop_rescue();
             }
             Op::EnterBegin => {
                 // Snapshot `$!` so `ExitBegin` (or a `return` out of a
@@ -3574,21 +3574,23 @@ impl Vm {
                 let saved_dollar_bang =
                     self.globals.get(&self.sym_bang).cloned().unwrap_or(Value::Nil);
                 let f = self.frames.last_mut().expect("ICE: EnterBegin no frame");
+                let aux = f.aux_mut();
                 let baseline = crate::vm::BeginBaseline {
-                    rescues_len: f.rescues.len(),
-                    loop_rescue_depths_len: f.loop_rescue_depths.len(),
-                    loop_stack_depths_len: f.loop_stack_depths.len(),
+                    rescues_len: aux.rescues.len(),
+                    loop_rescue_depths_len: aux.loop_rescue_depths.len(),
+                    loop_stack_depths_len: aux.loop_stack_depths.len(),
                     saved_dollar_bang,
                 };
-                f.begin_rescue_depths.push(baseline);
+                aux.begin_rescue_depths.push(baseline);
             }
             Op::ExitBegin => {
                 let baseline = self
                     .frames
                     .last_mut()
                     .expect("ICE: ExitBegin no frame")
-                    .begin_rescue_depths
-                    .pop()
+                    .aux
+                    .as_mut()
+                    .and_then(|a| a.begin_rescue_depths.pop())
                     .expect("ICE: ExitBegin without matching EnterBegin");
                 // Revert `$!` to its pre-begin value now that this
                 // region's rescue/ensure body has completed. A handled
@@ -3598,7 +3600,8 @@ impl Vm {
             }
             Op::TruncateRescuesToBeginBaseline => {
                 let f = self.frames.last_mut().expect("ICE: TruncateRescues no frame");
-                let baseline = f
+                let aux = f.aux_mut();
+                let baseline = aux
                     .begin_rescue_depths
                     .last()
                     .expect("ICE: retry without matching EnterBegin baseline")
@@ -3608,18 +3611,18 @@ impl Vm {
                 // (rescues truncation) or from inside a `while`
                 // loop in the rescue body (loop depths
                 // truncation). (Code-review #306 round 3.)
-                f.rescues.truncate(baseline.rescues_len);
-                f.loop_rescue_depths.truncate(baseline.loop_rescue_depths_len);
-                f.loop_stack_depths.truncate(baseline.loop_stack_depths_len);
+                aux.rescues.truncate(baseline.rescues_len);
+                aux.loop_rescue_depths.truncate(baseline.loop_rescue_depths_len);
+                aux.loop_stack_depths.truncate(baseline.loop_stack_depths_len);
             }
             Op::PushEnsure(off) => {
                 let f = self.frames.last().expect("ICE: PushEnsure no frame");
                 let ip = f.ip;
-                let loop_depth = f.loop_rescue_depths.len();
-                let begin_depth = f.begin_rescue_depths.len();
+                let loop_depth = f.loop_depth();
+                let begin_depth = f.begin_depth();
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
-                self.frames.last_mut().expect("ICE: PushEnsure no frame").rescues.push(RescueHandler {
+                self.frames.last_mut().expect("ICE: PushEnsure no frame").aux_mut().rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot: None, is_ensure: true,
                     filter_class: None, // ensure is unconditional
                     loop_depth_at_push: loop_depth,
@@ -3627,7 +3630,7 @@ impl Vm {
                 });
             }
             Op::PopEnsure => {
-                self.frames.last_mut().expect("ICE: PopEnsure no frame").rescues.pop();
+                self.frames.last_mut().expect("ICE: PopEnsure no frame").pop_rescue();
             }
             Op::Raise => {
                 let mut v = self.stack.pop().unwrap_or(Value::Nil);
@@ -3668,18 +3671,18 @@ impl Vm {
                 self.break_signaled = true;
             }
             Op::EnterLoop => {
-                let f = self.frames.last().expect("ICE: EnterLoop no frame");
-                let depth = f.rescues.len();
                 let stack_depth = self.stack.len();
                 let f = self.frames.last_mut().expect("ICE: EnterLoop no frame");
-                f.loop_rescue_depths.push(depth);
-                f.loop_stack_depths.push(stack_depth);
+                let aux = f.aux_mut();
+                let depth = aux.rescues.len();
+                aux.loop_rescue_depths.push(depth);
+                aux.loop_stack_depths.push(stack_depth);
             }
             Op::ExitLoop => {
-                let f = self.frames.last_mut().expect("ICE: ExitLoop no frame");
-                f.loop_rescue_depths.pop()
+                let aux = self.frames.last_mut().expect("ICE: ExitLoop no frame").aux_mut();
+                aux.loop_rescue_depths.pop()
                     .expect("ICE: ExitLoop with empty loop_rescue_depths");
-                f.loop_stack_depths.pop()
+                aux.loop_stack_depths.pop()
                     .expect("ICE: ExitLoop with empty loop_stack_depths");
             }
             Op::BreakLoop(off) => {
@@ -3687,7 +3690,8 @@ impl Vm {
                 // dispatcher has already advanced f.ip past this op,
                 // so the patched offset lands on the loop's join).
                 let f = self.frames.last().expect("ICE: BreakLoop no frame");
-                let target_depth = *f.loop_rescue_depths.last()
+                let target_depth = *f.aux.as_ref()
+                    .and_then(|a| a.loop_rescue_depths.last())
                     .expect("ICE: BreakLoop outside a while loop");
                 let target_ip = (f.ip as i32 + off) as usize;
                 // Break value was pushed by the compiler immediately
@@ -3702,7 +3706,8 @@ impl Vm {
                 // of join; no value to carry (while has no iteration
                 // value).
                 let f = self.frames.last().expect("ICE: NextLoop no frame");
-                let target_depth = *f.loop_rescue_depths.last()
+                let target_depth = *f.aux.as_ref()
+                    .and_then(|a| a.loop_rescue_depths.last())
                     .expect("ICE: NextLoop outside a while loop");
                 let target_ip = (f.ip as i32 + off) as usize;
                 self.begin_loop_transfer(LoopTransferKind::Next, target_ip, target_depth)?;
@@ -3911,8 +3916,11 @@ impl Vm {
                 // entry, so the caller's errinfo is unaffected by any
                 // exception this method handled internally. (No open
                 // begin → this method never touched `$!`, nothing to do.)
-                if let Some(saved) =
-                    f.begin_rescue_depths.first().map(|b| b.saved_dollar_bang.clone())
+                if let Some(saved) = f
+                    .aux
+                    .as_ref()
+                    .and_then(|a| a.begin_rescue_depths.first())
+                    .map(|b| b.saved_dollar_bang.clone())
                 {
                     self.globals.insert(self.sym_bang, saved);
                 }
