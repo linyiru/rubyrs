@@ -1634,6 +1634,7 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
+ "postcard",
  "regex",
  "regex-syntax",
  "rostdown",

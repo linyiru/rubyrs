@@ -54,6 +54,8 @@ pub(crate) mod yaml_native;
 #[cfg(feature = "_liquid_native")]
 pub(crate) mod liquid_native;
 mod output;
+#[cfg(feature = "preamble-cache")]
+pub mod preamble_cache;
 // `regex_engine` is public because `Value::Regex(Rc<CompiledRegex>)`
 // is reachable from the embedder-visible `Value` enum; an
 // unnameable type in a public field would trip Rust's
@@ -474,6 +476,17 @@ pub struct Config {
     /// narrows an open sandbox to a set of canonicalized prefixes
     /// (rubund's gemspec-evaluator shape).
     pub allow_filesystem_io: bool,
+    /// Directory for the preamble bytecode cache (`preamble-cache`
+    /// feature). `None` (the default) disables the cache entirely —
+    /// a library Runtime performs no filesystem access at
+    /// construction. Setting a directory is the host's explicit
+    /// consent to read/write cache blobs there; the CLI binary
+    /// defaults this to `~/.cache/rubyrs` (see
+    /// `preamble_cache::default_cache_dir`). Deliberately separate
+    /// from `allow_filesystem_io`, which gates SCRIPT-level IO.
+    /// Without the `preamble-cache` feature the field is accepted
+    /// and ignored, so embedder struct literals don't need cfg.
+    pub preamble_cache_dir: Option<std::path::PathBuf>,
     /// Path-level narrowing on top of `allow_filesystem_io`. The
     /// two fields compose as a layered sandbox:
     ///
@@ -655,6 +668,7 @@ impl Default for Config {
             // / __dir__ cannot reach the host filesystem. The CLI
             // binary opts in explicitly via `Config { allow_filesystem_io: true, .. }`.
             allow_filesystem_io: false,
+            preamble_cache_dir: None,
             // No path-level narrowing by default — `allow_filesystem_io`
             // already covers the secure-by-default case. Hosts that
             // want scoped FS access (rubund evaluating gemspecs in a
@@ -779,6 +793,24 @@ pub struct Runtime {
     /// before the snapshot is taken; `Some(_)` for the rest of
     /// the Runtime's lifetime. `reset()` is a no-op when None.
     post_preamble: Option<PostPreambleSnapshot>,
+    /// Host-provided directory for the preamble bytecode cache
+    /// (`Config::preamble_cache_dir`). `None` = cache disabled —
+    /// the library default, per ADR 0017's no-ambient-capability
+    /// posture. See `preamble_cache` module docs.
+    #[cfg(feature = "preamble-cache")]
+    preamble_cache_dir: Option<std::path::PathBuf>,
+    /// `Some(steps)` only while `load_preamble_inner` runs on a
+    /// cache MISS — `eval_inner` appends each chunk's entry-proto
+    /// index, `load_preamble_inner` appends the builtin-install
+    /// sentinel, and `load_preamble` serializes the finished
+    /// sequence. The recording IS the replay program, so the
+    /// chunk order is single-sourced from the live path.
+    #[cfg(feature = "preamble-cache")]
+    preamble_recording: Option<Vec<u32>>,
+    /// Whether this Runtime's preamble came from the cache.
+    /// Surfaced for tests and the CLI's startup-prof telemetry.
+    #[cfg(feature = "preamble-cache")]
+    preamble_cache_was_hit: bool,
 }
 
 /// Captures the boundary between "preamble state" and "user state"
@@ -940,6 +972,11 @@ struct ClassStateSnapshot {
     singleton_prepends: Vec<std::rc::Rc<value::Class>>,
     class_vars: crate::intern::FxHashMap<intern::SymId, value::Value>,
 }
+
+static STARTUP_PROF_PARSE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static STARTUP_PROF_AST_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static STARTUP_PROF_COMPILE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static STARTUP_PROF_RUN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Per-process slot used by the wizer pre-initialize path. On
 /// wasm32-wasip1, the binary exports `wizer.initialize` (below)
@@ -1460,7 +1497,18 @@ impl Runtime {
 
         let interner = intern::Interner::new();
         let vm = vm::Vm::new(vec![], interner);
-        Runtime { vm, fuel_budget: None, deadline: None, post_preamble: None }
+        Runtime {
+            vm,
+            fuel_budget: None,
+            deadline: None,
+            post_preamble: None,
+            #[cfg(feature = "preamble-cache")]
+            preamble_cache_dir: None,
+            #[cfg(feature = "preamble-cache")]
+            preamble_recording: None,
+            #[cfg(feature = "preamble-cache")]
+            preamble_cache_was_hit: false,
+        }
     }
 
     /// Wizer-able default Runtime: skeleton + preamble, no host
@@ -1501,6 +1549,10 @@ impl Runtime {
         // overwrite semantics.
         self.vm.stress_gc = cfg.stress_gc;
         self.fuel_budget = cfg.fuel;
+        #[cfg(feature = "preamble-cache")]
+        {
+            self.preamble_cache_dir = cfg.preamble_cache_dir.clone();
+        }
         self.vm.max_frames = cfg.max_frames;
         self.vm.max_dispatch_depth = cfg.max_dispatch_depth;
         self.vm.heap.max_live = cfg.max_heap_objects;
@@ -2149,6 +2201,86 @@ impl Runtime {
     /// panic AGAIN with the wrapped trap text — double-encoded
     /// diagnostic that buries the original site.
     fn load_preamble(&mut self) {
+        let _t_total = std::time::Instant::now();
+        #[cfg(feature = "preamble-cache")]
+        {
+            let key_dir = self
+                .preamble_cache_dir
+                .clone()
+                .and_then(|dir| preamble_cache::cache_key(&self.vm).map(|k| (dir, k)));
+            if let Some((dir, key)) = key_dir {
+                if let Some(plan) = preamble_cache::try_load(&mut self.vm, &dir, key) {
+                    // Cache hit: bytecode restored; replay the
+                    // recorded step sequence (entry protos + the
+                    // builtin-install sentinel) in order. Execution
+                    // semantics are identical to the live path —
+                    // only parse/AST/compile were skipped.
+                    for &step in &plan.steps {
+                        if step == preamble_cache::STEP_INSTALL_BUILTINS {
+                            self.vm.install_kernel_builtins();
+                            self.vm.install_basic_object_builtins();
+                        } else {
+                            self.run_compiled(step as usize)
+                                .expect("ICE: preamble cache replay failed");
+                        }
+                    }
+                    self.preamble_cache_was_hit = true;
+                } else {
+                    // Miss: live-compile while recording the step
+                    // sequence, then publish the snapshot.
+                    let pre_interner_len = self.vm.interner.len() as u32;
+                    let pre_protos_len = self.vm.protos.len() as u32;
+                    self.preamble_recording = Some(Vec::with_capacity(24));
+                    self.load_preamble_inner();
+                    let steps = self
+                        .preamble_recording
+                        .take()
+                        .expect("ICE: preamble recording vanished");
+                    preamble_cache::store(
+                        &self.vm, &dir, key, pre_interner_len, pre_protos_len, &steps,
+                    );
+                }
+                self.startup_prof_report(_t_total);
+                return;
+            }
+        }
+        self.load_preamble_inner();
+        self.startup_prof_report(_t_total);
+    }
+
+    fn startup_prof_report(&self, _t_total: std::time::Instant) {
+        if std::env::var_os("RUBYRS_STARTUP_PROF").is_some() {
+            use std::sync::atomic::Ordering::Relaxed;
+            eprintln!(
+                "startup-prof: preamble total={:.3}ms parse={:.3}ms ast={:.3}ms compile={:.3}ms run={:.3}ms",
+                _t_total.elapsed().as_secs_f64() * 1e3,
+                STARTUP_PROF_PARSE_NS.load(Relaxed) as f64 / 1e6,
+                STARTUP_PROF_AST_NS.load(Relaxed) as f64 / 1e6,
+                STARTUP_PROF_COMPILE_NS.load(Relaxed) as f64 / 1e6,
+                STARTUP_PROF_RUN_NS.load(Relaxed) as f64 / 1e6,
+            );
+            let total_ops: usize = self.vm.protos.iter().map(|pr| pr.code.len()).sum();
+            eprintln!(
+                "startup-prof: protos={} ops={} interner={} cache_counter={}",
+                self.vm.protos.len(), total_ops, self.vm.interner.len(), self.vm.cache_counter,
+            );
+            #[cfg(feature = "preamble-cache")]
+            eprintln!(
+                "startup-prof: preamble-cache {}",
+                if self.preamble_cache_was_hit { "HIT" } else { "miss/disabled" },
+            );
+        }
+    }
+
+    /// Whether this Runtime's preamble bytecode came from the
+    /// cache (`preamble-cache` feature). Diagnostic — semantics
+    /// are identical either way.
+    #[cfg(feature = "preamble-cache")]
+    pub fn preamble_cache_hit(&self) -> bool {
+        self.preamble_cache_was_hit
+    }
+
+    fn load_preamble_inner(&mut self) {
         // Exception hierarchy first — other preamble fragments below
         // (and any user code that raises during their load) need
         // `RuntimeError`/`StandardError`/etc. to be resolvable.
@@ -2186,6 +2318,13 @@ impl Runtime {
         // `invoke_method_with_block`.
         self.vm.install_kernel_builtins();
         self.vm.install_basic_object_builtins();
+        // Order-significant host step: record its slot in the
+        // replay program (the installs intern method names, so a
+        // cache replay must run them at exactly this point).
+        #[cfg(feature = "preamble-cache")]
+        if let Some(rec) = self.preamble_recording.as_mut() {
+            rec.push(preamble_cache::STEP_INSTALL_BUILTINS);
+        }
         // Kernel#catch / #throw — tag-based non-local control flow, built
         // on the exception machinery (needs the exception hierarchy +
         // Object, both loaded above). It's the mechanism Sinatra uses for
@@ -2980,6 +3119,7 @@ self.eval_inner(
         // loaded outside the top-level `eval` path.
         self.vm.sources.insert(filename_rc.clone(), source_rc);
 
+        let _t_parse = std::time::Instant::now();
         let parse_result = ruby_prism::parse(source.as_bytes());
         let mut errors_iter = parse_result.errors().peekable();
         if errors_iter.peek().is_some() {
@@ -2989,10 +3129,13 @@ self.eval_inner(
                 backtrace: vec![],
             });
         }
+        STARTUP_PROF_PARSE_NS.fetch_add(_t_parse.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        let _t_ast = std::time::Instant::now();
         let (prog, ast_errors) = ast::tr_with_errors_on_source(
             &parse_result.node(),
             parse_result.source(),
         );
+        STARTUP_PROF_AST_NS.fetch_add(_t_ast.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         if !ast_errors.is_empty() {
             // AST translation hit one or more Prism nodes the
             // language subset doesn't cover. Surface as a
@@ -3003,12 +3146,29 @@ self.eval_inner(
                 backtrace: vec![],
             });
         }
+        let _t_compile = std::time::Instant::now();
         let entry = compiler::compile_proto(
             "<main>".into(), vec![], &[prog], filename_rc,
             &mut self.vm.protos, &mut self.vm.interner, &mut self.vm.cache_counter,
         );
+        STARTUP_PROF_COMPILE_NS.fetch_add(_t_compile.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         let cache_count = self.vm.cache_counter as usize;
         self.vm.ensure_call_caches(cache_count);
+        // Preamble-cache recording: on a cache miss, load_preamble
+        // arms this Vec and each preamble chunk's entry proto lands
+        // here in execution order — the recording IS the replay
+        // program a later cache hit runs.
+        #[cfg(feature = "preamble-cache")]
+        if let Some(rec) = self.preamble_recording.as_mut() {
+            rec.push(entry as u32);
+        }
+        self.run_compiled(entry)
+    }
+
+    /// Execute an already-compiled entry proto with the full
+    /// per-eval state hygiene (`eval_inner`'s run half — split out
+    /// so the preamble cache's replay path shares it exactly).
+    fn run_compiled(&mut self, entry: usize) -> Result<Value, Trap> {
         // A previous `eval` on this Runtime may have left frames,
         // operand-stack residue, or pins behind if it ended in a
         // Trap (uncaught exception, fuel exhaustion, deadline hit).
@@ -3051,7 +3211,9 @@ self.eval_inner(
         // run, it must still be zero. The assert is debug-only —
         // release builds skip so a regression won't crash a host.
         let pinned_before = self.vm.pinned.len();
+        let _t_run = std::time::Instant::now();
         let result = self.vm.run(entry);
+        STARTUP_PROF_RUN_NS.fetch_add(_t_run.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         // Clear both per-eval working counters after run so the
         // between-evals state matches the documented contract:
         // `vm.fuel` and `vm.deadline_at` are anchored at eval

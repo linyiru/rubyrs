@@ -209,6 +209,19 @@ fn main() {
     // ENV, `$$ == 0`, and a silent stdout until they opt in.
     let cfg = Config {
         stress_gc: env_lookup("STRESS_GC").is_some(),
+        // Preamble bytecode cache (`preamble-cache` feature): the
+        // CLI opts in by default — cold start is the CLI's
+        // headline metric — with `RUBYRS_NO_PREAMBLE_CACHE=1` as
+        // the off switch. Library embedders stay opted out unless
+        // they set the field themselves (ADR 0017 posture).
+        #[cfg(feature = "preamble-cache")]
+        preamble_cache_dir: if env_lookup("RUBYRS_NO_PREAMBLE_CACHE").is_some() {
+            None
+        } else {
+            rubyrs::preamble_cache::default_cache_dir()
+        },
+        #[cfg(not(feature = "preamble-cache"))]
+        preamble_cache_dir: None,
         fuel: parse_env_cap("RUBYRS_FUEL", env_lookup("RUBYRS_FUEL")),
         max_heap_objects: parse_env_cap("RUBYRS_MAX_OBJECTS", env_lookup("RUBYRS_MAX_OBJECTS")),
         max_frames: parse_env_cap("RUBYRS_MAX_FRAMES", env_lookup("RUBYRS_MAX_FRAMES")),

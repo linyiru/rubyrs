@@ -24,9 +24,11 @@ process startup and the gem loader, not arithmetic.
 (Re-measured 2026-06-11. The earlier 1.8 ms / 42.5× figure was real
 on the pre-Jekyll-era binary; `Runtime::new` now parses a much
 larger always-on preamble — exceptions/enumerable/time/set/… plus
-the accelerator plumbing — which costs ~4 ms at startup. A
-wizer-style pre-initialized snapshot is the known fix if the niche
-demands the old floor back.)
+the accelerator plumbing — which costs ~4 ms at startup. The
+`preamble-cache` feature (see "Cold start" below) removes most of
+that for hosts that opt in via `Config::preamble_cache_dir`; this
+table's number is the library DEFAULT, which performs no filesystem
+access at construction and therefore compiles live.)
 
 This is what rubyrs is built for: a host Rust app embedding a Ruby
 DSL where script execution time is dwarfed by per-invocation
@@ -86,21 +88,31 @@ Trivial program: `puts 1 + 2`. Time to first output.
 
 | Implementation | Wall time |
 |----------------|-----------|
-| rubyrs (native) | **5.9 ms** |
+| rubyrs (native, preamble cache warm) | **3.0 ms** |
+| rubyrs (native, cache cold/disabled) | 6.5 ms |
 | rubyrs.wasm via wasmtime (raw, JIT each run) | 12.7 ms † |
 | rubyrs.cwasm via wasmtime (AOT, `--allow-precompiled`) | **~7 ms** † |
-| CRuby 3.4 (no YJIT) | 74.8 ms |
+| CRuby 3.4 (no YJIT) | 74.3 ms |
 | CRuby 3.4 + YJIT | 73.5 ms |
 | CRuby 3.4 `--disable=gems` | 51.1 ms |
 
 † wasm rows are from the pre-Jekyll-era lean binary (2026-06-04)
-and pending re-measurement; the native row and both CRuby rows were
+and pending re-measurement; the native rows and all CRuby rows were
 re-measured 2026-06-11.
 
-rubyrs is ~13× faster cold-start than CRuby as users invoke it, and
-~9× faster than the best-tuned `--disable=gems` invocation. (The
-earlier 1.5 ms / ~50× figure predates the Jekyll-era preamble
-growth — see the note in the DSL section above.) The two wasm rows
+rubyrs is ~25× faster cold-start than CRuby as users invoke it, and
+~17× faster than the best-tuned `--disable=gems` invocation. The
+Jekyll-era preamble growth had pushed the uncached start to ~6 ms
+(parse+AST+compile of ~176 KB of always-on preamble at every
+`Runtime::new`); the `preamble-cache` feature now snapshots that
+compile's output — interner additions, the `Proto` bytecode table,
+per-chunk entry points — keyed by the executable's identity, so
+every start after the first restores bytecode instead of compiling.
+Preamble *execution* stays live (class/method tables are rebuilt
+each run), and the cache is fail-open: any mismatch falls back to
+the live compile. Library embedders opt in via
+`Config::preamble_cache_dir`; the CLI defaults it on
+(`RUBYRS_NO_PREAMBLE_CACHE=1` to disable). The two wasm rows
 reflect different deployment shapes:
   * raw `.wasm` (12.7 ms) — what you ship to embedders, includes
     wasmtime's per-run JIT.
@@ -306,9 +318,13 @@ CRuby build idles lighter than the one measured earlier:
 
 | Workload | rubyrs RSS | CRuby RSS |
 |----------|-----------|-----------|
-| Trivial `puts 1+2` | 4.6 MB | 10.2 MB |
-| 1M fizzbuzz | 4.7 MB | 10.3 MB |
-| 200k cycle-allocations (with our mark-sweep GC) | 5.6 MB | 10.7 MB |
+| Trivial `puts 1+2` | 3.7 MB | 10.2 MB |
+| 1M fizzbuzz | 3.9 MB | 10.3 MB |
+| 200k cycle-allocations (with our mark-sweep GC) | 4.9 MB | 10.7 MB |
+
+(rubyrs rows are with the CLI's preamble cache warm — skipping the
+Prism parse also skips its peak allocations; add ~0.8 MB for the
+cache-cold first run.)
 
 GC works: heap stays flat even when the Ruby program allocates millions of
 short-lived objects with cycles. See [ADR 0003](adr/0003-rc-plus-mark-sweep-hybrid-gc.md).

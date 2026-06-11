@@ -104,13 +104,16 @@ WebAssembly target.
 | Jekyll 1k-post build | 0.66 s | — | **0.51 s, byte-identical** |
 
 Where the cold-start + footprint profile matters (CLI tools, DSL
-hosts, sandboxed script execution), rubyrs starts ~13× faster than
-CRuby (~9× even against `ruby --disable=gems`) at roughly half the
-RSS (4.6 MB vs 10.2 MB on `puts 1+2`):
+hosts, sandboxed script execution), rubyrs starts ~25× faster than
+CRuby (~17× even against `ruby --disable=gems`) at about a third of
+the RSS (3.7 MB vs 10.2 MB on `puts 1+2`). The CLI caches the
+preamble's compiled bytecode under `~/.cache/rubyrs` (the
+`preamble-cache` feature) — the very first run after a (re)build
+pays a one-time ~6.5 ms to populate it:
 
 | Cold start | rubyrs (native) | CRuby 3.4 | CRuby `--disable=gems` |
 |------------|----------------|-----------|------------------------|
-| `puts 1+2` | **5.9 ms** | 74.8 ms | 51.1 ms |
+| `puts 1+2` | **3.0 ms** | 74.3 ms | 51.1 ms |
 
 | End-to-end DSL hosting (Brewfile, ~50 lines) | rubyrs | CRuby 3.4 |
 |----------------------------------------------|--------|-----------|

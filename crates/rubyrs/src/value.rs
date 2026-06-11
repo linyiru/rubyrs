@@ -792,3 +792,70 @@ pub struct MethodClosure {
     pub(crate) param_start: u16,
     pub(crate) n_params: u16,
 }
+
+/// Serde bridge for the LITERAL subset of `Value` — only the shapes
+/// the compiler stores in `Proto::kw_param_defaults` (see
+/// `expr_is_compile_time_literal` in compiler.rs): Nil / Bool / Int
+/// / Float / Sym / Str. Heap-referencing variants (Object / Array /
+/// Hash / ObjId-carrying anything) are NOT serializable — an ObjId
+/// is only meaningful inside one live heap — and encoding one is a
+/// hard error so the preamble cache falls back to the live compile
+/// path rather than persisting a dangling reference.
+///
+/// Strings round-trip through bytes: valid UTF-8 reconstructs via
+/// `Value::new_str` and invalid via `Value::new_str_bytes`, the
+/// same split the compiler makes between `Expr::StrLit` and
+/// `Expr::StrLitBytes` when it built the literal in the first
+/// place, so the rebuilt RStr matches the original's constructor
+/// path (including the encoding tag).
+#[cfg(feature = "preamble-cache")]
+mod preamble_cache_serde {
+    use super::Value;
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    enum LitValue {
+        Nil,
+        Bool(bool),
+        Int(i64),
+        Float(f64),
+        Sym(crate::intern::SymId),
+        StrBytes(Vec<u8>),
+    }
+
+    impl serde::Serialize for Value {
+        fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::Error;
+            let lit = match self {
+                Value::Nil => LitValue::Nil,
+                Value::Bool(b) => LitValue::Bool(*b),
+                Value::Int(n) => LitValue::Int(*n),
+                Value::Float(f) => LitValue::Float(*f),
+                Value::Sym(id) => LitValue::Sym(*id),
+                Value::Str(s) => LitValue::StrBytes(s.borrow().clone()),
+                other => {
+                    return Err(S::Error::custom(format!(
+                        "non-literal Value ({}) cannot be serialized",
+                        other.type_name(),
+                    )));
+                }
+            };
+            lit.serialize(ser)
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for Value {
+        fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+            Ok(match LitValue::deserialize(de)? {
+                LitValue::Nil => Value::Nil,
+                LitValue::Bool(b) => Value::Bool(b),
+                LitValue::Int(n) => Value::Int(n),
+                LitValue::Float(f) => Value::Float(f),
+                LitValue::Sym(id) => Value::Sym(id),
+                LitValue::StrBytes(b) => match String::from_utf8(b) {
+                    Ok(s) => Value::new_str(s),
+                    Err(e) => Value::new_str_bytes(e.into_bytes()),
+                },
+            })
+        }
+    }
+}

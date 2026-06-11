@@ -8,6 +8,7 @@ use std::rc::Rc;
 /// Source position. Byte offset is what Prism gives us cheaply; line/column
 /// are resolved lazily at display time against the original source.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "preamble-cache", derive(serde::Serialize, serde::Deserialize))]
 pub struct Span {
     pub(crate) byte_offset: u32,
 }

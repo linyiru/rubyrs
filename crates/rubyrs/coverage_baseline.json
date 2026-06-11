@@ -56,6 +56,7 @@
     "crates/rubyrs/src/lib.rs": 96,
     "crates/rubyrs/src/main.rs": 63,
     "crates/rubyrs/src/output.rs": 83,
+    "crates/rubyrs/src/preamble_cache.rs": 85,
     "crates/rubyrs/src/regex_engine.rs": 65,
     "crates/rubyrs/src/sass.rs": 0,
     "crates/rubyrs/src/signals.rs": 97,

@@ -12,6 +12,7 @@ use crate::value::Value;
 // the bytecode-instruction nature, not a redundant tag).
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "preamble-cache", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum Op {
     LoadConstInt(i64),
     /// Float literal — `5.0`, `3.14`, etc. f64 is Copy so the Op
@@ -578,6 +579,7 @@ pub(crate) enum Op {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "preamble-cache", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum BinOpKind { Add, Sub, Mul, Div, Mod, Lt, Le, Gt, Ge, Eq, Ne }
 
 impl BinOpKind {
@@ -666,6 +668,7 @@ impl BinOpKind {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "preamble-cache", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct Proto {
     pub(crate) name: String,
     pub(crate) params: Vec<String>,

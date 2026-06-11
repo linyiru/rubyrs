@@ -64,6 +64,7 @@ pub(crate) type FxHashSet<T> =
 /// single u32 compare, which is what makes Ruby `Symbol#==`, method-dispatch
 /// hash keys, and IVar lookups O(1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "preamble-cache", derive(serde::Serialize, serde::Deserialize))]
 pub struct SymId(pub(crate) u32);
 
 /// Global string-intern table. Compile-time strings (method names, ivar

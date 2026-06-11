@@ -41,11 +41,20 @@ categories = ["compilers", "wasm", "command-line-utilities"]
 # stdlib / mri-compat tiers as well — they require larger surgery
 # and are explicitly out of scope for this PoC.)
 [features]
-default = ["cext", "regex", "bignum", "std-sink"]
+default = ["cext", "regex", "bignum", "std-sink", "preamble-cache"]
 # EXPERIMENT: swap the system allocator for mimalloc (a fast
 # small-object allocator). The VM is allocation-heavy, so the system
 # malloc shows up large in profiles. Opt-in: `--features mimalloc`.
 mimalloc = ["dep:mimalloc"]
+# Bootsnap-style preamble bytecode cache: Runtime::new's
+# parse+AST+compile of the ~176 KB always-on preamble (~2.7 ms of
+# the ~5 ms CLI cold start) is serialized to a host-provided cache
+# directory on first run and restored on subsequent runs. Execution
+# still happens live (class/method tables are rebuilt every run) — only
+# the pure source→bytecode pipeline is cached. Capability-gated per
+# ADR 0017: library Runtimes never touch the filesystem unless the
+# host sets `Config::preamble_cache_dir`; the CLI binary opts in.
+preamble-cache = ["dep:serde", "dep:postcard"]
 # Alternative global allocator for RSS-sensitive embedders.
 # Measured 2026-06-10 on the Jekyll 1k benches (ABAB x3 vs
 # mimalloc): wall +3-4% slower, peak RSS −8-9% (liquid-1k
@@ -338,7 +347,12 @@ socket2 = { version = "0.5", features = ["all"], optional = true }
 # `_json_native` battery: optional via the feature flag. Pulled
 # in only when an embedder builds with `--features _json_native`
 # so the default Tier-1 binary stays serde_json-free.
-serde = { version = "1", optional = true }
+serde = { version = "1", optional = true, features = ["derive", "rc"] }
+# Compact serde format for the preamble bytecode cache
+# (`preamble-cache` feature). default-features = false drops the
+# heapless/COBS embedded paths; `alloc` enables Vec-backed
+# encode/decode, the only mode the cache uses.
+postcard = { version = "1", optional = true, default-features = false, features = ["alloc"] }
 serde_json = { version = "1", optional = true, features = ["preserve_order"] }
 # `_sqlite` battery deps. rusqlite + bundled SQLite C source
 # (~2 MB compiled). ADR 0027 §1 pins to 0.39 for supply-chain
