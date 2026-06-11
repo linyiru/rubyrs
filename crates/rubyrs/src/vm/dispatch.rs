@@ -10862,6 +10862,28 @@ impl Vm {
         }
     }
 
+    /// Pool-buffer-reusing twin of `vec_nil` + `intern_locals` for
+    /// the method-invocation paths: pops a recycled cell and refills
+    /// its retained-capacity buffer with nils. The old shape — fresh
+    /// `vec_nil` (a malloc), bind args, then `intern_locals` swapping
+    /// the new Vec INTO the pooled cell and dropping the cell's old
+    /// buffer (a free) — meant the pool only saved the Rc while the
+    /// Vec itself churned malloc/free on every call (visible as the
+    /// mi_malloc/mi_free pair in the tight-call-loop profile).
+    /// Callers bind args through `cell.borrow_mut()` instead.
+    fn locals_cell_nil(&mut self, n: usize) -> Rc<RefCell<Vec<Value>>> {
+        if let Some(cell) = self.locals_pool.pop() {
+            {
+                let mut v = cell.borrow_mut();
+                v.clear();
+                v.resize(n, Value::Nil);
+            }
+            cell
+        } else {
+            Rc::new(RefCell::new(vec_nil(n)))
+        }
+    }
+
     /// Build a block invocation's fresh locals cell as a snapshot of
     /// `captured`, grown to `n_locals`, reusing a pooled cell's buffer
     /// when one is available. This is the block-form counterpart to
@@ -11028,18 +11050,20 @@ impl Vm {
         self.check_frames()?;
         // Bind the argc args (stack top) into the locals, then drop the recv.
         let n_locals = fixed.n_locals as usize;
-        let mut locals = vec_nil(n_locals);
-        for slot in (0..argc).rev() {
-            locals[slot] = self
-                .stack
-                .pop()
-                .expect("ICE: explicit-recv fast path arg underflow");
+        let locals = self.locals_cell_nil(n_locals);
+        {
+            let mut l = locals.borrow_mut();
+            for slot in (0..argc).rev() {
+                l[slot] = self
+                    .stack
+                    .pop()
+                    .expect("ICE: explicit-recv fast path arg underflow");
+            }
         }
         let recv = self
             .stack
             .pop()
             .expect("ICE: explicit-recv fast path recv underflow");
-        let locals = self.intern_locals(locals);
         self.frames.push(Frame {
             proto_idx: m.proto_idx,
             ip: 0,
@@ -11132,12 +11156,15 @@ impl Vm {
         // `unreachable!` (which the panic budget does not count)
         // documents the invariant without an `.expect`.
         let n_locals = fixed.n_locals as usize;
-        let mut locals = vec_nil(n_locals);
-        for slot in (0..argc).rev() {
-            locals[slot] = match self.stack.pop() {
-                Some(v) => v,
-                None => unreachable!("ICE: explicit-recv block fast path arg underflow"),
-            };
+        let locals = self.locals_cell_nil(n_locals);
+        {
+            let mut l = locals.borrow_mut();
+            for slot in (0..argc).rev() {
+                l[slot] = match self.stack.pop() {
+                    Some(v) => v,
+                    None => unreachable!("ICE: explicit-recv block fast path arg underflow"),
+                };
+            }
         }
         // Drop the block value (the ObjId is already captured in
         // `block_id`); it becomes the frame's `block_arg`.
@@ -11149,7 +11176,6 @@ impl Vm {
             Some(v) => v,
             None => unreachable!("ICE: explicit-recv block fast path recv underflow"),
         };
-        let locals = self.intern_locals(locals);
         self.frames.push(Frame {
             proto_idx: m.proto_idx,
             ip: 0,
@@ -11190,30 +11216,20 @@ impl Vm {
         };
         self.check_frames()?;
         let n_locals = fixed.n_locals as usize;
-        let locals = if n_locals == argc {
-            match argc {
-                0 => Vec::new(),
-                1 => vec![
-                    self.stack
-                        .pop()
-                        .expect("ICE: fixed method fast path arg underflow"),
-                ],
-                _ => {
-                    let split = self.stack.len() - argc;
-                    self.stack.drain(split..).collect()
-                }
-            }
-        } else {
-            let mut locals = vec_nil(n_locals);
+        // One pooled cell for every arity shape (the old
+        // special-cases built a fresh Vec that intern_locals then
+        // swapped into the cell, freeing the cell's buffer — see
+        // locals_cell_nil).
+        let locals = self.locals_cell_nil(n_locals);
+        {
+            let mut l = locals.borrow_mut();
             for slot in (0..argc).rev() {
-                locals[slot] = self
+                l[slot] = self
                     .stack
                     .pop()
                     .expect("ICE: fixed method fast path arg underflow");
             }
-            locals
-        };
-        let locals = self.intern_locals(locals);
+        }
         self.frames.push(Frame {
             proto_idx: m.proto_idx,
             ip: 0,
