@@ -35,3 +35,30 @@ begin
 rescue TypeError => e
   puts e.message
 end
+
+# One-arg base computation is a byte-level string op, not
+# Path::file_name() — root / trailing-slash / dot-dir shapes.
+["", "/", "//", "///", "a/", "a//", "..", ".", "/..", "/.",
+ "///a///", "a/b/", "/a", "a/../", "/a/b/.."].each do |path|
+  puts "#{path.inspect} => #{File.basename(path).inspect}"
+end
+
+# ".*" with all-dots prefixes: the stripped extension's dot must
+# have a non-dot byte somewhere before it (".." / "..." keep,
+# "a.." strips one trailing dot, "..a.b" strips ".b").
+[["/", ".*"], ["..", ".*"], [".", ".*"], ["...", ".*"],
+ ["a..", ".*"], ["..a.b", ".*"], ["a...", ".*"], ["..a", ".*"],
+ [".a.", ".*"], ["a.b..", ".*"]].each do |path, sfx|
+  puts "#{path.inspect} #{sfx.inspect} => #{File.basename(path, sfx).inspect}"
+end
+
+# File.dirname twin — same byte-level family (Path::parent() said
+# "" for "a" and "." for "/"): trailing-slash strip, cut-adjacent
+# separator runs removed, leading run collapses to one "/",
+# interior runs away from the cut preserved.
+["", "/", "//", "///", "a", "a/", "..", "/..", "/a", "//a",
+ "///a", "a/b/", "/a/b/..", "a//b", "a/b//c", "//a/b", "//a//b",
+ "////a/b", "//a/b/c", "/a//b/", "a//b/c", "/a//b/c",
+ "a///b/c/d"].each do |path|
+  puts "#{path.inspect} => dirname #{File.dirname(path).inspect}"
+end

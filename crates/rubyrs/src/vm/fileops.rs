@@ -204,6 +204,54 @@ fn glob_expand(pattern: &str) -> Vec<String> {
     out
 }
 
+/// CRuby `File.basename` base computation — a pure byte-level
+/// string op, NOT `Path::file_name()`: the std method returns
+/// `None` for `"/"` and `".."` (rubyrs then rendered `""`), while
+/// CRuby returns `"/"` and `".."`. Rule (probed vs ruby 3.4):
+/// strip ALL trailing slashes (a path that was nothing but slashes
+/// is `"/"`), then take everything after the last remaining slash
+/// — `"."` / `".."` are ordinary names, no normalization.
+fn ruby_basename(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return if path.is_empty() { "" } else { "/" };
+    }
+    match trimmed.rfind('/') {
+        Some(i) => &trimmed[i + 1..],
+        None => trimmed,
+    }
+}
+
+/// CRuby `File.dirname` — byte-level twin of `ruby_basename`
+/// (`Path::parent()` returned `Some("")` for `"a"` → rubyrs
+/// rendered `""` where CRuby says `"."`, and `None` for `"/"` →
+/// `"."` where CRuby says `"/"`). Rule (probed vs ruby 3.4):
+/// strip trailing slashes; cut the last component AND the whole
+/// separator run before it (`"a//b"` → `"a"`); empty result →
+/// `"/"` for absolute, `"."` for relative (also `"a"` → `"."`);
+/// a LEADING separator run collapses to a single `"/"`
+/// (`"//a/b"` → `"/a"`) while interior runs away from the cut
+/// are preserved (`"a//b/c"` → `"a//b"`).
+fn ruby_dirname(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return if path.is_empty() { ".".to_string() } else { "/".to_string() };
+    }
+    let Some(cut) = trimmed.rfind('/') else {
+        return ".".to_string();
+    };
+    let head = trimmed[..cut].trim_end_matches('/');
+    if head.is_empty() {
+        return "/".to_string();
+    }
+    let non_slash = head.find(|c| c != '/').unwrap_or(head.len());
+    if non_slash > 1 {
+        format!("/{}", &head[non_slash..])
+    } else {
+        head.to_string()
+    }
+}
+
 impl Vm {
     /// Coerce a `File`-path argument to a String the way CRuby does:
     /// a `String` passes through; any other object is asked for
@@ -554,18 +602,17 @@ impl Vm {
             }
             ("basename", [p]) => {
                 let path = path_arg(p)?;
-                let name = Path::new(&path).file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                Value::new_str(name)
+                Value::new_str(ruby_basename(&path).to_string())
             }
             // Two-arg form: strip `suffix` off the basename. `".*"`
             // strips the last extension — the final `.` and what
-            // follows, unless that `.` is the name's first byte
-            // (dotfiles: `basename(".hidden", ".*")` → ".hidden");
-            // any other suffix strips on exact tail match only when
-            // it isn't the whole name (`basename("c.md", "c.md")` →
-            // "c.md"). Ground-truth probed vs ruby 3.4
+            // follows — unless the dot is at index 0 OR everything
+            // before it is dots (dotfiles & dot-dirs:
+            // `basename(".hidden", ".*")` → ".hidden",
+            // `basename("..", ".*")` → ".."); any other suffix
+            // strips on exact tail match only when it isn't the
+            // whole name (`basename("c.md", "c.md")` → "c.md").
+            // Ground-truth probed vs ruby 3.4
             // (file_basename_suffix fixture). Discovery: Jekyll's
             // `Document#basename_without_ext` uses
             // `File.basename(path, ".*")` — was NoMethodError.
@@ -582,27 +629,26 @@ impl Vm {
                         }))
                     }
                 };
-                let name = Path::new(&path).file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                let name = ruby_basename(&path);
                 let stripped = if sfx == ".*" {
                     match name.rfind('.') {
-                        Some(i) if i > 0 => name[..i].to_string(),
+                        Some(i)
+                            if i > 0 && name[..i].bytes().any(|b| b != b'.') =>
+                        {
+                            &name[..i]
+                        }
                         _ => name,
                     }
                 } else if name.len() > sfx.len() && name.ends_with(sfx.as_str()) {
-                    name[..name.len() - sfx.len()].to_string()
+                    &name[..name.len() - sfx.len()]
                 } else {
                     name
                 };
-                Value::new_str(stripped)
+                Value::new_str(stripped.to_string())
             }
             ("dirname", [p]) => {
                 let path = path_arg(p)?;
-                let dir = Path::new(&path).parent()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| ".".to_string());
-                Value::new_str(dir)
+                Value::new_str(ruby_dirname(&path))
             }
             ("extname", [p]) => {
                 let path = path_arg(p)?;
