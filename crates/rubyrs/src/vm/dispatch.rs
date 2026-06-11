@@ -1507,6 +1507,40 @@ impl Vm {
     /// Scope of this PoC: only Object receivers (user instances).
     /// Primitive receivers (Int, Str, …) skip the lookup — adding
     /// per-primitive class chains is a follow-up.
+    /// Resolve `name` through the ancestry a class/module OBJECT
+    /// has as a VALUE: `Class` (whose preamble superclass is
+    /// `Module`) for classes, `Module` for modules, then `Object`
+    /// and `Kernel` explicitly — the preamble's `Module` is a
+    /// module shell with no superclass, so the implicit walk can't
+    /// reach them. This is what makes `class Module; def helper`
+    /// serve every module/class receiver (CRuby:
+    /// `Foo.singleton_class.ancestors` tails with
+    /// [Class, Module, Object, Kernel, BasicObject]).
+    ///
+    /// Uncached on purpose: these dispatches sit at the cold tail
+    /// (every singleton/builtin arm already missed), so polluting
+    /// the per-site inline caches with the meta-chain verdict
+    /// isn't worth the staleness surface.
+    pub(crate) fn lookup_class_object_instance_method(
+        &mut self,
+        recv_cls: &Rc<crate::value::Class>,
+        name_id: SymId,
+    ) -> Option<Rc<Method>> {
+        let chain: [&str; 3] = if recv_cls.is_module {
+            ["Module", "Object", "Kernel"]
+        } else {
+            ["Class", "Object", "Kernel"]
+        };
+        for mn in chain {
+            let Some(mid) = self.interner.get_id(mn) else { continue };
+            let Some(meta) = self.classes.get(&mid).cloned() else { continue };
+            if let Some(m) = self.lookup_method_uncached(&meta, name_id) {
+                return Some(m);
+            }
+        }
+        None
+    }
+
     pub(crate) fn try_method_missing(
         &mut self,
         recv: &Value,
@@ -5466,8 +5500,16 @@ impl Vm {
         // here for safety until a proper Class/Module allocator
         // lands; the only caller surfaced today (ERB stub) wants
         // an Instance, not a Class.
-        if cls.is_module
-            || cls.name == "Module"
+        // True modules don't HAVE allocate at all in CRuby —
+        // NoMethodError, not the removed-allocator TypeError — so
+        // decline and let the dispatch tail (meta-chain →
+        // method_missing → NoMethodError) produce the right
+        // surface. Surfaced when the bare-call→receiver-form
+        // bridge made module-body `allocate` reach this arm.
+        if cls.is_module && cls.name != "Module" {
+            return Ok(ClassOutcome::NotHandled { args, recv });
+        }
+        if cls.name == "Module"
             || cls.name == "Class"
             || is_primitive_class_name(&cls.name)
         {
@@ -7281,6 +7323,22 @@ impl Vm {
                 }
                 self.stack.push(Value::Bool(false));
                 return Ok(());
+            }
+            // Class/Module self: bridge the bare call into the
+            // receiver form so the universal arms
+            // (instance_variable_* / dup / …) and the class-object
+            // instance chain (the explicit tail's
+            // `lookup_class_object_instance_method` arm) serve it —
+            // `def self.parser=; remove_const(...)` (uri gem) is
+            // this shape. Diverges via return, so method_missing
+            // below stays the terminal for non-class selves; the
+            // bridged call re-runs method_missing with the same
+            // receiver if everything still misses.
+            if let Value::Class(_) = &self_val {
+                let argc = args.len();
+                self.stack.push(self_val.clone());
+                for a in args { self.stack.push(a); }
+                return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
             }
             // method_missing fallback (PoC #2). For Object self, look
             // up the class chain — if found, hand it the missed name
@@ -10843,6 +10901,18 @@ impl Vm {
             }
             self.stack.push(Value::Bool(false));
             return Ok(());
+        }
+        // Class/Module receivers: the value's own instance
+        // ancestry (`class Module; def x` / user Kernel reopens)
+        // resolves after every singleton/builtin arm and before
+        // method_missing — CRuby's resolution order for a class
+        // object.
+        if let Value::Class(recv_cls) = &recv {
+            let recv_cls = recv_cls.clone();
+            if let Some(m) = self.lookup_class_object_instance_method(&recv_cls, name_id) {
+                self.invoke_method(m, recv.clone(), args.to_vec())?;
+                return Ok(());
+            }
         }
         if self.try_method_missing(&recv, name_id, args.to_vec(), None)? {
             return Ok(());
@@ -14461,6 +14531,19 @@ impl Vm {
                 self.invoke_method_with_block(m, self_val, args, Some(block))?;
                 return Ok(());
             }
+            // Class/Module self: bridge to the receiver form (same
+            // rationale as the no-block twin in `do_call`) so
+            // class-object instance methods and universal arms
+            // serve bare block-calls — minitest's bare
+            // `trap name do ... end` from a class-method body is
+            // this shape.
+            if let Value::Class(_) = &self_val {
+                let argc = args.len();
+                self.stack.push(self_val.clone());
+                self.stack.push(Value::Block(block));
+                for a in args { self.stack.push(a); }
+                return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
+            }
             if self.try_method_missing(&self_val, name_id, args, Some(block))? {
                 return Ok(());
             }
@@ -14701,6 +14784,15 @@ impl Vm {
         // `array.sum { … }`). Same rationale as the no-block path.
         if self.try_enumerable_module_fallback(&recv, name_id, args.clone(), Some(block))? {
             return Ok(());
+        }
+        // Class/Module receivers: class-object instance ancestry
+        // (block-form twin of the arm in `do_call`'s tail).
+        if let Value::Class(recv_cls) = &recv {
+            let recv_cls = recv_cls.clone();
+            if let Some(m) = self.lookup_class_object_instance_method(&recv_cls, name_id) {
+                self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
+                return Ok(());
+            }
         }
         if self.try_method_missing(&recv, name_id, args, Some(block))? {
             return Ok(());
