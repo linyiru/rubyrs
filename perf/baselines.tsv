@@ -245,7 +245,15 @@ crates/rubyrs/examples/metaprog_bench/static_bench.rb	8200	1150	2M def+ivar (con
 # ~1.65× ubuntu-latest slowdown plus per-run jitter — same shape
 # as the metaprog rows above (static_bench: local 390ms / CI 650
 # / budget 1000 = 2.5× local; mm_bench: 1.62× CI ratio observed).
-crates/rubyrs/benches/fizzbuzz_1m.rb	8200	800	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
+# fizzbuzz_1m RSS bumped 8200 → 8400 on 2026-06-11 — observed CI
+# 8208-8212 KB (8-12 KB / ~0.1% over a razor-thin cap) on BOTH
+# 97e194ce (pre-arena, runner jitter at the boundary) and 26127917
+# (Locals::Stack frame-locals arena: +8 B/Frame for the Locals enum
+# + the persistent Vm::locals_arena buffer — a real but tiny
+# baseline shift). Joins the fizzbuzz/mm/hash_mutate 8400 tier;
+# ~2% headroom over the observed peak so future regressions still
+# surface.
+crates/rubyrs/benches/fizzbuzz_1m.rb	8400	800	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
 # gc_churn RSS bumped 6500 → 6700 on 2026-05-27 — same
 # direction as dm_bench's per-row bump above. Observed CI
 # RSS 6504 KB (just 4 KB over) after PR #182 / #184 / #186

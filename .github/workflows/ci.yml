@@ -437,7 +437,12 @@ jobs:
           # survives the panic-strip (the other is a doc-line sibling).
           # Both mirror `try_invoke_fixed_method_from_stack`'s existing
           # stack-direct expects and are not user-reachable.
-          check crates/rubyrs/src/vm/dispatch.rs     55
+          # Bumped 55 → 56 (+1) by the Locals::Stack escape-analysed
+          # frame locals (26127917): get_local_top / set_local_top each
+          # carry an ICE-class `.expect("ICE: ... no frame")` (one
+          # survives the strip net of removed sites). Mirrors the
+          # neighbouring top-frame expects; not user-reachable.
+          check crates/rubyrs/src/vm/dispatch.rs     56
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /
