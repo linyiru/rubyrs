@@ -49,6 +49,7 @@ impl Vm {
                 | "format"
                 | "using"
                 | "__time_now_raw"
+                | "__rubyrs_time_parse_iso"
                 | "sleep"
                 | "exit"
                 | "exit!"
@@ -496,7 +497,7 @@ impl Vm {
                     let is_builtin = matches!(
                         &*name,
                         "puts" | "p" | "pp" | "print" | "require" | "load" |
-                        "sprintf" | "format" | "__time_now_raw" | "sleep" |
+                        "sprintf" | "format" | "__time_now_raw" | "__rubyrs_time_parse_iso" | "sleep" |
                         "exit" | "exit!" | "abort" | "warn" | "at_exit" | "__rubyrs_signal_trap" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
                         "eval" | "caller" |
@@ -1123,6 +1124,31 @@ impl Vm {
                 let arr = vec![Value::Int(sec), Value::Int(nsec as i64)];
                 let id = self.heap.alloc(HeapObj::Array(arr.into()));
                 Some(Ok(Value::Array(id)))
+            }
+            // `__rubyrs_time_parse_iso` — pure-computation fast path
+            // for `Time.parse`'s ISO-8601-ish grammar (the
+            // preamble/time.rb parser interpreted ~15µs/call; Jekyll
+            // parses ~1 unique date string per document). Returns the
+            // epoch-seconds Int for inputs it is CERTAIN about, Nil
+            // to decline — the preamble then falls back to its Ruby
+            // parser, so accepted-input semantics can't drift: the
+            // helper only accepts strictly-digit fields and computes
+            // the IDENTICAL days_from_civil arithmetic; anything
+            // looser (to_i prefix coercion, junk suffixes, huge
+            // years) declines to Ruby. No capability gate: unlike
+            // `__time_now_raw` this reads no clock (deterministic).
+            "__rubyrs_time_parse_iso" => {
+                let [Value::Str(s)] = args else {
+                    return Some(Ok(Value::Nil));
+                };
+                let bytes = s.content.borrow();
+                let Ok(text) = std::str::from_utf8(&bytes) else {
+                    return Some(Ok(Value::Nil));
+                };
+                Some(Ok(match time_parse_iso(text) {
+                    Some(total) => Value::Int(total),
+                    None => Value::Nil,
+                }))
             }
             // `Kernel#sleep(seconds)` — host-injected via
             // `Config::sleep_for` (ADR 0017 Rule 1
@@ -3566,6 +3592,139 @@ fn signal_handler_state_to_value(
             // to a subsequent Signal.trap to restore.
             let _ = vm; // suppress unused-var when no allocation needed
             Value::Block(id)
+        }
+    }
+}
+
+/// Pure-computation core for `__rubyrs_time_parse_iso` (the
+/// `Time.parse` fast path). Mirrors preamble/time.rb's hand-rolled
+/// grammar — `YYYY-MM-DD`, optional `[ T]HH:MM[:SS]`, optional
+/// `Z` / `±HH:MM` / `±HHMM` zone — but STRICTER: every numeric
+/// field must be all-digits (the Ruby path's `to_i` accepts junk
+/// suffixes / empty → 0 quirks), the year must fit well inside
+/// i64 range, and anything else returns `None` so the Ruby parser
+/// stays the single source of truth for edge shapes. For accepted
+/// inputs the arithmetic is the identical Hinnant days_from_civil
+/// (year is always >= 0 here, where Rust trunc-div and Ruby
+/// floor-div agree; the `y - 399` pre-shift keeps the m<=2 → y=-1
+/// case exact).
+fn time_parse_iso(input: &str) -> Option<i64> {
+    fn all_digits(s: &str) -> bool {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+    }
+    fn parse_num(s: &str) -> Option<i64> {
+        if !all_digits(s) {
+            return None;
+        }
+        // Cap well below i64::MAX so the seconds arithmetic below
+        // can't overflow (the Ruby path auto-promotes to bignum;
+        // we decline instead).
+        if s.len() > 9 {
+            return None;
+        }
+        s.parse::<i64>().ok()
+    }
+    fn days_from_civil(mut y: i64, m: i64, d: i64) -> i64 {
+        if m <= 2 {
+            y -= 1;
+        }
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let mp = if m > 2 { m - 3 } else { m + 9 };
+        let doy = (153 * mp + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146_097 + doe - 719_468
+    }
+    let s = input.trim();
+    let sep = s.find([' ', 'T']);
+    let date_str = sep.map_or(s, |i| &s[..i]);
+    let mut rest = sep.map_or("", |i| s[i + 1..].trim());
+    let mut dparts = date_str.split('-');
+    let (y, m, d) = (dparts.next()?, dparts.next()?, dparts.next()?);
+    if dparts.next().is_some() {
+        return None;
+    }
+    let year = parse_num(y)?;
+    let month = parse_num(m)?;
+    let day = parse_num(d)?;
+    let mut off: i64 = 0;
+    let (mut hour, mut minute, mut second) = (0i64, 0i64, 0i64);
+    if !rest.is_empty() {
+        if let Some(stripped) = rest.strip_suffix('Z') {
+            rest = stripped.trim_end();
+        } else if let Some(tzpos) = rest.rfind(['+', '-']) {
+            let tz = &rest[tzpos..];
+            rest = rest[..tzpos].trim_end();
+            let sign: i64 = if tz.starts_with('-') { -1 } else { 1 };
+            let body = &tz[1..];
+            // `±HHMM` or `±HH:MM`, digits only — else decline.
+            let (oh, om) = match (body.len(), body.as_bytes().get(2)) {
+                (5, Some(b':')) if all_digits(&body[..2]) && all_digits(&body[3..]) => {
+                    (parse_num(&body[..2])?, parse_num(&body[3..])?)
+                }
+                (4, _) if all_digits(body) => (parse_num(&body[..2])?, parse_num(&body[2..])?),
+                _ => return None,
+            };
+            off = sign * (oh * 3600 + om * 60);
+        }
+        if !rest.is_empty() {
+            let mut tparts = rest.split(':');
+            hour = parse_num(tparts.next()?)?;
+            if let Some(t1) = tparts.next() {
+                minute = parse_num(t1)?;
+            }
+            if let Some(t2) = tparts.next() {
+                second = parse_num(t2)?;
+            }
+            if tparts.next().is_some() {
+                return None;
+            }
+        }
+    }
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second - off)
+}
+
+#[cfg(test)]
+mod time_parse_iso_tests {
+    use super::time_parse_iso;
+
+    #[test]
+    fn accepts_the_iso_shapes() {
+        // Ground truth from the preamble Ruby parser / CRuby.
+        assert_eq!(time_parse_iso("1970-01-01"), Some(0));
+        assert_eq!(time_parse_iso("1970-01-02"), Some(86_400));
+        assert_eq!(time_parse_iso("2024-03-15 10:30:00"), Some(1_710_498_600));
+        assert_eq!(time_parse_iso("2024-03-15T10:30:00Z"), Some(1_710_498_600));
+        assert_eq!(
+            time_parse_iso("2024-03-15 10:30:00 +0800"),
+            Some(1_710_498_600 - 8 * 3600)
+        );
+        assert_eq!(
+            time_parse_iso("2024-03-15 10:30:00 -05:00"),
+            Some(1_710_498_600 + 5 * 3600)
+        );
+        assert_eq!(time_parse_iso("  2024-03-15 10:30  "), Some(1_710_498_600));
+        // pre-epoch
+        assert_eq!(time_parse_iso("1969-12-31 23:59:59"), Some(-1));
+        // m <= 2 / leap handling
+        assert_eq!(time_parse_iso("2000-02-29"), Some(951_782_400));
+    }
+
+    #[test]
+    fn declines_anything_loose() {
+        for s in [
+            "",
+            "2024",
+            "2024-01",
+            "2024-01-02junk",
+            "2024-ab-cd",
+            "2024-01-02 10:30:00:99",
+            "2024-01-02 10:30 +08",
+            "2024-01-02 10:30 junk",
+            "99999999999999999999-01-01",
+            "2024-01-02-03",
+        ] {
+            assert_eq!(time_parse_iso(s), None, "should decline {s:?}");
         }
     }
 }

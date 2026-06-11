@@ -122,6 +122,13 @@ class Time
   # load-time SyntaxError.
   def self.parse(str, _now = nil)
     s = str.to_s.strip
+    # Host fast path (`__rubyrs_time_parse_iso`, vm/kernel.rs):
+    # strictly-digit ISO shapes compute epoch seconds natively with
+    # the identical days_from_civil arithmetic; anything it isn't
+    # certain about returns nil and the Ruby parser below stays the
+    # source of truth (to_i quirks, junk suffixes, huge years).
+    fast = __rubyrs_time_parse_iso(s)
+    return new(fast, 0) if fast
     # Split the date from the time/zone at the first space or 'T'.
     sep = nil
     i = 0
