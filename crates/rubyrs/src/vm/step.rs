@@ -531,12 +531,14 @@ impl Vm {
                 action.deliver(self)?;
                 continue;
             }
+            // Single frames.last_mut() fetch — see dispatch_until_inner.
             let (proto_idx, ip) = {
-                let f = self.frames.last().expect("ICE: dispatch with empty frame stack");
-                (f.proto_idx, f.ip)
+                let f = self.frames.last_mut().expect("ICE: dispatch with empty frame stack");
+                let pair = (f.proto_idx, f.ip);
+                f.ip += 1;
+                pair
             };
             let op = self.protos[proto_idx].code[ip];
-            self.frames.last_mut().expect("ICE: frame disappeared").ip += 1;
             match self.step(op, proto_idx) {
                 Ok(true) => {}
                 Ok(false) => return Ok(()),
@@ -783,12 +785,16 @@ impl Vm {
                 // `action.deliver`. Loop back to the top.
                 continue;
             }
+            // Single frames.last_mut() for the whole fetch — the old
+            // shape did a second bounds-check + deref chain just to
+            // bump ip (visible per-op in the tight-loop profile).
             let (proto_idx, ip) = {
-                let f = self.frames.last().expect("ICE: dispatch_until no frame");
-                (f.proto_idx, f.ip)
+                let f = self.frames.last_mut().expect("ICE: dispatch_until no frame");
+                let pair = (f.proto_idx, f.ip);
+                f.ip += 1;
+                pair
             };
             let op = self.protos[proto_idx].code[ip];
-            self.frames.last_mut().expect("ICE: frames empty").ip += 1;
             match self.step(op, proto_idx) {
                 Ok(true) => {}
                 Ok(false) => return Ok(()),
