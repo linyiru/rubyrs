@@ -55,11 +55,25 @@ if out="$("$BIN" "$probe" 2>&1)"; then
   # symbols' external visibility turned out to vary across builds
   # (one rebuild dropped them from -gU while 80+ other mi_ symbols
   # stayed), which made the narrow probe a false alarm.
-  if ! nm -gU "$BIN" 2>/dev/null | grep -q "_mi_"; then
-    echo "jekyll_guard: FEATURE SANITY FAILED — MISSING: mimalloc (no mi_malloc symbol)" >&2
-    echo "jekyll_guard: rebuild with:" >&2
-    echo "  cargo build --release -p rubyrs --features stdlib,sass,_rouge_native,_kramdown_native,_yaml_native,_liquid_native,mimalloc" >&2
-    exit 1
+  #
+  # Retry once: macOS `nm` fails TRANSIENTLY (observed 3× on
+  # 2026-06-10, incl. right after a fresh full build whose symbols
+  # a manual re-run then found fine) and the old `2>/dev/null`
+  # swallowed the error, turning an nm hiccup into a false
+  # "mimalloc missing" alarm. Distinguish "nm errored" from
+  # "nm ran, no _mi_ symbols" and only fail on the latter.
+  check_mi() { nm -gU "$BIN" 2>/tmp/jekyll_guard_nm.err | grep -q "_mi_"; }
+  if ! check_mi; then
+    sleep 1
+    if ! check_mi; then
+      echo "jekyll_guard: FEATURE SANITY FAILED — MISSING: mimalloc (no mi_malloc symbol)" >&2
+      if [ -s /tmp/jekyll_guard_nm.err ]; then
+        echo "jekyll_guard: nm stderr: $(cat /tmp/jekyll_guard_nm.err)" >&2
+      fi
+      echo "jekyll_guard: rebuild with:" >&2
+      echo "  cargo build --release -p rubyrs --features stdlib,sass,_rouge_native,_kramdown_native,_yaml_native,_liquid_native,mimalloc" >&2
+      exit 1
+    fi
   fi
   echo "jekyll_guard: $out ($BIN)"
 else
