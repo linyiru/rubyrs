@@ -248,7 +248,14 @@ crates/rubyrs/examples/metaprog_bench/mm_bench.rb	8400	1550	2M method_missing di
 # Joins the 8400 cohort (fizzbuzz / mm_bench / hash_mutate); ~2%
 # headroom over the observed peak.
 crates/rubyrs/examples/metaprog_bench/dm_bench.rb	8400	900	2M define_method dispatch (closure-method)
-crates/rubyrs/examples/metaprog_bench/static_bench.rb	8200	1150	2M def+ivar (control for the metaprog comparisons)
+# static_bench RSS bumped 8200 → 8400 on 2026-06-11 — observed CI
+# 8220 KB (20 KB / 0.24% over) after the merge-sort change
+# (f57031a8). static_bench never sorts; the lift is the wider
+# iter.rs/sort.rs binary on a runner image whose floors now sit at
+# ~8.1–8.2 MB across ALL workloads (fizzbuzz read 8212 the same
+# run). Joins the 8400 cohort (fizzbuzz / mm_bench / dm_bench /
+# hash_mutate); ~2% headroom over the observed peak.
+crates/rubyrs/examples/metaprog_bench/static_bench.rb	8400	1150	2M def+ivar (control for the metaprog comparisons)
 # Budgets at ~2× local M-series observed wall to absorb CI's
 # ~1.65× ubuntu-latest slowdown plus per-run jitter — same shape
 # as the metaprog rows above (static_bench: local 390ms / CI 650

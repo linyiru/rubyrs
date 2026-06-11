@@ -77,6 +77,7 @@
     "crates/rubyrs/src/vm/primitive.rs": 77,
     "crates/rubyrs/src/vm/raise.rs": 94,
     "crates/rubyrs/src/vm/range.rs": 82,
+    "crates/rubyrs/src/vm/sort.rs": 99,
     "crates/rubyrs/src/vm/sprintf.rs": 83,
     "crates/rubyrs/src/vm/step.rs": 88,
     "crates/rubyrs/src/vm/string.rs": 89,
