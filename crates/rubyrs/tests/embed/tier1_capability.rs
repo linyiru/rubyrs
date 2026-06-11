@@ -53,54 +53,32 @@ fn random_new_no_arg_raises_in_tier1_deterministic_mode() {
 }
 
 #[test]
-fn kernel_rand_raises_with_tier1_pointer_hint() {
-    // ADR 0017 row 131 also excludes the bare `Kernel#rand` /
-    // `Kernel#srand` surface (the implicit default RNG path
-    // that draws system entropy). Previously, calling `rand`
-    // at top level produced a confusing
-    // `undefined method 'rand' for NilClass` — the
-    // toplevel-nil-self dispatch surface fallthrough when the
-    // name was wholly absent. The preamble now defines a
-    // top-level `rand` (and `srand`) that raise
-    // NotImplementedError with a message that points at
-    // `Random.new(seed)`. Pinned here so a future cleanup
-    // can't quietly delete the shim and re-expose the
-    // misleading lookup failure.
+fn kernel_rand_is_deterministic_by_default() {
+    // ADR 0017 posture, minitest-substrate revision: the top-level
+    // rand/srand surface now backs a DETERMINISTIC default RNG
+    // (Random.new(0), Mulberry32) instead of raising — a constant
+    // seed strengthens determinism (every run of a never-srand
+    // script sees the same sequence), and srand(n) is the
+    // reproducible-test-order knob minitest turns. Pinned here so
+    // the deterministic-default contract can't silently drift back
+    // to entropy.
     let mut rt = rubyrs::Runtime::new();
-    let err = rt.eval("rand(10)", "rand_shim.rb").unwrap_err();
-    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
-        panic!("expected Uncaught NotImplementedError, got {:?}", err.err);
-    };
-    assert_eq!(class_name, "NotImplementedError");
-    assert!(
-        message.contains("Random.new(seed)"),
-        "expected pointer to Random.new(seed), got: {}",
-        message,
-    );
+    // Two srand(0)-anchored draws agree; the never-seeded first
+    // draw also equals them because the default seed IS 0.
+    let v = rt
+        .eval(
+            "a = rand(1000); srand(0); b = rand(1000); srand(0); c = rand(1000); a == b && b == c",
+            "rand_det.rb",
+        )
+        .expect("deterministic rand");
+    assert_eq!(format!("{v:?}"), "Bool(true)");
 
-    // srand mirrors the same pattern.
+    // srand returns the PREVIOUS seed, CRuby-style.
     let mut rt = rubyrs::Runtime::new();
-    let err = rt.eval("srand(42)", "srand_shim.rb").unwrap_err();
-    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
-        panic!("expected Uncaught NotImplementedError, got {:?}", err.err);
-    };
-    assert_eq!(class_name, "NotImplementedError");
-    assert!(
-        message.contains("Random.new(seed)"),
-        "expected pointer to Random.new(seed), got: {}",
-        message,
-    );
-
-    // The shim must be a Tier-1 *catch* — `Random.new(seed)`
-    // still works and produces a deterministic value. If the
-    // shim somehow shadowed the class path this would break.
-    let buf = SharedBuf::new();
-    let mut rt = rubyrs::Runtime::new();
-    rt.set_stdout(Box::new(buf.clone()));
-    rt.eval("puts Random.new(42).rand(100)", "random_seeded.rb")
-        .expect("Random.new(seed).rand should still work");
-    let snap = buf.snapshot();
-    assert!(snap.trim().parse::<u32>().is_ok(), "expected integer, got {snap:?}");
+    let v = rt
+        .eval("srand(7) == 0 && srand(9) == 7", "srand_prev.rb")
+        .expect("srand returns prev seed");
+    assert_eq!(format!("{v:?}"), "Bool(true)");
 }
 
 #[test]

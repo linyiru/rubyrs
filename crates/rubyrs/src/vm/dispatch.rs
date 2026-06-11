@@ -2053,6 +2053,7 @@ impl Vm {
     /// `Regexp#===` body shared by the String and Symbol receiver
     /// shapes: run captures, publish `$~` (or clear it on miss),
     /// return the hit verdict.
+    #[cfg(feature = "regex")]
     fn regex_case_eq_on(&mut self, native: &regex::Regex, input: &str) -> bool {
         match native.captures(input) {
             Some(caps) => {
