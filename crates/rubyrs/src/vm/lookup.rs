@@ -498,6 +498,127 @@ impl Vm {
         }
     }
 
+    /// Does a `primitive_call`-family arm (or a universal dispatch
+    /// arm) claim `name` for instances of the named builtin class?
+    /// Extracted from the `responds_to` shape lists below so the
+    /// reopen-precedence early gate (`fast_index_revalidate`'s
+    /// collision flags, vm/dispatch.rs) and `respond_to?` agree on
+    /// what counts as a builtin arm. Only the shapes served by
+    /// `primitive_call` / `sym_primitive` BEFORE the
+    /// primitive-receiver user-method gate matter here — Array /
+    /// Hash / Range route through `collection_call` AFTER that
+    /// gate, so their reopens already win.
+    pub(crate) fn primitive_arm_name_for_class(class_name: &str, name: &str) -> bool {
+        // Universal arms (`nil?` / `to_s` / `==` / `inspect` / ...)
+        // answer on every receiver shape; a user reopen of one on a
+        // primitive class needs the early gate just like a
+        // shape-specific arm.
+        if matches!(name,
+            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?" | "eql?"
+            | "send" | "__send__" | "object_id" | "__id__" | "hash" | "frozen?" | "inspect"
+            | "instance_variables" | "instance_variable_get" | "instance_variable_set"
+            | "instance_variable_defined?" | "instance_exec"
+            | "method" | "singleton_method" | "public_method"
+        ) {
+            return true;
+        }
+        match class_name {
+            "Integer" => Self::int_primitive_arm(name),
+            "Float" => Self::float_primitive_arm(name),
+            "String" => Self::str_primitive_arm(name),
+            "Symbol" => Self::sym_primitive_arm(name),
+            "NilClass" => Self::nil_primitive_arm(name),
+            "TrueClass" | "FalseClass" => Self::bool_primitive_arm(name),
+            "Rational" => Self::rational_primitive_arm(name),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn int_primitive_arm(name: &str) -> bool {
+        matches!(name,
+            "+" | "-" | "*" | "/" | "%" | "**" | "pow" |
+            "<" | "<=" | ">" | ">=" |
+            "&" | "|" | "^" | "<<" | ">>" | "~" |
+            "to_s" | "inspect" |
+            "to_i" | "to_f" | "abs" | "even?" | "odd?" |
+            "zero?" | "positive?" | "negative?" |
+            "succ" | "next" | "pred" | "-@" | "+@" |
+            "times" | "upto" | "downto" | "step" |
+            "digits" | "bit_length" | "size" | "[]" |
+            "allbits?" | "anybits?" | "nobits?" |
+            "gcd" | "lcm" | "gcdlcm" | "fdiv" | "divmod" |
+            "ceil" | "floor" | "round" | "truncate" |
+            "chr" | "coerce" |
+            "to_r" | "rationalize" |
+            "eql?" | "hash" |
+            "dup" | "clone"
+        )
+    }
+    pub(crate) fn float_primitive_arm(name: &str) -> bool {
+        matches!(name,
+            "+" | "-" | "*" | "/" | "%" | "**" |
+            "<" | "<=" | ">" | ">=" |
+            "to_s" | "inspect" |
+            "to_i" | "to_f" | "abs" |
+            "zero?" | "positive?" | "negative?" |
+            "nan?" | "infinite?" | "finite?" |
+            "eql?" | "hash" |
+            "floor" | "ceil" | "round" | "truncate" | "divmod" | "step" |
+            "-@" | "+@" |
+            "to_r" | "rationalize" |
+            "coerce" |
+            "dup" | "clone"
+        )
+    }
+    pub(crate) fn str_primitive_arm(name: &str) -> bool {
+        matches!(name,
+            "+" | "*" | "%" | "<" | "<=" | ">" | ">=" |
+            "length" | "size" | "empty?" |
+            "upcase" | "downcase" | "reverse" |
+            "capitalize" | "swapcase" |
+            "upcase!" | "downcase!" | "reverse!" |
+            "capitalize!" | "swapcase!" |
+            "strip" | "lstrip" | "rstrip" |
+            "strip!" | "lstrip!" | "rstrip!" |
+            "chomp" | "chomp!" |
+            "tr!" | "squeeze!" |
+            "center" | "ljust" | "rjust" |
+            "include?" | "start_with?" | "end_with?" |
+            "delete_prefix" | "delete_suffix" | "delete_prefix!" | "delete_suffix!" |
+            "to_i" | "to_f" | "chars" | "split" | "lines" | "each_line" | "to_sym" | "intern" |
+            "to_s" | "to_str" | "inspect" |
+            "sub" | "sub!" | "gsub" | "gsub!" |
+            "tr" | "tr_s" | "squeeze" | "sum" |
+            "encode" | "force_encoding" | "valid_encoding?" | "encoding" | "b" |
+            "unpack" | "unpack1" | "bytes" | "getbyte" | "each_byte" |
+            "match?" | "match" | "scan" | "index" | "rindex" |
+            "[]" | "slice" |
+            "<<" | "concat" | "prepend" | "replace" |
+            "freeze" | "frozen?" | "dup" | "+@" | "-@" | "dump" | "count" |
+            "hash"
+        )
+    }
+    pub(crate) fn sym_primitive_arm(name: &str) -> bool {
+        matches!(name, "to_sym" | "to_s" | "inspect" | "name" | "succ" | "next" | "dup" | "clone"
+            | "empty?" | "length" | "size" | "upcase" | "downcase" | "capitalize" | "swapcase")
+    }
+    pub(crate) fn nil_primitive_arm(name: &str) -> bool {
+        matches!(name, "to_s" | "inspect" | "dup" | "clone" | "to_a" | "to_h" | "&" | "|" | "^")
+    }
+    pub(crate) fn bool_primitive_arm(name: &str) -> bool {
+        matches!(name, "to_s" | "inspect" | "dup" | "clone" | "&" | "|" | "^")
+    }
+    pub(crate) fn rational_primitive_arm(name: &str) -> bool {
+        matches!(name,
+            "numerator" | "denominator" |
+            "to_s" | "inspect" | "to_r" |
+            "to_i" | "to_f" |
+            "+" | "-" | "*" | "/" | "**" |
+            "<" | "<=" | ">" | ">=" | "<=>" |
+            "coerce"
+        )
+    }
+
     /// `Object#respond_to?(name)` semantics: does `recv` have a
     /// callable method named `name`? Used directly by the
     /// `respond_to?` dispatch arm; doesn't invoke anything, so
@@ -589,24 +710,7 @@ impl Vm {
             return true;
         }
         let yes = match recv {
-            Value::Int(_) => matches!(name,
-                "+" | "-" | "*" | "/" | "%" | "**" | "pow" |
-                "<" | "<=" | ">" | ">=" |
-                "&" | "|" | "^" | "<<" | ">>" | "~" |
-                "to_s" | "inspect" |
-                "to_i" | "to_f" | "abs" | "even?" | "odd?" |
-                "zero?" | "positive?" | "negative?" |
-                "succ" | "next" | "pred" | "-@" | "+@" |
-                "times" | "upto" | "downto" | "step" |
-                "digits" | "bit_length" | "size" | "[]" |
-                "allbits?" | "anybits?" | "nobits?" |
-                "gcd" | "lcm" | "gcdlcm" | "fdiv" | "divmod" |
-                "ceil" | "floor" | "round" | "truncate" |
-                "chr" | "coerce" |
-                "to_r" | "rationalize" |
-                "eql?" | "hash" |
-                "dup" | "clone"
-            ),
+            Value::Int(_) => Self::int_primitive_arm(name),
             // Phase A BigInt subset + Phase B.1 `**` + Phase B.2
             // unary (`-@`/`+@`/`abs`) + Phase B.3 bit ops (`~`,
             // `& | ^`, `<< >>`) + Phase B.5 `pow(exp, mod)` +
@@ -643,48 +747,9 @@ impl Vm {
                 "eql?" | "hash" |
                 "dup" | "clone"
             ),
-            Value::Float(_) => matches!(name,
-                "+" | "-" | "*" | "/" | "%" | "**" |
-                "<" | "<=" | ">" | ">=" |
-                "to_s" | "inspect" |
-                "to_i" | "to_f" | "abs" |
-                "zero?" | "positive?" | "negative?" |
-                "nan?" | "infinite?" | "finite?" |
-                "eql?" | "hash" |
-                "floor" | "ceil" | "round" | "truncate" | "divmod" | "step" |
-                "-@" | "+@" |
-                "to_r" | "rationalize" |
-                "coerce" |
-                "dup" | "clone"
-            ),
-            Value::Str(_) => matches!(name,
-                "+" | "*" | "%" | "<" | "<=" | ">" | ">=" |
-                "length" | "size" | "empty?" |
-                "upcase" | "downcase" | "reverse" |
-                "capitalize" | "swapcase" |
-                "upcase!" | "downcase!" | "reverse!" |
-                "capitalize!" | "swapcase!" |
-                "strip" | "lstrip" | "rstrip" |
-                "strip!" | "lstrip!" | "rstrip!" |
-                "chomp" | "chomp!" |
-                "tr!" | "squeeze!" |
-                "center" | "ljust" | "rjust" |
-                "include?" | "start_with?" | "end_with?" |
-                "delete_prefix" | "delete_suffix" | "delete_prefix!" | "delete_suffix!" |
-                "to_i" | "to_f" | "chars" | "split" | "lines" | "each_line" | "to_sym" | "intern" |
-                "to_s" | "to_str" | "inspect" |
-                "sub" | "sub!" | "gsub" | "gsub!" |
-                "tr" | "tr_s" | "squeeze" | "sum" |
-                "encode" | "force_encoding" | "valid_encoding?" | "encoding" | "b" |
-                "unpack" | "unpack1" | "bytes" | "getbyte" | "each_byte" |
-                "match?" | "match" | "scan" | "index" | "rindex" |
-                "[]" | "slice" |
-                "<<" | "concat" | "prepend" | "replace" |
-                "freeze" | "frozen?" | "dup" | "+@" | "-@" | "dump" | "count" |
-                "hash"
-            ),
-            Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect" | "name" | "succ" | "next" | "dup" | "clone"
-                | "empty?" | "length" | "size" | "upcase" | "downcase" | "capitalize" | "swapcase"),
+            Value::Float(_) => Self::float_primitive_arm(name),
+            Value::Str(_) => Self::str_primitive_arm(name),
+            Value::Sym(_) => Self::sym_primitive_arm(name),
             Value::Array(_) => matches!(name,
                 "freeze" | "frozen?" |
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
@@ -754,23 +819,15 @@ impl Vm {
                 "group_by" | "sort_by" | "sort" |
                 "each_slice" | "each_cons" | "chunk_while" | "slice_when"
             ),
-            Value::Nil => matches!(name,
-                "to_s" | "inspect" | "dup" | "clone" | "to_a" | "to_h" | "&" | "|" | "^"),
-            Value::Bool(_) => matches!(name, "to_s" | "inspect" | "dup" | "clone" | "&" | "|" | "^"),
+            Value::Nil => Self::nil_primitive_arm(name),
+            Value::Bool(_) => Self::bool_primitive_arm(name),
             // Phase C.1 readers + Phase C.2 arithmetic / comparison.
             // `coerce` is included so cross-type promotion (Rational
             // arg with Int/Float receiver) routes through the
             // standard protocol — `1 + Rational(1, 2)` goes through
             // `try_rational_binop` directly, but `1.send(:+, r)` via
             // method-call dispatch consults respond_to.
-            Value::Rational(_) => matches!(name,
-                "numerator" | "denominator" |
-                "to_s" | "inspect" | "to_r" |
-                "to_i" | "to_f" |
-                "+" | "-" | "*" | "/" | "**" |
-                "<" | "<=" | ">" | ">=" | "<=>" |
-                "coerce"
-            ),
+            Value::Rational(_) => Self::rational_primitive_arm(name),
             Value::Class(cls) => {
                 // Built-in class-level methods (`.new`, `.name`,
                 // `.ancestors`, ...) are hardcoded; user-defined

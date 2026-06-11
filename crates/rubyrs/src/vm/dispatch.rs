@@ -2228,6 +2228,29 @@ impl Vm {
             }
             None => false,
         };
+        // Reopen-precedence mask: per primitive class, does the OWN
+        // method table hold any name a primitive arm claims? The
+        // preamble is audited collision-free
+        // (preamble_defines_no_primitive_arm_collisions), so the
+        // mask is 0 until a USER reopen lands and the per-call gate
+        // in do_call stays a single u8 compare.
+        const PRIM_CLASSES: [(u8, &str); 8] = [
+            (0, "Integer"), (1, "Float"), (2, "String"), (3, "Symbol"),
+            (4, "NilClass"), (5, "TrueClass"), (5, "FalseClass"), (6, "Rational"),
+        ];
+        let mut mask = 0u8;
+        for (bit, cname) in PRIM_CLASSES {
+            let sym = self.interner.intern(cname);
+            if let Some(c) = self.classes.get(&sym) {
+                let methods = c.methods.borrow();
+                if methods.keys().any(|nid| {
+                    Self::primitive_arm_name_for_class(cname, self.interner.resolve(*nid))
+                }) {
+                    mask |= 1 << bit;
+                }
+            }
+        }
+        self.prim_reopen_mask = mask;
     }
 
     /// `no_recv` builtin-or-host fast path. Tries the host-side
@@ -5836,6 +5859,54 @@ impl Vm {
                 if let Some(m) = self.active_refinements.get(&(tname, name_id)).cloned() {
                     let r = r.clone();
                     return self.invoke_method(m, r, args.into_vec());
+                }
+            }
+        }
+        // Reopen-precedence early gate: a USER `def` directly on a
+        // primitive's class (`class String; def upcase; …`) must win
+        // over the builtin arm (CRuby semantics), but the
+        // primitive_call family runs BEFORE the primitive-receiver
+        // user-method gate further down — so without this, the
+        // builtin silently shadowed every such reopen. Gated to a
+        // single u8 compare in the no-reopen universe (the
+        // method_gen-revalidated `prim_reopen_mask`; the preamble is
+        // audited collision-free). OWN table only — `include`d
+        // modules must not beat builtin arms (String includes
+        // Comparable). Operator SYNTAX on numerics compiles to
+        // Op::BinOp and never reaches do_call — that layer stays
+        // native (documented boundary); method-call syntax
+        // (`5.+(2)`, `5.send(:+, 2)`) honors the reopen.
+        if !force_primitive && let Some(r) = &recv {
+            // Revalidate-on-gen-change here too: the other
+            // revalidation triggers (try_fast_index /
+            // try_fast_primitive) skip argc >= 1 non-index calls,
+            // and a stale mask would silently miss a just-defined
+            // reopen.
+            if self.fast_index_checked_gen != self.method_gen {
+                self.fast_index_revalidate();
+            }
+            if self.prim_reopen_mask != 0 {
+                let bit: u8 = match r {
+                    Value::Int(_) => 0,
+                    #[cfg(feature = "bignum")]
+                    Value::BigInt(_) => 0,
+                    Value::Float(_) => 1,
+                    Value::Str(_) => 2,
+                    Value::Sym(_) => 3,
+                    Value::Nil => 4,
+                    Value::Bool(_) => 5,
+                    Value::Rational(_) => 6,
+                    _ => 7,
+                };
+                if bit < 7
+                    && self.prim_reopen_mask & (1 << bit) != 0
+                    && let Value::Class(cls) = self.class_of(r)
+                {
+                    let m = cls.methods.borrow().get(&name_id).cloned();
+                    if let Some(m) = m {
+                        let r = r.clone();
+                        return self.invoke_method(m, r, args.into_vec());
+                    }
                 }
             }
         }
@@ -12522,6 +12593,45 @@ impl Vm {
         } else {
             Some(self.stack.pop().expect("ICE: stack underflow before block receiver"))
         };
+
+        // Reopen-precedence early gate — block-form twin of
+        // do_call's (`5.times { }` with a user `def times` on
+        // Integer must invoke the reopen WITH the block, not the
+        // native iter driver). Same mask/own-table contract; see
+        // do_call for the rationale and the operator-syntax
+        // boundary note.
+        {
+            if self.fast_index_checked_gen != self.method_gen {
+                self.fast_index_revalidate();
+            }
+            if self.prim_reopen_mask != 0
+                && let Some(r) = &recv
+            {
+                let bit: u8 = match r {
+                    Value::Int(_) => 0,
+                    #[cfg(feature = "bignum")]
+                    Value::BigInt(_) => 0,
+                    Value::Float(_) => 1,
+                    Value::Str(_) => 2,
+                    Value::Sym(_) => 3,
+                    Value::Nil => 4,
+                    Value::Bool(_) => 5,
+                    Value::Rational(_) => 6,
+                    _ => 7,
+                };
+                if bit < 7
+                    && self.prim_reopen_mask & (1 << bit) != 0
+                    && let Value::Class(cls) = self.class_of(r)
+                {
+                    let m = cls.methods.borrow().get(&name_id).cloned();
+                    if let Some(m) = m {
+                        let r = r.clone();
+                        self.invoke_method_with_block(m, r, args, Some(block))?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
 
         // Bare `instance_exec { ... }` / `instance_eval { ... }`
         // inside an instance method — `recv` is None, so the

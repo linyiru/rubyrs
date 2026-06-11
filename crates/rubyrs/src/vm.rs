@@ -1089,6 +1089,20 @@ pub(crate) struct Vm {
     /// perf in that exotic program, never correctness).
     pub(crate) fast_prim_str_safe: bool,
     pub(crate) fast_prim_int_safe: bool,
+    /// Reopen-precedence early gate (same `method_gen`-revalidated
+    /// pass): bit per primitive class whose OWN method table holds
+    /// at least one name a `primitive_call`-family arm claims
+    /// (`primitive_arm_name_for_class`). Bits: 0=Integer, 1=Float,
+    /// 2=String, 3=Symbol, 4=NilClass, 5=True/FalseClass,
+    /// 6=Rational. Zero (the universal case — the preamble is
+    /// audited collision-free) keeps the gate to a single u8
+    /// compare per call; a set bit routes that shape through an
+    /// own-table probe BEFORE the primitive arms, so `class
+    /// String; def upcase; end` wins like CRuby. Own table ONLY —
+    /// `include`d modules must NOT beat builtin arms (String
+    /// includes Comparable; its Ruby `<` would otherwise shadow
+    /// the native compare).
+    pub(crate) prim_reopen_mask: u8,
     /// Stack of Array/Hash ObjIds currently being rendered by
     /// `inspect_value`. A re-entry on an id already present is a cycle
     /// (`a = []; a << a`) and renders as `[...]` / `{...}` instead of
@@ -1506,6 +1520,7 @@ impl Vm {
             fast_index_array_set_safe: false,
             fast_prim_str_safe: false,
             fast_prim_int_safe: false,
+            prim_reopen_mask: 0,
             inspect_stack: Vec::new(),
             builtin_class_cache: Default::default(),
             sym_to_s,

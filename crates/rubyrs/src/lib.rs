@@ -3172,6 +3172,36 @@ mod preamble_lift_guard_tests {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::time::Duration;
 
+    /// Reopen-precedence invariant: the PREAMBLE must not define
+    /// own-table methods on the primitive classes whose names a
+    /// `primitive_call`-family arm already claims. The early
+    /// reopen gate (vm/dispatch.rs) treats any colliding own-table
+    /// entry as "user reopen wins over the builtin arm" — a
+    /// preamble collision would silently FLIP that method from
+    /// builtin to the (previously dead) preamble Ruby version. If
+    /// this test fails, either rename/remove the preamble def or
+    /// teach the gate to diff against the post-preamble snapshot.
+    #[test]
+    fn preamble_defines_no_primitive_arm_collisions() {
+        let mut rt = Runtime::new();
+        for cname in [
+            "Integer", "Float", "String", "Symbol",
+            "NilClass", "TrueClass", "FalseClass", "Rational",
+        ] {
+            let sym = rt.vm.interner.intern(cname);
+            let Some(cls) = rt.vm.classes.get(&sym).cloned() else { continue };
+            for name_id in cls.methods.borrow().keys() {
+                let name = rt.vm.interner.resolve(*name_id).to_string();
+                assert!(
+                    !vm::Vm::primitive_arm_name_for_class(cname, &name),
+                    "preamble collision: {cname}#{name} is claimed by a \
+                     primitive arm — the reopen early gate assumes \
+                     preamble own-tables are collision-free"
+                );
+            }
+        }
+    }
+
     /// `PreambleLiftGuard`'s whole purpose is to be panic-safe — Drop
     /// must fire on unwinding and restore caps even when the
     /// guarded scope panics. Without this, an embedder that
