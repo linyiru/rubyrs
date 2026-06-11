@@ -2119,7 +2119,10 @@ impl Vm {
     ///     Hash insert/overwrite + Array IN-BOUNDS overwrite only
     ///
     /// Hit semantics mirror the canonical arms byte-for-byte: Hash
-    /// get → `hash_index_lookup` + pair clone / Nil; Array get →
+    /// get → `hash_index_lookup` + pair clone / Nil; Hash key probe
+    /// (`key?`/`has_key?`/`include?`/`member?`) →
+    /// `hash_index_lookup(..).is_some()`, defaults never consulted;
+    /// Array get →
     /// negative-wrap index, out-of-range Nil; Hash set → the same
     /// `hash_insert` the canonical arm calls; both sets evaluate to
     /// the assigned value. No GC-heap allocation on any of these
@@ -2130,7 +2133,15 @@ impl Vm {
         }
         let is_get = argc == 1 && name_id == self.sym_index_op;
         let is_set = argc == 2 && name_id == self.sym_index_set_op;
-        if !is_get && !is_set {
+        // Hash KEY probes only — Array#include?/member? are VALUE
+        // searches (ruby_eq scan) with entirely different semantics,
+        // so the Array arm below never sees these names.
+        let is_key_probe = argc == 1
+            && (name_id == self.sym_key_q
+                || name_id == self.sym_has_key_q
+                || name_id == self.sym_include_q
+                || name_id == self.sym_member_q);
+        if !is_get && !is_set && !is_key_probe {
             return false;
         }
         let n = self.stack.len();
@@ -2146,6 +2157,24 @@ impl Vm {
                 let id = *id;
                 if self.heap.hash_class_tag(id).is_some() {
                     return false;
+                }
+                if is_key_probe {
+                    // Mirrors hash.rs's canonical arm byte-for-byte:
+                    // `("include?" | "has_key?" | "key?" | "member?", [k])
+                    //   => Bool(hash_index_lookup(id, k).is_some())`.
+                    // Key probes never consult the default value /
+                    // default block, so no defaulted-hash
+                    // fall-through is needed (unlike the `[]` get
+                    // path below).
+                    if !self.fast_index_hash_key_safe {
+                        return false;
+                    }
+                    let v = Value::Bool(
+                        self.heap.hash_index_lookup(id, &self.stack[n - 1]).is_some(),
+                    );
+                    self.stack.truncate(recv_idx);
+                    self.stack.push(v);
+                    return true;
                 }
                 if is_get {
                     if !self.fast_index_hash_safe {
@@ -2185,6 +2214,11 @@ impl Vm {
             }
             Value::Array(id) => {
                 let id = *id;
+                if is_key_probe {
+                    // Array#include?/member? are value searches —
+                    // canonical array.rs arms own those.
+                    return false;
+                }
                 if self.heap.array_class_tag(id).is_some() {
                     return false;
                 }
@@ -2257,6 +2291,17 @@ impl Vm {
                 ),
                 None => (false, false),
             };
+        // Key-probe twin — lumped: ANY of the four spellings
+        // overridden on the Hash chain turns the whole arm off.
+        self.fast_index_hash_key_safe = match self.classes.get(&hash_sym).cloned() {
+            Some(c) => {
+                self.lookup_method_uncached(&c, self.sym_key_q).is_none()
+                    && self.lookup_method_uncached(&c, self.sym_has_key_q).is_none()
+                    && self.lookup_method_uncached(&c, self.sym_include_q).is_none()
+                    && self.lookup_method_uncached(&c, self.sym_member_q).is_none()
+            }
+            None => false,
+        };
         // `try_fast_primitive` twins — same gen, same walk.
         let str_sym = self.interner.intern("String");
         self.fast_prim_str_safe = match self.classes.get(&str_sym).cloned() {

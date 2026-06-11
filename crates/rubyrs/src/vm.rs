@@ -1113,6 +1113,18 @@ pub(crate) struct Vm {
     /// (`try_fast_index`, vm/dispatch.rs).
     pub(crate) sym_index_op: SymId,
     pub(crate) sym_index_set_op: SymId,
+    /// Pre-interned Hash key-probe names (`key?` / `has_key?` /
+    /// `include?` / `member?` — one canonical hash.rs arm, four
+    /// spellings) for the same fast path. Liquid's `Drop#invokable?`
+    /// probes a Set (whose `include?` is the vendored interpreted
+    /// wrapper around `@hash.include?`) on EVERY drop attribute
+    /// access, and Jekyll data hashes get `key?`-probed throughout
+    /// read/merge — both measured ~3.3k instructions through full
+    /// dispatch vs ~1.4k in CRuby.
+    pub(crate) sym_key_q: SymId,
+    pub(crate) sym_has_key_q: SymId,
+    pub(crate) sym_include_q: SymId,
+    pub(crate) sym_member_q: SymId,
     /// Pre-interned `frozen?` for the zero-arg primitive fast path
     /// (Jekyll's `Utils.duplicate_frozen_values` probes it on every
     /// value of every document data hash, 4x per doc).
@@ -1140,6 +1152,11 @@ pub(crate) struct Vm {
     pub(crate) fast_index_array_safe: bool,
     pub(crate) fast_index_hash_set_safe: bool,
     pub(crate) fast_index_array_set_safe: bool,
+    /// Key-probe twin (`key?`/`has_key?`/`include?`/`member?` on
+    /// Hash). Lumped across the four spellings — a user override of
+    /// ANY of them on the Hash chain turns the whole probe arm off
+    /// (costs only perf in that exotic program, never correctness).
+    pub(crate) fast_index_hash_key_safe: bool,
     /// `try_fast_primitive` twins (same revalidation pass): no user
     /// `length`/`size`/`to_s` on String, no user `to_s`/`inspect` on
     /// Integer. Lumped per class — a user override of ANY watched
@@ -1490,6 +1507,10 @@ impl Vm {
         let sym_bang = interner.intern("$!");
         let sym_index_op = interner.intern("[]");
         let sym_index_set_op = interner.intern("[]=");
+        let sym_key_q = interner.intern("key?");
+        let sym_has_key_q = interner.intern("has_key?");
+        let sym_include_q = interner.intern("include?");
+        let sym_member_q = interner.intern("member?");
         let sym_frozen_q = interner.intern("frozen?");
         let sym_nil_q = interner.intern("nil?");
         let sym_empty_q = interner.intern("empty?");
@@ -1632,6 +1653,10 @@ impl Vm {
             sym_bang,
             sym_index_op,
             sym_index_set_op,
+            sym_key_q,
+            sym_has_key_q,
+            sym_include_q,
+            sym_member_q,
             sym_frozen_q,
             sym_nil_q,
             sym_empty_q,
@@ -1640,6 +1665,7 @@ impl Vm {
             fast_index_array_safe: false,
             fast_index_hash_set_safe: false,
             fast_index_array_set_safe: false,
+            fast_index_hash_key_safe: false,
             fast_prim_str_safe: false,
             fast_prim_int_safe: false,
             prim_reopen_mask: 0,
