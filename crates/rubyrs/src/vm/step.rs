@@ -2187,7 +2187,7 @@ impl Vm {
                 // closures captured during that invocation thus
                 // hold a Rc to the per-invocation Vec, isolated
                 // from subsequent iterations.
-                let (captured, self_val) = {
+                let (captured, self_val, captured_is_method_scope) = {
                     let f = self.frames.last().expect("ICE: CreateBlock no frame");
                     let captured = match &f.locals {
                         crate::vm::Locals::Shared(rc) => rc.clone(),
@@ -2199,7 +2199,10 @@ impl Vm {
                             unreachable!("ICE: CreateBlock in a Locals::Stack frame")
                         }
                     };
-                    (captured, f.self_val.clone())
+                    // A non-block creating frame (method / class body /
+                    // toplevel) means `captured` is a real outer scope
+                    // → the block's outer-write share path is sound.
+                    (captured, f.self_val.clone(), !f.is_block)
                 };
                 // Capture the lexical class for `@@cvar` resolution. For
                 // a block created inside another block this returns the
@@ -2221,6 +2224,7 @@ impl Vm {
                     n_params,
                     rest_slot,
                     kw_rest_slot,
+                    captured_is_method_scope,
                 }));
                 self.stack.push(Value::Block(id));
             }

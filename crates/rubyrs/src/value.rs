@@ -395,6 +395,18 @@ pub struct BlockHandle {
     /// kwargs Hash (or a fresh `{}`) into this slot. `None` means
     /// no `**opts` — a trailing Hash arg stays a positional.
     pub(crate) kw_rest_slot: Option<u16>,
+    /// `true` when `captured` is the locals of a METHOD / class-body /
+    /// toplevel frame (a real outer scope), `false` when it's another
+    /// block's locals (this block was created inside an enclosing
+    /// block). The share-direct block-locals fast path
+    /// (`block_frame_locals`) keys on this: sharing is only sound when
+    /// outer-scope writes land on a genuine method scope — if
+    /// `captured` is an enclosing block's per-invocation COPY, a direct
+    /// share would skip that copy's write-back chain and lose the
+    /// propagation to the grandparent (the `[[1,2]].each { |p| p.each
+    /// { |n| total += n } }` case). Set at `Op::CreateBlock` from
+    /// whether the creating frame `is_block`.
+    pub(crate) captured_is_method_scope: bool,
 }
 
 #[derive(Debug)]

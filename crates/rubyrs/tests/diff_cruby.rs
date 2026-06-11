@@ -552,6 +552,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn frame_locals_pool() { run_diff("frame_locals_pool"); }
 #[test] fn locals_stack_arena() { run_diff("locals_stack_arena"); }
 #[test] fn class_singleton_fast_path() { run_diff("class_singleton_fast_path"); }
+#[test] fn block_locals_share() { run_diff("block_locals_share"); }
 #[test] fn str_hash_cache() { run_diff("str_hash_cache"); }
 #[test] fn fxhash_internal_maps() { run_diff("fxhash_internal_maps"); }
 #[test] fn fxhash_vm_maps() { run_diff("fxhash_vm_maps"); }

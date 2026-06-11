@@ -11041,6 +11041,89 @@ impl Vm {
         }
     }
 
+    /// Decide a block invocation's locals representation, returning the
+    /// frame `Locals` plus the `block_writeback` to install.
+    ///
+    /// SHARE-DIRECT (the new fast path): when the block's body creates
+    /// no inner closure (`!proto.creates_block`, so nothing can capture
+    /// and leak this invocation's slots) AND the same block isn't
+    /// already live on the stack (no re-entrancy), the block frame
+    /// reuses the `captured` Vec ITSELF — a single `Rc::clone`, zero
+    /// per-iteration byte copy. Writes to outer-scope slots land
+    /// directly on `captured` (which IS the enclosing method's locals),
+    /// so no write-back is needed (`None`), and the lexical-owner walk
+    /// finds the method frame for free because both share the Rc. The
+    /// captured Vec is grown to `needed` once; the extra `[param_start,
+    /// needed)` slots are block scratch the method never reads.
+    ///
+    /// COPY (the prior behaviour, preserved for the cases share-direct
+    /// can't serve): a capturing block needs per-invocation isolation
+    /// (the `.each { |s| -> { s } }` fix), and a re-entrant block needs
+    /// each live invocation to own distinct scratch. Both fall back to
+    /// `block_locals_from_captured` + a `(captured, param_start)`
+    /// write-back.
+    fn block_frame_locals(
+        &mut self,
+        captured: &Rc<RefCell<Vec<Value>>>,
+        proto_idx: usize,
+        needed: usize,
+        param_start: u16,
+        captured_is_method_scope: bool,
+    ) -> (Rc<RefCell<Vec<Value>>>, Option<(Rc<RefCell<Vec<Value>>>, u16)>) {
+        // Share-direct requires ALL of:
+        //  - `captured` is a genuine method / class-body / toplevel
+        //    scope, not an enclosing block's per-invocation COPY —
+        //    sharing a copy would skip its write-back chain and lose
+        //    the propagation to the grandparent (the `[[1,2]].each
+        //    { |p| p.each { |n| total += n } }` case);
+        //  - no inner closure can capture & leak this frame's slots
+        //    (`!creates_block`);
+        //  - the same block isn't already live on the stack
+        //    (`!reentrant`), which would clobber its scratch.
+        // Returns the locals cell (caller wraps in `Locals::Shared`)
+        // and the `block_writeback` — `None` for the share path
+        // (writes hit the method scope directly).
+        if captured_is_method_scope
+            && !self.protos[proto_idx].creates_block
+            && !self.block_is_reentrant(proto_idx, captured)
+        {
+            // Grow once so the block's body slots exist; the method
+            // only ever reads `[0, method_n_locals)` so the extra
+            // tail is invisible to it.
+            {
+                let mut c = captured.borrow_mut();
+                if c.len() < needed {
+                    c.resize(needed, Value::Nil);
+                }
+            }
+            (captured.clone(), None)
+        } else {
+            let cell = self.block_locals_from_captured(captured, needed);
+            (cell, Some((captured.clone(), param_start)))
+        }
+    }
+
+    /// Is a block with this `proto_idx` + `captured` already an active
+    /// frame on the stack? Such re-entrancy means a share-direct frame
+    /// would clobber the suspended invocation's param / body-local
+    /// scratch, so the caller must fall back to a per-invocation copy.
+    /// The `proto_idx` pre-filter (a cheap `usize` compare) keeps the
+    /// `Rc::ptr_eq` off all the unrelated frames; the enclosing method
+    /// frame is non-block so it never matches.
+    fn block_is_reentrant(
+        &self,
+        proto_idx: usize,
+        captured: &Rc<RefCell<Vec<Value>>>,
+    ) -> bool {
+        self.frames.iter().any(|f| {
+            f.is_block
+                && f.proto_idx == proto_idx
+                && f.locals
+                    .as_shared()
+                    .is_some_and(|l| Rc::ptr_eq(l, captured))
+        })
+    }
+
     /// Return a popped frame's locals cell to the pool, IFF nothing else
     /// still references it. A `define_method` body shares its locals Rc
     /// with the closure's capture (`strong_count >= 2`), and a pending
@@ -12488,6 +12571,10 @@ impl Vm {
             n_params: 0,
             rest_slot: Some(1),
             kw_rest_slot: None,
+            // Synthetic forwarder over a fixed 2-slot scratch Vec, not
+            // a method scope; its proto is `creates_block` anyway so
+            // the share path never sees it.
+            captured_is_method_scope: false,
         }));
         Ok(id)
     }
@@ -12570,6 +12657,9 @@ impl Vm {
             n_params: 0,
             rest_slot: Some(2),
             kw_rest_slot: None,
+            // Synthetic compose-forwarder scratch Vec, not a method
+            // scope; proto is `creates_block` regardless.
+            captured_is_method_scope: false,
         }));
         Ok(id)
     }
@@ -12695,10 +12785,10 @@ impl Vm {
     /// the Frame it pushes are byte-identical to the general path.
     pub(crate) fn invoke_block1(&mut self, block_id: ObjId, arg: Value) -> Result<(), Trap> {
         self.check_frames()?;
-        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class) = {
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope) = {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
-             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone())
+             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope)
         };
         if rest_slot.is_some() || kw_rest_slot.is_some() || n_params > 1 {
             return self.invoke_block(block_id, vec![arg]);
@@ -12706,9 +12796,10 @@ impl Vm {
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
         let body_local_start = proto.block_body_local_start;
-        let fresh_locals = self.block_locals_from_captured(&captured, needed);
+        let (block_cell, writeback) =
+            self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope);
         {
-            let mut locals = fresh_locals.borrow_mut();
+            let mut locals = block_cell.borrow_mut();
             if (body_local_start as usize) < needed {
                 for slot in body_local_start as usize..needed {
                     locals[slot] = Value::Nil;
@@ -12721,14 +12812,14 @@ impl Vm {
         self.frames.push(Frame {
             proto_idx,
             ip: 0,
-            locals: crate::vm::Locals::Shared(fresh_locals),
+            locals: crate::vm::Locals::Shared(block_cell),
             self_val,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
             lexical_cvar_class: bh_lexical_cvar_class,
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: true, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
-            block_writeback: Some((captured, param_start)),
+            block_writeback: writeback,
         });
         Ok(())
     }
@@ -12743,10 +12834,10 @@ impl Vm {
     /// path with the exact Vec the old call sites built.
     pub(crate) fn invoke_block2(&mut self, block_id: ObjId, a: Value, b: Value) -> Result<(), Trap> {
         self.check_frames()?;
-        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class) = {
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope) = {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
-             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone())
+             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope)
         };
         if rest_slot.is_some() || kw_rest_slot.is_some() || n_params != 2 {
             return self.invoke_block(block_id, vec![a, b]);
@@ -12754,9 +12845,10 @@ impl Vm {
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
         let body_local_start = proto.block_body_local_start;
-        let fresh_locals = self.block_locals_from_captured(&captured, needed);
+        let (block_cell, writeback) =
+            self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope);
         {
-            let mut locals = fresh_locals.borrow_mut();
+            let mut locals = block_cell.borrow_mut();
             if (body_local_start as usize) < needed {
                 for slot in body_local_start as usize..needed {
                     locals[slot] = Value::Nil;
@@ -12768,14 +12860,14 @@ impl Vm {
         self.frames.push(Frame {
             proto_idx,
             ip: 0,
-            locals: crate::vm::Locals::Shared(fresh_locals),
+            locals: crate::vm::Locals::Shared(block_cell),
             self_val,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
             lexical_cvar_class: bh_lexical_cvar_class,
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: true, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
-            block_writeback: Some((captured, param_start)),
+            block_writeback: writeback,
         });
         Ok(())
     }
@@ -12785,10 +12877,10 @@ impl Vm {
         // Snapshot what we need out of the block's heap slot before
         // taking any `&mut self` action. BlockHandle.captured is a
         // shared `Rc<RefCell<Vec<Value>>>` — cheap to clone.
-        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class) = {
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope) = {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
-             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone())
+             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope)
         };
         // `|**opts|` keyword-rest: peel the trailing kwargs Hash off
         // the args BEFORE positional binding (so it doesn't land in
@@ -12929,11 +13021,13 @@ impl Vm {
         // divergence — see the Op::Return write-back arm and
         // SUBSET.md for the trade-off.
         // Snapshot the captured outer scope into a fresh (pool-reused)
-        // cell sized to `needed`. The helper grows to `needed`, so the
-        // explicit grow loop that used to live here is gone.
-        let fresh_locals = self.block_locals_from_captured(&captured, needed);
+        // cell sized to `needed` — or share the captured Vec directly
+        // for a non-capturing, non-re-entrant block (no per-iteration
+        // copy). See `block_frame_locals`.
+        let (block_cell, writeback) =
+            self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope);
         {
-            let mut locals = fresh_locals.borrow_mut();
+            let mut locals = block_cell.borrow_mut();
             // Reset body-introduced block-local slots before
             // rebinding params. CRuby's "block-locals are fresh
             // each invocation" semantics: a variable
@@ -12976,14 +13070,14 @@ impl Vm {
         self.frames.push(Frame {
             proto_idx,
             ip: 0,
-            locals: crate::vm::Locals::Shared(fresh_locals),
+            locals: crate::vm::Locals::Shared(block_cell),
             self_val,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
             lexical_cvar_class: bh_lexical_cvar_class,
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: true, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
-            block_writeback: Some((captured, param_start)),
+            block_writeback: writeback,
         });
         Ok(())
     }
