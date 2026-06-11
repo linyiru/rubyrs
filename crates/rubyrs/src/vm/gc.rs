@@ -570,6 +570,18 @@ impl Vm {
                 // when it reaches the slot.
                 roots.push(Value::Block(id));
             }
+            // `BeginBaseline.saved_dollar_bang` snapshots the
+            // dynamically-scoped `$!` at Op::EnterBegin; once an
+            // inner `raise` REPLACES the global, the snapshot can be
+            // the ONLY reference to the previous exception object —
+            // Op::ExitBegin then restores a swept ObjId. Repro
+            // (STRESS_GC): nested begin/rescue with an unbound outer
+            // rescue + alloc churn inside the inner rescue →
+            // `$!.message` ICEs with "class_of called on non-Object
+            // slot" (begin_dollar_bang_snapshot_gc fixture).
+            for b in &f.begin_rescue_depths {
+                roots.push(b.saved_dollar_bang.clone());
+            }
         }
         // `define_method`-installed methods carry captured-locals
         // Rcs that aren't reachable from any Frame once the lexical
