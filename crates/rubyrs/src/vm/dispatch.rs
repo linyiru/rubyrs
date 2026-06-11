@@ -12158,6 +12158,55 @@ impl Vm {
         }
     }
 
+    /// Single-positional-arg fast path for the hot Rust-level iter
+    /// drivers (`times` / Array `each`/`map`/filter / Hash key-value
+    /// walks): skips the per-iteration args-Vec allocation, the
+    /// kw-rest peel, the auto-splat probe, and the rest/kw-rest
+    /// binding block of the general path. Blocks with a rest or
+    /// kw-rest slot, or with >1 params (auto-splat semantics), fall
+    /// back to `invoke_block` — the fallback re-reads the block
+    /// handle, which is fine for that rare shape. Locals setup and
+    /// the Frame it pushes are byte-identical to the general path.
+    pub(crate) fn invoke_block1(&mut self, block_id: ObjId, arg: Value) -> Result<(), Trap> {
+        self.check_frames()?;
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
+             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone())
+        };
+        if rest_slot.is_some() || kw_rest_slot.is_some() || n_params > 1 {
+            return self.invoke_block(block_id, vec![arg]);
+        }
+        let proto = &self.protos[proto_idx];
+        let needed = proto.n_locals as usize;
+        let body_local_start = proto.block_body_local_start;
+        let fresh_locals = self.block_locals_from_captured(&captured, needed);
+        {
+            let mut locals = fresh_locals.borrow_mut();
+            if (body_local_start as usize) < needed {
+                for slot in body_local_start as usize..needed {
+                    locals[slot] = Value::Nil;
+                }
+            }
+            if n_params == 1 {
+                locals[param_start as usize] = arg;
+            }
+        }
+        self.frames.push(Frame {
+            proto_idx,
+            ip: 0,
+            locals: fresh_locals,
+            self_val,
+            base_sp: self.stack.len(),
+            is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
+            lexical_cvar_class: bh_lexical_cvar_class,
+            #[cfg(feature = "regex")] saved_last_match: None,
+            is_block: true, n_given_positional: 0, kw_given_mask: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![], pending_yield: false, begin_rescue_depths: vec![],
+            block_writeback: Some((captured, param_start)),
+        });
+        Ok(())
+    }
+
     pub(crate) fn invoke_block(&mut self, block_id: ObjId, mut args: Vec<Value>) -> Result<(), Trap> {
         self.check_frames()?;
         // Snapshot what we need out of the block's heap slot before
@@ -12238,7 +12287,14 @@ impl Vm {
         // be swept and the later alloc would store a dangling
         // ObjId; same hazard the callable_coerce.rb / proc_curry_
         // compose.rb fixtures pinned against.)
-        let (rest_array_val, kw_rest_final): (SlotBinding, SlotBinding) = {
+        let (rest_array_val, kw_rest_final): (SlotBinding, SlotBinding) = if rest_slot.is_none()
+            && kw_rest_slot.is_none()
+        {
+            // No rest / kw-rest slots — nothing below allocates or
+            // calls maybe_gc, so skip the PinGuard entirely (its
+            // construct+drop showed up at ~2% of tight block loops).
+            (None, None)
+        } else {
             let mut g = crate::vm::PinGuard::new(self);
             g.pin(Value::Block(block_id));
             if let Some(v) = &kw_rest_value { g.pin(v.clone()); }
