@@ -64,11 +64,19 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
               key = "#{path}|#{slice}|#{fields ? fields.join(",") : ""}"
               cached = (@site_values ||= {})[key]
               if cached.nil?
-                resolved = resolve(payload, path, slice, fields)
+                # ONE walk shared by the value and its #size — the
+                # walked target can be expensive to produce anew
+                # (SiteDrop#posts sorts all posts per CALL because
+                # each render's payload carries a fresh drop, so its
+                # @site_posts memo never helps; the old
+                # resolve-then-resolve_full_size pair paid that sort
+                # twice — measured 2 x 49 ms on liquid-1k).
+                v = walk(payload, path)
+                resolved = resolve_walked(v, slice, fields)
                 return nil if resolved == :__decline
                 full = nil
                 if need_size
-                  full = resolve_full_size(payload, path)
+                  full = walked_size(v)
                   return nil if full == :__decline
                 end
                 cached = @site_values[key] = [resolved, full]
@@ -77,11 +85,12 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
               values[path + "#size"] = cached[1] if need_size
               next
             end
-            resolved = resolve(payload, path, slice, fields)
+            v = walk(payload, path)
+            resolved = resolve_walked(v, slice, fields)
             return nil if resolved == :__decline
             values[path] = resolved
             if need_size
-              full = resolve_full_size(payload, path)
+              full = walked_size(v)
               return nil if full == :__decline
               values[path + "#size"] = full
             end
@@ -104,8 +113,10 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
           cur
         end
 
-        def resolve(payload, path, slice, fields)
-          v = walk(payload, path)
+        # Value-side half of the old `resolve` — operates on an
+        # already-walked target so the caller can share one walk
+        # between the value and `walked_size`.
+        def resolve_walked(v, slice, fields)
           if fields
             # Iterated collection: materialize just the sliced items'
             # fields as plain hashes (the host model can't carry
@@ -127,8 +138,7 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
           deep_ok?(v) ? v : :__decline
         end
 
-        def resolve_full_size(payload, path)
-          v = walk(payload, path)
+        def walked_size(v)
           return 0 if v.nil?
           return :__decline unless v.respond_to?(:size)
           v.size
