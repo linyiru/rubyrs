@@ -548,12 +548,26 @@ impl Vm {
             | ("fnmatch?", [pat, path])
             | ("fnmatch", [pat, path, _])
             | ("fnmatch?", [pat, path, _]) => {
-                let pattern = path_arg(pat)?;
-                let target = path_arg(path)?;
                 let flags = match args.get(2) {
                     Some(Value::Int(n)) => *n,
                     _ => 0,
                 };
+                // Str/Str fast extraction: borrow both contents
+                // directly (no `path_arg` String copies — this arm
+                // runs N exclusion globs per Jekyll document).
+                // Non-Str args (Pathname `to_path` coercion) and
+                // non-UTF-8 take the general path below.
+                if let (Value::Str(a), Value::Str(b)) = (pat, path) {
+                    let ab = a.content.borrow();
+                    let bb = b.content.borrow();
+                    if let (Ok(ap), Ok(bp)) =
+                        (std::str::from_utf8(&ab), std::str::from_utf8(&bb))
+                    {
+                        return Ok(Some(Value::Bool(fnmatch(ap, bp, flags))));
+                    }
+                }
+                let pattern = path_arg(pat)?;
+                let target = path_arg(path)?;
                 Value::Bool(fnmatch(&pattern, &target, flags))
             }
             ("exist?", [p]) | ("exists?", [p]) | ("file?", [p]) => {
@@ -1347,9 +1361,25 @@ fn fnm_match(p: &[char], mut pi: usize, s: &[char], mut si: usize, flags: i64) -
     si == s.len()
 }
 
+thread_local! {
+    // Reused char buffers for `fnmatch` — the recursive matcher
+    // needs random access (`&[char]`), but collecting two fresh
+    // `Vec<char>`s per call was ~half the cost of the hot
+    // Jekyll path (`EntryFilter#glob_include?` runs N exclusion
+    // globs per document). clear+extend keeps the capacity.
+    static FNM_SCRATCH: std::cell::RefCell<(Vec<char>, Vec<char>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
 /// CRuby `File.fnmatch(pattern, path, flags)` — glob-style match.
 pub(crate) fn fnmatch(pattern: &str, path: &str, flags: i64) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let s: Vec<char> = path.chars().collect();
-    fnm_match(&p, 0, &s, 0, flags)
+    FNM_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        let (p, s) = &mut *scratch;
+        p.clear();
+        p.extend(pattern.chars());
+        s.clear();
+        s.extend(path.chars());
+        fnm_match(p, 0, s, 0, flags)
+    })
 }
