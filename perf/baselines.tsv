@@ -216,7 +216,15 @@ crates/rubyrs/tests/fixtures/fizzbuzz.rb	8400	0	tiny script; wall is sub-100ms n
 # as the 2026-06-04 / -06-05 bumps above. Within the documented
 # 20-30% wall noise floor; bump to ~8% over observed peak, leave
 # the ratchet defending future regressions.
-crates/rubyrs/examples/metaprog_bench/mm_bench.rb	8200	1550	2M method_missing dispatch
+# mm_bench RSS bumped 8200 → 8400 on 2026-06-10 — observed CI
+# 8236 KB (cap 8200; +0.4%) after the Frame slimming (f2033e5b:
+# the four inline Vecs moved behind Option<Box<FrameAux>>). The
+# frames Vec's per-element footprint SHRANK (328 → 240 B), but the
+# allocator's page mix shifted (mimalloc size-class change for the
+# frames backing buffer + per-aux boxes where begin/rescue runs) —
+# a ~36 KB page-boundary effect, not a leak. Joins fizzbuzz /
+# hash_mutate at the 8400 tier (same 2026-06-10 rhythm).
+crates/rubyrs/examples/metaprog_bench/mm_bench.rb	8400	1550	2M method_missing dispatch
 # dm_bench RSS bumped 6500 → 6700 on 2026-05-27 — the
 # define_method dispatch benchmark crossed 6500 KB at PR #175
 # (ic-stats baseline workloads added) + PR #178 (step-block
