@@ -296,7 +296,13 @@ crates/rubyrs/benches/fizzbuzz_1m.rb	8400	800	1M fizzbuzz; BinOpInt + IncLocal +
 # carmine-crate commit, which doesn't even link into rubyrs — pure
 # runner noise on an allocation-stress workload. Bump to ~2% headroom.
 crates/rubyrs/benches/gc_churn.rb	9000	400	200k short-lived Array+Hash allocs; stresses mark/sweep
-crates/rubyrs/benches/string_interp.rb	8200	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
+# string_interp RSS bumped 8200 → 8400 on 2026-06-11 — observed CI
+# 8284 KB (84 KB / 1% over) one run after static_bench tripped the
+# same way (8220). The runner image's RSS floor now sits at
+# ~8.1–8.3 MB across ALL workloads; this was the last row below
+# 8400. Joins the 8400 cohort (fizzbuzz / mm_bench / dm_bench /
+# static_bench / fizzbuzz_1m / hash_mutate).
+crates/rubyrs/benches/string_interp.rb	8400	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
 # hash_mutate WALL bumped 650 → 730 on 2026-05-27 — 3
 # consecutive master CI runs observed 690-710ms (4-9% over
 # 650 budget). Same pattern on dm_bench (700→780) and
