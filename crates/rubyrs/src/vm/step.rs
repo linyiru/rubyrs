@@ -3906,7 +3906,7 @@ impl Vm {
                 // each method-frame push.
                 #[cfg(feature = "regex")]
                 if let Some(saved) = f.saved_last_match {
-                    self.last_match = saved;
+                    self.last_match = saved.map(|b| *b);
                 }
                 // `$!` (errinfo) is dynamically scoped: a `return` out
                 // of a rescue body abandons the begin region(s) whose

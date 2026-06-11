@@ -135,7 +135,7 @@ pub(crate) struct Frame {
     /// `Vm::last_match` / `LastMatch` themselves — the wasm/regex-off
     /// build has no match state to scope.
     #[cfg(feature = "regex")]
-    pub(crate) saved_last_match: Option<Option<LastMatch>>,
+    pub(crate) saved_last_match: Option<Option<Box<LastMatch>>>,
     /// True for frames pushed by `Vm::invoke_block` (the frame
     /// for a `do…end` / `{ … }` body). Used by the non-local
     /// `return`-from-block path: when `Op::ReturnMethod` sets

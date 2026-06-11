@@ -10952,7 +10952,7 @@ impl Vm {
                 continue;
             }
             if f.saved_last_match.is_none() {
-                f.saved_last_match = Some(self.last_match.take());
+                f.saved_last_match = Some(self.last_match.take().map(Box::new));
             }
             return;
         }

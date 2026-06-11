@@ -303,7 +303,7 @@ impl Vm {
             // `$~`, not the raising callee's (block frames carry `None`).
             #[cfg(feature = "regex")]
             if let Some(saved) = f.saved_last_match {
-                self.last_match = saved;
+                self.last_match = saved.map(|b| *b);
             }
             if f.is_class_body {
                 self.class_stack.pop();
@@ -534,7 +534,7 @@ impl Vm {
                 // method doesn't leak that method's regex match.
                 #[cfg(feature = "regex")]
                 if let Some(saved) = popped.saved_last_match {
-                    self.last_match = saved;
+                    self.last_match = saved.map(|b| *b);
                 }
                 if popped.is_class_body {
                     let cls = self.class_stack.pop()
@@ -563,7 +563,7 @@ impl Vm {
             // landing pop above).
             #[cfg(feature = "regex")]
             if let Some(saved) = popped.saved_last_match {
-                self.last_match = saved;
+                self.last_match = saved.map(|b| *b);
             }
             if popped.is_class_body {
                 // Class-body frames carry class_stack /
