@@ -162,6 +162,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "stdlib")]
 #[test] fn os_surface_batch() { run_diff("os_surface_batch"); }
 #[test] fn object_dup_regex_sym_hash_default() { run_diff("object_dup_regex_sym_hash_default"); }
+#[test] fn stdio_argv_surface() { run_diff("stdio_argv_surface"); }
 #[test] fn string_to_s_passthrough() { run_diff("string_to_s_passthrough"); }
 #[test] fn assign_expr_value() { run_diff("assign_expr_value"); }
 #[test] fn begin_dollar_bang_snapshot_gc() { run_diff("begin_dollar_bang_snapshot_gc"); }

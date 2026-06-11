@@ -44,3 +44,108 @@ module Process
     end
   end
 end
+
+# ---- Standard streams ----------------------------------------
+#
+# CRuby's $stdout/$stderr/STDOUT/STDERR are IO objects; rubyrs's
+# write path is the host-injected sink pair on the Vm
+# (`set_stdout`/`set_stderr`), so these IO instances are thin Ruby
+# veneers over the `__rubyrs_std*_write` raw-byte builtins.
+#
+# DIVERGENCE: Kernel#puts/print write to the VM sink DIRECTLY —
+# reassigning `$stdout = StringIO.new` redirects only calls made
+# through the $stdout object, not bare puts. (CRuby consults the
+# global dynamically.) Test frameworks pass the IO object around
+# explicitly (minitest's `Minitest.io`), which is the supported
+# shape. STDIN stays absent-loud: rubyrs has no input capability.
+class IO
+  def initialize(which)
+    @which = which
+  end
+
+  def write(*args)
+    total = 0
+    args.each do |a|
+      s = a.to_s
+      total += s.bytesize
+      if @which == :err
+        __rubyrs_stderr_write(s)
+      else
+        __rubyrs_stdout_write(s)
+      end
+    end
+    total
+  end
+
+  def <<(obj)
+    write(obj.to_s)
+    self
+  end
+
+  def print(*args)
+    args.each { |a| write(a.to_s) }
+    nil
+  end
+
+  def puts(*args)
+    if args.empty?
+      write("\n")
+    else
+      args.each do |a|
+        if a.is_a?(Array)
+          # CRuby: an empty Array contributes NO output (not even
+          # a bare newline).
+          a.each { |x| puts(x) }
+        else
+          s = a.to_s
+          write(s.end_with?("\n") ? s : "#{s}\n")
+        end
+      end
+    end
+    nil
+  end
+
+  def printf(fmt, *args)
+    write(format(fmt, *args))
+    nil
+  end
+
+  def flush
+    self
+  end
+
+  # CRuby's piped-stdout default; assignment is honoured for
+  # read-back but write behavior is unchanged (the VM sink flushes
+  # on its own schedule).
+  def sync
+    @sync = false if @sync.nil?
+    @sync
+  end
+
+  def sync=(v)
+    @sync = v
+  end
+
+  def tty?
+    false
+  end
+  alias isatty tty?
+
+  def fileno
+    @which == :err ? 2 : 1
+  end
+
+  def closed?
+    false
+  end
+end
+
+STDOUT = IO.new(:out)
+STDERR = IO.new(:err)
+$stdout = STDOUT
+$stderr = STDERR
+
+# ARGV — empty by default (deterministic library posture); the CLI
+# overwrites it with the post-script-path arguments via
+# `Runtime::set_argv`.
+ARGV = []

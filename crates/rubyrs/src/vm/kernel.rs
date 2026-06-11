@@ -57,6 +57,8 @@ impl Vm {
                 | "warn"
                 | "at_exit"
                 | "__rubyrs_signal_trap"
+                | "__rubyrs_stdout_write"
+                | "__rubyrs_stderr_write"
                 | "__method__"
                 | "__callee__"
                 | "block_given?"
@@ -498,6 +500,7 @@ impl Vm {
                         "puts" | "p" | "pp" | "print" | "require" | "load" |
                         "sprintf" | "format" | "__time_now_raw" | "__rubyrs_time_parse_iso" | "sleep" |
                         "exit" | "exit!" | "abort" | "warn" | "at_exit" | "__rubyrs_signal_trap" |
+                        "__rubyrs_stdout_write" | "__rubyrs_stderr_write" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
                         "eval" | "caller" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?" |
@@ -1355,6 +1358,28 @@ impl Vm {
                     }
                 }
                 raise_system_exit(self, 1, msg.as_deref().unwrap_or("exit"))
+            }
+            // `__rubyrs_stdout_write` / `__rubyrs_stderr_write` —
+            // raw byte sinks behind the preamble's STDOUT/STDERR IO
+            // objects (preamble/process.rb). One String arg, written
+            // verbatim (no newline normalisation — that's IO#puts's
+            // job in Ruby); returns nil. Raw bytes (not to_display)
+            // so binary-ish output round-trips like CRuby's
+            // IO#write.
+            "__rubyrs_stdout_write" | "__rubyrs_stderr_write" => {
+                if let [Value::Str(sv)] = args {
+                    let bytes = sv.borrow();
+                    if name == "__rubyrs_stdout_write" {
+                        let _ = self.stdout.write_all(&bytes);
+                    } else {
+                        let _ = self.stderr.write_all(&bytes);
+                    }
+                } else {
+                    return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "stdio write expects a single String".to_string(),
+                    })));
+                }
+                Some(Ok(Value::Nil))
             }
             "warn" => {
                 // Tier-1 2c: `Kernel#warn(*msgs)` writes each

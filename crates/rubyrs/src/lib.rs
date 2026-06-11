@@ -2824,6 +2824,24 @@ self.eval_inner(
             .expect("ICE: failed to load encoding_full preamble");
     }
 
+    /// Replace the `ARGV` constant with the host's argument vector.
+    /// The preamble defines `ARGV = []` (the deterministic library
+    /// default — constructing a Runtime never reads the process
+    /// args); the CLI binary calls this with everything after the
+    /// script path so `rubyrs script.rb a b` sees what CRuby would.
+    pub fn set_argv(&mut self, args: &[String]) {
+        let elems: Vec<Value> = args.iter().map(|a| Value::new_str(a.as_str())).collect();
+        self.vm.maybe_gc();
+        let id = self.vm.heap.alloc(heap::HeapObj::Array(elems.into()));
+        let sym = self.vm.interner.intern("ARGV");
+        self.vm.constants.insert(sym, Value::Array(id));
+        // The preamble already defined `ARGV = []`, and constant
+        // reads go through the const inline cache — bump the
+        // generation so cached sites re-resolve to the new Array
+        // (same invalidation contract as Op::StoreConst).
+        self.vm.const_gen = self.vm.const_gen.wrapping_add(1);
+    }
+
     /// Replace the runtime's stdout sink.
     ///
     /// **Per ADR 0017 the default sink is `std::io::sink()`**, not
@@ -3344,6 +3362,19 @@ impl Drop for Runtime {
 
 #[cfg(test)]
 mod preamble_lift_guard_tests {
+    #[test]
+    fn set_argv_defines_the_constant() {
+        let mut rt = crate::Runtime::new();
+        // Library default: preamble-defined empty ARGV.
+        let v = rt.eval("ARGV.length", "t.rb").expect("default ARGV");
+        assert_eq!(format!("{v:?}"), "Int(0)");
+        rt.set_argv(&["alpha".to_string(), "beta".to_string()]);
+        let v = rt
+            .eval("ARGV.join(\",\") == \"alpha,beta\"", "t.rb")
+            .expect("argv join");
+        assert_eq!(format!("{v:?}"), "Bool(true)");
+    }
+
     use super::*;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::time::Duration;

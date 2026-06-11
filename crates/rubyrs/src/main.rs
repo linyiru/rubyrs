@@ -369,6 +369,9 @@ fn main() {
     trace.at("runtime_ready");
     rt.set_stdout(Box::new(std::io::stdout()));
     rt.set_stderr(Box::new(std::io::stderr()));
+    // Script arguments: everything after the script path becomes
+    // ARGV, CRuby-style (`rubyrs script.rb a b` → ARGV == ["a","b"]).
+    rt.set_argv(&args[2..]);
     // Stage 7d: expose `_http_server` host fns to scripts
     // when the feature is built in. Keeps the binary
     // useful for prefork subprocess tests + examples.
