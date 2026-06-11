@@ -2027,77 +2027,134 @@ impl Vm {
         true
     }
 
-    /// Collection-index fast path: `h[key]` / `a[int]` on a PLAIN
-    /// (untagged) Hash / Array short-circuits the full dispatch
-    /// preamble (name resolve + arm probing — ~150ns/call, 8× CRuby's
-    /// `opt_aref`, measured hot in both Jekyll's read phase — data-hash
-    /// probes in `populate_categories` / `merge_data!` — and Liquid's
-    /// render scopes). Soundness gates, in order:
-    ///   - refined `[]` detours before the call site (`maybe_refined`)
-    ///   - a user `[]` anywhere on the Hash/Array ancestor chain turns
-    ///     the path off via the `method_gen`-revalidated flags
-    ///     (`fast_index_revalidate` below)
+    /// Collection-index fast path: `h[key]` / `a[int]` (and the
+    /// `[]=` write twins) on a PLAIN (untagged) Hash / Array
+    /// short-circuit the full dispatch preamble (name resolve + arm
+    /// probing — ~150ns/call, 8× CRuby's `opt_aref`, measured hot in
+    /// both Jekyll's read phase — data-hash probes in
+    /// `populate_categories` / `merge_data!` — and Liquid's render
+    /// scopes). Soundness gates, in order:
+    ///   - refined `[]`/`[]=` detours before the call site
+    ///     (`maybe_refined`)
+    ///   - a user `[]`/`[]=` anywhere on the Hash/Array ancestor
+    ///     chain turns the matching path off via the
+    ///     `method_gen`-revalidated flags (`fast_index_revalidate`
+    ///     below; per-name flags so e.g. a `[]=`-only reopen leaves
+    ///     the read path fast)
     ///   - subclass instances (class_tag set) fall through to the
     ///     subclass-override gate
     ///   - Hash misses on a defaulted hash (scalar default or
     ///     default-block) fall through so the canonical hash.rs arm
     ///     owns those semantics; Array non-Int args (Range / two-arg
     ///     slice arrive as other shapes) fall through likewise
+    ///   - writes: capped Vms (`max_value_bytes`, embed-only) and
+    ///     Array growth / too-negative wrap (nil-padding, byte cap,
+    ///     IndexError shapes) fall through — the write fast path is
+    ///     Hash insert/overwrite + Array IN-BOUNDS overwrite only
     ///
-    /// Hit semantics mirror the canonical arms byte-for-byte: Hash →
-    /// `hash_index_lookup` + pair clone / Nil; Array → negative-wrap
-    /// index, out-of-range Nil. No allocation on this path, so no
-    /// `maybe_gc` (same as the arms it mirrors).
+    /// Hit semantics mirror the canonical arms byte-for-byte: Hash
+    /// get → `hash_index_lookup` + pair clone / Nil; Array get →
+    /// negative-wrap index, out-of-range Nil; Hash set → the same
+    /// `hash_insert` the canonical arm calls; both sets evaluate to
+    /// the assigned value. No GC-heap allocation on any of these
+    /// paths, so no `maybe_gc` (same as the arms they mirror).
     fn try_fast_index(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> bool {
-        if no_recv || argc != 1 || name_id != self.sym_index_op {
+        if no_recv {
+            return false;
+        }
+        let is_get = argc == 1 && name_id == self.sym_index_op;
+        let is_set = argc == 2 && name_id == self.sym_index_set_op;
+        if !is_get && !is_set {
             return false;
         }
         let n = self.stack.len();
-        if n < 2 {
+        if n < argc + 1 {
             return false;
         }
         if self.fast_index_checked_gen != self.method_gen {
             self.fast_index_revalidate();
         }
-        match &self.stack[n - 2] {
+        let recv_idx = n - argc - 1;
+        match &self.stack[recv_idx] {
             Value::Hash(id) => {
-                if !self.fast_index_hash_safe {
-                    return false;
-                }
                 let id = *id;
                 if self.heap.hash_class_tag(id).is_some() {
                     return false;
                 }
-                let v = if let Some(pos) = self.heap.hash_index_lookup(id, &self.stack[n - 1]) {
-                    self.heap.hash(id)[pos].1.clone()
-                } else {
-                    if self.heap.hash_default_value(id).is_some()
-                        || self.heap.hash_default_block(id).is_some()
-                    {
+                if is_get {
+                    if !self.fast_index_hash_safe {
                         return false;
                     }
-                    Value::Nil
-                };
-                self.stack.truncate(n - 2);
-                self.stack.push(v);
+                    let v = if let Some(pos) = self.heap.hash_index_lookup(id, &self.stack[n - 1])
+                    {
+                        self.heap.hash(id)[pos].1.clone()
+                    } else {
+                        if self.heap.hash_default_value(id).is_some()
+                            || self.heap.hash_default_block(id).is_some()
+                        {
+                            return false;
+                        }
+                        Value::Nil
+                    };
+                    self.stack.truncate(recv_idx);
+                    self.stack.push(v);
+                } else {
+                    if !self.fast_index_hash_set_safe {
+                        return false;
+                    }
+                    // The canonical arm's byte cap only fires when
+                    // `max_value_bytes` is set (embed-only); rather
+                    // than duplicate the cap logic, capped Vms take
+                    // the slow path.
+                    if self.max_value_bytes.is_some() {
+                        return false;
+                    }
+                    let v = self.stack[n - 1].clone();
+                    let k = self.stack[n - 2].clone();
+                    self.heap.hash_insert(id, k, v.clone());
+                    self.stack.truncate(recv_idx);
+                    self.stack.push(v);
+                }
                 true
             }
             Value::Array(id) => {
-                if !self.fast_index_array_safe {
-                    return false;
-                }
                 let id = *id;
                 if self.heap.array_class_tag(id).is_some() {
                     return false;
                 }
-                let Value::Int(i) = self.stack[n - 1] else {
+                let Value::Int(i) = self.stack[recv_idx + 1] else {
                     return false;
                 };
-                let a = self.heap.array(id);
-                let idx = if i < 0 { a.len() as i64 + i } else { i };
-                let v = a.get(idx as usize).cloned().unwrap_or(Value::Nil);
-                self.stack.truncate(n - 2);
-                self.stack.push(v);
+                if is_get {
+                    if !self.fast_index_array_safe {
+                        return false;
+                    }
+                    let a = self.heap.array(id);
+                    let idx = if i < 0 { a.len() as i64 + i } else { i };
+                    let v = a.get(idx as usize).cloned().unwrap_or(Value::Nil);
+                    self.stack.truncate(recv_idx);
+                    self.stack.push(v);
+                } else {
+                    if !self.fast_index_array_set_safe {
+                        return false;
+                    }
+                    // In-bounds overwrites only: growth (idx >= len,
+                    // nil-padding + byte cap) and too-negative wrap
+                    // (IndexError-class shapes) keep their semantics
+                    // in the canonical array.rs arm.
+                    let a_len = self.heap.array(id).len() as i64;
+                    let idx = if i < 0 { a_len + i } else { i };
+                    if idx < 0 || idx >= a_len {
+                        return false;
+                    }
+                    if self.max_value_bytes.is_some() {
+                        return false;
+                    }
+                    let v = self.stack[n - 1].clone();
+                    self.heap.array_mut(id)[idx as usize] = v.clone();
+                    self.stack.truncate(recv_idx);
+                    self.stack.push(v);
+                }
                 true
             }
             _ => false,
@@ -2115,16 +2172,25 @@ impl Vm {
     fn fast_index_revalidate(&mut self) {
         self.fast_index_checked_gen = self.method_gen;
         let idx_sym = self.sym_index_op;
+        let set_sym = self.sym_index_set_op;
         let hash_sym = self.interner.intern("Hash");
-        self.fast_index_hash_safe = match self.classes.get(&hash_sym).cloned() {
-            Some(c) => self.lookup_method_uncached(&c, idx_sym).is_none(),
-            None => false,
-        };
+        (self.fast_index_hash_safe, self.fast_index_hash_set_safe) =
+            match self.classes.get(&hash_sym).cloned() {
+                Some(c) => (
+                    self.lookup_method_uncached(&c, idx_sym).is_none(),
+                    self.lookup_method_uncached(&c, set_sym).is_none(),
+                ),
+                None => (false, false),
+            };
         let array_sym = self.interner.intern("Array");
-        self.fast_index_array_safe = match self.classes.get(&array_sym).cloned() {
-            Some(c) => self.lookup_method_uncached(&c, idx_sym).is_none(),
-            None => false,
-        };
+        (self.fast_index_array_safe, self.fast_index_array_set_safe) =
+            match self.classes.get(&array_sym).cloned() {
+                Some(c) => (
+                    self.lookup_method_uncached(&c, idx_sym).is_none(),
+                    self.lookup_method_uncached(&c, set_sym).is_none(),
+                ),
+                None => (false, false),
+            };
     }
 
     /// `no_recv` builtin-or-host fast path. Tries the host-side
