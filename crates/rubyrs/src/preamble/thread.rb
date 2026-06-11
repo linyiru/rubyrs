@@ -109,3 +109,63 @@ class ConditionVariable
     self
   end
 end
+
+# Thread::Queue — the single-threaded companion to Mutex /
+# ConditionVariable above: a plain FIFO. The semantic divergence is
+# `pop` on an empty queue, which CRuby BLOCKS on; with one thread a
+# block would deadlock unconditionally, so it returns nil instead
+# (the same shape minitest's worker loop uses as its terminator:
+# `while job = queue.pop`). `Thread::SizedQueue` is absent.
+#
+# Motivating consumer: minitest 5.25 (`Minitest::Parallel::Executor`
+# builds its job queue at load time; rack's test helper builds a
+# warnings queue per spec).
+class Thread
+  class Queue
+    def initialize
+      @items = []
+      @closed = false
+    end
+    def push(obj)
+      raise ClosedQueueError, "queue closed" if @closed
+      @items << obj
+      self
+    end
+    alias << push
+    alias enq push
+    def pop(_non_block = false)
+      @items.shift
+    end
+    alias deq pop
+    alias shift pop
+    def empty?
+      @items.empty?
+    end
+    def size
+      @items.size
+    end
+    alias length size
+    def num_waiting
+      0
+    end
+    def clear
+      @items.clear
+      self
+    end
+    def close
+      @closed = true
+      self
+    end
+    def closed?
+      @closed
+    end
+  end
+end
+
+# CRuby exposes the same class as top-level ::Queue.
+Queue = Thread::Queue
+
+# Raised by push-after-close. CRuby defines it under ::ClosedQueueError
+# (subclass of StopIteration).
+class ClosedQueueError < StopIteration
+end

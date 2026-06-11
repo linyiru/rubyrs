@@ -125,6 +125,12 @@ pub(crate) fn always_on_stub_extras(name: &str) -> Option<&'static str> {
 pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
     match name {
         "pathname" => Some(include_str!("stdlib_vendor/pathname.rb")),
+        // `etc` / `monitor`: tiny single-threaded-model subsets —
+        // see each file's header for the divergence notes.
+        // Discovery: minitest 5.25 requires "etc" unconditionally;
+        // logger 1.7's LogDevice requires "monitor".
+        "etc" => Some(include_str!("stdlib_vendor/etc.rb")),
+        "monitor" => Some(include_str!("stdlib_vendor/monitor.rb")),
         "set" => Some(include_str!("stdlib_vendor/set.rb")),
         "stringio" => Some(include_str!("stdlib_vendor/stringio.rb")),
         "strscan" => Some(include_str!("stdlib_vendor/strscan.rb")),

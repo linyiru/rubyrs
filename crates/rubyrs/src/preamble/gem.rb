@@ -66,3 +66,14 @@ module Gem
     end
   end
 end
+
+module Gem
+  # Plugin discovery (`Gem.find_files("minitest/*_plugin.rb")`).
+  # rubyrs has no gem installation database to search — requireable
+  # code comes from explicit `$LOAD_PATH` entries — so the answer
+  # is always "no plugin files found". Returning [] (not raising)
+  # matches how minitest/rake degrade when no plugins exist.
+  def self.find_files(_glob)
+    []
+  end
+end

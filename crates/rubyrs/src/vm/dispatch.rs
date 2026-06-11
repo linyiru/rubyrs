@@ -2016,6 +2016,44 @@ impl Vm {
     /// user `String#length` / `Integer#to_s` reopen wins through
     /// the slow path's primitive-receiver user-method gate. Before
     /// the flags existed these arms silently shadowed reopens.
+    /// `Regexp#===` body shared by the String and Symbol receiver
+    /// shapes: run captures, publish `$~` (or clear it on miss),
+    /// return the hit verdict.
+    fn regex_case_eq_on(&mut self, native: &regex::Regex, input: &str) -> bool {
+        match native.captures(input) {
+            Some(caps) => {
+                let m0 = caps.get(0).unwrap();
+                let (m_start, m_end) = (m0.start(), m0.end());
+                let whole = m0.as_str().to_string();
+                let last_caps: Vec<Option<String>> = (1..caps.len())
+                    .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                    .collect();
+                let named: Vec<(String, Option<String>)> = native
+                    .capture_names()
+                    .enumerate()
+                    .filter_map(|(i, n)| {
+                        n.map(|name| (name.to_string(), caps.get(i).map(|m| m.as_str().to_string())))
+                    })
+                    .collect();
+                self.save_match_scope_on_write();
+                self.last_match = Some(crate::vm::LastMatch {
+                    whole,
+                    caps: last_caps,
+                    input: input.to_string(),
+                    m_start,
+                    m_end,
+                    named,
+                });
+                true
+            }
+            None => {
+                self.save_match_scope_on_write();
+                self.last_match = None;
+                false
+            }
+        }
+    }
+
     fn try_fast_primitive(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> bool {
         if no_recv || argc != 0 {
             return false;
@@ -8670,6 +8708,35 @@ impl Vm {
         // CRuby DOES allow ivars on, supporting that surface
         // would require ivar slots on those HeapObj variants;
         // explicit out-of-scope until a caller surfaces it.
+        // `Object#dup` for plain user-class instances — shallow
+        // copy: same (real) class, ivars cloned, NO singleton
+        // class, NOT frozen (CRuby dup semantics; clone is the
+        // frozen/singleton-preserving sibling and stays
+        // unimplemented-loud). `initialize_copy` is not invoked —
+        // documented subset gap until a consumer needs the hook.
+        // Discovery: Sinatra dups its app prototype per request;
+        // user-defined `dup` overrides win via the class-method
+        // lookup that fires above this universal fallback.
+        if &*name == "dup" && args.is_empty()
+            && let Value::Object(oid) = &recv
+            && let crate::heap::HeapObj::Instance(inst) = self.heap.get(*oid)
+        {
+            let class = inst.class.clone();
+            let ivars = inst.ivars.clone();
+            let mut g = crate::vm::PinGuard::new(self);
+            g.pin(recv.clone());
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let new_id = g.vm.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
+                class,
+                ivars,
+                singleton_class: None,
+                frozen: std::cell::Cell::new(false),
+            }));
+            drop(g);
+            self.stack.push(Value::Object(new_id));
+            return Ok(());
+        }
         if &*name == "instance_variable_get" && args.len() == 1 {
             let ivar_id = self.resolve_ivar_name_arg(&args[0])?;
             let v = match &recv {
@@ -9860,38 +9927,21 @@ impl Vm {
                                 re.as_str(),
                             ),
                         }))?;
-                        s.with_str_lossy(|input| match native.captures(input) {
-                        Some(caps) => {
-                            let m0 = caps.get(0).unwrap();
-                            let (m_start, m_end) = (m0.start(), m0.end());
-                            let whole = m0.as_str().to_string();
-                            let last_caps: Vec<Option<String>> = (1..caps.len())
-                                .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
-                                .collect();
-                            let named: Vec<(String, Option<String>)> = native
-                                .capture_names()
-                                .enumerate()
-                                .filter_map(|(i, n)| {
-                                    n.map(|name| (name.to_string(), caps.get(i).map(|m| m.as_str().to_string())))
-                                })
-                                .collect();
-                            self.save_match_scope_on_write();
-                            self.last_match = Some(crate::vm::LastMatch {
-                                whole,
-                                caps: last_caps,
-                                input: input.to_string(),
-                                m_start,
-                                m_end,
-                                named,
-                            });
-                            true
-                        }
-                        None => {
-                            self.save_match_scope_on_write();
-                            self.last_match = None;
-                            false
-                        }
-                    })
+                        s.with_str_lossy(|input| self.regex_case_eq_on(native, input))
+                    },
+                    // CRuby's Regexp#=== also accepts Symbols,
+                    // matching against the symbol's name —
+                    // `methods.grep(/^test_/)` (minitest's
+                    // runnable-method discovery) depends on it.
+                    Value::Sym(sid) => {
+                        let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
+                            msg: format!(
+                                "regex op 'Regexp#===' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
+                                re.as_str(),
+                            ),
+                        }))?;
+                        let input = self.interner.resolve(*sid).to_string();
+                        self.regex_case_eq_on(native, &input)
                     },
                     _ => false,
                 },

@@ -42,6 +42,19 @@ impl Vm {
                     ("default", []) => {
                         Some(self.heap.hash_default_value(id).unwrap_or(Value::Nil))
                     }
+                    // `default=` — set (or nil-clear) the scalar
+                    // default. CRuby semantics: assigning a scalar
+                    // default replaces any default proc, so the
+                    // block slot clears too. Returns the assigned
+                    // value (assignment-expression contract).
+                    // Discovery: minitest's summary reporter does
+                    // `aggregate.default = []`.
+                    ("default=", [v]) => {
+                        let stored = if matches!(v, Value::Nil) { None } else { Some(v.clone()) };
+                        self.heap.hash_set_default_value(id, stored);
+                        self.heap.hash_set_default_block(id, None);
+                        Some(v.clone())
+                    }
                     // `default_proc` returns the Block value (CRuby
                     // returns it as a Proc; rubyrs's Value::Block
                     // resolves `.class` to "Proc", so the surface

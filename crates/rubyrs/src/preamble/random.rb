@@ -114,24 +114,68 @@ class Random
   end
 end
 
-# Top-level `rand` / `srand` are explicitly OUT of Tier 1 per ADR
-# 0017 row 131 — the implicit default RNG uses system entropy,
-# which the deterministic-by-default sandbox excludes. Define the
-# names anyway so callers get a clear, actionable error instead
-# of the confusing "undefined method `rand' for NilClass" the
-# toplevel-nil-self dispatch produces when the name is wholly
-# missing. Same top-level-def pattern as throw_catch.rb.
-def rand(*_args)
-  raise NotImplementedError,
-    "Kernel#rand is not available in rubyrs Tier 1 — the implicit " \
-    "default RNG uses system entropy, which is excluded by ADR 0017. " \
-    "Use `Random.new(seed).rand(...)` with an explicit Integer seed " \
-    "for deterministic Tier-1 random numbers."
+# Top-level `rand` / `srand` — backed by a DETERMINISTIC default
+# RNG. CRuby seeds its implicit RNG from system entropy; ADR 0017's
+# sandbox excludes entropy, so rubyrs's default seeds from the
+# constant 0 instead: every run of a script that never calls
+# `srand` sees the same sequence. That strengthens (not weakens)
+# the deterministic-by-default posture — `srand(n)` hands control
+# to the caller, exactly the knob test runners like minitest use
+# (`srand(seed)` then `shuffle` for reproducible test order).
+#
+# DIVERGENCE: sequences are Mulberry32, not MRI's MT19937, and the
+# unseeded default is fixed rather than entropy-derived. Property
+# contracts (range, determinism-under-seed) hold; exact values
+# don't.
+def __rubyrs_default_random
+  $__rubyrs_default_random ||= Random.new(0)
 end
 
-def srand(*_args)
-  raise NotImplementedError,
-    "Kernel#srand is not available in rubyrs Tier 1 — there is no " \
-    "implicit default RNG to seed. Construct a Random with an " \
-    "explicit seed instead: `Random.new(seed)`."
+def rand(arg = nil)
+  __rubyrs_default_random.rand(arg)
+end
+
+def srand(seed = 0)
+  unless seed.is_a?(Integer)
+    raise TypeError, "no implicit conversion of #{seed.class} into Integer"
+  end
+  prev = $__rubyrs_default_random_seed || 0
+  $__rubyrs_default_random = Random.new(seed)
+  $__rubyrs_default_random_seed = seed
+  prev
+end
+
+# Array#shuffle / #shuffle! / #sample — Fisher-Yates over the
+# default RNG (or an explicit `random:` source responding to
+# `rand(n)`). Lives here with the RNG it consumes. Same value
+# divergence note as above: permutations are deterministic per
+# seed but not byte-identical to CRuby's.
+class Array
+  def shuffle(random: nil)
+    dup.shuffle!(random: random)
+  end
+
+  def shuffle!(random: nil)
+    rng = random || ($__rubyrs_default_random ||= Random.new(0))
+    i = length
+    while i > 1
+      j = rng.rand(i)
+      i -= 1
+      tmp = self[i]
+      self[i] = self[j]
+      self[j] = tmp
+    end
+    self
+  end
+
+  def sample(n = nil, random: nil)
+    rng = random || ($__rubyrs_default_random ||= Random.new(0))
+    if n.nil?
+      return nil if empty?
+      self[rng.rand(length)]
+    else
+      raise ArgumentError, "negative sample number (#{n})" if n < 0
+      shuffle(random: rng).first(n)
+    end
+  end
 end

@@ -704,7 +704,10 @@ jobs:
           # and the recording Vec vanishing mid-load (programmer
           # error). Neither is user-reachable; a corrupt cache file
           # falls back to live compile BEFORE replay starts.
-          check crates/rubyrs/src/lib.rs       26
+          # Bumped 26 → 27 on 2026-06-11: preamble/process.rb chunk
+          # adds the standard load-tail `.expect` (same shape as
+          # every other preamble loader).
+          check crates/rubyrs/src/lib.rs       27
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
           # never went down, just up here. See docs/PANIC_AUDIT.md.

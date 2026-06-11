@@ -2804,6 +2804,14 @@ self.eval_inner(
             "<rubyrs:preamble:signal>",
         )
             .expect("ICE: failed to load Signal preamble");
+        // Process — host-process reflection subset (pid /
+        // clock_gettime). After signal.rb per the OS-surface
+        // grouping; consumers: minitest timing + at_exit guard.
+        self.eval_inner(
+            include_str!("preamble/process.rb"),
+            "<rubyrs:preamble:process>",
+        )
+            .expect("ICE: failed to load Process preamble");
         // ADR 0020 Tier 2 (`_encoding_full`): registry constants +
         // an Encoding.find extension layered over the core
         // three-name resolver. Same load-tail position as the

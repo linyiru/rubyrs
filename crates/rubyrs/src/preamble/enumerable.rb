@@ -418,4 +418,30 @@ module Enumerable
   def lazy
     to_enum(:each).lazy
   end
+
+  # `grep(pattern)` — elements where `pattern === element`, mapped
+  # through the block when given. CRuby's Regexp#=== accepts Symbols
+  # (matching against the symbol's name) — the VM's === arm mirrors
+  # that, so :test_a survives `methods.grep(/^test_/)` (minitest's
+  # runnable-method discovery shape).
+  def grep(pattern)
+    result = []
+    each do |e|
+      if pattern === e
+        result << (block_given? ? yield(e) : e)
+      end
+    end
+    result
+  end
+
+  # `grep_v(pattern)` — the complement; same block contract.
+  def grep_v(pattern)
+    result = []
+    each do |e|
+      unless pattern === e
+        result << (block_given? ? yield(e) : e)
+      end
+    end
+    result
+  end
 end

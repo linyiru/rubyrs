@@ -3265,6 +3265,9 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "jekyll-sass-converter"
         | "optparse" | "english" | "English"
         | "bigdecimal" | "monitor" | "erb"
+        // `etc`: vendored Etc.nprocessors subset (stdlib_vendor/etc.rb)
+        // — minitest requires it unconditionally at load.
+        | "etc"
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util" | "cgi/escape"
         | "ipaddr"
