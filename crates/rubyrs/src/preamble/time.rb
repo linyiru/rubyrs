@@ -425,6 +425,32 @@ class Time
   # `%5Y` width-5 year, `%3N` truncated-to-milliseconds nsec).
   def strftime(fmt)
     d = decompose
+    # Single-directive fast path. Jekyll's UrlDrop renders every
+    # date placeholder through a one-directive format (`%Y`, `%m`,
+    # `%-d`, `%b`, ...) — once per placeholder per document URL —
+    # and the full parser loop below costs ~6µs/call interpreted
+    # (measured 30× CRuby's C strftime). The length gate keeps
+    # composite formats ("%Y-%m-%d") at zero extra cost; matched
+    # singles skip the parser entirely. Semantics are pinned by the
+    # existing time_strftime fixture (the arms mirror the loop's
+    # zero-pad / no-pad / name-table behaviour exactly).
+    if fmt.length < 4
+      case fmt
+      when "%Y" then return format("%04d", d[:year])
+      when "%m" then return format("%02d", d[:month])
+      when "%d" then return format("%02d", d[:day])
+      when "%H" then return format("%02d", d[:hour])
+      when "%M" then return format("%02d", d[:min])
+      when "%S" then return format("%02d", d[:sec])
+      when "%y" then return format("%02d", d[:year] % 100)
+      when "%-d" then return d[:day].to_s
+      when "%-m" then return d[:month].to_s
+      when "%b", "%h" then return MONTH_ABBR[d[:month] - 1]
+      when "%B" then return MONTH_NAMES[d[:month] - 1]
+      when "%a" then return DAY_ABBR[d[:wday]]
+      when "%A" then return DAY_NAMES[d[:wday]]
+      end
+    end
     out = String.new
     i = 0
     len = fmt.length
