@@ -162,6 +162,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn assign_expr_value() { run_diff("assign_expr_value"); }
 #[test] fn begin_dollar_bang_snapshot_gc() { run_diff("begin_dollar_bang_snapshot_gc"); }
 #[test] fn primitive_reopen_precedence() { run_diff("primitive_reopen_precedence"); }
+#[test] fn dollar_tilde_scoping() { run_diff("dollar_tilde_scoping"); }
 #[test] fn hash_clear() { run_diff("hash_clear"); }
 #[test] fn hash_key_clone() { run_diff("hash_key_clone"); }
 #[test] fn hash_default_proc_set() { run_diff("hash_default_proc_set"); }

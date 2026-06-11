@@ -771,7 +771,12 @@ impl Vm {
                         msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
                     })
                 })?;
-                let last_match_before = g.vm.last_match.take();
+                // (The old `last_match.take()` pre-snapshot here was a
+                // leftover from before frame-scoped `$~`: under the
+                // LAZY scoping model taking the global would destroy
+                // the caller's value before save_match_scope_on_write
+                // could snapshot it — the write hooks below own the
+                // caller-save now.)
                 for oc in owned_matches {
                     any_match = true;
                     out.extend_from_slice(&source.as_bytes()[last_end..oc.m_start]);
@@ -779,6 +784,7 @@ impl Vm {
                     let m_start = oc.m_start;
                     let m_end = oc.m_end;
                     let whole = oc.whole.clone();
+                    g.vm.save_match_scope_on_write();
                     g.vm.last_match = Some(crate::vm::LastMatch {
                         whole: whole.clone(),
                         caps: oc.groups,
@@ -827,7 +833,7 @@ impl Vm {
                 // clear shape keeps `last_match` correctly None
                 // whether or not the block was invoked.
                 if !any_match {
-                    let _ = last_match_before;
+                    g.vm.save_match_scope_on_write();
                     g.vm.last_match = None;
                 }
                 out.extend_from_slice(&source.as_bytes()[last_end..]);

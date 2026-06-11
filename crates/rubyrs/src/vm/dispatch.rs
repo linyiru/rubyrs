@@ -5050,7 +5050,7 @@ impl Vm {
             // `rb_reg_nth_match`) — it can reach any capture but never
             // wraps to the whole match. `LastMatch.caps` holds ONLY
             // the captures (index 0 == group 1).
-            Some(Value::Int(n)) => match &self.last_match {
+            Some(Value::Int(n)) => match self.scoped_last_match() {
                 None => Value::Nil,
                 Some(lm) => {
                     let cl = lm.caps.len() as i64;
@@ -5085,7 +5085,7 @@ impl Vm {
                     Some(Value::Str(s)) => s.to_string_lossy(),
                     _ => unreachable!(),
                 };
-                let resolved: Option<Value> = match &self.last_match {
+                let resolved: Option<Value> = match self.scoped_last_match() {
                     None => Some(Value::Nil),
                     Some(lm) => match lm.named.iter().find(|(n, _)| *n == key) {
                         Some((_, Some(s))) => Some(Value::new_str(s.clone())),
@@ -9709,6 +9709,7 @@ impl Vm {
                                     n.map(|name| (name.to_string(), caps.get(i).map(|m| m.as_str().to_string())))
                                 })
                                 .collect();
+                            self.save_match_scope_on_write();
                             self.last_match = Some(crate::vm::LastMatch {
                                 whole,
                                 caps: last_caps,
@@ -9720,6 +9721,7 @@ impl Vm {
                             true
                         }
                         None => {
+                            self.save_match_scope_on_write();
                             self.last_match = None;
                             false
                         }
@@ -9748,6 +9750,7 @@ impl Vm {
                     self.do_regexp_match(&re, bound)?
                 }
                 Value::Nil => {
+                    self.save_match_scope_on_write();
                     self.last_match = None;
                     Value::Nil
                 }
@@ -9798,6 +9801,7 @@ impl Vm {
                             // a char-based position). The byte `m_start` is
                             // still stored for internal pre/post slicing.
                             let char_idx = bound[..m_start].chars().count() as i64;
+                            self.save_match_scope_on_write();
                             self.last_match = Some(crate::vm::LastMatch {
                                 whole: oc.whole,
                                 caps: oc.groups,
@@ -9809,6 +9813,7 @@ impl Vm {
                             Value::Int(char_idx)
                         }
                         None => {
+                            self.save_match_scope_on_write();
                             self.last_match = None;
                             Value::Nil
                         }
@@ -10924,16 +10929,58 @@ impl Vm {
     /// (they transparently share the enclosing method's match data).
     #[cfg(feature = "regex")]
     #[inline]
-    fn enter_method_match_scope(&mut self) {
-        let prev = std::mem::take(&mut self.last_match);
-        if let Some(f) = self.frames.last_mut() {
-            f.saved_last_match = Some(prev);
+    /// Lazy `$~` scoping: called before EVERY `last_match` write
+    /// (the 11 runtime sites — match/match?/=~ arms, scan/gsub,
+    /// MatchData install, iter drivers). The eager
+    /// `enter_method_match_scope` saved/restored on every method
+    /// invocation (~8% of a tight call loop, profiled) even though
+    /// almost no method touches a regex; instead, the FIRST write
+    /// inside a method scope snapshots the caller's `$~` into the
+    /// innermost METHOD frame (blocks and class bodies share their
+    /// enclosing method's scope, so the walk skips them — same
+    /// contract as the eager version's "None on a block frame
+    /// means don't touch on pop"). Between method entry and the
+    /// first write `$~` is invariant (nested calls restore
+    /// themselves), so the lazily-saved value equals what the
+    /// eager save would have captured. The Return/unwind restore
+    /// paths are unchanged: `None` still reads as "this frame
+    /// never touched `$~`".
+    #[cfg(feature = "regex")]
+    pub(crate) fn save_match_scope_on_write(&mut self) {
+        for f in self.frames.iter_mut().rev() {
+            if f.is_block || f.is_class_body {
+                continue;
+            }
+            if f.saved_last_match.is_none() {
+                f.saved_last_match = Some(self.last_match.take());
+            }
+            return;
         }
     }
-    /// regex-off build: no match state to scope, so this is a no-op.
-    #[cfg(not(feature = "regex"))]
-    #[inline]
-    fn enter_method_match_scope(&mut self) {}
+
+    /// `$~` visibility for the CURRENT scope — the read-side half of
+    /// the lazy scoping contract. The global `last_match` belongs to
+    /// this scope only if the innermost METHOD frame has written
+    /// (and therefore saved the caller's value); otherwise the
+    /// global is an OUTER scope's match and reads here must see nil.
+    /// The eager version achieved this by clearing the global at
+    /// every method entry; the lazy version leaves it in place and
+    /// gates the read sites (`$~` / `$1`..`$9` / `` $` `` / `$'` /
+    /// `$&` ops, `Regexp.last_match`, MatchData extraction) through
+    /// this getter instead. Toplevel (no method frame) reads the
+    /// global directly — toplevel matches are program-global, same
+    /// as before.
+    #[cfg(feature = "regex")]
+    pub(crate) fn scoped_last_match(&self) -> Option<&crate::vm::LastMatch> {
+        for f in self.frames.iter().rev() {
+            if f.is_block || f.is_class_body {
+                continue;
+            }
+            f.saved_last_match.as_ref()?;
+            break;
+        }
+        self.last_match.as_ref()
+    }
 
     /// Explicit-receiver monomorphic fast path — see the call site in
     /// `do_call`. Resolves via the SAME `class_of` + `lookup_method_cached`
@@ -11012,7 +11059,8 @@ impl Vm {
             pending_yield: false,
             block_writeback: None,
         });
-        self.enter_method_match_scope();
+        // $~ scoping is LAZY now — save_match_scope_on_write fires on
+        // the first last_match write inside this method scope.
         Ok(true)
     }
 
@@ -11121,7 +11169,8 @@ impl Vm {
             pending_yield: false,
             block_writeback: None,
         });
-        self.enter_method_match_scope();
+        // $~ scoping is LAZY now — save_match_scope_on_write fires on
+        // the first last_match write inside this method scope.
         Ok(true)
     }
 
@@ -11184,7 +11233,8 @@ impl Vm {
             pending_yield: false,
             block_writeback: None,
         });
-        self.enter_method_match_scope();
+        // $~ scoping is LAZY now — save_match_scope_on_write fires on
+        // the first last_match write inside this method scope.
         Ok(true)
     }
 
@@ -11442,7 +11492,8 @@ impl Vm {
                 aux: None, pending_yield: false,
                 block_writeback: None,
             });
-            self.enter_method_match_scope();
+            // $~ scoping is LAZY now — save_match_scope_on_write fires on
+            // the first last_match write inside this method scope.
             return Ok(());
         }
         if let Some(fixed) = m.fixed_arity
@@ -11471,7 +11522,8 @@ impl Vm {
                 pending_yield: false,
                 block_writeback: None,
             });
-            self.enter_method_match_scope();
+            // $~ scoping is LAZY now — save_match_scope_on_write fires on
+            // the first last_match write inside this method scope.
             return Ok(());
         }
         // Default-argument support (literal defaults only): a Proto
@@ -11800,7 +11852,8 @@ impl Vm {
             aux: None, pending_yield: false,
             block_writeback: None,
         });
-        self.enter_method_match_scope();
+        // $~ scoping is LAZY now — save_match_scope_on_write fires on
+        // the first last_match write inside this method scope.
         Ok(())
     }
 

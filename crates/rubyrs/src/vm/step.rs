@@ -1755,7 +1755,7 @@ impl Vm {
                     && name.as_bytes()[1..].iter().all(|c| c.is_ascii_digit())
                 {
                     let n: usize = name[1..].parse().unwrap_or(0);
-                    let v = match &self.last_match {
+                    let v = match self.scoped_last_match() {
                         Some(m) if n >= 1 => match m.caps.get(n - 1) {
                             Some(Some(cap)) => Value::new_str(cap.clone()),
                             _ => Value::Nil,
@@ -1774,7 +1774,7 @@ impl Vm {
                 #[cfg(feature = "regex")]
                 match &*name {
                     "$&" => {
-                        let v = match &self.last_match {
+                        let v = match self.scoped_last_match() {
                             Some(m) => Value::new_str(m.whole.clone()),
                             None => Value::Nil,
                         };
@@ -1785,7 +1785,7 @@ impl Vm {
                         // CRuby: last non-nil capture from the last
                         // successful match — `nil` if no match or no
                         // group participated.
-                        let v = match &self.last_match {
+                        let v = match self.scoped_last_match() {
                             Some(m) => m.caps.iter().rev().find_map(|c| c.as_ref())
                                 .map(|s| Value::new_str(s.clone()))
                                 .unwrap_or(Value::Nil),
@@ -1795,7 +1795,7 @@ impl Vm {
                         return Ok(true);
                     }
                     "$`" => {
-                        let v = match &self.last_match {
+                        let v = match self.scoped_last_match() {
                             Some(m) => Value::new_str(m.input[..m.m_start].to_string()),
                             None => Value::Nil,
                         };
@@ -1803,7 +1803,7 @@ impl Vm {
                         return Ok(true);
                     }
                     "$'" => {
-                        let v = match &self.last_match {
+                        let v = match self.scoped_last_match() {
                             Some(m) => Value::new_str(m.input[m.m_end..].to_string()),
                             None => Value::Nil,
                         };

@@ -3102,6 +3102,7 @@ impl Vm {
         let captures = native.captures(&bound);
         let caps = match captures {
             None => {
+                self.save_match_scope_on_write();
                 self.last_match = None;
                 return Ok(Value::Nil);
             }
@@ -3129,6 +3130,7 @@ impl Vm {
             })
             .collect();
         drop(caps);
+        self.save_match_scope_on_write();
         self.last_match = Some(crate::vm::LastMatch {
             whole,
             caps: last_caps,

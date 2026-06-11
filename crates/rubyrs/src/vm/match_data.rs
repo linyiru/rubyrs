@@ -118,7 +118,7 @@ impl Vm {
     /// global read and `Regexp.last_match` so both expose the same
     /// surface, including named-capture access (`$~[:name]`).
     pub(crate) fn materialize_last_match(&mut self) -> Result<Value, Trap> {
-        let extracted = self.last_match.as_ref().map(|lm| {
+        let extracted = self.scoped_last_match().map(|lm| {
             let caps: Vec<Value> = lm
                 .caps
                 .iter()
@@ -162,6 +162,7 @@ impl Vm {
         })?;
         match owned {
             None => {
+                self.save_match_scope_on_write();
                 self.last_match = None;
                 Ok(Value::Nil)
             }
@@ -177,6 +178,7 @@ impl Vm {
                         None => Value::Nil,
                     })
                     .collect();
+                self.save_match_scope_on_write();
                 self.last_match = Some(crate::vm::LastMatch {
                     whole: oc.whole.clone(),
                     caps: oc.groups.clone(),
