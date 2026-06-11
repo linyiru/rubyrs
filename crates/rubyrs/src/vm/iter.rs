@@ -136,6 +136,7 @@ impl Vm {
         let r = self.stack.pop().unwrap_or(Value::Nil);
         if self.break_signaled {
             self.break_signaled = false;
+            self.sync_control_signals();
             return Ok(BlockStep::Break(r));
         }
         Ok(BlockStep::Value(r))
@@ -162,6 +163,7 @@ impl Vm {
         let r = self.stack.pop().unwrap_or(Value::Nil);
         if self.break_signaled {
             self.break_signaled = false;
+            self.sync_control_signals();
             return Ok(BlockStep::Break(r));
         }
         Ok(BlockStep::Value(r))
@@ -189,6 +191,7 @@ impl Vm {
         let r = self.stack.pop().unwrap_or(Value::Nil);
         if self.break_signaled {
             self.break_signaled = false;
+            self.sync_control_signals();
             return Ok(BlockStep::Break(r));
         }
         Ok(BlockStep::Value(r))

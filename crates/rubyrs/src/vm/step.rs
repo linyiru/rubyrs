@@ -389,131 +389,144 @@ impl Vm {
 
     pub(crate) fn dispatch(&mut self) -> Result<(), Trap> {
         while !self.frames.is_empty() {
-            // ADR 0024 Phase A.5: block-break in flight. Op::Yield
-            // case (b) parked the break and the Rust iter driver
-            // above propagated the value via step_block;
-            // continue_method_break now walks intermediate
-            // frames + ensures until landing on the yielding
-            // method. If the walk drains the frame stack, exit.
-            if let Some(mb) = self.pending_method_break.as_ref()
-                && !mb.suspended
-                && self.frames.len() > mb.target_frame_idx
-            {
-                self.continue_method_break()?;
-                if self.frames.is_empty() { return Ok(()); }
-                continue;
-            }
-            // ADR 0024 Phase A.8: break-after-Fiber-resume
-            // recovery (see dispatch_until_inner for full
-            // rationale).
-            if self.break_signaled && self.frames.last()
-                .map(|f| f.pending_yield)
-                .unwrap_or(false)
-            {
-                self.break_signaled = false;
-                let target_idx = self.frames.len() - 1;
-                self.frames[target_idx].pending_yield = false;
-                let value = self.stack.pop().unwrap_or(Value::Nil);
-                self.begin_method_break(value, target_idx)?;
-                if self.frames.is_empty() { return Ok(()); }
-                continue;
-            }
-            // Non-local return unwind. `Op::ReturnMethod` sets
-            // `method_return`; here we honour it by popping any
-            // block frames between us and the enclosing method,
-            // then popping the method frame and pushing the value
-            // as its return. Exit the whole dispatch if we
-            // unwound off the bottom of the frame stack.
-            if self.method_return.is_some() {
-                // Capture the lexical-owner Rc BEFORE
-                // `take_method_return` clears it (the helper
-                // pairs the value and locals consumption to keep
-                // the invariant that they vanish together).
-                let owner_rc = self.method_return_locals.clone();
-                let val = self.take_method_return().unwrap();
-                // Lexical-aware unwind: walk frames popping
-                // intermediate blocks AND intermediate methods
-                // (the yielding-but-not-defining method, e.g.
-                // `outer` in `outer { ... return ... }` where
-                // the block was defined in caller_method). The
-                // target is the topmost non-block frame whose
-                // `locals` Rc matches the snapshot taken at
-                // `Op::ReturnMethod` time. (TRY_RUNS pass-10
-                // layer #4.)
-                //
-                // Pre-scan to locate the target index. If no
-                // match exists (block escaped its lexical scope
-                // — e.g. stored as a Proc and called from
-                // elsewhere after the owner returned, OR
-                // `method_return_locals` is None because some
-                // path set `method_return` without going through
-                // Op::ReturnMethod), fall back to the legacy
-                // "first non-block" behavior: walk while
-                // `is_block`, then pop exactly one method frame.
-                // The CRuby-correct response is LocalJumpError,
-                // but Tier-1 doesn't model that yet — tracked as
-                // a separate future layer. (Copilot review #285
-                // round 1.)
-                let target_idx: Option<usize> = match &owner_rc {
-                    Some(rc) => self.frames.iter().rposition(|f| {
-                        !f.is_block
-                            && f.locals
-                                .as_shared()
-                                .is_some_and(|l| std::rc::Rc::ptr_eq(l, rc))
-                    }),
-                    None => None,
-                };
-                if let Some(owner_idx) = target_idx {
-                    // ADR 0024 Phase A.6: route method_return
-                    // through the same Phase A.4/A.5 ensure-walk
-                    // machinery as block-break. `begin_method_break`
-                    // walks the in-flight frame stack from current
-                    // top down to + including the owner; for each
-                    // frame it pops the `is_ensure` rescue
-                    // handlers and runs their bodies before
-                    // dropping the frame, then pushes `val` (or
-                    // the class for an `is_class_body` owner) onto
-                    // the caller's operand stack.
-                    //
-                    // Pre-A.6 the unwind was a raw-pop loop that
-                    // skipped intermediate ensures — `def f;
-                    // begin; (1..3).each { |x| return x if x==2
-                    // }; ensure; cleanup; end; end` left
-                    // `cleanup` un-run.
-                    self.begin_method_break(val.clone(), owner_idx)?;
+            debug_assert!(
+                self.control_signals_synced(),
+                "control_signals mask out of sync with signal fields",
+            );
+            // Folded-signal gate: the three control-flow signal checks
+            // below only matter when SOMETHING is pending — one byte
+            // test covers method_return / pending_method_break /
+            // break_signaled (see Vm::control_signals). Each arm still
+            // re-tests its own field; the gate just keeps the common
+            // per-op iteration to a single load+branch.
+            if self.control_signals != 0 {
+                // ADR 0024 Phase A.5: block-break in flight. Op::Yield
+                // case (b) parked the break and the Rust iter driver
+                // above propagated the value via step_block;
+                // continue_method_break now walks intermediate
+                // frames + ensures until landing on the yielding
+                // method. If the walk drains the frame stack, exit.
+                if let Some(mb) = self.pending_method_break.as_ref()
+                    && !mb.suspended
+                    && self.frames.len() > mb.target_frame_idx
+                {
+                    self.continue_method_break()?;
                     if self.frames.is_empty() { return Ok(()); }
-                } else {
-                    // ADR 0024 Phase A.6 round 2: stored Proc
-                    // tried to `return` after its lexical owner
-                    // (the def that created the Proc) has already
-                    // returned — `method_return_locals` doesn't
-                    // pin down any live frame. CRuby's response is
-                    // `LocalJumpError: unexpected return`; route
-                    // through `unwind_with_exception` so user
-                    // rescue handlers can catch it.
-                    let _ = val; // unwind discards the would-be return value
-                    let trap = self.trap(RubyError::LocalJumpError {
-                        msg: "unexpected return".to_string(),
-                    });
-                    let exc = match self.trap_to_exception(&trap) {
-                        Some(e) => e,
-                        None => return Err(trap),
-                    };
-                    let original_bt = trap.backtrace.clone();
-                    let original_class = trap.err.class_name().to_string();
-                    let original_msg = trap.err.message();
-                    match self.unwind_with_exception(exc) {
-                        Ok(()) => continue,
-                        Err(_) => return Err(Trap {
-                            err: RubyError::Uncaught {
-                                class_name: original_class,
-                                message: original_msg,
-                            },
-                            backtrace: original_bt,
-                        }),
-                    }
+                    continue;
                 }
-                continue;
+                // ADR 0024 Phase A.8: break-after-Fiber-resume
+                // recovery (see dispatch_until_inner for full
+                // rationale).
+                if self.break_signaled && self.frames.last()
+                    .map(|f| f.pending_yield)
+                    .unwrap_or(false)
+                {
+                    self.break_signaled = false;
+                    self.sync_control_signals();
+                    let target_idx = self.frames.len() - 1;
+                    self.frames[target_idx].pending_yield = false;
+                    let value = self.stack.pop().unwrap_or(Value::Nil);
+                    self.begin_method_break(value, target_idx)?;
+                    if self.frames.is_empty() { return Ok(()); }
+                    continue;
+                }
+                // Non-local return unwind. `Op::ReturnMethod` sets
+                // `method_return`; here we honour it by popping any
+                // block frames between us and the enclosing method,
+                // then popping the method frame and pushing the value
+                // as its return. Exit the whole dispatch if we
+                // unwound off the bottom of the frame stack.
+                if self.method_return.is_some() {
+                    // Capture the lexical-owner Rc BEFORE
+                    // `take_method_return` clears it (the helper
+                    // pairs the value and locals consumption to keep
+                    // the invariant that they vanish together).
+                    let owner_rc = self.method_return_locals.clone();
+                    let val = self.take_method_return().unwrap();
+                    // Lexical-aware unwind: walk frames popping
+                    // intermediate blocks AND intermediate methods
+                    // (the yielding-but-not-defining method, e.g.
+                    // `outer` in `outer { ... return ... }` where
+                    // the block was defined in caller_method). The
+                    // target is the topmost non-block frame whose
+                    // `locals` Rc matches the snapshot taken at
+                    // `Op::ReturnMethod` time. (TRY_RUNS pass-10
+                    // layer #4.)
+                    //
+                    // Pre-scan to locate the target index. If no
+                    // match exists (block escaped its lexical scope
+                    // — e.g. stored as a Proc and called from
+                    // elsewhere after the owner returned, OR
+                    // `method_return_locals` is None because some
+                    // path set `method_return` without going through
+                    // Op::ReturnMethod), fall back to the legacy
+                    // "first non-block" behavior: walk while
+                    // `is_block`, then pop exactly one method frame.
+                    // The CRuby-correct response is LocalJumpError,
+                    // but Tier-1 doesn't model that yet — tracked as
+                    // a separate future layer. (Copilot review #285
+                    // round 1.)
+                    let target_idx: Option<usize> = match &owner_rc {
+                        Some(rc) => self.frames.iter().rposition(|f| {
+                            !f.is_block
+                                && f.locals
+                                    .as_shared()
+                                    .is_some_and(|l| std::rc::Rc::ptr_eq(l, rc))
+                        }),
+                        None => None,
+                    };
+                    if let Some(owner_idx) = target_idx {
+                        // ADR 0024 Phase A.6: route method_return
+                        // through the same Phase A.4/A.5 ensure-walk
+                        // machinery as block-break. `begin_method_break`
+                        // walks the in-flight frame stack from current
+                        // top down to + including the owner; for each
+                        // frame it pops the `is_ensure` rescue
+                        // handlers and runs their bodies before
+                        // dropping the frame, then pushes `val` (or
+                        // the class for an `is_class_body` owner) onto
+                        // the caller's operand stack.
+                        //
+                        // Pre-A.6 the unwind was a raw-pop loop that
+                        // skipped intermediate ensures — `def f;
+                        // begin; (1..3).each { |x| return x if x==2
+                        // }; ensure; cleanup; end; end` left
+                        // `cleanup` un-run.
+                        self.begin_method_break(val.clone(), owner_idx)?;
+                        if self.frames.is_empty() { return Ok(()); }
+                    } else {
+                        // ADR 0024 Phase A.6 round 2: stored Proc
+                        // tried to `return` after its lexical owner
+                        // (the def that created the Proc) has already
+                        // returned — `method_return_locals` doesn't
+                        // pin down any live frame. CRuby's response is
+                        // `LocalJumpError: unexpected return`; route
+                        // through `unwind_with_exception` so user
+                        // rescue handlers can catch it.
+                        let _ = val; // unwind discards the would-be return value
+                        let trap = self.trap(RubyError::LocalJumpError {
+                            msg: "unexpected return".to_string(),
+                        });
+                        let exc = match self.trap_to_exception(&trap) {
+                            Some(e) => e,
+                            None => return Err(trap),
+                        };
+                        let original_bt = trap.backtrace.clone();
+                        let original_class = trap.err.class_name().to_string();
+                        let original_msg = trap.err.message();
+                        match self.unwind_with_exception(exc) {
+                            Ok(()) => continue,
+                            Err(_) => return Err(Trap {
+                                err: RubyError::Uncaught {
+                                    class_name: original_class,
+                                    message: original_msg,
+                                },
+                                backtrace: original_bt,
+                            }),
+                        }
+                    }
+                    continue;
+                }
             }
             // ADR 0025 Phase 2 + Phase 4b: SIGINT safe-point check.
             // v7 round-3 cosmetic: order placed AFTER `method_return`
@@ -621,94 +634,107 @@ impl Vm {
 
     fn dispatch_until_inner(&mut self, until_depth: usize) -> Result<(), Trap> {
         while self.frames.len() > until_depth {
-            // Non-local return signal. Two cases, distinguished by
-            // whether the return's lexical owner (the method frame it
-            // targets) lives WITHIN this dispatch_until scope:
-            //
-            //  - Owner is at/below `until_depth` (or unknown): we're
-            //    about to unwind past our boundary anyway. Exit early
-            //    and let the iterator driver (our caller) propagate the
-            //    signal — the original behaviour, and the common case
-            //    for `coll.each { return }` driven from the top-level
-            //    loop, where the target method sits below us.
-            //
-            //  - Owner is INSIDE our scope (`owner_idx >= until_depth`):
-            //    the method being returned-from is one we're driving
-            //    (e.g. a Ruby method called from a Rust-invoked Rack
-            //    block via `call_ruby_block_sync` → `step_block`). The
-            //    top-level `step` loop would consume the return at the
-            //    owner frame; we must do the same here, otherwise the
-            //    signal escapes all the way to the Rust caller and is
-            //    reported as "no enclosing Ruby method to unwind to".
-            //    Mirrors the lexical-aware unwind in the main loop and
-            //    the in-scope check used for `pending_method_break`
-            //    just below.
-            if self.method_return.is_some() {
-                let owner_idx: Option<usize> = match &self.method_return_locals {
-                    Some(rc) => self.frames.iter().rposition(|f| {
-                        !f.is_block
-                            && f.locals
-                                .as_shared()
-                                .is_some_and(|l| std::rc::Rc::ptr_eq(l, rc))
-                    }),
-                    None => None,
-                };
-                match owner_idx {
-                    Some(idx) if idx >= until_depth => {
-                        let val = self.take_method_return().unwrap();
-                        self.begin_method_break(val, idx)?;
-                        if self.frames.len() <= until_depth { return Ok(()); }
-                        continue;
+            debug_assert!(
+                self.control_signals_synced(),
+                "control_signals mask out of sync with signal fields",
+            );
+            // Folded-signal gate: the three control-flow signal checks
+            // below only matter when SOMETHING is pending — one byte
+            // test covers method_return / pending_method_break /
+            // break_signaled (see Vm::control_signals). Each arm still
+            // re-tests its own field; the gate just keeps the common
+            // per-op iteration to a single load+branch.
+            if self.control_signals != 0 {
+                // Non-local return signal. Two cases, distinguished by
+                // whether the return's lexical owner (the method frame it
+                // targets) lives WITHIN this dispatch_until scope:
+                //
+                //  - Owner is at/below `until_depth` (or unknown): we're
+                //    about to unwind past our boundary anyway. Exit early
+                //    and let the iterator driver (our caller) propagate the
+                //    signal — the original behaviour, and the common case
+                //    for `coll.each { return }` driven from the top-level
+                //    loop, where the target method sits below us.
+                //
+                //  - Owner is INSIDE our scope (`owner_idx >= until_depth`):
+                //    the method being returned-from is one we're driving
+                //    (e.g. a Ruby method called from a Rust-invoked Rack
+                //    block via `call_ruby_block_sync` → `step_block`). The
+                //    top-level `step` loop would consume the return at the
+                //    owner frame; we must do the same here, otherwise the
+                //    signal escapes all the way to the Rust caller and is
+                //    reported as "no enclosing Ruby method to unwind to".
+                //    Mirrors the lexical-aware unwind in the main loop and
+                //    the in-scope check used for `pending_method_break`
+                //    just below.
+                if self.method_return.is_some() {
+                    let owner_idx: Option<usize> = match &self.method_return_locals {
+                        Some(rc) => self.frames.iter().rposition(|f| {
+                            !f.is_block
+                                && f.locals
+                                    .as_shared()
+                                    .is_some_and(|l| std::rc::Rc::ptr_eq(l, rc))
+                        }),
+                        None => None,
+                    };
+                    match owner_idx {
+                        Some(idx) if idx >= until_depth => {
+                            let val = self.take_method_return().unwrap();
+                            self.begin_method_break(val, idx)?;
+                            if self.frames.len() <= until_depth { return Ok(()); }
+                            continue;
+                        }
+                        _ => return Ok(()),
                     }
-                    _ => return Ok(()),
                 }
-            }
-            // ADR 0024 Phase A.5/A.9: block-break in flight
-            // from an Op::Yield case (b). Fire
-            // continue_method_break when the target frame is
-            // at-or-above the current top AND within our
-            // dispatch scope (target_frame_idx >= until_depth).
-            // Cases:
-            //   - target == top: A.5 single-method case.
-            //   - target < top: A.9 multi-method case — pop
-            //     intermediate frames (running their ensures)
-            //     until reaching target.
-            // If target < until_depth, the target sits in a
-            // frame our outer driver owns — bail and let the
-            // outer dispatch level fire continue_method_break.
-            if let Some(mb) = self.pending_method_break.as_ref()
-                && !mb.suspended
-                && mb.target_frame_idx >= until_depth
-                && self.frames.len() > mb.target_frame_idx
-            {
-                self.continue_method_break()?;
-                if self.frames.len() <= until_depth { return Ok(()); }
-                continue;
-            }
-            // ADR 0024 Phase A.8: break-after-Fiber-resume
-            // recovery. The original Op::Yield wrapper that
-            // would have observed `break_signaled` was on the
-            // Rust stack that Fiber.yield unwound; after a
-            // subsequent resume, the block can run more
-            // statements + break with no Rust-side observer
-            // left. `pending_yield` on the top frame survived
-            // the FiberSnapshot stash (per-Frame, deep-copied)
-            // — that's our marker that this method's Op::Yield
-            // wrapper is gone. Pop the break value off the
-            // operand stack (Op::Return pushed it as the
-            // block's return), clear the marker, and fire
-            // the Phase A.4/A.5 unwind walk.
-            if self.break_signaled && self.frames.last()
-                .map(|f| f.pending_yield)
-                .unwrap_or(false)
-            {
-                self.break_signaled = false;
-                let target_idx = self.frames.len() - 1;
-                self.frames[target_idx].pending_yield = false;
-                let value = self.stack.pop().unwrap_or(Value::Nil);
-                self.begin_method_break(value, target_idx)?;
-                if self.frames.len() <= until_depth { return Ok(()); }
-                continue;
+                // ADR 0024 Phase A.5/A.9: block-break in flight
+                // from an Op::Yield case (b). Fire
+                // continue_method_break when the target frame is
+                // at-or-above the current top AND within our
+                // dispatch scope (target_frame_idx >= until_depth).
+                // Cases:
+                //   - target == top: A.5 single-method case.
+                //   - target < top: A.9 multi-method case — pop
+                //     intermediate frames (running their ensures)
+                //     until reaching target.
+                // If target < until_depth, the target sits in a
+                // frame our outer driver owns — bail and let the
+                // outer dispatch level fire continue_method_break.
+                if let Some(mb) = self.pending_method_break.as_ref()
+                    && !mb.suspended
+                    && mb.target_frame_idx >= until_depth
+                    && self.frames.len() > mb.target_frame_idx
+                {
+                    self.continue_method_break()?;
+                    if self.frames.len() <= until_depth { return Ok(()); }
+                    continue;
+                }
+                // ADR 0024 Phase A.8: break-after-Fiber-resume
+                // recovery. The original Op::Yield wrapper that
+                // would have observed `break_signaled` was on the
+                // Rust stack that Fiber.yield unwound; after a
+                // subsequent resume, the block can run more
+                // statements + break with no Rust-side observer
+                // left. `pending_yield` on the top frame survived
+                // the FiberSnapshot stash (per-Frame, deep-copied)
+                // — that's our marker that this method's Op::Yield
+                // wrapper is gone. Pop the break value off the
+                // operand stack (Op::Return pushed it as the
+                // block's return), clear the marker, and fire
+                // the Phase A.4/A.5 unwind walk.
+                if self.break_signaled && self.frames.last()
+                    .map(|f| f.pending_yield)
+                    .unwrap_or(false)
+                {
+                    self.break_signaled = false;
+                    self.sync_control_signals();
+                    let target_idx = self.frames.len() - 1;
+                    self.frames[target_idx].pending_yield = false;
+                    let value = self.stack.pop().unwrap_or(Value::Nil);
+                    self.begin_method_break(value, target_idx)?;
+                    if self.frames.len() <= until_depth { return Ok(()); }
+                    continue;
+                }
             }
             // P1c.2 (ADR 0023): Fiber.yield(v) sets this slot
             // and we exit so `resume_fiber` can observe the
@@ -718,7 +744,8 @@ impl Vm {
             // `resume_fiber`. Without this check the bytecode
             // would just continue past the yield point as if
             // nothing happened, defeating cooperative
-            // suspension.
+            // suspension. NOT part of the folded control_signals
+            // mask — it must run on every iteration regardless.
             #[cfg(feature = "_fiber")]
             if self.fiber_yield_pending.is_some() { return Ok(()); }
             // ADR 0025 Phase 2 + Phase 4b: SIGINT safe-point check.
@@ -2433,6 +2460,7 @@ impl Vm {
                     //     would strand the Rust driver mid-loop.
                     if yielding_idx == pre_frames - 1 {
                         yguard.vm.break_signaled = false;
+                        yguard.vm.sync_control_signals();
                         // ADR 0024 Phase A.4: walk the yielding
                         // method's `is_ensure` rescue handlers
                         // before the frame returns. After
@@ -2501,6 +2529,7 @@ impl Vm {
                             target_frame_idx: yielding_idx,
                             suspended: false,
                         });
+                        yguard.vm.sync_control_signals();
                     }
                     yguard.vm.stack.push(block_return_value);
                     drop(yguard);
@@ -3730,6 +3759,7 @@ impl Vm {
                 // operand stack and rides out with the subsequent
                 // Op::Return; collection_call_block reads it then.
                 self.break_signaled = true;
+                self.sync_control_signals();
             }
             Op::EnterLoop => {
                 let stack_depth = self.stack.len();
@@ -4042,6 +4072,7 @@ impl Vm {
                 // enclosing method.
                 let v = self.stack.pop().unwrap_or(Value::Nil);
                 self.method_return = Some(v);
+                self.sync_control_signals();
                 // Snapshot the lexical-owner identity. The current
                 // frame is the block where `return` fired; its
                 // BlockHandle's `captured` slot points at the

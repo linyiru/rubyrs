@@ -260,6 +260,10 @@ impl FiberSnapshot {
         );
         #[cfg(feature = "regex")]
         std::mem::swap(&mut vm.last_match, &mut self.last_match);
+        // The folded mask is a cache over swapped fields — refresh it
+        // for the state that just landed in the Vm. (The snapshot side
+        // doesn't carry a mask; it's recomputed on every swap-in.)
+        vm.sync_control_signals();
     }
 
     /// Construct the snapshot a freshly-created Fiber

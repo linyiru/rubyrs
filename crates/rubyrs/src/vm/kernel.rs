@@ -2844,6 +2844,7 @@ impl Vm {
             }
             if escaped {
                 self.method_return = Some(val);
+                self.sync_control_signals();
                 self.method_return_locals = owner_rc;
                 break;
             }
@@ -3106,6 +3107,7 @@ impl Vm {
             }
             if self.frames.len() <= depth_before + 1 {
                 self.method_return = Some(val);
+                self.sync_control_signals();
                 break;
             }
             let f = self.frames.pop().unwrap();

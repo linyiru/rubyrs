@@ -144,6 +144,7 @@ impl Vm {
         // body cancels the in-flight break — the exception takes
         // over the unwind, and the break value is dropped.
         self.pending_method_break = None;
+        self.sync_control_signals();
         // Populate `@backtrace` on the raised exception from the
         // current frame stack — covers both the `raise "msg"` /
         // `raise FooClass.new` Object route (where normalize_
@@ -472,6 +473,7 @@ impl Vm {
     /// `self.frames.last()` IS the yielding method.
     pub(crate) fn begin_method_break(&mut self, value: Value, target_frame_idx: usize) -> Result<(), Trap> {
         self.pending_method_break = Some(crate::vm::MethodBreak { value, target_frame_idx, suspended: false });
+        self.sync_control_signals();
         self.continue_method_break()
     }
 
@@ -537,6 +539,7 @@ impl Vm {
                 // end" evaluates to X's class).
                 let mb = self.pending_method_break.take()
                     .expect("ICE: pending_method_break vanished mid-continue");
+                self.sync_control_signals();
                 let popped = self.frames.pop()
                     .expect("ICE: continue_method_break landing with empty frames");
                 self.stack.truncate(popped.base_sp);

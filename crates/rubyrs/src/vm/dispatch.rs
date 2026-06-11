@@ -2440,6 +2440,7 @@ impl Vm {
                 // raises `LocalJumpError: break from proc-closure`.
                 if self.break_signaled {
                     self.break_signaled = false;
+                    self.sync_control_signals();
                     // Discard the break value the block left on
                     // the stack — it won't be the call's result.
                     self.stack.pop();

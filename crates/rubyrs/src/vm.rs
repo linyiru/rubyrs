@@ -1216,6 +1216,16 @@ pub(crate) struct Vm {
     /// switches swap this Vec into `FiberSnapshot` together with
     /// `frames` — each fiber owns its own arena contents.
     pub(crate) locals_arena: Vec<Value>,
+    /// Folded "any control-flow signal pending?" mask — a pure CACHE
+    /// over `method_return.is_some()` / `break_signaled` /
+    /// `pending_method_break.is_some()`, so the dispatch loops' hot
+    /// top-of-iteration check is ONE byte test instead of three
+    /// scattered Option/bool loads. Every site that mutates any of
+    /// the three fields must call `sync_control_signals()` afterwards
+    /// — the loop heads `debug_assert!(control_signals_synced())`, so
+    /// a missed sync fails the (debug-built) test suites loudly
+    /// rather than dispatching against a stale mask.
+    pub(crate) control_signals: u8,
     /// In-flight `break`/`next` through `ensure` chain. Set by
     /// `Op::BreakLoop`/`Op::NextLoop` when an `is_ensure` handler
     /// sits between the source and the target; cleared once the
@@ -1591,6 +1601,7 @@ impl Vm {
             method_return_locals: None,
             locals_pool: Vec::new(),
             locals_arena: Vec::new(),
+            control_signals: 0,
             pending_loop_transfer: None,
             pending_method_break: None,
             suppress_call_result_push: false,
@@ -1649,6 +1660,29 @@ impl Vm {
     /// drift apart in one of them. Read-only `is_some()` checks
     /// keep using the field directly — they don't consume, so the
     /// invariant doesn't apply.
+    /// Recompute the folded control-signal mask from the three
+    /// underlying fields. MUST be called after every mutation of
+    /// `method_return` / `break_signaled` / `pending_method_break`
+    /// (see the `control_signals` field doc). Cheap enough that the
+    /// cold mutation sites just call it unconditionally.
+    #[inline]
+    pub(crate) fn sync_control_signals(&mut self) {
+        self.control_signals = (self.method_return.is_some() as u8)
+            | ((self.break_signaled as u8) << 1)
+            | ((self.pending_method_break.is_some() as u8) << 2);
+    }
+
+    /// Debug-gate: does the cached mask agree with the fields?
+    /// Asserted at the dispatch loop heads so a mutation site that
+    /// forgot `sync_control_signals()` fails tests loudly.
+    #[inline]
+    pub(crate) fn control_signals_synced(&self) -> bool {
+        self.control_signals
+            == ((self.method_return.is_some() as u8)
+                | ((self.break_signaled as u8) << 1)
+                | ((self.pending_method_break.is_some() as u8) << 2))
+    }
+
     pub(crate) fn take_method_return(&mut self) -> Option<Value> {
         let v = self.method_return.take();
         if v.is_some() {
@@ -1659,6 +1693,7 @@ impl Vm {
             // `return` wins, the break value is dropped).
             self.pending_method_break = None;
         }
+        self.sync_control_signals();
         // Always clear `method_return_locals` — the field-pair
         // invariant says it lives and dies with `method_return`,
         // and unconditional clear here is the cheapest way to
@@ -1749,6 +1784,7 @@ impl Vm {
     /// the kind of drift that's caused real bugs elsewhere in
     /// this codebase.
     pub(crate) fn clear_control_flow_signals(&mut self) {
+        self.control_signals = 0;
         self.break_signaled = false;
         self.method_return = None;
         // Paired with `method_return` — see field doc. Without
