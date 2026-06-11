@@ -285,9 +285,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let mk = || {
-            let mut cfg = crate::Config::default();
-            cfg.preamble_cache_dir = Some(dir.clone());
-            crate::Runtime::with_config(cfg)
+            crate::Runtime::with_config(crate::Config {
+                preamble_cache_dir: Some(dir.clone()),
+                ..Default::default()
+            })
         };
         // First construction: cache miss → live compile → store.
         let mut a = mk();
@@ -326,9 +327,10 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         let mk = || {
-            let mut cfg = crate::Config::default();
-            cfg.preamble_cache_dir = Some(dir.clone());
-            crate::Runtime::with_config(cfg)
+            crate::Runtime::with_config(crate::Config {
+                preamble_cache_dir: Some(dir.clone()),
+                ..Default::default()
+            })
         };
         let _ = mk(); // populate
         // Truncate / scribble every cache file in the dir.

@@ -859,3 +859,46 @@ mod preamble_cache_serde {
         }
     }
 }
+
+#[cfg(all(test, feature = "preamble-cache"))]
+mod preamble_cache_serde_tests {
+    use super::Value;
+
+    fn roundtrip(v: &Value) -> Value {
+        let bytes = postcard::to_allocvec(v).expect("encode");
+        postcard::from_bytes(&bytes).expect("decode")
+    }
+
+    #[test]
+    fn literal_variants_roundtrip() {
+        assert!(matches!(roundtrip(&Value::Nil), Value::Nil));
+        assert!(matches!(roundtrip(&Value::Bool(true)), Value::Bool(true)));
+        assert!(matches!(roundtrip(&Value::Bool(false)), Value::Bool(false)));
+        assert!(matches!(roundtrip(&Value::Int(-42)), Value::Int(-42)));
+        assert!(matches!(roundtrip(&Value::Float(1.5)), Value::Float(f) if (f - 1.5).abs() < 1e-12));
+        let sym = Value::Sym(crate::intern::SymId(7));
+        assert!(matches!(roundtrip(&sym), Value::Sym(crate::intern::SymId(7))));
+    }
+
+    #[test]
+    fn utf8_string_rebuilds_via_new_str() {
+        let v = Value::new_str("héllo");
+        assert!(matches!(roundtrip(&v), Value::Str(s) if &*s.borrow() == "héllo".as_bytes()));
+    }
+
+    #[test]
+    fn binary_string_rebuilds_via_new_str_bytes() {
+        // Invalid UTF-8 — the compiler's `Expr::StrLitBytes` shape.
+        let v = Value::new_str_bytes(vec![0xFF, 0xFE, 0x00]);
+        assert!(matches!(roundtrip(&v), Value::Str(s) if &*s.borrow() == &[0xFF, 0xFE, 0x00]));
+    }
+
+    #[test]
+    fn heap_variants_refuse_to_serialize() {
+        // An ObjId is only meaningful inside one live heap — the
+        // bridge must hard-error, which the preamble cache treats
+        // as "skip storing", never persisting a dangling reference.
+        let v = Value::Array(crate::value::ObjId(3));
+        assert!(postcard::to_allocvec(&v).is_err());
+    }
+}
