@@ -925,3 +925,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn marshal_roundtrip_contract() { run_diff("marshal_roundtrip_contract"); }
 // Range#map over String endpoints (str_succ materialize).
 #[test] fn range_string_map() { run_diff("range_string_map"); }
+// undef_method kills same-class methods (tombstone + table removal).
+#[test] fn undef_own_class_method() { run_diff("undef_own_class_method"); }
+// super from overrides into Object#send/===; StringIO mode arg.
+#[cfg(feature = "stdlib")]
+#[test] fn super_into_dispatch_builtins() { run_diff("super_into_dispatch_builtins"); }

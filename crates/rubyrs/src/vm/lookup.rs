@@ -2098,6 +2098,58 @@ impl Vm {
                                 return Ok(());
                             }
                         }
+                        // `super` into Object/Kernel's dispatch-level
+                        // builtins from an instance-method override:
+                        // CRuby ships real `Object#send` /
+                        // `#__send__` / `#public_send` / `#===`, so
+                        // `define_method(:send) { |*a| ... super(*a) }`
+                        // (minitest Mock's blank-slate keeps a
+                        // passthrough send) can call up. rubyrs
+                        // handles these names inline in do_call, so
+                        // the ancestor walk finds nothing. The
+                        // send-family substitution re-dispatches the
+                        // FORWARDED name (not `send` itself — that
+                        // would re-enter the override and loop):
+                        // exactly Object#send's job, and an undef'd
+                        // target correctly falls to method_missing.
+                        // `===` substitutes identity, Object#==='s
+                        // default.
+                        ("send" | "__send__" | "public_send", Some(obj @ Value::Object(_))) => {
+                            let mut args = args;
+                            if args.is_empty() {
+                                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                                    msg: "no method name given".into(),
+                                }));
+                            }
+                            let target = args.remove(0);
+                            let target_id = match &target {
+                                Value::Sym(s) => *s,
+                                Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                                other => {
+                                    return Err(self.trap(crate::error::RubyError::TypeError {
+                                        msg: format!(
+                                            "{} is not a symbol nor a string",
+                                            other.type_name()
+                                        ),
+                                    }));
+                                }
+                            };
+                            let argc = args.len();
+                            self.stack.push(obj);
+                            for a in args {
+                                self.stack.push(a);
+                            }
+                            return self.do_call(target_id, argc, /*no_recv=*/ false, u16::MAX);
+                        }
+                        ("===", Some(obj @ Value::Object(_))) => {
+                            let same = match (&obj, args.first()) {
+                                (Value::Object(a), Some(Value::Object(b))) => a == b,
+                                (_, Some(other)) => obj.ruby_eq(other, &self.heap),
+                                (_, None) => false,
+                            };
+                            self.stack.push(Value::Bool(same));
+                            return Ok(());
+                        }
                         // General Class-receiver builtin: CRuby
                         // ships real `Class#name` / `#to_s` /
                         // `#inspect`, so a singleton override can

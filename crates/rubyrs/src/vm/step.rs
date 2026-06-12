@@ -2166,8 +2166,87 @@ impl Vm {
                     })),
                 };
                 let name_id = self.super_runtime_name(name_id);
-                let (m, self_val) = self.super_lookup(name_id)?;
-                self.invoke_method_with_block(m, self_val, args, block_id)?;
+                match self.super_lookup(name_id) {
+                    Ok((m, self_val)) => {
+                        self.invoke_method_with_block(m, self_val, args, block_id)?;
+                    }
+                    Err(trap) => {
+                        // Builtin-substitution twin of the no-block
+                        // path's intercept in
+                        // super_call_with_lifecycle_noop: minitest
+                        // Mock's blank-slate keeps a
+                        // `define_method(:send) { |*a, &b|
+                        // super(*a, &b) }` passthrough, and
+                        // Object#send is a do_call recogniser (no
+                        // table Method above the override).
+                        // Re-dispatch the FORWARDED name — an
+                        // undef'd target then falls to
+                        // method_missing, exactly Object#send's
+                        // contract. `===` substitutes identity.
+                        let is_no_super = matches!(
+                            &trap.err,
+                            RubyError::NoMethodError {
+                                kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
+                                ..
+                            },
+                        );
+                        if !is_no_super {
+                            return Err(trap);
+                        }
+                        let nm = self.interner.resolve(name_id).clone();
+                        let cur_self = self.frames.last().map(|f| f.self_val.clone());
+                        match (&*nm, cur_self) {
+                            ("send" | "__send__" | "public_send", Some(obj @ Value::Object(_))) => {
+                                let mut args = args;
+                                if args.is_empty() {
+                                    return Err(self.trap(RubyError::ArgumentError {
+                                        msg: "no method name given".into(),
+                                    }));
+                                }
+                                let target = args.remove(0);
+                                let target_id = match &target {
+                                    Value::Sym(s) => *s,
+                                    Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                                    other => {
+                                        return Err(self.trap(RubyError::TypeError {
+                                            msg: format!(
+                                                "{} is not a symbol nor a string",
+                                                other.type_name()
+                                            ),
+                                        }));
+                                    }
+                                };
+                                let argc = args.len();
+                                match block_id {
+                                    Some(bid) => {
+                                        self.stack.push(obj);
+                                        self.stack.push(Value::Block(bid));
+                                        for a in args {
+                                            self.stack.push(a);
+                                        }
+                                        self.do_call_block(target_id, argc, /*no_recv=*/ false, u16::MAX)?;
+                                    }
+                                    None => {
+                                        self.stack.push(obj);
+                                        for a in args {
+                                            self.stack.push(a);
+                                        }
+                                        self.do_call(target_id, argc, /*no_recv=*/ false, u16::MAX)?;
+                                    }
+                                }
+                            }
+                            ("===", Some(obj @ Value::Object(_))) => {
+                                let same = match (&obj, args.first()) {
+                                    (Value::Object(a), Some(Value::Object(b))) => a == b,
+                                    (_, Some(other)) => obj.ruby_eq(other, &self.heap),
+                                    (_, None) => false,
+                                };
+                                self.stack.push(Value::Bool(same));
+                            }
+                            _ => return Err(trap),
+                        }
+                    }
+                }
             }
             Op::Super(name_id, argc) => {
                 let split = self.stack.len() - argc as usize;

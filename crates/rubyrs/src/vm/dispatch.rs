@@ -12309,6 +12309,35 @@ impl Vm {
     }
 
     pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {
+        // GC rooting for the pre-frame window: receiver, args, and
+        // the block arrive as Rust locals (popped off the operand
+        // stack by the caller), and the param-binding work below
+        // allocates (rest-arg collection, kwargs peeling) BEFORE
+        // the new frame roots them — under STRESS_GC the literal
+        // block of `obj.m(:x) { ... }` was swept right here and
+        // `yield` later read a reused slot ("heap slot is not a
+        // Block" ICE, super_into_dispatch_builtins fixture). Pin
+        // across the inner call; by the time it returns the frame
+        // (or the re-entered do_call path) holds its own roots.
+        // Scope note: receiver and args have a second root in the
+        // common path (the caller's frame locals / enclosing
+        // expression); the literal block is the value whose ONLY
+        // reference can be this Rust local, so it alone pays the
+        // pin. Measured: pinning all three cost +5% instructions
+        // on the minitest-1000 workload; block-only is noise.
+        match block {
+            Some(bid) => {
+                let pin_base = self.pinned.len();
+                self.pinned.push(Value::Block(bid));
+                let r = self.invoke_method_with_block_inner(m, self_val, args, block);
+                self.pinned.truncate(pin_base);
+                r
+            }
+            None => self.invoke_method_with_block_inner(m, self_val, args, block),
+        }
+    }
+
+    fn invoke_method_with_block_inner(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {
         // Builtin-method short-circuit: synthesised Methods on
         // Kernel (and any future host class with similar
         // reflection records) carry a `builtin: Some(...)` payload

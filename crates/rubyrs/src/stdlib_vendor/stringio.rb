@@ -13,10 +13,16 @@
 # Gated behind the `stdlib` Cargo feature.
 
 class StringIO
-  def initialize(string = "")
+  # The optional MODE argument ("r", "w", "a", ...) is accepted and
+  # recorded but not enforced — the in-memory buffer has no fd-level
+  # read/write split (minitest's stub tests open `StringIO.new(+"",
+  # "w")`). "a" still positions writes at the end via the normal
+  # append path; "w" truncation matches CRuby (fresh buffer).
+  def initialize(string = "", mode = nil)
     @str = string.dup
     @pos = 0
     @closed = false
+    @mode = mode
   end
 
   # String#new-shaped factory aliases. CRuby has `StringIO.open`
