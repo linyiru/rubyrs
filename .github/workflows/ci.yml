@@ -451,7 +451,10 @@ jobs:
           # eigenclass dispatch gate adds one stack-shape ICE
           # expect (receiver vanished between the gate's peek and
           # the drain — programmer error, not user-reachable).
-          check crates/rubyrs/src/vm/dispatch.rs     59
+          # Bumped 59 → 60 on 2026-06-12 (same day): the String
+          # per-instance eigenclass gate adds the twin stack-shape
+          # ICE expect ("ICE: str-singleton recv").
+          check crates/rubyrs/src/vm/dispatch.rs     60
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /
