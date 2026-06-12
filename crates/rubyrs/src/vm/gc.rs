@@ -602,6 +602,12 @@ impl Vm {
         // object reachable only from the suspended side (the
         // `fiber_current_is_nil...` class_of ICE). Mirrors the
         // heap-side `HeapObj::Fiber` mark arm's snapshot walk.
+        // `proc.call(.., &blk)`'s one-shot block channel — set
+        // before invoke_block's frame push, so allocs in that
+        // window (rest-array, kwrest) must not sweep the block.
+        if let Some(bid) = self.pending_block_arg {
+            roots.push(crate::value::Value::Block(bid));
+        }
         #[cfg(feature = "_fiber")]
         for snap in &self.fiber_stash_stack {
             // The suspended side's Stack-frame slots live in ITS

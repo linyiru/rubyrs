@@ -1383,6 +1383,13 @@ pub(crate) struct Vm {
     /// `alias` snapshots the original method; this reproduces that for
     /// the un-snapshottable primitive case.
     pub(crate) force_primitive_dispatch: bool,
+    /// One-shot channel for `proc.call(args, &blk)` — the caller's
+    /// block ObjId, set by the Block-recv `.call` arm in
+    /// `do_call_block` and taken at `invoke_block`'s top, where it
+    /// binds into the callee proto's `block_param_slot` (`|.., &b|`).
+    /// Walked by the GC root gather (the window between set and
+    /// frame-push crosses allocs).
+    pub(crate) pending_block_arg: Option<crate::value::ObjId>,
     /// P1c.2 (ADR 0023) — fiber yield signaling slot.
     ///
     /// `Fiber.yield(v)` sets this to `Some(v)` and returns
@@ -1750,6 +1757,7 @@ impl Vm {
             bypass_visibility_once: false,
             trailing_hash_positional: false,
             force_primitive_dispatch: false,
+            pending_block_arg: None,
             #[cfg(feature = "_fiber")]
             fiber_yield_pending: None,
             #[cfg(feature = "_fiber")]

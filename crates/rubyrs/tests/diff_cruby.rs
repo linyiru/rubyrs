@@ -979,3 +979,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // instance_methods universals, undef->method_missing,
 // redefine-after-undef, public_send override.
 #[test] fn blank_slate_dispatch() { run_diff("blank_slate_dispatch"); }
+// proc.call(args, &blk) binds the callee's |.., &b| slot.
+#[test] fn proc_call_block_arg() { run_diff("proc_call_block_arg"); }

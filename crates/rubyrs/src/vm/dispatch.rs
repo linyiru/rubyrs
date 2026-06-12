@@ -13406,6 +13406,7 @@ impl Vm {
                 kw_has_computed_default: Vec::new(),
                 kw_rest_param: None,
                 block_kw_params: vec![],
+            block_param_slot: None,
                 block_param: None,
                 n_locals: 2,
                 // Not literally true (no Op::CreateBlock in the body),
@@ -13503,6 +13504,7 @@ impl Vm {
                 kw_has_computed_default: Vec::new(),
                 kw_rest_param: None,
                 block_kw_params: vec![],
+            block_param_slot: None,
                 block_param: None,
                 n_locals: 3,
                 // Same as the callable-forwarder: closure-run proto,
@@ -13683,7 +13685,8 @@ impl Vm {
              bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope)
         };
         if rest_slot.is_some() || kw_rest_slot.is_some() || n_params > 1
-            || !self.protos[proto_idx].block_kw_params.is_empty() {
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some() {
             return self.invoke_block(block_id, vec![arg]);
         }
         let proto = &self.protos[proto_idx];
@@ -13733,7 +13736,8 @@ impl Vm {
              bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope)
         };
         if rest_slot.is_some() || kw_rest_slot.is_some() || n_params != 2
-            || !self.protos[proto_idx].block_kw_params.is_empty() {
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some() {
             return self.invoke_block(block_id, vec![a, b]);
         }
         let proto = &self.protos[proto_idx];
@@ -13788,6 +13792,11 @@ impl Vm {
         // empty Vec is alloc-free, so kw-less blocks pay one len
         // check here.
         let kw_params: Vec<(String, u16, bool)> = self.protos[proto_idx].block_kw_params.clone();
+        // `proc.call(.., &blk)`'s one-shot caller-block channel:
+        // ALWAYS take (a stale value must not leak into the next
+        // block invocation); binds into block_param_slot below.
+        let caller_block = self.pending_block_arg.take();
+        let block_param_slot = self.protos[proto_idx].block_param_slot;
         let kw_rest_value: Option<Value> = if kw_rest_slot.is_some() {
             // Only treat a trailing Hash as kwargs; otherwise the
             // block was called with no keywords → bind `{}`.
@@ -14061,6 +14070,14 @@ impl Vm {
             for (slot, val) in kw_bound {
                 locals[slot as usize] = val;
             }
+            // `|.., &b|`: caller's block or Nil — written EVERY
+            // invocation (param slots aren't body-reset).
+            if let Some(slot) = block_param_slot {
+                locals[slot as usize] = match caller_block {
+                    Some(bid) => Value::Block(bid),
+                    None => Value::Nil,
+                };
+            }
         }
         self.frames.push(Frame {
             proto_idx,
@@ -14285,10 +14302,10 @@ impl Vm {
         // (`val_or_callable.call(*args, &blk)`) lands here and
         // raised NoMethodError. Tier-1 limitation (documented):
         // the passed block is NOT bound to a `&param` of the
-        // callee proc — a callee that declares `|.., &b|` sees
-        // b = nil (BlockHandle doesn't carry a block-param slot
-        // yet). The dominant gem shape — a `->(*args) { ... }`
-        // that ignores the incoming block — works.
+        // callee proc — a callee that declares `|.., &b|` gets the
+        // incoming block bound via the one-shot
+        // `pending_block_arg` channel (mock's
+        // `val_or_callable.call(*args, &blk)` stub shape).
         if let Some(Value::Block(target_bid)) = &recv
             && matches!(&*name, "call" | "[]" | "()" | "yield" | "===")
         {
@@ -14297,13 +14314,15 @@ impl Vm {
             // GC rooting: recv/args/incoming-block were drained off
             // the stack into Rust locals — invoke_block's rest-param
             // collection allocates, and under STRESS_GC that sweeps
-            // any heap-shaped arg (and the ignored incoming block)
-            // before the callee frame roots them.
+            // any heap-shaped arg before the callee frame roots
+            // them. (The incoming block is additionally rooted via
+            // pending_block_arg's root-gather entry.)
             {
                 let mut g = crate::vm::PinGuard::new(self);
                 g.pin(Value::Block(target));
                 g.pin(Value::Block(block));
                 for a in &args { g.pin(a.clone()); }
+                g.vm.pending_block_arg = Some(block);
                 g.vm.invoke_block(target, args)?;
             }
             self.dispatch_until(pre_frames)?;
@@ -16577,6 +16596,7 @@ impl Vm {
                 kw_has_computed_default: vec![],
                 kw_rest_param: None,
                 block_kw_params: vec![],
+            block_param_slot: None,
                 block_param: None,
                 n_locals: 0,
                 creates_block: false,
@@ -16615,6 +16635,7 @@ impl Vm {
                 kw_has_computed_default: vec![],
                 kw_rest_param: None,
                 block_kw_params: vec![],
+            block_param_slot: None,
                 block_param: None,
                 n_locals: 1,
                 creates_block: false,
@@ -16671,6 +16692,7 @@ impl Vm {
             kw_has_computed_default: vec![],
             kw_rest_param: None,
             block_kw_params: vec![],
+            block_param_slot: None,
             block_param: None,
             n_locals: 1,
             creates_block: false,
@@ -16770,6 +16792,7 @@ impl Vm {
             kw_has_computed_default: vec![],
             kw_rest_param: None,
             block_kw_params: vec![],
+            block_param_slot: None,
             block_param: None,
             n_locals: 1,
             creates_block: false,
@@ -16818,6 +16841,7 @@ impl Vm {
             kw_has_computed_default: vec![],
             kw_rest_param: None,
             block_kw_params: vec![],
+            block_param_slot: None,
             block_param: None,
             n_locals: 1,
             creates_block: false,

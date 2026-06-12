@@ -756,6 +756,16 @@ pub(crate) struct Proto {
     /// is unchanged (kw-blocks installed as methods keep their
     /// pre-existing arity behaviour — documented gap).
     pub(crate) block_kw_params: Vec<(String, u16, bool)>,
+    /// BLOCK protos only: the ABSOLUTE local slot of a `|.., &b|`
+    /// block parameter. `invoke_block` binds the caller's block
+    /// (`proc.call(args, &blk)` → `Vm::pending_block_arg`) or Nil
+    /// into it EVERY invocation (the slot sits below
+    /// `block_body_local_start`, so a skipped write would leak the
+    /// previous invocation's block). `None` for non-block protos
+    /// and `&`-less blocks — the invoke_block1/2 fast paths gate
+    /// on it. Distinct from `block_param` (the NAME, used by the
+    /// define_method-as-method binder's by-position math).
+    pub(crate) block_param_slot: Option<u16>,
     pub(crate) n_locals: u16,
     /// `true` when `code` contains an `Op::CreateBlock` — i.e. running
     /// this proto can capture the frame's locals cell into a

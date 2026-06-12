@@ -1141,6 +1141,7 @@ impl ProtoBuilder {
             kw_rest_param: None,
             block_param: None,
             block_kw_params: vec![],
+            block_param_slot: None,
             n_locals: self.n_locals,
             creates_block,
             code: self.code,
@@ -2321,6 +2322,9 @@ pub(crate) fn compile_block(
     // empty and `&blk` arrived Nil.
     let mut rest_param_name: Option<String> = None;
     let mut block_arg_name: Option<String> = None;
+    // `|.., &b|` absolute slot — stamped onto the proto so
+    // invoke_block can bind the caller's block (or Nil) into it.
+    let mut block_arg_slot: Option<u16> = None;
     // `|**opts|` keyword-rest: a slot (not counted in n_params,
     // like rest) that invoke_block fills with the trailing kwargs
     // Hash (default `{}`). `u16::MAX` sentinel = no kw-rest param.
@@ -2357,7 +2361,8 @@ pub(crate) fn compile_block(
             }
             BlockParam::BlockArg(name) => {
                 let slot_name = if name == "&" { format!("__blkarg_{i}") } else { name.clone() };
-                b.define_local_slot(&slot_name);
+                let s = b.define_local_slot(&slot_name);
+                block_arg_slot = Some(s);
                 block_arg_name = Some(slot_name);
             }
             BlockParam::KwRest(name) => {
@@ -2506,6 +2511,10 @@ pub(crate) fn compile_block(
     }
     if let Some(name) = block_arg_name {
         protos.last_mut().expect("ICE: just pushed").block_param = Some(name);
+    }
+    if block_arg_slot.is_some()
+        && let Some(p) = protos.last_mut() {
+        p.block_param_slot = block_arg_slot;
     }
     // Stamp `kw_rest_param` so a block installed AS A METHOD via
     // `define_method` routes through invoke_method's kw-rest
