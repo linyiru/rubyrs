@@ -9023,6 +9023,32 @@ impl Vm {
         // `resolve_ivar_name_arg` validator as get/set, so an
         // invalid identifier (e.g. `:foo` without `@`) raises
         // NameError before the lookup runs — matching CRuby.
+        // `Object#remove_instance_variable(:@x)` — delete the ivar
+        // and return its value; NameError when absent (CRuby).
+        // minitest's reporting path strips internal state with it.
+        if &*name == "remove_instance_variable" && args.len() == 1 {
+            let ivar_id = self.resolve_ivar_name_arg(&args[0])?;
+            let removed = match &recv {
+                Value::Object(oid) => match self.heap.get_mut(*oid) {
+                    crate::heap::HeapObj::Instance(inst) => inst.ivars.remove(&ivar_id),
+                    _ => None,
+                },
+                Value::Class(cls) => cls.ivars.borrow_mut().remove(&ivar_id),
+                _ => None,
+            };
+            match removed {
+                Some(v) => {
+                    self.stack.push(v);
+                    return Ok(());
+                }
+                None => {
+                    let nm = self.interner.resolve(ivar_id).to_string();
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("instance variable {} not defined", nm),
+                    }));
+                }
+            }
+        }
         if &*name == "instance_variable_defined?" && args.len() == 1 {
             let ivar_id = self.resolve_ivar_name_arg(&args[0])?;
             let defined = match &recv {
@@ -14679,6 +14705,18 @@ impl Vm {
             }
             if let Some(m) = self.toplevel_methods.get(&name_id).cloned() {
                 self.invoke_method_with_block(m, self_val, args, Some(block))?;
+                return Ok(());
+            }
+            // Toplevel nil-self bare call WITH a block: walk
+            // NilClass → Object → Kernel, mirroring the no-block
+            // twin in `do_call` — `module Kernel; def describe`
+            // (minitest/spec's DSL entry) is called as
+            // `describe "..." do ... end` from main.
+            if matches!(&self_val, Value::Nil)
+                && let Value::Class(cls) = self.class_of(&self_val)
+                && let Some(m) = self.lookup_method_uncached(&cls, name_id)
+            {
+                self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
                 return Ok(());
             }
             // Class/Module self: bridge to the receiver form (same

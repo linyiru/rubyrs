@@ -3294,6 +3294,12 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         // `etc`: vendored Etc.nprocessors subset (stdlib_vendor/etc.rb)
         // — minitest requires it unconditionally at load.
         | "etc"
+        // `timeout`: lenient shell (rack's spec_utils requires it
+        // for one Timeout::Error assertion; Timeout.timeout itself
+        // needs real preemption — out of the single-threaded
+        // model). The vendored stub defines the constants so the
+        // require + rescue-class references resolve.
+        | "timeout"
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util" | "cgi/escape"
         | "ipaddr"

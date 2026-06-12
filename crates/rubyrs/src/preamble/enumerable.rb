@@ -445,3 +445,18 @@ module Enumerable
     result
   end
 end
+
+module Enumerable
+  # `chain(*others)` — eager concatenation subset (CRuby returns a
+  # lazy Enumerator::Chain; consumers on the spike paths iterate it
+  # immediately — minitest chains runnable lists). Each source only
+  # needs #each.
+  def chain(*others)
+    result = []
+    each { |e| result << e }
+    others.each do |o|
+      o.each { |e| result << e }
+    end
+    result
+  end
+end

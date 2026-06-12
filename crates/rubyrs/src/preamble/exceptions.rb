@@ -43,6 +43,48 @@ class Exception
     @backtrace
   end
 
+  # `Exception#dup` — exceptions can be VM-bridged shapes (the
+  # stack-guard's SystemStackError) that the universal Object#dup
+  # arm doesn't model; rebuild via the class constructor and carry
+  # message + backtrace. Falls back to self when even allocation
+  # is fenced (exceptions are treated as quasi-immutable then).
+  def dup
+    copy = begin
+      self.class.allocate
+    rescue StandardError, TypeError
+      return self
+    end
+    copy.instance_variable_set(:@message, @message)
+    copy.instance_variable_set(:@backtrace, @backtrace)
+    copy
+  end
+
+  # `Exception#exception` — no args (or self-same message): return
+  # self; with a message: a shallow copy carrying the new message
+  # and the ORIGINAL backtrace (CRuby's re-raise-with-context
+  # idiom, `raise e.exception("wrapped: ...")`). Both minitest's
+  # unexpected-error plumbing and Kernel#raise's 2-arg form route
+  # through it.
+  def exception(msg = nil)
+    return self if msg.nil? || msg.equal?(self)
+    copy = dup
+    copy.instance_variable_set(:@message, msg.to_s)
+    copy
+  end
+
+  # `Exception.exception(msg)` — class-level alias of new (CRuby).
+  def self.exception(msg = nil)
+    new(msg)
+  end
+
+  # `Exception#set_backtrace(frames)` — replace the stored
+  # backtrace. CRuby accepts a String (wrapped into one frame),
+  # an Array of Strings, or nil; returns the assigned value.
+  # minitest filters assertion backtraces through this.
+  def set_backtrace(frames)
+    @backtrace = frames.is_a?(String) ? [frames] : frames
+  end
+
   # `Exception#full_message` for gem logging paths
   # (rails / sentry-ruby / etc.) that call it without checking
   # `respond_to?(:full_message)` first.

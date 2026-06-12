@@ -130,6 +130,7 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         // Discovery: minitest 5.25 requires "etc" unconditionally;
         // logger 1.7's LogDevice requires "monitor".
         "etc" => Some(include_str!("stdlib_vendor/etc.rb")),
+        "timeout" => Some(include_str!("stdlib_vendor/timeout.rb")),
         "monitor" => Some(include_str!("stdlib_vendor/monitor.rb")),
         "set" => Some(include_str!("stdlib_vendor/set.rb")),
         "stringio" => Some(include_str!("stdlib_vendor/stringio.rb")),

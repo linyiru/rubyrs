@@ -2078,6 +2078,26 @@ impl Vm {
                                 return Ok(());
                             }
                         }
+                        // General Class-receiver builtin: CRuby
+                        // ships real `Class#name` / `#to_s` /
+                        // `#inspect`, so a singleton override can
+                        // `super` into them (minitest/spec's
+                        // `def self.name; defined?(@name) ? @name :
+                        // super; end` on describe-created classes).
+                        // `primitive_call` is the same stateless
+                        // table the explicit-dispatch arm consults,
+                        // so the substitution can't drift from
+                        // `Foo.name` semantics.
+                        (_, Some(cv @ Value::Class(_))) => {
+                            if let Some(v) = crate::vm::primitive::primitive_call(
+                                &cv, &nm, &args, self.max_value_bytes,
+                            )
+                            .map_err(|e| self.trap(e))?
+                            {
+                                self.stack.push(v);
+                                return Ok(());
+                            }
+                        }
                         _ => {}
                     }
                 }

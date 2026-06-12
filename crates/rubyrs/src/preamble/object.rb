@@ -126,3 +126,24 @@ class Regexp < Object
   EXTENDED   = 2
   MULTILINE  = 4
 end
+
+# Marshal — binary serialization is out of the Tier-1 subset (no
+# stable wire format commitment). The surface exists because real
+# callers use `dump` as a DUMPABILITY PROBE, not for the bytes:
+# minitest's exception sanitizer dumps every captured exception
+# (and structurally requires the neutered-RuntimeError dump to
+# SUCCEED — its "if this raises, we die" terminal). `dump`
+# therefore returns an opaque placeholder and never raises;
+# `load` raises loudly so any actual round-trip attempt fails at
+# the read side instead of silently corrupting (a dump written to
+# disk is garbage — documented divergence).
+module Marshal
+  def self.dump(_obj, *_rest)
+    "\x04\brubyrs:marshal-placeholder"
+  end
+
+  def self.load(*_args)
+    raise NotImplementedError,
+      "Marshal.load is not supported in rubyrs Tier 1 (dump emits an opaque placeholder)"
+  end
+end
