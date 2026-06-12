@@ -133,17 +133,25 @@ end
 # minitest's exception sanitizer dumps every captured exception
 # (and structurally requires the neutered-RuntimeError dump to
 # SUCCEED — its "if this raises, we die" terminal). `dump`
-# therefore returns an opaque placeholder and never raises;
-# `load` raises loudly so any actual round-trip attempt fails at
-# the read side instead of silently corrupting (a dump written to
-# disk is garbage — documented divergence).
+# therefore returns a placeholder and never raises.
+#
+# The placeholder is VALID EMPTY YAML on purpose: Jekyll's
+# regenerator writes `Marshal.dump(metadata)` to `.jekyll-metadata`
+# and reads it back with `Marshal.load → rescue TypeError →
+# SafeYAML.load`. Our `load` raises TypeError for ANY input (we
+# can't parse real marshal bytes either — the same answer CRuby
+# gives non-marshal input), so that fallback chain lands in
+# SafeYAML, parses the placeholder to `{}`, and Jekyll degrades to
+# a full rebuild — byte-identical output, no crash. A
+# NotImplementedError here escaped regenerator's rescue list and
+# aborted real builds (caught by the jk-real byte-identity gate).
 module Marshal
   def self.dump(_obj, *_rest)
-    "\x04\brubyrs:marshal-placeholder"
+    "--- {}\n"
   end
 
   def self.load(*_args)
-    raise NotImplementedError,
-      "Marshal.load is not supported in rubyrs Tier 1 (dump emits an opaque placeholder)"
+    raise TypeError,
+      "incompatible marshal file format (rubyrs Tier 1: Marshal.dump emits a YAML placeholder; Marshal.load parses nothing)"
   end
 end
