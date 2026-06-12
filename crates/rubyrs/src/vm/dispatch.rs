@@ -4274,28 +4274,44 @@ impl Vm {
                 let mut sids: Vec<crate::intern::SymId> = Vec::new();
                 if inherited {
                     let mut visited: Vec<*const crate::value::Class> = Vec::new();
+                    // `undef_method` tombstones kill INHERITED names
+                    // from the undef-ing class downward — the listing
+                    // must agree with the lookup walk (lookup.rs), or
+                    // a runner that enumerates then send()s (minitest
+                    // spec's nuke_test_methods! + runnable_methods)
+                    // sees phantom methods that NoMethodError at
+                    // dispatch. Own-table names still list (a
+                    // redefine-after-undef leaves its stale tombstone
+                    // behind, and own-first wins in lookup too).
+                    let mut dead: Vec<crate::intern::SymId> = Vec::new();
                     fn walk(
                         c: &std::rc::Rc<crate::value::Class>,
                         allow: fn(Visibility) -> bool,
                         out: &mut Vec<crate::intern::SymId>,
                         visited: &mut Vec<*const crate::value::Class>,
+                        dead: &mut Vec<crate::intern::SymId>,
                     ) {
                         let ptr = std::rc::Rc::as_ptr(c);
                         if visited.contains(&ptr) { return; }
                         visited.push(ptr);
                         for (k, m) in c.methods.borrow().iter() {
-                            if allow(m.visibility.get()) && !out.contains(k) {
+                            if allow(m.visibility.get()) && !out.contains(k) && !dead.contains(k) {
                                 out.push(*k);
                             }
                         }
                         for inc in c.includes.borrow().iter() {
-                            walk(inc, allow, out, visited);
+                            walk(inc, allow, out, visited, dead);
+                        }
+                        for k in c.undefed.borrow().iter() {
+                            if !dead.contains(k) {
+                                dead.push(*k);
+                            }
                         }
                         if let Some(sup) = c.superclass.borrow().clone() {
-                            walk(&sup, allow, out, visited);
+                            walk(&sup, allow, out, visited, dead);
                         }
                     }
-                    walk(&cls, allow, &mut sids, &mut visited);
+                    walk(&cls, allow, &mut sids, &mut visited, &mut dead);
                 } else {
                     for (k, m) in cls.methods.borrow().iter() {
                         if allow(m.visibility.get()) {
@@ -12939,6 +12955,31 @@ impl Vm {
     /// to splat the caller's args into a `.call(...)` on it.
     /// Caller must pass a value whose `.call` dispatch is
     /// already wired up (currently BoundMethod and CurriedProc).
+    /// Coerce a Symbol into a Block by dispatching the preamble's
+    /// `Symbol#to_proc` (pure Ruby — symbol.rb) and unwrapping the
+    /// resulting Proc. Single source of truth: the variable-form
+    /// `&sym` block-pass can't drift from the literal/explicit
+    /// `:sym.to_proc` semantics.
+    pub(crate) fn symbol_block_via_to_proc(
+        &mut self,
+        sid: crate::intern::SymId,
+    ) -> Result<crate::value::ObjId, Trap> {
+        let to_proc_id = self.interner.intern("to_proc");
+        self.stack.push(Value::Sym(sid));
+        let pre_frames = self.frames.len();
+        self.do_call(to_proc_id, 0, /*no_recv=*/false, u16::MAX)?;
+        self.dispatch_until(pre_frames)?;
+        match self.stack.pop() {
+            Some(Value::Block(bid)) => Ok(bid),
+            other => Err(self.trap(RubyError::TypeError {
+                msg: format!(
+                    "wrong argument type Symbol (expected Proc; to_proc returned {})",
+                    other.map(|v| v.type_name().to_string()).unwrap_or_else(|| "nothing".into()),
+                ),
+            })),
+        }
+    }
+
     pub(crate) fn coerce_callable_to_block(&mut self, callable: Value)
         -> Result<crate::value::ObjId, Trap>
     {
@@ -13594,6 +13635,17 @@ impl Vm {
                 let mut g = crate::vm::PinGuard::new(self);
                 for a in &args { g.pin(a.clone()); }
                 g.vm.coerce_callable_to_block(Value::CurriedProc(cp_id))?
+            }
+            // `&sym_variable` — Symbol#to_proc coercion. The literal
+            // `&:sym` form desugars at AST translation; a VARIABLE
+            // holding a Symbol reaches this runtime match (minitest's
+            // mu_pp_for_diff does `gsub(/…/, &process)` where process
+            // is `:itself`). Route through the existing Symbol#to_proc
+            // primitive so semantics can't drift from the literal form.
+            Value::Sym(sym_id) => {
+                let mut g = crate::vm::PinGuard::new(self);
+                for a in &args { g.pin(a.clone()); }
+                g.vm.symbol_block_via_to_proc(sym_id)?
             }
             // `foo(&nil)` in CRuby is equivalent to `foo` without
             // a block. Common shape: `def render(&block);
