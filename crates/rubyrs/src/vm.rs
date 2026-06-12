@@ -1047,6 +1047,9 @@ pub(crate) struct Vm {
     /// makes File.*/require/__dir__ trap; `true` lets them
     /// through.
     pub(crate) allow_filesystem_io: bool,
+    /// Mirror of `Config::allow_process_spawn` — gates
+    /// Kernel#system / backtick subprocess execution.
+    pub(crate) allow_process_spawn: bool,
     /// Mirror of `Config::allowed_paths`. When `Some(prefixes)`,
     /// each FS op's resolved path is checked against the
     /// prefixes before proceeding (see
@@ -1683,6 +1686,7 @@ impl Vm {
             // `allow_filesystem_io: false`. CLI / FS-needing
             // embedders flip this via `apply_config`.
             allow_filesystem_io: false,
+            allow_process_spawn: false,
             // No path narrowing by default — `allow_filesystem_io: false`
             // already covers the secure-by-default sandbox.
             allowed_paths: None,

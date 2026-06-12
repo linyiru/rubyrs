@@ -960,3 +960,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn defined_method_in_class_body() { run_diff("defined_method_in_class_body"); }
 // Hash per-instance eigenclass (def h.method_missing, overrides).
 #[test] fn hash_singleton_methods() { run_diff("hash_singleton_methods"); }
+// system/backtick capability + Tempfile diff pipeline — stdlib-gated
+// (vendored Tempfile) and regex-gated (sub! patterns).
+#[cfg(all(feature = "stdlib", feature = "regex"))]
+#[test] fn process_spawn_diff_pipeline() { run_diff("process_spawn_diff_pipeline"); }

@@ -332,6 +332,9 @@ fn main() {
         // POLA. Embed users that want a sandbox leave the
         // `Config::allow_filesystem_io: false` default.
         allow_filesystem_io: true,
+        // Subprocess spawning: the CLI runs trusted local scripts —
+        // same opt-in rationale as filesystem IO above.
+        allow_process_spawn: true,
         // CLI binary: no path narrowing — `rubyrs script.rb`
         // behaves like `ruby script.rb` and can touch any path
         // the shell can. Embed users wanting scope (rubund for

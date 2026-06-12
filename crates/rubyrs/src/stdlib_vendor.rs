@@ -137,6 +137,10 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         // accepted the DSL but parsed nothing — minitest then
         // appended a fallback "--seed 0" and ignored every filter.
         "optparse" => Some(include_str!("stdlib_vendor/optparse.rb")),
+        // Tempfile: buffered handle over a real temp file (FS
+        // capability applies). minitest's diff pipeline + the
+        // capture_subprocess_io reopen target.
+        "tempfile" => Some(include_str!("stdlib_vendor/tempfile.rb")),
         "set" => Some(include_str!("stdlib_vendor/set.rb")),
         "stringio" => Some(include_str!("stdlib_vendor/stringio.rb")),
         "strscan" => Some(include_str!("stdlib_vendor/strscan.rb")),

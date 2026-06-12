@@ -4544,16 +4544,41 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     // libyaml_checker.rb does `(`which dpkg` rescue '').empty?` at
     // (deferred) runtime; compiling the backtick lets safe_yaml load,
     // and the rescue yields '' so its libyaml probe reports "absent".
-    if node.as_x_string_node().is_some() || node.as_interpolated_x_string_node().is_some() {
+    if let Some(xs) = node.as_x_string_node() {
+        // Plain backtick: dispatch to the capability-gated builtin
+        // (off → the same catchable RuntimeError the old
+        // compile-time raise produced; on → captured stdout).
+        let cmd = String::from_utf8_lossy(xs.unescaped()).into_owned();
         return sp(node, Expr::Call {
             receiver: None,
-            name: "raise".into(),
-            args: vec![
-                sp(node, Expr::ConstRead("RuntimeError".into())),
-                sp(node, Expr::StrLit(
-                    "rubyrs: backtick / %x command execution is not available (Tier-1 sandbox)".into(),
-                )),
-            ],
+            name: "__rubyrs_backtick".into(),
+            args: vec![sp(node, Expr::StrLit(cmd))],
+            kwargs_trailing: false,
+        });
+    }
+    if let Some(n) = node.as_interpolated_x_string_node() {
+        // Interpolated backtick — build the command string with the
+        // same parts walk as interpolated strings, then dispatch to
+        // the capability-gated builtin. minitest's diff pipeline is
+        // exactly `\`#{diff_tool} #{a.path} #{b.path}\``.
+        let parts: Vec<SExpr> = n.parts().iter().map(|p| {
+            if let Some(es) = p.as_embedded_statements_node() {
+                let stmts: Vec<SExpr> = es.statements()
+                    .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
+                    .unwrap_or_default();
+                if stmts.len() == 1 { stmts.into_iter().next().unwrap() }
+                else { Spanned::new(node_span(&p), seq_inner(stmts)) }
+            } else if let Some(ev) = p.as_embedded_variable_node() {
+                tr(ctx, &ev.variable())
+            } else {
+                tr(ctx, &p)
+            }
+        }).collect();
+        let cmd = sp(node, Expr::InterpolatedStr(parts));
+        return sp(node, Expr::Call {
+            receiver: None,
+            name: "__rubyrs_backtick".into(),
+            args: vec![cmd],
             kwargs_trailing: false,
         });
     }

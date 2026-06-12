@@ -1,13 +1,12 @@
-# Backtick / %x command execution compiles but raises a StandardError
-# at runtime (rubyrs is a Tier-1 sandbox — no subprocess). A bare
-# `rescue` catches it, just as CRuby's Errno::ENOENT is caught when a
-# command is absent — so guarded probes degrade identically. We assert
-# only the rescued VALUE (parity-safe); the raised error CLASS differs
-# across runtimes and isn't asserted. Discovery: P3 Jekyll spike —
-# safe_yaml's libyaml_checker does `(`which dpkg` rescue '').empty?`.
+# Backtick / %x on a MISSING bare-word command raises Errno::ENOENT
+# on both runtimes (under the CLI's allow_process_spawn capability a
+# bare word execs directly, same split as Kernel#system; with the
+# capability off the dispatch raises a catchable RuntimeError
+# instead — still StandardError, so the probe shape is identical).
+# Discovery: P3 Jekyll spike — safe_yaml's libyaml_checker does
+# `(`which dpkg` rescue '').empty?`.
 
-# A definitely-absent command: CRuby raises Errno::ENOENT, rubyrs
-# raises RuntimeError — both StandardError, both caught.
+# A definitely-absent command raises; a bare `rescue` catches.
 p((`this_command_truly_does_not_exist_xyz_42` rescue "rescued"))
 p((`this_command_truly_does_not_exist_xyz_42` rescue "").empty?)
 

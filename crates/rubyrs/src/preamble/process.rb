@@ -161,15 +161,10 @@ module RbConfig
   CONFIG = { "host_os" => "rubyrs" }
 end
 
-# `Kernel#system` — process spawning is host-side per ADR 0017
-# Rule 4; the Tier-1 answer is nil, CRuby's "command could not be
-# executed" shape, which probing callers (minitest's
-# `system "diff", ...` tool discovery) treat as feature-absent and
-# route around. DIVERGENCE: a script that NEEDS the side effect of
-# a real command sees nil instead of the command running.
-def system(*_args)
-  nil
-end
+# `Kernel#system` lives in the Rust builtin table (vm/kernel.rs)
+# behind the `allow_process_spawn` capability — nil when the
+# capability is off (the old Tier-1 constant answer), real
+# subprocess execution when the host opts in (the CLI does).
 
 # Warning — CRuby's warning-control module (Warning.warn override
 # point, Warning[]= category toggles). Tier-1 ships the bare

@@ -476,6 +476,14 @@ pub struct Config {
     /// narrows an open sandbox to a set of canonicalized prefixes
     /// (rubund's gemspec-evaluator shape).
     pub allow_filesystem_io: bool,
+    /// Host-process SPAWNING (`Kernel#system`, backticks). Same
+    /// trust model as `allow_filesystem_io`: off by default for
+    /// library embeds (system → nil, backtick → catchable
+    /// RuntimeError — the "command not found"-shaped degradations
+    /// real probes already handle); the CLI binary opts in.
+    /// minitest's assert_equal diff output is the motivating
+    /// consumer (Tempfile pair + `diff -u`).
+    pub allow_process_spawn: bool,
     /// Directory for the preamble bytecode cache (`preamble-cache`
     /// feature). `None` (the default) disables the cache entirely —
     /// a library Runtime performs no filesystem access at
@@ -668,6 +676,7 @@ impl Default for Config {
             // / __dir__ cannot reach the host filesystem. The CLI
             // binary opts in explicitly via `Config { allow_filesystem_io: true, .. }`.
             allow_filesystem_io: false,
+            allow_process_spawn: false,
             preamble_cache_dir: None,
             // No path-level narrowing by default — `allow_filesystem_io`
             // already covers the secure-by-default case. Hosts that
@@ -1582,6 +1591,7 @@ impl Runtime {
         self.vm.interrupt_pending = signals::install_signals(cfg.install_signal_handler);
         self.deadline = cfg.deadline;
         self.vm.allow_filesystem_io = cfg.allow_filesystem_io;
+        self.vm.allow_process_spawn = cfg.allow_process_spawn;
         // Canonicalize each allowed prefix once at apply_config
         // time. The per-op `check_path_in_allowlist` lexically
         // resolves the input and does `starts_with` against the

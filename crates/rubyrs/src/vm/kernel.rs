@@ -1590,6 +1590,105 @@ impl Vm {
                 self.suppress_call_result_push = true;
                 Some(Ok(Value::Nil))
             }
+            // `Kernel#system(*args)` — subprocess execution behind
+            // the `allow_process_spawn` capability (ADR 0017: CLI
+            // opts in, library embeds keep the deterministic nil =
+            // "command could not be executed", which probing
+            // callers — minitest's diff-tool discovery — treat as
+            // feature-absent). Two CRuby shapes: a single string
+            // runs through the shell; multiple args exec directly.
+            // stdout/stderr inherit (a same-file `system "diff" f f`
+            // probe prints nothing). Spawn failure (ENOENT) → nil.
+            "system" => {
+                if !self.allow_process_spawn {
+                    return Some(Ok(Value::Nil));
+                }
+                let mut argv: Vec<String> = Vec::with_capacity(args.len());
+                for a in args {
+                    match a {
+                        Value::Str(s) => argv.push(s.to_string_lossy()),
+                        other => argv.push(other.to_display(&self.heap, &self.interner)),
+                    }
+                }
+                if argv.is_empty() {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "wrong number of arguments (given 0, expected 1+)".into(),
+                    })));
+                }
+                // CRuby's single-string form only routes through
+                // the shell when shell metacharacters are present;
+                // a bare word execs directly, so a missing command
+                // is a clean ENOENT → nil (no shell noise) — the
+                // probe shape minitest's diff discovery relies on.
+                let needs_shell = argv.len() == 1
+                    && argv[0].bytes().any(|b| {
+                        matches!(b, b' ' | b'\t' | b'*' | b'?' | b'{' | b'}' | b'[' | b']'
+                            | b'<' | b'>' | b'|' | b'&' | b';' | b'(' | b')' | b'$'
+                            | b'`' | b'\\' | b'"' | b'\'' | b'~' | b'#' | b'\n')
+                    });
+                let status = if argv.len() == 1 && needs_shell {
+                    std::process::Command::new("/bin/sh")
+                        .arg("-c")
+                        .arg(&argv[0])
+                        .status()
+                } else if argv.len() == 1 {
+                    std::process::Command::new(&argv[0]).status()
+                } else {
+                    std::process::Command::new(&argv[0])
+                        .args(&argv[1..])
+                        .status()
+                };
+                Some(Ok(match status {
+                    Ok(st) => Value::Bool(st.success()),
+                    Err(_) => Value::Nil,
+                }))
+            }
+            // Backtick / `%x{}` — capture stdout as a String. Off →
+            // the same catchable RuntimeError the old compile-time
+            // lowering raised (safe_yaml's `(\`which dpkg\` rescue
+            // '')` probe shape depends on rescuability).
+            "__rubyrs_backtick" => {
+                if !self.allow_process_spawn {
+                    return Some(Err(self.trap(RubyError::RuntimeError {
+                        msg: "rubyrs: backtick / %x command execution is not available (process spawn capability is off)".into(),
+                    })));
+                }
+                let cmd = match args.first() {
+                    Some(Value::Str(s)) => s.to_string_lossy(),
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "backtick command must be a String".into(),
+                    }))),
+                };
+                // Same simple-command split as Kernel#system: a
+                // bare word execs directly so a missing command is
+                // CRuby's Errno::ENOENT raise (the
+                // `(\`which dpkg\` rescue '')` probe shape);
+                // metacharacters route through the shell, whose
+                // missing-command behavior (empty stdout, message
+                // on stderr) also matches CRuby.
+                let needs_shell = cmd.bytes().any(|b| {
+                    matches!(b, b' ' | b'\t' | b'*' | b'?' | b'{' | b'}' | b'[' | b']'
+                        | b'<' | b'>' | b'|' | b'&' | b';' | b'(' | b')' | b'$'
+                        | b'`' | b'\\' | b'"' | b'\'' | b'~' | b'#' | b'\n')
+                });
+                let output = if needs_shell {
+                    std::process::Command::new("/bin/sh")
+                        .arg("-c")
+                        .arg(&cmd)
+                        .output()
+                } else {
+                    std::process::Command::new(&cmd).output()
+                };
+                match output {
+                    Ok(out) => Some(Ok(Value::new_str(
+                        String::from_utf8_lossy(&out.stdout).into_owned(),
+                    ))),
+                    Err(_) => Some(Err(self.trap(RubyError::HostException {
+                        class_name: "Errno::ENOENT".to_string(),
+                        message: format!("No such file or directory - {cmd}"),
+                    }))),
+                }
+            }
             "__rubyrs_math" => {
                 fn as_f64(v: &Value) -> Option<f64> {
                     match v {
@@ -3514,7 +3613,6 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
         "delegate" => &[("Delegator", false), ("SimpleDelegator", false)],
         "ostruct" => &[("OpenStruct", false)],
         "pathname" => &[("Pathname", false)],
-        "tempfile" => &[("Tempfile", false)],
         "stringio" => &[("StringIO", false)],
         "strscan" => &[("StringScanner", false)],
         "fileutils" => &[("FileUtils", true)],

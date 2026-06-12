@@ -2233,6 +2233,69 @@ mod tests {
     /// arrays and round-trip on tagged ones, and the GC walk marks
     /// subclass ivars (a value reachable ONLY through an Array
     /// ivar must survive a collect rooted at that array).
+    /// Hash per-instance eigenclass GC: a closure-method capture
+    /// and an eigenclass ivar reachable ONLY through the Hash's
+    /// singleton_class slot must survive a collect rooted at the
+    /// Hash (the dispatch-level fixture can't force a collection
+    /// deterministically; this pins the mark-walk arm directly).
+    #[test]
+    fn hash_singleton_class_gc_walk() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        let mut heap = Heap::new();
+        let captured = heap.alloc(HeapObj::Array(vec![Value::Int(42)].into()));
+        let ivar_val = heap.alloc(HeapObj::Array(vec![Value::Int(7)].into()));
+        let sc = Rc::new(crate::value::Class {
+            name: "#<Class:#<Hash>>".to_string(),
+            is_module: false,
+            ivars: RefCell::new(crate::intern::FxHashMap::default()),
+            methods: RefCell::new(crate::intern::FxHashMap::default()),
+            singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
+            superclass: RefCell::new(None),
+            includes: RefCell::new(Vec::new()),
+            prepends: RefCell::new(Vec::new()),
+            singleton_prepends: RefCell::new(Vec::new()),
+            singleton_includes: RefCell::new(Vec::new()),
+            singleton_view: RefCell::new(None),
+            singleton_target: RefCell::new(None),
+            undefed: RefCell::new(crate::intern::FxHashSet::default()),
+            anon_serial: Cell::new(0),
+            class_vars: RefCell::new(crate::intern::FxHashMap::default()),
+            consts: RefCell::new(crate::intern::FxHashMap::default()),
+            assigned_name: RefCell::new(None),
+            #[cfg(feature = "cext")]
+            cext_alloc_func: Cell::new(None),
+        });
+        let m = Rc::new(crate::value::Method {
+            params: vec![],
+            proto_idx: 0,
+            fixed_arity: None,
+            defining_class: Some(Rc::downgrade(&sc)),
+            visibility: Cell::new(crate::value::Visibility::Public),
+            closure: Some(crate::value::MethodClosure {
+                captured: Rc::new(RefCell::new(vec![Value::Array(captured)])),
+                param_start: 0,
+                n_params: 0,
+            }),
+            builtin: None,
+            original_name: None,
+        });
+        sc.methods.borrow_mut().insert(crate::intern::SymId(3), m);
+        sc.ivars.borrow_mut().insert(crate::intern::SymId(4), Value::Array(ivar_val));
+        let mut hobj = HashObj::with_pairs(vec![]);
+        hobj.singleton_class = Some(sc);
+        let h = heap.alloc(HeapObj::Hash(hobj));
+        let roots = vec![Value::Hash(h)];
+        let _ = heap.collect(&roots);
+        // Both eigenclass-reachable slots survive.
+        assert!(matches!(heap.array(captured)[0], Value::Int(42)));
+        assert!(matches!(heap.array(ivar_val)[0], Value::Int(7)));
+        // An unreachable slot is swept (sanity that collect ran).
+        let orphan = heap.alloc(HeapObj::Array(vec![].into()));
+        let _ = heap.collect(&roots);
+        assert!(matches!(heap.slots[orphan.0 as usize], Slot::Dead));
+    }
+
     #[test]
     fn array_obj_tag_and_ivars() {
         let mut heap = Heap::new();
