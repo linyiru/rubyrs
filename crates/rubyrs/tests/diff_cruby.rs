@@ -883,3 +883,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn rescue_splat_filters() { run_diff("rescue_splat_filters"); }
 // sprintf `%s` dispatches user to_s overrides (minitest failure reports).
 #[test] fn sprintf_user_to_s() { run_diff("sprintf_user_to_s"); }
+// any?/all?/none?/one? with a pattern argument (`pat === element`).
+#[cfg(feature = "regex")]
+#[test] fn enumerable_pattern_predicates() { run_diff("enumerable_pattern_predicates"); }

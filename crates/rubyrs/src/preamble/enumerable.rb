@@ -312,34 +312,56 @@ module Enumerable
   end
   alias_method :member?, :include?
 
-  def all?
+# The quartet takes an optional PATTERN argument (CRuby 2.5+):
+  # `any?(pat)` tests `pat === element` instead of truthiness
+  # (minitest's `failures.any? UnexpectedError`). A literal nil
+  # pattern is indistinguishable from "absent" in this encoding —
+  # `any?(nil)` behaves as no-arg; CRuby would test `nil === el`.
+  # Documented divergence, no real caller hits it.
+  def all?(pattern = nil)
     each do |*x|
-      v = block_given? ? yield(*x) : __enum_elem(x)
+      v = if pattern
+            pattern === __enum_elem(x)
+          else
+            block_given? ? yield(*x) : __enum_elem(x)
+          end
       return false unless v
     end
     true
   end
 
-  def any?
+  def any?(pattern = nil)
     each do |*x|
-      v = block_given? ? yield(*x) : __enum_elem(x)
+      v = if pattern
+            pattern === __enum_elem(x)
+          else
+            block_given? ? yield(*x) : __enum_elem(x)
+          end
       return true if v
     end
     false
   end
 
-  def none?
+  def none?(pattern = nil)
     each do |*x|
-      v = block_given? ? yield(*x) : __enum_elem(x)
+      v = if pattern
+            pattern === __enum_elem(x)
+          else
+            block_given? ? yield(*x) : __enum_elem(x)
+          end
       return false if v
     end
     true
   end
 
-  def one?
+  def one?(pattern = nil)
     n = 0
     each do |*x|
-      v = block_given? ? yield(*x) : __enum_elem(x)
+      v = if pattern
+            pattern === __enum_elem(x)
+          else
+            block_given? ? yield(*x) : __enum_elem(x)
+          end
       n += 1 if v
       return false if n > 1
     end
