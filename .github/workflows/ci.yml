@@ -707,7 +707,10 @@ jobs:
           # Bumped 26 → 27 on 2026-06-11: preamble/process.rb chunk
           # adds the standard load-tail `.expect` (same shape as
           # every other preamble loader).
-          check crates/rubyrs/src/lib.rs       27
+          # Bumped 27 → 28 on 2026-06-12: preamble/math.rb chunk
+          # (Math over __rubyrs_math) adds the same standard
+          # load-tail `.expect`.
+          check crates/rubyrs/src/lib.rs       28
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
           # never went down, just up here. See docs/PANIC_AUDIT.md.
