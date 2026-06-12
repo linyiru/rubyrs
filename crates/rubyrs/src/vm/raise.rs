@@ -139,6 +139,28 @@ impl Vm {
         Some(Value::Object(id))
     }
 
+    /// Shared raise driver: the Op::Raise semantics (nil → re-raise
+    /// `$!` or "unhandled exception"; normalize; unwind; signal the
+    /// native iter boundary) — also reachable from dispatch-form
+    /// raises (`send(:raise, ...)`, the kernel-alias forwarder that
+    /// a stub's save/restore cycle installs).
+    pub(crate) fn do_raise_value(&mut self, mut v: Value) -> Result<(), Trap> {
+        if matches!(v, Value::Nil) {
+            match self.globals.get(&self.sym_bang).cloned() {
+                Some(cur) if !matches!(cur, Value::Nil) => v = cur,
+                _ => v = Value::new_str("unhandled exception".to_string()),
+            }
+        }
+        let exc = self.normalize_exception(v);
+        self.unwind_with_exception(exc)?;
+        if let Some(&d) = self.dispatch_until_depths.last()
+            && self.frames.len() <= d
+        {
+            return Err(self.trap(crate::error::RubyError::AlreadyCaught));
+        }
+        Ok(())
+    }
+
     pub(crate) fn unwind_with_exception(&mut self, exc: Value) -> Result<(), Trap> {
         cold_path();
         // A real exception supersedes any in-flight `break`/`next`

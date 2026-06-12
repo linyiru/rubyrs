@@ -8726,7 +8726,26 @@ impl Vm {
                         return Ok(());
                     }
                     None => {
-                        let old_name = self.interner.resolve(old_id).to_string();
+                        // Kernel-private builtins (`sleep`, `rand`,
+                        // `puts`, ...) have no table Method —
+                        // synthesise a no-recv forwarder so
+                        // eigenclass stubbing can save/restore them
+                        // (minitest's `self.stub :sleep, nil`).
+                        let old_name_rc = self.interner.resolve(old_id).clone();
+                        if matches!(&*old_name_rc,
+                            "sleep" | "rand" | "srand" | "exit" | "exit!" | "abort"
+                            | "puts" | "print" | "p" | "pp" | "warn"
+                            | "sprintf" | "format" | "caller" | "at_exit"
+                            | "require" | "require_relative" | "load" | "system"
+                            | "raise" | "fail"
+                        ) {
+                            let synth = self.synth_kernel_forwarder(target, old_id);
+                            target.methods.borrow_mut().insert(new_id, synth);
+                            self.method_gen = self.method_gen.wrapping_add(1);
+                            self.stack.push(Value::Sym(new_id));
+                            return Ok(());
+                        }
+                        let old_name = old_name_rc.to_string();
                         return Err(self.trap(RubyError::NameError {
                             msg: format!(
                                 "undefined method '{}' for class '{}'",
@@ -10497,6 +10516,14 @@ impl Vm {
         // true when there's NO match. Discovery: P3 Jekyll spike —
         // kramdown's block parser uses `str !~ /pat/`.
         if (&*name == "=~" || &*name == "!~") && args.len() == 1 {
+            // Symbol receivers match like their String form (CRuby:
+            // `:__x =~ /^__/` → 0 — minitest's Mock blank-slate
+            // filter `m =~ /^__/` over instance_methods relies on
+            // it to KEEP the __-prefixed survivors).
+            let recv = match &recv {
+                Value::Sym(sid) => Value::new_str(self.interner.resolve(*sid).to_string()),
+                other => other.clone(),
+            };
             let result = match (&recv, &args[0]) {
                 #[cfg(feature = "regex")]
                 (Value::Regex(re), Value::Str(s)) | (Value::Str(s), Value::Regex(re)) => {
@@ -11404,6 +11431,11 @@ impl Vm {
         if matches!(name.as_ref(),
             "Array" | "Integer" | "Float" | "String"
             | "sprintf" | "format"
+            // Kernel#raise via an explicit receiver only reaches
+            // here AFTER user lookup + method_missing missed —
+            // exactly CRuby's order, so a stubbed raise still wins
+            // through send(:raise).
+            | "raise" | "fail"
         ) && let Some(res) = self.builtin_call(name.as_ref(), &args) {
             let v = res?;
             // Mirror the flag handling in the no_recv builtin
@@ -16417,6 +16449,54 @@ impl Vm {
             ],
             op_spans: vec![Span::ZERO; 4],
             filename: "<primitive-alias>".into(),
+            block_body_local_start: u16::MAX,
+            byte_literals: vec![],
+            const_chains: vec![],
+            lexical_scope: vec![],
+        };
+        let idx = self.protos.len();
+        self.protos.push(proto);
+        Rc::new(crate::value::Method {
+            params: vec!["args".to_string()],
+            proto_idx: idx,
+            fixed_arity: None,
+            defining_class: Some(Rc::downgrade(cls)),
+            visibility: std::cell::Cell::new(crate::value::Visibility::Public),
+            closure: None,
+            builtin: None,
+            original_name: Some(orig_id),
+        })
+    }
+
+    /// Variadic forwarder to a NO-RECV Kernel builtin (`sleep`,
+    /// `rand`, `puts`, ...). The alias target when stubbing a
+    /// Kernel-private method through an object's eigenclass
+    /// (minitest's `self.stub :sleep, nil` saves the original via
+    /// `metaclass.send :alias_method, save, :sleep`). Body:
+    /// `ApplyCallNoRecv(orig)` over the collected rest args — the
+    /// no-recv dispatch is exactly how a bare `sleep(...)` resolves.
+    pub(crate) fn synth_kernel_forwarder(&mut self, cls: &Rc<Class>, orig_id: SymId) -> Rc<crate::value::Method> {
+        use crate::bytecode::{Op, Proto};
+        use crate::error::Span;
+        let proto = Proto {
+            name: format!("<kernel-alias-forwarder:{}>", self.interner.resolve(orig_id)),
+            params: vec!["args".to_string()],
+            n_required_positional: 0,
+            n_required_post: 0,
+            rest_param: Some("args".to_string()),
+            kw_param_defaults: vec![],
+            kw_has_computed_default: vec![],
+            kw_rest_param: None,
+            block_param: None,
+            n_locals: 1,
+            creates_block: false,
+            code: vec![
+                Op::LoadLocal(0),
+                Op::ApplyCallNoRecv(orig_id, u16::MAX),
+                Op::Return,
+            ],
+            op_spans: vec![Span::ZERO; 3],
+            filename: "<kernel-alias>".into(),
             block_body_local_start: u16::MAX,
             byte_literals: vec![],
             const_chains: vec![],

@@ -1540,6 +1540,89 @@ impl Vm {
             // doubles as valid YAML (a comment line after an empty
             // hash) so disk-written dumps still degrade gracefully
             // through SafeYAML fallback chains.
+            // `__rubyrs_math(op, x[, y])` — single host entry for the
+            // f64 math surface behind preamble/math (Math.sqrt/log/
+            // sin/...). Domain handling stays in Ruby (the preamble
+            // raises Math::DomainError on CRuby's contract); this
+            // primitive just computes, returning NaN/Infinity as
+            // the raw operation does.
+            // Dispatch-form raise: bare `raise` compiles straight to
+            // Op::Raise, but the kernel-alias forwarder (a stub's
+            // saved original) and `send(:raise, ...)`-style paths
+            // re-enter through the method namespace. Same three
+            // shapes as the compiler intercept; 2+ args set the
+            // message directly on the normalized instance (the
+            // initialize dispatch is skipped — standard error
+            // classes only carry @message).
+            "raise" | "fail" => {
+                let v = match args.len() {
+                    0 => Value::Nil,
+                    1 => args[0].clone(),
+                    _ => {
+                        let exc = self.normalize_exception(args[0].clone());
+                        if let (Value::Object(id), Value::Str(_)) = (&exc, &args[1]) {
+                            let msg_id = self.interner.intern("@message");
+                            self.heap.instance_mut(*id).ivars.insert(msg_id, args[1].clone());
+                        }
+                        exc
+                    }
+                };
+                if let Err(t) = self.do_raise_value(v) {
+                    return Some(Err(t));
+                }
+                // Unwind already retargeted the frame; nothing to
+                // push (the handler's stack depth is authoritative).
+                self.suppress_call_result_push = true;
+                Some(Ok(Value::Nil))
+            }
+            "__rubyrs_math" => {
+                fn as_f64(v: &Value) -> Option<f64> {
+                    match v {
+                        Value::Int(n) => Some(*n as f64),
+                        Value::Float(f) => Some(*f),
+                        Value::Rational(_) => None, // preamble converts first
+                        _ => None,
+                    }
+                }
+                let op = match args.first() {
+                    Some(Value::Sym(s)) => self.interner.resolve(*s).clone(),
+                    _ => return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "__rubyrs_math: op symbol required".into(),
+                    }))),
+                };
+                let x = match args.get(1).and_then(as_f64) {
+                    Some(v) => v,
+                    None => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "can't convert into Float".into(),
+                    }))),
+                };
+                let y = args.get(2).and_then(as_f64);
+                let r = match (&*op, y) {
+                    ("sqrt", _) => x.sqrt(),
+                    ("cbrt", _) => x.cbrt(),
+                    ("exp", _) => x.exp(),
+                    ("log", None) => x.ln(),
+                    ("log", Some(base)) => x.log(base),
+                    ("log2", _) => x.log2(),
+                    ("log10", _) => x.log10(),
+                    ("sin", _) => x.sin(),
+                    ("cos", _) => x.cos(),
+                    ("tan", _) => x.tan(),
+                    ("asin", _) => x.asin(),
+                    ("acos", _) => x.acos(),
+                    ("atan", _) => x.atan(),
+                    ("atan2", Some(b)) => x.atan2(b),
+                    ("sinh", _) => x.sinh(),
+                    ("cosh", _) => x.cosh(),
+                    ("tanh", _) => x.tanh(),
+                    ("hypot", Some(b)) => x.hypot(b),
+                    ("pow", Some(b)) => x.powf(b),
+                    _ => return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("__rubyrs_math: unknown op {op}"),
+                    }))),
+                };
+                Some(Ok(Value::Float(r)))
+            }
             "__rubyrs_marshal_stash" => {
                 const MARSHAL_REGISTRY_CAP: usize = 1024;
                 let obj = args.first().cloned().unwrap_or(Value::Nil);

@@ -946,3 +946,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn anon_class_display_serial() { run_diff("anon_class_display_serial"); }
 // Kernel#binding + raise-time set_backtrace dispatch + hook super chain.
 #[test] fn binding_set_backtrace_raise() { run_diff("binding_set_backtrace_raise"); }
+// Math module over the __rubyrs_math primitive (+ aliasability).
+#[test] fn math_module_surface() { run_diff("math_module_surface"); }
+// raise as a method: send-form, eigenclass stub of bare raise, Symbol#=~.
+#[cfg(feature = "regex")]
+#[test] fn raise_as_method() { run_diff("raise_as_method"); }

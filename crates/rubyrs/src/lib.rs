@@ -2835,6 +2835,14 @@ self.eval_inner(
             "<rubyrs:preamble:process>",
         )
             .expect("ICE: failed to load Process preamble");
+        // Math — f64 surface over the __rubyrs_math host
+        // primitive; real singleton-table methods so module-method
+        // stubbing (minitest's Math.stub :log10) can alias them.
+        self.eval_inner(
+            include_str!("preamble/math.rb"),
+            "<rubyrs:preamble:math>",
+        )
+            .expect("ICE: failed to load Math preamble");
         // ADR 0020 Tier 2 (`_encoding_full`): registry constants +
         // an Encoding.find extension layered over the core
         // three-name resolver. Same load-tail position as the

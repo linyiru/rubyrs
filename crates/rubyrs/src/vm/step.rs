@@ -3954,35 +3954,43 @@ impl Vm {
                 self.frames.last_mut().expect("ICE: PopEnsure no frame").pop_rescue();
             }
             Op::Raise => {
-                let mut v = self.stack.pop().unwrap_or(Value::Nil);
-                // Bare `raise` (no args) compiles to `LoadNil; Raise` and
-                // means "re-raise the current exception" — `$!`, set on
-                // `globals` while a rescue/ensure body runs. Consult it
-                // when the operand is nil. If there is no current
-                // exception, fall back to a `RuntimeError` ("unhandled
-                // exception"), matching CRuby's bare-`raise`-with-no-
-                // context behaviour. (The ensure-rethrow path pushes a
-                // real exception object, never nil, so it is unaffected.)
-                if matches!(v, Value::Nil) {
-                    match self.globals.get(&self.sym_bang).cloned() {
-                        Some(cur) if !matches!(cur, Value::Nil) => v = cur,
-                        _ => v = Value::new_str("unhandled exception".to_string()),
+                let v = self.stack.pop().unwrap_or(Value::Nil);
+                // A user/stub `raise` OVERRIDE (minitest's
+                // `obj.stub :raise, nil` installs one on the
+                // receiver's eigenclass) must intercept even the
+                // bare keyword form — CRuby's raise is an ordinary
+                // Kernel method. raise is a cold path, so one
+                // class-chain lookup here is acceptable; the
+                // kernel-alias forwarder (the saved original)
+                // doesn't count as an override or the restore
+                // cycle would loop.
+                {
+                    let raise_sym = self.interner.intern("raise");
+                    let self_val = self.frames.last().map(|f| f.self_val.clone()).unwrap_or(Value::Nil);
+                    let user_override = match &self_val {
+                        Value::Object(id) => {
+                            let cls = self.heap.class_of(*id);
+                            self.lookup_method_uncached(&cls, raise_sym)
+                        }
+                        _ => None,
+                    };
+                    if let Some(m) = user_override
+                        && !self.protos[m.proto_idx].name.starts_with("<kernel-alias-forwarder")
+                    {
+                        // Run the override SYNCHRONOUSLY (raise is
+                        // cold; stub bodies are tiny) and discard
+                        // its return — the compiler emits
+                        // `Raise; LoadNil`, and the LoadNil is the
+                        // expression value on the no-unwind path.
+                        let argv = if matches!(v, Value::Nil) { vec![] } else { vec![v] };
+                        let pre_frames = self.frames.len();
+                        self.invoke_method(m, self_val, argv)?;
+                        self.dispatch_until(pre_frames)?;
+                        self.stack.pop();
+                        return Ok(true);
                     }
                 }
-                let exc = self.normalize_exception(v);
-                self.unwind_with_exception(exc)?;
-                // If unwind redirected IP to a handler in a
-                // frame at or above the current dispatch_until
-                // boundary, signal the native iter driver to
-                // stop looping. Otherwise it would keep
-                // iterating, push spurious results, and possibly
-                // re-raise on the next iter — corrupting the
-                // rescue's stack snapshot.
-                if let Some(&d) = self.dispatch_until_depths.last()
-                    && self.frames.len() <= d
-                {
-                    return Err(self.trap(RubyError::AlreadyCaught));
-                }
+                self.do_raise_value(v)?;
             }
             Op::Break => {
                 // Mark the surrounding native-driven loop to terminate.
