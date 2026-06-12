@@ -13859,7 +13859,18 @@ impl Vm {
         {
             let target = *target_bid;
             let pre_frames = self.frames.len();
-            self.invoke_block(target, args)?;
+            // GC rooting: recv/args/incoming-block were drained off
+            // the stack into Rust locals — invoke_block's rest-param
+            // collection allocates, and under STRESS_GC that sweeps
+            // any heap-shaped arg (and the ignored incoming block)
+            // before the callee frame roots them.
+            {
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(Value::Block(target));
+                g.pin(Value::Block(block));
+                for a in &args { g.pin(a.clone()); }
+                g.vm.invoke_block(target, args)?;
+            }
             self.dispatch_until(pre_frames)?;
             // Same proc-closure break contract as the no-block
             // intrinsics arm: a stored Proc breaking after its
