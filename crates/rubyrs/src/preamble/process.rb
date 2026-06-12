@@ -64,6 +64,14 @@ class IO
   end
 
   def write(*args)
+    # Delegation mode — `$stdout.reopen(tempfile)` redirects this
+    # handle's writes into the target until a reopen back to a real
+    # IO (minitest's capture_subprocess_io). See #reopen.
+    if @delegate
+      total = 0
+      args.each { |a| total += @delegate.write(a.to_s).to_i }
+      return total
+    end
     total = 0
     args.each do |a|
       s = a.to_s
@@ -75,6 +83,32 @@ class IO
       end
     end
     total
+  end
+
+  # `io.reopen(target)` — CRuby redirects the underlying fd. Tier-1
+  # models the observable subset: writes DELEGATE to the target
+  # (a Tempfile / StringIO-ish) until reopened back onto a real IO
+  # (the `$stdout.reopen orig_stdout` restore half — orig is a
+  # `$stdout.dup`, itself an IO veneer, which clears delegation).
+  # minitest's capture_subprocess_io is the round-trip consumer.
+  def reopen(target)
+    @delegate = target.is_a?(IO) ? nil : target
+    self
+  end
+
+  # Forward rewind to the delegate (capture_subprocess_io rewinds
+  # $stdout before reading the tempfile back); no-op on a native
+  # sink.
+  def rewind
+    @delegate ? @delegate.rewind : 0
+  end
+
+  def read
+    @delegate ? @delegate.read : nil
+  end
+
+  def close
+    nil
   end
 
   def <<(obj)

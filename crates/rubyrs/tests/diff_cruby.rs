@@ -964,3 +964,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // (vendored Tempfile) and regex-gated (sub! patterns).
 #[cfg(all(feature = "stdlib", feature = "regex"))]
 #[test] fn process_spawn_diff_pipeline() { run_diff("process_spawn_diff_pipeline"); }
+// $stdout.reopen(tempfile) delegation (capture_subprocess_io).
+#[cfg(feature = "stdlib")]
+#[test] fn io_reopen_capture() { run_diff("io_reopen_capture"); }

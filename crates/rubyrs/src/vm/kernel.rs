@@ -145,7 +145,18 @@ impl Vm {
         match &v {
             Value::Object(id) => {
                 if veneer_ok && self.heap.class_of(*id).name == "IO" {
-                    None
+                    // A DELEGATING veneer ($stdout.reopen'd onto a
+                    // Tempfile — capture_subprocess_io) must still
+                    // route through dispatch so the veneer's write
+                    // forwards to its target.
+                    let delegate_sym = self.interner.intern("@delegate");
+                    let delegating = self
+                        .heap
+                        .instance(*id)
+                        .ivars
+                        .get(&delegate_sym)
+                        .is_some_and(|d| !matches!(d, Value::Nil));
+                    if delegating { Some(v) } else { None }
                 } else {
                     Some(v)
                 }
