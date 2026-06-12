@@ -881,3 +881,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // these forms existed the splat was dropped and the clause matched
 // every StandardError.
 #[test] fn rescue_splat_filters() { run_diff("rescue_splat_filters"); }
+// sprintf `%s` dispatches user to_s overrides (minitest failure reports).
+#[test] fn sprintf_user_to_s() { run_diff("sprintf_user_to_s"); }

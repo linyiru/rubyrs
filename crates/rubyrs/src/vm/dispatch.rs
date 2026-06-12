@@ -1744,6 +1744,45 @@ impl Vm {
         }
     }
 
+    /// Pre-render sprintf/format args whose class overrides `to_s`.
+    /// `ruby_sprintf` only has `&Heap` (it can't dispatch), so its
+    /// `%s` arm uses the native `to_display` — which printed
+    /// `#<Minitest::Result>` instead of minitest's failure report.
+    /// Both sprintf entry points (`Kernel#sprintf`/`format` and
+    /// `String#%`) route their args through here first: an Object
+    /// with a user `to_s` is rendered to a String NOW (full
+    /// dispatch, GC-pinned); everything else passes through
+    /// untouched so `%d`/`%f` still see their raw Int/Float.
+    /// DIVERGENCE: `%p` on such an object then inspects the
+    /// pre-rendered String (quoted) instead of calling the object's
+    /// `inspect` — acceptable until ruby_sprintf learns to dispatch.
+    pub(crate) fn sprintf_prepare_args(&mut self, args: &[Value]) -> Result<Vec<Value>, Trap> {
+        if !args.iter().any(|v| matches!(v, Value::Object(_))) {
+            return Ok(args.to_vec());
+        }
+        let to_s_id = self.interner.intern("to_s");
+        let snapshot: Vec<Value> = args.to_vec();
+        let mut g = PinGuard::new(self);
+        for a in &snapshot { g.pin(a.clone()); }
+        let mut out = Vec::with_capacity(snapshot.len());
+        for v in &snapshot {
+            let has_user_to_s = match v {
+                Value::Object(id) => {
+                    let cls = g.vm.heap.class_of(*id);
+                    g.vm.lookup_method_uncached(&cls, to_s_id).is_some()
+                }
+                _ => false,
+            };
+            if has_user_to_s {
+                let s = g.vm.stringify_for_output(v, false)?;
+                out.push(Value::new_str(s));
+            } else {
+                out.push(v.clone());
+            }
+        }
+        Ok(out)
+    }
+
     pub(crate) fn stringify_for_output(&mut self, v: &Value, inspect: bool) -> Result<String, Trap> {
         // Collections route through the cycle-safe, per-element
         // dispatching renderer so `p [exc]` / `p [custom]` keep each
