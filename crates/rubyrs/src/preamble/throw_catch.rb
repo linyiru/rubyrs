@@ -53,10 +53,17 @@ class RubyrsThrowSignal < Exception
   end
 end
 
-$__rubyrs_catch_tags = []
-
+# Lazy-init (`||=`) rather than a one-time assignment: the
+# `_http_server` battery clears ALL globals between requests
+# (`reset_between_requests_inner`), which vaporized an
+# assign-once stack and made the first in-request `catch` call
+# `nil.push` (broke every Sinatra-lite dispatch — caught by the
+# framework-parity CI job, not locally). Same defensive pattern
+# as random.rb's `$__rubyrs_default_random ||=`. Post-reset
+# state — an empty stack — is also the CORRECT state: no catch
+# from a previous request is live.
 def catch(tag = Object.new)
-  $__rubyrs_catch_tags.push(tag)
+  ($__rubyrs_catch_tags ||= []).push(tag)
   begin
     yield tag
   rescue RubyrsThrowSignal => e
@@ -68,7 +75,7 @@ def catch(tag = Object.new)
 end
 
 def throw(tag, value = nil)
-  if $__rubyrs_catch_tags.any? { |t| t.equal?(tag) }
+  if ($__rubyrs_catch_tags ||= []).any? { |t| t.equal?(tag) }
     raise RubyrsThrowSignal.new(tag, value)
   else
     raise UncaughtThrowError.new(tag, value)
