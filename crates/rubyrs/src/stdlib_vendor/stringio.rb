@@ -113,6 +113,16 @@ class StringIO
     self
   end
 
+  # In-memory buffer is always "synced" — accept and ignore the
+  # writer (minitest's metametameta harness sets `io.sync = true`).
+  def sync
+    true
+  end
+
+  def sync=(v)
+    v
+  end
+
   def print(*args)
     args.each { |a| write(a.to_s) }
     nil

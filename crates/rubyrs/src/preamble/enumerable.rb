@@ -163,6 +163,51 @@ module Enumerable
     nil
   end
 
+  # `chunk_while { |a, b| ... }` — split into runs of adjacent
+  # elements while the block holds between neighbours; its dual
+  # `slice_when` starts a NEW chunk when the block holds. CRuby
+  # returns a lazy Enumerator; Tier-1 returns the materialized
+  # Array of chunks (duck-compatible for the map/each consumers —
+  # minitest's SystemStackError backtrace compressor is the
+  # motivating caller: `bt.chunk_while { |a, b| a == b }`).
+  def chunk_while
+    chunks = []
+    prev = nil
+    first = true
+    each do |*x|
+      e = __enum_elem(x)
+      if first
+        chunks << [e]
+        first = false
+      elsif yield(prev, e)
+        chunks.last << e
+      else
+        chunks << [e]
+      end
+      prev = e
+    end
+    chunks
+  end
+
+  def slice_when
+    chunks = []
+    prev = nil
+    first = true
+    each do |*x|
+      e = __enum_elem(x)
+      if first
+        chunks << [e]
+        first = false
+      elsif yield(prev, e)
+        chunks << [e]
+      else
+        chunks.last << e
+      end
+      prev = e
+    end
+    chunks
+  end
+
   def reduce(*args)
     if args.length == 2
       memo = args[0]

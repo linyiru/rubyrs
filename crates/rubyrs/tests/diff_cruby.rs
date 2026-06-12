@@ -905,3 +905,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Object.const_set installs at toplevel under the bare name —
 // minitest's RuntimeError remove/restore round-trip.
 #[test] fn const_set_toplevel_roundtrip() { run_diff("const_set_toplevel_roundtrip"); }
+// chunk_while / slice_when (materialized-Array Tier-1 shape).
+#[test] fn enumerable_chunk_slice_when() { run_diff("enumerable_chunk_slice_when"); }
