@@ -890,3 +890,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // (minitest capture_io). Needs the vendored StringIO → stdlib-gated.
 #[cfg(feature = "stdlib")]
 #[test] fn stdio_redirect_capture() { run_diff("stdio_redirect_capture"); }
+// throw flies past intervening StandardError rescues (minitest
+// assert_throws); wrong-tag throw raises UncaughtThrowError at site.
+#[test] fn throw_passthrough_rescue() { run_diff("throw_passthrough_rescue"); }
