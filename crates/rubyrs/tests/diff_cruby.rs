@@ -907,3 +907,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn const_set_toplevel_roundtrip() { run_diff("const_set_toplevel_roundtrip"); }
 // chunk_while / slice_when (materialized-Array Tier-1 shape).
 #[test] fn enumerable_chunk_slice_when() { run_diff("enumerable_chunk_slice_when"); }
+// Array#* (repetition + join alias), Object#singleton_class on
+// instances (class<<self;self;end in methods), Proc#call(&blk).
+#[test] fn array_mul_and_eigen() { run_diff("array_mul_and_eigen"); }

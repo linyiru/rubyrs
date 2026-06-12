@@ -1932,6 +1932,37 @@ impl Vm {
                         let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
+                    // `arr * n` — repetition (shallow element clones,
+                    // like CRuby: same object references repeated).
+                    // minitest's SystemStackError compressor test
+                    // builds its synthetic backtrace as
+                    // `("aa".."ad").to_a * 67`. Negative count is
+                    // ArgumentError, zero gives [].
+                    ("*", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "negative argument".into(),
+                            }));
+                        }
+                        let n = *n as usize;
+                        let src: Vec<Value> = self.heap.array(id).clone();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        for v in &src {
+                            if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                        }
+                        let mut out: Vec<Value> = Vec::with_capacity(src.len() * n);
+                        for _ in 0..n {
+                            out.extend(src.iter().cloned());
+                        }
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
+                        Some(Value::Array(nid))
+                    }
+                    // `arr * "sep"` — alias for join(sep) (CRuby).
+                    ("*", [Value::Str(_)]) => {
+                        return self.array_collection_call(id, "join", args);
+                    }
                     ("-", [Value::Array(other)]) => {
                         // Same root-hole pattern as `+` above —
                         // pin both source Arrays before maybe_gc.

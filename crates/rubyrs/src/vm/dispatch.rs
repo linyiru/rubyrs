@@ -11229,6 +11229,20 @@ impl Vm {
             self.stack.push(Value::Bool(false));
             return Ok(());
         }
+        // `Object#singleton_class` — materialize the instance's
+        // eigenclass (same `ensure_singleton_class` the
+        // `obj.extend` / `def obj.m` paths use). minitest's
+        // `Object#stub` does `metaclass = class << self; self; end`
+        // inside a method (the AST desugars that construct to
+        // `self.singleton_class`), then drives define_method /
+        // alias_method / undef_method through it.
+        if &*name == "singleton_class" && args.is_empty()
+            && let Value::Object(id) = &recv
+        {
+            let eigen = self.heap.ensure_singleton_class(*id);
+            self.stack.push(Value::Class(eigen));
+            return Ok(());
+        }
         // Class/Module receivers: the value's own instance
         // ancestry (`class Module; def x` / user Kernel reopens)
         // resolves after every singleton/builtin arm and before
@@ -13829,6 +13843,37 @@ impl Vm {
             return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
         }
 
+        // `proc.call(args, &blk)` — Proc invocation WITH a
+        // block-pass argument. The no-block shape routes through
+        // do_call's callable intrinsics and never sees a block;
+        // minitest's Object#stub callable path
+        // (`val_or_callable.call(*args, &blk)`) lands here and
+        // raised NoMethodError. Tier-1 limitation (documented):
+        // the passed block is NOT bound to a `&param` of the
+        // callee proc — a callee that declares `|.., &b|` sees
+        // b = nil (BlockHandle doesn't carry a block-param slot
+        // yet). The dominant gem shape — a `->(*args) { ... }`
+        // that ignores the incoming block — works.
+        if let Some(Value::Block(target_bid)) = &recv
+            && matches!(&*name, "call" | "[]" | "()" | "yield" | "===")
+        {
+            let target = *target_bid;
+            let pre_frames = self.frames.len();
+            self.invoke_block(target, args)?;
+            self.dispatch_until(pre_frames)?;
+            // Same proc-closure break contract as the no-block
+            // intrinsics arm: a stored Proc breaking after its
+            // creator returned has no observer above.
+            if self.break_signaled {
+                self.break_signaled = false;
+                self.sync_control_signals();
+                self.stack.pop();
+                return Err(self.trap(crate::error::RubyError::LocalJumpError {
+                    msg: "break from proc-closure".to_string(),
+                }));
+            }
+            return Ok(());
+        }
         // `bm.call(args, &block)` — the block-form counterpart to
         // the no-block BoundMethod#call arm in `do_call` (line
         // ~1969). Without this, calling a stored `Method` with a
