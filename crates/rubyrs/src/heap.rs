@@ -1252,17 +1252,58 @@ impl Heap {
             Value::Class(c) => {
                 let mut stack: Vec<Rc<Class>> = vec![c.clone()];
                 let mut seen: Vec<*const Class> = vec![Rc::as_ptr(c)];
+                // Shared visit for every Value reachable from a
+                // class's tables: nested classes feed the cycle-
+                // guarded stack, everything else goes through the
+                // normal heap visitor.
+                let mut touch = |v: &Value, stack: &mut Vec<Rc<Class>>, seen: &mut Vec<*const Class>| {
+                    if let Value::Class(d) = v {
+                        let p = Rc::as_ptr(d);
+                        if !seen.contains(&p) {
+                            seen.push(p);
+                            stack.push(d.clone());
+                        }
+                    } else {
+                        Heap::visit_value(v, marks, worklist);
+                    }
+                };
                 while let Some(cls) = stack.pop() {
                     for iv in cls.ivars.borrow().values() {
-                        if let Value::Class(d) = iv {
-                            let p = Rc::as_ptr(d);
-                            if !seen.contains(&p) {
-                                seen.push(p);
-                                stack.push(d.clone());
+                        touch(iv, &mut stack, &mut seen);
+                    }
+                    // Closure-method captures (define_method &block)
+                    // hold heap Values — for an ANONYMOUS class
+                    // (e.g. minitest's describe-generated Spec
+                    // subclasses, reachable only through the
+                    // @@runnables registry) this arm is the ONLY
+                    // mark path; the Vm root walk that handles
+                    // registered classes iterates `Vm.classes` and
+                    // never sees them. Without this, a `before`/`it`
+                    // block captured by a define_method'd setup was
+                    // swept and instance_exec'd post-free (minitest
+                    // spec suite ICE under normal GC pressure).
+                    for m in cls.methods.borrow().values() {
+                        if let Some(cl) = &m.closure {
+                            for v in cl.captured.borrow().iter() {
+                                touch(v, &mut stack, &mut seen);
                             }
-                        } else {
-                            Heap::visit_value(iv, marks, worklist);
                         }
+                    }
+                    for m in cls.singleton_methods.borrow().values() {
+                        if let Some(cl) = &m.closure {
+                            for v in cl.captured.borrow().iter() {
+                                touch(v, &mut stack, &mut seen);
+                            }
+                        }
+                    }
+                    // Class variables + per-class consts can hold
+                    // heap Values on anonymous classes too (the
+                    // registered-class walk covers named ones).
+                    for v in cls.class_vars.borrow().values() {
+                        touch(v, &mut stack, &mut seen);
+                    }
+                    for v in cls.consts.borrow().values() {
+                        touch(v, &mut stack, &mut seen);
                     }
                 }
             }

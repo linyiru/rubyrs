@@ -683,6 +683,21 @@ impl Vm {
             for v in cls.class_vars.borrow().values() {
                 roots.push(v.clone());
             }
+            // CLASS-LEVEL instance variables (`@foo` inside
+            // `class << self` / `def self.x`) hold heap Values
+            // too — minitest's Runnable keeps its registry as
+            // `@runnables = []` and Spec::DSL keeps `@children`,
+            // both class ivars holding Arrays of live state. The
+            // `visit_value(Value::Class)` arm walks ivars when a
+            // class is reached AS A VALUE, but this registry walk
+            // iterates `self.classes` directly and never routed
+            // the Rc through that arm — so a class ivar holding
+            // the ONLY reference to a heap value was swept under
+            // STRESS_GC (minitest's at_exit then read the freed
+            // Array: ICE use-after-free).
+            for v in cls.ivars.borrow().values() {
+                roots.push(v.clone());
+            }
         }
         // Toplevel `@@foo` fallback (no class on hand).
         for v in self.toplevel_cvars.values() {

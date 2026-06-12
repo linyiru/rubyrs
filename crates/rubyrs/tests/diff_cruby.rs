@@ -910,3 +910,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Array#* (repetition + join alias), Object#singleton_class on
 // instances (class<<self;self;end in methods), Proc#call(&blk).
 #[test] fn array_mul_and_eigen() { run_diff("array_mul_and_eigen"); }
+// Anonymous-class closure captures / class-ivar GC roots (minitest
+// Spec registry shape). Meaningful under the STRESS_GC=1 job.
+#[test] fn anon_class_closure_gc() { run_diff("anon_class_closure_gc"); }
