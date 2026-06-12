@@ -656,7 +656,7 @@ impl Vm {
             "tr" | "tr_s" | "squeeze" | "sum" |
             "encode" | "force_encoding" | "valid_encoding?" | "encoding" | "b" |
             "unpack" | "unpack1" | "bytes" | "getbyte" | "each_byte" |
-            "match?" | "match" | "scan" | "index" | "rindex" |
+            "match?" | "match" | "scan" | "index" | "rindex" | "=~" |
             "[]" | "slice" |
             "<<" | "concat" | "prepend" | "replace" |
             "freeze" | "frozen?" | "dup" | "+@" | "-@" | "dump" | "count" |
@@ -716,6 +716,24 @@ impl Vm {
             return true;
         }
         let name: &str = self.interner.resolve(name_id);
+        // Kernel's PRIVATE builtin surface — `respond_to?(name,
+        // true)` must report the no-recv builtins dispatch actually
+        // accepts (CRuby: Kernel private instance methods live on
+        // every object). minitest's assert_respond_to with
+        // include_all probes `:exit`. The list is the
+        // stable/commonly-probed core of `builtin_call`; keep it in
+        // sync when builtins graduate. (Without include_all these
+        // stay false — explicit-receiver calls reject them, same as
+        // CRuby's NoMethodError-private.)
+        if include_private && matches!(name,
+            "exit" | "exit!" | "abort" | "at_exit"
+            | "puts" | "print" | "p" | "pp" | "warn"
+            | "require" | "require_relative" | "load"
+            | "sprintf" | "format" | "caller"
+            | "rand" | "srand" | "raise" | "fail"
+        ) {
+            return true;
+        }
         // Universal — every receiver responds to these.
         // `send` / `__send__` go here because the `do_call`
         // recogniser handles them on any receiver type (primitive

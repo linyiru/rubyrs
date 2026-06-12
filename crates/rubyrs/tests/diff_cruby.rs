@@ -900,3 +900,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn array_join_recursive() { run_diff("array_join_recursive"); }
 // Time.utc/gm/local/mktime civil constructors (Tier-1 UTC-only).
 #[test] fn time_civil_constructors() { run_diff("time_civil_constructors"); }
+// respond_to? surface: String#=~, Kernel-private include_all bits.
+#[test] fn respond_to_surface() { run_diff("respond_to_surface"); }
