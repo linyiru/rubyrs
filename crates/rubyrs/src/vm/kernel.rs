@@ -2019,6 +2019,26 @@ impl Vm {
             // contract the token loader keeps. Motivating consumer:
             // addressable's pregenerated unicode.data table
             // (Hash{Int => Array[Int|nil]}, 4233 keys).
+            // `Encoding.default_external=` host half: resolve the
+            // name and stamp Vm::default_external (what tag-less
+            // File.read uses). Unknown name → CRuby's ArgumentError.
+            "__rubyrs_set_default_external" => {
+                let name = match args.first() {
+                    Some(Value::Str(s)) => s.to_string_lossy(),
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "encoding name must be a String".into(),
+                    }))),
+                };
+                match Self::encoding_tag_from_str(&name) {
+                    Some(tag) => {
+                        self.default_external = tag;
+                        Some(Ok(Value::Nil))
+                    }
+                    None => Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("unknown encoding name - {name}"),
+                    }))),
+                }
+            }
             "__rubyrs_marshal_load_binary" => {
                 let bytes: Vec<u8> = match args.first() {
                     Some(Value::Str(s)) => s.content.borrow().clone(),

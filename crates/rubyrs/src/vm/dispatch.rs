@@ -1367,7 +1367,6 @@ impl Vm {
     /// `@name`) — to an E1 tag. `None` = unknown name (caller
     /// raises CRuby's ArgumentError shape).
     pub(crate) fn resolve_encoding_arg(&mut self, arg: &Value) -> Option<crate::value::EncodingTag> {
-        use crate::value::EncodingTag;
         let name: String = match arg {
             Value::Str(s) => s.to_string_lossy(),
             Value::Object(id) => {
@@ -1383,15 +1382,15 @@ impl Vm {
             }
             _ => return None,
         };
-        match name.to_ascii_uppercase().as_str() {
-            "UTF-8" => Some(EncodingTag::Utf8),
-            "US-ASCII" | "ASCII" => Some(EncodingTag::UsAscii),
-            "ASCII-8BIT" | "BINARY" => Some(EncodingTag::Binary),
-            #[cfg(feature = "_encoding_full")]
-            other => crate::encoding_full::find(other),
-            #[cfg(not(feature = "_encoding_full"))]
-            _ => None,
-        }
+        encoding_tag_from_name(&name)
+    }
+
+    /// Resolve an encoding NAME (case-insensitive, CRuby's fold
+    /// set + the `_encoding_full` registry) to an E1 tag. Shared
+    /// by `resolve_encoding_arg` and the File-read encoding
+    /// plumbing (E3) so the accepted-name set can't drift.
+    pub(crate) fn encoding_tag_from_str(name: &str) -> Option<crate::value::EncodingTag> {
+        encoding_tag_from_name(name)
     }
 
     /// `Integer#chr(encoding)` — CRuby widens the accepted range and
@@ -17319,6 +17318,19 @@ fn is_valid_ivar_name(s: &str) -> bool {
 ///     code's integer literals reach (`|n| < 2^58` for any
 ///     practical int produces an id below 2^59, well clear of
 ///     the Sym/Float/Heap tag bits).
+fn encoding_tag_from_name(name: &str) -> Option<crate::value::EncodingTag> {
+    use crate::value::EncodingTag;
+    match name.to_ascii_uppercase().as_str() {
+        "UTF-8" => Some(EncodingTag::Utf8),
+        "US-ASCII" | "ASCII" => Some(EncodingTag::UsAscii),
+        "ASCII-8BIT" | "BINARY" => Some(EncodingTag::Binary),
+        #[cfg(feature = "_encoding_full")]
+        other => crate::encoding_full::find(other),
+        #[cfg(not(feature = "_encoding_full"))]
+        _ => None,
+    }
+}
+
 pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
     use crate::value::Value;
     /// Heap-managed value id:

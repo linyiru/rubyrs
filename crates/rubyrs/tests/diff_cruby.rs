@@ -354,9 +354,12 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn encoding_full_latin1() { run_diff("encoding_full_latin1"); }
 #[cfg(feature = "_encoding_full")]
 #[test] fn encoding_full_seven() { run_diff("encoding_full_seven"); }
-// E2 v3: reflection trio, Other-tag case ops, pivot-chain pairs.
+// E2 v3: reflection trio, Other-tag case ops, pivot-chain pairs
+// + E3 registry-tag / ext:int transcoding reads.
 #[cfg(feature = "_encoding_full")]
 #[test] fn encoding_full_v3() { run_diff("encoding_full_v3"); }
+// E3 core surface: File.read encoding: tags, default_external.
+#[test] fn file_read_encoding() { run_diff("file_read_encoding"); }
 #[test] fn lifecycle_hook_super() { run_diff("lifecycle_hook_super"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
 #[test] fn user_sort() { run_diff("user_sort"); }

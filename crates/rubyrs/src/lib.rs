@@ -2612,12 +2612,17 @@ class Encoding
   ## non-UTF-8 values rather than raising: callers like minitest's
   ## suite guard (`Encoding.default_external != Encoding::UTF_8`
   ## → warn) only ever read.
+  ## E3: the REAL process-wide default — tag-less `File.read`
+  ## stamps this tag (Vm::default_external, set through the host
+  ## fn). The getter mirrors the last successful assignment.
   def self.default_external
-    UTF_8
+    @default_external || UTF_8
   end
 
-  def self.default_external=(_enc)
-    UTF_8
+  def self.default_external=(enc)
+    name = enc.is_a?(Encoding) ? enc.name : enc.to_s
+    __rubyrs_set_default_external(name)
+    @default_external = Encoding.find(name)
   end
 
   def self.default_internal

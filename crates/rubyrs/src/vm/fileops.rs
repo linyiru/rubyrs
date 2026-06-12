@@ -253,6 +253,105 @@ fn ruby_dirname(path: &str) -> String {
 }
 
 impl Vm {
+    /// E3 `ext:int` read transcode: decode the bytes as `ext`,
+    /// re-encode into `int`. UTF-8/US-ASCII/BINARY sources decode
+    /// trivially; registry sources go through encoding_full. An
+    /// undecodable byte raises CRuby's
+    /// Encoding::InvalidByteSequenceError; an unmappable char on
+    /// the encode side raises UndefinedConversionError.
+    fn transcode_read(
+        &mut self,
+        bytes: &[u8],
+        ext: crate::value::EncodingTag,
+        int: crate::value::EncodingTag,
+        path: &str,
+    ) -> Result<Vec<u8>, crate::error::Trap> {
+        use crate::value::EncodingTag;
+        if ext == int {
+            return Ok(bytes.to_vec());
+        }
+        // Decode to UTF-8 text first (the pivot CRuby uses too).
+        let text: String = match ext {
+            EncodingTag::Utf8 => match std::str::from_utf8(bytes) {
+                Ok(t) => t.to_string(),
+                Err(e) => {
+                    // CRuby names the offending byte: `"\xFF" on
+                    // UTF-8`.
+                    let b = bytes.get(e.valid_up_to()).copied().unwrap_or(0);
+                    let _ = path;
+                    return Err(self.trap(RubyError::HostException {
+                        class_name: "Encoding::InvalidByteSequenceError".to_string(),
+                        message: format!("\"\\x{b:02X}\" on UTF-8"),
+                    }));
+                }
+            },
+            EncodingTag::UsAscii | EncodingTag::Binary => {
+                if let Some(&b) = bytes.iter().find(|&&b| b >= 0x80) {
+                    return Err(self.trap(RubyError::HostException {
+                        class_name: "Encoding::UndefinedConversionError".to_string(),
+                        message: format!(
+                            "\"\\x{b:02X}\" to UTF-8 in conversion from ASCII-8BIT to UTF-8"
+                        ),
+                    }));
+                }
+                String::from_utf8_lossy(bytes).into_owned()
+            }
+            #[cfg(feature = "_encoding_full")]
+            EncodingTag::Other(idx) => {
+                match crate::encoding_full::decode_to_utf8(idx, bytes) {
+                    Some(t) => t,
+                    None => {
+                        let name = crate::encoding_full::name(idx).unwrap_or("OTHER");
+                        let b = bytes.iter().copied().find(|&b| b >= 0x80).unwrap_or(0);
+                        return Err(self.trap(RubyError::HostException {
+                            class_name: "Encoding::InvalidByteSequenceError".to_string(),
+                            message: format!("\"\\x{b:02X}\" on {name}"),
+                        }));
+                    }
+                }
+            }
+            #[cfg(not(feature = "_encoding_full"))]
+            EncodingTag::Other(_) => {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "registry encodings need the _encoding_full feature".to_string(),
+                }));
+            }
+        };
+        // Encode the pivot text into the internal coding.
+        match int {
+            EncodingTag::Utf8 => Ok(text.into_bytes()),
+            EncodingTag::UsAscii | EncodingTag::Binary => {
+                match text.chars().find(|c| !c.is_ascii()) {
+                    None => Ok(text.into_bytes()),
+                    Some(c) => Err(self.trap(RubyError::HostException {
+                        class_name: "Encoding::UndefinedConversionError".to_string(),
+                        message: format!(
+                            "U+{:04X} from UTF-8 to {}",
+                            c as u32,
+                            if int == EncodingTag::UsAscii { "US-ASCII" } else { "ASCII-8BIT" },
+                        ),
+                    })),
+                }
+            }
+            #[cfg(feature = "_encoding_full")]
+            EncodingTag::Other(idx) => {
+                match crate::encoding_full::encode_from_utf8(idx, &text, None) {
+                    Ok(out) => Ok(out),
+                    Err((cp, to)) => Err(self.trap(RubyError::HostException {
+                        class_name: "Encoding::UndefinedConversionError".to_string(),
+                        message: format!("U+{cp:04X} from UTF-8 to {to}"),
+                    })),
+                }
+            }
+            #[cfg(not(feature = "_encoding_full"))]
+            EncodingTag::Other(_) => Err(self.trap(RubyError::ArgumentError {
+                msg: "registry encodings need the _encoding_full feature".to_string(),
+            })),
+        }
+    }
+}
+
+impl Vm {
     /// Coerce a `File`-path argument to a String the way CRuby does:
     /// a `String` passes through; any other object is asked for
     /// `to_path` then `to_str` (a `Pathname` answers `to_path`).
@@ -381,18 +480,70 @@ impl Vm {
                 // transcoding — rubyrs stays raw-bytes there, same
                 // as before. The `File.open(path, "r:bom|utf-8")`
                 // mode-string spelling is NOT handled yet.
-                let bom_utf8 = args.iter().skip(1).any(|a| {
-                    let Value::Hash(hid) = a else { return false };
-                    self.heap.hash(*hid).iter().any(|(k, v)| {
-                        // Symbol key ONLY — CRuby ignores a String
-                        // "encoding" key in the opts Hash (verified
-                        // in the fixture's string-key row).
-                        matches!(k, Value::Sym(s)
+                // The Symbol-keyed `encoding:` opt (CRuby ignores a
+                // String "encoding" key — fixture-verified). E3
+                // semantics, probed on CRuby 3.4.1:
+                //   - single name  → raw bytes + that TAG (no
+                //     transcode; an invalid-in-encoding read keeps
+                //     its bytes and reports valid_encoding?=false)
+                //   - "ext:int"    → decode as ext, ENCODE to int
+                //     (the only transcoding form)
+                //   - "bom|utf-8"  → BOM strip (pre-existing)
+                //   - absent       → Encoding.default_external tag
+                let enc_opt: Option<String> = args.iter().skip(1).find_map(|a| {
+                    let Value::Hash(hid) = a else { return None };
+                    self.heap.hash(*hid).iter().find_map(|(k, v)| {
+                        if matches!(k, Value::Sym(s)
                             if &**self.interner.resolve(*s) == "encoding")
-                            && matches!(v, Value::Str(s)
-                                if s.to_string_lossy().eq_ignore_ascii_case("bom|utf-8"))
+                            && let Value::Str(s) = v
+                        {
+                            Some(s.to_string_lossy())
+                        } else {
+                            None
+                        }
                     })
                 });
+                let bom_utf8 = enc_opt
+                    .as_deref()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("bom|utf-8"));
+                // Resolve the read's resulting tag (and the
+                // optional transcode pair) BEFORE touching the disk
+                // so an unknown name raises without a stray read.
+                let mut transcode: Option<(crate::value::EncodingTag, crate::value::EncodingTag)> = None;
+                let read_tag: crate::value::EncodingTag = match enc_opt.as_deref() {
+                    None => self.default_external,
+                    Some(e) if e.eq_ignore_ascii_case("bom|utf-8") => {
+                        crate::value::EncodingTag::Utf8
+                    }
+                    // Unknown names WARN and fall back to the
+                    // default tag — CRuby's read path is lenient
+                    // ("warning: Unsupported encoding NOPE
+                    // ignored"); only `Encoding.default_external=`
+                    // raises (probed on 3.4.1).
+                    Some(e) => match e.split_once(':') {
+                        Some((ext, int)) => {
+                            let ext_tag = Self::encoding_tag_from_str(ext);
+                            let int_tag = Self::encoding_tag_from_str(int);
+                            match (ext_tag, int_tag) {
+                                (Some(x), Some(i)) => {
+                                    transcode = Some((x, i));
+                                    i
+                                }
+                                _ => {
+                                    eprintln!("warning: Unsupported encoding {e} ignored");
+                                    self.default_external
+                                }
+                            }
+                        }
+                        None => match Self::encoding_tag_from_str(e) {
+                            Some(t) => t,
+                            None => {
+                                eprintln!("warning: Unsupported encoding {e} ignored");
+                                self.default_external
+                            }
+                        },
+                    },
+                };
                 match std::fs::read(&path) {
                     Ok(b) => {
                         // BOM strip happens at the stream head,
@@ -403,17 +554,30 @@ impl Vm {
                             (true, Some(rest)) => rest.to_vec(),
                             _ => b,
                         };
-                        if offset == 0 && length.is_none() {
-                            Value::new_str_bytes(b)
+                        let b = if offset == 0 && length.is_none() {
+                            b
                         } else {
                             let start = offset.min(b.len());
                             let slice = &b[start..];
-                            let out = match length {
-                                Some(n) => &slice[..n.min(slice.len())],
-                                None => slice,
-                            };
-                            Value::new_str_bytes(out.to_vec())
+                            match length {
+                                Some(n) => slice[..n.min(slice.len())].to_vec(),
+                                None => slice.to_vec(),
+                            }
+                        };
+                        // `ext:int` — the transcoding form. Decode
+                        // with the external coding, re-encode into
+                        // the internal one (E2's per-char machinery;
+                        // an undecodable byte raises CRuby's
+                        // InvalidByteSequenceError class).
+                        let b = match transcode {
+                            None => b,
+                            Some((ext, int)) => self.transcode_read(&b, ext, int, &path)?,
+                        };
+                        let v = Value::new_str_bytes(b);
+                        if let Value::Str(ref ns) = v {
+                            ns.encoding.set(read_tag);
                         }
+                        v
                     }
                     Err(e) => return Err(self.trap(io_error(&e, Some(Path::new(&path))))),
                 }

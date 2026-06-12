@@ -1028,6 +1028,12 @@ pub(crate) struct Vm {
     /// is the set-once dispatch gate, same as `any_hash_singletons`.
     pub(crate) str_singletons: crate::intern::FxHashMap<usize, (std::rc::Rc<crate::value::RStr>, Rc<Class>)>,
     pub(crate) any_str_singletons: bool,
+    /// `Encoding.default_external` (E3): the tag File.read stamps
+    /// when no `encoding:` argument is given. CRuby's process-wide
+    /// default; ours starts at UTF-8 and is set through the
+    /// preamble's `Encoding.default_external=` →
+    /// `__rubyrs_set_default_external`.
+    pub(crate) default_external: crate::value::EncodingTag,
     /// Refinements (`refine` / `using`). Tier-1: activation is GLOBAL
     /// from the `using` point on, not lexically scoped per file/module
     /// like CRuby — equivalent for the common single-file case (see
@@ -1684,6 +1690,7 @@ impl Vm {
             any_hash_singletons: false,
             str_singletons: crate::intern::FxHashMap::default(),
             any_str_singletons: false,
+            default_external: crate::value::EncodingTag::Utf8,
             module_refinements: crate::intern::FxHashMap::default(),
             active_refinements: crate::intern::FxHashMap::default(),
             refined_method_names: crate::intern::FxHashSet::default(),
