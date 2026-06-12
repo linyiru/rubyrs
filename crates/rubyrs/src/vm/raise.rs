@@ -421,6 +421,7 @@ impl Vm {
                     }
                     _ => exc.to_display(&self.heap, &self.interner),
                 };
+                self.last_uncaught_exception = Some(exc.clone());
                 return Err(self.trap(RubyError::Uncaught { class_name, message }));
             }
         }

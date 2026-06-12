@@ -208,3 +208,74 @@ end
 # to toggle.
 module Warning
 end
+
+# Kernel#fork / Process.fork / Process.waitpid — REAL fork(2),
+# gated on the same process-spawn capability as Kernel#system
+# (ADR 0017) and on a unix host. Where unsupported the methods
+# are simply NOT DEFINED, so `Process.respond_to?(:fork)` is
+# false exactly like CRuby on Windows — minitest's fork-exit
+# tests then take their documented skip path.
+#
+# Subset: block form only (`fork { ... }`); the no-block
+# both-sides-continue form would need the dispatch loop itself to
+# be re-entered post-fork and is declined loudly.
+if __rubyrs_fork_supported?
+  module Kernel
+    def fork(&blk)
+      raise NotImplementedError, "rubyrs fork requires a block (Tier-1 subset)" unless blk
+      __rubyrs_fork_block(blk)
+    end
+  end
+
+  module Process
+    def self.fork(&blk)
+      raise NotImplementedError, "rubyrs fork requires a block (Tier-1 subset)" unless blk
+      __rubyrs_fork_block(blk)
+    end
+
+    def self.waitpid(pid, flags = 0)
+      r = __rubyrs_waitpid(pid, flags)
+      $? = Process::Status.new(r[0], r[1])
+      r[0]
+    end
+
+    class << self
+      alias_method :wait, :waitpid
+    end
+  end
+end
+
+module Process
+  # `$?` value shape — only the surface minitest / shell-status
+  # consumers read (exitstatus / success? / pid). CRuby packs the
+  # wait(2) status word; `to_i` reproduces the exited-child form.
+  class Status
+    attr_reader :pid, :exitstatus
+
+    def initialize(pid, exitstatus)
+      @pid = pid
+      @exitstatus = exitstatus
+    end
+
+    def success?
+      @exitstatus == 0
+    end
+
+    def exited?
+      true
+    end
+
+    def signaled?
+      false
+    end
+
+    def to_i
+      @exitstatus << 8
+    end
+
+    def inspect
+      "#<Process::Status: pid #{@pid} exit #{@exitstatus}>"
+    end
+    alias_method :to_s, :inspect
+  end
+end

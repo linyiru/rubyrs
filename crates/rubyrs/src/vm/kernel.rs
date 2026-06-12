@@ -1702,6 +1702,139 @@ impl Vm {
             // runs through the shell; multiple args exec directly.
             // stdout/stderr inherit (a same-file `system "diff" f f`
             // probe prints nothing). Spawn failure (ENOENT) → nil.
+            // Fork support probe — the preamble gates the
+            // Kernel#fork / Process.fork definitions on this, so
+            // `respond_to?(:fork)` is false exactly where CRuby's
+            // is (Windows) plus where the spawn capability is off
+            // (minitest then takes its documented skip path).
+            "__rubyrs_fork_supported?" => {
+                #[cfg(all(unix, not(target_os = "wasi")))]
+                let supported = self.allow_process_spawn;
+                #[cfg(not(all(unix, not(target_os = "wasi"))))]
+                let supported = false;
+                Some(Ok(Value::Bool(supported)))
+            }
+            // `fork { ... }` body runner (block arrives as an
+            // explicit Proc arg via the preamble wrapper — the
+            // builtin channel has no block slot). Parent returns
+            // the child pid; the CHILD runs the block to
+            // completion, drains its inherited at_exit handlers
+            // (the snapshot semantics match what a mid-run fork
+            // inherits — minitest's nested autorun at_exit), and
+            // hard-exits without returning to the Ruby caller.
+            #[cfg(all(unix, not(target_os = "wasi")))]
+            "__rubyrs_fork_block" => {
+                if !self.allow_process_spawn {
+                    return Some(Err(self.trap(RubyError::HostException {
+                        class_name: "NotImplementedError".to_string(),
+                        message: "fork is not available (process spawn capability is off)".to_string(),
+                    })));
+                }
+                let blk = match args.first() {
+                    Some(Value::Block(bid)) => *bid,
+                    _ => return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "fork requires a block in rubyrs (Tier-1 subset)".into(),
+                    }))),
+                };
+                // Flush BOTH host stdio buffers — the child is a
+                // process copy; unflushed bytes would print twice.
+                {
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                    let _ = std::io::stderr().flush();
+                }
+                let pid = unsafe { libc::fork() };
+                if pid < 0 {
+                    return Some(Err(self.trap(RubyError::HostException {
+                        class_name: "Errno::EAGAIN".to_string(),
+                        message: "Resource temporarily unavailable - fork(2)".to_string(),
+                    })));
+                }
+                if pid > 0 {
+                    // Parent: child pid, Ruby-side.
+                    return Some(Ok(Value::Int(pid as i64)));
+                }
+                // ---- CHILD ----
+                // `$$` / Process.pid must observe the NEW pid —
+                // minitest's autorun at_exit guards on
+                // `Process.pid != install_pid`.
+                self.pid = Some(unsafe { libc::getpid() } as i64);
+                // The child NEVER returns to its Ruby caller — the
+                // block is its whole program. Truncate the
+                // inherited frame/operand stacks BEFORE running it,
+                // or an `exit` inside the block unwinds through the
+                // parent's residual frames and gets swallowed by an
+                // enclosing rescue (minitest's capture_exceptions
+                // turned `fork { exit 42 }` into status 0).
+                self.frames.clear();
+                self.stack.clear();
+                self.pinned.clear();
+                self.clear_control_flow_signals();
+                let mut status: i32 = {
+                    let r = self.invoke_block(blk, Vec::new())
+                        .and_then(|()| self.dispatch_until(0))
+                        .map(|()| { self.stack.pop(); });
+                    match r {
+                        Ok(()) => 0,
+                        Err(t) => self.fork_child_status_from_trap(&t),
+                    }
+                };
+                // Drain inherited at_exit handlers LIFO (simplified
+                // twin of Runtime::drain_at_exit_handlers — no
+                // catch_unwind layer; a SystemExit raised by a
+                // handler REPLACES the status, CRuby semantics).
+                let handlers: Vec<crate::value::ObjId> =
+                    self.at_exit_handlers.drain(..).rev().collect();
+                for h in handlers {
+                    self.clear_control_flow_signals();
+                    self.frames.clear();
+                    self.stack.clear();
+                    let r = self.invoke_block(h, Vec::new())
+                        .and_then(|()| self.dispatch_until(0))
+                        .map(|()| { self.stack.pop(); });
+                    if let Err(t) = r {
+                        status = self.fork_child_status_from_trap(&t);
+                    }
+                }
+                {
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                    let _ = std::io::stderr().flush();
+                }
+                std::process::exit(status);
+            }
+            #[cfg(all(unix, not(target_os = "wasi")))]
+            "__rubyrs_waitpid" => {
+                let pid = match args.first() {
+                    Some(Value::Int(n)) => *n as i32,
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "waitpid pid must be an Integer".into(),
+                    }))),
+                };
+                let mut st: i32 = 0;
+                let r = unsafe { libc::waitpid(pid, &mut st, 0) };
+                if r < 0 {
+                    return Some(Err(self.trap(RubyError::HostException {
+                        class_name: "Errno::ECHILD".to_string(),
+                        message: format!("No child processes - waitpid({pid})"),
+                    })));
+                }
+                let exitstatus: i64 = if libc::WIFEXITED(st) {
+                    libc::WEXITSTATUS(st) as i64
+                } else {
+                    // Signalled child — surface 128+signo like a
+                    // shell would; minitest only consumes the
+                    // WIFEXITED path.
+                    128 + libc::WTERMSIG(st) as i64
+                };
+                self.maybe_gc();
+                if let Err(e) = self.check_alloc() { return Some(Err(e)); }
+                let id = self.heap.alloc(HeapObj::Array(vec![
+                    Value::Int(r as i64),
+                    Value::Int(exitstatus),
+                ].into()));
+                Some(Ok(Value::Array(id)))
+            }
             "system" => {
                 if !self.allow_process_spawn {
                     return Some(Ok(Value::Nil));
@@ -4224,6 +4357,31 @@ fn parse_exit_status(args: &[Value]) -> Result<i32, Option<Result<Value, Trap>>>
 /// dispatch loop doesn't push a spurious Nil over the rescue
 /// binding. If no handler, the trap propagates to the embedder
 /// as `RubyError::Uncaught { class_name: "SystemExit", .. }`.
+impl Vm {
+    /// Fork-child status from a block/handler trap: an uncaught
+    /// SystemExit carries its status in the `$!` instance's
+    /// `@status` (the unwind already stamped `$!`); anything else
+    /// prints the trap like a dying script and exits 1.
+    #[cfg(all(unix, not(target_os = "wasi")))]
+    fn fork_child_status_from_trap(&mut self, t: &Trap) -> i32 {
+        if let RubyError::Uncaught { class_name, .. } = &t.err
+            && class_name == "SystemExit"
+        {
+            if let Some(Value::Object(id)) = &self.last_uncaught_exception
+                && let crate::heap::HeapObj::Instance(inst) = self.heap.get(*id)
+            {
+                let status_sym = self.interner.intern("@status");
+                if let Some(Value::Int(n)) = inst.ivars.get(&status_sym) {
+                    return *n as i32;
+                }
+            }
+            return 0;
+        }
+        eprintln!("rubyrs (fork child): {:?}", t.err);
+        1
+    }
+}
+
 fn raise_system_exit(vm: &mut Vm, status: i32, message: &str) -> Option<Result<Value, Trap>> {
     // Look up SystemExit class. If the preamble hasn't loaded
     // (Phase 0.5a not yet in this build), surface a clear error

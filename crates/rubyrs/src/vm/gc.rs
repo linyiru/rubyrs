@@ -614,6 +614,9 @@ impl Vm {
         for (_, sc) in self.str_singletons.values() {
             roots.push(crate::value::Value::Class(sc.clone()));
         }
+        if let Some(v) = &self.last_uncaught_exception {
+            roots.push(v.clone());
+        }
         #[cfg(feature = "_fiber")]
         for snap in &self.fiber_stash_stack {
             // The suspended side's Stack-frame slots live in ITS

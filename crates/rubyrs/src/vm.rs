@@ -990,6 +990,12 @@ pub(crate) struct Vm {
     /// the "process" — handlers drain at its end. Documented
     /// in `Kernel#at_exit`'s docstring.
     pub(crate) at_exit_handlers: Vec<crate::value::ObjId>,
+    /// The exception VALUE behind the most recent
+    /// `RubyError::Uncaught` trap (the trap itself only carries
+    /// class_name + message strings). Consumer: the fork-child
+    /// exit path reads `@status` off an uncaught SystemExit.
+    /// GC-rooted by the root gather.
+    pub(crate) last_uncaught_exception: Option<Value>,
     /// Same-process Marshal round-trip registry (ADR 0017-honest
     /// subset): `Marshal.dump` stashes the object here and returns
     /// a YAML-comment token naming the slot; `Marshal.load` of that
@@ -1672,6 +1678,7 @@ impl Vm {
             // safe-point check treats None as "unlimited".
             max_yield_recursion: None,
             at_exit_handlers: Vec::new(),
+            last_uncaught_exception: None,
             marshal_registry: Vec::new(),
             anon_class_counter: 0,
             any_hash_singletons: false,

@@ -994,3 +994,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // system under $stdout/$stderr reopen-delegation (subprocess capture).
 #[cfg(feature = "stdlib")]
 #[test] fn system_capture_redirect() { run_diff("system_capture_redirect"); }
+// Real fork(2) + waitpid + $? (block form; unix; spawn-gated).
+#[cfg(unix)]
+#[test] fn fork_waitpid_status() { run_diff("fork_waitpid_status"); }

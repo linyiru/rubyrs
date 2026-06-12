@@ -402,6 +402,10 @@ libloading = { workspace = true, optional = true }
 # embedder that never opts in pays nothing at runtime.
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
+# Kernel#fork / Process.waitpid (minitest's fork-exit-status
+# tests): unix-only production dep — the same 3-syscall surface
+# the _http_server pre-fork supervisor already justified.
+libc = "0.2"
 
 [build-dependencies]
 cc.workspace = true
