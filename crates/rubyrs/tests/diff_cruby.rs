@@ -955,3 +955,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // anon-instance inspect nesting.
 #[cfg(feature = "regex")]
 #[test] fn class_eval_string_context() { run_diff("class_eval_string_context"); }
+// defined?(name) in class bodies via the class-object chain; Proc eq.
+#[cfg(feature = "regex")]
+#[test] fn defined_method_in_class_body() { run_diff("defined_method_in_class_body"); }

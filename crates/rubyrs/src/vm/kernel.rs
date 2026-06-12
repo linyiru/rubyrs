@@ -567,10 +567,25 @@ impl Vm {
                     let self_val = self.frames.last()
                         .map(|f| f.self_val.clone())
                         .unwrap_or(Value::Nil);
-                    let class_hit = if let Value::Object(oid) = &self_val {
-                        let cls = self.heap.instance(*oid).class.clone();
-                        self.lookup_method_uncached(&cls, *sid).is_some()
-                    } else { false };
+                    let class_hit = match &self_val {
+                        Value::Object(oid) => {
+                            let cls = self.heap.instance(*oid).class.clone();
+                            self.lookup_method_uncached(&cls, *sid).is_some()
+                        }
+                        // Inside a class/module BODY (self is the
+                        // class object) a bare name resolves
+                        // through the class-object instance chain
+                        // (Class/Module reopens): minitest's mock.rb
+                        // guards `infect_an_assertion ... if
+                        // defined?(infect_an_assertion)` inside
+                        // `module Minitest::Expectations`, and
+                        // infect_an_assertion lives on Module.
+                        Value::Class(c) => {
+                            self.lookup_class_singleton_method(c, *sid).is_some()
+                                || self.lookup_class_object_instance_method(c, *sid).is_some()
+                        }
+                        _ => false,
+                    };
                     let toplevel_hit = self.toplevel_methods.contains_key(sid);
                     let hit = is_builtin || host_hit || class_hit || toplevel_hit;
                     return Some(Ok(if hit { Value::new_str("method") } else { Value::Nil }));

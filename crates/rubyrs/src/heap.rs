@@ -1981,6 +1981,14 @@ impl Value {
             // (minitest's register_spec_type) relies on it.
             return a.as_str() == b.as_str() && a.options() == b.options();
         }
+        // Procs/methods compare by identity (same heap slot) —
+        // the same matcher table holds Proc entries too.
+        if let (Value::Block(a), Value::Block(b)) = (self, other) {
+            return a == b;
+        }
+        if let (Value::BoundMethod(a), Value::BoundMethod(b)) = (self, other) {
+            return a == b;
+        }
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
