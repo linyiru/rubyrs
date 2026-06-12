@@ -7727,7 +7727,11 @@ impl Vm {
                 Some(Value::Str(f)) => (f.to_string_lossy(), false),
                 _ => ("(class_eval)".to_string(), true),
             };
-            let v = self.eval_string(&src, &filename, synthetic)?;
+            // Run in the RECEIVER'S class context (CRuby): self =
+            // cls, def installs onto cls. (Previously landed at
+            // toplevel — documented divergence, removed; minitest's
+            // infect_an_assertion was the forcing consumer.)
+            let v = self.eval_string_with_class_ctx(&src, &filename, synthetic, Some(cls.clone()))?;
             if self.suppress_call_result_push {
                 self.suppress_call_result_push = false;
             } else {
@@ -11133,7 +11137,15 @@ impl Vm {
                 _ => None,
             };
             let cls_name = cls_rc.as_ref()
-                .map(|c| c.name.clone())
+                .map(|c| {
+                    if c.effective_name().is_some() {
+                        c.name.clone()
+                    } else {
+                        // Anonymous class: nest its display form —
+                        // CRuby's `#<#<Class:0xN>:0xM>` instance shape.
+                        crate::value::class_display_name(c)
+                    }
+                })
                 .unwrap_or_else(|| "Object".to_string());
             // Tier-1 2a: Exception subclasses render as
             // `#<ClassName: message>` (or bare `#<ClassName>`

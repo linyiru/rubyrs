@@ -167,6 +167,18 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         // class-table lookup in `Op::DefClass`, so
         // `class Foo; end; class Foo; end; Foo == Foo` is `true`.
         (Value::Class(a), "==", [Value::Class(b)]) => Some(Value::Bool(Rc::ptr_eq(a, b))),
+        // Regexp equality is source + flags, not identity —
+        // minitest's register_spec_type matcher table is searched
+        // with include?([//, Spec]).
+        #[cfg(feature = "regex")]
+        (Value::Regex(a), "==", [Value::Regex(b)])
+        | (Value::Regex(a), "eql?", [Value::Regex(b)]) => {
+            Some(Value::Bool(a.as_str() == b.as_str() && a.options() == b.options()))
+        }
+        #[cfg(feature = "regex")]
+        (Value::Regex(a), "!=", [Value::Regex(b)]) => {
+            Some(Value::Bool(!(a.as_str() == b.as_str() && a.options() == b.options())))
+        }
         (Value::Class(a), "!=", [Value::Class(b)]) => Some(Value::Bool(!Rc::ptr_eq(a, b))),
         _ => None,
     })

@@ -3192,6 +3192,25 @@ impl Vm {
         filename: &str,
         synthetic: bool,
     ) -> Result<Value, Trap> {
+        self.eval_string_with_class_ctx(source, filename, synthetic, None)
+    }
+
+    /// `eval_string` with an optional CLASS CONTEXT: string-form
+    /// `cls.class_eval(src)` runs its toplevel with self = cls,
+    /// is_class_body = true, and cls on class_stack — `def` inside
+    /// lands on cls's table (CRuby semantics; previously a
+    /// documented toplevel-landing divergence). minitest's
+    /// infect_an_assertion defines every must_*/wont_* this way —
+    /// the LAST class_eval used to win globally, shadowing the
+    /// deprecated Object shim with the ctx-reading Expectation
+    /// body ("ctx for Integer").
+    pub(crate) fn eval_string_with_class_ctx(
+        &mut self,
+        source: &str,
+        filename: &str,
+        synthetic: bool,
+        class_ctx: Option<std::rc::Rc<crate::value::Class>>,
+    ) -> Result<Value, Trap> {
         // Fast-fail BEFORE any parse / AST / compile work when
         // the frame cap is already exhausted. CPU-bound parse of
         // a large untrusted eval string shouldn't run just to
@@ -3287,14 +3306,36 @@ impl Vm {
         // the cap-rejected path leaves no VM state behind. The
         // frame stack hasn't grown since then — we haven't pushed
         // a frame yet — so we don't need a second check here.
+        //
+        // Class context (string-form class_eval): self = the
+        // receiver class, is_class_body so `def` installs onto it,
+        // and the class_stack entry mirrors what Op::DefClass
+        // pushes for a literal `class X` body. Popped on EVERY
+        // exit below (ok / trap / non-local return).
+        let cls_depth_at_entry = self.class_stack.len();
+        let vis_depth_at_entry = self.class_visibility_stack.len();
+        if let Some(cls) = &class_ctx {
+            self.class_stack.push(cls.clone());
+            self.class_visibility_stack.push(crate::value::Visibility::Public);
+        }
         self.frames.push(super::Frame {
             proto_idx: entry,
             ip: 0,
             locals: crate::vm::Locals::Shared(std::rc::Rc::new(std::cell::RefCell::new(
                 super::vec_nil(self.protos[entry].n_locals as usize)
             ))),
-            self_val: Value::Nil,
+            self_val: match &class_ctx {
+                Some(cls) => Value::Class(cls.clone()),
+                None => Value::Nil,
+            },
             base_sp: self.stack.len(),
+            // NOT is_class_body even with a ctx: that flag drives
+            // the class-body RETURN convention (pop class_stack,
+            // discard the body value) — here the eval's last
+            // expression IS the return value (CRuby:
+            // `cls.class_eval("__FILE__")` → the string). def
+            // installation only consults class_stack, which we
+            // push/truncate around the run ourselves.
             is_class_body: false,
             swap_return: None,
             block_arg: None,
@@ -3313,7 +3354,14 @@ impl Vm {
         // should unwind locally, but a `return` escaping the
         // eval'd top level pops back into the caller's frame.
         loop {
-            self.dispatch_until(depth_before)?;
+            if let Err(t) = self.dispatch_until(depth_before) {
+                // Restore-to-depth, not unconditional pop: the
+                // normal frame-return path (is_class_body) pops the
+                // ctx itself; only an abnormal exit leaves it.
+                self.class_stack.truncate(cls_depth_at_entry);
+                self.class_visibility_stack.truncate(vis_depth_at_entry);
+                return Err(t);
+            }
             if self.method_return.is_none() {
                 break;
             }
@@ -3384,6 +3432,8 @@ impl Vm {
             }
             self.release_frame_locals(f.locals);
         }
+        self.class_stack.truncate(cls_depth_at_entry);
+        self.class_visibility_stack.truncate(vis_depth_at_entry);
         // Method-return escaping out of the eval — let outer
         // dispatch finish the unwind.
         if self.method_return.is_some() {

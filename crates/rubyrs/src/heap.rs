@@ -1622,7 +1622,19 @@ impl Value {
             // doesn't surface the eigenclass here even when one
             // exists. Use `real_class_of` for the same reason
             // `Object#class` does.
-            Value::Object(id) => format!("#<{}>", heap.real_class_of(*id).name),
+            Value::Object(id) => {
+                let cls = heap.real_class_of(*id);
+                if cls.effective_name().is_some() {
+                    format!("#<{}>", cls.name)
+                } else {
+                    // Anonymous class: nest the class's own display
+                    // form (#<#<Class:0xN>:0xN>-ish; the instance
+                    // side reuses the class serial — Tier-1 has no
+                    // per-object id to print deterministically).
+                    let cd = crate::value::class_display_name(&cls);
+                    format!("#<{}>", cd)
+                }
+            }
             Value::Array(id) => {
                 let a = heap.array(*id);
                 let parts: Vec<String> = a.iter().map(|v| v.to_inspect(heap, interner)).collect();
@@ -1962,6 +1974,13 @@ impl Value {
     }
 
     pub(crate) fn ruby_eq(&self, other: &Value, heap: &Heap) -> bool {
+        #[cfg(feature = "regex")]
+        if let (Value::Regex(a), Value::Regex(b)) = (self, other) {
+            // Source + flags equality (CRuby Regexp#==), not Rc
+            // identity — Array#include? over matcher tables
+            // (minitest's register_spec_type) relies on it.
+            return a.as_str() == b.as_str() && a.options() == b.options();
+        }
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,

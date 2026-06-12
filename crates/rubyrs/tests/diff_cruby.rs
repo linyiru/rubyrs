@@ -951,3 +951,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // raise as a method: send-form, eigenclass stub of bare raise, Symbol#=~.
 #[cfg(feature = "regex")]
 #[test] fn raise_as_method() { run_diff("raise_as_method"); }
+// String class_eval runs in receiver class context; Regexp ==;
+// anon-instance inspect nesting.
+#[cfg(feature = "regex")]
+#[test] fn class_eval_string_context() { run_diff("class_eval_string_context"); }
