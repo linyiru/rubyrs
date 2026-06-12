@@ -4118,7 +4118,20 @@ impl Vm {
                     None => recv.type_name().to_string(),
                 }
             }
-            other => other.type_name().to_string(),
+            // CRuby's primitive-receiver shapes: literal singletons
+            // render as themselves; everything else is "an instance
+            // of <Class>" (minitest asserts on the `for nil` form).
+            Value::Nil => "nil".to_string(),
+            Value::Bool(true) => "true".to_string(),
+            Value::Bool(false) => "false".to_string(),
+            // Class/Module receivers: CRuby says "for class String"
+            // / "for module Q" (no quotes in NoMethodError — the
+            // quoted form is undef_method's NameError).
+            Value::Class(c) => {
+                let kind = if c.is_module { "module" } else { "class" };
+                format!("{} {}", kind, crate::value::class_display_name(c))
+            }
+            other => format!("an instance of {}", other.type_name()),
         }
     }
 
@@ -4627,8 +4640,25 @@ impl Vm {
                         };
                     if !resolvable {
                         let nm = self.interner.resolve(sid).to_string();
+                        // CRuby naming rule (probed on 3.4.1): a
+                        // singleton-of-class/module shell names the
+                        // ATTACHED constant — `class << Time;
+                        // undef_method :nope` says "for class
+                        // 'Time'" (what minitest's stub-NameError
+                        // test asserts: the stub ensure-block's
+                        // undef_method REPLACES the in-flight alias
+                        // NameError). Plain modules say "module";
+                        // everything else (incl. object eigenclasses)
+                        // keeps its display name under "class".
+                        let (kind, shown) = match &shell_target {
+                            Some(real) => ("class", crate::value::class_display_name(real)),
+                            None => (
+                                if cls.is_module { "module" } else { "class" },
+                                crate::value::class_display_name(&cls),
+                            ),
+                        };
                         return Err(self.trap(RubyError::NameError {
-                            msg: format!("undefined method `{}' for class `{}'", nm, cls.name),
+                            msg: format!("undefined method '{}' for {} '{}'", nm, kind, shown),
                         }));
                     }
                     cls.undefed.borrow_mut().insert(sid);
@@ -8750,6 +8780,14 @@ impl Vm {
                         }
                         None => {
                             let old_name = self.interner.resolve(old_id).to_string();
+                            // CRuby's alias_method NameError keeps
+                            // the eigenclass shell name ("for class
+                            // '#<Class:Time>'") — the attached-name
+                            // form belongs to undef_method. In
+                            // minitest's stub flow the ensure
+                            // block's undef_method raises and
+                            // REPLACES this one, so the test
+                            // asserts on undef's message, not ours.
                             return Err(self.trap(RubyError::NameError {
                                 msg: format!(
                                     "undefined method '{}' for class '{}'",

@@ -967,3 +967,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // $stdout.reopen(tempfile) delegation (capture_subprocess_io).
 #[cfg(feature = "stdlib")]
 #[test] fn io_reopen_capture() { run_diff("io_reopen_capture"); }
+// NoMethodError receiver shapes (nil/true/instance-of/class/module)
+// + undef_method/alias_method NameError naming on eigenclass shells.
+#[test] fn nomethod_receiver_shapes() { run_diff("nomethod_receiver_shapes"); }
+// Kernel#sleep user-override gate (minitest stubs sleep on tests).
+#[test] fn kernel_sleep_override() { run_diff("kernel_sleep_override"); }

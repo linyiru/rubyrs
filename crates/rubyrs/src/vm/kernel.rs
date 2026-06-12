@@ -1277,6 +1277,34 @@ impl Vm {
             // `ArgumentError("time interval must not be
             // negative")`; we match.
             "sleep" => {
+                // A user/stub override on self's class chain wins —
+                // bare `sleep(10)` in CRuby is an ordinary Kernel
+                // method, and minitest's `self.stub :sleep, nil`
+                // installs one on the test instance's eigenclass.
+                // Same cold-path gate shape as Op::Raise's; the
+                // kernel-alias forwarder (the saved original) is
+                // excluded so the restore cycle can't loop.
+                {
+                    let sleep_sym = self.interner.intern("sleep");
+                    let self_val = self.frames.last().map(|f| f.self_val.clone());
+                    if let Some(Value::Object(oid)) = &self_val {
+                        let cls = self.heap.class_of(*oid);
+                        if let Some(m) = self.lookup_method_uncached(&cls, sleep_sym)
+                            && !self.protos[m.proto_idx].name.starts_with("<kernel-alias-forwarder")
+                        {
+                            let self_val = self_val.expect("checked above");
+                            let pre_frames = self.frames.len();
+                            if let Err(t) = self
+                                .invoke_method(m, self_val, args.to_vec())
+                                .and_then(|()| self.dispatch_until(pre_frames))
+                            {
+                                return Some(Err(t));
+                            }
+                            let v = self.stack.pop().unwrap_or(Value::Nil);
+                            return Some(Ok(v));
+                        }
+                    }
+                }
                 // ADR 0025 Phase 3 (CRuby-faithful semantics):
                 //   - no args + signal handler installed →
                 //     sleep until SIGINT; raise Interrupt.
