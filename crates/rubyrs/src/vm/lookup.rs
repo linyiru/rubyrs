@@ -569,6 +569,32 @@ impl Vm {
     /// inside any user class can recognise the source and
     /// synthesise a forwarder (mock.rb's
     /// `alias __respond_to? respond_to?` shape).
+    /// Universal Object instance methods every object answers via
+    /// builtin/universal arms (no user-table entry). TWO consumers
+    /// MUST agree on this list: `Module#instance_methods` appends
+    /// it for Object-descended classes, and `undef_method` accepts
+    /// every entry as resolvable — minitest Mock's blank slate does
+    /// `instance_methods.each { |m| undef_method m ... }`, so a
+    /// name listed here but rejected by undef raises NameError at
+    /// gem-require time. Mirrors CRuby 3.4 Object.instance_methods
+    /// minus the `__`-prefixed reserved pair (which Mock skips
+    /// anyway) and minus pp/gem-injected extras.
+    pub(crate) const UNIVERSAL_OBJECT_METHODS: &'static [&'static str] = &[
+        "!", "!=", "!~", "<=>", "==", "===", "=~",
+        "class", "clone", "define_singleton_method", "display",
+        "dup", "enum_for", "eql?", "equal?", "extend", "freeze",
+        "frozen?", "hash", "inspect", "instance_eval",
+        "instance_exec", "instance_of?", "instance_variable_defined?",
+        "instance_variable_get", "instance_variable_set",
+        "instance_variables", "is_a?", "itself", "kind_of?",
+        "method", "methods", "nil?", "object_id", "private_methods",
+        "protected_methods", "public_method", "public_methods",
+        "public_send", "remove_instance_variable", "respond_to?",
+        "send", "singleton_class", "singleton_method",
+        "singleton_methods", "tap", "then", "to_enum", "to_s",
+        "yield_self",
+    ];
+
     pub(crate) fn universal_arm_name(name: &str) -> bool {
         matches!(name,
             "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?" | "eql?"

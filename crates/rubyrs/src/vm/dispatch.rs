@@ -2586,7 +2586,7 @@ impl Vm {
         // User override only blocks `send` (the reserved-name
         // rule applies only to `__send__`). Same lookup shape
         // as the originals at the two inlined sites.
-        let user_override = name == "send" && match subject {
+        let user_override = matches!(name, "send" | "public_send") && match subject {
             Value::Object(id) => {
                 let cls = self.heap.class_of(*id);
                 self.lookup_method_cached(&cls, name_id, cache_id).is_some()
@@ -4410,6 +4410,24 @@ impl Vm {
                         }
                     }
                     walk(&cls, allow, &mut sids, &mut visited, &mut dead);
+                    // Universal Object methods (kind_of? / == /
+                    // respond_to? / ...) live in builtin arms, not
+                    // user tables, so the walk above can't see them.
+                    // CRuby lists them on every Object-descended
+                    // class (NOT on modules); minitest Mock's blank
+                    // slate enumerates instance_methods to undef
+                    // each one. Tombstoned (dead) and user-shadowed
+                    // names stay excluded. Public-only: they're all
+                    // public, so the private/protected variants
+                    // skip the append.
+                    if !cls.is_module && name == "instance_methods" {
+                        for nm in Self::UNIVERSAL_OBJECT_METHODS {
+                            let sid = self.interner.intern(nm);
+                            if !sids.contains(&sid) && !dead.contains(&sid) {
+                                sids.push(sid);
+                            }
+                        }
+                    }
                 } else {
                     for (k, m) in cls.methods.borrow().iter() {
                         if allow(m.visibility.get()) {
@@ -4620,12 +4638,12 @@ impl Vm {
                         // any class. Evidence: msgpack's Buffer
                         // undefs dup/clone; concurrent-ruby's Map
                         // undefs freeze (the Jekyll require chain).
-                        || matches!(&*nm_owned,
-                            "dup" | "clone" | "freeze"
-                            | "itself" | "tap" | "then" | "yield_self"
-                            | "methods" | "public_methods" | "private_methods"
-                            | "protected_methods" | "singleton_methods"
-                            | "instance_eval" | "display")
+                        // The shared universal-Object list — MUST
+                        // cover everything instance_methods appends
+                        // (Mock's blank slate undefs each listed
+                        // name; see UNIVERSAL_OBJECT_METHODS doc).
+                        || Self::UNIVERSAL_OBJECT_METHODS.contains(&&*nm_owned)
+                        || matches!(&*nm_owned, "instance_eval")
                         || {
                             let mut hit = false;
                             let mut visited: std::collections::HashSet<*const crate::value::Class> =
@@ -7676,8 +7694,13 @@ impl Vm {
                 let mut walker = Some(root);
                 while let Some(c) = walker {
                     if !visited.insert(Rc::as_ptr(&c)) { break; }
-                    if c.undefed.borrow().contains(&name_id) { undefed = true; break; }
+                    // Own-table BEFORE tombstone: a redefine-after-
+                    // undef leaves its stale tombstone behind and
+                    // the new method wins (mirrors
+                    // lookup_method_uncached; minitest Mock undefs
+                    // respond_to? then defines its own).
                     if c.methods.borrow().contains_key(&name_id) { break; }
+                    if c.undefed.borrow().contains(&name_id) { undefed = true; break; }
                     walker = c.superclass.borrow().clone();
                 }
                 if undefed {
@@ -7992,7 +8015,17 @@ impl Vm {
         if let Value::Object(id) = &recv
             && let Some(cls) = self.heap.try_class_of(*id)
         {
-            if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
+            // `force_primitive` (the primitive-alias forwarder's
+            // one-shot flag) skips the USER table here — `alias
+            // __respond_to? respond_to?` snapshots the builtin, so
+            // the forwarder must fall through to the universal arms
+            // even when the class later defines its own
+            // `respond_to?` (minitest Mock's blank-slate pattern:
+            // user respond_to? calls __respond_to?, which without
+            // this gate re-entered the user method — infinite
+            // recursion).
+            if !force_primitive
+                && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
                 self.check_method_visibility(&m, &recv, &name, bypass_visibility)?;
                 self.invoke_method(m, recv.clone(), args.into_vec())?;
                 return Ok(());
@@ -15192,7 +15225,7 @@ impl Vm {
                 let frame_self = self.frames.last()
                     .expect("ICE: do_call_block(no_recv) with empty frames")
                     .self_val.clone();
-                let user_override = &*name == "send" && match &frame_self {
+                let user_override = matches!(&*name, "send" | "public_send") && match &frame_self {
                     Value::Object(id) => {
                         let cls = self.heap.class_of(*id);
                         self.lookup_method_cached(&cls, name_id, cache_id).is_some()
@@ -15426,7 +15459,7 @@ impl Vm {
         // the block-less arm. User-`def send` override + visibility
         // bypass parity — same rules as the block-less arm; see
         // there for the rationale.
-        let user_send_override = &*name == "send" && match &recv {
+        let user_send_override = matches!(&*name, "send" | "public_send") && match &recv {
             Value::Object(id) => {
                 let cls = self.heap.class_of(*id);
                 self.lookup_method_cached(&cls, name_id, cache_id).is_some()

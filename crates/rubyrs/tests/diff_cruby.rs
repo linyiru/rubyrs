@@ -975,3 +975,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn nomethod_receiver_shapes() { run_diff("nomethod_receiver_shapes"); }
 // Kernel#sleep user-override gate (minitest stubs sleep on tests).
 #[test] fn kernel_sleep_override() { run_diff("kernel_sleep_override"); }
+// Blank-slate dispatch family: alias-of-builtin snapshots,
+// instance_methods universals, undef->method_missing,
+// redefine-after-undef, public_send override.
+#[test] fn blank_slate_dispatch() { run_diff("blank_slate_dispatch"); }
