@@ -2565,8 +2565,19 @@ impl Vm {
         args: ArgsBuf,
         recv: Value,
     ) -> Result<CallableOutcome, Trap> {
+        // `Proc#to_proc` — identity (CRuby returns self).
+        if matches!(&recv, Value::Block(_) | Value::CurriedProc(_))
+            && name == "to_proc" && args.is_empty()
+        {
+            self.stack.push(recv.clone());
+            return Ok(CallableOutcome::Handled);
+        }
         if let Value::Block(bid) = &recv
-            && matches!(name, "call" | "[]" | "()" | "yield") {
+            && matches!(name, "call" | "[]" | "()" | "yield" | "===") {
+                // `===` joins the invocation aliases: CRuby's
+                // `Proc#===` CALLS the proc with the operand
+                // (`case x when matcher_proc` and minitest's
+                // mock-test validators ride it).
                 // CRuby exposes block invocation under four names:
                 // `.call(args)`, `.()` (already lowered to `call`
                 // by parsers but kept here defensively), `[args]`
@@ -8288,6 +8299,76 @@ impl Vm {
         // `mustermann/ast/translator.rb:62`:
         //   subclass.const_set(:NodeTranslator, node_translator)
         // — sets a constant on the subclass at class-build time.
+        // `Module#remove_const(:NAME)` — delete the constant and
+        // return its value; NameError when absent (CRuby). Removal
+        // mirrors const_set's dual write surface: Object receivers
+        // (and `Class`/`Module` themselves) own the TOP-LEVEL
+        // table; named owners clear both the qualified global map
+        // and (for class-valued constants) the classes registry
+        // entry; anonymous owners clear their per-class consts
+        // table. uri's `parser=` (Sinatra/rack chains) and
+        // minitest's own suite both scrub constants this way.
+        if &*name == "remove_const" && args.len() == 1
+            && let Value::Class(owner) = &recv
+        {
+            let const_name = match &args[0] {
+                Value::Sym(id) => self.interner.resolve(*id).to_string(),
+                Value::Str(s) => s.to_string_lossy(),
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!("{} is not a symbol nor a string", other.type_name()),
+                    }));
+                }
+            };
+            if !const_name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                return Err(self.trap(RubyError::NameError {
+                    msg: format!("wrong constant name {}", const_name),
+                }));
+            }
+            let owner = owner.clone();
+            // A constant can live in `constants` (value consts,
+            // const_set writes) OR `classes` (`class NAME; end`
+            // registers there only) — removal consults both, and
+            // clears both when a class is aliased into each.
+            let mut remove_key = |vm: &mut Self, key: crate::intern::SymId| -> Option<Value> {
+                let v = vm.constants.remove(&key);
+                let c = vm.classes.remove(&key);
+                v.or(c.map(Value::Class))
+            };
+            let removed: Option<Value> = if matches!(owner.name.as_str(), "Object" | "Class" | "Module") {
+                let key = self.interner.intern(&const_name);
+                remove_key(self, key)
+            } else {
+                match owner.effective_name() {
+                    Some(owner_name) => {
+                        let qualified = format!("{}::{}", owner_name, const_name);
+                        let key = self.interner.intern(&qualified);
+                        let v = remove_key(self, key);
+                        // A nested `class Owner::NAME` also lands in
+                        // the owner's consts table — clear both.
+                        let short = self.interner.intern(&const_name);
+                        let tbl = owner.consts.borrow_mut().remove(&short);
+                        v.or(tbl)
+                    }
+                    None => {
+                        let short = self.interner.intern(&const_name);
+                        owner.consts.borrow_mut().remove(&short)
+                    }
+                }
+            };
+            self.bump_const_gen();
+            match removed {
+                Some(v) => {
+                    self.stack.push(v);
+                    return Ok(());
+                }
+                None => {
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("constant {}::{} not defined", owner.name, const_name),
+                    }));
+                }
+            }
+        }
         if &*name == "const_set" && args.len() == 2
             && let Value::Class(cls) = &recv {
             let const_name = match &args[0] {

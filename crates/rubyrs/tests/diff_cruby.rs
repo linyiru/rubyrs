@@ -167,6 +167,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn metaclass_alias_undef() { run_diff("metaclass_alias_undef"); }
 #[test] fn encoding_defaults() { run_diff("encoding_defaults"); }
 #[cfg(feature = "stdlib")]
+#[test] fn remove_const_forwardable_proc() { run_diff("remove_const_forwardable_proc"); }
+#[cfg(feature = "stdlib")]
 #[test] fn minitest_substrate_extras() { run_diff("minitest_substrate_extras"); }
 #[test] fn string_to_s_passthrough() { run_diff("string_to_s_passthrough"); }
 #[test] fn assign_expr_value() { run_diff("assign_expr_value"); }

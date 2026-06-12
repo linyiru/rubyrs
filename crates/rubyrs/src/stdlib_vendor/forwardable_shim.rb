@@ -54,7 +54,7 @@ module Forwardable
     # / `instance_variable_get(accessor)` stay safe (they don't
     # `class_of` the symbol-ish accessor).
     is_self_class = (accessor_str == "self.class")
-    define_method(ali) do |*args, &blk|
+    body = proc do |*args, &blk|
       target =
         if is_ivar
           instance_variable_get(accessor)
@@ -72,6 +72,15 @@ module Forwardable
       # Kwargs-passing delegates would need a separate fix.
       target.__send__(method, *args, &blk)
     end
+    # Module self (the class-body `extend Forwardable` shape) owns
+    # instance methods; a plain-OBJECT self (CRuby allows
+    # `obj.extend Forwardable; obj.delegate ...` — minitest's
+    # reporter tests do exactly this) gets a singleton method.
+    if is_a?(Module)
+      define_method(ali, &body)
+    else
+      define_singleton_method(ali, &body)
+    end
   end
 
   # CRuby's `instance_delegate(hash)` form is the hash-shaped
@@ -80,6 +89,11 @@ module Forwardable
   # (methods, accessor) pair, define one or many delegates.
   # Not hit by mustermann/sinatra at load time but listed for
   # completeness so a future caller doesn't NoMethodError.
+  # CRuby exposes the hash form as `delegate` too.
+  def delegate(hash)
+    instance_delegate(hash)
+  end
+
   def instance_delegate(hash)
     hash.each do |methods, accessor|
       if methods.respond_to?(:each) && !methods.is_a?(Symbol) && !methods.is_a?(String)
