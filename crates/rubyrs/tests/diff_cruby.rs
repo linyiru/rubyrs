@@ -986,3 +986,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn super_mm_caller_range() { run_diff("super_mm_caller_range"); }
 // String per-instance eigenclass (def s.foo / stub save-restore).
 #[test] fn string_singleton_methods() { run_diff("string_singleton_methods"); }
+// Default-inspect ivar tail, %p dispatch (incl. container elements),
+// str-singleton operator gate, =~ to_str, pattern length-mismatch.
+#[test] fn inspect_ivars_pattern_msg() { run_diff("inspect_ivars_pattern_msg"); }

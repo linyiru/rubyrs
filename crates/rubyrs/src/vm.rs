@@ -17,7 +17,7 @@ mod cext;
 #[cfg(all(feature = "cext", target_os = "wasi"))]
 mod cext_wasi;
 mod vm_ptr;
-mod dispatch;
+pub(crate) mod dispatch;
 mod fileops;
 mod gc;
 mod hash;

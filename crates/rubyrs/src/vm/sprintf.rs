@@ -23,6 +23,12 @@ pub(crate) fn ruby_sprintf(
     heap: &Heap,
     interner: &Interner,
     max_value_bytes: Option<usize>,
+    // Per-arg pre-rendered `%p` forms (parallel to `args`; None =
+    // use the stateless to_inspect). The engine can't dispatch a
+    // user/singleton `inspect`, so `sprintf_prepare_args` renders
+    // those through Vm::inspect_value up front (minitest's
+    // `"%p" % [act]` where act embeds a singleton-inspect object).
+    inspect_overrides: &[Option<String>],
 ) -> Result<String, RubyError> {
     let mut out = String::new();
     let mut idx: usize = 0;
@@ -126,6 +132,7 @@ pub(crate) fn ruby_sprintf(
         let arg = args.get(idx).ok_or_else(|| RubyError::ArgumentError {
             msg: "too few arguments".into(),
         })?;
+        let arg_idx = idx;
         idx += 1;
         let mut body = match spec {
             'd' | 'i' => {
@@ -264,7 +271,10 @@ pub(crate) fn ruby_sprintf(
                 }
                 body
             }
-            'p' => arg.to_inspect(heap, interner),
+            'p' => match inspect_overrides.get(arg_idx).and_then(|o| o.as_ref()) {
+                Some(pre) => pre.clone(),
+                None => arg.to_inspect(heap, interner),
+            },
             'c' => match arg {
                 Value::Int(n) => {
                     char::from_u32(*n as u32).map(|c| c.to_string()).ok_or_else(|| {

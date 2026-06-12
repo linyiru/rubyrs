@@ -1648,15 +1648,20 @@ impl Value {
             // `Object#class` does.
             Value::Object(id) => {
                 let cls = heap.real_class_of(*id);
+                // CRuby's default Object#to_s/#inspect carries the
+                // address (`#<Foo:0x0000...>`); ours carries the
+                // deterministic object_id encoding instead (ADR
+                // 0017 — same value `.object_id`/explicit
+                // `.inspect` report). minitest's mu_pp normalizes
+                // the hex away, but its "No visible difference"
+                // diff messages only trigger when the form HAS a
+                // hex field to normalize.
+                let oid = crate::vm::dispatch::object_id_for(self);
                 if cls.effective_name().is_some() {
-                    format!("#<{}>", cls.name)
+                    format!("#<{}:0x{:016x}>", cls.name, oid)
                 } else {
-                    // Anonymous class: nest the class's own display
-                    // form (#<#<Class:0xN>:0xN>-ish; the instance
-                    // side reuses the class serial — Tier-1 has no
-                    // per-object id to print deterministically).
                     let cd = crate::value::class_display_name(&cls);
-                    format!("#<{}>", cd)
+                    format!("#<{}:0x{:016x}>", cd, oid)
                 }
             }
             Value::Array(id) => {
@@ -1769,6 +1774,45 @@ impl Value {
                     }
                 };
                 format!("{}{}{}", endpoint(&r.begin), sep, endpoint(&r.end))
+            }
+            // Default Object#inspect: `#<Foo:0xID @a=1, @b="x">`
+            // — the ivar tail is what minitest's hex-diff messages
+            // key on (its absence made unequal-but-same-shape
+            // objects "No visible difference"). Divergences from
+            // CRuby (documented): ivars render NAME-SORTED (the
+            // backing FxHashMap has no insertion order), and an
+            // Object-valued ivar prints its to_display short form
+            // instead of recursing (no cycle guard at this layer —
+            // a self-referential ivar would otherwise overflow).
+            Value::Object(id) => {
+                let head = self.to_display(heap, interner);
+                let inst_ivars = match heap.get(*id) {
+                    HeapObj::Instance(inst) => Some(&inst.ivars),
+                    _ => None,
+                };
+                match inst_ivars {
+                    Some(iv) if !iv.is_empty() => {
+                        let mut pairs: Vec<(String, String)> = iv
+                            .iter()
+                            .map(|(k, v)| {
+                                let val = match v {
+                                    Value::Object(_) => v.to_display(heap, interner),
+                                    _ => v.to_inspect(heap, interner),
+                                };
+                                (interner.resolve(*k).to_string(), val)
+                            })
+                            .collect();
+                        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                        let body: Vec<String> = pairs
+                            .into_iter()
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect();
+                        // head is "#<Foo:0xID>" — splice the ivars
+                        // before the closing '>'.
+                        format!("{} {}>", &head[..head.len() - 1], body.join(", "))
+                    }
+                    _ => head,
+                }
             }
             // `Rational#inspect` wraps the `num/den` display form
             // in parens to match CRuby (`Rational(1, 2).inspect ==

@@ -1768,31 +1768,53 @@ impl Vm {
     /// DIVERGENCE: `%p` on such an object then inspects the
     /// pre-rendered String (quoted) instead of calling the object's
     /// `inspect` — acceptable until ruby_sprintf learns to dispatch.
-    pub(crate) fn sprintf_prepare_args(&mut self, args: &[Value]) -> Result<Vec<Value>, Trap> {
-        if !args.iter().any(|v| matches!(v, Value::Object(_))) {
-            return Ok(args.to_vec());
+    pub(crate) fn sprintf_prepare_args(
+        &mut self,
+        fmt: &str,
+        args: &[Value],
+    ) -> Result<(Vec<Value>, Vec<Option<String>>), Trap> {
+        let wants_p = fmt.contains("%p") || fmt.contains("$p");
+        let needs_prep = args.iter().any(|v| matches!(v, Value::Object(_)))
+            || (wants_p
+                && args.iter().any(|v| matches!(v, Value::Hash(_) | Value::Array(_))));
+        if !needs_prep {
+            return Ok((args.to_vec(), Vec::new()));
         }
         let to_s_id = self.interner.intern("to_s");
+        let inspect_id = self.interner.intern("inspect");
         let snapshot: Vec<Value> = args.to_vec();
         let mut g = PinGuard::new(self);
         for a in &snapshot { g.pin(a.clone()); }
         let mut out = Vec::with_capacity(snapshot.len());
+        // `%p` consumes inspect, not to_s — and the stateless
+        // engine can't dispatch a user/singleton inspect (or reach
+        // a Hash/Array ELEMENT bearing one), so those args get a
+        // pre-rendered override via the dispatching, cycle-safe
+        // inspect_value. The arg itself stays untouched (a `%s` on
+        // the same arg still sees the real value).
+        let mut overrides: Vec<Option<String>> = Vec::with_capacity(snapshot.len());
         for v in &snapshot {
-            let has_user_to_s = match v {
+            let (has_user_to_s, has_user_inspect) = match v {
                 Value::Object(id) => {
                     let cls = g.vm.heap.class_of(*id);
-                    g.vm.lookup_method_uncached(&cls, to_s_id).is_some()
+                    (g.vm.lookup_method_uncached(&cls, to_s_id).is_some(),
+                     g.vm.lookup_method_uncached(&cls, inspect_id).is_some())
                 }
-                _ => false,
+                _ => (false, false),
             };
-            if has_user_to_s {
+            if wants_p && (has_user_inspect || matches!(v, Value::Hash(_) | Value::Array(_))) {
+                overrides.push(Some(g.vm.inspect_value(v)?));
+            } else {
+                overrides.push(None);
+            }
+            if has_user_to_s && !has_user_inspect {
                 let s = g.vm.stringify_for_output(v, false)?;
                 out.push(Value::new_str(s));
             } else {
                 out.push(v.clone());
             }
         }
-        Ok(out)
+        Ok((out, overrides))
     }
 
     /// CRuby-shaped Proc rendering: `#<Proc:0xADDR file:line>`
@@ -10699,7 +10721,29 @@ impl Vm {
                 Value::Sym(sid) => Value::new_str(self.interner.resolve(*sid).to_string()),
                 other => other.clone(),
             };
-            let result = match (&recv, &args[0]) {
+            // CRuby's Regexp#=~ coerces a non-String operand
+            // through to_str (assert_match's matchee contract:
+            // `def obj.to_str; "blah"; end`). Synchronous user
+            // dispatch, same pattern as the sleep override gate.
+            let arg0: Value = match (&recv, &args[0]) {
+                (Value::Regex(_), Value::Object(oid)) => {
+                    let to_str_id = self.interner.intern("to_str");
+                    let cls = self.heap.class_of(*oid);
+                    match self.lookup_method_uncached(&cls, to_str_id) {
+                        Some(m) => {
+                            let pre_frames = self.frames.len();
+                            self.invoke_method(m, args[0].clone(), Vec::new())?;
+                            if self.frames.len() > pre_frames {
+                                self.dispatch_until(pre_frames)?;
+                            }
+                            self.stack.pop().unwrap_or(Value::Nil)
+                        }
+                        None => args[0].clone(),
+                    }
+                }
+                _ => args[0].clone(),
+            };
+            let result = match (&recv, &arg0) {
                 #[cfg(feature = "regex")]
                 (Value::Regex(re), Value::Str(s)) | (Value::Str(s), Value::Regex(re)) => {
                     let bound = s.to_string_lossy();
@@ -11332,8 +11376,10 @@ impl Vm {
                 self.stack.push(Value::new_str(s));
                 return Ok(());
             }
-            let oid = object_id_for(&recv);
-            let s = format!("#<{}:0x{:016x}>", cls_name, oid);
+            // Default form (with the ivar tail) — shared with
+            // Array/Hash element rendering via Value::to_inspect.
+            let _ = cls_name;
+            let s = recv.to_inspect(&self.heap, &self.interner);
             self.stack.push(Value::new_str(s));
             return Ok(());
         }

@@ -2002,12 +2002,13 @@ impl Vm {
                         })));
                     }
                 };
-                let fmt_args = match self.sprintf_prepare_args(&args[1..]) {
+                let (fmt_args, p_overrides) = match self.sprintf_prepare_args(&fmt, &args[1..]) {
                     Ok(v) => v,
                     Err(t) => return Some(Err(t)),
                 };
                 let out = match crate::vm::ruby_sprintf(
                     &fmt, &fmt_args, &self.heap, &self.interner, self.max_value_bytes,
+                    &p_overrides,
                 ) {
                     Ok(s) => s,
                     Err(e) => return Some(Err(self.trap(e))),

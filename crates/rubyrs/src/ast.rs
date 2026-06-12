@@ -974,6 +974,39 @@ fn pm_bind(anchor: &Node<'_>, name: &str, value: SExpr) -> SExpr {
     ]))
 }
 
+/// Fixed expected length of a top-level array pattern WITHOUT a
+/// rest splat (`[Integer, Integer]` → Some(2); `[a, *r]` → None).
+/// Feeds the CRuby-shaped "length mismatch (given N, expected M)"
+/// tail of NoMatchingPatternError via __rubyrs_pm_fail_msg —
+/// minitest's assert_pattern asserts /length mismatch/.
+fn pm_fixed_array_len(pat: &Node<'_>) -> Option<usize> {
+    let ap = pat.as_array_pattern_node()?;
+    if ap.rest().is_some() || !ap.posts().is_empty() {
+        return None;
+    }
+    Some(ap.requireds().len())
+}
+
+fn pm_fail_msg_args(anchor: &Node<'_>, subj: &str, pat: &Node<'_>) -> Vec<SExpr> {
+    let mut args = vec![
+        sp(anchor, Expr::ConstRead("NoMatchingPatternError".into())),
+    ];
+    let msg = match pm_fixed_array_len(pat) {
+        Some(n) => sp(anchor, Expr::Call {
+            receiver: None,
+            name: "__rubyrs_pm_fail_msg".into(),
+            args: vec![
+                pm_lvar(anchor, subj),
+                sp(anchor, Expr::IntLit(n as i64)),
+            ],
+            kwargs_trailing: false,
+        }),
+        None => pm_meth(anchor, pm_lvar(anchor, subj), "inspect", vec![]),
+    };
+    args.push(msg);
+    args
+}
+
 fn pm_lvar(anchor: &Node<'_>, name: &str) -> SExpr {
     sp(anchor, Expr::LVarRead(name.to_string()))
 }
@@ -1065,15 +1098,30 @@ fn tr_pattern_construct(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> Option
         // Innermost else: the `else` clause body, or the no-match raise.
         let mut else_body: Vec<SExpr> = match cm.else_clause() {
             Some(e) => e.statements().map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect()).unwrap_or_default(),
-            None => vec![sp(node, Expr::Call {
-                receiver: None,
-                name: "raise".into(),
-                args: vec![
-                    sp(node, Expr::ConstRead("NoMatchingPatternError".into())),
-                    pm_meth(node, pm_lvar(node, &subj), "inspect", vec![]),
-                ],
-                kwargs_trailing: false,
-            })],
+            None => {
+                // Single-arm `case/in` gets the length-aware
+                // message (the failing pattern is unambiguous);
+                // multi-arm keeps the bare inspect form.
+                let arms: Vec<_> = cm.conditions().iter().collect();
+                let single_pat = if arms.len() == 1 {
+                    arms[0].as_in_node().map(|inn| inn.pattern())
+                } else {
+                    None
+                };
+                let args = match &single_pat {
+                    Some(p) => pm_fail_msg_args(node, &subj, p),
+                    None => vec![
+                        sp(node, Expr::ConstRead("NoMatchingPatternError".into())),
+                        pm_meth(node, pm_lvar(node, &subj), "inspect", vec![]),
+                    ],
+                };
+                vec![sp(node, Expr::Call {
+                    receiver: None,
+                    name: "raise".into(),
+                    args,
+                    kwargs_trailing: false,
+                })]
+            }
         };
         // Fold the `in` arms in reverse so each becomes the else of the
         // previous If.
@@ -1130,10 +1178,7 @@ fn tr_pattern_construct(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> Option
         let raise = sp(node, Expr::Call {
             receiver: None,
             name: "raise".into(),
-            args: vec![
-                sp(node, Expr::ConstRead("NoMatchingPatternError".into())),
-                pm_meth(node, pm_lvar(node, &subj), "inspect", vec![]),
-            ],
+            args: pm_fail_msg_args(node, &subj, &mr.pattern()),
             kwargs_trailing: false,
         });
         let check = sp(node, Expr::If {

@@ -499,3 +499,23 @@ end
 ## CRuby-shape rescue parity.
 class NoMemoryError < Exception
 end
+
+# NoMatchingPatternError message builder for the pattern-matching
+# desugar (ast.rs): CRuby 3.1+ shapes an array-pattern length
+# failure as "SUBJ: SUBJ length mismatch (given N, expected M)"
+# (minitest's assert_pattern asserts on /length mismatch/). The
+# desugar can't know WHY a pattern failed, so this recovers the
+# dominant case — subject deconstructs to a different length than
+# the fixed-size pattern; everything else keeps the bare inspect.
+def __rubyrs_pm_fail_msg(subj, expected_len)
+  i = subj.inspect
+  unless subj.is_a?(Array) || subj.respond_to?(:deconstruct)
+    return "#{i}: #{i} does not respond to #deconstruct"
+  end
+  probe = subj.is_a?(Array) ? subj : subj.deconstruct
+  if probe.respond_to?(:length) && probe.length != expected_len
+    "#{i}: #{probe.inspect} length mismatch (given #{probe.length}, expected #{expected_len})"
+  else
+    i
+  end
+end

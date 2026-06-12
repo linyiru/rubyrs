@@ -2808,8 +2808,8 @@ impl Vm {
                             _ => std::slice::from_ref(single_arg),
                         };
                         let fmt_str = s.to_string_lossy();
-                        let prepared = self.sprintf_prepare_args(fmt_args)?;
-                        let out = ruby_sprintf(&fmt_str, &prepared, &self.heap, &self.interner, self.max_value_bytes)
+                        let (prepared, p_overrides) = self.sprintf_prepare_args(&fmt_str, fmt_args)?;
+                        let out = ruby_sprintf(&fmt_str, &prepared, &self.heap, &self.interner, self.max_value_bytes, &p_overrides)
                             .map_err(|e| self.trap(e))?;
                         if let Some(max) = self.max_value_bytes
                             && out.len() > max {

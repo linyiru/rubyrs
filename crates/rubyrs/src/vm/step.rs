@@ -4131,6 +4131,17 @@ impl Vm {
             }
             Op::BinOpInt(kind, rhs) => {
                 let a = self.stack.pop().expect("ICE: BinOpInt lhs underflow");
+                // Str-singleton operator-override gate (see Op::BinOp).
+                if self.any_str_singletons
+                    && matches!(&a, Value::Str(s)
+                        if self.str_singletons.contains_key(&(std::rc::Rc::as_ptr(s) as usize)))
+                {
+                    self.stack.push(a);
+                    self.stack.push(Value::Int(rhs));
+                    let name_id = self.interner.intern(kind.name());
+                    self.do_call(name_id, 1, false, u16::MAX)?;
+                    return Ok(true);
+                }
                 if let Value::Int(x) = a {
                     // Int / 0 and Int % 0 raise ZeroDivisionError;
                     // Rust's `wrapping_div` / `wrapping_rem` panic
@@ -4178,6 +4189,21 @@ impl Vm {
             Op::BinOp(kind) => {
                 let b = self.stack.pop().expect("ICE: BinOp rhs underflow");
                 let a = self.stack.pop().expect("ICE: BinOp lhs underflow");
+                // A String carrying a per-instance eigenclass may
+                // override operators (`def exp.== _; false; end` —
+                // minitest's long_invisible test); operator SYNTAX
+                // otherwise never consults user tables. Set-once
+                // gate keeps this a single false branch normally.
+                if self.any_str_singletons
+                    && matches!(&a, Value::Str(s)
+                        if self.str_singletons.contains_key(&(std::rc::Rc::as_ptr(s) as usize)))
+                {
+                    self.stack.push(a);
+                    self.stack.push(b);
+                    let name_id = self.interner.intern(kind.name());
+                    self.do_call(name_id, 1, false, u16::MAX)?;
+                    return Ok(true);
+                }
                 if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
                     // Same guard as `Op::BinOpInt` — divide / mod
                     // by literal 0 in the Int×Int fast path. Without
@@ -4242,6 +4268,19 @@ impl Vm {
                     },
                     None => unreachable!("BinOpLocalLocal with empty frame stack"),
                 };
+                // Same str-singleton operator-override gate as
+                // Op::BinOp above (assert_equal's `exp == act`
+                // compiles to this superinstruction).
+                if self.any_str_singletons
+                    && matches!(&a, Value::Str(s)
+                        if self.str_singletons.contains_key(&(std::rc::Rc::as_ptr(s) as usize)))
+                {
+                    self.stack.push(a);
+                    self.stack.push(b);
+                    let name_id = self.interner.intern(kind.name());
+                    self.do_call(name_id, 1, false, u16::MAX)?;
+                    return Ok(true);
+                }
                 if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
                     // Same divide/mod-by-zero guard as the other BinOp
                     // arms — `n / m` with a zero RHS raises rather than
