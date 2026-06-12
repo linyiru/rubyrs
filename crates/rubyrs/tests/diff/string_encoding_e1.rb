@@ -42,3 +42,9 @@ t("encode u2b asc") { "abc".encode("ASCII-8BIT").encoding }
 t("encode u2b bad") { "é".encode("ASCII-8BIT") }
 t("plus mixed asc") { ("abc" + "def".b).encoding }
 t("eq cross asc")   { "abc" == "abc".b }
+# CRuby aliases the bare-ASCII constant family to US-ASCII —
+# minitest's encoding-diff test forces via Encoding::ASCII.
+t("ASCII alias")    { Encoding::ASCII }
+t("ASCII identity") { Encoding::ASCII.equal?(Encoding::US_ASCII) }
+t("force ASCII")    { "bad-\xF1".b.dup.force_encoding(Encoding::ASCII).encoding }
+t("ASCII valid?")   { "bad-\xF1".b.dup.force_encoding(Encoding::ASCII).valid_encoding? }

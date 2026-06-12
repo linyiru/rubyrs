@@ -2689,6 +2689,10 @@ class Encoding
 end
 Encoding::UTF_8 = Encoding.new("UTF-8")
 Encoding::US_ASCII = Encoding.new("US-ASCII")
+## CRuby aliases the bare-ASCII constant family to US-ASCII
+## (Encoding::ASCII.equal?(Encoding::US_ASCII) is true) —
+## minitest's encoding-diff test forces via Encoding::ASCII.
+Encoding::ASCII = Encoding::US_ASCII
 Encoding::ASCII_8BIT = Encoding.new("ASCII-8BIT")
 Encoding::BINARY = Encoding::ASCII_8BIT
 
