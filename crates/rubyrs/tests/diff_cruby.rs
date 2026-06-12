@@ -917,3 +917,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn method_defined_visibility() { run_diff("method_defined_visibility"); }
 // Array#delete_at value/negative/out-of-range forms.
 #[test] fn array_delete_at() { run_diff("array_delete_at"); }
+// Vendored OptionParser (minitest process_args surface) — stdlib-gated.
+#[cfg(feature = "stdlib")]
+#[test] fn optparse_minitest_surface() { run_diff("optparse_minitest_surface"); }

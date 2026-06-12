@@ -132,6 +132,11 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         "etc" => Some(include_str!("stdlib_vendor/etc.rb")),
         "timeout" => Some(include_str!("stdlib_vendor/timeout.rb")),
         "monitor" => Some(include_str!("stdlib_vendor/monitor.rb")),
+        // OptionParser: declarative-on + parse! subset (minitest's
+        // process_args). Replaces the old lenient shell, which
+        // accepted the DSL but parsed nothing — minitest then
+        // appended a fallback "--seed 0" and ignored every filter.
+        "optparse" => Some(include_str!("stdlib_vendor/optparse.rb")),
         "set" => Some(include_str!("stdlib_vendor/set.rb")),
         "stringio" => Some(include_str!("stdlib_vendor/stringio.rb")),
         "strscan" => Some(include_str!("stdlib_vendor/strscan.rb")),

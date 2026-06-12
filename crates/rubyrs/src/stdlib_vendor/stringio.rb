@@ -114,7 +114,12 @@ class StringIO
   end
 
   # In-memory buffer is always "synced" — accept and ignore the
-  # writer (minitest's metametameta harness sets `io.sync = true`).
+  # writer (minitest's metametameta harness sets `io.sync = true`);
+  # flush is likewise a no-op returning self.
+  def flush
+    self
+  end
+
   def sync
     true
   end

@@ -3318,7 +3318,6 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
         // `require 'time'` then references bare `DateTime`.
         "time" => &[("Date", false), ("DateTime", false)],
         "csv" => &[("CSV", false)],
-        "optparse" => &[("OptionParser", false)],
         "english" | "English" => &[],
         "bigdecimal" => &[("BigDecimal", false)],
         "monitor" => &[("Monitor", false), ("MonitorMixin", true)],
@@ -3374,7 +3373,9 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         // jekyll-sass-converter: shim routes SCSS→CSS to the grass
         // `sass` battery instead of native sass-embedded.
         | "jekyll-sass-converter"
-        | "optparse" | "english" | "English"
+        | "english" | "English"
+        // `optparse`: vendored real parser (stdlib_vendor/optparse.rb)
+        | "optparse"
         | "bigdecimal" | "monitor" | "erb"
         // `etc`: vendored Etc.nprocessors subset (stdlib_vendor/etc.rb)
         // — minitest requires it unconditionally at load.

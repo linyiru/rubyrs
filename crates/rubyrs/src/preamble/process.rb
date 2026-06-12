@@ -170,3 +170,12 @@ end
 def system(*_args)
   nil
 end
+
+# Warning — CRuby's warning-control module (Warning.warn override
+# point, Warning[]= category toggles). Tier-1 ships the bare
+# module so feature probes (`::Warning.respond_to? :[]=` —
+# minitest's process_args does this at option-build time) resolve
+# the constant and answer false; rubyrs has no warning categories
+# to toggle.
+module Warning
+end
