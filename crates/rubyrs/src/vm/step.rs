@@ -2165,6 +2165,7 @@ impl Vm {
                         ),
                     })),
                 };
+                let name_id = self.super_runtime_name(name_id);
                 let (m, self_val) = self.super_lookup(name_id)?;
                 self.invoke_method_with_block(m, self_val, args, block_id)?;
             }

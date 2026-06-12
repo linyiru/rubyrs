@@ -11644,6 +11644,16 @@ impl Vm {
     /// no cell, hence this explicit shortcut). A block top frame
     /// always carries `Shared` locals, so the writeback-chain walk
     /// applies unchanged.
+    /// Effective `super` dispatch name: the lexical owner frame's
+    /// runtime-stamped name (define_method bodies) when present,
+    /// else the compile-time name the op carried.
+    pub(crate) fn super_runtime_name(&self, compiled: crate::intern::SymId) -> crate::intern::SymId {
+        self.lexical_owner_of_top()
+            .and_then(|idx| self.frames[idx].aux.as_ref())
+            .and_then(|aux| aux.invoked_name)
+            .unwrap_or(compiled)
+    }
+
     pub(crate) fn lexical_owner_of_top(&self) -> Option<usize> {
         let f = self.frames.last()?;
         if !f.is_block {
@@ -12340,7 +12350,18 @@ impl Vm {
                 // defaults), so all params are "given".
                 n_given_positional: given as u16,
                 kw_given_mask: 0,
-                aux: None, pending_yield: false,
+                // Stamp the installed name so super()/__method__
+                // inside the body resolve against the RUNTIME name
+                // (see FrameAux::invoked_name). The aux box is an
+                // extra alloc, but only on this already-slow
+                // closure path.
+                aux: m.original_name.map(|nm| {
+                    Box::new(crate::vm::FrameAux {
+                        invoked_name: Some(nm),
+                        ..Default::default()
+                    })
+                }),
+                pending_yield: false,
                 block_writeback: None,
             });
             // $~ scoping is LAZY now — save_match_scope_on_write fires on

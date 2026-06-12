@@ -258,6 +258,16 @@ pub(crate) struct Frame {
 ///   (code-review #306 round 1 / the `3134717c` dynamic scoping).
 #[derive(Default)]
 pub(crate) struct FrameAux {
+    /// The RUNTIME name a `define_method`-installed method was
+    /// invoked under. `def`-compiled methods bake their name into
+    /// the proto, but a define_method body is a BLOCK proto whose
+    /// compile-time name is its lexical context — useless for
+    /// `super()` resolution and `__method__` (minitest/spec's
+    /// before/after hooks are `define_method :setup do super() …`).
+    /// The closure-method invoke path stamps the installed name
+    /// here; `super_runtime_name` and `__method__` prefer it.
+    /// Lives in the cold aux box so plain frames don't grow.
+    pub(crate) invoked_name: Option<crate::intern::SymId>,
     pub(crate) rescues: Vec<RescueHandler>,
     pub(crate) loop_rescue_depths: Vec<usize>,
     pub(crate) loop_stack_depths: Vec<usize>,

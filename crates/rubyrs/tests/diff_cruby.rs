@@ -166,6 +166,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn class_object_instance_dispatch() { run_diff("class_object_instance_dispatch"); }
 #[test] fn metaclass_alias_undef() { run_diff("metaclass_alias_undef"); }
 #[test] fn encoding_defaults() { run_diff("encoding_defaults"); }
+#[test] fn define_method_runtime_name() { run_diff("define_method_runtime_name"); }
 #[cfg(feature = "stdlib")]
 #[test] fn remove_const_forwardable_proc() { run_diff("remove_const_forwardable_proc"); }
 #[cfg(feature = "stdlib")]

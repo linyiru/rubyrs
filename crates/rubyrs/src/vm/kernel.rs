@@ -425,6 +425,13 @@ impl Vm {
                     let mut found = None;
                     for f in self.frames.iter().rev() {
                         if f.is_block || f.is_class_body { continue; }
+                        // define_method frames stamp their RUNTIME
+                        // name in aux (the proto name is the block's
+                        // lexical context, e.g. "<block>").
+                        if let Some(nm) = f.aux.as_ref().and_then(|a| a.invoked_name) {
+                            found = Some(self.interner.resolve(nm).to_string());
+                            break;
+                        }
                         let n = &self.protos[f.proto_idx].name;
                         if n == "<main>" { break; }
                         found = Some(n.clone());

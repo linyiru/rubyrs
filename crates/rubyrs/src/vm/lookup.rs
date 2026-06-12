@@ -1998,6 +1998,8 @@ impl Vm {
         name_id: SymId,
         args: Vec<Value>,
     ) -> Result<(), crate::error::Trap> {
+        // define_method bodies super under their RUNTIME name.
+        let name_id = self.super_runtime_name(name_id);
         match self.super_lookup(name_id) {
             Ok((m, self_val)) => self.invoke_method(m, self_val, args),
             Err(trap) => {
