@@ -4003,6 +4003,38 @@ impl Vm {
                     None => Value::Nil,
                 })
             }
+            // Block-form `rindex { |e| … }` — last index whose
+            // element satisfies the block (reverse iteration, so
+            // the FIRST truthy hit from the tail wins). minitest's
+            // filter_backtrace: `bt.rindex { |s| s.match? RE }`.
+            (Value::Array(id), "rindex", []) => {
+                let id = *id;
+                let snapshot: Vec<Value> = self.heap.array(id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(id));
+                g.pin(Value::Block(block));
+                for v in &snapshot {
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut found: Option<i64> = None;
+                let mut early = None;
+                let len = snapshot.len();
+                for i in (0..len).rev() {
+                    let v = snapshot[i].clone();
+                    let r = match g.vm.step_block1(block, v, pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    if r.is_truthy() { found = Some(i as i64); break; }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                Some(match found {
+                    Some(i) => Value::Int(i),
+                    None => Value::Nil,
+                })
+            }
             (Value::Array(id), "find_index", []) | (Value::Array(id), "index", []) => {
                 let id = *id;
                 let snapshot: Vec<Value> = self.heap.array(id).clone();

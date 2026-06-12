@@ -874,3 +874,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // into the caller's $1.. (uses =~, so regex-gated like scan_fancy_regex).
 #[cfg(feature = "regex")]
 #[test] fn frame_local_match() { run_diff("frame_local_match"); }
+// Array#rindex value + block forms (minitest backtrace filter).
+#[test] fn array_rindex() { run_diff("array_rindex"); }

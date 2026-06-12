@@ -480,6 +480,25 @@ impl Vm {
                     // target, or nil. The block form lives in
                     // iter.rs; the no-arg-no-block form returns
                     // an Enumerator in CRuby (not implemented).
+                    // `rindex(value)` — LAST index whose element
+                    // ruby_eq-matches, nil when absent (the reverse
+                    // twin of `index`; block form lives in iter.rs).
+                    // minitest's backtrace filter anchors on it.
+                    ("rindex", [target]) => {
+                        let len = self.heap.array(id).len();
+                        let mut found: Option<i64> = None;
+                        for i in (0..len).rev() {
+                            let el = self.heap.array(id)[i].clone();
+                            if el.ruby_eq(target, &self.heap) {
+                                found = Some(i as i64);
+                                break;
+                            }
+                        }
+                        Some(match found {
+                            Some(i) => Value::Int(i),
+                            None => Value::Nil,
+                        })
+                    }
                     ("find_index", [target]) | ("index", [target]) => {
                         let target = target.clone();
                         let len = self.heap.array(id).len();
