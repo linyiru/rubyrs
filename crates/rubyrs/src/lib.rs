@@ -2595,6 +2595,29 @@ class Encoding
   ## `Encoding.find("missing")` shape (and avoiding the equality-
   ## breaking trap of returning two different `.new` instances for
   ## the same name).
+  ## Process-default encodings. rubyrs's string model is UTF-8
+  ## throughout (binary tags exist per-string; see RStr.encoding),
+  ## so both defaults are the UTF-8 singleton — equivalent to
+  ## CRuby launched with `-Eutf-8`. Writers accept-and-ignore
+  ## non-UTF-8 values rather than raising: callers like minitest's
+  ## suite guard (`Encoding.default_external != Encoding::UTF_8`
+  ## → warn) only ever read.
+  def self.default_external
+    UTF_8
+  end
+
+  def self.default_external=(_enc)
+    UTF_8
+  end
+
+  def self.default_internal
+    UTF_8
+  end
+
+  def self.default_internal=(_enc)
+    UTF_8
+  end
+
   def self.find(name)
     # Case-insensitive only — match CRuby's actual behaviour.
     # ERB and similar consumers feed values from magic-comment
