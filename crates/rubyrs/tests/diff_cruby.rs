@@ -913,3 +913,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Anonymous-class closure captures / class-ivar GC roots (minitest
 // Spec registry shape). Meaningful under the STRESS_GC=1 job.
 #[test] fn anon_class_closure_gc() { run_diff("anon_class_closure_gc"); }
+// public/private/protected_method_defined? (minitest Spec nested-it).
+#[test] fn method_defined_visibility() { run_diff("method_defined_visibility"); }

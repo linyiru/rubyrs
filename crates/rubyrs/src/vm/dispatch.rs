@@ -4435,6 +4435,48 @@ impl Vm {
                 self.stack.push(Value::Bool(answer));
                 Ok(true)
             }
+            // Visibility-filtered method_defined? triplet. The
+            // optional second arg (inherit flag) is accepted like
+            // method_defined?'s. minitest's Spec DSL `it` walks
+            // `children.reject { |c| c.public_method_defined? name }`
+            // — its absence aborted every NESTED describe's it
+            // registration (leaf describes never call it, which is
+            // why 41 of 76 specs still registered).
+            ("public_method_defined?", [first])
+            | ("public_method_defined?", [first, _])
+            | ("private_method_defined?", [first])
+            | ("private_method_defined?", [first, _])
+            | ("protected_method_defined?", [first])
+            | ("protected_method_defined?", [first, _]) => {
+                let sid = match first {
+                    Value::Sym(sid) => *sid,
+                    Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!("{} is not a symbol nor a string", other.type_name()),
+                        }));
+                    }
+                };
+                let want = match name {
+                    "public_method_defined?" => crate::value::Visibility::Public,
+                    "private_method_defined?" => crate::value::Visibility::Private,
+                    _ => crate::value::Visibility::Protected,
+                };
+                // User methods carry visibility on the Method
+                // record; primitive/builtin surfaces (the sentinel
+                // probe inside class_method_defined) are all
+                // public, so a defined-but-not-user-table hit
+                // answers true only for the Public variant.
+                let answer = match self.lookup_method_uncached(&cls, sid) {
+                    Some(m) => m.visibility.get() == want,
+                    None => {
+                        want == crate::value::Visibility::Public
+                            && class_method_defined(self, &cls, sid)
+                    }
+                };
+                self.stack.push(Value::Bool(answer));
+                Ok(true)
+            }
             ("undef_method", args) => {
                 // REAL undef since the minitest-substrate work: each
                 // name gets a tombstone on THIS class (see
