@@ -927,6 +927,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn range_string_map() { run_diff("range_string_map"); }
 // undef_method kills same-class methods (tombstone + table removal).
 #[test] fn undef_own_class_method() { run_diff("undef_own_class_method"); }
-// super from overrides into Object#send/===; StringIO mode arg.
-#[cfg(feature = "stdlib")]
+// super from overrides into Object#send/=== — UNGATED so the
+// default-features Coverage job exercises the ApplySuperBlock
+// fallback lines in step.rs (stdlib-gating it dropped step.rs
+// below the per-file ratchet).
 #[test] fn super_into_dispatch_builtins() { run_diff("super_into_dispatch_builtins"); }

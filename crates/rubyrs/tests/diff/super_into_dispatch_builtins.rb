@@ -1,8 +1,6 @@
 # `super` from an override into Object's dispatch-level builtins
 # (send/__send__/public_send/===) — minitest Mock's blank-slate
-# keeps passthrough overrides that super up. StringIO.new also
-# takes an optional mode string.
-require "stringio"
+# keeps passthrough overrides that super up.
 class BlankIsh
   def method_missing(sym, *args)
     [:mm, sym, args]
@@ -34,6 +32,28 @@ class DefSend
   end
 end
 p DefSend.new.send(:zork)
-io = StringIO.new(+"", "w")
-io.write "ok"
-p io.string
+# error paths of the substitution: super() with no forwarded name,
+# and a non-symbol name
+class BadSend
+  def method_missing(*); :nope; end
+  def send(*_args)
+    super()
+  end
+  def send2(x)
+    self.send(x)
+  end
+end
+begin
+  BadSend.new.send(:x)
+rescue ArgumentError => e
+  puts "no-name: ArgumentError"
+end
+class NumSend
+  def method_missing(*); :n; end
+  define_method(:send) { |*a, &b| super(*a, &b) }
+end
+begin
+  NumSend.new.send(42)
+rescue TypeError => e
+  puts "non-sym: TypeError"
+end

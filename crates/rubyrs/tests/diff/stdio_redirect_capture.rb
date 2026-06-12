@@ -28,3 +28,7 @@ puts "via-dup"
 $stdout.flush
 $stdout = orig
 puts "after-restore"
+# StringIO.new accepts the optional MODE argument.
+io2 = StringIO.new(+"", "w")
+io2.write "ok"
+p io2.string
