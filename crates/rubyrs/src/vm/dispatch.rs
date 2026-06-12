@@ -8452,6 +8452,24 @@ impl Vm {
             // would collapse `("" + "BAZ")` into a toplevel-aliasing
             // key); a named/assigned owner mirrors into the global
             // qualified maps so external `Owner::BAZ` reads resolve.
+            // Object/Class/Module receivers install at the TOP LEVEL
+            // under the bare name — CRuby: Object's constants ARE the
+            // toplevel constants (`Object.const_set :RuntimeError, k`
+            // must restore what `remove_const :RuntimeError` took, or
+            // `raise "msg"`'s RuntimeError lookup dies; minitest's
+            // const round-trip tests do exactly this). Mirrors the
+            // bare-key branch in the remove_const arm above — keep
+            // the two symmetric.
+            if matches!(cls.name.as_str(), "Object" | "Class" | "Module") {
+                if let Value::Class(installed) = &value {
+                    self.name_anon_class(installed, &const_name);
+                    self.classes.insert(const_id, installed.clone());
+                }
+                self.constants.insert(const_id, value.clone());
+                self.bump_const_gen();
+                self.stack.push(value);
+                return Ok(());
+            }
             match cls.effective_name() {
                 None => {
                     // Anonymous receiver — route through the

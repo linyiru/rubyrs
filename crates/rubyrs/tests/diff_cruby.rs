@@ -902,3 +902,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn time_civil_constructors() { run_diff("time_civil_constructors"); }
 // respond_to? surface: String#=~, Kernel-private include_all bits.
 #[test] fn respond_to_surface() { run_diff("respond_to_surface"); }
+// Object.const_set installs at toplevel under the bare name —
+// minitest's RuntimeError remove/restore round-trip.
+#[test] fn const_set_toplevel_roundtrip() { run_diff("const_set_toplevel_roundtrip"); }
