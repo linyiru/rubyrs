@@ -2248,6 +2248,43 @@ impl Vm {
                     .last()
                     .map(|f| matches!(f.self_val, Value::Class(_)))
                     .unwrap_or(false);
+                // CRuby: `super` with no superclass method falls
+                // back to `method_missing` on self (BasicObject's
+                // default then raises the same NoMethodError, so
+                // programs WITHOUT a user method_missing are
+                // unaffected). minitest's test_dynamic_method
+                // depends on this: a stub super-forwarder
+                // (`define_method(:found) { super(...) }`) on a
+                // class whose only `found` lives in
+                // `def self.method_missing`.
+                if is_no_super && !is_lifecycle_hook {
+                    let self_val = self.frames.last().map(|f| f.self_val.clone());
+                    let mm_id = self.interner.intern("method_missing");
+                    // `super` FROM method_missing itself must not
+                    // fall back to the same method_missing — that's
+                    // the infinite-recursion shape. CRuby resolves
+                    // it to BasicObject#method_missing (raise);
+                    // skipping the fallback reaches our raise the
+                    // same way (method_missing_on_class fixture's
+                    // MFilter#method_missing super-filter).
+                    if name_id == mm_id {
+                        return Err(trap);
+                    }
+                    let mm = match &self_val {
+                        Some(Value::Class(c)) => self.lookup_class_singleton_method(c, mm_id),
+                        Some(Value::Object(id)) => {
+                            let cls = self.heap.class_of(*id);
+                            self.lookup_method_uncached(&cls, mm_id)
+                        }
+                        _ => None,
+                    };
+                    if let (Some(m), Some(sv)) = (mm, self_val) {
+                        let mut mm_args = Vec::with_capacity(args.len() + 1);
+                        mm_args.push(Value::Sym(name_id));
+                        mm_args.extend(args);
+                        return self.invoke_method(m, sv, mm_args);
+                    }
+                }
                 if is_no_super && is_lifecycle_hook && on_class_or_module {
                     // Before substituting the no-op default, check
                     // whether user code has installed a hook at the

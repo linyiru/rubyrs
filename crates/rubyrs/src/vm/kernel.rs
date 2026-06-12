@@ -311,6 +311,70 @@ impl Vm {
                         ),
                     })));
                 }
+                // `caller(1..1)` Range form (probed on CRuby 3.4.1):
+                // inclusive end; endless → unbounded; beginless →
+                // begin 0; empty span (3..1) → []; begin past the
+                // stack depth → nil (handled by the shared skip >
+                // total check below via the rewritten args).
+                // minitest mock.rb's KW_WARNED path does
+                // `caller(1..1).first`.
+                let range_args: Option<(i64, i64)> = match args {
+                    [Value::Range(rid)] => {
+                        let r = self.heap.range(*rid);
+                        let b = match &r.begin {
+                            Value::Int(n) => *n,
+                            Value::Nil => 0,
+                            other => {
+                                return Some(Err(self.trap(RubyError::TypeError {
+                                    msg: format!(
+                                        "no implicit conversion of {} into Integer",
+                                        other.type_name(),
+                                    ),
+                                })));
+                            }
+                        };
+                        let e = match &r.end {
+                            Value::Int(n) => Some(if r.exclusive { *n - 1 } else { *n }),
+                            Value::Nil => None,
+                            other => {
+                                return Some(Err(self.trap(RubyError::TypeError {
+                                    msg: format!(
+                                        "no implicit conversion of {} into Integer",
+                                        other.type_name(),
+                                    ),
+                                })));
+                            }
+                        };
+                        if b < 0 || e.is_some_and(|e| e < 0) {
+                            return Some(Err(self.trap(RubyError::ArgumentError {
+                                msg: "negative level".to_string(),
+                            })));
+                        }
+                        match e {
+                            // Empty span → [] (NOT nil), unless the
+                            // begin itself is past the depth.
+                            Some(e) if e < b => {
+                                if (b as usize) > self.frames.len() {
+                                    return Some(Ok(Value::Nil));
+                                }
+                                self.maybe_gc();
+                                if let Err(t) = self.check_alloc() { return Some(Err(t)); }
+                                let id = self.heap.alloc(HeapObj::Array(Vec::new().into()));
+                                return Some(Ok(Value::Array(id)));
+                            }
+                            Some(e) => Some((b, e - b + 1)),
+                            None => Some((b, i64::MAX)),
+                        }
+                    }
+                    _ => None,
+                };
+                let range_buf;
+                let args: &[Value] = if let Some((b, l)) = range_args {
+                    range_buf = [Value::Int(b), Value::Int(l)];
+                    &range_buf
+                } else {
+                    args
+                };
                 for a in args.iter() {
                     // `Value::BigInt` IS an Integer in rubyrs's
                     // bignum build (just one that doesn't fit

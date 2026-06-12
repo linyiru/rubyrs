@@ -981,3 +981,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn blank_slate_dispatch() { run_diff("blank_slate_dispatch"); }
 // proc.call(args, &blk) binds the callee's |.., &b| slot.
 #[test] fn proc_call_block_arg() { run_diff("proc_call_block_arg"); }
+// super->method_missing fallback, caller(Range), bare reflection
+// universals (minitest Object#stub family).
+#[test] fn super_mm_caller_range() { run_diff("super_mm_caller_range"); }

@@ -6361,6 +6361,19 @@ impl Vm {
                     | "is_a?"
                     | "kind_of?"
                     | "instance_of?"
+                    // Reflection universals minitest's Object#stub
+                    // calls bare (`not methods.map(&:to_s)...` with
+                    // self = the stubbed object).
+                    | "methods"
+                    | "singleton_methods"
+                    | "public_methods"
+                    | "private_methods"
+                    | "protected_methods"
+                    | "singleton_class"
+                    | "frozen?"
+                    | "hash"
+                    | "itself"
+                    | "object_id"
             )
         {
             let self_val = self.frames.last()

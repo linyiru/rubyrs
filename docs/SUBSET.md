@@ -758,6 +758,16 @@ MyStr.new("hi").upcase      # NoMethodError — still a bare Instance
   forbids subclass instantiation of anyway) still falls through
   to a bare `Value::Object` Instance without the String
   primitives — the remaining documented gap of this family.
+- Same family: PER-INSTANCE String singletons (`def s.foo` /
+  `s.singleton_class` / `class << s` on a String VALUE) are not
+  modelled — `Value::Str` is a bare `Rc<RStr>` with no eigenclass
+  anchor, and adding one would grow every string by a pointer
+  (Hash/Array got per-instance singletons in the HashObj/ArrayObj
+  shape instead; a Str equivalent needs a side-table keyed on the
+  Rc identity). Consumer that hits it: minitest's
+  `test_stub_yield_self` (`(+"foo").stub :to_s, "bar"`) — the
+  stub's `class << self; self; end` returns nil and the mock
+  suite reports its one remaining error there.
 
 ### `Hash#transform_keys!` / `transform_values!` on `break` leave the receiver untouched
 
