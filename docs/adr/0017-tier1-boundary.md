@@ -79,14 +79,34 @@ all four is in. Anything that fails any one is outside.
    same way, for the same reasons. Embedders who need regex
    either enable the feature or register a host fn.
 
-4. **No OS threads; cooperative concurrency only.**
-   `Thread`, `Mutex`, `Queue`, `ConditionVariable` belong
-   outside Tier 1. `Fiber` is on the boundary — every embeddable
+4. **No OS threads; concurrency primitives collapse to
+   deterministic sequential execution.**
+   There are no OS threads under a single VM — every embeddable
    scripting language (Lua coroutines, mruby Fiber, Wren fiber,
    rhai single-threaded, rune single-threaded core) treats
-   cooperative concurrency as the only primitive a script gets.
-   We follow that default: Tier 1 ships single-threaded with
-   Fiber TBD per PR.
+   cooperative concurrency as the only primitive a script gets,
+   and we follow that default. But "no OS threads" is *not* "no
+   `Thread` API." To run real gems (minitest above all), Tier 1
+   ships `Thread` / `Mutex` / `Queue` / `ConditionVariable` as
+   shims that **collapse to deterministic sequential execution**:
+
+   - `Thread.new { ... }` is a deferred green thread — it captures
+     the block and runs it inline at the first `join`/`value`.
+   - `Mutex` / `ConditionVariable` are no-ops (a critical section
+     is already exclusive with one thread; there is nothing to
+     wait on or signal).
+   - `Thread::Queue#pop` on an empty queue returns `nil` instead
+     of blocking (a block would deadlock unconditionally).
+
+   The contract: for the patterns real code uses — fork-join,
+   producer/consumer drained at join, `synchronize` around a
+   cache — results MATCH CRuby. The shims DIVERGE (no preemption,
+   no real parallelism, non-blocking `pop`) only for code that
+   depends on threads overlapping in time; such code is wrong
+   here, not silently slow. Real OS threads are deferred to a
+   future Tier 2 `_thread` gate, at which point these shims must
+   be REPLACED, not extended. `Fiber` is on the same boundary —
+   single-threaded core, Fiber TBD per PR.
 
    *Permitted*: a single `Runtime` accumulating script state
    (class definitions, method tables, constants, host-registered
@@ -121,7 +141,7 @@ scope for rubyrs."
 |-----------|------|-----------|
 | `Regexp`, `/pattern/` literals | 2 (`regex` feature) | Rule 3. |
 | `Fiber`, `Enumerator` | 2 (`language` feature) | Rule 4; deferred until a real use case. |
-| `Thread`, `Mutex`, `Queue`, `ConditionVariable` | 3 or never | Rule 4. OS threads under a single VM violate the model every embed scripting language has adopted. |
+| Real OS threads / parallelism (`Thread` scheduling, `Thread.list`, `Ractor`) | 2 (`_thread`) or never | Rule 4. OS threads under a single VM violate the model every embed scripting language has adopted. NOTE: the `Thread` / `Mutex` / `Queue` / `ConditionVariable` *API surface* is IN Tier 1 as sequential-collapse shims (see Rule 4); what's out is genuine concurrency. |
 | `File`, `Dir`, `IO`, `Pathname`, `Tempfile` | 3 (`stdlib` feature) | Rule 2. |
 | `Net::HTTP`, `Socket`, `OpenSSL`, `URI` | 3 | Rule 2. |
 | `Kernel#system`, `` Kernel#` ``, `exec`, `spawn`, `Process.*` | 3 or never | Rule 2; capability-gated even when present. (`` Kernel#` `` is Ruby's backtick command-execution operator.) |

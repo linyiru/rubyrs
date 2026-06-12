@@ -1,41 +1,42 @@
-# Thread — rubyrs is single-threaded (ADR 0017 Tier 1 Rule 4: no
-# OS threads). Real codebases (tilt, sinatra) use
-# `Thread.current.object_id` to derive a unique method-name suffix
-# when compiling templates so different compiled bodies don't
-# clash. With one thread, a stable integer is enough.
+# Thread — rubyrs has no OS threads (ADR 0017 Tier 1 Rule 4). The
+# POSITION is NOT "Thread is unsupported"; it is "the concurrency
+# primitives exist but COLLAPSE TO DETERMINISTIC SEQUENTIAL
+# EXECUTION." For the patterns real gems actually use — fork-join,
+# producer/consumer drained at join, `Mutex.synchronize` around a
+# cache — this yields the SAME RESULTS CRuby would, with zero
+# concurrency. It DIVERGES (no preemption/overlap, no real
+# parallelism, `Queue#pop` on empty returns nil instead of
+# blocking) for code that depends on threads overlapping in time.
+# Real OS threads are deferred to a future Tier 2 `_thread` gate.
 #
-# Motivating consumer: tilt-2.7.0 `lib/tilt/template.rb:439`
-# computes `method_name = "__tilt_#{Thread.current.object_id.abs}"`
-# at every `compile_template_method` call. The integer just has
-# to be deterministic and call-time-stable; tilt suffixes the
-# template's identity into the rest of the bytecode separately.
+# This file is the whole story together with preamble/mutex.rb
+# (no-op lock) and the ConditionVariable / Thread::Queue shims
+# below. The pieces:
 #
-# Tier 1 shape:
-#   - `Thread.current` returns the Thread class itself (a stable
-#     singleton-shaped object). Avoids needing a real Thread
-#     instance type when no thread semantics exist to model.
+#   - `Thread.new { ... }` is a DEFERRED-EXECUTION green thread:
+#     it captures the block and runs it inline at the first
+#     `join`/`value` (see `self.new` / `__run_deferred` below).
+#     Motivating consumer: minitest's Parallel::Executor.
+#   - `Thread.current` returns the Thread class itself — a stable
+#     singleton-shaped object. With one thread there is no
+#     distinct "current thread" to model, and class-level
+#     fiber-local / thread-var stores (`[]`, `thread_variable_*`)
+#     are process-global, which is the correct semantics for
+#     exactly one thread. Consumers: minitest spec.rb
+#     (`Thread.current[:current_spec]`), rouge, tilt.
 #   - `Thread.object_id` returns a constant non-zero integer so
-#     `.object_id.abs` (CRuby's tilt pattern) produces the same
-#     stable, positive value every call. `Object#object_id` isn't
-#     implemented globally — defining it just on the Thread class
-#     keeps the contract narrow and the surface obviously a stub.
+#     tilt's `"__tilt_#{Thread.current.object_id.abs}"` (tilt
+#     2.7.0 template.rb:439) is deterministic and call-time-stable.
 #
-# DIVERGENCE: this is the entire Thread API.
-# - `Thread.new {...}` raises NotImplementedError instead of
-#   silently allocating an instance and dropping the block (a
-#   fail-loud override on top of `Class#new` — otherwise the
-#   default allocator would accept the call and quietly ignore
-#   the thread body, which is the kind of silent divergence
-#   single-threaded shims tend to leak).
-# - `Thread.list`, `#join`, `#value`, `Thread.kill`, the whole
-#   Mutex/ConditionVariable interplay — all absent.
-# - Because `Thread.current` returns the Thread class itself,
-#   class-level reflection calls like `.class` / `.name` /
-#   `.ancestors` resolve via Class's normal dispatch and DON'T
-#   raise NoMethodError. That's a known consequence of the
-#   "return self" shape; nothing in tilt's call site exercises
-#   them.
-# Will revisit if/when Tier 2 ever introduces real concurrency.
+# DIVERGENCES (documented, deliberate):
+#   - `Thread.list`, `Thread.kill`, real scheduling — absent.
+#   - Because `Thread.current` returns the Thread class, class-level
+#     reflection (`.class` / `.name` / `.ancestors`) resolves via
+#     Class's normal dispatch instead of raising; a known, benign
+#     consequence of the "return self" shape.
+#   - The deferred model is correct ONLY for the drain-at-join
+#     shape; a producer that blocks waiting on a worker's progress
+#     would deadlock in CRuby and gives wrong results here.
 
 # Raised by Thread.new-without-block (and CRuby's other
 # thread-state errors). Standard hierarchy position.
@@ -114,6 +115,14 @@ class Thread
   end
   def self.current
     self
+  end
+  # Exactly one thread ever exists, and `Thread.current` IS the
+  # Thread class, so the live-thread list is the single-element
+  # `[self]`. Consumer: rack 2.2.8 reloader.rb guards reloading
+  # with `Thread.list.size > 1` (dev-only middleware); size 1
+  # gives it the correct single-threaded answer.
+  def self.list
+    [self]
   end
   def self.object_id
     1
