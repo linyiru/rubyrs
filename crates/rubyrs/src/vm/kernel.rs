@@ -3395,22 +3395,6 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
         _ => &[],
     }
 }
-
-/// Known stdlib-shaped require names that rubyrs Tier 1 stubs to
-/// `true` rather than load. Whitelist is conservative: only the
-/// names script authors typically `require` for feature-detection
-/// or as no-op dependencies of larger files. Anything not in this
-/// set falls through to cext (or "cannot find" if cext is off).
-///
-/// Aligns with ADR 0017 (stdlib is Tier 3; this is the Tier 1
-/// lenient-mode bridge that lets gem helpers load). Scripts that
-/// actually USE the stdlib's API (`URI.parse`, `Logger.new`,
-/// `JSON.parse`, ...) get NameError / NoMethodError at the call
-/// site — sharper "feature absent" surface than a failed require.
-///
-/// See the gate note on `stdlib_constant_names` above — same
-/// reasoning, same cfg.
-#[cfg(not(target_os = "wasi"))]
 impl Vm {
     /// Marshal-dumpability probe (see `__rubyrs_marshal_stash`).
     /// Walks the value graph and returns Err(message) on the first
@@ -3518,6 +3502,23 @@ impl Vm {
     }
 }
 
+
+/// Known stdlib-shaped require names that rubyrs Tier 1 stubs to
+/// `true` rather than load. Whitelist is conservative: only the
+/// names script authors typically `require` for feature-detection
+/// or as no-op dependencies of larger files. Anything not in this
+/// set falls through to cext (or "cannot find" if cext is off).
+///
+/// Aligns with ADR 0017 (stdlib is Tier 3; this is the Tier 1
+/// lenient-mode bridge that lets gem helpers load). Scripts that
+/// actually USE the stdlib's API (`URI.parse`, `Logger.new`,
+/// `JSON.parse`, ...) get NameError / NoMethodError at the call
+/// site — sharper "feature absent" surface than a failed require.
+///
+/// See the gate note on `stdlib_constant_names` above — same
+/// reasoning, same cfg.
+
+#[cfg(not(target_os = "wasi"))]
 fn is_stdlib_stub_name(name: &str) -> bool {
     matches!(
         name,
