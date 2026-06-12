@@ -28,6 +28,62 @@
 use std::collections::HashMap;
 
 use fancy_regex::Regex;
+
+/// Rule regex, linear-first: regex-automata's meta engine when the
+/// pattern fits its syntax (no lookaround/backrefs/atomic groups),
+/// the fancy backtracker otherwise. The split matters twice over —
+/// the meta engine is linear-time AND supports true anchored-at-pos
+/// search, while fancy can only scan-from-pos and post-filter
+/// (`m0.start == pos`), paying a full O(n) scan on every miss.
+pub(crate) enum CRegex {
+    Linear(regex_automata::meta::Regex),
+    Fancy(Regex),
+}
+
+impl CRegex {
+    /// Anchored-at-`pos` capture search with full-haystack context
+    /// (`^`/`\b` see the real surroundings). Returns group spans;
+    /// `out[0]` is the whole match and is guaranteed to start at
+    /// `pos`. `out` is a reusable buffer (cleared on entry).
+    pub(crate) fn captures_at(
+        &self,
+        text: &str,
+        pos: usize,
+        out: &mut Vec<Option<(usize, usize)>>,
+    ) -> bool {
+        out.clear();
+        match self {
+            CRegex::Linear(re) => {
+                let mut caps = re.create_captures();
+                let input = regex_automata::Input::new(text)
+                    .anchored(regex_automata::Anchored::Yes)
+                    .range(pos..);
+                re.captures(input, &mut caps);
+                if !caps.is_match() {
+                    return false;
+                }
+                for i in 0..caps.group_len() {
+                    out.push(caps.get_group(i).map(|s| (s.start, s.end)));
+                }
+                true
+            }
+            CRegex::Fancy(re) => {
+                let caps = match re.captures_from_pos(text, pos) {
+                    Ok(Some(c)) => c,
+                    _ => return false,
+                };
+                let m0 = caps.get(0).expect("capture 0 always present");
+                if m0.start() != pos {
+                    return false;
+                }
+                for i in 0..caps.len() {
+                    out.push(caps.get(i).map(|m| (m.start(), m.end())));
+                }
+                true
+            }
+        }
+    }
+}
 use serde_json::Value as J;
 
 use crate::Error;
@@ -87,7 +143,7 @@ pub(crate) enum Kind {
 
 pub(crate) struct Rule {
     /// `None` for `mixin` entries.
-    pub(crate) re: Option<Regex>,
+    pub(crate) re: Option<CRegex>,
     /// The rule's regex begins with `^` — rouge pre-checks
     /// beginning-of-line before trying it.
     pub(crate) bol: bool,
@@ -655,7 +711,7 @@ fn rewrite_ascii_shorthand_classes(pat: &str) -> std::borrow::Cow<'_, str> {
 /// - Ruby's `m` option (bit 4) means dot-matches-newline → Rust `s`.
 /// - bits: 1 = `i`, 2 = `x`.
 /// - Onigmo `{,n}` → `{0,n}`.
-fn compile_ruby_regex(src: &str, opts: u64) -> Result<Regex, Error> {
+fn compile_ruby_regex(src: &str, opts: u64) -> Result<CRegex, Error> {
     let mut flags = String::from("m");
     if opts & 1 != 0 {
         flags.push('i');
@@ -670,10 +726,24 @@ fn compile_ruby_regex(src: &str, opts: u64) -> Result<Regex, Error> {
     let fixed = strip_leading_carets(src, extended).replace("{,", "{0,");
     let fixed = rewrite_ascii_shorthand_classes(&fixed);
     let pat = format!("(?{flags}){fixed}");
-    Regex::new(&pat).map_err(|e| Error::Regex {
-        pattern: src.to_string(),
-        message: e.to_string(),
-    })
+    // Linear first; syntax the meta engine rejects (lookaround,
+    // backrefs, atomic groups) falls to the fancy backtracker.
+    if let Ok(re) = regex_automata::meta::Regex::new(&pat) {
+        return Ok(CRegex::Linear(re));
+    }
+    // Fancy can't anchor through its API, but it SUPPORTS `\G`
+    // (anchors at the search start = captures_from_pos's pos), so
+    // a miss is O(1) instead of a scan to end-of-text — the
+    // engine probes every rule at every position, so unanchored
+    // misses dominated the profile (124 samples even after the
+    // linear split). `(?:...)` keeps capture numbering intact.
+    let anchored = format!("\\G(?:{pat})");
+    Regex::new(&anchored)
+        .map(CRegex::Fancy)
+        .map_err(|e| Error::Regex {
+            pattern: src.to_string(),
+            message: e.to_string(),
+        })
 }
 
 /// Remove `^` anchors that sit in LEADING position — i.e. every char

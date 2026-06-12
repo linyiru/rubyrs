@@ -238,6 +238,7 @@ name = "carmine"
 version = "0.2.0"
 dependencies = [
  "fancy-regex",
+ "regex-automata",
  "serde_json",
 ]
 

@@ -165,6 +165,12 @@ pub struct Lexer<'t> {
     null_steps: u32,
     pending: Option<Pending>,
     toks: Vec<(TokenId, String)>,
+    /// Reusable group-span buffer for `CRegex::captures_at` —
+    /// avoids a Vec allocation per rule probe (rules are probed
+    /// in order until one matches, so this is the hottest alloc
+    /// site in the step loop). Taken (`std::mem::take`) on a hit
+    /// and dropped with the borrow; misses just reuse it.
+    caps_buf: Vec<Option<(usize, usize)>>,
 }
 
 impl<'t> Lexer<'t> {
@@ -177,6 +183,7 @@ impl<'t> Lexer<'t> {
             null_steps: 0,
             pending: None,
             toks: Vec::new(),
+            caps_buf: Vec::new(),
         }
     }
 
@@ -319,26 +326,25 @@ impl<'t> Lexer<'t> {
             let re = rule.re.as_ref().expect("non-mixin rule has a regex");
             // Anchored-at-pos match with FULL-haystack context so `^`,
             // `\b` and lookbehind see the real surroundings (rouge scans
-            // a StringScanner positioned mid-string).
-            let caps = match re.captures_from_pos(text, pos) {
-                Ok(Some(c)) => c,
-                _ => continue,
-            };
-            let m0 = caps.get(0).expect("capture 0 always present");
-            if m0.start() != pos {
+            // a StringScanner positioned mid-string). Spans buffer is
+            // reused across rules (cleared inside captures_at).
+            if !re.captures_at(text, pos, &mut self.caps_buf) {
                 continue;
             }
-            let size = m0.end() - pos;
+            let spans = std::mem::take(&mut self.caps_buf);
+            let (m0s, m0e) = spans[0].expect("capture 0 always present");
+            debug_assert_eq!(m0s, pos);
+            let size = m0e - pos;
 
             match &self.table.states[state as usize][ri].kind {
                 Kind::Tok { tok, next } => {
                     let tok = *tok;
                     let next = next.clone();
-                    self.emit(tok, m0.as_str());
+                    self.emit(tok, &text[m0s..m0e]);
                     self.apply_next(&next)?;
                 }
                 Kind::Wordlist { sets, default } => {
-                    let word = m0.as_str();
+                    let word = &text[m0s..m0e];
                     let tok = sets
                         .iter()
                         .find(|(_, set)| set.contains_key(word))
@@ -349,10 +355,11 @@ impl<'t> Lexer<'t> {
                 Kind::Actions(_) => {
                     // Re-borrow pattern: capture group strings first, then
                     // walk the actions by index so emits can mutate self.
-                    let groups: Vec<Option<String>> = (1..caps.len())
-                        .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                    let groups: Vec<Option<String>> = spans[1..]
+                        .iter()
+                        .map(|s| s.map(|(a, b)| text[a..b].to_string()))
                         .collect();
-                    let whole = m0.as_str().to_string();
+                    let whole = text[m0s..m0e].to_string();
                     let n_acts = match &self.table.states[state as usize][ri].kind {
                         Kind::Actions(a) => a.len(),
                         _ => unreachable!(),
@@ -405,14 +412,16 @@ impl<'t> Lexer<'t> {
                     let Kind::Ir(ops) = &table.states[state as usize][ri].kind else {
                         unreachable!()
                     };
-                    let groups: Vec<Option<String>> = (0..caps.len())
-                        .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                    let groups: Vec<Option<String>> = spans
+                        .iter()
+                        .map(|s| s.map(|(a, b)| text[a..b].to_string()))
                         .collect();
                     self.run_ir_ops(ops, &groups)?;
                 }
                 Kind::Callback => {
-                    let groups: Vec<Option<String>> = (0..caps.len())
-                        .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                    let groups: Vec<Option<String>> = spans
+                        .iter()
+                        .map(|s| s.map(|(a, b)| text[a..b].to_string()))
                         .collect();
                     self.pending = Some(Pending { size });
                     return Ok(Some(StepHit::NeedCallback {

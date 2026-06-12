@@ -13,4 +13,11 @@ categories = ["text-processing", "parser-implementations"]
 
 [dependencies]
 fancy-regex = "0.18"
+# Linear-first engine: most rouge rules are plain
+# keyword/literal/char-class shapes that regex-automata's meta
+# engine matches in linear time WITH anchored-at-pos search and
+# full-haystack \b context; only lookaround/backref rules stay on
+# the fancy backtracker (which also can't anchor, so it pays an
+# O(n) scan per miss).
+regex-automata = "0.4"
 serde_json.workspace = true
