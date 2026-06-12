@@ -530,9 +530,18 @@ impl Vm {
                     let self_val = self.frames.last()
                         .map(|f| f.self_val.clone())
                         .unwrap_or(Value::Nil);
-                    let hit = if let Value::Object(oid) = self_val {
-                        self.heap.instance(oid).ivars.contains_key(sid)
-                    } else { false };
+                    let hit = match &self_val {
+                        Value::Object(oid) => {
+                            self.heap.instance(*oid).ivars.contains_key(sid)
+                        }
+                        // Class-level ivars: `defined?(@name)` inside
+                        // `def self.x` reads the class object's own
+                        // table — minitest Spec::DSL's
+                        // `defined?(@name) ? @name : super` name
+                        // resolution on describe-created classes.
+                        Value::Class(cls) => cls.ivars.borrow().contains_key(sid),
+                        _ => false,
+                    };
                     return Some(Ok(if hit { Value::new_str("instance-variable") } else { Value::Nil }));
                 }
                 Some(Ok(Value::Nil))
