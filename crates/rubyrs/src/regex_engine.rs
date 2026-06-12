@@ -159,6 +159,13 @@ pub(crate) fn compile_with_flags(
         // genuinely malformed patterns.
         Err(syntax_err) => match fancy_regex::Regex::new(&prepared) {
             Ok(re) => {
+                // RUBYRS_REGEX_STATS=2: name every pattern that
+                // lands on the backtracking engine — the fancy VM
+                // showing up in a profile means one of these is
+                // hot (jekyll-1k hunt, 2026-06-12).
+                if std::env::var_os("RUBYRS_REGEX_STATS").is_some_and(|v| v == "2") {
+                    eprintln!("[fancy-regex] /{}/", bare_source);
+                }
                 let cell = std::cell::OnceCell::new();
                 let _ = cell.set(Engine::Fancy(re));
                 Ok(CompiledRegex {

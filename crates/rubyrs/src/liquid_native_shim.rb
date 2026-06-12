@@ -199,7 +199,27 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
             $__rubyrs_native_stats[:lq_tpl_decline] += 1
           end
           @__liquidus_entry = entry == false ? nil : entry
+          if @__liquidus_entry
+            # DEFER the pure-liquid parse: a native-armed template
+            # renders through the host, so eagerly building the
+            # pure template alongside doubled the parse cost
+            # (~1.0B instructions on jekyll-1k, ~6% of the build).
+            # The source is kept so a mid-render decline can still
+            # parse lazily and fall back (see render!/render).
+            @__liquidus_src = content
+            return self
+          end
+          @__liquidus_src = nil
           __liquidus_orig_parse(content)
+        end
+
+        # Build the pure-liquid template on demand — only reached
+        # when a native-armed template's render declines mid-flight.
+        def __liquidus_ensure_parsed
+          if (src = @__liquidus_src)
+            @__liquidus_src = nil
+            __liquidus_orig_parse(src)
+          end
         end
 
         alias_method :__liquidus_orig_render!, :render!
@@ -211,6 +231,7 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
               $__rubyrs_native_stats[out ? :lq_native : :lq_render_decline] += 1
             end
             return out if out
+            __liquidus_ensure_parsed
           end
           __liquidus_orig_render!(*args)
         end
@@ -224,6 +245,7 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
               $__rubyrs_native_stats[out ? :lq_native : :lq_render_decline] += 1
             end
             return out if out
+            __liquidus_ensure_parsed
           end
           __liquidus_orig_render(*args)
         end
@@ -231,8 +253,14 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
         alias_method :__liquidus_orig_warnings, :warnings
         def warnings
           return [] if @__liquidus_static
-          # Native-rendered templates also parsed through pure liquid
-          # in #parse, so @template exists and reports real warnings.
+          # Native-armed templates defer the pure parse, so there is
+          # no @template to ask. Liquidus's compile whitelist keeps
+          # deprecated-syntax shapes OUT of the native subset (they
+          # decline), so the honest answer for an armed template is
+          # "no warnings" — documented narrowing: a warning-bearing
+          # template that still compiles natively would have its
+          # warnings suppressed.
+          return [] if @__liquidus_entry && @__liquidus_src
           __liquidus_orig_warnings
         end
       end
