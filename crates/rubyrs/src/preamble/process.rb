@@ -149,3 +149,24 @@ $stderr = STDERR
 # overwrites it with the post-script-path arguments via
 # `Runtime::set_argv`.
 ARGV = []
+
+# RbConfig — CRuby's build-configuration table, available without a
+# require. rubyrs has no autoconf build, so the table carries one
+# honest sentinel: host_os = "rubyrs" (consumers branch on
+# /mswin|mingw/-style probes — minitest's diff-tool discovery — and
+# a neutral value routes them down the POSIX path). Other keys are
+# absent-loud: a script needing "bindir" etc. should fail visibly
+# rather than act on an invented path.
+module RbConfig
+  CONFIG = { "host_os" => "rubyrs" }
+end
+
+# `Kernel#system` — process spawning is host-side per ADR 0017
+# Rule 4; the Tier-1 answer is nil, CRuby's "command could not be
+# executed" shape, which probing callers (minitest's
+# `system "diff", ...` tool discovery) treat as feature-absent and
+# route around. DIVERGENCE: a script that NEEDS the side effect of
+# a real command sees nil instead of the command running.
+def system(*_args)
+  nil
+end
