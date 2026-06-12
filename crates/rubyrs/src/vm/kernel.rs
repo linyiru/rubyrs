@@ -3517,7 +3517,6 @@ impl Vm {
 ///
 /// See the gate note on `stdlib_constant_names` above — same
 /// reasoning, same cfg.
-
 #[cfg(not(target_os = "wasi"))]
 fn is_stdlib_stub_name(name: &str) -> bool {
     matches!(
