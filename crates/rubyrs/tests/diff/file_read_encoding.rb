@@ -30,3 +30,14 @@ end
 File.write(path, "caf\xE9".dup.force_encoding("ASCII-8BIT"))
 p File.binread(path).bytes
 File.delete(path)
+
+# Byte-based handle reads: a BINARY buffer's lines/chunks keep
+# their bytes (no lossy char view) and IO#read(n) counts BYTES.
+path = "/tmp/rubyrs-e3-core2-#{Process.pid}.bin"
+File.binwrite(path, "a\xFFb\nzz\n".b)
+File.open(path, "rb") do |f|
+  l = f.gets
+  p [l.bytes, l.encoding.name]
+  p f.read(2).bytes
+end
+File.delete(path)

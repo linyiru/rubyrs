@@ -45,3 +45,29 @@ t("default l1")   { Encoding.default_external = "ISO-8859-1"; e = File.read(path
 t("u8>l1 file")   { File.binwrite(path, "caf\xC3\xA9".b); s = File.read(path, encoding: "UTF-8:ISO-8859-1"); [s.bytes, s.encoding.name] }
 t("bad seq")      { File.binwrite(path, "\xFF\xFE".b); File.read(path, encoding: "UTF-8:ISO-8859-1") }
 File.delete(path)
+
+# E3 close-out: default_internal (nil by default; when set, even
+# single-name reads transcode) + byte-based line reads carrying
+# the buffer's tag.
+path2 = "/tmp/rubyrs-e3-v3b-#{Process.pid}.bin"
+File.binwrite(path2, "caf\xE9\nb\xC0r\n".b)
+t("internal nil")  { Encoding.default_internal }
+t("internal set")  {
+  Encoding.default_internal = "UTF-8"
+  Encoding.default_external = "ISO-8859-1"
+  s = File.read(path2)
+  Encoding.default_internal = nil
+  Encoding.default_external = "UTF-8"
+  [s.bytes.first(6), s.encoding.name]
+}
+t("internal+name") {
+  Encoding.default_internal = "UTF-8"
+  s = File.read(path2, encoding: "ISO-8859-1")
+  Encoding.default_internal = nil
+  [s.bytes.first(6), s.encoding.name]
+}
+t("gets l1 tag")   { File.open(path2, "r:ISO-8859-1") { |f| l = f.gets; [l.bytes, l.encoding.name] } }
+t("gets l1>u8")    { File.open(path2, "r:ISO-8859-1:UTF-8") { |f| l = f.gets; [l.bytes, l.encoding.name] } }
+t("readlines tag") { File.open(path2, "r:ISO-8859-1") { |f| f.readlines }.map { |l| l.encoding.name } }
+t("byteindex")     { "caf\xE9x".dup.force_encoding("ISO-8859-1").byteindex("x") }
+File.delete(path2)

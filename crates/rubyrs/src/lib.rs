@@ -2625,12 +2625,22 @@ class Encoding
     @default_external = Encoding.find(name)
   end
 
+  ## E3: nil by default (CRuby — no implicit conversion). When
+  ## set, tag-less / single-name File.read transcodes
+  ## external→internal.
   def self.default_internal
-    UTF_8
+    @default_internal
   end
 
-  def self.default_internal=(_enc)
-    UTF_8
+  def self.default_internal=(enc)
+    if enc.nil?
+      __rubyrs_set_default_internal(nil)
+      @default_internal = nil
+    else
+      name = enc.is_a?(Encoding) ? enc.name : enc.to_s
+      __rubyrs_set_default_internal(name)
+      @default_internal = Encoding.find(name)
+    end
   end
 
   def self.find(name)

@@ -480,11 +480,37 @@ pinned to CRuby 3.4 by the `string_encoding_e1` /
   the receiver's tag; BINARY strings `inspect` with CRuby's
   `\xNN` byte escapes.
 
-Remaining E1 boundaries (documented, not silent): other derived
-strings (`slice`/`gsub`/`reverse`/case ops) still produce UTF-8-
-tagged results, and char-level operations on BINARY strings use
-the UTF-8-lossy view rather than CRuby's byte-indexed semantics —
-both queued behind `_encoding_full`.
+Remaining boundaries after E2/E3 (documented): case ops on
+registry-tagged strings are real (Unicode mapping, tag-carrying —
+see `encoding_full_v3`), but OTHER derived strings
+(`slice`/`reverse`) still produce UTF-8-tagged results, and
+char-level operations on BINARY strings use the UTF-8-lossy view
+rather than CRuby's byte-indexed semantics.
+
+#### Regexp over non-UTF-8 strings — settled boundary (E3)
+
+CRuby compiles a regexp PER ENCODING and matches in the string's
+own coding; rubyrs's engines are UTF-8-only and match through the
+lossy view. The practical contract:
+
+- Read-only matching with ASCII patterns (`=~`, `match`, `scan`
+  positions/captures over the ASCII portion) agrees with CRuby —
+  byte offsets line up because the lossy view only rewrites
+  high bytes.
+- DERIVED strings from regex/substring ops (`gsub`/`sub`/`split`/
+  capture strings) on a registry- or BINARY-tagged receiver are
+  rebuilt through the lossy view: non-ASCII bytes come back as
+  U+FFFD and the tag resets to UTF-8. This is the same E1-era
+  boundary, now PERMANENT for patterns-in-foreign-encodings
+  (a per-encoding regex engine is out of scope — ADR 0020).
+- Workaround that preserves fidelity: transcode first, operate,
+  transcode back — `s.encode("UTF-8").gsub(...).encode(
+  "ISO-8859-1")` round-trips losslessly for every registry
+  encoding.
+- High-byte patterns targeting a foreign coding (`/\xE9/n`-style)
+  are out of subset on both sides of the divergence (CRuby's `n`
+  flag has its own restrictions); spell the pattern in UTF-8 and
+  use the workaround above.
 
 ### Object reflection
 

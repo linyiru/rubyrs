@@ -116,7 +116,7 @@ class File
   def __io_init(path, buf, write: false, read: true)
     @__io_path = path
     @__io_buf = buf
-    @__io_pos = write ? buf.length : 0
+    @__io_pos = write ? buf.bytesize : 0
     @__io_closed = false
     @__io_write = write
     @__io_read = read
@@ -176,38 +176,44 @@ class File
     raise IOError, "closed stream" if @__io_closed
     raise IOError, "not opened for reading" unless @__io_read
     if length.nil? && @__io_pos == 0
-      # Whole-buffer read: return a dup, NOT a `[0..]` slice —
-      # slicing a BINARY-tagged buffer goes through the lossy char
-      # view (E1 boundary) and U+FFFD-mangles it (addressable's
+      # Whole-buffer read: return a dup, NOT a slice — slicing a
+      # BINARY/registry-tagged buffer through the char view
+      # U+FFFD-mangles it (E1 boundary; addressable's
       # `File.open(path, "rb") { Marshal.load(f.read) }`).
-      @__io_pos = @__io_buf.length
+      @__io_pos = @__io_buf.bytesize
       return @__io_buf.dup
     end
-    rest = @__io_buf[@__io_pos..] || ""
+    # Byte-based cursor + byteslice throughout: CRuby's IO#read
+    # length is BYTES, and byte slicing keeps the buffer's tag
+    # without mangling non-UTF-8 content.
+    total = @__io_buf.bytesize
     if length.nil?
-      @__io_pos = @__io_buf.length
+      rest = @__io_buf.byteslice(@__io_pos, total - @__io_pos) || ""
+      @__io_pos = total
       rest
     else
-      chunk = rest[0, length] || ""
-      @__io_pos += chunk.length
-      chunk.empty? ? nil : chunk
+      chunk = @__io_buf.byteslice(@__io_pos, length) || ""
+      @__io_pos += chunk.bytesize
+      chunk.bytesize == 0 ? nil : chunk
     end
   end
 
   def gets(sep = "\n")
     raise IOError, "closed stream" if @__io_closed
     raise IOError, "not opened for reading" unless @__io_read
-    return nil if @__io_pos >= @__io_buf.length
-    idx = @__io_buf.index(sep, @__io_pos)
+    total = @__io_buf.bytesize
+    return nil if @__io_pos >= total
+    idx = @__io_buf.byteindex(sep, @__io_pos)
     if idx
-      # Include the FULL separator in the returned line (CRuby). The
-      # inclusive `[@__io_pos..idx]` kept only the separator's first
-      # character; a multi-char separator ("XX") was truncated to "X".
-      line = @__io_buf[@__io_pos...(idx + sep.length)]
-      @__io_pos = idx + sep.length
+      # Include the FULL separator in the returned line (CRuby).
+      # Byte-level split: a registry/BINARY-tagged buffer must not
+      # go through the lossy char view, and byteslice carries the
+      # buffer's tag onto each line (CRuby line encodings).
+      line = @__io_buf.byteslice(@__io_pos, idx + sep.bytesize - @__io_pos)
+      @__io_pos = idx + sep.bytesize
     else
-      line = @__io_buf[@__io_pos..] || ""
-      @__io_pos = @__io_buf.length
+      line = @__io_buf.byteslice(@__io_pos, total - @__io_pos) || ""
+      @__io_pos = total
     end
     line
   end
@@ -262,7 +268,7 @@ class File
   end
 
   def eof?
-    @__io_pos >= @__io_buf.length
+    @__io_pos >= @__io_buf.bytesize
   end
 
   def fileno

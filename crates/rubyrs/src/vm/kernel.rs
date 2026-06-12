@@ -2022,6 +2022,31 @@ impl Vm {
             // `Encoding.default_external=` host half: resolve the
             // name and stamp Vm::default_external (what tag-less
             // File.read uses). Unknown name → CRuby's ArgumentError.
+            // `Encoding.default_internal=` host half. nil clears
+            // (CRuby's default); a name resolves strictly.
+            "__rubyrs_set_default_internal" => {
+                match args.first() {
+                    Some(Value::Nil) | None => {
+                        self.default_internal = None;
+                        Some(Ok(Value::Nil))
+                    }
+                    Some(Value::Str(s)) => {
+                        let name = s.to_string_lossy();
+                        match Self::encoding_tag_from_str(&name) {
+                            Some(tag) => {
+                                self.default_internal = Some(tag);
+                                Some(Ok(Value::Nil))
+                            }
+                            None => Some(Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("unknown encoding name - {name}"),
+                            }))),
+                        }
+                    }
+                    _ => Some(Err(self.trap(RubyError::TypeError {
+                        msg: "encoding name must be a String or nil".into(),
+                    }))),
+                }
+            }
             "__rubyrs_set_default_external" => {
                 let name = match args.first() {
                     Some(Value::Str(s)) => s.to_string_lossy(),

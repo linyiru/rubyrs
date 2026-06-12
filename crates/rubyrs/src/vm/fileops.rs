@@ -544,6 +544,19 @@ impl Vm {
                         },
                     },
                 };
+                // `Encoding.default_internal` (when set) upgrades a
+                // tag-only read into a transcode: the resolved tag
+                // above becomes the EXTERNAL side, the internal
+                // default the destination (probed: it applies to
+                // single-name `encoding:` forms too; an explicit
+                // ext:int pair already decided and wins).
+                let read_tag = match (transcode, self.default_internal) {
+                    (None, Some(int)) if int != read_tag && !bom_utf8 => {
+                        transcode = Some((read_tag, int));
+                        int
+                    }
+                    _ => read_tag,
+                };
                 match std::fs::read(&path) {
                     Ok(b) => {
                         // BOM strip happens at the stream head,

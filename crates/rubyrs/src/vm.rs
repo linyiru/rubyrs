@@ -1034,6 +1034,10 @@ pub(crate) struct Vm {
     /// preamble's `Encoding.default_external=` →
     /// `__rubyrs_set_default_external`.
     pub(crate) default_external: crate::value::EncodingTag,
+    /// `Encoding.default_internal` (E3): when Some, a tag-less or
+    /// single-name File.read TRANSCODES external→internal instead
+    /// of just tagging (CRuby's default is nil = no conversion).
+    pub(crate) default_internal: Option<crate::value::EncodingTag>,
     /// Refinements (`refine` / `using`). Tier-1: activation is GLOBAL
     /// from the `using` point on, not lexically scoped per file/module
     /// like CRuby — equivalent for the common single-file case (see
@@ -1691,6 +1695,7 @@ impl Vm {
             str_singletons: crate::intern::FxHashMap::default(),
             any_str_singletons: false,
             default_external: crate::value::EncodingTag::Utf8,
+            default_internal: None,
             module_refinements: crate::intern::FxHashMap::default(),
             active_refinements: crate::intern::FxHashMap::default(),
             refined_method_names: crate::intern::FxHashSet::default(),

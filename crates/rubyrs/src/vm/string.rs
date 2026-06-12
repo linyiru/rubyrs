@@ -416,6 +416,29 @@ pub(crate) fn string_call(
             Some(Value::Int(h.finish() as i64))
         }
         (Value::Str(a), "bytesize", []) => Some(Value::Int(a.borrow().len() as i64)),
+        // `byteindex(substr[, byte_offset])` — Ruby 3.2's byte-level
+        // index (substring form; the regexp form is out of subset).
+        // Powers the File-veneer's byte-based line splitting, which
+        // must not run a registry/BINARY-tagged buffer through the
+        // lossy char view.
+        (Value::Str(a), "byteindex", [Value::Str(n)])
+        | (Value::Str(a), "byteindex", [Value::Str(n), Value::Int(_)]) => {
+            let hay = a.borrow();
+            let needle = n.borrow();
+            let start = match args.get(1) {
+                Some(Value::Int(s)) if *s >= 0 => (*s as usize).min(hay.len()),
+                Some(Value::Int(_)) => return Ok(Some(Value::Nil)),
+                _ => 0,
+            };
+            if needle.is_empty() {
+                return Ok(Some(Value::Int(start as i64)));
+            }
+            let found = hay[start..]
+                .windows(needle.len())
+                .position(|w| w == &needle[..])
+                .map(|i| (start + i) as i64);
+            Some(found.map(Value::Int).unwrap_or(Value::Nil))
+        }
         // `String#byteslice(start[, len])` — byte-level substring,
         // encoding preserved (CRuby contract; the result may be
         // broken in that encoding — that's the caller's business,
