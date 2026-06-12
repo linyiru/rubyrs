@@ -1683,7 +1683,15 @@ pub(crate) fn string_call(
                 crate::value::EncodingTag::Other(_) => {
                     crate::heap::inspect_escape_bytes_into(&s.content.borrow(), &mut out);
                 }
-                _ => crate::heap::inspect_escape_into(&s.to_string_lossy(), &mut out),
+                _ => {
+                    let b = s.content.borrow();
+                    if std::str::from_utf8(&b).is_ok() {
+                        drop(b);
+                        crate::heap::inspect_escape_into(&s.to_string_lossy(), &mut out);
+                    } else {
+                        crate::heap::inspect_escape_utf8_bytes_into(&b, &mut out);
+                    }
+                }
             }
             out.push('"');
             Some(Value::new_str(out))

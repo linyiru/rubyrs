@@ -935,3 +935,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Array#join user-to_s dispatch; Proc inspect file:line form.
 #[cfg(feature = "regex")]
 #[test] fn join_proc_inspect_dispatch() { run_diff("join_proc_inspect_dispatch"); }
+// Invalid-UTF-8 inspect: per-byte \xNN for bad runs (mu_pp headers).
+#[test] fn string_invalid_utf8_inspect() { run_diff("string_invalid_utf8_inspect"); }

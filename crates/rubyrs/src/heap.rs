@@ -1358,6 +1358,35 @@ pub(crate) fn inspect_escape_bytes_into(bytes: &[u8], out: &mut String) {
         }
     }
 }
+/// Escape a UTF-8-TAGGED byte buffer that may contain invalid
+/// sequences: valid runs take the normal char escapes, invalid
+/// bytes render as `\xNN` — CRuby's `"\xB6".inspect` shape.
+/// (The lossy-decode path replaced them with U+FFFD, which broke
+/// minitest's mu_pp encoding header comparisons for bad-UTF-8
+/// fixtures.)
+pub(crate) fn inspect_escape_utf8_bytes_into(bytes: &[u8], out: &mut String) {
+    let mut rest = bytes;
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(valid) => {
+                inspect_escape_into(valid, out);
+                break;
+            }
+            Err(e) => {
+                let (valid, after) = rest.split_at(e.valid_up_to());
+                // SAFETY: from_utf8 just validated this prefix.
+                inspect_escape_into(unsafe { std::str::from_utf8_unchecked(valid) }, out);
+                let bad_len = e.error_len().unwrap_or(after.len()).max(1);
+                inspect_escape_bytes_into(&after[..bad_len.min(after.len())], out);
+                if bad_len >= after.len() {
+                    break;
+                }
+                rest = &after[bad_len..];
+            }
+        }
+    }
+}
+
 
 /// Escape `raw` for inclusion in a Ruby `String#inspect`/`#to_inspect`
 /// representation, appending to `out` (caller wraps in the `"` quotes).
@@ -1669,7 +1698,16 @@ impl Value {
                     crate::value::EncodingTag::Other(_) => {
                         inspect_escape_bytes_into(&s.content.borrow(), &mut out);
                     }
-                    _ => inspect_escape_into(&s.to_string_lossy(), &mut out),
+                    _ => {
+                        let b = s.content.borrow();
+                        if std::str::from_utf8(&b).is_ok() {
+                            inspect_escape_into(&s.to_string_lossy(), &mut out);
+                        } else {
+                            // UTF-8 tag with invalid bytes: per-byte
+                            // \xNN for the bad runs (CRuby shape).
+                            inspect_escape_utf8_bytes_into(&b, &mut out);
+                        }
+                    }
                 }
                 out.push('"');
                 out
@@ -2185,6 +2223,30 @@ mod tests {
     /// route only runs for BINARY-tagged strings, so the rarer
     /// control escapes need a unit caller for the coverage
     /// ratchet — and deserve one anyway).
+    #[test]
+    fn inspect_escape_utf8_bytes_mixed_runs() {
+        // valid prefix + invalid byte + valid suffix
+        let mut out = String::new();
+        inspect_escape_utf8_bytes_into(b"ok\xFF!", &mut out);
+        assert_eq!(out, "ok\\xFF!");
+        // lone invalid byte
+        let mut out = String::new();
+        inspect_escape_utf8_bytes_into(b"\xB6", &mut out);
+        assert_eq!(out, "\\xB6");
+        // invalid byte then escape-needing char
+        let mut out = String::new();
+        inspect_escape_utf8_bytes_into(b"\xB6A\nB", &mut out);
+        assert_eq!(out, "\\xB6A\\nB");
+        // fully valid passes through the char path
+        let mut out = String::new();
+        inspect_escape_utf8_bytes_into("h\u{e9}llo".as_bytes(), &mut out);
+        assert_eq!(out, "h\u{e9}llo");
+        // truncated multibyte at end (error_len None)
+        let mut out = String::new();
+        inspect_escape_utf8_bytes_into(b"a\xE2\x82", &mut out);
+        assert_eq!(out, "a\\xE2\\x82");
+    }
+
     #[test]
     fn inspect_escape_bytes_all_arms() {
         let mut out = String::new();
