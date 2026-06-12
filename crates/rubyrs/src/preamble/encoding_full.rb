@@ -34,5 +34,28 @@ class Encoding
       else __rubyrs_find_core(name)
       end
     end
+
+    alias __rubyrs_list_core list
+    def list
+      __rubyrs_list_core + [
+        ISO_8859_1, Windows_1252, ISO_8859_15, KOI8_R,
+        Windows_31J, EUC_JP, GBK, Big5,
+      ]
+    end
+
+    ## Alias spellings probed against CRuby 3.4.1 (the subset our
+    ## find() resolves; CRuby also has CP878/PCK/csWindows31J/
+    ## eucJP and the locale/external/filesystem pseudo-names).
+    alias __rubyrs_aliases_core aliases
+    def aliases
+      __rubyrs_aliases_core.merge(
+        "ISO8859-1" => "ISO-8859-1",
+        "CP1252" => "Windows-1252",
+        "ISO8859-15" => "ISO-8859-15",
+        "CP932" => "Windows-31J",
+        "SJIS" => "Windows-31J",
+        "CP936" => "GBK",
+      )
+    end
   end
 end

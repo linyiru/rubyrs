@@ -1281,32 +1281,73 @@ impl Vm {
                 if src != target && !ascii_only {
                     // Real transcoding territory — E1 declines with
                     // CRuby's error class AND message shape (Tier 2
-                    // converts instead): the first offending unit is
-                    // shown as `"\xNN"` when the source is
-                    // byte-oriented, or `U+XXXX` when the source is
-                    // UTF-8 (CRuby names the codepoint).
-                    let disp = |t: EncodingTag| match t {
-                        EncodingTag::Utf8 => "UTF-8",
-                        EncodingTag::UsAscii => "US-ASCII",
-                        EncodingTag::Binary => "ASCII-8BIT",
-                        EncodingTag::Other(_) => "OTHER",
+                    // converts instead). Direct pairs keep CRuby's
+                    // two-name form (`U+00E9 from UTF-8 to
+                    // ASCII-8BIT`); pairs CRuby routes through a
+                    // UTF-8 pivot (a registry encoding on either
+                    // side, probed on 3.4.1) name the whole chain:
+                    //   Other → narrow:
+                    //     U+00E9 to ASCII-8BIT in conversion from
+                    //     ISO-8859-1 to UTF-8 to ASCII-8BIT
+                    //   Binary → Other:
+                    //     "\xE9" to UTF-8 in conversion from
+                    //     ASCII-8BIT to UTF-8 to ISO-8859-1
+                    let disp = |t: EncodingTag| -> &'static str {
+                        match t {
+                            EncodingTag::Utf8 => "UTF-8",
+                            EncodingTag::UsAscii => "US-ASCII",
+                            EncodingTag::Binary => "ASCII-8BIT",
+                            #[cfg(feature = "_encoding_full")]
+                            EncodingTag::Other(idx) => {
+                                crate::encoding_full::name(idx).unwrap_or("OTHER")
+                            }
+                            #[cfg(not(feature = "_encoding_full"))]
+                            EncodingTag::Other(_) => "OTHER",
+                        }
                     };
                     let (from, to) = (disp(src), disp(target));
-                    let offender = if src == EncodingTag::Utf8 {
-                        std::str::from_utf8(&bytes)
-                            .ok()
-                            .and_then(|t| t.chars().find(|c| !c.is_ascii()))
-                            .map(|c| format!("U+{:04X}", c as u32))
-                    } else {
-                        None
-                    };
-                    let offender = offender.unwrap_or_else(|| {
+                    let first_high_byte = || {
                         let b = bytes.iter().copied().find(|&b| b >= 0x80).unwrap_or(0);
                         format!("\"\\x{b:02X}\"")
-                    });
+                    };
+                    let message = match src {
+                        // Registry source: decode the offender to
+                        // its codepoint; the chain pivots through
+                        // UTF-8.
+                        #[cfg(feature = "_encoding_full")]
+                        EncodingTag::Other(idx) => {
+                            let cp = crate::encoding_full::decode_to_utf8(idx, &bytes)
+                                .and_then(|t| t.chars().find(|c| !c.is_ascii()).map(|c| c as u32));
+                            match cp {
+                                Some(cp) => format!(
+                                    "U+{cp:04X} to {to} in conversion from {from} to UTF-8 to {to}"
+                                ),
+                                None => format!("{} from {from} to {to}", first_high_byte()),
+                            }
+                        }
+                        // Binary source headed at a registry target:
+                        // the offending BYTE can't even reach the
+                        // UTF-8 pivot.
+                        #[cfg(feature = "_encoding_full")]
+                        EncodingTag::Binary if matches!(target, EncodingTag::Other(_)) => {
+                            format!(
+                                "{} to UTF-8 in conversion from ASCII-8BIT to UTF-8 to {to}",
+                                first_high_byte()
+                            )
+                        }
+                        EncodingTag::Utf8 => {
+                            let offender = std::str::from_utf8(&bytes)
+                                .ok()
+                                .and_then(|t| t.chars().find(|c| !c.is_ascii()))
+                                .map(|c| format!("U+{:04X}", c as u32))
+                                .unwrap_or_else(first_high_byte);
+                            format!("{offender} from {from} to {to}")
+                        }
+                        _ => format!("{} from {from} to {to}", first_high_byte()),
+                    };
                     return Err(self.trap(RubyError::HostException {
                         class_name: "Encoding::UndefinedConversionError".to_string(),
-                        message: format!("{offender} from {from} to {to}"),
+                        message,
                     }));
                 }
                 let v = Value::new_str_bytes(bytes);

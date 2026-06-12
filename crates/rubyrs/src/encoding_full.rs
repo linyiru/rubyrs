@@ -171,6 +171,57 @@ pub(crate) fn char_count(idx: u8, bytes: &[u8]) -> Option<usize> {
 /// Per-character byte chunks under registry encoding `idx` —
 /// `String#chars` for Other-tagged strings. Round-trips each
 /// decoded char back through the encoder so the chunks are exact.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum CaseMode {
+    Up,
+    Down,
+    Capitalize,
+    Swap,
+}
+
+/// Unicode case over a registry-tagged byte string, CRuby shape
+/// (probed on 3.4.1 / ISO-8859-1): per source char, decode → apply
+/// the FULL Unicode mapping (ß.upcase → "SS", output grows) →
+/// re-encode; a mapped char the encoding can't hold keeps the
+/// ORIGINAL char's bytes (ÿ.upcase stays ÿ — Ÿ is unmappable in
+/// latin1). `None` = the input isn't valid in the encoding; the
+/// caller falls back to its pre-existing lossy route.
+pub(crate) fn case_other(idx: u8, bytes: &[u8], mode: CaseMode) -> Option<Vec<u8>> {
+    let chunks = char_chunks(idx, bytes)?;
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut first = true;
+    for ch_bytes in &chunks {
+        let s = decode_to_utf8(idx, ch_bytes)?;
+        let c = s.chars().next()?;
+        let mapped: String = match mode {
+            CaseMode::Up => c.to_uppercase().collect(),
+            CaseMode::Down => c.to_lowercase().collect(),
+            CaseMode::Capitalize => {
+                if first {
+                    c.to_uppercase().collect()
+                } else {
+                    c.to_lowercase().collect()
+                }
+            }
+            CaseMode::Swap => {
+                if c.is_uppercase() {
+                    c.to_lowercase().collect()
+                } else if c.is_lowercase() {
+                    c.to_uppercase().collect()
+                } else {
+                    c.to_string()
+                }
+            }
+        };
+        match encode_from_utf8(idx, &mapped, None) {
+            Ok(b) => out.extend_from_slice(&b),
+            Err(_) => out.extend_from_slice(ch_bytes),
+        }
+        first = false;
+    }
+    Some(out)
+}
+
 pub(crate) fn char_chunks(idx: u8, bytes: &[u8]) -> Option<Vec<Vec<u8>>> {
     if idx == 0 {
         return Some(bytes.iter().map(|&b| vec![b]).collect());

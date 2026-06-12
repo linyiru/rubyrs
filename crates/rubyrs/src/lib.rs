@@ -2646,6 +2646,26 @@ class Encoding
     end
   end
 
+  ## Reflection trio (CRuby shapes, registry-sized): the core
+  ## build serves the three built-ins; `_encoding_full` layers
+  ## its eight registry encodings + their aliases on top (see
+  ## preamble/encoding_full.rb). The alias map is the COMMON
+  ## subset of CRuby's (which also carries locale/external/
+  ## filesystem pseudo-names and historical spellings) —
+  ## documented narrowing, asserted by intersection in the
+  ## fixture.
+  def self.list
+    [ASCII_8BIT, UTF_8, US_ASCII]
+  end
+
+  def self.name_list
+    list.map(&:name) + aliases.keys
+  end
+
+  def self.aliases
+    { "BINARY" => "ASCII-8BIT", "ASCII" => "US-ASCII" }
+  end
+
   def initialize(name)
     @name = name
   end

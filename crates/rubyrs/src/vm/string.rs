@@ -463,21 +463,57 @@ pub(crate) fn string_call(
             ))
         }
         (Value::Str(a), "empty?", []) => Some(Value::Bool(a.borrow().is_empty())),
-        (Value::Str(a), "upcase", []) => Some(Value::new_str(a.to_string_lossy().to_uppercase())),
-        (Value::Str(a), "downcase", []) => Some(Value::new_str(a.to_string_lossy().to_lowercase())),
+        (Value::Str(a), "upcase", []) => {
+            // Registry-tagged strings get real per-encoding case
+            // mapping (decode → Unicode case → re-encode, original
+            // bytes kept for unmappables); the lossy route below
+            // would U+FFFD-mangle them AND drop the tag.
+            #[cfg(feature = "_encoding_full")]
+            if let crate::value::EncodingTag::Other(idx) = a.encoding.get()
+                && let Some(out) = crate::encoding_full::case_other(
+                    idx, &a.content.borrow(), crate::encoding_full::CaseMode::Up)
+            {
+                return Ok(Some(with_tag(Value::new_str_bytes(out), a.encoding.get())));
+            }
+            Some(Value::new_str(a.to_string_lossy().to_uppercase()))
+        }
+        (Value::Str(a), "downcase", []) => {
+            #[cfg(feature = "_encoding_full")]
+            if let crate::value::EncodingTag::Other(idx) = a.encoding.get()
+                && let Some(out) = crate::encoding_full::case_other(
+                    idx, &a.content.borrow(), crate::encoding_full::CaseMode::Down)
+            {
+                return Ok(Some(with_tag(Value::new_str_bytes(out), a.encoding.get())));
+            }
+            Some(Value::new_str(a.to_string_lossy().to_lowercase()))
+        }
         (Value::Str(a), "reverse", []) => Some(Value::new_str(a.to_string_lossy().chars().rev().collect::<String>())),
         // `String#capitalize` — first char uppercase, rest
         // lowercase. ASCII-only fold (Unicode options out of
         // subset). Empty string is a no-op. First non-letter
         // (digit / punctuation) stays as-is.
-        (Value::Str(a), "capitalize", []) => Some(Value::new_str(
-            a.with_str_lossy(capitalize_ascii)
-        )),
+        (Value::Str(a), "capitalize", []) => {
+            #[cfg(feature = "_encoding_full")]
+            if let crate::value::EncodingTag::Other(idx) = a.encoding.get()
+                && let Some(out) = crate::encoding_full::case_other(
+                    idx, &a.content.borrow(), crate::encoding_full::CaseMode::Capitalize)
+            {
+                return Ok(Some(with_tag(Value::new_str_bytes(out), a.encoding.get())));
+            }
+            Some(Value::new_str(a.with_str_lossy(capitalize_ascii)))
+        }
         // `String#swapcase` — every letter has its case
         // flipped; non-letters pass through.
-        (Value::Str(a), "swapcase", []) => Some(Value::new_str(
-            a.with_str_lossy(swapcase_ascii)
-        )),
+        (Value::Str(a), "swapcase", []) => {
+            #[cfg(feature = "_encoding_full")]
+            if let crate::value::EncodingTag::Other(idx) = a.encoding.get()
+                && let Some(out) = crate::encoding_full::case_other(
+                    idx, &a.content.borrow(), crate::encoding_full::CaseMode::Swap)
+            {
+                return Ok(Some(with_tag(Value::new_str_bytes(out), a.encoding.get())));
+            }
+            Some(Value::new_str(a.with_str_lossy(swapcase_ascii)))
+        }
         // Wrong-arity arms: CRuby accepts an optional Unicode
         // case-mapping option symbol (`:ascii` / `:turkic` /
         // `:lithuanian` / `:fold`); we don't support the option

@@ -354,6 +354,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn encoding_full_latin1() { run_diff("encoding_full_latin1"); }
 #[cfg(feature = "_encoding_full")]
 #[test] fn encoding_full_seven() { run_diff("encoding_full_seven"); }
+// E2 v3: reflection trio, Other-tag case ops, pivot-chain pairs.
+#[cfg(feature = "_encoding_full")]
+#[test] fn encoding_full_v3() { run_diff("encoding_full_v3"); }
 #[test] fn lifecycle_hook_super() { run_diff("lifecycle_hook_super"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
 #[test] fn user_sort() { run_diff("user_sort"); }
