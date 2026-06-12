@@ -146,12 +146,28 @@ end
 # NotImplementedError here escaped regenerator's rescue list and
 # aborted real builds (caught by the jk-real byte-identity gate).
 module Marshal
-  def self.dump(_obj, *_rest)
-    "--- {}\n"
+  # Same-process round-trip: dump stashes the object in the VM
+  # registry and returns a token (still valid YAML — an empty hash
+  # plus a comment — so disk consumers degrade through SafeYAML
+  # fallbacks); load of that exact token returns the SAME object.
+  # DIVERGENCES (documented): shallow (CRuby deep-copies through
+  # the byte stream — mutations are shared here); tokens are
+  # process-local (a dump written to disk and loaded by another
+  # run raises TypeError, the honest answer that rescue chains
+  # like Jekyll's regenerator already handle); registry caps at
+  # 1024 dumps, after which dump degrades to the tokenless
+  # placeholder. minitest's Result over-the-wire tests only need
+  # the same-process equality contract.
+  def self.dump(obj, *_rest)
+    __rubyrs_marshal_stash(obj)
   end
 
-  def self.load(*_args)
-    raise TypeError,
-      "incompatible marshal file format (rubyrs Tier 1: Marshal.dump emits a YAML placeholder; Marshal.load parses nothing)"
+  def self.load(src, *_rest)
+    hit = __rubyrs_marshal_fetch(src.to_s)
+    unless hit
+      raise TypeError,
+        "incompatible marshal file format (rubyrs Tier 1: same-process token round-trip only)"
+    end
+    hit[0]
   end
 end

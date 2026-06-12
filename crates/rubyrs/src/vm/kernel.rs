@@ -1526,6 +1526,61 @@ impl Vm {
             // we match. The WITH-block form is intercepted in
             // `do_call_block`'s no_recv arm (alongside `lambda` /
             // `proc`) where the block ObjId is in scope.
+            // Marshal round-trip primitives (see Vm::marshal_registry).
+            // `__rubyrs_marshal_stash(obj)` → token String; the token
+            // doubles as valid YAML (a comment line after an empty
+            // hash) so disk-written dumps still degrade gracefully
+            // through SafeYAML fallback chains.
+            "__rubyrs_marshal_stash" => {
+                const MARSHAL_REGISTRY_CAP: usize = 1024;
+                let obj = args.first().cloned().unwrap_or(Value::Nil);
+                // CRuby's Marshal.dump REJECTS shapes that can't be
+                // byte-serialized; real callers rely on the raise as
+                // a dumpability PROBE (minitest's sanitize_exception
+                // routes un-dumpable exceptions into its neuter
+                // chain). Mirror the common rejections — procs and
+                // friends, IO-ish typed data, anonymous classes,
+                // singleton-augmented objects — by walking the value
+                // graph (cycle-safe, ivars + container elements).
+                if let Err(why) = self.marshal_dumpable(&obj) {
+                    return Some(Err(self.trap(RubyError::TypeError { msg: why })));
+                }
+                if self.marshal_registry.len() >= MARSHAL_REGISTRY_CAP {
+                    // Cap reached: degrade to the plain placeholder
+                    // (no token) — load of it raises TypeError, the
+                    // honest "can't round-trip" answer.
+                    return Some(Ok(Value::new_str("--- {}\n".to_string())));
+                }
+                let idx = self.marshal_registry.len();
+                self.marshal_registry.push(obj);
+                Some(Ok(Value::new_str(format!("--- {{}}\n# rubyrs-marshal:{idx}\n"))))
+            }
+            // `__rubyrs_marshal_fetch(str)` → one-element Array
+            // [obj] on a token hit, nil otherwise (the wrapper
+            // distinguishes a legitimately-dumped nil from a miss).
+            "__rubyrs_marshal_fetch" => {
+                let token = match args.first() {
+                    Some(Value::Str(s)) => s.to_string_lossy(),
+                    _ => return Some(Ok(Value::Nil)),
+                };
+                let idx: Option<usize> = token
+                    .strip_prefix("--- {}\n# rubyrs-marshal:")
+                    .and_then(|rest| rest.strip_suffix('\n'))
+                    .and_then(|n| n.parse().ok());
+                match idx.and_then(|i| self.marshal_registry.get(i).cloned()) {
+                    Some(v) => {
+                        let mut g = PinGuard::new(self);
+                        g.pin(v.clone());
+                        g.vm.maybe_gc();
+                        if let Err(t) = g.vm.check_alloc() {
+                            return Some(Err(t));
+                        }
+                        let id = g.vm.heap.alloc(HeapObj::Array(vec![v].into()));
+                        Some(Ok(Value::Array(id)))
+                    }
+                    None => Some(Ok(Value::Nil)),
+                }
+            }
             "at_exit" => {
                 Some(Err(self.trap(RubyError::LocalJumpError {
                     msg: "no block given (at_exit)".into(),
@@ -3356,6 +3411,113 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
 /// See the gate note on `stdlib_constant_names` above — same
 /// reasoning, same cfg.
 #[cfg(not(target_os = "wasi"))]
+impl Vm {
+    /// Marshal-dumpability probe (see `__rubyrs_marshal_stash`).
+    /// Walks the value graph and returns Err(message) on the first
+    /// CRuby-rejected shape. Cycle-safe via a visited set; the walk
+    /// is depth-capped defensively (a graph deeper than this is
+    /// pathological and we'd rather accept than stack-overflow —
+    /// accepting only weakens the probe, never corrupts).
+    pub(crate) fn marshal_dumpable(&self, root: &Value) -> Result<(), String> {
+        use crate::heap::HeapObj;
+        let mut seen: Vec<u32> = Vec::new();
+        let mut stack: Vec<Value> = vec![root.clone()];
+        let mut budget = 10_000usize;
+        while let Some(v) = stack.pop() {
+            if budget == 0 {
+                return Ok(());
+            }
+            budget -= 1;
+            match &v {
+                Value::Block(_) | Value::CurriedProc(_) => {
+                    return Err("no _dump_data is defined for class Proc".into());
+                }
+                Value::BoundMethod(_) => {
+                    return Err("no _dump_data is defined for class Method".into());
+                }
+                Value::UnboundMethod(_) => {
+                    return Err("no _dump_data is defined for class UnboundMethod".into());
+                }
+                Value::Object(id) => {
+                    if seen.contains(&id.0) {
+                        continue;
+                    }
+                    seen.push(id.0);
+                    match self.heap.get(*id) {
+                        HeapObj::Instance(inst) => {
+                            if inst.singleton_class.is_some() {
+                                return Err(format!(
+                                    "singleton can't be dumped (instance of {})",
+                                    inst.class.name
+                                ));
+                            }
+                            if inst.class.name.is_empty()
+                                || inst.class.name.starts_with("#<")
+                            {
+                                return Err("can't dump anonymous class".into());
+                            }
+                            for iv in inst.ivars.values() {
+                                stack.push(iv.clone());
+                            }
+                        }
+                        // IO-ish / opaque host shapes can't serialize.
+                        _ => return Err("no _dump_data is defined for this object".into()),
+                    }
+                }
+                Value::Array(id) => {
+                    if seen.contains(&id.0) {
+                        continue;
+                    }
+                    seen.push(id.0);
+                    match self.heap.get(*id) {
+                        crate::heap::HeapObj::Array(a) => {
+                            for e in a.elems.iter() {
+                                stack.push(e.clone());
+                            }
+                            for iv in a.ivars.values() {
+                                stack.push(iv.clone());
+                            }
+                        }
+                        _ => return Err("no _dump_data is defined for this object".into()),
+                    }
+                }
+                Value::Hash(id) => {
+                    if seen.contains(&id.0) {
+                        continue;
+                    }
+                    seen.push(id.0);
+                    match self.heap.get(*id) {
+                        crate::heap::HeapObj::Hash(h) => {
+                            if h.default_block.is_some() {
+                                return Err("can't dump hash with default proc".into());
+                            }
+                            for (k, val) in h.pairs.iter() {
+                                stack.push(k.clone());
+                                stack.push(val.clone());
+                            }
+                            for iv in h.ivars.values() {
+                                stack.push(iv.clone());
+                            }
+                        }
+                        _ => return Err("no _dump_data is defined for this object".into()),
+                    }
+                }
+                Value::Range(id) => {
+                    if seen.contains(&id.0) {
+                        continue;
+                    }
+                    seen.push(id.0);
+                    let r = self.heap.range(*id);
+                    stack.push(r.begin.clone());
+                    stack.push(r.end.clone());
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 fn is_stdlib_stub_name(name: &str) -> bool {
     matches!(
         name,

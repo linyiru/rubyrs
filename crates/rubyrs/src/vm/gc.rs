@@ -531,6 +531,9 @@ impl Vm {
         // then aliases the last-allocated block (observed under
         // STRESS_GC: five `at_exit` blocks all ran the fifth one's body).
         for id in &self.at_exit_handlers { roots.push(Value::Block(*id)); }
+        // Marshal round-trip registry — dumped objects must survive
+        // until (a possible) Marshal.load names them again.
+        for v in &self.marshal_registry { roots.push(v.clone()); }
         // Top-level constants (`FOO = expr`) are reachable from any
         // future LoadConst — root every value so Array/Hash/Object
         // constants don't get swept between assignment and read.

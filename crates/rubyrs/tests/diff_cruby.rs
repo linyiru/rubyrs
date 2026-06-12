@@ -920,3 +920,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Vendored OptionParser (minitest process_args surface) — stdlib-gated.
 #[cfg(feature = "stdlib")]
 #[test] fn optparse_minitest_surface() { run_diff("optparse_minitest_surface"); }
+// Marshal same-process round-trip contract + dumpability TypeErrors
+// + Exception ivar reflection (message/backtrace hidden).
+#[test] fn marshal_roundtrip_contract() { run_diff("marshal_roundtrip_contract"); }

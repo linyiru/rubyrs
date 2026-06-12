@@ -9048,7 +9048,36 @@ impl Vm {
             let ivar_ids: Vec<crate::intern::SymId> = match &recv {
                 Value::Object(id) => {
                     if let crate::heap::HeapObj::Instance(inst) = self.heap.get(*id) {
-                        inst.ivars.keys().copied().collect()
+                        // CRuby keeps an Exception's message and
+                        // backtrace in C-level slots, NOT ivars —
+                        // `RuntimeError.new("x").instance_variables`
+                        // is []. rubyrs models them as @message /
+                        // @backtrace, so the reflection surface must
+                        // hide those two on Exception descendants or
+                        // ivar-scrubbing loops destroy the message
+                        // (minitest's neuter kill path:
+                        // `ne.instance_variables.each { |v|
+                        //  ne.remove_instance_variable v }`).
+                        // User-set ivars still list normally.
+                        let is_exception = {
+                            let mut c = Some(inst.class.clone());
+                            let mut hit = false;
+                            while let Some(k) = c {
+                                if k.name == "Exception" { hit = true; break; }
+                                let next = k.superclass.borrow().clone();
+                                c = next;
+                            }
+                            hit
+                        };
+                        if is_exception {
+                            let msg_id = self.interner.intern("@message");
+                            let bt_id = self.interner.intern("@backtrace");
+                            inst.ivars.keys().copied()
+                                .filter(|k| *k != msg_id && *k != bt_id)
+                                .collect()
+                        } else {
+                            inst.ivars.keys().copied().collect()
+                        }
                     } else {
                         Vec::new()
                     }
