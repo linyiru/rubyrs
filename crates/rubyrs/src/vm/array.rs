@@ -359,6 +359,20 @@ impl Vm {
                             ),
                         }));
                     }
+                    // `delete_at(idx)` — remove and return the
+                    // element at idx (negative counts from the
+                    // end); nil when out of range. The vendored
+                    // OptionParser's destructive parse! consumes
+                    // argv with it.
+                    ("delete_at", [Value::Int(n)]) => {
+                        let len = self.heap.array(id).len() as i64;
+                        let idx = if *n < 0 { n + len } else { *n };
+                        if idx < 0 || idx >= len {
+                            Some(Value::Nil)
+                        } else {
+                            Some(self.heap.array_mut(id).remove(idx as usize))
+                        }
+                    }
                     ("delete", [needle]) => {
                         // Two-phase: walk the immutable view to
                         // collect indices that match (need the
