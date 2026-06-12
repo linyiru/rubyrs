@@ -171,3 +171,19 @@ module Marshal
     hit[0]
   end
 end
+
+# Binding — Tier-1 opaque context token. CRuby's Binding captures
+# the full lexical environment for later eval; rubyrs has no
+# eval-in-binding, so `binding` returns an inert marker instance.
+# It exists because real code stores one in an ivar as a "context
+# I might inspect later" breadcrumb (minitest's BetterError test
+# fixture does `@bad_ivar = binding` inside set_backtrace) — and
+# because Marshal must REJECT it (no _dump_data), which is what
+# routes such exceptions into minitest's neuter chain. Calling
+# eval/local_variables on it raises NoMethodError (honest absence).
+class Binding
+end
+
+def binding
+  Binding.new
+end

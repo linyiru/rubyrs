@@ -2214,6 +2214,26 @@ impl Vm {
                     .map(|f| matches!(f.self_val, Value::Class(_)))
                     .unwrap_or(false);
                 if is_no_super && is_lifecycle_hook && on_class_or_module {
+                    // Before substituting the no-op default, check
+                    // whether user code has installed a hook at the
+                    // METACLASS-TOWER TOP — `Class.class_eval {
+                    // alias inherited hack }` (minitest's
+                    // with_overridden_include). CRuby's class-method
+                    // super chain terminates in Class's instance
+                    // methods, so `Runnable.inherited`'s `super`
+                    // must reach the hack. Same O(1) gate as
+                    // invoke_inherited_hook: Class's instance table
+                    // stays empty unless user code reopens it.
+                    let class_class = self.classes
+                        .get(&self.interner.intern("Class"))
+                        .filter(|cc| !cc.methods.borrow().is_empty())
+                        .cloned();
+                    if let Some(cc) = class_class
+                        && let Some(m) = cc.methods.borrow().get(&name_id).cloned()
+                    {
+                        let self_val = self.frames.last().map(|f| f.self_val.clone()).unwrap_or(Value::Nil);
+                        return self.invoke_method(m, self_val, args);
+                    }
                     self.stack.push(Value::Nil);
                     Ok(())
                 } else {

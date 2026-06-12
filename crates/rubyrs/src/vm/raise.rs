@@ -202,9 +202,46 @@ impl Vm {
                     let n_pinned = bt_strings.len() + 1;
                     self.maybe_gc();
                     let bt_arr_id = self.heap.alloc(HeapObj::Array(bt_strings.into()));
+                    // CRuby's raise funcalls `set_backtrace`, so a
+                    // USER override observes the raise (minitest's
+                    // BetterError fixture stamps `@bad_ivar =
+                    // binding` there to poison marshalability).
+                    // Detect an override by its defining class —
+                    // the preamble default lives on Exception
+                    // itself; anything narrower is user code. The
+                    // dispatch runs BEFORE the handler walk (frames
+                    // untouched); on any failure inside the
+                    // override, fall back to the direct ivar write
+                    // (best-effort, never compounds the unwind).
+                    let sbt_sym = self.interner.intern("set_backtrace");
+                    let exc_cls = self.heap.real_class_of(*exc_id);
+                    let user_sbt = self.lookup_method_uncached(&exc_cls, sbt_sym)
+                        .filter(|m| {
+                            m.defining_class
+                                .as_ref()
+                                .and_then(std::rc::Weak::upgrade)
+                                .is_none_or(|dc| dc.name != "Exception")
+                        });
+                    let mut dispatched = false;
+                    if let Some(m) = user_sbt {
+                        self.pinned.push(Value::Array(bt_arr_id));
+                        let pre_frames = self.frames.len();
+                        let invoked = self
+                            .invoke_method(m, Value::Object(*exc_id), vec![Value::Array(bt_arr_id)])
+                            .and_then(|()| self.dispatch_until(pre_frames));
+                        self.pinned.pop();
+                        if invoked.is_ok() {
+                            self.stack.pop();
+                            dispatched = true;
+                        } else {
+                            self.frames.truncate(pre_frames);
+                        }
+                    }
                     for _ in 0..n_pinned { self.pinned.pop(); }
-                    self.heap.instance_mut(*exc_id).ivars
-                        .insert(bt_sym, Value::Array(bt_arr_id));
+                    if !dispatched {
+                        self.heap.instance_mut(*exc_id).ivars
+                            .insert(bt_sym, Value::Array(bt_arr_id));
+                    }
                 }
             }
         }

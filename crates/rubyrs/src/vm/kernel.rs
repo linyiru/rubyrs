@@ -3439,6 +3439,13 @@ impl Vm {
                     seen.push(id.0);
                     match self.heap.get(*id) {
                         HeapObj::Instance(inst) => {
+                            // Binding is CRuby's canonical
+                            // un-marshalable: minitest's neuter
+                            // chain is triggered by exceptions
+                            // carrying one in an ivar.
+                            if inst.class.name == "Binding" {
+                                return Err("no _dump_data is defined for class Binding".into());
+                            }
                             if inst.singleton_class.is_some() {
                                 return Err(format!(
                                     "singleton can't be dumped (instance of {})",

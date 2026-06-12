@@ -944,3 +944,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Anonymous class display serial (#<Class:0xN> shape).
 #[cfg(feature = "regex")]
 #[test] fn anon_class_display_serial() { run_diff("anon_class_display_serial"); }
+// Kernel#binding + raise-time set_backtrace dispatch + hook super chain.
+#[test] fn binding_set_backtrace_raise() { run_diff("binding_set_backtrace_raise"); }
