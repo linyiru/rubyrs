@@ -91,6 +91,25 @@ class Time
     end
   end
 
+  # `Time.utc(year, month=1, day=1, hour=0, min=0, sec=0)` — civil
+  # fields → Time, via days_from_civil. Fractional/string seconds
+  # and the 10-arg `Time.gm` form are out of scope. `Time.local` /
+  # `Time.mktime` alias to it: Tier-1 time is UTC-only (the TZ=UTC
+  # CRuby flavour), so local-zone construction IS utc construction
+  # here — documented divergence for hosts in other zones
+  # (minitest's skip_until/fail_after only compare dates, where
+  # this is exact).
+  def self.utc(year, month = 1, day = 1, hour = 0, min = 0, sec = 0)
+    days = days_from_civil(year, month, day)
+    new(days * 86_400 + hour * 3600 + min * 60 + sec, 0)
+  end
+
+  class << self
+    alias_method :gm, :utc
+    alias_method :local, :utc
+    alias_method :mktime, :utc
+  end
+
   # Howard Hinnant's `days_from_civil` — the inverse of `decompose`'s
   # `civil_from_days`. Returns days since 1970-01-01 for a proleptic
   # Gregorian (year, month 1..12, day) triple, correct for pre-1970

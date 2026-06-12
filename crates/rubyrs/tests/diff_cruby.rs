@@ -898,3 +898,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn exception_surface_extras() { run_diff("exception_surface_extras"); }
 // Array#join recurses into nested arrays; cycle-safe.
 #[test] fn array_join_recursive() { run_diff("array_join_recursive"); }
+// Time.utc/gm/local/mktime civil constructors (Tier-1 UTC-only).
+#[test] fn time_civil_constructors() { run_diff("time_civil_constructors"); }
