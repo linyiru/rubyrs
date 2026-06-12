@@ -20,10 +20,13 @@ pub(crate) enum Block {
         spans: Vec<Span>,
     },
     Para(Vec<Span>),
-    /// Tight list (no blank lines inside) — items are span runs.
+    /// Tight list (no blank lines inside) — items are span runs
+    /// plus an optional trailing nested child list. Lazy
+    /// continuations join the item's spans with a literal newline
+    /// (kramdown's verbatim line joining).
     List {
         ordered: bool,
-        items: Vec<Vec<Span>>,
+        items: Vec<ListItem>,
     },
     Quote(Vec<Block>),
     Code {
@@ -31,6 +34,15 @@ pub(crate) enum Block {
         text: String,
     },
     Hr,
+}
+
+#[derive(Debug)]
+pub(crate) struct ListItem {
+    pub(crate) spans: Vec<Span>,
+    /// Trailing nested list: `(ordered, items)`. Tight items carry
+    /// at most text-then-one-child in our subset; anything richer
+    /// (blank lines, content after the child) declines first.
+    pub(crate) child: Option<(bool, Vec<ListItem>)>,
 }
 
 #[derive(Debug)]
@@ -189,56 +201,16 @@ fn parse_blocks(lines: &[&str], opts: &Options) -> Result<Vec<Block>, Error> {
             continue;
         }
 
-        // Lists (tight only — a blank line inside, nesting, or
-        // multi-paragraph items decline).
+        // Lists (tight only — blank lines inside / loose shapes
+        // decline). Nesting via marker-width indentation is
+        // supported for UNORDERED parents (`- a` over `  - b`, the
+        // form real posts use): the 2-space-stripped tail of an
+        // item parses as continuation text plus at most one child
+        // list. Ordered parents keep the conservative decline
+        // (their content column is digits+2, not a fixed strip
+        // width).
         if let Some(ordered) = list_marker(line) {
-            let mut items: Vec<Vec<Span>> = Vec::new();
-            while i < lines.len() {
-                let l = lines[i];
-                if l.trim().is_empty() {
-                    // Blank: list ends here if followed by a non-item;
-                    // a following item would make the list LOOSE.
-                    let mut j = i;
-                    while j < lines.len() && lines[j].trim().is_empty() {
-                        j += 1;
-                    }
-                    if j < lines.len() && list_marker(lines[j]) == Some(ordered) {
-                        return Err(declined("loose-list"));
-                    }
-                    break;
-                }
-                if list_marker(l) == Some(ordered) {
-                    let content = strip_marker(l, ordered);
-                    // Item content is block-level in kramdown — tables,
-                    // EOB markers, IALs etc. inside an item are out of
-                    // subset, same as at the top level.
-                    decline_block_scan(content)?;
-                    // Trailing whitespace carries hard-break semantics.
-                    if content.trim_end() != content {
-                        return Err(declined("list-trailing-ws"));
-                    }
-                    items.push(parse_spans(content)?);
-                    i += 1;
-                } else if l.starts_with("  ") || l.starts_with('\t') {
-                    return Err(declined("list-continuation"));
-                } else if list_marker(l).is_some() {
-                    return Err(declined("mixed-list-markers"));
-                } else {
-                    // Lazy continuation line appended to the last item.
-                    decline_block_scan(l)?;
-                    if l.trim_end() != l || l.starts_with(' ') {
-                        return Err(declined("list-continuation-ws"));
-                    }
-                    match items.last_mut() {
-                        Some(item) => {
-                            item.push(Span::Text("\n".to_string()));
-                            item.extend(parse_spans(l)?);
-                            i += 1;
-                        }
-                        None => break,
-                    }
-                }
-            }
+            let items = parse_list_items(lines, &mut i, ordered)?;
             out.push(Block::List { ordered, items });
             continue;
         }
@@ -416,6 +388,135 @@ fn is_hr(line: &str) -> bool {
 }
 
 /// `Some(ordered?)` when the line opens a list item.
+/// Collect the items of one (tight) list level starting at
+/// `lines[*i]`. Shares the old inline loop's decline rules; the
+/// marker-indented tail of an item (stripped by exactly the
+/// unordered content column, 2) parses as lazy-continuation text
+/// followed by at most one nested child list — which recurses
+/// through this same fn, so deeper nesting works and a deeper
+/// continuation line attaches to the DEEPEST open item
+/// (kramdown's behaviour, probed: `- a` / `  - b` / `    cont`
+/// joins `cont` onto b).
+fn parse_list_items(
+    lines: &[&str],
+    i: &mut usize,
+    ordered: bool,
+) -> Result<Vec<ListItem>, Error> {
+    let mut items: Vec<ListItem> = Vec::new();
+    while *i < lines.len() {
+        let l = lines[*i];
+        if l.trim().is_empty() {
+            // Blank: list ends here if followed by a non-item; a
+            // following same-level item would make the list LOOSE.
+            let mut j = *i;
+            while j < lines.len() && lines[j].trim().is_empty() {
+                j += 1;
+            }
+            if j < lines.len() && list_marker(lines[j]) == Some(ordered) {
+                return Err(declined("loose-list"));
+            }
+            break;
+        }
+        if list_marker(l) == Some(ordered) {
+            let content = strip_marker(l, ordered);
+            // Item content is block-level in kramdown — tables,
+            // EOB markers, IALs etc. inside an item are out of
+            // subset, same as at the top level.
+            decline_block_scan(content)?;
+            // Trailing whitespace carries hard-break semantics.
+            if content.trim_end() != content {
+                return Err(declined("list-trailing-ws"));
+            }
+            items.push(ListItem { spans: parse_spans(content)?, child: None });
+            *i += 1;
+            // Marker-indented tail block (>= 2 spaces): strip the
+            // content column and attach to THIS item. Ordered
+            // parents decline (content column != 2). Tabs decline.
+            let mut tail: Vec<&str> = Vec::new();
+            while *i < lines.len()
+                && !lines[*i].trim().is_empty()
+                && (lines[*i].starts_with("  ") || lines[*i].starts_with('\t'))
+            {
+                if lines[*i].starts_with('\t') {
+                    return Err(declined("list-tab-indent"));
+                }
+                if ordered {
+                    return Err(declined("list-continuation"));
+                }
+                tail.push(&lines[*i][2..]);
+                *i += 1;
+            }
+            if !tail.is_empty() {
+                let mut extra: Vec<Span> = Vec::new();
+                let mut j = 0usize;
+                // Leading non-marker lines: lazy continuations of
+                // this item (kramdown joins them verbatim with a
+                // newline, indentation stripped).
+                while j < tail.len() && list_marker(tail[j]).is_none() {
+                    let cont = tail[j];
+                    decline_block_scan(cont)?;
+                    if cont.trim_end() != cont || cont.starts_with(' ') || cont.starts_with('\t') {
+                        return Err(declined("list-continuation-ws"));
+                    }
+                    extra.push(Span::Text("\n".to_string()));
+                    extra.extend(parse_spans(cont)?);
+                    j += 1;
+                }
+                let child = if j < tail.len() {
+                    // Child list: recurse over the rest of the
+                    // stripped tail. Deeper-indented lines inside
+                    // recurse again; a trailing stripped non-marker
+                    // line is the child's own lazy continuation.
+                    let child_ordered = list_marker(tail[j])
+                        .expect("loop exit condition");
+                    let mut k = j;
+                    let child_items = parse_list_items(&tail, &mut k, child_ordered)?;
+                    if k < tail.len() {
+                        // Content after the child list inside the
+                        // same item (blank-separated etc.) — out of
+                        // subset.
+                        return Err(declined("list-after-child"));
+                    }
+                    Some((child_ordered, child_items))
+                } else {
+                    None
+                };
+                let item = items.last_mut().expect("just pushed");
+                item.spans.extend(extra);
+                item.child = child;
+            }
+        } else if l.starts_with(' ') {
+            // Sub-2-space indent (1 space): kramdown treats a
+            // 1-space marker as a SAME-level item; conservatively
+            // decline the whole family.
+            return Err(declined("list-continuation"));
+        } else if list_marker(l).is_some() {
+            return Err(declined("mixed-list-markers"));
+        } else {
+            // Lazy continuation line appended to the last item.
+            decline_block_scan(l)?;
+            if l.trim_end() != l {
+                return Err(declined("list-continuation-ws"));
+            }
+            match items.last_mut() {
+                Some(item) => {
+                    if item.child.is_some() {
+                        // Column-0 text after a nested child would
+                        // join the PARENT item in kramdown — out of
+                        // our emit shape.
+                        return Err(declined("list-after-child"));
+                    }
+                    item.spans.push(Span::Text("\n".to_string()));
+                    item.spans.extend(parse_spans(l)?);
+                    *i += 1;
+                }
+                None => break,
+            }
+        }
+    }
+    Ok(items)
+}
+
 fn list_marker(line: &str) -> Option<bool> {
     let b = line.as_bytes();
     if b.len() >= 2 && matches!(b[0], b'*' | b'+' | b'-') && (b[1] == b' ' || b[1] == b'\t') {

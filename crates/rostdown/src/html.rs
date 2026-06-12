@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use crate::parse::{Block, Span};
 use crate::{CodeHighlighter, Options};
+use crate::parse::ListItem;
 
 pub(crate) fn convert(blocks: &[Block], opts: &Options, hl: &mut dyn CodeHighlighter) -> String {
     let mut out = String::new();
@@ -60,16 +61,7 @@ fn convert_blocks(
                 out.push_str("</p>\n");
             }
             Block::List { ordered, items } => {
-                let tag = if *ordered { "ol" } else { "ul" };
-                out.push_str(&format!("{pad}<{tag}>\n"));
-                let item_pad = " ".repeat(indent + 2);
-                for item in items {
-                    out.push_str(&item_pad);
-                    out.push_str("<li>");
-                    convert_spans(out, item, hl.codespan_class());
-                    out.push_str("</li>\n");
-                }
-                out.push_str(&format!("{pad}</{tag}>\n"));
+                emit_list(out, items, *ordered, indent, hl);
             }
             Block::Quote(inner) => {
                 out.push_str(&format!("{pad}<blockquote>\n"));
@@ -110,6 +102,43 @@ fn convert_blocks(
             Block::Hr => out.push_str(&format!("{pad}<hr />\n")),
         }
     }
+}
+
+/// kramdown's tight-list emission: leaf items are single-line
+/// (`{pad}<li>text</li>`); an item with a nested child opens
+/// across lines with the child <ul>/<ol> indented one level
+/// deeper and `</li>` back at the item's own column:
+///   {pad}<li>a
+///   {pad+2}<ul>
+///   {pad+4}<li>b</li>
+///   {pad+2}</ul>
+///   {pad}</li>
+fn emit_list(
+    out: &mut String,
+    items: &[ListItem],
+    ordered: bool,
+    indent: usize,
+    hl: &mut dyn CodeHighlighter,
+) {
+    let pad = " ".repeat(indent);
+    let tag = if ordered { "ol" } else { "ul" };
+    out.push_str(&format!("{pad}<{tag}>\n"));
+    let item_pad = " ".repeat(indent + 2);
+    for item in items {
+        out.push_str(&item_pad);
+        out.push_str("<li>");
+        convert_spans(out, &item.spans, hl.codespan_class());
+        match &item.child {
+            Some((c_ord, c_items)) => {
+                out.push('\n');
+                emit_list(out, c_items, *c_ord, indent + 4, hl);
+                out.push_str(&item_pad);
+                out.push_str("</li>\n");
+            }
+            None => out.push_str("</li>\n"),
+        }
+    }
+    out.push_str(&format!("{pad}</{tag}>\n"));
 }
 
 fn convert_spans(out: &mut String, spans: &[Span], codespan_class: Option<&str>) {
