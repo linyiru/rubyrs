@@ -424,6 +424,7 @@ impl<'t> Lexer<'t> {
                         .map(|s| s.map(|(a, b)| text[a..b].to_string()))
                         .collect();
                     self.pending = Some(Pending { size });
+                    self.caps_buf = spans;
                     return Ok(Some(StepHit::NeedCallback {
                         state,
                         rule: ri,
@@ -433,6 +434,10 @@ impl<'t> Lexer<'t> {
                 Kind::Mixin(_) => unreachable!("handled above"),
             }
 
+            // Give the span buffer back for the next probe — `take`
+            // left an empty Vec behind, which would re-allocate on
+            // every subsequent hit.
+            self.caps_buf = spans;
             return Ok(Some(StepHit::Advance(self.bump_null_guard(size, pos)?)));
         }
         Ok(None)

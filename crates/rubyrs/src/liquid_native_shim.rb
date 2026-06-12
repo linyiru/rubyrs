@@ -51,7 +51,12 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
             if tid
               needs = __rubyrs_liquid_needs(tid).split("\n").map do |line|
                 path, slice, size, fields = line.split("\t", 4)
-                [path, slice == "-" ? nil : slice.to_i, size == "1",
+                # Pre-split the walk path once at compile time — the
+                # render loop walks every need on EVERY render
+                # (1371 renders on jekyll-1k), and the per-render
+                # `path.split(".")` allocation showed up in the
+                # post-dual-engine profile residue.
+                [path, path.split("."), slice == "-" ? nil : slice.to_i, size == "1",
                  fields.to_s.empty? ? nil : fields.split(",")]
               end
               [tid, needs]
@@ -71,7 +76,7 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
         def render(entry, payload)
           tid, needs = entry
           values = {}
-          needs.each do |path, slice, need_size, fields|
+          needs.each do |path, segs, slice, need_size, fields|
             if path.start_with?("site.")
               key = "#{path}|#{slice}|#{fields ? fields.join(",") : ""}"
               cached = (@site_values ||= {})[key]
@@ -83,7 +88,7 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
                 # @site_posts memo never helps; the old
                 # resolve-then-resolve_full_size pair paid that sort
                 # twice — measured 2 x 49 ms on liquid-1k).
-                v = walk(payload, path)
+                v = walk_segs(payload, segs)
                 resolved = resolve_walked(v, slice, fields)
                 return nil if resolved == :__decline
                 full = nil
@@ -97,7 +102,7 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
               values[path + "#size"] = cached[1] if need_size
               next
             end
-            v = walk(payload, path)
+            v = walk_segs(payload, segs)
             resolved = resolve_walked(v, slice, fields)
             return nil if resolved == :__decline
             values[path] = resolved
@@ -116,11 +121,14 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
 
         # Walk a dotted path through the Liquid payload (drops answer
         # #[]). nil mid-walk is a legitimate liquid nil.
-        def walk(payload, path)
+        def walk_segs(payload, segs)
           cur = payload
-          path.split(".").each do |seg|
+          i = 0
+          n = segs.length
+          while i < n
             return nil if cur.nil?
-            cur = cur[seg]
+            cur = cur[segs[i]]
+            i += 1
           end
           cur
         end
