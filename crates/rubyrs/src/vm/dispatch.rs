@@ -4586,6 +4586,16 @@ impl Vm {
                         }));
                     }
                     cls.undefed.borrow_mut().insert(sid);
+                    // The tombstone alone only blocks ANCESTOR
+                    // lookups: lookup_method_uncached checks it
+                    // AFTER walking the class's own table (so a
+                    // post-undef redefine wins). A method defined
+                    // ON this class — `def obj.x` then
+                    // `obj.singleton_class.undef_method :x`,
+                    // minitest's Object#stub restore path — must
+                    // also leave the table, or the undef is a
+                    // no-op for it.
+                    cls.methods.borrow_mut().remove(&sid);
                     self.any_undefs = true;
                     self.fire_method_lifecycle_hook(&cls, "method_undefined", sid)?;
                 }
