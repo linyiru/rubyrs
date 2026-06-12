@@ -750,6 +750,14 @@ impl Vm {
         {
             return true;
         }
+        // String per-instance eigenclass methods (side-table twin).
+        if self.any_str_singletons
+            && let Value::Str(s) = recv
+            && let Some((_, sc)) = self.str_singletons.get(&(std::rc::Rc::as_ptr(s) as usize))
+            && self.lookup_method_uncached(sc, name_id).is_some()
+        {
+            return true;
+        }
         let name: &str = self.interner.resolve(name_id);
         // Kernel's PRIVATE builtin surface — `respond_to?(name,
         // true)` must report the no-recv builtins dispatch actually
@@ -2113,6 +2121,22 @@ impl Vm {
                             }
                             if nm == "initialize" {
                                 self.stack.push(Value::Nil);
+                                return Ok(());
+                            }
+                        }
+                        // `super` from a str-singleton method (the
+                        // stub super-forwarder shape: minitest's
+                        // Object#stub defines `do |*a| super(*a) end`
+                        // on the eigenclass when `methods` doesn't
+                        // list the stubbed name) → the String
+                        // primitive of the same name.
+                        (_, Some(sv @ Value::Str(_))) => {
+                            if let Some(v) = crate::vm::primitive::primitive_call(
+                                &sv, &nm, &args, self.max_value_bytes,
+                            )
+                            .map_err(|e| self.trap(e))?
+                            {
+                                self.stack.push(v);
                                 return Ok(());
                             }
                         }

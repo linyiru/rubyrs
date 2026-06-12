@@ -2847,6 +2847,30 @@ impl Vm {
                     self.stack.push(Value::Sym(name_id));
                     return Ok(true);
                 }
+                // String receivers: per-instance eigenclass via the
+                // str_singletons side-table (minitest's stub /
+                // assertions' diff-test `def s.pretty_print`).
+                if let Value::Str(s) = &recv {
+                    let s = s.clone();
+                    let sc = self.ensure_str_singleton(&s);
+                    let proto = &self.protos[p_idx as usize];
+                    let params = proto.params.clone();
+                    let fixed_arity = Self::fixed_arity_for_proto(proto, params.len());
+                    let m = Rc::new(Method {
+                        params,
+                        proto_idx: p_idx as usize,
+                        fixed_arity,
+                        defining_class: Some(Rc::downgrade(&sc)),
+                        visibility: std::cell::Cell::new(Visibility::Public),
+                        closure: None,
+                        builtin: None,
+                        original_name: Some(name_id),
+                    });
+                    sc.methods.borrow_mut().insert(name_id, m);
+                    self.method_gen = self.method_gen.wrapping_add(1);
+                    self.stack.push(Value::Sym(name_id));
+                    return Ok(true);
+                }
                 let obj_id = match recv {
                     Value::Object(id) => id,
                     other => {

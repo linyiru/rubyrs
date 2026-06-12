@@ -984,3 +984,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // super->method_missing fallback, caller(Range), bare reflection
 // universals (minitest Object#stub family).
 #[test] fn super_mm_caller_range() { run_diff("super_mm_caller_range"); }
+// String per-instance eigenclass (def s.foo / stub save-restore).
+#[test] fn string_singleton_methods() { run_diff("string_singleton_methods"); }

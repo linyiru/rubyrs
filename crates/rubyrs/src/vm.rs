@@ -1010,6 +1010,18 @@ pub(crate) struct Vm {
     /// the singleton probe (set-once, never cleared; mirrors
     /// `any_undefs`).
     pub(crate) any_hash_singletons: bool,
+    /// String per-instance eigenclasses (`(+"s").stub :to_s, ...` /
+    /// `def s.foo`). `Value::Str` is a bare `Rc<RStr>` with no room
+    /// for an eigenclass pointer (strings are the hottest heap
+    /// shape), so the eigenclass lives in this side-table keyed on
+    /// the Rc's pointer identity. The map holds a strong Rc to the
+    /// RStr so a freed-and-reused allocation can't alias an old
+    /// entry (string singletons are test-harness-rare; the leak is
+    /// bounded by their count). Walked by the GC root gather (the
+    /// eigenclass's Methods capture GC objects). `any_str_singletons`
+    /// is the set-once dispatch gate, same as `any_hash_singletons`.
+    pub(crate) str_singletons: crate::intern::FxHashMap<usize, (std::rc::Rc<crate::value::RStr>, Rc<Class>)>,
+    pub(crate) any_str_singletons: bool,
     /// Refinements (`refine` / `using`). Tier-1: activation is GLOBAL
     /// from the `using` point on, not lexically scoped per file/module
     /// like CRuby — equivalent for the common single-file case (see
@@ -1663,6 +1675,8 @@ impl Vm {
             marshal_registry: Vec::new(),
             anon_class_counter: 0,
             any_hash_singletons: false,
+            str_singletons: crate::intern::FxHashMap::default(),
+            any_str_singletons: false,
             module_refinements: crate::intern::FxHashMap::default(),
             active_refinements: crate::intern::FxHashMap::default(),
             refined_method_names: crate::intern::FxHashSet::default(),

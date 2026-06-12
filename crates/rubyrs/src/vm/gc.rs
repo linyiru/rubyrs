@@ -608,6 +608,12 @@ impl Vm {
         if let Some(bid) = self.pending_block_arg {
             roots.push(crate::value::Value::Block(bid));
         }
+        // String per-instance eigenclasses: their methods capture
+        // closures over GC objects, and nothing else roots the
+        // side-table's classes.
+        for (_, sc) in self.str_singletons.values() {
+            roots.push(crate::value::Value::Class(sc.clone()));
+        }
         #[cfg(feature = "_fiber")]
         for snap in &self.fiber_stash_stack {
             // The suspended side's Stack-frame slots live in ITS

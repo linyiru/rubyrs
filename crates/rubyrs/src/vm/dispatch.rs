@@ -6283,7 +6283,30 @@ impl Vm {
         // set-once `any_hash_singletons` flag so the probe costs a
         // single false branch until the first such Hash exists
         // (mirrors the `any_undefs` gate).
-        if self.any_hash_singletons && !no_recv && argc < self.stack.len() {
+        // String-singleton twin of the Hash gate below.
+        // `!force_primitive`: a <primitive-alias-forwarder> saved
+        // ONTO the eigenclass (stub save/restore) re-dispatches its
+        // original name with the force flag — without the gate
+        // exclusion it would re-find ITSELF and recurse.
+        if self.any_str_singletons && !force_primitive && !no_recv && argc < self.stack.len() {
+            let ridx = self.stack.len() - 1 - argc;
+            let m = if let Some(Value::Str(s)) = self.stack.get(ridx) {
+                self.str_singletons
+                    .get(&(std::rc::Rc::as_ptr(s) as usize))
+                    .map(|(_, sc)| sc.clone())
+                    .and_then(|sc| self.lookup_method_uncached(&sc, name_id))
+            } else {
+                None
+            };
+            if let Some(m) = m {
+                let split = self.stack.len() - argc;
+                let args: Vec<Value> = self.stack.drain(split..).collect();
+                let recv = self.stack.pop().expect("ICE: str-singleton recv");
+                self.invoke_method(m, recv, args)?;
+                return Ok(());
+            }
+        }
+        if self.any_hash_singletons && !force_primitive && !no_recv && argc < self.stack.len() {
             let ridx = self.stack.len() - 1 - argc;
             if let Some(Value::Hash(hid)) = self.stack.get(ridx) {
                 let m = match self.heap.get(*hid) {
@@ -8866,6 +8889,32 @@ impl Vm {
                             | "raise" | "fail"
                         ) {
                             let synth = self.synth_kernel_forwarder(target, old_id);
+                            target.methods.borrow_mut().insert(new_id, synth);
+                            self.method_gen = self.method_gen.wrapping_add(1);
+                            self.stack.push(Value::Sym(new_id));
+                            return Ok(());
+                        }
+                        // Primitive instance method reachable
+                        // through the target's superclass chain
+                        // (str-singleton stub: `sc.send
+                        // :alias_method, :__save_to_s, :to_s` where
+                        // to_s is the String primitive) — same
+                        // forwarder the class-body `alias` arm
+                        // synthesises (step.rs Op::AliasMethod).
+                        let prim_hit = {
+                            let mut hit = false;
+                            let mut visited: std::collections::HashSet<*const crate::value::Class> =
+                                std::collections::HashSet::new();
+                            let mut walker = Some(target.clone());
+                            while let Some(c) = walker {
+                                if !visited.insert(Rc::as_ptr(&c)) { break; }
+                                if self.primitive_class_responds_to(&c.name, old_id) { hit = true; break; }
+                                walker = c.superclass.borrow().clone();
+                            }
+                            hit
+                        };
+                        if prim_hit {
+                            let synth = self.synth_primitive_forwarder(target, old_id);
                             target.methods.borrow_mut().insert(new_id, synth);
                             self.method_gen = self.method_gen.wrapping_add(1);
                             self.stack.push(Value::Sym(new_id));
@@ -11527,6 +11576,16 @@ impl Vm {
             && let Value::Hash(hid) = &recv
         {
             let eigen = self.ensure_hash_singleton(*hid);
+            self.stack.push(Value::Class(eigen));
+            return Ok(());
+        }
+        // `class << self; self; end` with a String self desugars to
+        // this call (minitest's Object#stub on a String value).
+        if &*name == "singleton_class" && args.is_empty()
+            && let Value::Str(s) = &recv
+        {
+            let s = s.clone();
+            let eigen = self.ensure_str_singleton(&s);
             self.stack.push(Value::Class(eigen));
             return Ok(());
         }
@@ -16781,6 +16840,45 @@ impl Vm {
             h.singleton_class = Some(sc.clone());
         }
         self.any_hash_singletons = true;
+        self.method_gen = self.method_gen.wrapping_add(1);
+        sc
+    }
+
+    /// String twin of `ensure_hash_singleton`: materialize (or
+    /// fetch) the per-instance eigenclass for a `Value::Str`,
+    /// stored in the `Vm::str_singletons` side-table (RStr has no
+    /// eigenclass pointer — see the field doc). Superclass = the
+    /// String builtin class so `super` / undef-resolvable walks
+    /// reach the primitives. Sets the `any_str_singletons` gate.
+    pub(crate) fn ensure_str_singleton(&mut self, s: &std::rc::Rc<crate::value::RStr>) -> Rc<Class> {
+        let key = std::rc::Rc::as_ptr(s) as usize;
+        if let Some((_, sc)) = self.str_singletons.get(&key) {
+            return sc.clone();
+        }
+        let base = self.classes.get(&self.interner.intern("String")).cloned();
+        let sc = Rc::new(Class {
+            name: "#<Class:#<String>>".to_string(),
+            is_module: false,
+            ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            superclass: std::cell::RefCell::new(base),
+            includes: std::cell::RefCell::new(Vec::new()),
+            prepends: std::cell::RefCell::new(Vec::new()),
+            singleton_prepends: std::cell::RefCell::new(Vec::new()),
+            singleton_includes: std::cell::RefCell::new(Vec::new()),
+            singleton_view: std::cell::RefCell::new(None),
+            singleton_target: std::cell::RefCell::new(None),
+            undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
+            anon_serial: std::cell::Cell::new(0),
+            class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            assigned_name: std::cell::RefCell::new(None),
+            #[cfg(feature = "cext")]
+            cext_alloc_func: std::cell::Cell::new(None),
+        });
+        self.str_singletons.insert(key, (s.clone(), sc.clone()));
+        self.any_str_singletons = true;
         self.method_gen = self.method_gen.wrapping_add(1);
         sc
     }
