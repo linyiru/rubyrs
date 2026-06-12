@@ -1729,22 +1729,58 @@ impl Vm {
                             | b'<' | b'>' | b'|' | b'&' | b';' | b'(' | b')' | b'$'
                             | b'`' | b'\\' | b'"' | b'\'' | b'~' | b'#' | b'\n')
                     });
-                let status = if argv.len() == 1 && needs_shell {
-                    std::process::Command::new("/bin/sh")
-                        .arg("-c")
-                        .arg(&argv[0])
-                        .status()
+                let mut cmd = if argv.len() == 1 && needs_shell {
+                    let mut c = std::process::Command::new("/bin/sh");
+                    c.arg("-c").arg(&argv[0]);
+                    c
                 } else if argv.len() == 1 {
-                    std::process::Command::new(&argv[0]).status()
-                } else {
                     std::process::Command::new(&argv[0])
-                        .args(&argv[1..])
-                        .status()
+                } else {
+                    let mut c = std::process::Command::new(&argv[0]);
+                    c.args(&argv[1..]);
+                    c
                 };
-                Some(Ok(match status {
-                    Ok(st) => Value::Bool(st.success()),
-                    Err(_) => Value::Nil,
-                }))
+                // capture_subprocess_io: when $stdout/$stderr are
+                // reopen-delegating veneers (Tempfile-backed — no
+                // real fd to hand the child), capture the child's
+                // pipes and forward the bytes through the veneer's
+                // Ruby-level write, the same path Kernel#puts takes
+                // under redirection.
+                let out_redirect = self.stdio_redirect("$stdout", true);
+                let err_redirect = self.stdio_redirect("$stderr", true);
+                if out_redirect.is_none() && err_redirect.is_none() {
+                    return Some(Ok(match cmd.status() {
+                        Ok(st) => Value::Bool(st.success()),
+                        Err(_) => Value::Nil,
+                    }));
+                }
+                let out = match cmd.output() {
+                    Ok(o) => o,
+                    Err(_) => return Some(Ok(Value::Nil)),
+                };
+                if !out.stdout.is_empty() {
+                    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+                    match out_redirect {
+                        Some(t) => {
+                            if let Err(e) = self.forward_stdio_call(t, "write", &[Value::new_str(s)]) {
+                                return Some(Err(e));
+                            }
+                        }
+                        None => print!("{s}"),
+                    }
+                }
+                if !out.stderr.is_empty() {
+                    let s = String::from_utf8_lossy(&out.stderr).into_owned();
+                    match err_redirect {
+                        Some(t) => {
+                            if let Err(e) = self.forward_stdio_call(t, "write", &[Value::new_str(s)]) {
+                                return Some(Err(e));
+                            }
+                        }
+                        None => eprint!("{s}"),
+                    }
+                }
+                Some(Ok(Value::Bool(out.status.success())))
             }
             // Backtick / `%x{}` — capture stdout as a String. Off →
             // the same catchable RuntimeError the old compile-time

@@ -991,3 +991,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn inspect_ivars_pattern_msg() { run_diff("inspect_ivars_pattern_msg"); }
 // Class kind_of? extend-chain + Thread.new empty fiber-locals.
 #[test] fn class_kind_of_extend_thread_locals() { run_diff("class_kind_of_extend_thread_locals"); }
+// system under $stdout/$stderr reopen-delegation (subprocess capture).
+#[cfg(feature = "stdlib")]
+#[test] fn system_capture_redirect() { run_diff("system_capture_redirect"); }
