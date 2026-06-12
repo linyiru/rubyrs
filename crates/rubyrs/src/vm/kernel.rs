@@ -1888,6 +1888,7 @@ impl Vm {
                                         name: cname.to_string(),
                                         is_module,
                                         undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
+                                        anon_serial: std::cell::Cell::new(0),
                                         methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                                         singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                                         superclass: std::cell::RefCell::new(None),

@@ -937,3 +937,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn join_proc_inspect_dispatch() { run_diff("join_proc_inspect_dispatch"); }
 // Invalid-UTF-8 inspect: per-byte \xNN for bad runs (mu_pp headers).
 #[test] fn string_invalid_utf8_inspect() { run_diff("string_invalid_utf8_inspect"); }
+// class << self inside a method body (runtime-self eigenclass).
+#[test] fn class_lt_lt_self_in_method() { run_diff("class_lt_lt_self_in_method"); }
+// alias/restore of VM-side lifecycle hook defaults (Class#inherited).
+#[test] fn lifecycle_hook_alias() { run_diff("lifecycle_hook_alias"); }
+// Anonymous class display serial (#<Class:0xN> shape).
+#[cfg(feature = "regex")]
+#[test] fn anon_class_display_serial() { run_diff("anon_class_display_serial"); }

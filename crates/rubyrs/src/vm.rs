@@ -1001,6 +1001,10 @@ pub(crate) struct Vm {
     /// Rooted by the GC gather walk; capped (see MARSHAL_REGISTRY_CAP)
     /// so a dump loop can't pin unbounded memory.
     pub(crate) marshal_registry: Vec<Value>,
+    /// Creation counter feeding `Class.anon_serial` (see
+    /// value::class_display_name) — deterministic stand-in for
+    /// CRuby's address digits in `#<Class:0x...>`.
+    pub(crate) anon_class_counter: u32,
     /// Refinements (`refine` / `using`). Tier-1: activation is GLOBAL
     /// from the `using` point on, not lexically scoped per file/module
     /// like CRuby — equivalent for the common single-file case (see
@@ -1642,6 +1646,7 @@ impl Vm {
             max_yield_recursion: None,
             at_exit_handlers: Vec::new(),
             marshal_registry: Vec::new(),
+            anon_class_counter: 0,
             module_refinements: crate::intern::FxHashMap::default(),
             active_refinements: crate::intern::FxHashMap::default(),
             refined_method_names: crate::intern::FxHashSet::default(),

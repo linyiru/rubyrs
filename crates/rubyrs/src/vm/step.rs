@@ -2743,7 +2743,30 @@ impl Vm {
                 if let Some(cls) = self.class_stack.last() {
                     cls.singleton_methods.borrow_mut().insert(name_id, m);
                 } else {
-                    self.toplevel_methods.insert(name_id, m);
+                    // `class << self; def x; end` inside a METHOD
+                    // body — there's no class_stack entry, but the
+                    // runtime self tells us whose eigenclass to
+                    // target (CRuby semantics). minitest's
+                    // i_suck_and_my_tests_are_order_dependent!
+                    // does exactly this with self = the test
+                    // Class. Object receivers route through the
+                    // same eigenclass `def obj.x` uses; only a
+                    // true toplevel (main) self falls back to
+                    // toplevel_methods.
+                    let self_val = self.frames.last().map(|f| f.self_val.clone());
+                    match self_val {
+                        Some(Value::Class(c)) => {
+                            let anchor = c.effective_install_class();
+                            anchor.singleton_methods.borrow_mut().insert(name_id, m);
+                        }
+                        Some(Value::Object(oid)) => {
+                            let sc = self.heap.ensure_singleton_class(oid);
+                            sc.methods.borrow_mut().insert(name_id, m);
+                        }
+                        _ => {
+                            self.toplevel_methods.insert(name_id, m);
+                        }
+                    }
                 }
                 self.method_gen = self.method_gen.wrapping_add(1);
                 // `singleton_method_added(name)` fires on the
@@ -2977,6 +3000,29 @@ impl Vm {
                             if primitive_hit || shell_class_whitelist_hit {
                                 let forwarder_cls = probe_cls.as_ref().unwrap_or(cls);
                                 let synth = self.synth_primitive_forwarder(forwarder_cls, old_id);
+                                cls.install_method(new_id, synth);
+                                self.method_gen = self.method_gen.wrapping_add(1);
+                                self.fire_method_lifecycle_hook(cls, "method_added", new_id)?;
+                                self.stack.push(Value::Nil);
+                                return Ok(true);
+                            }
+                            // Lifecycle hooks: CRuby ships real
+                            // empty defaults (Class#inherited,
+                            // Module#included/extended/prepended,
+                            // method_added family); rubyrs fires
+                            // them VM-side with no table Method, so
+                            // `alias x inherited` inside a
+                            // Class/Module reopen found nothing.
+                            // Substitute a variadic no-op — exactly
+                            // the default's behavior. minitest's
+                            // with_overridden_include saves/restores
+                            // Class#inherited this way.
+                            if matches!(self.interner.resolve(old_id).as_ref(),
+                                "inherited" | "included" | "extended" | "prepended"
+                                | "method_added" | "method_removed" | "method_undefined"
+                                | "singleton_method_added"
+                            ) && matches!(cls.name.as_str(), "Class" | "Module" | "Object") {
+                                let synth = self.synth_noop_method(cls, old_id);
                                 cls.install_method(new_id, synth);
                                 self.method_gen = self.method_gen.wrapping_add(1);
                                 self.fire_method_lifecycle_hook(cls, "method_added", new_id)?;
@@ -3525,6 +3571,7 @@ impl Vm {
                     singleton_view: RefCell::new(None),
                     singleton_target: RefCell::new(None),
                     undefed: RefCell::new(crate::intern::FxHashSet::default()),
+                    anon_serial: std::cell::Cell::new(0),
                     class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
                     assigned_name: RefCell::new(None),

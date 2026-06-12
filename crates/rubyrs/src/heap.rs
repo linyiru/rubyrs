@@ -582,6 +582,7 @@ impl Heap {
             singleton_view: RefCell::new(None),
             singleton_target: RefCell::new(None),
             undefed: RefCell::new(crate::intern::FxHashSet::default()),
+            anon_serial: std::cell::Cell::new(0),
                     class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
@@ -1613,7 +1614,7 @@ impl Value {
             Value::Bool(true) => "true".into(),
             Value::Bool(false) => "false".into(),
             Value::Nil => "".into(),
-            Value::Class(c) => c.name.clone(),
+            Value::Class(c) => crate::value::class_display_name(c),
             // Use class_of so TypedData-backed Objects (L3-B) print
             // safely too — `heap.instance(*id)` would panic on
             // those slots (review #1).

@@ -1455,6 +1455,71 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 }
                 continue;
             }
+            // Reflective method-table calls inside `class << X` —
+            // define_method / undef_method / remove_method /
+            // method_defined? / alias_method and the visibility-
+            // filtered probes. CRuby runs the body with self = the
+            // eigenclass, so these calls operate on X's singleton
+            // table. Desugar to an explicit-receiver call on
+            // `RECV.singleton_class` (the dispatch arms for
+            // eigenclass receivers — define_method redirect,
+            // alias shells, undef tombstones — already exist).
+            // minitest's i_suck_and_my_tests_are_order_dependent!
+            // is `class << self; undef_method :test_order if
+            // method_defined? :test_order; define_method(:test_order)
+            // { :alpha }; end` inside a class method.
+            if let Some(call) = bn.as_call_node()
+                && call.receiver().is_none()
+                && matches!(cid_to_string(call.name()).as_str(),
+                    "define_method" | "undef_method" | "remove_method"
+                    | "alias_method" | "method_defined?"
+                    | "public_method_defined?" | "private_method_defined?"
+                    | "protected_method_defined?" | "instance_method"
+                )
+            {
+                let receiver_expr = if needs_local {
+                    sp(bn, Expr::LVarRead(synth_local.clone()))
+                } else {
+                    recv_expr.clone()
+                };
+                let sc_expr = sp(bn, Expr::Call {
+                    receiver: Some(Box::new(receiver_expr)),
+                    name: "singleton_class".to_string(),
+                    args: vec![],
+                    kwargs_trailing: false,
+                });
+                let translated = tr(ctx, bn);
+                let rewritten = match translated.node {
+                    Expr::Call { receiver: None, name, args, kwargs_trailing } => Some(sp(bn, Expr::Call {
+                        receiver: Some(Box::new(sc_expr)),
+                        name,
+                        args,
+                        kwargs_trailing,
+                    })),
+                    Expr::CallWithBlock {
+                        receiver: None, name, args, block_params, block_body,
+                    } => Some(sp(bn, Expr::CallWithBlock {
+                        receiver: Some(Box::new(sc_expr)),
+                        name,
+                        args,
+                        block_params,
+                        block_body,
+                    })),
+                    other => {
+                        // e.g. `undef_method :x if cond` arrives as a
+                        // ConditionalNode wrapping the call — handled
+                        // by the if/unless admission arm below, which
+                        // re-enters this loop body shape. Fall through
+                        // by re-wrapping the translated node untouched.
+                        out.push(sp(bn, other));
+                        continue;
+                    }
+                };
+                if let Some(r) = rewritten {
+                    out.push(r);
+                }
+                continue;
+            }
             // `attr_reader :foo` / `attr_writer :foo` / `attr_accessor :foo`
             // inside `class << X` body. CRuby installs reader/writer
             // methods on X's singleton class. We desugar each symbol

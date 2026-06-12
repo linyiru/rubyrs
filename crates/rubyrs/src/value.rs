@@ -231,6 +231,26 @@ impl std::ops::Deref for RStr {
     fn deref(&self) -> &Self::Target { &self.content }
 }
 
+
+/// Display form for a Class value: the effective name when one
+/// exists, otherwise CRuby's `#<Class:0xADDR>` placeholder — with
+/// the ADR 0017 twist that the hex digits are the deterministic
+/// `anon_serial` creation counter (stamped by Class.new/Module.new),
+/// not a raw address. A never-stamped anonymous class (internal
+/// construction paths) renders without the id.
+pub(crate) fn class_display_name(c: &std::rc::Rc<Class>) -> String {
+    if let Some(n) = c.effective_name() {
+        return n;
+    }
+    let kind = if c.is_module { "Module" } else { "Class" };
+    let serial = c.anon_serial.get();
+    if serial == 0 {
+        format!("#<{kind}>")
+    } else {
+        format!("#<{kind}:0x{:012x}>", serial)
+    }
+}
+
 /// Method visibility. Default is `Public`; `private` / `protected`
 /// inside a class body changes the mode for subsequent `def`s and
 /// `private :sym` retroactively flips already-defined methods.
@@ -555,6 +575,14 @@ pub struct Class {
     /// every dispatch-side check, so programs that never undef pay
     /// one bool test.
     pub(crate) undefed: RefCell<crate::intern::FxHashSet<crate::intern::SymId>>,
+    /// Deterministic serial for ANONYMOUS classes' display form —
+    /// CRuby renders `#<Class:0xADDR>`; ADR 0017 keeps raw
+    /// addresses out of Tier 1, so `Class.new`/`Module.new` stamp a
+    /// per-VM creation counter here instead (same digits-shape, so
+    /// consumers that normalize `0x[hex]+` — minitest's mu_pp
+    /// comparisons — behave identically; run-to-run deterministic).
+    /// 0 = never stamped (named classes; display omits the id).
+    pub(crate) anon_serial: std::cell::Cell<u32>,
     pub(crate) class_vars: RefCell<FxHashMap<SymId, Value>>,
     /// Per-class constant storage for ANONYMOUS classes
     /// (cls.name == ""). Named classes still keep their

@@ -2367,6 +2367,7 @@ mod tests {
             singleton_target: RefCell::new(None),
             superclass: RefCell::new(superclass),
             undefed: RefCell::new(crate::intern::FxHashSet::default()),
+            anon_serial: std::cell::Cell::new(0),
                     class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),

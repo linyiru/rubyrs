@@ -159,13 +159,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             }
         }
         (Value::Class(c), "to_s", []) | (Value::Class(c), "inspect", []) => {
-            match c.effective_name() {
-                Some(n) => Some(Value::new_str(n)),
-                None => {
-                    let kind = if c.is_module { "Module" } else { "Class" };
-                    Some(Value::new_str(format!("#<{}>", kind)))
-                }
-            }
+            Some(Value::new_str(crate::value::class_display_name(c)))
         }
         // Class identity is `Rc::ptr_eq` — two `Value::Class` refer
         // to the same class iff they point at the same `Rc<Class>`.

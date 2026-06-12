@@ -4304,6 +4304,7 @@ impl Vm {
                             name: format!("#<Class:{}>", cls.name),
                             is_module: false,
                             undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
+                            anon_serial: std::cell::Cell::new(0),
                             ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                             methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                             singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -5113,6 +5114,7 @@ impl Vm {
             name: String::new(),
             is_module: true,
             undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
+            anon_serial: std::cell::Cell::new(0),
             ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -5272,6 +5274,7 @@ impl Vm {
             name: String::new(),
             is_module: false,
             undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
+            anon_serial: std::cell::Cell::new(0),
             ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -5299,6 +5302,8 @@ impl Vm {
         // Missing-hook is silently accepted (matches CRuby's
         // default Object#inherited no-op).
         self.invoke_inherited_hook(&new_cls)?;
+        self.anon_class_counter += 1;
+        new_cls.anon_serial.set(self.anon_class_counter);
         self.stack.push(Value::Class(new_cls));
         return Ok(ClassOutcome::Handled);
     }
@@ -12320,8 +12325,29 @@ impl Vm {
             return Ok(());
         }
         let inherited_sym = self.interner.intern("inherited");
-        let Some(m) = self.lookup_class_singleton_method(&parent, inherited_sym) else {
-            return Ok(());
+        let m = match self.lookup_class_singleton_method(&parent, inherited_sym) {
+            Some(m) => m,
+            None => {
+                // `Class.class_eval { alias inherited hack }` puts
+                // the hook on Class's INSTANCE-method table (every
+                // class object responds). Gate on that table being
+                // non-empty — O(1), and it stays empty unless user
+                // code reopens Class — so the per-DefClass cost is
+                // a single is_empty check in the common case.
+                // (minitest's with_overridden_include.)
+                let via_class_obj = self.classes
+                    .get(&self.interner.intern("Class"))
+                    .filter(|cc| !cc.methods.borrow().is_empty())
+                    .cloned()
+                    .and_then(|cc| {
+                        let _ = &cc;
+                        self.lookup_class_object_instance_method(&parent, inherited_sym)
+                    });
+                match via_class_obj {
+                    Some(m) => m,
+                    None => return Ok(()),
+                }
+            }
         };
         // Frame-count synchronisation so the queued hook body
         // actually executes before we pop the return value —
@@ -12991,6 +13017,7 @@ impl Vm {
             name: String::new(),
             is_module: true,
             undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
+            anon_serial: std::cell::Cell::new(0),
             ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -14206,6 +14233,7 @@ impl Vm {
                 name: String::new(),
                 is_module: false,
                 undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
+                anon_serial: std::cell::Cell::new(0),
                 ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -14232,6 +14260,8 @@ impl Vm {
             // `subclass.const_set(:NodeTranslator, ...)` lands
             // before any subsequent `translate(...)` block can
             // call `const_get(:NodeTranslator)`.
+            self.anon_class_counter += 1;
+            new_cls.anon_serial.set(self.anon_class_counter);
             self.invoke_inherited_hook(&new_cls)?;
             let cls_val = Value::Class(new_cls);
             self.invoke_block_with_self(
@@ -14269,6 +14299,7 @@ impl Vm {
                 name: String::new(),
                 is_module: true,
                 undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
+                anon_serial: std::cell::Cell::new(0),
                 ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -14285,6 +14316,8 @@ impl Vm {
                 #[cfg(feature = "cext")]
                 cext_alloc_func: std::cell::Cell::new(None),
             });
+            self.anon_class_counter += 1;
+            new_mod.anon_serial.set(self.anon_class_counter);
             let mod_val = Value::Class(new_mod);
             // `as_class_body=true` so `def name; …; end` inside
             // the block lands on the module's methods table. Same
@@ -16384,6 +16417,49 @@ impl Vm {
             ],
             op_spans: vec![Span::ZERO; 4],
             filename: "<primitive-alias>".into(),
+            block_body_local_start: u16::MAX,
+            byte_literals: vec![],
+            const_chains: vec![],
+            lexical_scope: vec![],
+        };
+        let idx = self.protos.len();
+        self.protos.push(proto);
+        Rc::new(crate::value::Method {
+            params: vec!["args".to_string()],
+            proto_idx: idx,
+            fixed_arity: None,
+            defining_class: Some(Rc::downgrade(cls)),
+            visibility: std::cell::Cell::new(crate::value::Visibility::Public),
+            closure: None,
+            builtin: None,
+            original_name: Some(orig_id),
+        })
+    }
+
+    /// Variadic no-op Method (body: nil) — the alias target for
+    /// CRuby's default lifecycle hooks. `Class.class_eval { alias
+    /// inherited_without_hacks inherited }` (minitest's
+    /// with_overridden_include) needs SOME method behind
+    /// `inherited`; CRuby ships real empty defaults, rubyrs fires
+    /// hooks VM-side, so the alias source is synthesised here.
+    pub(crate) fn synth_noop_method(&mut self, cls: &Rc<Class>, orig_id: SymId) -> Rc<crate::value::Method> {
+        use crate::bytecode::{Op, Proto};
+        use crate::error::Span;
+        let proto = Proto {
+            name: format!("<lifecycle-noop:{}>", self.interner.resolve(orig_id)),
+            params: vec!["args".to_string()],
+            n_required_positional: 0,
+            n_required_post: 0,
+            rest_param: Some("args".to_string()),
+            kw_param_defaults: vec![],
+            kw_has_computed_default: vec![],
+            kw_rest_param: None,
+            block_param: None,
+            n_locals: 1,
+            creates_block: false,
+            code: vec![Op::LoadNil, Op::Return],
+            op_spans: vec![Span::ZERO; 2],
+            filename: "<lifecycle-noop>".into(),
             block_body_local_start: u16::MAX,
             byte_literals: vec![],
             const_chains: vec![],
