@@ -882,6 +882,7 @@ impl Vm {
                             class_tag,
                             ivars,
                             index: None,
+                singleton_class: None,
                         }));
                         if default_block.is_some() {
                             g.vm.heap.hash_set_default_block(nid, default_block);

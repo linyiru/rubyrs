@@ -2825,6 +2825,28 @@ impl Vm {
                     self.stack.push(Value::Sym(name_id));
                     return Ok(true);
                 }
+                // Hash receivers get a real per-instance eigenclass
+                // (the openstruct-over-Hash pattern: `def h.method_missing`).
+                if let Value::Hash(hid) = recv {
+                    let sc = self.ensure_hash_singleton(hid);
+                    let proto = &self.protos[p_idx as usize];
+                    let params = proto.params.clone();
+                    let fixed_arity = Self::fixed_arity_for_proto(proto, params.len());
+                    let m = Rc::new(Method {
+                        params,
+                        proto_idx: p_idx as usize,
+                        fixed_arity,
+                        defining_class: Some(Rc::downgrade(&sc)),
+                        visibility: std::cell::Cell::new(Visibility::Public),
+                        closure: None,
+                        builtin: None,
+                        original_name: Some(name_id),
+                    });
+                    sc.methods.borrow_mut().insert(name_id, m);
+                    self.method_gen = self.method_gen.wrapping_add(1);
+                    self.stack.push(Value::Sym(name_id));
+                    return Ok(true);
+                }
                 let obj_id = match recv {
                     Value::Object(id) => id,
                     other => {

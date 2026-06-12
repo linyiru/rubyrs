@@ -1567,6 +1567,18 @@ impl Vm {
             Value::Class(cls) => {
                 self.lookup_class_singleton_method(cls, mm_id)
             }
+            // Hash with a per-instance eigenclass: the
+            // openstruct-over-Hash pattern installs
+            // `def h.method_missing` there.
+            Value::Hash(hid) if self.any_hash_singletons => {
+                match self.heap.get(*hid) {
+                    crate::heap::HeapObj::Hash(h) => h
+                        .singleton_class
+                        .as_ref()
+                        .and_then(|sc| self.lookup_method_uncached(sc, mm_id)),
+                    _ => None,
+                }
+            }
             _ => None,
         };
         let m = match m {
@@ -4986,6 +4998,7 @@ impl Vm {
             class_tag,
             ivars: crate::intern::FxHashMap::default(),
             index: None,
+                singleton_class: None,
         }));
         g.vm.stack.push(Value::Hash(hid));
         return Ok(ClassOutcome::Handled);
@@ -6216,6 +6229,31 @@ impl Vm {
         // refinements active, only the few refined names detour.
         let maybe_refined = !self.refined_method_names.is_empty()
             && self.refined_method_names.contains(&name_id);
+        // Hash per-instance eigenclass methods (`def h.x` /
+        // `h.define_singleton_method`) override EVERYTHING below,
+        // including the primitive/index fast paths. Gated on the
+        // set-once `any_hash_singletons` flag so the probe costs a
+        // single false branch until the first such Hash exists
+        // (mirrors the `any_undefs` gate).
+        if self.any_hash_singletons && !no_recv && argc < self.stack.len() {
+            let ridx = self.stack.len() - 1 - argc;
+            if let Some(Value::Hash(hid)) = self.stack.get(ridx) {
+                let m = match self.heap.get(*hid) {
+                    crate::heap::HeapObj::Hash(h) => h
+                        .singleton_class
+                        .as_ref()
+                        .and_then(|sc| self.lookup_method_uncached(sc, name_id)),
+                    _ => None,
+                };
+                if let Some(m) = m {
+                    let split = self.stack.len() - argc;
+                    let args: Vec<Value> = self.stack.drain(split..).collect();
+                    let recv = self.stack.pop().expect("ICE: hash-singleton recv");
+                    self.invoke_method(m, recv, args)?;
+                    return Ok(());
+                }
+            }
+        }
         // Primitive-receiver fast-path. Runs after
         // `take_bypass_visibility()` above; the helper's doc
         // comment spells out why that's currently safe and what
@@ -11401,6 +11439,13 @@ impl Vm {
             self.stack.push(Value::Class(eigen));
             return Ok(());
         }
+        if &*name == "singleton_class" && args.is_empty()
+            && let Value::Hash(hid) = &recv
+        {
+            let eigen = self.ensure_hash_singleton(*hid);
+            self.stack.push(Value::Class(eigen));
+            return Ok(());
+        }
         // Class/Module receivers: the value's own instance
         // ancestry (`class Module; def x` / user Kernel reopens)
         // resolves after every singleton/builtin arm and before
@@ -16271,6 +16316,7 @@ impl Vm {
                 class_tag: Some(cls.clone()),
                 ivars: crate::intern::FxHashMap::default(),
                 index: None,
+                singleton_class: None,
             }));
             return Ok(Value::Hash(id));
         }
@@ -16478,6 +16524,51 @@ impl Vm {
             builtin: None,
             original_name: Some(orig_id),
         })
+    }
+
+    /// Materialize (or fetch) a Hash's per-instance eigenclass —
+    /// the `def h.x` / `h.define_singleton_method` target. The
+    /// eigenclass's superclass is the Hash's class (subclass tag or
+    /// the Hash builtin class), so `super` and ancestor walks
+    /// behave. Sets the VM-wide `any_hash_singletons` dispatch gate.
+    pub(crate) fn ensure_hash_singleton(&mut self, id: crate::value::ObjId) -> Rc<Class> {
+        if let crate::heap::HeapObj::Hash(h) = self.heap.get(id)
+            && let Some(sc) = &h.singleton_class
+        {
+            return sc.clone();
+        }
+        let base = match self.heap.get(id) {
+            crate::heap::HeapObj::Hash(h) => h.class_tag.clone(),
+            _ => None,
+        }
+        .or_else(|| self.classes.get(&self.interner.intern("Hash")).cloned());
+        let sc = Rc::new(Class {
+            name: "#<Class:#<Hash>>".to_string(),
+            is_module: false,
+            ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            superclass: std::cell::RefCell::new(base),
+            includes: std::cell::RefCell::new(Vec::new()),
+            prepends: std::cell::RefCell::new(Vec::new()),
+            singleton_prepends: std::cell::RefCell::new(Vec::new()),
+            singleton_includes: std::cell::RefCell::new(Vec::new()),
+            singleton_view: std::cell::RefCell::new(None),
+            singleton_target: std::cell::RefCell::new(None),
+            undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
+            anon_serial: std::cell::Cell::new(0),
+            class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            assigned_name: std::cell::RefCell::new(None),
+            #[cfg(feature = "cext")]
+            cext_alloc_func: std::cell::Cell::new(None),
+        });
+        if let crate::heap::HeapObj::Hash(h) = self.heap.get_mut(id) {
+            h.singleton_class = Some(sc.clone());
+        }
+        self.any_hash_singletons = true;
+        self.method_gen = self.method_gen.wrapping_add(1);
+        sc
     }
 
     /// Variadic forwarder to a NO-RECV Kernel builtin (`sleep`,

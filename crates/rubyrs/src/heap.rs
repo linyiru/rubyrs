@@ -369,6 +369,13 @@ pub(crate) struct HashObj {
     /// already returns a well-mixed 64-bit value — re-hashing it
     /// through SipHash would just burn cycles.
     pub(crate) index: Option<HashIndex>,
+    /// Per-instance eigenclass — `def h.method_missing` /
+    /// `h.define_singleton_method` (the openstruct-over-Hash
+    /// pattern; minitest's ValueMonad tests). `None` for the
+    /// overwhelming majority of Hashes; dispatch only consults it
+    /// behind the VM-level `any_hash_singletons` gate so plain
+    /// Hash traffic pays nothing.
+    pub(crate) singleton_class: Option<Rc<Class>>,
 }
 
 /// `ruby_hash(key)` → pair positions, keyed directly on the 64-bit
@@ -405,6 +412,7 @@ impl HashObj {
             class_tag: None,
             ivars: crate::intern::FxHashMap::default(),
             index: None,
+            singleton_class: None,
         }
     }
 }
@@ -1005,6 +1013,22 @@ impl Heap {
                     // Hash-subclass instance variables.
                     for v in h.ivars.values() {
                         Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
+                    // Per-instance eigenclass (def h.x): closure
+                    // captures + ivars, same walk as the Instance
+                    // arm above — this eigenclass is reachable
+                    // ONLY through the Hash slot.
+                    if let Some(sc) = &h.singleton_class {
+                        for m in sc.methods.borrow().values() {
+                            if let Some(cl) = &m.closure {
+                                for v in cl.captured.borrow().iter() {
+                                    Heap::visit_value(v, &mut self.marks, &mut worklist);
+                                }
+                            }
+                        }
+                        for v in sc.ivars.borrow().values() {
+                            Heap::visit_value(v, &mut self.marks, &mut worklist);
+                        }
                     }
                 }
                 Slot::Live(HeapObj::Range(r)) => {

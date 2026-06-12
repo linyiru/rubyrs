@@ -958,3 +958,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // defined?(name) in class bodies via the class-object chain; Proc eq.
 #[cfg(feature = "regex")]
 #[test] fn defined_method_in_class_body() { run_diff("defined_method_in_class_body"); }
+// Hash per-instance eigenclass (def h.method_missing, overrides).
+#[test] fn hash_singleton_methods() { run_diff("hash_singleton_methods"); }

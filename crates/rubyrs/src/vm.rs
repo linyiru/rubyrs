@@ -1005,6 +1005,11 @@ pub(crate) struct Vm {
     /// value::class_display_name) — deterministic stand-in for
     /// CRuby's address digits in `#<Class:0x...>`.
     pub(crate) anon_class_counter: u32,
+    /// True once ANY Hash gained a per-instance eigenclass —
+    /// the dispatch gate that keeps plain-Hash traffic free of
+    /// the singleton probe (set-once, never cleared; mirrors
+    /// `any_undefs`).
+    pub(crate) any_hash_singletons: bool,
     /// Refinements (`refine` / `using`). Tier-1: activation is GLOBAL
     /// from the `using` point on, not lexically scoped per file/module
     /// like CRuby — equivalent for the common single-file case (see
@@ -1647,6 +1652,7 @@ impl Vm {
             at_exit_handlers: Vec::new(),
             marshal_registry: Vec::new(),
             anon_class_counter: 0,
+            any_hash_singletons: false,
             module_refinements: crate::intern::FxHashMap::default(),
             active_refinements: crate::intern::FxHashMap::default(),
             refined_method_names: crate::intern::FxHashSet::default(),

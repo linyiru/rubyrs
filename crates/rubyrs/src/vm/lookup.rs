@@ -715,6 +715,15 @@ impl Vm {
         if self.host_fns.contains_key(&name_id) {
             return true;
         }
+        // Hash per-instance eigenclass methods.
+        if self.any_hash_singletons
+            && let Value::Hash(hid) = recv
+            && let crate::heap::HeapObj::Hash(h) = self.heap.get(*hid)
+            && let Some(sc) = &h.singleton_class
+            && self.lookup_method_uncached(sc, name_id).is_some()
+        {
+            return true;
+        }
         let name: &str = self.interner.resolve(name_id);
         // Kernel's PRIVATE builtin surface — `respond_to?(name,
         // true)` must report the no-recv builtins dispatch actually
