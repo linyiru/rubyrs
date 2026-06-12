@@ -932,3 +932,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // fallback lines in step.rs (stdlib-gating it dropped step.rs
 // below the per-file ratchet).
 #[test] fn super_into_dispatch_builtins() { run_diff("super_into_dispatch_builtins"); }
+// Array#join user-to_s dispatch; Proc inspect file:line form.
+#[cfg(feature = "regex")]
+#[test] fn join_proc_inspect_dispatch() { run_diff("join_proc_inspect_dispatch"); }

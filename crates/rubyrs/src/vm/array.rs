@@ -1876,51 +1876,23 @@ impl Vm {
                     ("join", []) | ("join", [Value::Str(_)]) | ("join", [Value::Nil]) => {
                         // CRuby Array#join RECURSES into nested Array
                         // elements — each nested Array contributes its
-                        // own join(sep), not its inspect. minitest's
-                        // exception_details builds
-                        // `[msg, ..., filter_backtrace(bt), ...].join("\n")`
-                        // with the backtrace Array as a plain nested
-                        // element and relies on this. Cycle-safe via
-                        // the same visited-stack discipline as
-                        // flatten_rec. `join(nil)` joins with "".
+                        // own join(sep), not its inspect (minitest's
+                        // exception_details embeds filter_backtrace's
+                        // Array). It also DISPATCHES a user to_s on
+                        // non-String elements: minitest Spec's
+                        // describe-name builder does
+                        // `[parent_class, desc].join("::")` where the
+                        // parent is a describe-created Class whose
+                        // to_s returns @name. Cycle-safe via the same
+                        // visited-stack discipline as flatten_rec;
+                        // `join(nil)` joins with "".
                         let sep = match args {
                             [Value::Str(s)] => s.to_string_lossy(),
                             _ => String::new(),
                         };
-                        fn elem_str(
-                            heap: &crate::heap::Heap,
-                            interner: &crate::intern::Interner,
-                            v: &Value,
-                            sep: &str,
-                            stack: &mut Vec<crate::value::ObjId>,
-                        ) -> Result<String, ()> {
-                            match v {
-                                Value::Array(aid) => {
-                                    if stack.contains(aid) {
-                                        return Err(());
-                                    }
-                                    stack.push(*aid);
-                                    let parts: Result<Vec<String>, ()> = heap.array(*aid).iter()
-                                        .map(|e| elem_str(heap, interner, e, sep, stack))
-                                        .collect();
-                                    stack.pop();
-                                    Ok(parts?.join(sep))
-                                }
-                                other => Ok(other.to_display(heap, interner)),
-                            }
-                        }
                         let mut stack = vec![id];
-                        let parts: Result<Vec<String>, ()> = self.heap.array(id).iter()
-                            .map(|v| elem_str(&self.heap, &self.interner, v, &sep, &mut stack))
-                            .collect();
-                        match parts {
-                            Ok(p) => Some(Value::new_str(p.join(&sep))),
-                            Err(()) => {
-                                return Err(self.trap(RubyError::ArgumentError {
-                                    msg: "recursive array join".into(),
-                                }));
-                            }
-                        }
+                        let v = self.join_recursive(id, &sep, &mut stack)?;
+                        Some(Value::new_str(v))
                     }
                     ("+", [Value::Array(other)]) => {
                         // Pin both source Arrays across maybe_gc — by the
@@ -2315,5 +2287,51 @@ impl Vm {
                     _ => None,
                 }
     )
+    }
+}
+
+impl crate::vm::Vm {
+    /// Array#join worker — recursive over nested Arrays, dispatching
+    /// a user `to_s` on Object/Class elements (CRuby join semantics;
+    /// see the join arm). `stack` carries the visited Array ids for
+    /// the "recursive array join" ArgumentError.
+    fn join_recursive(
+        &mut self,
+        id: crate::value::ObjId,
+        sep: &str,
+        stack: &mut Vec<crate::value::ObjId>,
+    ) -> Result<String, crate::error::Trap> {
+        let snapshot: Vec<Value> = self.heap.array(id).clone();
+        // Pin the snapshot: a user to_s runs arbitrary code (→ GC)
+        // and the drained Rust Vec isn't a root.
+        let mut g = crate::vm::PinGuard::new(self);
+        g.pin(Value::Array(id));
+        for v in &snapshot {
+            if v.is_gc_heap_ref() {
+                g.pin(v.clone());
+            }
+        }
+        let mut parts: Vec<String> = Vec::with_capacity(snapshot.len());
+        for v in &snapshot {
+            match v {
+                Value::Array(aid) => {
+                    if stack.contains(aid) {
+                        return Err(g.vm.trap(crate::error::RubyError::ArgumentError {
+                            msg: "recursive array join".into(),
+                        }));
+                    }
+                    stack.push(*aid);
+                    let inner = g.vm.join_recursive(*aid, sep, stack)?;
+                    stack.pop();
+                    parts.push(inner);
+                }
+                Value::Str(s) => parts.push(s.to_string_lossy()),
+                other @ (Value::Object(_) | Value::Class(_)) => {
+                    parts.push(g.vm.stringify_for_output(other, false)?);
+                }
+                other => parts.push(other.to_display(&g.vm.heap, &g.vm.interner)),
+            }
+        }
+        Ok(parts.join(sep))
     }
 }

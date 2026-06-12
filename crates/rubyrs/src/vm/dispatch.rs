@@ -1783,6 +1783,26 @@ impl Vm {
         Ok(out)
     }
 
+    /// CRuby-shaped Proc rendering: `#<Proc:0xADDR file:line>`
+    /// (`(lambda)` suffix omitted — Tier-1 doesn't track
+    /// lambda-ness; minitest's mu_pp comparisons accept the plain
+    /// form). Needs `Vm` (protos + sources) so it can't live on
+    /// `Value::to_inspect`.
+    pub(crate) fn proc_inspect_string(&self, bid: crate::value::ObjId) -> String {
+        let proto_idx = self.heap.block(bid).proto_idx;
+        let proto = &self.protos[proto_idx];
+        let span = proto.op_spans.first().copied();
+        let line = match (span, self.sources.get(proto.filename.as_ref())) {
+            (Some(sp), Some(src)) => crate::error::line_col(src, sp.byte_offset).0,
+            _ => 0,
+        };
+        if line == 0 {
+            format!("#<Proc:0x{:012x}>", bid.0)
+        } else {
+            format!("#<Proc:0x{:012x} {}:{}>", bid.0, proto.filename, line)
+        }
+    }
+
     pub(crate) fn stringify_for_output(&mut self, v: &Value, inspect: bool) -> Result<String, Trap> {
         // Collections route through the cycle-safe, per-element
         // dispatching renderer so `p [exc]` / `p [custom]` keep each
@@ -1799,6 +1819,11 @@ impl Vm {
         // `p` (inspect=true) still dispatches a user String#inspect.
         if !inspect && let Value::Str(_) = v {
             return Ok(v.to_display(&self.heap, &self.interner));
+        }
+        // Proc#to_s aliases inspect in CRuby; both render the
+        // file:line form, which needs Vm context (protos).
+        if let Value::Block(bid) = v {
+            return Ok(self.proc_inspect_string(*bid));
         }
         let meth_id = self.interner.intern(if inspect { "inspect" } else { "to_s" });
         let m = match v {
@@ -2682,6 +2707,14 @@ impl Vm {
         // callers that matter locate the enclosing block by "line
         // within block range", e.g. the rouge-native IR compiler).
         // nil for blocks whose source isn't tracked.
+        // `Proc#inspect` / `#to_s` — the file:line form. Sits here
+        // (not Value::to_inspect) because it reads protos/sources.
+        if let Value::Block(bid) = &recv
+            && matches!(name, "inspect" | "to_s") && args.is_empty() {
+            let s = self.proc_inspect_string(*bid);
+            self.stack.push(Value::new_str(s));
+            return Ok(CallableOutcome::Handled);
+        }
         if let Value::Block(bid) = &recv
             && name == "source_location" && args.is_empty() {
             let proto_idx = self.heap.block(*bid).proto_idx;
