@@ -123,9 +123,16 @@ class StringIO
       write("\n")
     else
       args.each do |a|
-        s = a.to_s
-        write(s)
-        write("\n") unless s.end_with?("\n")
+        # IO#puts semantics: Array args flatten recursively, one
+        # line per leaf (Kernel#puts forwards here whenever
+        # $stdout is swapped for a StringIO — capture_io).
+        if a.is_a?(Array)
+          puts(*a) unless a.empty?
+        else
+          s = a.to_s
+          write(s)
+          write("\n") unless s.end_with?("\n")
+        end
       end
     end
     nil

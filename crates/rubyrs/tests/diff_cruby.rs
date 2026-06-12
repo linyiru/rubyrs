@@ -886,3 +886,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // any?/all?/none?/one? with a pattern argument (`pat === element`).
 #[cfg(feature = "regex")]
 #[test] fn enumerable_pattern_predicates() { run_diff("enumerable_pattern_predicates"); }
+// Kernel#puts/print/p/warn route through a reassigned $stdout/$stderr
+// (minitest capture_io). Needs the vendored StringIO → stdlib-gated.
+#[cfg(feature = "stdlib")]
+#[test] fn stdio_redirect_capture() { run_diff("stdio_redirect_capture"); }

@@ -131,9 +131,50 @@ impl Vm {
         )
     }
 
+    /// `$stdout`-redirect probe. minitest's `capture_io` swaps
+    /// `$stdout` for a StringIO; Kernel#puts/print/p must then route
+    /// through the replacement object instead of the native sink.
+    /// Returns the redirect target, or `None` when `$stdout` is
+    /// unset or still an instance of our preamble IO veneer — whose
+    /// own write path IS the native sink (this includes `.dup`ed
+    /// copies, which carry the same `@which`, so a dup round-trip
+    /// stays native). The same probe serves `$stderr` for `warn`.
+    fn stdio_redirect(&mut self, global: &str, veneer_ok: bool) -> Option<Value> {
+        let sym = self.interner.intern(global);
+        let v = self.globals.get(&sym)?.clone();
+        match &v {
+            Value::Object(id) => {
+                if veneer_ok && self.heap.class_of(*id).name == "IO" {
+                    None
+                } else {
+                    Some(v)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Forward a Kernel-level IO call (`puts`/`print`/`write`) to a
+    /// redirected `$stdout`/`$stderr` object via full dispatch, so
+    /// StringIO (or any user object with the right methods) sees it.
+    fn forward_stdio_call(&mut self, target: Value, meth: &str, args: &[Value]) -> Result<Value, Trap> {
+        let m_id = self.interner.intern(meth);
+        self.stack.push(target);
+        for a in args {
+            self.stack.push(a.clone());
+        }
+        let pre = self.frames.len();
+        self.do_call(m_id, args.len(), /*no_recv=*/false, u16::MAX)?;
+        self.dispatch_until(pre)?;
+        Ok(self.stack.pop().unwrap_or(Value::Nil))
+    }
+
     pub(crate) fn builtin_call(&mut self, name: &str, args: &[Value]) -> Option<Result<Value, Trap>> {
         match name {
             "puts" => {
+                if let Some(target) = self.stdio_redirect("$stdout", true) {
+                    return Some(self.forward_stdio_call(target, "puts", args));
+                }
                 // CRuby's `puts` flattens arrays: each element is
                 // printed on its own line, recursively. Empty
                 // string still gets a newline (so `puts ""` and
@@ -709,6 +750,13 @@ impl Vm {
                 // `inspect` runs arbitrary code (→ GC) and the arg buffer
                 // isn't in the root set.
                 {
+                    // Redirected `$stdout` (capture_io): render the
+                    // inspect lines first (p uses inspect, so the
+                    // whole-call forward that puts/print use would
+                    // lose it to the target's own to_s), then hand
+                    // the text over via a single `write`.
+                    let redirect = self.stdio_redirect("$stdout", true);
+                    let mut redirected = redirect.as_ref().map(|_| String::new());
                     let pinned: Vec<Value> = args.to_vec();
                     let mut g = PinGuard::new(self);
                     for a in &pinned { g.pin(a.clone()); }
@@ -717,7 +765,18 @@ impl Vm {
                             Ok(s) => s,
                             Err(t) => return Some(Err(t)),
                         };
-                        let _ = writeln!(g.vm.stdout, "{}", s);
+                        if let Some(buf) = redirected.as_mut() {
+                            buf.push_str(&s);
+                            buf.push('\n');
+                        } else {
+                            let _ = writeln!(g.vm.stdout, "{}", s);
+                        }
+                    }
+                    drop(g);
+                    if let (Some(target), Some(buf)) = (redirect, redirected)
+                        && let Err(t) = self.forward_stdio_call(target, "write", &[Value::new_str(buf)])
+                    {
+                        return Some(Err(t));
                     }
                 }
                 match args {
@@ -1081,6 +1140,9 @@ impl Vm {
                 }
             }
             "print" => {
+                if let Some(target) = self.stdio_redirect("$stdout", true) {
+                    return Some(self.forward_stdio_call(target, "print", args));
+                }
                 let pinned: Vec<Value> = args.to_vec();
                 let mut g = PinGuard::new(self);
                 for a in &pinned { g.pin(a.clone()); }
@@ -1397,6 +1459,19 @@ impl Vm {
                 // `uplevel:` / `category:` kwargs CRuby exposes
                 // (not in the rubyrs subset yet) — positional
                 // args only.
+                if let Some(target) = self.stdio_redirect("$stderr", true) {
+                    // Render to one buffer, forward as a single
+                    // write — same shape as the redirected `p`.
+                    let mut buf = String::new();
+                    for arg in args {
+                        let s = arg.to_display(&self.heap, &self.interner);
+                        buf.push_str(&s);
+                        if !s.ends_with('\n') {
+                            buf.push('\n');
+                        }
+                    }
+                    return Some(self.forward_stdio_call(target, "write", &[Value::new_str(buf)]));
+                }
                 for arg in args {
                     let s = arg.to_display(&self.heap, &self.interner);
                     if s.ends_with('\n') {
