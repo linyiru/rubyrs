@@ -5118,22 +5118,37 @@ impl Vm {
             (Value::Range(id), "one?", []) => self.iter_range_filter(*id, IterMode::One, block)?,
 
             (Value::Range(id), "map", []) | (Value::Range(id), "collect", []) => {
-                let (bi, ei, excl) = {
+                // Two element sources: Int endpoints walk lazily by
+                // counter (no upfront materialization); Str endpoints
+                // materialize via the same str_succ walk Range#to_a
+                // uses (minitest's SystemStackError compressor maps
+                // ("a".."z")). Anything else declines with the
+                // RuntimeError shape that keeps `respond_to?` and
+                // dispatch in lockstep (lookup.rs:756 contract).
+                enum MapSrc { Ints(i64, i64), Vals(Vec<Value>) }
+                let src = {
                     let r = self.heap.range(*id);
                     match (&r.begin, &r.end) {
-                        (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
-                        // Str+Str ranges (e.g. ('a'..'z')) are
-                        // supported by Range#each via str_succ
-                        // but not yet by each_slice / each_cons.
-                        // Returning Ok(None) here used to fall
-                        // through to NoMethodError — but
-                        // `respond_to?(:each_slice)` is true
-                        // for any Range, so that contradicted
-                        // the lockstep contract documented at
-                        // lookup.rs:756. Raise RuntimeError
-                        // instead (same fallback shape as the
-                        // zero-arg find_index path in
-                        // array.rs:357 / PR #308 cycle 3).
+                        (Value::Int(a), Value::Int(c)) => {
+                            let end_inc = if r.exclusive { c - 1 } else { *c };
+                            MapSrc::Ints(*a, end_inc)
+                        }
+                        (Value::Str(sa), Value::Str(se)) => {
+                            let start = sa.to_string_lossy();
+                            let stop = se.to_string_lossy();
+                            let excl = r.exclusive;
+                            let mut out: Vec<Value> = Vec::new();
+                            let mut cur = start;
+                            loop {
+                                let done = if excl { cur >= stop } else { cur > stop };
+                                if done { break; }
+                                out.push(Value::new_str(cur.clone()));
+                                let next = super::string::str_succ(&cur);
+                                if next.len() > stop.len() { break; }
+                                cur = next;
+                            }
+                            MapSrc::Vals(out)
+                        }
                         _ => return Err(self.trap(crate::error::RubyError::RuntimeError {
                             msg: format!(
                                 "Range#{name} with non-Int endpoints is not yet implemented in rubyrs"
@@ -5146,21 +5161,39 @@ impl Vm {
                 g.pin(Value::Block(block));
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let count = if excl { (ei - bi).max(0) } else { (ei - bi + 1).max(0) };
-                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(count as usize).into()));
+                let cap = match &src {
+                    MapSrc::Ints(bi, end_inc) => (end_inc - bi + 1).max(0) as usize,
+                    MapSrc::Vals(v) => v.len(),
+                };
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(cap).into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
-                let end_inc = if excl { ei - 1 } else { ei };
-                let mut i = bi;
-                while i <= end_inc {
-                    let r = match g.vm.step_block1(block, Value::Int(i), pre_frames)? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(r) => r,
-                    };
-                    g.vm.heap.array_mut(result_id).push(r);
-                    i += 1;
+                match src {
+                    MapSrc::Ints(bi, end_inc) => {
+                        let mut i = bi;
+                        while i <= end_inc {
+                            let r = match g.vm.step_block1(block, Value::Int(i), pre_frames)? {
+                                BlockStep::MethodReturn => break,
+                                BlockStep::Break(r) => { early = Some(r); break; }
+                                BlockStep::Value(r) => r,
+                            };
+                            g.vm.heap.array_mut(result_id).push(r);
+                            i += 1;
+                        }
+                    }
+                    MapSrc::Vals(vals) => {
+                        // Value::Str is Rc-backed (not a heap slot),
+                        // so the snapshot needs no per-element pins.
+                        for v in vals {
+                            let r = match g.vm.step_block1(block, v, pre_frames)? {
+                                BlockStep::MethodReturn => break,
+                                BlockStep::Break(r) => { early = Some(r); break; }
+                                BlockStep::Value(r) => r,
+                            };
+                            g.vm.heap.array_mut(result_id).push(r);
+                        }
+                    }
                 }
                 Some(early.unwrap_or(Value::Array(result_id)))
             }

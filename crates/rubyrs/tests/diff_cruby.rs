@@ -923,3 +923,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Marshal same-process round-trip contract + dumpability TypeErrors
 // + Exception ivar reflection (message/backtrace hidden).
 #[test] fn marshal_roundtrip_contract() { run_diff("marshal_roundtrip_contract"); }
+// Range#map over String endpoints (str_succ materialize).
+#[test] fn range_string_map() { run_diff("range_string_map"); }
