@@ -4616,6 +4616,41 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     // `Wrapper::TopErr` instead of the intended
                     // top-level class.
                     classes.push(crate::const_marker::tag_absolute(joined, is_constant_path_absolute(&exc)));
+                } else if let Some(sp) = exc.as_splat_node() {
+                    // `rescue *CONST` — minitest's
+                    // `rescue *PASSTHROUGH_EXCEPTIONS` idiom. The
+                    // constant NAME travels with a splat marker;
+                    // PushRescue resolves it to an Array of classes
+                    // at run time and matches any element. Only
+                    // const-shaped splat operands are supported;
+                    // anything else falls to the drop note below.
+                    // (Before this arm existed the splat was
+                    // silently dropped → empty class list → bare
+                    // `rescue` → StandardError matched EVERYTHING,
+                    // which made minitest's passthrough arm re-raise
+                    // every test error and kill the whole run.)
+                    if let Some(inner) = sp.expression() {
+                        if let Some(c) = inner.as_constant_read_node() {
+                            classes.push(crate::const_marker::tag_splat(cid_to_string(c.name())));
+                        } else if inner.as_constant_path_node().is_some()
+                            && let Some(joined) = flatten_constant_path(&inner)
+                        {
+                            classes.push(crate::const_marker::tag_splat(
+                                crate::const_marker::tag_absolute(joined, is_constant_path_absolute(&inner)),
+                            ));
+                        } else if let Some(lv) = inner.as_local_variable_read_node() {
+                            // `rescue *exp` on a LOCAL — minitest's
+                            // `assert_raises *exp` shape. The compiler
+                            // resolves the name to a slot and emits
+                            // `Op::PushRescueSplatLocal`. Caveat: slot
+                            // resolution uses the CURRENT proto's
+                            // table, so a captured outer local inside
+                            // a block would mis-slot — that reads Nil
+                            // and matches nothing (fail-closed), it
+                            // can't wrong-catch.
+                            classes.push(crate::const_marker::tag_splat_local(cid_to_string(lv.name())));
+                        }
+                    }
                 }
                 // Anything else (dynamic expression in rescue
                 // position) is dropped silently for now.

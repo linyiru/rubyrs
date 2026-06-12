@@ -75,6 +75,52 @@ pub(crate) fn strip_absolute(name: &str) -> Option<&str> {
     name.strip_prefix(ABSOLUTE_PREFIX)
 }
 
+/// Marker prefix for a splatted rescue filter (`rescue *CONST`).
+/// The marked name is the CONSTANT's name, not a class name — the
+/// `PushRescue` handler resolves it to an Array value and matches
+/// the exception against each element. `*` can't begin a real
+/// constant name, so the marker can't collide. Composes OUTSIDE
+/// the absolute marker: `rescue *::Foo::BAR` encodes as
+/// `*::Foo::BAR` — strip the splat first, then the absolute.
+pub(crate) const SPLAT_PREFIX: &str = "*";
+
+/// Tag a rescue-filter constant name as splatted.
+pub(crate) fn tag_splat(name: String) -> String {
+    let mut tagged = String::with_capacity(SPLAT_PREFIX.len() + name.len());
+    tagged.push_str(SPLAT_PREFIX);
+    tagged.push_str(&name);
+    tagged
+}
+
+/// Strip the splat marker if present. Returns `None` for ordinary
+/// (non-splat) rescue class names.
+pub(crate) fn strip_splat(name: &str) -> Option<&str> {
+    name.strip_prefix(SPLAT_PREFIX)
+}
+
+/// Marker prefix for a splatted rescue filter whose operand is a
+/// LOCAL variable (`rescue *exp` — minitest's `assert_raises *exp`
+/// idiom, where `exp` is the method's own splat-args array). The
+/// marked name is the local's name; the COMPILER resolves it to a
+/// slot and emits `Op::PushRescueSplatLocal`, so unlike the
+/// constant-splat marker this one never reaches the runtime.
+/// `&` can't begin a constant or local name in source, so the
+/// marker can't collide with either of the other two.
+pub(crate) const SPLAT_LOCAL_PREFIX: &str = "&";
+
+/// Tag a rescue-filter local name as splatted-local.
+pub(crate) fn tag_splat_local(name: String) -> String {
+    let mut tagged = String::with_capacity(SPLAT_LOCAL_PREFIX.len() + name.len());
+    tagged.push_str(SPLAT_LOCAL_PREFIX);
+    tagged.push_str(&name);
+    tagged
+}
+
+/// Strip the splatted-local marker if present.
+pub(crate) fn strip_splat_local(name: &str) -> Option<&str> {
+    name.strip_prefix(SPLAT_LOCAL_PREFIX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +151,19 @@ mod tests {
     fn strip_absolute_single_segment() {
         assert_eq!(strip_absolute("::TopErr"), Some("TopErr"));
         assert_eq!(strip_absolute("TopErr"), None);
+    }
+
+    #[test]
+    fn splat_tag_roundtrip_and_composition() {
+        let s = tag_splat("PASSTHROUGH".to_string());
+        assert_eq!(s, "*PASSTHROUGH");
+        assert_eq!(strip_splat(&s), Some("PASSTHROUGH"));
+        assert_eq!(strip_splat("PASSTHROUGH"), None);
+
+        // splat outside absolute: `rescue *::Foo::BAR`
+        let composed = tag_splat(tag_absolute("Foo::BAR".to_string(), true));
+        assert_eq!(composed, "*::Foo::BAR");
+        let inner = strip_splat(&composed).unwrap();
+        assert_eq!(strip_absolute(inner), Some("Foo::BAR"));
     }
 }

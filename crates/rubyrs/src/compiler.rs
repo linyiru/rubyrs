@@ -845,14 +845,24 @@ fn compile_begin_arm(
                 Some(name) => (b.local_slot(name), 1u8),
                 None => (0u16, 0u8),
             };
-            let filter_syms: Vec<crate::intern::SymId> = if rc.classes.is_empty() {
-                vec![stderr_sym]
+            let mut group = Vec::with_capacity(rc.classes.len().max(1));
+            if rc.classes.is_empty() {
+                group.push(b.emit(Op::PushRescue(0, slot, bind, stderr_sym)));
             } else {
-                rc.classes.iter().rev().map(|n| interner.intern(n)).collect()
-            };
-            let mut group = Vec::with_capacity(filter_syms.len());
-            for sym in filter_syms {
-                group.push(b.emit(Op::PushRescue(0, slot, bind, sym)));
+                for n in rc.classes.iter().rev() {
+                    // Splatted-local filter (`rescue *exp`) carries
+                    // the LOCAL's name — resolve to a slot here and
+                    // emit the local-reading op variant; everything
+                    // else (plain class names, const-splat markers)
+                    // stays on the SymId channel for the runtime to
+                    // resolve.
+                    if let Some(local_name) = crate::const_marker::strip_splat_local(n) {
+                        let src_slot = b.local_slot(local_name);
+                        group.push(b.emit(Op::PushRescueSplatLocal(0, slot, bind, src_slot)));
+                    } else {
+                        group.push(b.emit(Op::PushRescue(0, slot, bind, interner.intern(n))));
+                    }
+                }
             }
             groups.push(group);
         }
@@ -870,8 +880,10 @@ fn compile_begin_arm(
             let handler_start = b.pos();
             for &placeholder in group {
                 let off = handler_start as i32 - placeholder as i32 - 1;
-                if let Op::PushRescue(o, _, _, _) = &mut b.code[placeholder] {
-                    *o = off;
+                match &mut b.code[placeholder] {
+                    Op::PushRescue(o, _, _, _)
+                    | Op::PushRescueSplatLocal(o, _, _, _) => *o = off,
+                    _ => {}
                 }
             }
             // Make begin_top reachable from inside this rescue

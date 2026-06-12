@@ -22,7 +22,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{Class, Instance, Value};
 
-use super::{class_is_a, LoopTransfer, LoopTransferKind, Vm};
+use super::{class_is_a, LoopTransfer, LoopTransferKind, RescueFilter, Vm};
 
 impl Vm {
     /// Convert a Ruby-level `raise` argument into an Exception instance.
@@ -229,7 +229,12 @@ impl Vm {
                     } else if let Some(filter) = &h.filter_class {
                         // explicit class filter (including bare
                         // `rescue` which compiles to StandardError).
-                        exc_class.as_ref().is_some_and(|cls| class_is_a(cls, filter))
+                        // The splat form (`rescue *PASSTHROUGH`)
+                        // matches if ANY listed class matches.
+                        exc_class.as_ref().is_some_and(|cls| match filter {
+                            RescueFilter::Class(f) => class_is_a(cls, f),
+                            RescueFilter::Any(list) => list.iter().any(|f| class_is_a(cls, f)),
+                        })
                     } else {
                         // Non-ensure handler with no resolved filter
                         // class means the source said `rescue Foo`

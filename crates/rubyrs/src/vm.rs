@@ -458,7 +458,7 @@ pub(crate) struct RescueHandler {
     pub(crate) begin_depth_at_push: usize,
     /// Class filter for `rescue`. `None` means catch-all (used for
     /// `ensure` and as a future hook for internal/host-only handlers).
-    /// `Some(cls)` means the handler only fires when the raised
+    /// `Some(Class(cls))` means the handler only fires when the raised
     /// exception's class is `cls` or a descendant. Bare `rescue` (no
     /// class listed) populates this with `StandardError`, so any
     /// exception that intentionally lives outside the StandardError
@@ -466,8 +466,26 @@ pub(crate) struct RescueHandler {
     /// by `rescue => e`. Explicit `rescue ClassName => e` carries the
     /// resolved Class here. Multi-class clauses (`rescue A, B => e`)
     /// emit one handler per class — same handler_ip, same bind_slot —
-    /// so each entry holds exactly one filter.
-    pub(crate) filter_class: Option<Rc<Class>>,
+    /// so each entry holds exactly one filter. `Some(Any(list))` is
+    /// the splat form `rescue *CONST`: the constant's Array value is
+    /// snapshotted into a class list at push time and the handler
+    /// fires when ANY entry matches.
+    pub(crate) filter_class: Option<RescueFilter>,
+}
+
+/// The two resolved shapes a `rescue` class filter can take. The
+/// single-class form stays an `Rc` clone (no extra allocation on
+/// the common path); the splat form carries the materialized list.
+pub(crate) enum RescueFilter {
+    /// `rescue Foo` / bare `rescue` (= StandardError) — one class.
+    Class(Rc<Class>),
+    /// `rescue *CONST` — match if any listed class matches. The
+    /// list is the constant's Array value AS OF push time; CRuby
+    /// re-evaluates the expression at match time, a divergence
+    /// only observable if the array is mutated while the body
+    /// runs (no real gem does this — minitest's
+    /// PASSTHROUGH_EXCEPTIONS pattern is a frozen-ish constant).
+    Any(Vec<Rc<Class>>),
 }
 
 pub(crate) type HostFn = dyn Fn(&[Value]) -> Result<Value, Trap>;

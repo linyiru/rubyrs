@@ -876,3 +876,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn frame_local_match() { run_diff("frame_local_match"); }
 // Array#rindex value + block forms (minitest backtrace filter).
 #[test] fn array_rindex() { run_diff("array_rindex"); }
+// rescue-splat filters (`rescue *CONST` / `rescue *local`) — the
+// minitest PASSTHROUGH_EXCEPTIONS / assert_raises shapes. Before
+// these forms existed the splat was dropped and the clause matched
+// every StandardError.
+#[test] fn rescue_splat_filters() { run_diff("rescue_splat_filters"); }

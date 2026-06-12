@@ -466,6 +466,17 @@ pub(crate) enum Op {
     /// unresolved class (e.g. `rescue UndefinedConst`) makes the
     /// handler match nothing — see `unwind_with_exception`.
     PushRescue(i32, u16, u8, SymId),
+    /// `rescue *exp` where the splat operand is a LOCAL variable
+    /// (minitest's `assert_raises *exp` shape — the class list is
+    /// the method's own args array, not a constant). Args:
+    /// handler-offset, bind-slot, bind-flag, source-local-slot.
+    /// At push time the source slot is read from the frame and its
+    /// Array elements become the filter list (`RescueFilter::Any`);
+    /// a single Class coerces to a one-element match and anything
+    /// else (incl. an unset Nil slot) matches nothing. Re-executed
+    /// on every begin entry, so retry re-reads the local — same
+    /// re-evaluation timing as CRuby.
+    PushRescueSplatLocal(i32, u16, u8, u16),
     PopRescue,
     /// Begin/rescue baseline marker. Pushes the current
     /// `frame.rescues.len()` onto `frame.begin_rescue_depths`
