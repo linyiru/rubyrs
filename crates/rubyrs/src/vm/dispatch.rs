@@ -10759,6 +10759,7 @@ impl Vm {
             // `def obj.to_str; "blah"; end`). Synchronous user
             // dispatch, same pattern as the sleep override gate.
             let arg0: Value = match (&recv, &args[0]) {
+                #[cfg(feature = "regex")]
                 (Value::Regex(_), Value::Object(oid)) => {
                     let to_str_id = self.interner.intern("to_str");
                     let cls = self.heap.class_of(*oid);
