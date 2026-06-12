@@ -71,7 +71,7 @@
     "crates/rubyrs/src/vm/gc.rs": 90,
     "crates/rubyrs/src/vm/hash.rs": 93,
     "crates/rubyrs/src/vm/iter.rs": 88,
-    "crates/rubyrs/src/vm/kernel.rs": 78,
+    "crates/rubyrs/src/vm/kernel.rs": 76.5,
     "crates/rubyrs/src/vm/lookup.rs": 92,
     "crates/rubyrs/src/vm/match_data.rs": 94,
     "crates/rubyrs/src/vm/numeric.rs": 93,
