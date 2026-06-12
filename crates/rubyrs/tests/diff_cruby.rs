@@ -893,3 +893,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // throw flies past intervening StandardError rescues (minitest
 // assert_throws); wrong-tag throw raises UncaughtThrowError at site.
 #[test] fn throw_passthrough_rescue() { run_diff("throw_passthrough_rescue"); }
+// raise-SomeClass message default, SyntaxError class, block-frame names.
+#[cfg(feature = "regex")]
+#[test] fn exception_surface_extras() { run_diff("exception_surface_extras"); }

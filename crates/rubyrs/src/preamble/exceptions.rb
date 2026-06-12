@@ -134,6 +134,14 @@ class ScriptError < Exception
 end
 class NotImplementedError < ScriptError
 end
+## SyntaxError — raised by CRuby's parser (and by rubyrs's own
+## AST front-end via the SyntaxError trap, which bypasses this
+## class). The CLASS exists so user code can reference and raise
+## it (minitest's own tests `raise SyntaxError, "icky"` to model
+## an unexpected non-StandardError); rubyrs's genuine parse
+## failures still abort uncatchably (ADR 0008).
+class SyntaxError < ScriptError
+end
 ## LoadError — CRuby's exception for `require` / `require_relative`
 ## / `load` failure. `rescue LoadError` is the idiomatic catch
 ## for "feature not available", and the FS-sandbox cap

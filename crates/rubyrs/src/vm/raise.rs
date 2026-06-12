@@ -54,18 +54,26 @@ impl Vm {
                 // `raise SomeClass` with no message: instantiate
                 // an empty Exception of that class. We skip the
                 // `initialize` dispatch — there's no argument to
-                // pass — and leave `@message` unset. CRuby's
-                // `SomeClass.exception` for the no-arg form would
-                // call `initialize` with no args; the user's
-                // `initialize` (if any) accepting a default-nil
-                // message would produce the same end-state.
+                // pass — and stamp `@message` with the class name,
+                // matching what the preamble's
+                // `Exception#initialize(nil)` fallback would have
+                // produced (CRuby: `raise ArgumentError` then
+                // `e.message` is "ArgumentError", and minitest's
+                // `e.message.include?` chains rely on it being a
+                // String). Divergence: a user subclass whose custom
+                // no-arg `initialize` sets a different @message
+                // still sees the class name here, since we don't
+                // dispatch.
                 self.maybe_gc();
+                let msg = Value::new_str(cls.name.clone());
                 let id = self.heap.alloc(HeapObj::Instance(Instance {
                     class: cls.clone(),
                     ivars: crate::intern::FxHashMap::default(),
                     singleton_class: None,
             frozen: std::cell::Cell::new(false),
                 }));
+                let msg_id = self.interner.intern("@message");
+                self.heap.instance_mut(id).ivars.insert(msg_id, msg);
                 Value::Object(id)
             }
             _ => v,
@@ -731,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_exception_class_returns_empty_instance() {
+    fn normalize_exception_class_stamps_class_name_message() {
         let mut vm = mk_vm();
         let cls = mk_class("MyError", None);
         let v = Value::Class(cls.clone());
@@ -741,9 +749,16 @@ mod tests {
             other => panic!("expected Object, got {other:?}"),
         };
         assert!(Rc::ptr_eq(&vm.heap.class_of(id), &cls));
-        // `@message` is NOT set (no arg).
+        // `@message` defaults to the class name — CRuby:
+        // `raise MyError` then `e.message` is "MyError" (what the
+        // preamble's `Exception#initialize(nil)` fallback would
+        // produce if we dispatched it).
         let msg_sym = vm.interner.intern("@message");
-        assert!(!vm.heap.instance(id).ivars.contains_key(&msg_sym));
+        let msg = vm.heap.instance(id).ivars.get(&msg_sym).cloned();
+        match msg {
+            Some(Value::Str(s)) => assert_eq!(s.to_string_lossy(), "MyError"),
+            other => panic!("expected @message String, got {other:?}"),
+        }
     }
 
     #[test]

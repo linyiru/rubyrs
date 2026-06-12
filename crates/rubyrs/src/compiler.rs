@@ -2448,7 +2448,21 @@ pub(crate) fn compile_block(
     // happens to bind into the same index later.
     let block_n_locals = b.n_locals;
     let lex = build_lexical_scope(&b.class_path, interner);
-    protos.push(b.build("<block>".into(), proto_params, proto_param_count as u16, lex));
+    // CRuby backtrace shape: a block frame reports
+    // "block in <enclosing method>" ("block in <main>" at the
+    // toplevel, "block in <class:Foo>" in a class body). minitest's
+    // assertion-message tests compare backtraces against the
+    // 'block in test_*' form (nesting levels are normalized away by
+    // the suite, so a flat "block in" for nested blocks is enough —
+    // documented divergence from CRuby's "block (2 levels) in").
+    let block_name = match &b.method_name {
+        Some(m) => format!("block in {m}"),
+        None => match b.class_path.last() {
+            Some(cls) => format!("block in <class:{cls}>"),
+            None => "block in <main>".to_string(),
+        },
+    };
+    protos.push(b.build(block_name, proto_params, proto_param_count as u16, lex));
     // Stamp the body-local-reset range on the just-built block
     // Proto. `build()` defaults this to `u16::MAX` (no reset)
     // because that's correct for every non-block builder; the
