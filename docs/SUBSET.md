@@ -1195,31 +1195,37 @@ puts C.new.m(1, a: 2)  # rubyrs: "p: x=1 opts={}"; CRuby: "p: x=1 opts={a: 2}"
   channel at dispatch time. Significant opcode-level work;
   deferred until a real caller surfaces.
 
-### `**kw` parameter on a block body doesn't bind kwargs
+### Block keyword params: kwargs-vs-positional-Hash recovery is a heuristic
 
 ```ruby
-proc { |*args, **kw| puts "args=#{args} kw=#{kw}" }.call(1, x: 2)
-# rubyrs: "args=[1, {x: 2}] kw=nil"
-#  CRuby: "args=[1] kw={x: 2}"
+proc { |a, k: 5| [a, k] }.call({k: 9})
+# rubyrs: [nil, 9]   (the Hash is peeled as kwargs)
+#  CRuby: [{k: 9}, 5] (a positional Hash literal stays positional)
 ```
 
-- Block parameters with `**kw` (`define_method(:f) do |*args,
-  **kw| ... end`, lambda `->(*args, **kw) { ... }`, proc-form
-  similar) don't split the trailing Hash into the `**kw` slot
-  — the kwhash stays in `*args` as a positional Hash and the
-  `**kw` slot is `nil`.
-- Surfaced in the `Forwardable` shim — `define_method(ali)
-  do |*args, **kw, &blk| ... end` was rewritten to
-  `|*args, &blk|` because kwargs would silently land in
-  `args`. The shim's gem-load surface only delegates to
-  positional-arity methods, so the workaround is non-lossy
-  for the Sinatra spike chain; gems whose delegate targets
-  accept kwargs would silently forward them as a trailing
-  positional Hash instead.
-- Proper fix lives at the block-binder (vm/dispatch.rs
-  `invoke_block_*`) — split a trailing Hash arg into the
-  `**kw` slot when the BlockHandle declares one. Not yet
-  modelled; deferred until a real caller hits it.
+- `|k1:, k2: default|` block/lambda keyword params bind, raise
+  CRuby-worded `missing keyword:`/`unknown keyword:` ArgumentErrors
+  (missing reported first), and split leftovers into `**rest` —
+  see `tests/diff/block_kw_params.rb`. But our block call sites
+  flatten kwargs into a trailing positional Hash before
+  `invoke_block`, so the caller's kwargs-vs-brace-hash bit is
+  gone. Recovery heuristic: the trailing Hash is treated as
+  kwargs only when at least one key names a declared keyword
+  param (or the block has `**rest`, which peels any trailing
+  Hash — pre-existing behaviour). A passed brace-Hash whose keys
+  happen to overlap a declared keyword is therefore consumed as
+  kwargs; zero-overlap Hashes stay positional (so iteration
+  drivers yielding Hash elements bind them positionally, like
+  CRuby).
+- `|k: default|` with an EXPLICIT `k: nil` argument re-evaluates
+  the default (CRuby keeps the nil): the default is a
+  translation-time desugar to `k = default if k.nil?` at the
+  head of the block body (ast.rs `prepend_kw_default_prologue`),
+  not a caller-supplied bit.
+- A kw-param block installed AS A METHOD via `define_method`
+  keeps the pre-existing method-binder arity behaviour (kw names
+  stay out of `proto.params`); only ordinary block invocation
+  (`call`/`yield`/iterators) binds `Proto::block_kw_params`.
 
 ### `DelegateClass(SuperKlass)` collapses to one class for all callers
 

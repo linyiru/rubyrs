@@ -13372,6 +13372,7 @@ impl Vm {
                 kw_param_defaults: Vec::new(),
                 kw_has_computed_default: Vec::new(),
                 kw_rest_param: None,
+                block_kw_params: vec![],
                 block_param: None,
                 n_locals: 2,
                 // Not literally true (no Op::CreateBlock in the body),
@@ -13468,6 +13469,7 @@ impl Vm {
                 kw_param_defaults: Vec::new(),
                 kw_has_computed_default: Vec::new(),
                 kw_rest_param: None,
+                block_kw_params: vec![],
                 block_param: None,
                 n_locals: 3,
                 // Same as the callable-forwarder: closure-run proto,
@@ -13647,7 +13649,8 @@ impl Vm {
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
              bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope)
         };
-        if rest_slot.is_some() || kw_rest_slot.is_some() || n_params > 1 {
+        if rest_slot.is_some() || kw_rest_slot.is_some() || n_params > 1
+            || !self.protos[proto_idx].block_kw_params.is_empty() {
             return self.invoke_block(block_id, vec![arg]);
         }
         let proto = &self.protos[proto_idx];
@@ -13696,7 +13699,8 @@ impl Vm {
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
              bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope)
         };
-        if rest_slot.is_some() || kw_rest_slot.is_some() || n_params != 2 {
+        if rest_slot.is_some() || kw_rest_slot.is_some() || n_params != 2
+            || !self.protos[proto_idx].block_kw_params.is_empty() {
             return self.invoke_block(block_id, vec![a, b]);
         }
         let proto = &self.protos[proto_idx];
@@ -13746,6 +13750,11 @@ impl Vm {
         // a=1, o={x:2}; `proc { |**o| }.call` → o={}. The kwargs
         // arrive as a trailing positional Hash (verified: a block
         // called with `k: v` receives `[{k=>v}]`).
+        // `|k1:, k2: d|` named keyword params, from the block proto
+        // (absolute slots — see Proto::block_kw_params). Cloning an
+        // empty Vec is alloc-free, so kw-less blocks pay one len
+        // check here.
+        let kw_params: Vec<(String, u16, bool)> = self.protos[proto_idx].block_kw_params.clone();
         let kw_rest_value: Option<Value> = if kw_rest_slot.is_some() {
             // Only treat a trailing Hash as kwargs; otherwise the
             // block was called with no keywords → bind `{}`.
@@ -13754,8 +13763,87 @@ impl Vm {
             } else {
                 None
             }
+        } else if !kw_params.is_empty() {
+            // Named-kw-only blocks peel by OVERLAP, not shape: the
+            // trailing Hash is kwargs only when at least one of its
+            // keys names a declared kw param. A trailing Hash with
+            // zero overlap stays positional, so iteration drivers
+            // yielding Hash elements (`[{a: 1}].each { |h, k: 2| }`)
+            // bind h={a: 1} like CRuby instead of exploding with
+            // "unknown keyword: :a". (Our call sites flatten kwargs
+            // into a trailing positional Hash before invoke_block,
+            // so the caller's kwargs-vs-brace-hash bit is already
+            // gone — this heuristic is the best recovery. Mixed
+            // missing/unknown error ORDER matches CRuby: missing
+            // first — see the bind loop below.)
+            if let Some(Value::Hash(hid)) = args.last() {
+                let overlap = self.heap.hash(*hid).iter().any(|(k, _)| {
+                    matches!(k, Value::Sym(s)
+                        if kw_params.iter().any(|(n, _, _)| &**self.interner.resolve(*s) == n.as_str()))
+                });
+                if overlap { args.pop() } else { None }
+            } else {
+                None
+            }
         } else {
             None
+        };
+        // Bind named kw params: caller value, Nil for a missing
+        // optional (the body-prologue desugar turns it into the
+        // default), ArgumentError for a missing required. Writing
+        // EVERY kw slot every invocation matters — kw slots are
+        // param slots (below block_body_local_start), so a skipped
+        // write would leak the previous invocation's value.
+        let kw_bound: Vec<(u16, Value)> = if kw_params.is_empty() {
+            Vec::new()
+        } else {
+            let pairs: Vec<(Value, Value)> = match &kw_rest_value {
+                Some(Value::Hash(hid)) => self.heap.hash(*hid).clone(),
+                _ => Vec::new(),
+            };
+            let mut out: Vec<(u16, Value)> = Vec::with_capacity(kw_params.len());
+            let mut missing: Vec<&str> = Vec::new();
+            for (name, slot, required) in &kw_params {
+                let found = pairs.iter().find(|(k, _)| {
+                    matches!(k, Value::Sym(s) if &**self.interner.resolve(*s) == name.as_str())
+                }).map(|(_, v)| v.clone());
+                match found {
+                    Some(v) => out.push((*slot, v)),
+                    None if *required => missing.push(name.as_str()),
+                    None => out.push((*slot, Value::Nil)),
+                }
+            }
+            // CRuby reports missing before unknown when both apply.
+            if !missing.is_empty() {
+                let msg = if missing.len() == 1 {
+                    format!("missing keyword: :{}", missing[0])
+                } else {
+                    format!("missing keywords: :{}", missing.join(", :"))
+                };
+                return Err(self.trap(RubyError::ArgumentError { msg }));
+            }
+            if kw_rest_slot.is_none() {
+                let mut unknown: Vec<String> = Vec::new();
+                for (k, _) in &pairs {
+                    let claimed = matches!(k, Value::Sym(s)
+                        if kw_params.iter().any(|(n, _, _)| &**self.interner.resolve(*s) == n.as_str()));
+                    if !claimed {
+                        unknown.push(match k {
+                            Value::Sym(s) => format!(":{}", self.interner.resolve(*s)),
+                            other => self.inspect_value(other)?,
+                        });
+                    }
+                }
+                if !unknown.is_empty() {
+                    let msg = if unknown.len() == 1 {
+                        format!("unknown keyword: {}", unknown[0])
+                    } else {
+                        format!("unknown keywords: {}", unknown.join(", "))
+                    };
+                    return Err(self.trap(RubyError::ArgumentError { msg }));
+                }
+            }
+            out
         };
         // CRuby auto-splat: when a block declared with >1 parameter
         // is called with a single Array argument, the Array's
@@ -13833,10 +13921,24 @@ impl Vm {
             let kwr = if let Some(slot) = kw_rest_slot {
                 // The peeled kwargs Hash, or a fresh `{}` (CRuby
                 // binds `{}` when the block was called with no
-                // keywords).
-                let v = match &kw_rest_value {
-                    Some(h) => h.clone(),
-                    None => {
+                // keywords). With named kw params alongside
+                // (`|k:, **rest|`), the rest Hash gets only the
+                // LEFTOVER pairs — keys not claimed by a named kw.
+                let v = match (&kw_rest_value, kw_params.is_empty()) {
+                    (Some(h), true) => h.clone(),
+                    (Some(Value::Hash(hid)), false) => {
+                        let leftover: Vec<(Value, Value)> = g.vm.heap.hash(*hid).iter()
+                            .filter(|(k, _)| !matches!(k, Value::Sym(s)
+                                if kw_params.iter().any(|(n, _, _)| &**g.vm.interner.resolve(*s) == n.as_str())))
+                            .cloned()
+                            .collect();
+                        for (k, v) in &leftover { g.pin(k.clone()); g.pin(v.clone()); }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        Value::Hash(g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(leftover))))
+                    }
+                    (Some(h), false) => h.clone(),
+                    (None, _) => {
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
                         Value::Hash(g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new()))))
@@ -13921,6 +14023,9 @@ impl Vm {
                 locals[slot as usize] = val;
             }
             if let Some((slot, val)) = kw_rest_final {
+                locals[slot as usize] = val;
+            }
+            for (slot, val) in kw_bound {
                 locals[slot as usize] = val;
             }
         }
@@ -16438,6 +16543,7 @@ impl Vm {
                 kw_param_defaults: vec![],
                 kw_has_computed_default: vec![],
                 kw_rest_param: None,
+                block_kw_params: vec![],
                 block_param: None,
                 n_locals: 0,
                 creates_block: false,
@@ -16475,6 +16581,7 @@ impl Vm {
                 kw_param_defaults: vec![],
                 kw_has_computed_default: vec![],
                 kw_rest_param: None,
+                block_kw_params: vec![],
                 block_param: None,
                 n_locals: 1,
                 creates_block: false,
@@ -16530,6 +16637,7 @@ impl Vm {
             kw_param_defaults: vec![],
             kw_has_computed_default: vec![],
             kw_rest_param: None,
+            block_kw_params: vec![],
             block_param: None,
             n_locals: 1,
             creates_block: false,
@@ -16628,6 +16736,7 @@ impl Vm {
             kw_param_defaults: vec![],
             kw_has_computed_default: vec![],
             kw_rest_param: None,
+            block_kw_params: vec![],
             block_param: None,
             n_locals: 1,
             creates_block: false,
@@ -16675,6 +16784,7 @@ impl Vm {
             kw_param_defaults: vec![],
             kw_has_computed_default: vec![],
             kw_rest_param: None,
+            block_kw_params: vec![],
             block_param: None,
             n_locals: 1,
             creates_block: false,

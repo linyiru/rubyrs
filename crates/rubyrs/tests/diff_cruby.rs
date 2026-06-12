@@ -967,6 +967,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // $stdout.reopen(tempfile) delegation (capture_subprocess_io).
 #[cfg(feature = "stdlib")]
 #[test] fn io_reopen_capture() { run_diff("io_reopen_capture"); }
+// Block keyword params: |k1:, k2:| required + |k: default| optional,
+// CRuby error wording/ordering, kwargs-vs-positional-Hash recovery.
+#[test] fn block_kw_params() { run_diff("block_kw_params"); }
 // NoMethodError receiver shapes (nil/true/instance-of/class/module)
 // + undef_method/alias_method NameError naming on eigenclass shells.
 #[test] fn nomethod_receiver_shapes() { run_diff("nomethod_receiver_shapes"); }

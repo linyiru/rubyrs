@@ -572,6 +572,19 @@ pub(crate) enum BlockParam {
     /// `def_delegator`-generated blocks and many gems use
     /// `do |*a, **o| ... end`; pre-fix `**o` bound nil.
     KwRest(String),
+    /// `|k1:, k2:|` named keyword parameter. `bool` is the
+    /// required flag: `true` for `k:` (missing at call time →
+    /// ArgumentError), `false` for `k: default` (the default is
+    /// desugared at translation time into a body-prologue
+    /// `k = default if k.nil?`, so the binder just writes Nil on
+    /// miss — documented divergence: an explicit `k: nil` at the
+    /// call site also re-evaluates the default). Translation
+    /// pushes Keyword entries LAST in the param vec (after
+    /// BlockArg / KwRest) so the kw slots land past every slot
+    /// the `define_method`-as-method binder locates by position
+    /// in `proto.params`; ordinary block invocation binds them
+    /// by the absolute slots in `Proto::block_kw_params`.
+    Keyword(String, bool),
 }
 
 #[derive(Debug, Clone)]
@@ -767,6 +780,9 @@ fn tr_block_node(
     // args to them (and auto-splats for `_2`+ just like an explicit
     // two-param block). Without this they were dropped and `_1` / `it`
     // read back as nil.
+    // Optional-keyword defaults (`|k: expr|`) collected during the
+    // params walk, desugared into a body prologue below.
+    let mut kw_defaults: Vec<(String, SExpr)> = Vec::new();
     let block_params: Vec<BlockParam> = match bn.parameters() {
         None => Vec::new(),
         Some(pn) => {
@@ -799,13 +815,18 @@ fn tr_block_node(
                             let name = krp.name().map(cid_to_string).unwrap_or_default();
                             out.push(BlockParam::KwRest(name));
                         }
+                        // Keyword params LAST (after BlockArg/KwRest) so
+                        // their slots don't shift the by-position slot
+                        // math the define_method-as-method binder does
+                        // over `proto.params` — see BlockParam::Keyword.
+                        walk_block_keywords(ctx, &p, &mut out, &mut kw_defaults);
                         out
                     })
                     .unwrap_or_default()
             }
         }
     };
-    let block_body: Vec<SExpr> = match bn.body() {
+    let mut block_body: Vec<SExpr> = match bn.body() {
         Some(b) => {
             if let Some(stmts) = b.as_statements_node() {
                 stmts.body().iter().map(|c| tr(ctx, &c)).collect()
@@ -815,7 +836,56 @@ fn tr_block_node(
         }
         None => vec![],
     };
+    prepend_kw_default_prologue(&mut block_body, kw_defaults);
     (block_params, block_body)
+}
+
+/// Shared keywords()-walk for block + lambda param lists: pushes a
+/// `BlockParam::Keyword` per `RequiredKeywordParameterNode` /
+/// `OptionalKeywordParameterNode`, collecting optional defaults
+/// (any expression) for the body-prologue desugar.
+fn walk_block_keywords(
+    ctx: &mut TranslationCtx<'_>,
+    p: &ruby_prism::ParametersNode<'_>,
+    out: &mut Vec<BlockParam>,
+    kw_defaults: &mut Vec<(String, SExpr)>,
+) {
+    for kw in p.keywords().iter() {
+        if let Some(rk) = kw.as_required_keyword_parameter_node() {
+            out.push(BlockParam::Keyword(cid_to_string(rk.name()), true));
+        } else if let Some(ok) = kw.as_optional_keyword_parameter_node() {
+            let name = cid_to_string(ok.name());
+            kw_defaults.push((name.clone(), tr(ctx, &ok.value())));
+            out.push(BlockParam::Keyword(name, false));
+        }
+    }
+}
+
+/// Desugar optional-keyword defaults into a body prologue: each
+/// `|k: expr|` becomes `k = expr if k.nil?` at the head of the
+/// block body. The binder writes Nil into an optional kw slot the
+/// caller didn't supply (kw slots are param slots, BELOW
+/// `block_body_local_start`, so without the explicit Nil-write a
+/// stale value would leak across invocations — invoke_block handles
+/// that; this prologue only turns that Nil into the default).
+/// Documented divergence: an explicit `k: nil` argument also
+/// triggers the default (CRuby keeps the nil).
+fn prepend_kw_default_prologue(body: &mut Vec<SExpr>, kw_defaults: Vec<(String, SExpr)>) {
+    for (name, default) in kw_defaults.into_iter().rev() {
+        let span = default.span;
+        let nil_check = Spanned::new(span, Expr::Call {
+            receiver: Some(Box::new(Spanned::new(span, Expr::LVarRead(name.clone())))),
+            name: "nil?".to_string(),
+            args: vec![],
+            kwargs_trailing: false,
+        });
+        let assign = Spanned::new(span, Expr::LVarWrite(name, Box::new(default)));
+        body.insert(0, Spanned::new(span, Expr::If {
+            cond: Box::new(nil_check),
+            then_body: vec![assign],
+            else_body: vec![],
+        }));
+    }
 }
 
 fn tr_kwhash(
@@ -3731,6 +3801,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // Lambda literals take implicit `_1`/`it` params too
         // (`-> { _1 + 1 }`, `-> { it * 3 }`), same three parameter-node
         // shapes a block has — synthesize the implicit slots.
+        let mut kw_defaults: Vec<(String, SExpr)> = Vec::new();
         let params: Vec<BlockParam> = match n.parameters() {
             None => Vec::new(),
             Some(pn) => {
@@ -3765,13 +3836,16 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                                     let name = krp.name().map(cid_to_string).unwrap_or_default();
                                     out.push(BlockParam::KwRest(name));
                                 }
+                            // `->(k1:, k2: default) { }` — same keyword walk
+                            // + body-prologue desugar as block literals.
+                            walk_block_keywords(ctx, &p, &mut out, &mut kw_defaults);
                             out
                         })
                         .unwrap_or_default()
                 }
             }
         };
-        let body: Vec<SExpr> = match n.body() {
+        let mut body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
                     stmts.body().iter().map(|c| tr(ctx, &c)).collect()
@@ -3779,6 +3853,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             }
             None => vec![],
         };
+        prepend_kw_default_prologue(&mut body, kw_defaults);
         return sp(node, Expr::Lambda { params, body });
     }
     if let Some(n) = node.as_yield_node() {

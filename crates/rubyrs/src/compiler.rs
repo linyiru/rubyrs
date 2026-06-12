@@ -1140,6 +1140,7 @@ impl ProtoBuilder {
             kw_has_computed_default: vec![],
             kw_rest_param: None,
             block_param: None,
+            block_kw_params: vec![],
             n_locals: self.n_locals,
             creates_block,
             code: self.code,
@@ -2287,6 +2288,10 @@ pub(crate) fn compile_block(
                     // `**opts` inside a destructure (`|(a, **b)|`)
                     // isn't legal Ruby; defensive skip.
                 }
+                BlockParam::Keyword(..) => {
+                    // `k:` inside a destructure (`|(a, k: 1)|`)
+                    // isn't legal Ruby; defensive skip.
+                }
             }
         }
         jobs.push(Job::Job(parent_slot, child_slots));
@@ -2321,6 +2326,11 @@ pub(crate) fn compile_block(
     // Hash (default `{}`). `u16::MAX` sentinel = no kw-rest param.
     let mut kw_rest_slot: u16 = u16::MAX;
     let mut kw_rest_param_name: Option<String> = None;
+    // `|k1:, k2: d|` keyword params: (name, absolute slot,
+    // required). Stamped onto the proto below; invoke_block binds
+    // by these slots. ast.rs pushes Keyword entries last, so the
+    // slots land after every positional/rest/blockarg/kwrest slot.
+    let mut block_kw_params: Vec<(String, u16, bool)> = Vec::new();
     for (i, p) in block_params.iter().enumerate() {
         match p {
             BlockParam::Single(name) => {
@@ -2357,6 +2367,13 @@ pub(crate) fn compile_block(
                 let s = b.define_local_slot(&slot_name);
                 kw_rest_slot = s;
                 kw_rest_param_name = Some(slot_name);
+            }
+            BlockParam::Keyword(name, required) => {
+                // Not counted in n_required (kw params aren't
+                // positional); the binder writes the slot every
+                // invocation (value / Nil), so no reset needed.
+                let s = b.define_local_slot(name);
+                block_kw_params.push((name.clone(), s, *required));
             }
         }
     }
@@ -2422,18 +2439,23 @@ pub(crate) fn compile_block(
     // `invoke_method_with_block`'s subtractive `positional_max`
     // math work when the same proto is installed as a method via
     // `Module#define_method`.
-    let proto_params: Vec<String> = block_params.iter().enumerate().map(|(i, p)| match p {
-        BlockParam::Single(n) => n.clone(),
-        BlockParam::Destructure(_) => format!("__destruct_{i}"),
+    let proto_params: Vec<String> = block_params.iter().enumerate().filter_map(|(i, p)| match p {
+        BlockParam::Single(n) => Some(n.clone()),
+        BlockParam::Destructure(_) => Some(format!("__destruct_{i}")),
         BlockParam::Rest(name) => {
-            if name.is_empty() { format!("__rest_{i}") } else { name.clone() }
+            Some(if name.is_empty() { format!("__rest_{i}") } else { name.clone() })
         }
         BlockParam::BlockArg(name) => {
-            if name == "&" { format!("__blkarg_{i}") } else { name.clone() }
+            Some(if name == "&" { format!("__blkarg_{i}") } else { name.clone() })
         }
         BlockParam::KwRest(name) => {
-            if name.is_empty() { format!("__kwrest_{i}") } else { name.clone() }
+            Some(if name.is_empty() { format!("__kwrest_{i}") } else { name.clone() })
         }
+        // Keyword names stay OUT of `params` so the
+        // define_method-as-method binder's by-position slot math
+        // (rest/kwrest/blockarg) is unchanged; ordinary block
+        // invocation binds kw by `Proto::block_kw_params` slots.
+        BlockParam::Keyword(..) => None,
     }).collect();
     let proto_param_count = proto_params.len();
     let idx = protos.len();
@@ -2495,6 +2517,12 @@ pub(crate) fn compile_block(
     if let Some(name) = kw_rest_param_name
         && let Some(p) = protos.last_mut() {
         p.kw_rest_param = Some(name);
+    }
+    // Stamp the keyword-param table (empty for kw-less blocks —
+    // the invoke_block1/2 fast paths gate on is_empty()).
+    if !block_kw_params.is_empty()
+        && let Some(p) = protos.last_mut() {
+        p.block_kw_params = block_kw_params;
     }
     if parent.n_locals < block_n_locals {
         parent.n_locals = block_n_locals;

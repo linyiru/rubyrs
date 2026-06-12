@@ -742,6 +742,20 @@ pub(crate) struct Proto {
     /// at the very end of `params` (after kw_rest if any) so the
     /// rest/kw layout stays contiguous.
     pub(crate) block_param: Option<String>,
+    /// BLOCK protos only: `(name, absolute_slot, required)` per
+    /// `|k1:, k2: default|` keyword param, in declaration order.
+    /// `invoke_block` binds these by ABSOLUTE slot index (block
+    /// locals share the captured frame, so by-position math over
+    /// `params` doesn't apply): caller-supplied value, or Nil on
+    /// miss — required + missing raises ArgumentError; optional's
+    /// default is a body-prologue desugar (`k = d if k.nil?`,
+    /// see ast.rs). Empty for every non-block proto AND for
+    /// kw-less blocks — the hot invoke_block1/2 paths gate on
+    /// `is_empty()`. Kw names are deliberately NOT in `params`,
+    /// so the define_method-as-method binder's positional math
+    /// is unchanged (kw-blocks installed as methods keep their
+    /// pre-existing arity behaviour — documented gap).
+    pub(crate) block_kw_params: Vec<(String, u16, bool)>,
     pub(crate) n_locals: u16,
     /// `true` when `code` contains an `Op::CreateBlock` — i.e. running
     /// this proto can capture the frame's locals cell into a
