@@ -14,6 +14,18 @@
 #     output, no parse needed on either engine.
 # Jekyll autoloads LiquidRenderer — force it in so the patch target
 # exists (idempotent; a LoadError leaves the shim inert).
+# RUBYRS_NATIVE_STATS=1: count native-accelerator hits vs declines
+# (the 2.8x new-corpus regression hunt — see RUBYRS_REGEX_STATS for
+# the pattern). Zero cost when the env var is unset (one nil check
+# per counter site).
+if ENV["RUBYRS_NATIVE_STATS"] && !$__rubyrs_native_stats
+  $__rubyrs_native_stats = Hash.new(0)
+  at_exit do
+    $stderr.puts "[native-stats] " +
+      $__rubyrs_native_stats.sort.map { |k, v| "#{k}=#{v}" }.join(" ")
+  end
+end
+
 if defined?(__rubyrs_liquid_compile) && defined?(Jekyll)
   begin
     require "jekyll/liquid_renderer"
@@ -183,6 +195,9 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
           @__liquidus_static = nil
           site = @renderer.instance_variable_get(:@site)
           entry = Jekyll::LiquidusNative.compile(@filename, content, site)
+          if $__rubyrs_native_stats && entry == false
+            $__rubyrs_native_stats[:lq_tpl_decline] += 1
+          end
           @__liquidus_entry = entry == false ? nil : entry
           __liquidus_orig_parse(content)
         end
@@ -192,6 +207,9 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
           return @__liquidus_static if @__liquidus_static
           if @__liquidus_entry
             out = Jekyll::LiquidusNative.render(@__liquidus_entry, args[0])
+            if $__rubyrs_native_stats
+              $__rubyrs_native_stats[out ? :lq_native : :lq_render_decline] += 1
+            end
             return out if out
           end
           __liquidus_orig_render!(*args)
@@ -202,6 +220,9 @@ if defined?(__rubyrs_liquid_compile) && defined?(Jekyll::LiquidRenderer::File)
           return @__liquidus_static if @__liquidus_static
           if @__liquidus_entry
             out = Jekyll::LiquidusNative.render(@__liquidus_entry, args[0])
+            if $__rubyrs_native_stats
+              $__rubyrs_native_stats[out ? :lq_native : :lq_render_decline] += 1
+            end
             return out if out
           end
           __liquidus_orig_render(*args)

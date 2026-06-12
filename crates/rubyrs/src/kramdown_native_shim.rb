@@ -13,6 +13,18 @@
 #     Rouge-formatter path kramdown's rouge plugin uses (accelerated by
 #     _rouge_native when active), so highlighting stays byte-identical
 #     by construction.
+# RUBYRS_NATIVE_STATS=1: count native-accelerator hits vs declines
+# (the 2.8x new-corpus regression hunt — see RUBYRS_REGEX_STATS for
+# the pattern). Zero cost when the env var is unset (one nil check
+# per counter site).
+if ENV["RUBYRS_NATIVE_STATS"] && !$__rubyrs_native_stats
+  $__rubyrs_native_stats = Hash.new(0)
+  at_exit do
+    $stderr.puts "[native-stats] " +
+      $__rubyrs_native_stats.sort.map { |k, v| "#{k}=#{v}" }.join(" ")
+  end
+end
+
 if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
    !::Kramdown::JekyllDocument.method_defined?(:__rostdown_orig_initialize)
   module Kramdown
@@ -134,9 +146,15 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
       # only happens when the static gate is closed — otherwise rouge
       # loads lazily on the first block the static path can't serve.
       def self.render(source)
-        return nil unless static_hl_ok? || rouge_available?
+        unless static_hl_ok? || rouge_available?
+          $stderr.puts "[kd-hl-unavailable]" if ENV["RUBYRS_NATIVE_STATS"] == "2"
+          return nil
+        end
         sid = __rubyrs_kd_scan(source)
-        return nil if sid.nil?
+        if sid.nil?
+          $stderr.puts "[kd-scan-decline] #{source[0, 60].inspect}" if ENV["RUBYRS_NATIVE_STATS"] == "2"
+          return nil
+        end
         begin
           i = 0
           n = __rubyrs_kd_count(sid)
@@ -146,8 +164,15 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
             __rubyrs_kd_supply(sid, i, highlight_block(lang, code))
             i += 1
           end
-          __rubyrs_kd_render(sid)
-        rescue StandardError
+          html = __rubyrs_kd_render(sid)
+          if html.nil? && ENV["RUBYRS_NATIVE_STATS"] == "2"
+            $stderr.puts "[kd-render-decline] engine declined post-supply"
+          end
+          html
+        rescue StandardError => e
+          if ENV["RUBYRS_NATIVE_STATS"] == "2"
+            $stderr.puts "[kd-raise] #{e.class}: #{e.message.to_s[0, 80]}"
+          end
           # Highlighting raised (or protocol misuse): free the session
           # and decline. kd_render frees on success, so a late abort on
           # an already-freed sid is a no-op.
@@ -183,9 +208,13 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
   class ::Kramdown::JekyllDocument
     alias_method :__rostdown_orig_initialize, :initialize
     def initialize(source, options = {})
+      $__rubyrs_native_stats[:kd_total] += 1 if $__rubyrs_native_stats
       @__rostdown_html = nil
       if ::Kramdown::RostdownNative.eligible?(options)
         html = ::Kramdown::RostdownNative.render(source)
+        if $__rubyrs_native_stats
+          $__rubyrs_native_stats[html ? :kd_native : :kd_decline] += 1
+        end
         if html
           # Skip the Ruby parse entirely; Jekyll only touches #to_html
           # and #warnings afterwards.
@@ -195,6 +224,9 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
           @root = nil
           return
         end
+      end
+      if $__rubyrs_native_stats && !::Kramdown::RostdownNative.eligible?(options)
+        $__rubyrs_native_stats[:kd_ineligible] += 1
       end
       __rostdown_orig_initialize(source, options)
     end

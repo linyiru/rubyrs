@@ -9,6 +9,18 @@
 #   - per CONSUMER: anything that iterates the lex result instead of
 #     going through the patched HTML formatter gets real tokens via
 #     NativeLexProxy#each's pure-Ruby fallback.
+# RUBYRS_NATIVE_STATS=1: count native-accelerator hits vs declines
+# (the 2.8x new-corpus regression hunt — see RUBYRS_REGEX_STATS for
+# the pattern). Zero cost when the env var is unset (one nil check
+# per counter site).
+if ENV["RUBYRS_NATIVE_STATS"] && !$__rubyrs_native_stats
+  $__rubyrs_native_stats = Hash.new(0)
+  at_exit do
+    $stderr.puts "[native-stats] " +
+      $__rubyrs_native_stats.sort.map { |k, v| "#{k}=#{v}" }.join(" ")
+  end
+end
+
 if defined?(__rubyrs_rouge_native_table) && defined?(Rouge::RegexLexer)
   require "json"
 
@@ -345,6 +357,10 @@ if defined?(__rubyrs_rouge_native_table) && defined?(Rouge::RegexLexer)
       def lex(source, opts = nil, &b)
         if b.nil? && opts.nil?
           tid = CarmineNative.table_id(self.class)
+          if $__rubyrs_native_stats
+            key = tid ? :rg_native : :"rg_decline_#{self.class.tag rescue self.class}"
+            $__rubyrs_native_stats[key] += 1
+          end
           return CarmineNativeLex.new(self.class, source, tid) if tid
         end
         __carmine_pure_lex(source, opts, &b)
