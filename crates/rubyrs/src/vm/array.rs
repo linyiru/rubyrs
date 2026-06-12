@@ -1859,17 +1859,54 @@ impl Vm {
                         drop(g);
                         Some(Value::Array(nid))
                     }
-                    ("join", []) => {
-                        let parts: Vec<String> = self.heap.array(id).iter()
-                            .map(|v| v.to_display(&self.heap, &self.interner))
+                    ("join", []) | ("join", [Value::Str(_)]) | ("join", [Value::Nil]) => {
+                        // CRuby Array#join RECURSES into nested Array
+                        // elements — each nested Array contributes its
+                        // own join(sep), not its inspect. minitest's
+                        // exception_details builds
+                        // `[msg, ..., filter_backtrace(bt), ...].join("\n")`
+                        // with the backtrace Array as a plain nested
+                        // element and relies on this. Cycle-safe via
+                        // the same visited-stack discipline as
+                        // flatten_rec. `join(nil)` joins with "".
+                        let sep = match args {
+                            [Value::Str(s)] => s.to_string_lossy(),
+                            _ => String::new(),
+                        };
+                        fn elem_str(
+                            heap: &crate::heap::Heap,
+                            interner: &crate::intern::Interner,
+                            v: &Value,
+                            sep: &str,
+                            stack: &mut Vec<crate::value::ObjId>,
+                        ) -> Result<String, ()> {
+                            match v {
+                                Value::Array(aid) => {
+                                    if stack.contains(aid) {
+                                        return Err(());
+                                    }
+                                    stack.push(*aid);
+                                    let parts: Result<Vec<String>, ()> = heap.array(*aid).iter()
+                                        .map(|e| elem_str(heap, interner, e, sep, stack))
+                                        .collect();
+                                    stack.pop();
+                                    Ok(parts?.join(sep))
+                                }
+                                other => Ok(other.to_display(heap, interner)),
+                            }
+                        }
+                        let mut stack = vec![id];
+                        let parts: Result<Vec<String>, ()> = self.heap.array(id).iter()
+                            .map(|v| elem_str(&self.heap, &self.interner, v, &sep, &mut stack))
                             .collect();
-                        Some(Value::new_str(parts.join("")))
-                    }
-                    ("join", [Value::Str(sep)]) => {
-                        let parts: Vec<String> = self.heap.array(id).iter()
-                            .map(|v| v.to_display(&self.heap, &self.interner))
-                            .collect();
-                        Some(Value::new_str(parts.join(sep.to_string_lossy().as_str())))
+                        match parts {
+                            Ok(p) => Some(Value::new_str(p.join(&sep))),
+                            Err(()) => {
+                                return Err(self.trap(RubyError::ArgumentError {
+                                    msg: "recursive array join".into(),
+                                }));
+                            }
+                        }
                     }
                     ("+", [Value::Array(other)]) => {
                         // Pin both source Arrays across maybe_gc — by the

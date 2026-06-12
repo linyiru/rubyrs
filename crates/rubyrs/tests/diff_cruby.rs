@@ -896,3 +896,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // raise-SomeClass message default, SyntaxError class, block-frame names.
 #[cfg(feature = "regex")]
 #[test] fn exception_surface_extras() { run_diff("exception_surface_extras"); }
+// Array#join recurses into nested arrays; cycle-safe.
+#[test] fn array_join_recursive() { run_diff("array_join_recursive"); }
