@@ -6424,7 +6424,9 @@ impl Vm {
             let self_val = self.frames.last()
                 .expect("ICE: do_call(no_recv) with empty frames for ivar bare-call routing")
                 .self_val.clone();
-            if matches!(&self_val, Value::Object(_)) {
+            // Class self too: `kind_of?(DSL)` bare inside a
+            // class-level method (minitest Spec.describe).
+            if matches!(&self_val, Value::Object(_) | Value::Class(_)) {
                 // Insert receiver BELOW the args so the explicit-
                 // recv path's stack layout (`[..., recv, arg1,
                 // ..., argN]`) is satisfied — `do_call` drains
@@ -9053,6 +9055,37 @@ impl Vm {
         // class via `class_of`.
         if matches!(&*name, "is_a?" | "kind_of?" | "instance_of?") && args.len() == 1
             && let Value::Class(target) = &args[0] {
+                // Class/Module receiver + module target: a CLASS
+                // OBJECT is kind_of? every module `extend`ed into
+                // its metaclass tower — walk singleton_includes up
+                // the superclass chain (extend inherits: Kid's
+                // metaclass superclass is Base's metaclass).
+                // minitest Spec.describe gates on
+                // `kind_of?(Minitest::Spec::DSL)` with self = a
+                // describe-created Spec subclass.
+                if &*name != "instance_of?"
+                    && target.is_module
+                    && let Value::Class(rc) = &recv
+                {
+                    let mut visited: std::collections::HashSet<*const crate::value::Class> =
+                        std::collections::HashSet::new();
+                    let mut walker = Some(rc.clone());
+                    let mut hit = false;
+                    'outer: while let Some(c) = walker {
+                        if !visited.insert(Rc::as_ptr(&c)) { break; }
+                        for inc in c.singleton_includes.borrow().iter() {
+                            if Rc::ptr_eq(inc, target) || super::class_is_a(inc, target) {
+                                hit = true;
+                                break 'outer;
+                            }
+                        }
+                        walker = c.superclass.borrow().clone();
+                    }
+                    if hit {
+                        self.stack.push(Value::Bool(true));
+                        return Ok(());
+                    }
+                }
                 let recv_class_v = self.class_of(&recv);
                 let recv_class = if let Value::Class(c) = recv_class_v { c } else {
                     self.stack.push(Value::Bool(false));

@@ -989,3 +989,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Default-inspect ivar tail, %p dispatch (incl. container elements),
 // str-singleton operator gate, =~ to_str, pattern length-mismatch.
 #[test] fn inspect_ivars_pattern_msg() { run_diff("inspect_ivars_pattern_msg"); }
+// Class kind_of? extend-chain + Thread.new empty fiber-locals.
+#[test] fn class_kind_of_extend_thread_locals() { run_diff("class_kind_of_extend_thread_locals"); }

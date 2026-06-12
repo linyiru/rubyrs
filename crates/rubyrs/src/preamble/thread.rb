@@ -82,7 +82,18 @@ class Thread
   def __run_deferred
     return if @done
     @done = true
-    @value = @block.call(*@args)
+    # CRuby: a new thread starts with EMPTY fiber-locals — swap in
+    # a fresh store for the block's duration so
+    # `Thread.current[:k]` inside the body doesn't see the
+    # spawner's values (minitest pins this: `must_equal` inside
+    # Thread.new must raise because :current_spec is unset there).
+    outer = Thread.instance_variable_get(:@fiber_locals)
+    Thread.instance_variable_set(:@fiber_locals, {})
+    begin
+      @value = @block.call(*@args)
+    ensure
+      Thread.instance_variable_set(:@fiber_locals, outer)
+    end
   end
 
   def join(*_limit)
