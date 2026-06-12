@@ -8330,7 +8330,7 @@ impl Vm {
             // const_set writes) OR `classes` (`class NAME; end`
             // registers there only) — removal consults both, and
             // clears both when a class is aliased into each.
-            let mut remove_key = |vm: &mut Self, key: crate::intern::SymId| -> Option<Value> {
+            let remove_key = |vm: &mut Self, key: crate::intern::SymId| -> Option<Value> {
                 let v = vm.constants.remove(&key);
                 let c = vm.classes.remove(&key);
                 v.or(c.map(Value::Class))
