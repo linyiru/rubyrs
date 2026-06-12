@@ -2009,6 +2009,47 @@ impl Vm {
                 };
                 Some(Ok(Value::Float(r)))
             }
+            // `__rubyrs_marshal_load_binary(bytes)` — load-only reader
+            // for CRuby's Marshal 4.8 byte format, COMMON-TAG subset:
+            // nil/true/false, Fixnum, Float, String (raw + I-wrapped
+            // encoding ivars), Symbol (+ symlink), Array, Hash, and
+            // object links. Anything else (Bignum, user classes,
+            // Time, Struct, regexp, extended/user-marshal forms)
+            // raises TypeError naming the tag — fail-loud, the same
+            // contract the token loader keeps. Motivating consumer:
+            // addressable's pregenerated unicode.data table
+            // (Hash{Int => Array[Int|nil]}, 4233 keys).
+            "__rubyrs_marshal_load_binary" => {
+                let bytes: Vec<u8> = match args.first() {
+                    Some(Value::Str(s)) => s.content.borrow().clone(),
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "marshal data must be a String".into(),
+                    }))),
+                };
+                if bytes.len() < 2 || bytes[0] != 0x04 || bytes[1] != 0x08 {
+                    return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "incompatible marshal file format (can't be read)".into(),
+                    })));
+                }
+                let mut rd = MarshalReader {
+                    b: &bytes,
+                    pos: 2,
+                    symbols: Vec::new(),
+                    objects: Vec::new(),
+                };
+                // Every container the reader allocates stays pinned
+                // until the WHOLE graph is wired (children are only
+                // reachable from Rust locals until their parent's
+                // final write-back) — one truncate releases them
+                // all, success or error.
+                let pin_base = self.pinned.len();
+                let r = rd.read_value(self);
+                self.pinned.truncate(pin_base);
+                match r {
+                    Ok(v) => Some(Ok(v)),
+                    Err(msg) => Some(Err(self.trap(RubyError::TypeError { msg }))),
+                }
+            }
             "__rubyrs_marshal_stash" => {
                 const MARSHAL_REGISTRY_CAP: usize = 1024;
                 let obj = args.first().cloned().unwrap_or(Value::Nil);
@@ -4379,6 +4420,197 @@ impl Vm {
         }
         eprintln!("rubyrs (fork child): {:?}", t.err);
         1
+    }
+}
+
+/// Marshal 4.8 load-only reader (common-tag subset — see the
+/// `__rubyrs_marshal_load_binary` arm). Object/symbol link tables
+/// follow CRuby's registration order: every linkable object
+/// registers BEFORE its children parse.
+struct MarshalReader<'a> {
+    b: &'a [u8],
+    pos: usize,
+    symbols: Vec<crate::intern::SymId>,
+    objects: Vec<Value>,
+}
+
+impl MarshalReader<'_> {
+    fn byte(&mut self) -> Result<u8, String> {
+        let c = *self.b.get(self.pos).ok_or("marshal data too short")?;
+        self.pos += 1;
+        Ok(c)
+    }
+
+    fn take(&mut self, n: usize) -> Result<&[u8], String> {
+        let end = self.pos.checked_add(n).ok_or("marshal length overflow")?;
+        if end > self.b.len() {
+            return Err("marshal data too short".into());
+        }
+        let s = &self.b[self.pos..end];
+        self.pos = end;
+        Ok(s)
+    }
+
+    /// Marshal's variable-length long: 0 → 0; |c| in 1..=4 → that
+    /// many little-endian payload bytes (sign-extended when c<0);
+    /// otherwise the value is folded into the tag byte (c-5 / c+5).
+    fn long(&mut self) -> Result<i64, String> {
+        let c = self.byte()? as i8;
+        Ok(match c {
+            0 => 0,
+            1..=4 => {
+                let mut v: i64 = 0;
+                for (i, &byte) in self.take(c as usize)?.iter().enumerate() {
+                    v |= (byte as i64) << (8 * i);
+                }
+                v
+            }
+            -4..=-1 => {
+                let n = (-c) as usize;
+                let mut v: i64 = -1;
+                for (i, &byte) in self.take(n)?.iter().enumerate() {
+                    v &= !(0xff_i64 << (8 * i));
+                    v |= (byte as i64) << (8 * i);
+                }
+                v
+            }
+            5..=127 => (c as i64) - 5,
+            _ => (c as i64) + 5,
+        })
+    }
+
+    fn read_value(&mut self, vm: &mut Vm) -> Result<Value, String> {
+        let tag = self.byte()?;
+        match tag {
+            b'0' => Ok(Value::Nil),
+            b'T' => Ok(Value::Bool(true)),
+            b'F' => Ok(Value::Bool(false)),
+            b'i' => Ok(Value::Int(self.long()?)),
+            b'f' => {
+                let n = self.long()?;
+                let raw = self.take(n.max(0) as usize)?;
+                let txt = std::str::from_utf8(raw).map_err(|_| "bad float text".to_string())?;
+                let f = match txt {
+                    "inf" => f64::INFINITY,
+                    "-inf" => f64::NEG_INFINITY,
+                    "nan" => f64::NAN,
+                    _ => txt.parse::<f64>().map_err(|_| "bad float text".to_string())?,
+                };
+                let v = Value::Float(f);
+                self.objects.push(v.clone());
+                Ok(v)
+            }
+            b'"' => {
+                let n = self.long()?;
+                let raw = self.take(n.max(0) as usize)?.to_vec();
+                let v = match String::from_utf8(raw) {
+                    Ok(s) => Value::new_str(s),
+                    Err(e) => Value::new_str_bytes_binary(e.into_bytes()),
+                };
+                self.objects.push(v.clone());
+                Ok(v)
+            }
+            b':' => {
+                let n = self.long()?;
+                let raw = self.take(n.max(0) as usize)?;
+                let name = std::str::from_utf8(raw).map_err(|_| "bad symbol text".to_string())?;
+                let sid = vm.interner.intern(name);
+                self.symbols.push(sid);
+                Ok(Value::Sym(sid))
+            }
+            b';' => {
+                let idx = self.long()?;
+                let sid = self
+                    .symbols
+                    .get(usize::try_from(idx).map_err(|_| "bad symlink".to_string())?)
+                    .ok_or("bad symlink index")?;
+                Ok(Value::Sym(*sid))
+            }
+            b'@' => {
+                let idx = self.long()?;
+                self.objects
+                    .get(usize::try_from(idx).map_err(|_| "bad object link".to_string())?)
+                    .cloned()
+                    .ok_or_else(|| "bad object link index".to_string())
+            }
+            b'I' => {
+                // Ivar-wrapped object: the payload first, then the
+                // ivar list. Only the encoding shorthands (:E true/
+                // false, :encoding "name") are consumed — they're
+                // presentation-only for our tagged strings; any
+                // other ivar name is out of subset.
+                let inner = self.read_value(vm)?;
+                let n = self.long()?;
+                for _ in 0..n.max(0) {
+                    let key = self.read_value(vm)?;
+                    let val = self.read_value(vm)?;
+                    let kname = match key {
+                        Value::Sym(s) => vm.interner.resolve(s).to_string(),
+                        _ => return Err("ivar key must be a symbol".into()),
+                    };
+                    match kname.as_str() {
+                        "E" | "encoding" => {
+                            let _ = val;
+                        }
+                        other => {
+                            return Err(format!(
+                                "unsupported marshal ivar :{other} (rubyrs load-only subset)"
+                            ));
+                        }
+                    }
+                }
+                Ok(inner)
+            }
+            b'[' => {
+                let n = self.long()?;
+                vm.maybe_gc();
+                vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
+                let id = vm.heap.alloc(crate::heap::HeapObj::Array(Vec::new().into()));
+                // Register BEFORE children (CRuby's link order) and
+                // pin via the registration itself — `objects` is
+                // walked by nothing, so pin explicitly around child
+                // allocs instead: push to vm.pinned for the scope.
+                // Register + pin BEFORE children; released by the
+                // caller's pin_base truncate once the whole graph
+                // is wired (popping here would expose a completed
+                // child to GC while it's only held by the parent's
+                // Rust-local buffer — the unicode.data UAF).
+                self.objects.push(Value::Array(id));
+                vm.pinned.push(Value::Array(id));
+                let mut elems: Vec<Value> = Vec::with_capacity(n.max(0) as usize);
+                for _ in 0..n.max(0) {
+                    elems.push(self.read_value(vm)?);
+                }
+                if let crate::heap::HeapObj::Array(a) = vm.heap.get_mut(id) {
+                    a.elems = elems;
+                }
+                Ok(Value::Array(id))
+            }
+            b'{' => {
+                let n = self.long()?;
+                vm.maybe_gc();
+                vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
+                let id = vm
+                    .heap
+                    .alloc(crate::heap::HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
+                self.objects.push(Value::Hash(id));
+                vm.pinned.push(Value::Hash(id));
+                let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(n.max(0) as usize);
+                for _ in 0..n.max(0) {
+                    let k = self.read_value(vm)?;
+                    let v = self.read_value(vm)?;
+                    pairs.push((k, v));
+                }
+                if let crate::heap::HeapObj::Hash(h) = vm.heap.get_mut(id) {
+                    h.pairs = pairs;
+                }
+                Ok(Value::Hash(id))
+            }
+            other => Err(format!(
+                "unsupported marshal tag '{}' (rubyrs load-only subset: nil/bool/int/float/string/symbol/array/hash)",
+                other as char
+            )),
+        }
     }
 }
 

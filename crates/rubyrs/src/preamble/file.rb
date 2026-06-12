@@ -60,7 +60,17 @@ class File
     # rather than silently returning "".
     reading = flags.include?("r") || flags.include?("+")
     read_now = lambda do
-      enc ? File.read(path, :encoding => enc) : File.read(path)
+      if flags.include?("b")
+        # Binary mode: byte-transparent read (BINARY tag) — the
+        # text-mode primitive would U+FFFD-mangle invalid UTF-8
+        # (addressable's `File.open(path, "rb") { Marshal.load
+        # (f.read) }` over its pregenerated unicode.data).
+        File.binread(path)
+      elsif enc
+        File.read(path, :encoding => enc)
+      else
+        File.read(path)
+      end
     end
     if writing
       # Write/append mode: start from "" (truncate) or the existing
@@ -165,6 +175,14 @@ class File
   def read(length = nil)
     raise IOError, "closed stream" if @__io_closed
     raise IOError, "not opened for reading" unless @__io_read
+    if length.nil? && @__io_pos == 0
+      # Whole-buffer read: return a dup, NOT a `[0..]` slice —
+      # slicing a BINARY-tagged buffer goes through the lossy char
+      # view (E1 boundary) and U+FFFD-mangles it (addressable's
+      # `File.open(path, "rb") { Marshal.load(f.read) }`).
+      @__io_pos = @__io_buf.length
+      return @__io_buf.dup
+    end
     rest = @__io_buf[@__io_pos..] || ""
     if length.nil?
       @__io_pos = @__io_buf.length

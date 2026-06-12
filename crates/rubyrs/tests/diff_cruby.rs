@@ -997,3 +997,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Real fork(2) + waitpid + $? (block form; unix; spawn-gated).
 #[cfg(unix)]
 #[test] fn fork_waitpid_status() { run_diff("fork_waitpid_status"); }
+// Marshal.load over real CRuby 4.8 bytes (common-tag subset) +
+// binary-mode whole-buffer handle read transparency.
+#[test] fn marshal_load_binary() { run_diff("marshal_load_binary"); }

@@ -163,12 +163,19 @@ module Marshal
   end
 
   def self.load(src, *_rest)
-    hit = __rubyrs_marshal_fetch(src.to_s)
-    unless hit
-      raise TypeError,
-        "incompatible marshal file format (rubyrs Tier 1: same-process token round-trip only)"
+    s = src.to_s
+    hit = __rubyrs_marshal_fetch(s)
+    return hit[0] if hit
+    # Real CRuby marshal bytes (\x04\x08 header): the load-only
+    # binary reader handles the common-tag subset (nil/bool/int/
+    # float/string/symbol/array/hash + links); anything richer
+    # raises TypeError naming the tag. Consumer: addressable's
+    # pregenerated unicode.data table.
+    if s.getbyte(0) == 4 && s.getbyte(1) == 8
+      return __rubyrs_marshal_load_binary(s)
     end
-    hit[0]
+    raise TypeError,
+      "incompatible marshal file format (rubyrs Tier 1: token round-trip or common-tag binary subset)"
   end
 end
 
