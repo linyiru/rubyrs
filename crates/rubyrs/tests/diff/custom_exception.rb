@@ -8,6 +8,19 @@ rescue => e
   puts e.to_s
 end
 
+# 3-arg raise(class, message, backtrace): the exception is built via
+# #exception with the MESSAGE ONLY (not the backtrace as a 2nd ctor
+# arg), so a class whose initialize takes 0..1 doesn't ArgumentError.
+# rack's QueryParser does `raise InvalidParameterError, e.message,
+# e.backtrace`. The backtrace arg is dropped.
+class E3 < StandardError; end
+begin; raise E3, "boom3", ["a:1", "b:2"]; rescue => x; p [x.class, x.message]; end
+begin; raise E3.new("orig"), "override", []; rescue => x; p [x.class, x.message]; end
+class E1msg < StandardError
+  def initialize(m = "default"); super; end
+end
+begin; raise E1msg, "msg1", caller; rescue => x; p [x.class, x.message]; end
+
 # Nested rescue: inner re-raises a custom exception, outer catches.
 class FileNotFound < StandardError
 end

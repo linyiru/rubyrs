@@ -981,16 +981,29 @@ fn compile_call_arm(
             0 => { b.emit(Op::LoadNil); }
             1 => { compile_expr(b, &args[0], protos, interner, cc); }
             _ => {
-                // `raise SomeClass, "msg", *more` →
-                // `SomeClass.new("msg", *more)` so initialize fires.
-                let new_call = SExpr {
+                // `raise SomeClass, msg[, backtrace]` →
+                // `SomeClass.exception(msg)`. CRuby builds the
+                // exception with the MESSAGE ONLY (via `#exception`,
+                // not `#new` — works for both a class and an existing
+                // instance, which has no `.new`), then applies the
+                // optional 3rd backtrace arg separately. Passing the
+                // backtrace into the constructor (the old `.new(msg,
+                // backtrace)`) raised ArgumentError on any exception
+                // whose initialize takes 0..1 — rack's QueryParser
+                // does `raise InvalidParameterError, e.message,
+                // e.backtrace`. The backtrace arg is dropped here; the
+                // raised frame's own backtrace stands in (a documented
+                // minor divergence vs CRuby's preserved chain).
+                let exc_call = SExpr {
                     span: args[0].span,
                     node: Expr::Call {
                         receiver: Some(Box::new(args[0].clone())),
-                        name: "new".to_string(),
-                        args: args[1..].to_vec(), kwargs_trailing: false },
+                        name: "exception".to_string(),
+                        args: vec![args[1].clone()],
+                        kwargs_trailing: false,
+                    },
                 };
-                compile_expr(b, &new_call, protos, interner, cc);
+                compile_expr(b, &exc_call, protos, interner, cc);
             }
         }
         b.emit(Op::Raise);
