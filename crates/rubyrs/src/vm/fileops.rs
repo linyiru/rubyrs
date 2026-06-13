@@ -943,6 +943,12 @@ impl Vm {
                         ),
                     }));
                 };
+                // Mode is applied only on Unix; on other targets the
+                // type-check above still runs (so behaviour matches),
+                // but the value is unused — discard it to keep
+                // `-D unused-variables` happy on the wasm build.
+                #[cfg(not(unix))]
+                let _ = m;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
