@@ -1622,6 +1622,7 @@ dependencies = [
  "cc",
  "encoding_rs",
  "fancy-regex",
+ "flate2",
  "grass",
  "http",
  "http-body-util",
