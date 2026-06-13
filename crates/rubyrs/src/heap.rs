@@ -1330,6 +1330,23 @@ impl Heap {
                     for v in cls.consts.borrow().values() {
                         touch(v, &mut stack, &mut seen);
                     }
+                    // Descend the SUPERCLASS chain: a named class can
+                    // inherit from an anonymous generated one whose
+                    // tables nobody else reaches — rack's
+                    // `class MimePart < Struct.new(:body, ...)` keeps
+                    // `@__struct_attrs` (the members Array) as an ivar
+                    // on the anonymous parent. Without this hop the
+                    // Array is swept while every MimePart instance
+                    // still consults it (use-after-free at
+                    // ObjId-reuse time; rack's multipart suite was
+                    // the reproducer).
+                    if let Some(sup) = cls.superclass.borrow().clone() {
+                        let p = Rc::as_ptr(&sup);
+                        if !seen.contains(&p) {
+                            seen.push(p);
+                            stack.push(sup);
+                        }
+                    }
                 }
             }
             _ => {}

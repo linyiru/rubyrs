@@ -783,6 +783,9 @@ impl CompiledRegex {
                     let groups = (1..caps.len())
                         .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
                         .collect();
+                    let group_spans = (1..caps.len())
+                        .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
+                        .collect();
                     let named = r
                         .capture_names()
                         .enumerate()
@@ -797,6 +800,7 @@ impl CompiledRegex {
                         m_start: m0.start(),
                         m_end: m0.end(),
                         groups,
+                        group_spans,
                         named,
                     }))
                 }
@@ -812,6 +816,9 @@ impl CompiledRegex {
                     let groups = (1..caps.len())
                         .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
                         .collect();
+                    let group_spans = (1..caps.len())
+                        .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
+                        .collect();
                     let named = r
                         .capture_names()
                         .enumerate()
@@ -826,6 +833,7 @@ impl CompiledRegex {
                         m_start: m0.start(),
                         m_end: m0.end(),
                         groups,
+                        group_spans,
                         named,
                     }))
                 }
@@ -855,6 +863,9 @@ impl CompiledRegex {
                     let groups = (1..caps.len())
                         .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
                         .collect();
+                    let group_spans = (1..caps.len())
+                        .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
+                        .collect();
                     let named = r
                         .capture_names()
                         .enumerate()
@@ -867,6 +878,7 @@ impl CompiledRegex {
                         m_start: m0.start(),
                         m_end: m0.end(),
                         groups,
+                        group_spans,
                         named,
                     });
                 }
@@ -881,6 +893,9 @@ impl CompiledRegex {
                     let groups = (1..caps.len())
                         .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
                         .collect();
+                    let group_spans = (1..caps.len())
+                        .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
+                        .collect();
                     let named = r
                         .capture_names()
                         .enumerate()
@@ -893,6 +908,7 @@ impl CompiledRegex {
                         m_start: m0.start(),
                         m_end: m0.end(),
                         groups,
+                        group_spans,
                         named,
                     });
                 }
@@ -931,6 +947,10 @@ pub(crate) struct OwnedCaptures {
     /// Groups 1..N — matched string, or `None` for a group that
     /// didn't participate (e.g. an unmatched `|` arm).
     pub(crate) groups: Vec<Option<String>>,
+    /// Byte spans for groups 1..N (parallel to `groups`) —
+    /// `String#slice!(regexp, n)` cuts the receiver at the
+    /// capture's span, so spans travel with the strings.
+    pub(crate) group_spans: Vec<Option<(usize, usize)>>,
     /// `(name, matched | None)` for each NAMED capture group.
     pub(crate) named: Vec<(String, Option<String>)>,
 }

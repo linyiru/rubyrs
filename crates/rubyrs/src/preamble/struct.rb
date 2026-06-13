@@ -51,19 +51,36 @@ class Struct
     # keeps the Array rooted via the Class ivars table.
     cls.instance_variable_set(:@__struct_attrs, attrs)
     cls.instance_variable_set(:@__struct_kw, kw_init)
+    # Both readers WALK the superclass chain: subclasses of the
+    # generated class (rack's `class BufferPart < MimePart` where
+    # MimePart = Struct.new(...)) don't inherit class-level ivars,
+    # so the tables live on whichever ancestor Struct.new built.
+    # (Explicit `self.` — bare `instance_variable_get` doesn't
+    # reach the universal Object arm under method dispatch in
+    # rubyrs; same workaround as the Forwardable shim.)
     cls.define_singleton_method(:members) do
-      # Explicit `self.` — bare `instance_variable_get`
-      # doesn't reach the universal Object arm under method
-      # dispatch in rubyrs (the same gap workaround
-      # Forwardable / Delegate shims use). Self here is the
-      # Struct subclass (a Value::Class).
-      self.instance_variable_get(:@__struct_attrs)
+      k = self
+      a = nil
+      while k && (a = k.instance_variable_get(:@__struct_attrs)).nil?
+        k = k.superclass
+      end
+      a
     end
     cls.define_method(:members) do
-      self.class.instance_variable_get(:@__struct_attrs)
+      k = self.class
+      a = nil
+      while k && (a = k.instance_variable_get(:@__struct_attrs)).nil?
+        k = k.superclass
+      end
+      a
     end
     cls.define_method(:initialize) do |*args|
-      if self.class.instance_variable_get(:@__struct_kw)
+      kw = nil
+      k = self.class
+      while k && (kw = k.instance_variable_get(:@__struct_kw)).nil?
+        k = k.superclass
+      end
+      if kw
         # `keyword_init: true` — `S.new(a: 1, b: 2)` passes the kwargs
         # as a trailing Hash (rubyrs routes them positionally to a
         # `*args` callee). Read each member out of it; absent → nil.

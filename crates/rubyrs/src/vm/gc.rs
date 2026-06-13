@@ -550,6 +550,14 @@ impl Vm {
         // assignment and read from inside a class method.
         for cls in self.classes.values() {
             for v in cls.ivars.borrow().values() { roots.push(v.clone()); }
+            // Root the class AS A VALUE too: the mark-phase
+            // `visit_value(Value::Class)` arm walks tables the
+            // direct ivar push can't see — in particular the
+            // SUPERCLASS chain, where an anonymous generated
+            // parent (`class MimePart < Struct.new(...)`) keeps
+            // its own ivar table (`@__struct_attrs`) that no
+            // other root reaches (rack multipart UAF).
+            roots.push(Value::Class(cls.clone()));
         }
         // Anonymous classes named only by assignment (`S = Struct.new`),
         // stashed in a `$global`, or held inside a container (an

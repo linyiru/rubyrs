@@ -2192,37 +2192,33 @@ impl Vm {
     /// shapes: run captures, publish `$~` (or clear it on miss),
     /// return the hit verdict.
     #[cfg(feature = "regex")]
-    fn regex_case_eq_on(&mut self, native: &regex::Regex, input: &str) -> bool {
-        match native.captures(input) {
-            Some(caps) => {
-                let m0 = caps.get(0).unwrap();
-                let (m_start, m_end) = (m0.start(), m0.end());
-                let whole = m0.as_str().to_string();
-                let last_caps: Vec<Option<String>> = (1..caps.len())
-                    .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
-                    .collect();
-                let named: Vec<(String, Option<String>)> = native
-                    .capture_names()
-                    .enumerate()
-                    .filter_map(|(i, n)| {
-                        n.map(|name| (name.to_string(), caps.get(i).map(|m| m.as_str().to_string())))
-                    })
-                    .collect();
+    fn regex_case_eq_on(
+        &mut self,
+        re: &crate::regex_engine::CompiledRegex,
+        input: &str,
+    ) -> Result<bool, Trap> {
+        let owned = re.captures_owned(input).map_err(|e| {
+            self.trap(RubyError::RuntimeError {
+                msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
+            })
+        })?;
+        match owned {
+            Some(oc) => {
                 self.save_match_scope_on_write();
                 self.last_match = Some(crate::vm::LastMatch {
-                    whole,
-                    caps: last_caps,
+                    whole: oc.whole,
+                    caps: oc.groups,
                     input: input.to_string(),
-                    m_start,
-                    m_end,
-                    named,
+                    m_start: oc.m_start,
+                    m_end: oc.m_end,
+                    named: oc.named,
                 });
-                true
+                Ok(true)
             }
             None => {
                 self.save_match_scope_on_write();
                 self.last_match = None;
-                false
+                Ok(false)
             }
         }
     }
@@ -10762,40 +10758,21 @@ impl Vm {
                 Value::Regex(re) => match arg {
                     // CRuby: `Regexp#===` (used by `case/when`) sets
                     // `$~`/`$1`.. on hit and clears them on miss,
-                    // just like `=~`/`String#match`. Switch from
-                    // `is_match` to `captures` so the side-channel
-                    // sees the same view through every entry point.
-                    // Keep `with_str_lossy` for the miss path's
-                    // zero-alloc happy case (a String whose bytes
-                    // are already valid UTF-8 borrows through the
-                    // closure without allocating). Only materialize
-                    // an owned `input` String inside the Some arm.
-                    //
-                    // Layer #17: capture extraction not yet
-                    // dual-engine; trap on fancy patterns until
-                    // the migration lands.
+                    // just like `=~`/`String#match`. Dual-engine via
+                    // `captures_owned` — lookaround/backref patterns
+                    // route through fancy-regex transparently (rack's
+                    // multipart specs `case` on lookahead patterns).
                     Value::Str(s) => {
-                        let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
-                            msg: format!(
-                                "regex op 'Regexp#===' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
-                                re.as_str(),
-                            ),
-                        }))?;
-                        s.with_str_lossy(|input| self.regex_case_eq_on(native, input))
+                        let bound = s.to_string_lossy();
+                        self.regex_case_eq_on(re, &bound)?
                     },
                     // CRuby's Regexp#=== also accepts Symbols,
                     // matching against the symbol's name —
                     // `methods.grep(/^test_/)` (minitest's
                     // runnable-method discovery) depends on it.
                     Value::Sym(sid) => {
-                        let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
-                            msg: format!(
-                                "regex op 'Regexp#===' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
-                                re.as_str(),
-                            ),
-                        }))?;
                         let input = self.interner.resolve(*sid).to_string();
-                        self.regex_case_eq_on(native, &input)
+                        self.regex_case_eq_on(re, &input)?
                     },
                     _ => false,
                 },

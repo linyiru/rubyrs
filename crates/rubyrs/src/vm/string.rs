@@ -979,6 +979,80 @@ pub(crate) fn string_call(
                 None => Value::Nil,
             })))
         }
+        // `String#rindex(needle, offset)` — rightmost match whose
+        // START is <= offset. Char units like the 1-arg form;
+        // negative offsets count from the end. rack's multipart
+        // parser bounds its tail scans with this.
+        (Value::Str(a), "rindex", [Value::Str(b), Value::Int(off)]) => {
+            Some(a.with_str_lossy(|sa| b.with_str_lossy(|sb| {
+                let char_len = sa.chars().count() as i64;
+                let limit_char = if *off < 0 { char_len + *off } else { *off };
+                if limit_char < 0 {
+                    return Value::Nil;
+                }
+                let limit_char = limit_char.min(char_len);
+                let limit_byte = sa
+                    .char_indices()
+                    .nth(limit_char as usize)
+                    .map(|(byte, _)| byte)
+                    .unwrap_or(sa.len());
+                if sb.is_empty() {
+                    return Value::Int(limit_char);
+                }
+                // The match may EXTEND past the limit; only its
+                // start is bounded. Search the prefix that can
+                // hold a start <= limit_byte.
+                let hi = (limit_byte + sb.len()).min(sa.len());
+                match sa[..hi].rfind(sb) {
+                    Some(byte_i) => Value::Int(sa[..byte_i].chars().count() as i64),
+                    None => Value::Nil,
+                }
+            })))
+        }
+        // `String#scrub` / `#scrub!` — replace invalid UTF-8 byte
+        // runs with U+FFFD (or the given replacement). Receivers
+        // tagged BINARY / registry encodings are always "valid"
+        // in their own encoding, so they scrub to nil/self-copy
+        // unchanged (CRuby agrees for BINARY; per-encoding
+        // validity for registry tags lives behind
+        // `_encoding_full`'s valid_encoding? — the scrub here
+        // stays UTF-8-centric, documented). Block form is out of
+        // subset.
+        (Value::Str(a), "scrub", args2 @ ([] | [Value::Str(_)]))
+        | (Value::Str(a), "scrub!", args2 @ ([] | [Value::Str(_)])) => {
+            let bang = name == "scrub!";
+            if bang && a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let rep = match args2.first() {
+                Some(Value::Str(r)) => r.to_string_lossy(),
+                _ => "\u{FFFD}".to_string(),
+            };
+            let bytes = a.borrow().clone();
+            let mut out = String::with_capacity(bytes.len());
+            let mut changed = false;
+            for chunk in bytes.utf8_chunks() {
+                out.push_str(chunk.valid());
+                if !chunk.invalid().is_empty() {
+                    changed = true;
+                    out.push_str(&rep);
+                }
+            }
+            if bang {
+                // CRuby's scrub! ALWAYS returns self (unlike the
+                // select!-family nil-when-unchanged convention).
+                if changed {
+                    check(out.len())?;
+                    *a.borrow_mut() = out.into_bytes();
+                }
+                Some(Value::Str(a.clone()))
+            } else {
+                check(out.len())?;
+                Some(with_tag(Value::new_str(out), a.encoding.get()))
+            }
+        }
         // Literal-substring sub/gsub. Regex forms (`gsub(/pat/, ...)`)
         // are out of scope until we add a regex engine — documented
         // in SUBSET.md. CRuby's `gsub("", "x")` on a non-empty
@@ -2285,6 +2359,228 @@ impl Vm {
                     }
                     return Ok(None);
                 }
+                // `String#index(regexp[, offset])` — like the
+                // string-needle primitive forms but pattern-based;
+                // sets `$~` like CRuby (rack's multipart parser
+                // scans quoted-string escapes with
+                // `index(/(["\\])/)` in a slice! loop). Offsets and
+                // the result are CHAR positions. The scan runs on
+                // the suffix at `offset` — lookBEHIND patterns
+                // can't see across that boundary (documented;
+                // lookahead is unaffected).
+                #[cfg(feature = "regex")]
+                if name == "index"
+                    && let Some(Value::Regex(re)) = args.first()
+                    && (args.len() == 1 || matches!(args.get(1), Some(Value::Int(_))))
+                {
+                    let off = match args.get(1) {
+                        Some(Value::Int(o)) => *o,
+                        _ => 0,
+                    };
+                    let sa = s.to_string_lossy();
+                    let char_len = sa.chars().count() as i64;
+                    let start_char = if off < 0 { char_len + off } else { off };
+                    if !(0..=char_len).contains(&start_char) {
+                        return Ok(Some(Value::Nil));
+                    }
+                    let start_byte = sa
+                        .char_indices()
+                        .nth(start_char as usize)
+                        .map(|(b, _)| b)
+                        .unwrap_or(sa.len());
+                    let owned = re.captures_owned(&sa[start_byte..]).map_err(|e| {
+                        self.trap(RubyError::RuntimeError {
+                            msg: format!(
+                                "regex match failed: {} (pattern: /{}/)",
+                                e,
+                                re.as_str(),
+                            ),
+                        })
+                    })?;
+                    return Ok(Some(match owned {
+                        None => {
+                            self.save_match_scope_on_write();
+                            self.last_match = None;
+                            Value::Nil
+                        }
+                        Some(oc) => {
+                            let abs_start = start_byte + oc.m_start;
+                            let abs_end = start_byte + oc.m_end;
+                            let result = Value::Int(sa[..abs_start].chars().count() as i64);
+                            self.save_match_scope_on_write();
+                            self.last_match = Some(crate::vm::LastMatch {
+                                whole: oc.whole,
+                                caps: oc.groups,
+                                input: sa,
+                                m_start: abs_start,
+                                m_end: abs_end,
+                                named: oc.named,
+                            });
+                            result
+                        }
+                    }));
+                }
+                // `String#slice!` — destructive slice: resolve the
+                // byte span the read form would return, cut it out
+                // of the receiver, return the removed piece (with
+                // the receiver's tag). rack's multipart parser
+                // peels Content-Disposition params with
+                // `slice!(0, n)` (~60 call sites across its
+                // specs). Char-indexed like CRuby's []; the regexp
+                // forms share str_bracket_regex so `$~` updates
+                // exactly like `String#[regexp]` — including the
+                // capture form, which removes the GROUP's span
+                // (CRuby: `"hello".slice!(/l(l)o/, 1)` → "helo").
+                if name == "slice!" {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 1..2)",
+                                args.len(),
+                            ),
+                        }));
+                    }
+                    if s.frozen.get() {
+                        return Err(self.trap(RubyError::FrozenError {
+                            msg: format!("can't modify frozen String: {:?}", s.content.borrow()),
+                        }));
+                    }
+                    #[cfg(feature = "regex")]
+                    if let Value::Regex(re) = &args[0] {
+                        let n = match args.get(1) {
+                            Some(Value::Int(n)) => *n,
+                            Some(other) => {
+                                return Err(self.trap(RubyError::TypeError {
+                                    msg: format!(
+                                        "no implicit conversion of {} into Integer",
+                                        other.type_name(),
+                                    ),
+                                }));
+                            }
+                            None => 0,
+                        };
+                        let bound = s.to_string_lossy();
+                        let owned = re.captures_owned(&bound).map_err(|e| {
+                            self.trap(RubyError::RuntimeError {
+                                msg: format!(
+                                    "regex match failed: {} (pattern: /{}/)",
+                                    e,
+                                    re.as_str(),
+                                ),
+                            })
+                        })?;
+                        let Some(oc) = owned else {
+                            self.save_match_scope_on_write();
+                            self.last_match = None;
+                            return Ok(Some(Value::Nil));
+                        };
+                        let span = if n == 0 {
+                            Some((oc.m_start, oc.m_end))
+                        } else if n > 0 && (n as usize) <= oc.group_spans.len() {
+                            oc.group_spans[(n as usize) - 1]
+                        } else {
+                            None
+                        };
+                        self.save_match_scope_on_write();
+                        self.last_match = Some(crate::vm::LastMatch {
+                            whole: oc.whole,
+                            caps: oc.groups,
+                            input: bound,
+                            m_start: oc.m_start,
+                            m_end: oc.m_end,
+                            named: oc.named,
+                        });
+                        return Ok(Some(match span {
+                            None => Value::Nil,
+                            Some((b0, b1)) => {
+                                let removed: Vec<u8> = s.borrow()[b0..b1].to_vec();
+                                s.borrow_mut().drain(b0..b1);
+                                with_tag(Value::new_str_bytes(removed), s.encoding.get())
+                            }
+                        }));
+                    }
+                    let lossy = s.to_string_lossy();
+                    let char_bytes: Vec<usize> = lossy.char_indices().map(|(b, _)| b).collect();
+                    let char_len = char_bytes.len() as i64;
+                    let total = lossy.len();
+                    let byte_at = |ci: i64| -> usize {
+                        let ci = ci as usize;
+                        if ci >= char_bytes.len() { total } else { char_bytes[ci] }
+                    };
+                    let span: Option<(usize, usize)> = match (&args[0], args.get(1)) {
+                        (Value::Int(i), Some(Value::Int(n))) => {
+                            let start = if *i < 0 { char_len + *i } else { *i };
+                            if start < 0 || start > char_len || *n < 0 {
+                                None
+                            } else {
+                                let cnt = (*n).min(char_len - start);
+                                Some((byte_at(start), byte_at(start + cnt)))
+                            }
+                        }
+                        (Value::Int(i), None) => {
+                            let idx = if *i < 0 { char_len + *i } else { *i };
+                            if idx < 0 || idx >= char_len {
+                                None
+                            } else {
+                                Some((byte_at(idx), byte_at(idx + 1)))
+                            }
+                        }
+                        (Value::Range(rid), None) => {
+                            let r = self.heap.range(*rid);
+                            let excl = r.exclusive;
+                            let bi = match &r.begin {
+                                Value::Int(a) => *a,
+                                Value::Nil => 0,
+                                _ => return Ok(None),
+                            };
+                            let ei_opt = match &r.end {
+                                Value::Int(c) => Some(*c),
+                                Value::Nil => None,
+                                _ => return Ok(None),
+                            };
+                            let start = if bi < 0 { char_len + bi } else { bi };
+                            if start < 0 || start > char_len {
+                                None
+                            } else {
+                                let mut end = match ei_opt {
+                                    None => char_len,
+                                    Some(e) if e < 0 => char_len + e,
+                                    Some(e) => e,
+                                };
+                                if !excl && ei_opt.is_some() { end += 1; }
+                                let end = end.clamp(start, char_len);
+                                Some((byte_at(start), byte_at(end)))
+                            }
+                        }
+                        (Value::Str(needle), None) => {
+                            // `s.slice!(s)` (same Rc) would double-
+                            // borrow below — it trivially matches
+                            // the whole string.
+                            if std::rc::Rc::ptr_eq(&s, needle) {
+                                Some((0, s.borrow().len()))
+                            } else {
+                                let hay = s.borrow();
+                                let nb = needle.borrow();
+                                if nb.is_empty() {
+                                    Some((0, 0))
+                                } else {
+                                    hay.windows(nb.len())
+                                        .position(|w| w == &nb[..])
+                                        .map(|p| (p, p + nb.len()))
+                                }
+                            }
+                        }
+                        _ => return Ok(None),
+                    };
+                    return Ok(Some(match span {
+                        None => Value::Nil,
+                        Some((b0, b1)) => {
+                            let removed: Vec<u8> = s.borrow()[b0..b1].to_vec();
+                            s.borrow_mut().drain(b0..b1);
+                            with_tag(Value::new_str_bytes(removed), s.encoding.get())
+                        }
+                    }));
+                }
                 // String#[]= — in-place mutation. Three shapes:
                 //   s[i]      = x   → replace one char at char-index i
                 //   s[i, n]   = x   → replace n chars from char-index i
@@ -3148,64 +3444,42 @@ impl Vm {
         re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
         n: i64,
     ) -> Result<Value, Trap> {
-        // Tier-1 partial: capture-group extraction (`String#[]`
-        // / `String#slice`) hasn't been migrated to the
-        // dual-engine dispatcher yet. Patterns that landed on
-        // the fancy-regex engine (lookaround / backref) raise
-        // `RubyError::RuntimeError` instead of silently
-        // returning nil. (rubyrs doesn't model
-        // `NotImplementedError` as its own `RubyError`
-        // variant yet — `RuntimeError` with a clear "not yet
-        // supported" message is the closest fit.) Follow-up
-        // PRs can swap this to a normalized owned-captures
-        // struct that both engines populate. (TRY_RUNS
-        // pass-13 layer #17.)
-        let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
-            msg: format!(
-                "regex op 'String#[]/slice' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
-                re.as_str(),
-            ),
-        }))?;
+        // Dual-engine via `captures_owned` (the same normalized
+        // owned-captures path `Regexp#match` uses) — lookaround /
+        // backref patterns route through fancy-regex transparently.
+        // rack's multipart parser slices MIME headers with
+        // `/Content-Disposition:(.*)(?=...)/` (~70 of its specs
+        // died on the old native-only trap here). A fancy-engine
+        // match-time error (backtracking blow-up) still traps.
         let bound = s.to_string_lossy();
-        let captures = native.captures(&bound);
-        let caps = match captures {
+        let owned = re.captures_owned(&bound).map_err(|e| {
+            self.trap(RubyError::RuntimeError {
+                msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
+            })
+        })?;
+        let oc = match owned {
             None => {
                 self.save_match_scope_on_write();
                 self.last_match = None;
                 return Ok(Value::Nil);
             }
-            Some(c) => c,
+            Some(oc) => oc,
         };
-        let m0 = caps.get(0).unwrap();
-        let (m_start, m_end) = (m0.start(), m0.end());
-        let whole = m0.as_str().to_string();
-        let mut last_caps: Vec<Option<String>> = Vec::with_capacity(caps.len().saturating_sub(1));
-        for i in 1..caps.len() {
-            last_caps.push(caps.get(i).map(|m| m.as_str().to_string()));
-        }
         let picked = if n == 0 {
-            Some(whole.clone())
-        } else if n > 0 && (n as usize) <= last_caps.len() {
-            last_caps[(n as usize) - 1].clone()
+            Some(oc.whole.clone())
+        } else if n > 0 && (n as usize) <= oc.groups.len() {
+            oc.groups[(n as usize) - 1].clone()
         } else {
             None
         };
-        let named: Vec<(String, Option<String>)> = native
-            .capture_names()
-            .enumerate()
-            .filter_map(|(i, n)| {
-                n.map(|name| (name.to_string(), caps.get(i).map(|m| m.as_str().to_string())))
-            })
-            .collect();
-        drop(caps);
         self.save_match_scope_on_write();
         self.last_match = Some(crate::vm::LastMatch {
-            whole,
-            caps: last_caps,
+            whole: oc.whole,
+            caps: oc.groups,
             input: bound,
-            m_start,
-            m_end,
-            named,
+            m_start: oc.m_start,
+            m_end: oc.m_end,
+            named: oc.named,
         });
         Ok(match picked {
             Some(s) => Value::new_str(s),

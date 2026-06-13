@@ -153,11 +153,27 @@ class Time
   # on that one format, like CRuby's lib/time.rb (which also
   # accepts the obsolete RFC 850/asctime forms — out of subset
   # until a consumer needs them).
+  #
+  # String-walk parser, NO regex literal: the Time preamble loads
+  # unconditionally, and a regex literal here breaks every
+  # no-`regex`-feature build at boot (the wasm32-wasip1 CI smoke
+  # caught exactly that).
+  HTTPDATE_DAYS = %w[Sun, Mon, Tue, Wed, Thu, Fri, Sat,].freeze
+
   def self.httpdate(str)
-    m = /\A\s*(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat),\s+(\d{2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s+GMT\s*\z/.match(str)
-    raise ArgumentError, "not RFC 2616 compliant date: #{str.inspect}" unless m
-    mon = MONTH_ABBR.index(m[2]) + 1
-    utc(m[3].to_i, mon, m[1].to_i, m[4].to_i, m[5].to_i, m[6].to_i)
+    parts = str.to_s.split(" ")
+    bad = lambda { raise ArgumentError, "not RFC 2616 compliant date: #{str.inspect}" }
+    bad.call unless parts.length == 6 && parts[5] == "GMT"
+    bad.call unless HTTPDATE_DAYS.include?(parts[0])
+    digits = lambda do |s2, n|
+      s2.length == n && s2.each_char.all? { |c| c >= "0" && c <= "9" }
+    end
+    day, mon_abbr, year, hms = parts[1], parts[2], parts[3], parts[4]
+    mon = MONTH_ABBR.index(mon_abbr)
+    bad.call unless mon && digits.call(day, 2) && digits.call(year, 4)
+    hh, mm, ss = hms.split(":")
+    bad.call unless ss && digits.call(hh, 2) && digits.call(mm, 2) && digits.call(ss, 2)
+    utc(year.to_i, mon + 1, day.to_i, hh.to_i, mm.to_i, ss.to_i)
   end
 
   def self.parse(str, _now = nil)
