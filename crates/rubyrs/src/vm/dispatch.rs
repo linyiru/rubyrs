@@ -5056,6 +5056,13 @@ impl Vm {
     if name == "[]"
         && let Value::Class(cls) = &recv
         && (cls.name.as_str() == "Hash" || class_inherits_named(cls, "Hash"))
+        // A subclass that REDEFINES `self.[]` (e.g. Rack::Headers,
+        // which downcases keys via `new.merge!`) must reach its own
+        // class method, not this native constructor. Only intercept
+        // when no user singleton `[]` shadows it; a plain subclass
+        // that merely inherits Hash.[] finds nothing here and still
+        // gets the native tagged-instance build below.
+        && self.lookup_class_singleton_method(cls, name_id).is_none()
     {
         // A Hash subclass (`class Conf < Hash`) constructs a tagged
         // instance of itself — `Jekyll::Configuration[override]` is
@@ -5492,6 +5499,9 @@ impl Vm {
     if name == "[]"
         && let Value::Class(cls) = &recv
         && (cls.name.as_str() == "Array" || class_inherits_named(cls, "Array"))
+        // Same guard as the Hash[] intercept: a subclass overriding
+        // `self.[]` reaches its own class method.
+        && self.lookup_class_singleton_method(cls, name_id).is_none()
     {
         let class_tag = if cls.name.as_str() == "Array" {
             None

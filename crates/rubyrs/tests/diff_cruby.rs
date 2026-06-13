@@ -182,6 +182,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn hash_default_proc_set() { run_diff("hash_default_proc_set"); }
 #[test] fn hash_subclass() { run_diff("hash_subclass"); }
 #[test] fn hash_subclass_override() { run_diff("hash_subclass_override"); }
+// A Hash/Array subclass that redefines `self.[]` reaches its own
+// class method (not the native Hash[]/Array[] constructor); a plain
+// subclass still gets the native tagged build. rack Rack::Headers[...].
+#[test] fn subclass_class_aref() { run_diff("subclass_class_aref"); }
 #[cfg(feature = "stdlib")]
 #[test] fn set_merge() { run_diff("set_merge"); }
 #[test] fn block_basics() { run_diff("block_basics"); }
