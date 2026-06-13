@@ -2104,6 +2104,52 @@ impl Vm {
                             self.stack.push(Value::Nil);
                             return Ok(());
                         }
+                        // `super` from a `respond_to?` override →
+                        // Object#respond_to? (a do_call recogniser,
+                        // no table Method above the override).
+                        // rack's Lint::Wrapper does
+                        // `def respond_to?(name, include_all =
+                        // false); name == :to_path ? ... : super;
+                        // end`. Any receiver shape: `responds_to`
+                        // + the respond_to_missing? protocol,
+                        // exactly the bare-call stub's logic
+                        // (dispatch.rs ~7740). Listed BEFORE the
+                        // Hash/Str/Array primitive arms so a
+                        // collection-subclass override supers into
+                        // respond_to? semantics, not a primitive
+                        // arm of that name.
+                        ("respond_to?", Some(recv)) => {
+                            if args.is_empty() || args.len() > 2 {
+                                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                                    msg: format!(
+                                        "wrong number of arguments (given {}, expected 1..2)",
+                                        args.len(),
+                                    ),
+                                }));
+                            }
+                            let lookup = match &args[0] {
+                                Value::Sym(s) => *s,
+                                Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                                other => {
+                                    return Err(self.trap(crate::error::RubyError::TypeError {
+                                        msg: format!(
+                                            "{} is not a symbol nor a string",
+                                            other.to_inspect(&self.heap, &self.interner),
+                                        ),
+                                    }));
+                                }
+                            };
+                            let include_private = matches!(args.get(1), Some(Value::Bool(true)));
+                            if self.responds_to(&recv, lookup, include_private) {
+                                self.stack.push(Value::Bool(true));
+                                return Ok(());
+                            }
+                            if self.try_respond_to_missing(&recv, lookup, include_private)? {
+                                return Ok(());
+                            }
+                            self.stack.push(Value::Bool(false));
+                            return Ok(());
+                        }
                         // `super` from a method defined on a Hash
                         // subclass → the Hash PRIMITIVE of the same
                         // name (`class M < Hash; def [](k); super(
@@ -2120,6 +2166,16 @@ impl Vm {
                                 return Ok(());
                             }
                             if nm == "initialize" {
+                                // Hash#initialize(default) — a
+                                // subclass `super(7)` sets the
+                                // scalar default, same as
+                                // `Hash.new(7)`. The block form
+                                // arrives via Op::ApplySuperBlock
+                                // (step.rs), which has the
+                                // default_proc twin of this arm.
+                                if let Some(d) = args.first() {
+                                    self.heap.hash_set_default_value(id, Some(d.clone()));
+                                }
                                 self.stack.push(Value::Nil);
                                 return Ok(());
                             }

@@ -172,6 +172,12 @@ pub(crate) fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
 #[cfg(feature = "regex")]
 pub(crate) fn apply_ruby_flags(pattern: &str, flags: u8) -> std::borrow::Cow<'_, str> {
     use crate::regex_engine::{RB_IGNORECASE, RB_EXTENDED, RB_MULTILINE};
+    // Only the three matcher-relevant bits build inline flags.
+    // Encoding bits (FIXEDENCODING=16 / NOENCODING=32 — rack's
+    // URLMap passes the latter to Regexp.new) carry no matching
+    // semantics here; without the mask they'd produce an empty
+    // `(?)` group and a SyntaxError.
+    let flags = flags & (RB_IGNORECASE | RB_EXTENDED | RB_MULTILINE);
     if flags == 0 {
         return std::borrow::Cow::Borrowed(pattern);
     }
@@ -2243,6 +2249,35 @@ impl Vm {
                                 };
                                 self.stack.push(Value::Bool(same));
                             }
+                            // `super(...) { |h, k| ... }` from a
+                            // Hash-subclass method. `initialize`
+                            // with a block is `Hash.new { ... }`
+                            // semantics — install the default_proc
+                            // (rack's QueryParser params_class
+                            // subclasses `Params < Hash` and supers
+                            // with an auto-vivify block). Twin of
+                            // the no-block Hash arm in
+                            // `super_call_with_lifecycle_noop`;
+                            // other names route to the same
+                            // primitives (the block is dropped
+                            // there — collection_call has no block
+                            // plumbing; documented divergence, no
+                            // known consumer).
+                            (_, Some(Value::Hash(id))) if self.heap.hash_class_tag(id).is_some() => {
+                                if &*nm == "initialize" {
+                                    self.heap.hash_set_default_block(id, block_id);
+                                    if let Some(d) = args.first() {
+                                        self.heap.hash_set_default_value(id, Some(d.clone()));
+                                    }
+                                    self.stack.push(Value::Nil);
+                                } else {
+                                    let recv = Value::Hash(id);
+                                    match self.collection_call(&recv, &nm, &args)? {
+                                        Some(v) => self.stack.push(v),
+                                        None => return Err(trap),
+                                    }
+                                }
+                            }
                             _ => return Err(trap),
                         }
                     }
@@ -2727,7 +2762,16 @@ impl Vm {
                 // singleton chain. Keep `cls` as-is.
                 // (Code-review #253 round 2 #2.)
                 let defining_class = self.class_stack.last().map(Rc::downgrade);
-                let vis = self.class_visibility_stack.last().copied().unwrap_or(Visibility::Public);
+                // Singleton defs are ALWAYS Public — CRuby's
+                // visibility modes (`private` / `protected` /
+                // `module_function`) only apply to instance
+                // `def`s; `def self.x` after a bare
+                // `module_function` stays callable (rack
+                // utils.rb defines `def self.param_depth_limit`
+                // below its `module_function` line). Demoting a
+                // singleton def needs an explicit
+                // `private_class_method`.
+                let vis = Visibility::Public;
                 let params = proto.params.clone();
                 let fixed_arity = Self::fixed_arity_for_proto(proto, params.len());
                 let m = Rc::new(Method {

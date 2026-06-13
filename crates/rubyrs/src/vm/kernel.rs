@@ -65,6 +65,7 @@ impl Vm {
                 | "__defined_ivar?"
                 | "__defined_method?"
                 | "__defined_const?"
+                | "__defined_recv_method?"
                 | "eval"
                 // `autoload(:Foo, "path")` / `autoload?(:Foo)`
                 // top-level forms — Phase 1 of issue #224. The
@@ -178,6 +179,34 @@ impl Vm {
         self.do_call(m_id, args.len(), /*no_recv=*/false, u16::MAX)?;
         self.dispatch_until(pre)?;
         Ok(self.stack.pop().unwrap_or(Value::Nil))
+    }
+
+    /// TRUE when the current frame's `self` carries a USER method
+    /// named `name` — a bare builtin call must defer to it (CRuby
+    /// method lookup runs before Kernel's private builtins). rack
+    /// overrides both `warn` (test-helper singleton capture) and
+    /// `fail` (Files#fail returns a status triple instead of
+    /// raising). Callers `return None` from their builtin arm on a
+    /// hit so do_call falls through to normal dispatch.
+    ///
+    /// Deliberately NARROW: only consulted by specific builtin
+    /// arms (warn / raise / fail), not as a general pre-gate —
+    /// the broader builtin-shadowing question is the documented
+    /// #491 own-table-early-gate design task.
+    fn bare_builtin_user_override(&mut self, name: &str) -> bool {
+        let id = self.interner.intern(name);
+        let self_val = self.frames.last().map(|f| f.self_val.clone());
+        match &self_val {
+            Some(Value::Object(oid)) => {
+                let cls = self.heap.instance(*oid).class.clone();
+                self.lookup_method_uncached(&cls, id).is_some()
+            }
+            Some(Value::Class(c)) => {
+                self.lookup_class_singleton_method(c, id).is_some()
+                    || self.lookup_class_object_instance_method(c, id).is_some()
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn builtin_call(&mut self, name: &str, args: &[Value]) -> Option<Result<Value, Trap>> {
@@ -663,6 +692,21 @@ impl Vm {
                     };
                     let toplevel_hit = self.toplevel_methods.contains_key(sid);
                     let hit = is_builtin || host_hit || class_hit || toplevel_hit;
+                    return Some(Ok(if hit { Value::new_str("method") } else { Value::Nil }));
+                }
+                Some(Ok(Value::Nil))
+            }
+            // `defined?(recv.m)` with an already-evaluated receiver
+            // (ast.rs lowers the side-effect-free receiver shapes
+            // to this; const receivers arrive guarded by a
+            // `__defined_const?` check so the receiver eval can't
+            // NameError). Pure method-table check via `responds_to`
+            // — deliberately NOT consulting respond_to_missing?,
+            // matching CRuby's defined? (method-entry lookup, not
+            // the respond_to? protocol).
+            "__defined_recv_method?" => {
+                if let (Some(recv), Some(Value::Sym(sid))) = (args.first(), args.get(1)) {
+                    let hit = self.responds_to(recv, *sid, false);
                     return Some(Ok(if hit { Value::new_str("method") } else { Value::Nil }));
                 }
                 Some(Ok(Value::Nil))
@@ -1586,6 +1630,22 @@ impl Vm {
                 // `uplevel:` / `category:` kwargs CRuby exposes
                 // (not in the rubyrs subset yet) — positional
                 // args only.
+                //
+                // USER OVERRIDE WINS: a `warn` defined on self's
+                // method chain (or, for a Class/Module self, its
+                // singleton chain) shadows Kernel#warn for bare
+                // calls — CRuby method lookup runs before
+                // Kernel's. rack's test helper captures
+                // deprecation warnings by
+                // `define_singleton_method(:warn)` on Rack::Utils
+                // and the module's own bodies call bare `warn`;
+                // without this fall-through the capture never
+                // sees them. `return None` defers to the normal
+                // dispatch walk (same mechanism as the class-body
+                // `autoload` deferral above).
+                if self.bare_builtin_user_override("warn") {
+                    return None;
+                }
                 if let Some(target) = self.stdio_redirect("$stderr", true) {
                     // Render to one buffer, forward as a single
                     // write — same shape as the redirected `p`.
@@ -1673,6 +1733,15 @@ impl Vm {
             // initialize dispatch is skipped — standard error
             // classes only carry @message).
             "raise" | "fail" => {
+                // User override wins (rack Files defines a private
+                // `fail(status, body)` returning a response triple
+                // — bare `fail(404, ...)` must dispatch there, not
+                // raise). Same deferral as `warn` above; the
+                // existing raise_as_method fixture pins the
+                // eigenclass-stub flavour of this.
+                if self.bare_builtin_user_override(name) {
+                    return None;
+                }
                 let v = match args.len() {
                     0 => Value::Nil,
                     1 => args[0].clone(),

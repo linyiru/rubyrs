@@ -4847,12 +4847,35 @@ impl Vm {
                     // mutation in one hash lookup + one
                     // `borrow_mut()`.
                     if cls.methods.borrow_mut().remove(&sid).is_none() {
-                        // Resolve name only on the rare missing
-                        // path. Free for the common case.
-                        let name_for_msg = self.interner.resolve(sid).to_string();
-                        return Err(self.trap(RubyError::NameError {
-                            msg: format!("method '{}' not defined in {}", name_for_msg, cls.name),
-                        }));
+                        // Eigenclass shell: the DEFINE side
+                        // (`define_singleton_method` / `def
+                        // self.m` / module_function) installs on
+                        // the TARGET's `singleton_methods` table,
+                        // not the shell's own `methods` — bridge
+                        // the remove through `singleton_target`,
+                        // same as undef_method's probe above.
+                        // rack's test helper stubs module-level
+                        // `warn` via `define_singleton_method`
+                        // and tears it down with
+                        // `singleton_class.send(:remove_method,
+                        // :warn)`; without the bridge the ensure
+                        // block NameErrors and replaces the real
+                        // assertion failure.
+                        let shell_removed = cls
+                            .singleton_target
+                            .borrow()
+                            .as_ref()
+                            .and_then(std::rc::Weak::upgrade)
+                            .map(|real| real.singleton_methods.borrow_mut().remove(&sid).is_some())
+                            .unwrap_or(false);
+                        if !shell_removed {
+                            // Resolve name only on the rare missing
+                            // path. Free for the common case.
+                            let name_for_msg = self.interner.resolve(sid).to_string();
+                            return Err(self.trap(RubyError::NameError {
+                                msg: format!("method '{}' not defined in {}", name_for_msg, cls.name),
+                            }));
+                        }
                     }
                     // Bump `method_gen` BEFORE firing the hook so
                     // any inline-cache-backed dispatch inside the
@@ -7642,17 +7665,55 @@ impl Vm {
                             *top = vis;
                         }
                     } else {
-                        let methods = cls.methods.borrow();
                         for a in &args {
                             let key: Option<SymId> = match a {
                                 Value::Sym(s) => Some(*s),
                                 Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
                                 _ => None,
                             };
-                            if let Some(mid) = key
-                                && let Some(m) = methods.get(&mid) {
-                                    m.visibility.set(vis);
-                                }
+                            let Some(mid) = key else { continue };
+                            // Own-table hit: flip in place (the
+                            // Method's visibility Cell), same as
+                            // CRuby's in-place flag change.
+                            let own = cls.methods.borrow().get(&mid).cloned();
+                            if let Some(m) = own {
+                                m.visibility.set(vis);
+                                continue;
+                            }
+                            // Inherited / included method (e.g.
+                            // `include Rack::Utils; public
+                            // :parse_nested_query` re-exposing a
+                            // module_function'd private). CRuby
+                            // installs a ZSUPER stub on self with
+                            // the new visibility; we install a
+                            // FRESH copy of the resolved Method —
+                            // fresh, not the shared Rc, because
+                            // Method.visibility is a Cell and
+                            // setting it through the shared Rc
+                            // would flip the module's own copy for
+                            // every other includer (same trap the
+                            // module_function arm hit in
+                            // code-review #324 round 1). Documented
+                            // divergence from ZSUPER: a later
+                            // redefinition on the module is not
+                            // picked up by this class's flipped
+                            // entry.
+                            if let Some(m) = self.lookup_method_uncached(cls, mid) {
+                                use crate::value::Method;
+                                use std::cell::Cell;
+                                let copy = std::rc::Rc::new(Method {
+                                    params: m.params.clone(),
+                                    proto_idx: m.proto_idx,
+                                    fixed_arity: m.fixed_arity,
+                                    defining_class: Some(std::rc::Rc::downgrade(cls)),
+                                    visibility: Cell::new(vis),
+                                    closure: m.closure.clone(),
+                                    original_name: m.original_name,
+                                    builtin: m.builtin.clone(),
+                                });
+                                cls.methods.borrow_mut().insert(mid, copy);
+                                self.method_gen = self.method_gen.wrapping_add(1);
+                            }
                         }
                     }
                     self.stack.push(Value::Nil);

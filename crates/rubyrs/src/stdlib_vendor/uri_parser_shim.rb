@@ -111,6 +111,169 @@ module URI
   # `RFC2396_PARSER` branch and `URI_PARSER` ends up pointing at
   # one object (lets identity-checks line up too).
   RFC2396_PARSER = DEFAULT_PARSER
+  # CRuby's `URI::Parser` is an alias for its current parser class
+  # (RFC3986 in 3.x). Rack's MockRequest memoizes
+  # `URI::Parser.new` for parse_uri_rfc2396; point the alias at
+  # the shim class so that instantiation works. (`parse` is still
+  # absent — callers get NoMethodError, the right feature-absent
+  # signal, until a fuller URI lands.)
+  Parser = RFC2396_Parser
+
+  # The www-form component pair (CRuby lib/uri/common.rb). These
+  # back `Rack::Utils.escape` / `.unescape` and the query parsers.
+  #
+  # Both are implemented BYTE-level on purpose: percent-encoding
+  # is defined over bytes, and `gsub`-over-chars would push
+  # registry-tagged receivers (`"ø".encode("ISO-8859-1")`) through
+  # the lossy char view — the settled Regexp-over-non-UTF-8
+  # boundary (docs/SUBSET.md). Byte loops sidestep that entirely:
+  # escape("ø" as ISO-8859-1) is "%F8", matching CRuby.
+  def self.encode_www_form_component(str, enc = nil)
+    str = str.to_s
+    # CRuby transcodes only when an explicit target encoding is
+    # given (with :replace fallbacks we don't mirror — documented
+    # simplification; rack never passes `enc`).
+    str = str.encode(enc) if enc && str.encoding != enc
+    out = +""
+    str.bytes.each do |b|
+      if (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A) ||
+         (b >= 0x61 && b <= 0x7A) ||
+         b == 0x2A || b == 0x2D || b == 0x2E || b == 0x5F
+        # unreserved set: ALNUM *-._  (note: `~` is NOT in the
+        # www-form set — CRuby encodes it as %7E)
+        out << b.chr
+      elsif b == 0x20
+        out << "+"
+      else
+        out << ("%%%02X" % b)
+      end
+    end
+    out.force_encoding(Encoding::US_ASCII)
+  end
+
+  def self.decode_www_form_component(str, enc = Encoding::UTF_8)
+    str = str.to_s
+    bytes = str.bytes
+    out = []
+    i = 0
+    n = bytes.length
+    hex = lambda do |c|
+      if c.nil? then nil
+      elsif c >= 0x30 && c <= 0x39 then c - 0x30
+      elsif c >= 0x41 && c <= 0x46 then c - 0x41 + 10
+      elsif c >= 0x61 && c <= 0x66 then c - 0x61 + 10
+      end
+    end
+    while i < n
+      b = bytes[i]
+      if b == 0x25 # %
+        d1 = hex.call(bytes[i + 1])
+        d2 = hex.call(bytes[i + 2])
+        # CRuby validates the whole string against
+        # %-followed-by-two-hex before decoding; the in-loop check
+        # is equivalent (and O(n) — the spec pins the
+        # catastrophic-backtracking regression from CRuby's old
+        # regex validator, ruby-lang #5149).
+        raise ArgumentError, "invalid %-encoding (#{str})" if d1.nil? || d2.nil?
+        out << (d1 * 16 + d2)
+        i += 3
+      elsif b == 0x2B # +
+        out << 0x20
+        i += 1
+      else
+        out << b
+        i += 1
+      end
+    end
+    out.pack("C*").force_encoding(enc)
+  end
+
+  class Error < StandardError; end
+  class InvalidURIError < Error; end
+
+  # Minimal URI value object — the surface
+  # `Rack::MockRequest.env_for` actually reads after
+  # `URI::Parser#parse` (scheme / host / port / path= / query),
+  # plus `to_s` for round-tripping. `port` is filled with the
+  # scheme default when the authority omits it, matching CRuby's
+  # post-parse view (`URI.parse("http://x/").port` → 80).
+  class Generic
+    attr_accessor :scheme, :userinfo, :host, :port, :path, :query, :fragment
+
+    DEFAULT_PORTS = {
+      "http" => 80, "https" => 443, "ftp" => 21,
+      "ws" => 80, "wss" => 443,
+    }.freeze
+
+    def initialize(scheme, userinfo, host, port, path, query, fragment)
+      @scheme = scheme
+      @userinfo = userinfo
+      @host = host
+      @port = port || (scheme && DEFAULT_PORTS[scheme.downcase])
+      @path = path
+      @query = query
+      @fragment = fragment
+    end
+
+    def to_s
+      out = +""
+      out << "#{@scheme}:" if @scheme
+      if @host
+        out << "//"
+        out << "#{@userinfo}@" if @userinfo
+        out << @host
+        default = @scheme && DEFAULT_PORTS[@scheme.downcase]
+        out << ":#{@port}" if @port && @port != default
+      end
+      out << @path.to_s
+      out << "?#{@query}" if @query
+      out << "##{@fragment}" if @fragment
+      out
+    end
+  end
+
+  class RFC2396_Parser
+    # RFC 3986 appendix-B reference split (scheme / authority /
+    # path / query / fragment), NOT a validating parser — it
+    # accepts whatever it sees, which covers the
+    # MockRequest.env_for shapes ("", "/", "/path?q=1",
+    # "https://example.org:8080/x"). IPv6 bracket hosts are out
+    # of subset (the rindex(":") port split would mis-cut them;
+    # documented gap, no rack-spec consumer).
+    SPLIT_RE = %r{\A(?:([A-Za-z][A-Za-z0-9+.\-]*):)?(?://([^/?\#]*))?([^?\#]*)(?:\?([^\#]*))?(?:\#(.*))?\z}m
+
+    def parse(uri)
+      m = SPLIT_RE.match(uri.to_s)
+      raise InvalidURIError, "bad URI (is not URI?): #{uri.inspect}" unless m
+      scheme = m[1]
+      authority = m[2]
+      userinfo = nil
+      host = nil
+      port = nil
+      if authority
+        rest = authority
+        if at = rest.rindex("@")
+          userinfo = rest[0, at]
+          rest = rest[at + 1, rest.length]
+        end
+        if colon = rest.rindex(":")
+          maybe_port = rest[colon + 1, rest.length]
+          if maybe_port =~ /\A\d+\z/
+            port = maybe_port.to_i
+            rest = rest[0, colon]
+          end
+        end
+        host = rest unless rest.empty?
+      end
+      # path is "" (never nil) when absent — env_for does
+      # `uri.path[0]` and `(uri.path).b` unconditionally.
+      Generic.new(scheme, userinfo, host, port, m[3] || "", m[4], m[5])
+    end
+  end
+
+  def self.parse(uri)
+    DEFAULT_PARSER.parse(uri)
+  end
 end
 
 end # `unless defined?(URI::DEFAULT_PARSER)`

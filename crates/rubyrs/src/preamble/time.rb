@@ -369,6 +369,25 @@ class Time
   end
   alias_method :iso8601, :xmlschema
 
+  # `require "time"` surface (CRuby defines these in lib/time.rb;
+  # rubyrs's `require "time"` lands in the lenient-stub path so the
+  # methods live here unconditionally). Tier-1 time is UTC-only,
+  # which collapses both forms:
+  #   - httpdate (RFC 7231 IMF-fixdate) always renders the GMT
+  #     shape — CRuby calls getutc first, which is a no-op here.
+  #   - rfc2822 renders "-0000" for UTC receivers (RFC 2822's
+  #     "UTC, local offset unknown" zone), the only kind Tier 1
+  #     produces. CRuby prints "+HHMM" for genuinely-local times;
+  #     that branch is unreachable until local zones land.
+  def httpdate
+    strftime("%a, %d %b %Y %H:%M:%S GMT")
+  end
+
+  def rfc2822
+    strftime("%a, %d %b %Y %H:%M:%S -0000")
+  end
+  alias_method :rfc822, :rfc2822
+
   # Stringification. CRuby's `Time#to_s` default format is local-
   # time `"YYYY-MM-DD HH:MM:SS ±HHMM"`; Tier 1's UTC-only form is
   # `"YYYY-MM-DD HH:MM:SS UTC"`. `inspect` matches `to_s` (CRuby

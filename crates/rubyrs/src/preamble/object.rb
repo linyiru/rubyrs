@@ -125,6 +125,14 @@ class Regexp < Object
   IGNORECASE = 1
   EXTENDED   = 2
   MULTILINE  = 4
+  ## Encoding-flag constants. rubyrs regexes have no per-regex
+  ## encoding semantics (UTF-8 throughout; see the settled
+  ## Regexp-over-non-UTF-8 boundary in SUBSET.md), so these bits
+  ## are accepted-and-ignored by `Regexp.new` — they exist so
+  ## option-passing callers load (rack's URLMap builds
+  ## `Regexp.new(pattern, Regexp::NOENCODING)`).
+  FIXEDENCODING = 16
+  NOENCODING    = 32
 end
 
 # Marshal — binary serialization is out of the Tier-1 subset (no

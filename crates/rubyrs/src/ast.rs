@@ -3835,6 +3835,82 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     name: "__defined_method?".into(),
                     args: vec![sp(node, Expr::SymbolLit(name))], kwargs_trailing: false });
             }
+            // Receiver-bearing `defined?(recv.m)`. CRuby evaluates
+            // the receiver (NameError → the whole defined? is nil)
+            // and then checks the method's existence. Full fidelity
+            // needs exception plumbing around the receiver eval; we
+            // cover the side-effect-free receiver shapes gems
+            // actually use for feature detection and stay
+            // optimistic for the rest:
+            //   - Const / Const::Path receiver → guard with
+            //     `__defined_const?` first, then a runtime respond
+            //     check on the (now known-resolvable) receiver.
+            //     rack/utils.rb's
+            //     `defined?(OpenSSL.fixed_length_secure_compare)`
+            //     needs the nil here to pick its pure-Ruby
+            //     secure_compare branch when openssl is absent —
+            //     the old unconditional "method" sent it down the
+            //     OpenSSL path and NameError'd at call time.
+            //   - self / lvar / ivar receiver → zero-side-effect
+            //     reads; runtime respond check directly (an unset
+            //     ivar reads as nil and the check runs against
+            //     NilClass, same as CRuby).
+            //   - anything else (chained calls, receivers with
+            //     side effects, ...) → "method" optimistically
+            //     (documented divergence, unchanged).
+            if let Some(recv) = cn.receiver() {
+                let mname = cid_to_string(cn.name());
+                let const_key = if let Some(cr) = recv.as_constant_read_node() {
+                    Some(cid_to_string(cr.name()))
+                } else if recv.as_constant_path_node().is_some() {
+                    flatten_constant_path(&recv)
+                } else {
+                    None
+                };
+                let probe = sp(node, Expr::Call {
+                    receiver: None,
+                    name: "__defined_recv_method?".into(),
+                    args: vec![tr(ctx, &recv), sp(node, Expr::SymbolLit(mname))],
+                    kwargs_trailing: false,
+                });
+                if let Some(key) = const_key {
+                    let cond = sp(node, Expr::Call {
+                        receiver: None,
+                        name: "__defined_const?".into(),
+                        args: vec![sp(node, Expr::SymbolLit(key))],
+                        kwargs_trailing: false,
+                    });
+                    return Spanned::new(span, Expr::If {
+                        cond: Box::new(cond),
+                        then_body: vec![probe],
+                        else_body: vec![sp(node, Expr::Nil)],
+                    });
+                }
+                if recv.as_self_node().is_some()
+                    || recv.as_local_variable_read_node().is_some()
+                {
+                    return probe;
+                }
+                // ivar receiver: CRuby checks the RECEIVER's
+                // definedness first — `defined?(@unset.to_s)` is
+                // nil even though nil responds to to_s. Guard
+                // with `__defined_ivar?`, mirroring the const
+                // shape.
+                if let Some(iv) = recv.as_instance_variable_read_node() {
+                    let ivname = cid_to_string(iv.name());
+                    let cond = sp(node, Expr::Call {
+                        receiver: None,
+                        name: "__defined_ivar?".into(),
+                        args: vec![sp(node, Expr::SymbolLit(ivname))],
+                        kwargs_trailing: false,
+                    });
+                    return Spanned::new(span, Expr::If {
+                        cond: Box::new(cond),
+                        then_body: vec![probe],
+                        else_body: vec![sp(node, Expr::Nil)],
+                    });
+                }
+            }
             return s("method");
         }
         return s("expression");

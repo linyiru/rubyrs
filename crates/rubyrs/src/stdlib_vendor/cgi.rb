@@ -8,12 +8,30 @@ module CGI
     '"' => "&quot;", "'" => "&#39;",
   }.freeze
 
+  # BYTE-level on purpose: the five escapees are ASCII, and a char
+  # walk pushes invalid-UTF-8 input through the lossy char view
+  # (U+FFFD), where CRuby's escapeHTML preserves the raw bytes —
+  # rack's spec pins `escape_html("\xC0<")` == "\xC0&lt;" with the
+  # invalid byte intact. Same pattern as the uri shim's www-form
+  # pair; the result keeps the receiver's encoding tag (including
+  # its invalid-ness), matching CRuby.
+  ESCAPE_HTML_BYTES = {
+    38 => "&amp;".bytes.freeze, 60 => "&lt;".bytes.freeze,
+    62 => "&gt;".bytes.freeze, 34 => "&quot;".bytes.freeze,
+    39 => "&#39;".bytes.freeze,
+  }.freeze
+
   def self.escapeHTML(str)
-    out = +""
-    str.to_s.each_char do |c|
-      out << (HTML_ESCAPE[c] || c)
+    str = str.to_s
+    bytes = []
+    str.each_byte do |b|
+      if esc = ESCAPE_HTML_BYTES[b]
+        bytes.concat(esc)
+      else
+        bytes << b
+      end
     end
-    out
+    bytes.pack("C*").force_encoding(str.encoding)
   end
 
   def self.unescapeHTML(str)
