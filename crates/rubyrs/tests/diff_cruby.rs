@@ -352,6 +352,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn file_read_bom_utf8() { run_diff("file_read_bom_utf8"); }
 #[test] fn file_delete() { run_diff("file_delete"); }
 #[test] fn array_subclass() { run_diff("array_subclass"); }
+// Array#freeze enforcement: every mutator (incl. []=, block forms,
+// no-op bang) raises FrozenError; clone preserves frozen, dup resets.
+// rack Lock relies on `[].freeze.pop` raising so `ensure` unlocks.
+#[test] fn array_freeze() { run_diff("array_freeze"); }
 #[test] fn string_encoding_e1() { run_diff("string_encoding_e1"); }
 #[test] fn string_encoding_compat() { run_diff("string_encoding_compat"); }
 #[cfg(feature = "_encoding_full")]

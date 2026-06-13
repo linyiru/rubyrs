@@ -675,6 +675,22 @@ impl Vm {
     }
 
     pub(crate) fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: ObjId) -> Result<Option<Value>, Trap> {
+        // Frozen guard for the block-form Array mutators (map! /
+        // select! / reject! / sort_by! / keep_if / delete_if /
+        // collect! / filter!) — these dispatch here, not through
+        // array_collection_call, so they need their own check to
+        // raise FrozenError on a frozen receiver (CRuby raises before
+        // running the block). The non-bang block readers (each / map /
+        // select) aren't mutators, so they pass through.
+        if let Value::Array(id) = recv
+            && super::array::is_array_mutator(name)
+            && self.heap.array_frozen(*id)
+        {
+            let shown = self.inspect_value(recv)?;
+            return Err(self.trap(crate::error::RubyError::FrozenError {
+                msg: format!("can't modify frozen Array: {}", shown),
+            }));
+        }
         // Object#itself with a block — CRuby ignores the block
         // and returns the receiver unchanged. Sits next to the
         // tap/then/yield_self block path so the universal-arm

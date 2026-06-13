@@ -21,6 +21,24 @@ use super::{value_cmp_v_heap, PinGuard, Vm};
 /// currently being flattened — returns `false` if a member is already on
 /// it (a self-referential array), which the caller turns into the
 /// ArgumentError CRuby raises ("tried to flatten recursive array").
+/// Array methods that mutate the receiver in place — CRuby raises
+/// FrozenError on each when the receiver is frozen. Centralised so
+/// the `array_collection_call` frozen-guard stays consistent with the
+/// set of mutating arms below. (`[]=` covers the explicit
+/// `arr.[]=(i, v)` / `arr.store` forms; the `arr[i] = v` assignment
+/// syntax routes through Op::CallAset, guarded separately.)
+pub(crate) fn is_array_mutator(name: &str) -> bool {
+    matches!(
+        name,
+        "push" | "<<" | "append" | "pop" | "shift" | "unshift" | "prepend"
+            | "[]=" | "store" | "concat" | "insert" | "delete" | "delete_at"
+            | "delete_if" | "reject!" | "select!" | "filter!" | "keep_if"
+            | "clear" | "fill" | "replace" | "compact!" | "flatten!" | "uniq!"
+            | "sort!" | "sort_by!" | "reverse!" | "rotate!" | "shuffle!"
+            | "map!" | "collect!" | "slice!"
+    )
+}
+
 pub(crate) fn flatten_rec(
     heap: &crate::heap::Heap,
     src: &[Value],
@@ -59,6 +77,18 @@ impl Vm {
         name: &str,
         args: &[Value],
     ) -> Result<Option<Value>, Trap> {
+        // Frozen guard: every mutating method raises FrozenError on a
+        // frozen Array, UNCONDITIONALLY — even a no-op `uniq!` on an
+        // already-unique array (CRuby checks frozen before deciding
+        // whether the call would change anything). One central check
+        // by method name keeps all mutators consistent. rack's Lock
+        // relies on `[].freeze.pop` raising so its `ensure` unlocks.
+        if is_array_mutator(name) && self.heap.array_frozen(id) {
+            let shown = self.inspect_value(&Value::Array(id))?;
+            return Err(self.trap(crate::error::RubyError::FrozenError {
+                msg: format!("can't modify frozen Array: {}", shown),
+            }));
+        }
         Ok(
                 match (name, args) {
                     ("length", []) | ("size", []) => Some(Value::Int(self.heap.array(id).len() as i64)),
@@ -72,8 +102,11 @@ impl Vm {
                     // still raises ArgumentError, matching CRuby, so
                     // caller bugs don't get misreported as missing
                     // methods by the no-recv fall-through.
-                    ("freeze", []) => Some(Value::Array(id)),
-                    ("frozen?", []) => Some(Value::Bool(false)),
+                    ("freeze", []) => {
+                        self.heap.set_array_frozen(id);
+                        Some(Value::Array(id))
+                    }
+                    ("frozen?", []) => Some(Value::Bool(self.heap.array_frozen(id))),
                     // Array#<=> — element-wise lex compare; length is
                     // the tiebreaker when the common prefix is Equal.
                     // Returns nil when any element pair is incompara-
@@ -1584,12 +1617,9 @@ impl Vm {
                     // `respond_to?(:to_ary)` to its wrapped body.
                     ("to_a", []) | ("to_ary", []) => Some(Value::Array(id)),
                     // `arr.dup` / `arr.clone` — shallow copy. CRuby's
-                    // `clone` also preserves the frozen flag; Tier-1
-                    // Arrays don't model `freeze` beyond a no-op
-                    // (see line 41 above where `freeze` returns the
-                    // same id), so `dup` and `clone` are
-                    // indistinguishable here. Closes TRY_RUNS
-                    // pass-9.7d layer #26 — sinatra/base.rb:1534
+                    // `clone` preserves the frozen bit (and singleton
+                    // class); `dup` resets frozen to false. Closes
+                    // TRY_RUNS pass-9.7d layer #26 — sinatra/base.rb:1534
                     // (`get` handler) does `@conditions = conditions.dup`
                     // to snapshot route conditions; without this arm
                     // it raised NoMethodError.
@@ -1601,11 +1631,13 @@ impl Vm {
                         // both) — mirrors the Hash dup arm.
                         let class_tag = self.heap.array_class_tag(id);
                         let ivars = self.heap.array_ivars_clone(id);
+                        let keep_frozen = name == "clone" && self.heap.array_frozen(id);
                         self.maybe_gc();
                         let nid = self.heap.alloc(HeapObj::Array(crate::heap::ArrayObj {
                             elems: src,
                             class_tag,
                             ivars,
+                            frozen: std::cell::Cell::new(keep_frozen),
                         }));
                         Some(Value::Array(nid))
                     }

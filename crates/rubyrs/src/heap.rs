@@ -284,11 +284,20 @@ pub(crate) struct ArrayObj {
     /// Instance variables for subclass instances. Values are
     /// GC-marked alongside `elems`.
     pub(crate) ivars: crate::intern::FxHashMap<crate::intern::SymId, Value>,
+    /// CRuby's per-object frozen bit. `false` by default; `freeze`
+    /// flips it and every mutating method then raises FrozenError.
+    /// `clone` copies it (CRuby semantics); `dup` resets it to false.
+    pub(crate) frozen: std::cell::Cell<bool>,
 }
 
 impl ArrayObj {
     pub(crate) fn plain(elems: Vec<Value>) -> Self {
-        Self { elems, class_tag: None, ivars: crate::intern::FxHashMap::default() }
+        Self {
+            elems,
+            class_tag: None,
+            ivars: crate::intern::FxHashMap::default(),
+            frozen: std::cell::Cell::new(false),
+        }
     }
 }
 
@@ -621,6 +630,14 @@ impl Heap {
     /// the Array twin of `hash_class_tag`.
     pub(crate) fn array_class_tag(&self, id: ObjId) -> Option<Rc<Class>> {
         if let HeapObj::Array(a) = self.get(id) { a.class_tag.clone() } else { None }
+    }
+    /// CRuby's frozen bit for an Array. `freeze` sets it; every
+    /// mutating method then raises FrozenError.
+    pub(crate) fn array_frozen(&self, id: ObjId) -> bool {
+        if let HeapObj::Array(a) = self.get(id) { a.frozen.get() } else { false }
+    }
+    pub(crate) fn set_array_frozen(&self, id: ObjId) {
+        if let HeapObj::Array(a) = self.get(id) { a.frozen.set(true); }
     }
     pub(crate) fn hash(&self, id: ObjId) -> &Vec<(Value, Value)> {
         if let HeapObj::Hash(h) = self.get(id) { &h.pairs } else { panic!("ICE: heap slot is not a Hash") }
@@ -2387,6 +2404,7 @@ mod tests {
                 m.insert(crate::intern::SymId(3), Value::Array(inner));
                 m
             },
+            frozen: std::cell::Cell::new(false),
         }));
         assert!(matches!(
             heap.array_ivar_get(tagged, crate::intern::SymId(3)),

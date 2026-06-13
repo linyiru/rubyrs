@@ -2445,6 +2445,13 @@ impl Vm {
                     if !self.fast_index_array_set_safe {
                         return false;
                     }
+                    // A frozen Array must raise FrozenError on `[]=`.
+                    // Defer to the slow path, where
+                    // array_collection_call's central frozen guard
+                    // raises it (this fast path returns bool and can't).
+                    if self.heap.array_frozen(id) {
+                        return false;
+                    }
                     // In-bounds overwrites only: growth (idx >= len,
                     // nil-padding + byte cap) and too-negative wrap
                     // (IndexError-class shapes) keep their semantics
@@ -5518,6 +5525,7 @@ impl Vm {
             elems: args.to_vec(),
             class_tag,
             ivars: crate::intern::FxHashMap::default(),
+            frozen: std::cell::Cell::new(false),
         }));
         g.vm.stack.push(Value::Array(aid));
         return Ok(ClassOutcome::Handled);
@@ -16806,6 +16814,7 @@ impl Vm {
                 elems: Vec::new(),
                 class_tag: Some(cls.clone()),
                 ivars: crate::intern::FxHashMap::default(),
+                frozen: std::cell::Cell::new(false),
             }));
             return Ok(Value::Array(id));
         }
