@@ -84,6 +84,10 @@ t("mktmpdir blk")  { inner = nil; r = Dir.mktmpdir("rk") { |d| inner = d; File.d
 t("mktmpdir path") { d = Dir.mktmpdir; ok = File.directory?(d); Dir.rmdir(d); ok }
 
 # 3 — Tempfile surface
+# Array basename [prefix, suffix] + encoding kwarg (rack's UploadedFile
+# does `Tempfile.new([name, ext], encoding: Encoding::BINARY)`); path
+# must keep the suffix for File.extname.
+t("tmp arr name") { t2 = Tempfile.new(["pre", ".txt"], encoding: Encoding::BINARY); ok = File.extname(t2.path); t2.close!; ok }
 tf = Tempfile.new("rack-lib-fix")
 tf << "ab\ncd\n"
 t("tmp chmod")   { tf.chmod(0o000) }

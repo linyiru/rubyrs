@@ -1434,6 +1434,21 @@ impl Vm {
                 }
                 Value::Nil
             }
+            // `FileUtils.copy_file(src, dest[, preserve, dereference])`
+            // — a file→file content copy (always file semantics, never
+            // dest-is-dir join). rack's UploadedFile copies the source
+            // into its Tempfile with it. Trailing preserve/dereference
+            // args are accepted and ignored.
+            ("copy_file", [src, dst, ..]) => {
+                self.check_filesystem_io_allowed("FileUtils.copy_file", None)?;
+                let s = paths(self, src)?.into_iter().next().unwrap_or_default();
+                let d = paths(self, dst)?.into_iter().next().unwrap_or_default();
+                self.check_filesystem_io_allowed("FileUtils.copy_file", Some(Path::new(&s)))?;
+                self.check_filesystem_io_allowed("FileUtils.copy_file", Some(Path::new(&d)))?;
+                std::fs::copy(&s, &d)
+                    .map_err(|e| self.trap(io_error(&e, Some(Path::new(&s)))))?;
+                Value::Nil
+            }
             ("cp_r", [src, dst]) => {
                 self.check_filesystem_io_allowed("FileUtils.cp_r", None)?;
                 let srcs = paths(self, src)?;

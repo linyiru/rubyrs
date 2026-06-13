@@ -52,6 +52,10 @@ File.mkfifo(ff)
 t("fifo not file") { s = File.stat(ff); [s.file?, s.directory?, s.readable?] }
 File.delete(ff)
 
+# FileUtils.copy_file (rack's UploadedFile copies into a Tempfile).
+t("copy_file")     { d = fp + "-cp"; FileUtils.copy_file(fp, d); r = File.binread(d); File.delete(d); r }
+t("copy_file 3arg"){ d = fp + "-cp2"; FileUtils.copy_file(fp, d, true); r = File.size(d); File.delete(d); r }
+
 # chmod (last — it mutates fp's perms): set 0600, read the mode back.
 t("chmod mode")    { File.chmod(0o600, fp); File.stat(fp).mode & 0o777 }
 File.delete(fp)

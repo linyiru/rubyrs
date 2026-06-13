@@ -22,8 +22,8 @@ require "tmpdir"
 class Tempfile
   @@seq = 0
 
-  def self.open(basename = "tmp")
-    f = new(basename)
+  def self.open(basename = "tmp", *rest, **opts)
+    f = new(basename, *rest, **opts)
     return f unless block_given?
     begin
       yield f
@@ -32,11 +32,22 @@ class Tempfile
     end
   end
 
-  def initialize(basename = "tmp")
+  # CRuby's `Tempfile.new(basename = "", tmpdir = nil, mode: 0,
+  # **options)`. `basename` is a String prefix OR a `[prefix, suffix]`
+  # pair (rack's UploadedFile passes `[name, ".txt"]` so the temp path
+  # keeps the extension for File.extname / content-type sniffing).
+  # tmpdir + mode + the options hash (encoding:, etc.) are accepted;
+  # only the path shape matters for the buffered veneer.
+  def initialize(basename = "tmp", tmpdir = nil, mode: 0, **_opts)
     @@seq += 1
-    dir = ENV["TMPDIR"] || "/tmp"
-    dir = dir.chomp("/")
-    @path = "#{dir}/rubyrs-#{Process.pid}-#{@@seq}-#{basename}"
+    dir = (tmpdir || ENV["TMPDIR"] || "/tmp").to_s.chomp("/")
+    prefix, suffix =
+      if basename.is_a?(Array)
+        [basename[0].to_s, (basename[1] || "").to_s]
+      else
+        [basename.to_s, ""]
+      end
+    @path = "#{dir}/#{prefix}-rubyrs#{Process.pid}-#{@@seq}#{suffix}"
     @buf = +""
     @flushed = false
     @closed = false
