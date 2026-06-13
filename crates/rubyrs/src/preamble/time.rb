@@ -217,6 +217,18 @@ class Time
     # source of truth (to_i quirks, junk suffixes, huge years).
     fast = __rubyrs_time_parse_iso(s)
     return new(fast, 0) if fast
+    # RFC 2822 / RFC 7231 httpdate shapes carry a month NAME ("Jun")
+    # rather than the ISO numeric `-` layout — e.g.
+    # "Sat, 13 Jun 2026 22:00:05 GMT". rack's Response cache helpers
+    # write `Time.now.httpdate` into a header then re-`Time.parse` it,
+    # so without this `Time.parse` raised "no time information" on its
+    # own output. Delegate to the rfc2822 parser (which also accepts
+    # the httpdate variant) whenever a month-name token is present; it
+    # raises ArgumentError on a true mismatch, which propagates as
+    # CRuby's would.
+    if s.split(" ").any? { |tk| MONTH_ABBR.include?(tk) }
+      return rfc2822(s)
+    end
     # Split the date from the time/zone at the first space or 'T'.
     sep = nil
     i = 0

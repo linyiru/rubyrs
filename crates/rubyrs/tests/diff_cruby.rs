@@ -785,6 +785,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn struct_anon_ivars() { run_diff("struct_anon_ivars"); }
 #[test] fn struct_in_container_gc() { run_diff("struct_in_container_gc"); }
 #[test] fn time_parse() { run_diff("time_parse"); }
+// Time.parse accepts RFC 2822 / RFC 7231 httpdate (month-name) shapes,
+// not just ISO — rack Response cache helpers re-parse their own
+// httpdate output. All cases carry an explicit zone (TZ-independent).
+#[test] fn time_parse_rfc() { run_diff("time_parse_rfc"); }
 #[test] fn file_open_write() { run_diff("file_open_write"); }
 #[test] fn file_gets_separator() { run_diff("file_gets_separator"); }
 #[test] fn file_write_handle_read() { run_diff("file_write_handle_read"); }
