@@ -128,6 +128,33 @@ module URI
   # the lossy char view — the settled Regexp-over-non-UTF-8
   # boundary (docs/SUBSET.md). Byte loops sidestep that entirely:
   # escape("ø" as ISO-8859-1) is "%F8", matching CRuby.
+  # Per-byte emit table (256 entries): unreserved ALNUM *-._ pass
+  # through, space → "+", everything else → "%XX" uppercase. Note
+  # `~` is NOT in the www-form unreserved set — CRuby emits %7E.
+  #
+  # Built with loops rather than one boolean chain ON PURPOSE: a
+  # long `a || b || c …` condition lowers through deep AST
+  # recursion, and the coverage CI job (debug + instrument-coverage
+  # frames on a 2MB test thread) overflowed compiling the previous
+  # 9-term chain here. Tables are also what CRuby's uri/common.rb
+  # does (TBLENCWWWCOMP_).
+  WWW_FORM_EMIT = ::Array.new(256)
+  (0x00..0xFF).each { |b| WWW_FORM_EMIT[b] = "%%%02X" % b }
+  (0x30..0x39).each { |b| WWW_FORM_EMIT[b] = b.chr }
+  (0x41..0x5A).each { |b| WWW_FORM_EMIT[b] = b.chr }
+  (0x61..0x7A).each { |b| WWW_FORM_EMIT[b] = b.chr }
+  [0x2A, 0x2D, 0x2E, 0x5F].each { |b| WWW_FORM_EMIT[b] = b.chr }
+  WWW_FORM_EMIT[0x20] = "+"
+  WWW_FORM_EMIT.freeze
+
+  # Hex-digit value table ("0".."9" / "A".."F" / "a".."f" → 0..15,
+  # everything else nil). Same no-long-chain rationale as above.
+  HEX_VAL = ::Array.new(256)
+  (0..9).each { |d| HEX_VAL[0x30 + d] = d }
+  (0..5).each { |d| HEX_VAL[0x41 + d] = 10 + d }
+  (0..5).each { |d| HEX_VAL[0x61 + d] = 10 + d }
+  HEX_VAL.freeze
+
   def self.encode_www_form_component(str, enc = nil)
     str = str.to_s
     # CRuby transcodes only when an explicit target encoding is
@@ -136,17 +163,7 @@ module URI
     str = str.encode(enc) if enc && str.encoding != enc
     out = +""
     str.bytes.each do |b|
-      if (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A) ||
-         (b >= 0x61 && b <= 0x7A) ||
-         b == 0x2A || b == 0x2D || b == 0x2E || b == 0x5F
-        # unreserved set: ALNUM *-._  (note: `~` is NOT in the
-        # www-form set — CRuby encodes it as %7E)
-        out << b.chr
-      elsif b == 0x20
-        out << "+"
-      else
-        out << ("%%%02X" % b)
-      end
+      out << WWW_FORM_EMIT[b]
     end
     out.force_encoding(Encoding::US_ASCII)
   end
@@ -157,18 +174,13 @@ module URI
     out = []
     i = 0
     n = bytes.length
-    hex = lambda do |c|
-      if c.nil? then nil
-      elsif c >= 0x30 && c <= 0x39 then c - 0x30
-      elsif c >= 0x41 && c <= 0x46 then c - 0x41 + 10
-      elsif c >= 0x61 && c <= 0x66 then c - 0x61 + 10
-      end
-    end
     while i < n
       b = bytes[i]
       if b == 0x25 # %
-        d1 = hex.call(bytes[i + 1])
-        d2 = hex.call(bytes[i + 2])
+        c1 = bytes[i + 1]
+        c2 = bytes[i + 2]
+        d1 = c1 && HEX_VAL[c1]
+        d2 = c2 && HEX_VAL[c2]
         # CRuby validates the whole string against
         # %-followed-by-two-hex before decoding; the in-loop check
         # is equivalent (and O(n) — the spec pins the
@@ -209,7 +221,15 @@ module URI
       @scheme = scheme
       @userinfo = userinfo
       @host = host
-      @port = port || (scheme && DEFAULT_PORTS[scheme.downcase])
+      # Split on purpose — the one-line `port || (scheme &&
+      # DEFAULT_PORTS[…])` shape hit a pathological compiler
+      # recursion under the coverage build (debug +
+      # instrument-coverage frames, 2MB test thread): the
+      # ||(&&(index(call))) nesting overflowed while COMPILING.
+      # Tracked as a compiler-robustness task; the split is
+      # semantically identical.
+      default_port = scheme && DEFAULT_PORTS[scheme.downcase]
+      @port = port || default_port
       @path = path
       @query = query
       @fragment = fragment

@@ -63,3 +63,58 @@ module CGI
     str.to_s.gsub("+", " ").gsub(/%([0-9A-Fa-f]{2})/) { $1.to_i(16).chr }
   end
 end
+
+# CGI::Cookie — the parse-side cookie value rack's MockResponse
+# builds (`require "cgi/cookie"`; one Cookie per set-cookie line).
+# CRuby's is an Array SUBCLASS whose elements are the cookie's
+# values; #value returns self. Out of subset: CGI::Cookie.parse,
+# input validation beyond the required name.
+module CGI
+  class Cookie < Array
+    attr_accessor :name, :path, :domain, :expires
+    attr_reader :secure
+
+    def initialize(name = "", *values)
+      if name.is_a?(Hash)
+        options = name
+        @name = options["name"]
+        raise ArgumentError, "`name' required" unless @name
+        values = Array(options["value"] || [])
+        @path = options["path"]
+        @domain = options["domain"]
+        @expires = options["expires"]
+        @secure = options["secure"] == true
+      else
+        @name = name
+        @path = ""
+        @domain = nil
+        @expires = nil
+        @secure = false
+      end
+      values.each { |v| self << v }
+    end
+
+    def value
+      self
+    end
+
+    def value=(val)
+      clear
+      Array(val).each { |v| self << v }
+    end
+
+    def secure=(val)
+      @secure = (val == true)
+      @secure
+    end
+
+    def to_s
+      buf = +"#{@name}=#{join('&')}"
+      buf << "; domain=#{@domain}" if @domain
+      buf << "; path=#{@path}" if @path
+      buf << "; expires=#{@expires.httpdate}" if @expires
+      buf << "; secure" if @secure
+      buf
+    end
+  end
+end

@@ -172,10 +172,14 @@ class File
     nil
   end
 
-  def read(length = nil)
+  # `read(N, outbuf)` second arg: the result is REPLACED into
+  # outbuf and outbuf itself returned (same object — rack's
+  # multipart parser reuses one buffer across chunk reads); the
+  # EOF-nil path clears the buffer, matching CRuby.
+  def read(length = nil, outbuf = nil)
     raise IOError, "closed stream" if @__io_closed
     raise IOError, "not opened for reading" unless @__io_read
-    if length.nil? && @__io_pos == 0
+    if length.nil? && @__io_pos == 0 && outbuf.nil?
       # Whole-buffer read: return a dup, NOT a slice — slicing a
       # BINARY/registry-tagged buffer through the char view
       # U+FFFD-mangles it (E1 boundary; addressable's
@@ -187,14 +191,22 @@ class File
     # length is BYTES, and byte slicing keeps the buffer's tag
     # without mangling non-UTF-8 content.
     total = @__io_buf.bytesize
-    if length.nil?
-      rest = @__io_buf.byteslice(@__io_pos, total - @__io_pos) || ""
-      @__io_pos = total
-      rest
+    result =
+      if length.nil?
+        rest = @__io_buf.byteslice(@__io_pos, total - @__io_pos) || ""
+        @__io_pos = total
+        rest
+      else
+        chunk = @__io_buf.byteslice(@__io_pos, length) || ""
+        @__io_pos += chunk.bytesize
+        # read(N) at EOF is nil — but read(0) is always "".
+        chunk.bytesize == 0 && length > 0 ? nil : chunk
+      end
+    if outbuf
+      outbuf.replace(result || "")
+      result.nil? ? nil : outbuf
     else
-      chunk = @__io_buf.byteslice(@__io_pos, length) || ""
-      @__io_pos += chunk.bytesize
-      chunk.bytesize == 0 ? nil : chunk
+      result
     end
   end
 
@@ -216,6 +228,14 @@ class File
       @__io_pos = total
     end
     line
+  end
+
+  # The handle's read encoding = the buffer's tag (the veneer
+  # transcodes/tags at open, so the buffer IS the external view).
+  # CRuby returns nil for write-only handles; the veneer keeps it
+  # simple and reports the buffer tag whenever one exists.
+  def external_encoding
+    @__io_buf ? @__io_buf.encoding : Encoding::UTF_8
   end
 
   # Like #gets but raises EOFError at end of file instead of

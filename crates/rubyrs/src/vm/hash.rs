@@ -234,6 +234,60 @@ impl Vm {
                     ("include?", [k]) | ("has_key?", [k]) | ("key?", [k]) | ("member?", [k]) => {
                         Some(Value::Bool(self.heap.hash_index_lookup(id, k).is_some()))
                     }
+                    // `h.assoc(key)` → [key, value] or nil. CRuby
+                    // compares with ==; the index lookup uses eql?,
+                    // identical for the string/symbol keys real
+                    // callers (rack Headers#assoc supers here) use.
+                    ("assoc", [k]) => {
+                        let found = self.heap.hash_index_lookup(id, k)
+                            .map(|pos| self.heap.hash(id)[pos].1.clone());
+                        match found {
+                            Some(v) => {
+                                self.maybe_gc();
+                                let nid = self.heap.alloc(HeapObj::Array(vec![k.clone(), v].into()));
+                                Some(Value::Array(nid))
+                            }
+                            None => Some(Value::Nil),
+                        }
+                    }
+                    // `h.rassoc(value)` → first [key, value] whose
+                    // value == v (linear, insertion order), or nil.
+                    ("rassoc", [val]) => {
+                        let found = self.heap.hash(id).iter()
+                            .find(|(_, v)| v.ruby_eq(val, &self.heap))
+                            .map(|(k, v)| (k.clone(), v.clone()));
+                        match found {
+                            Some((k, v)) => {
+                                self.maybe_gc();
+                                let nid = self.heap.alloc(HeapObj::Array(vec![k, v].into()));
+                                Some(Value::Array(nid))
+                            }
+                            None => Some(Value::Nil),
+                        }
+                    }
+                    ("value?", [val]) | ("has_value?", [val]) => {
+                        Some(Value::Bool(
+                            self.heap.hash(id).iter().any(|(_, v)| v.ruby_eq(val, &self.heap)),
+                        ))
+                    }
+                    // `h.shift` — removes and returns the FIRST pair
+                    // (insertion order) as [key, value]; nil when
+                    // empty (CRuby 3.x; the old default-return form
+                    // was dropped in 3.2).
+                    ("shift", []) => {
+                        let first = {
+                            let pairs = self.heap.hash_mut(id);
+                            if pairs.is_empty() { None } else { Some(pairs.remove(0)) }
+                        };
+                        match first {
+                            Some((k, v)) => {
+                                self.maybe_gc();
+                                let nid = self.heap.alloc(HeapObj::Array(vec![k, v].into()));
+                                Some(Value::Array(nid))
+                            }
+                            None => Some(Value::Nil),
+                        }
+                    }
                     ("keys", []) => {
                         let keys: Vec<Value> = self.heap.hash(id).iter().map(|(k, _)| k.clone()).collect();
                         self.maybe_gc();

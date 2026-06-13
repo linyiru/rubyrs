@@ -111,7 +111,7 @@ pub(crate) fn always_on_stub_extras(name: &str) -> Option<&'static str> {
         // call (escape → CGI.escapeHTML, url_encode → CGI.escape).
         // Always-on for the same reason as bigdecimal: liquid is a
         // default-build consumer.
-        "cgi" | "cgi/util" | "cgi/escape" => Some(include_str!("stdlib_vendor/cgi.rb")),
+        "cgi" | "cgi/util" | "cgi/escape" | "cgi/cookie" => Some(include_str!("stdlib_vendor/cgi.rb")),
         _ => None,
     }
 }

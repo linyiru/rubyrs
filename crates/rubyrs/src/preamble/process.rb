@@ -63,6 +63,29 @@ class IO
     @which = which
   end
 
+  # `IO.pipe` — an in-memory pipe pair. Tier-1 models the
+  # single-threaded write-then-read shape (rack's MockRequest
+  # specs feed a pipe as rack.input): the writer appends to a
+  # shared binary buffer, the reader consumes byte-based with the
+  # `(length, outbuf)` IO contract. No real fd, no blocking
+  # semantics — a reader that outpaces the writer sees EOF
+  # immediately rather than blocking (documented divergence; the
+  # cross-thread streaming shape needs real pipes).
+  def self.pipe
+    state = { buf: +"".b, pos: 0, wclosed: false }
+    r = RubyrsPipeReader.new(state)
+    w = RubyrsPipeWriter.new(state)
+    if block_given?
+      begin
+        return yield(r, w)
+      ensure
+        r.close rescue nil
+        w.close rescue nil
+      end
+    end
+    [r, w]
+  end
+
   def write(*args)
     # Delegation mode — `$stdout.reopen(tempfile)` redirects this
     # handle's writes into the target until a reopen back to a real
@@ -277,5 +300,141 @@ module Process
       "#<Process::Status: pid #{@pid} exit #{@exitstatus}>"
     end
     alias_method :to_s, :inspect
+  end
+end
+
+# IO.pipe's in-memory endpoints (see IO.pipe above). Both are
+# byte-based over one shared state Hash; deliberately NOT IO
+# subclasses (IO#initialize models stdout/stderr sinks) — duck-typed
+# like StringIO, which is what rack/minitest consumers dispatch on.
+class RubyrsPipeReader
+  def initialize(state)
+    @state = state
+    @closed = false
+  end
+
+  def read(length = nil, outbuf = nil)
+    raise IOError, "closed stream" if @closed
+    buf = @state[:buf]
+    total = buf.bytesize
+    pos = @state[:pos]
+    result =
+      if length.nil?
+        out = buf.byteslice(pos, total - pos) || ""
+        @state[:pos] = total
+        out
+      else
+        chunk = buf.byteslice(pos, length) || ""
+        @state[:pos] = pos + chunk.bytesize
+        chunk.bytesize == 0 && length > 0 ? nil : chunk
+      end
+    if outbuf
+      outbuf.replace(result || "")
+      result.nil? ? nil : outbuf
+    else
+      result
+    end
+  end
+
+  def gets(sep = "\n")
+    buf = @state[:buf]
+    total = buf.bytesize
+    pos = @state[:pos]
+    return nil if pos >= total
+    idx = buf.byteindex(sep, pos)
+    if idx
+      line = buf.byteslice(pos, idx + sep.bytesize - pos)
+      @state[:pos] = idx + sep.bytesize
+    else
+      line = buf.byteslice(pos, total - pos)
+      @state[:pos] = total
+    end
+    line
+  end
+
+  def each(sep = "\n")
+    while (l = gets(sep))
+      yield l
+    end
+    self
+  end
+  alias_method :each_line, :each
+
+  def eof?
+    @state[:pos] >= @state[:buf].bytesize
+  end
+
+  def rewind
+    @state[:pos] = 0
+    0
+  end
+
+  def binmode; self; end
+  def set_encoding(*_a); self; end
+
+  def close
+    @closed = true
+    nil
+  end
+
+  def closed?
+    @closed
+  end
+end
+
+class RubyrsPipeWriter
+  def initialize(state)
+    @state = state
+    @closed = false
+  end
+
+  def write(*args)
+    raise IOError, "closed stream" if @closed
+    total = 0
+    args.each do |a|
+      s = a.to_s
+      @state[:buf] << s.b
+      total += s.bytesize
+    end
+    total
+  end
+
+  def <<(s)
+    write(s)
+    self
+  end
+
+  def puts(*args)
+    if args.empty?
+      write("\n")
+    else
+      args.each do |a|
+        s = a.to_s
+        write(s)
+        write("\n") unless s.end_with?("\n")
+      end
+    end
+    nil
+  end
+
+  def print(*args)
+    args.each { |a| write(a.to_s) }
+    nil
+  end
+
+  def flush; self; end
+  def sync; true; end
+  def sync=(_v); _v; end
+  def binmode; self; end
+  def set_encoding(*_a); self; end
+
+  def close
+    @closed = true
+    @state[:wclosed] = true
+    nil
+  end
+
+  def closed?
+    @closed
   end
 end

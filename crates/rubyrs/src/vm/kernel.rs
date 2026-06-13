@@ -66,6 +66,7 @@ impl Vm {
                 | "__defined_method?"
                 | "__defined_const?"
                 | "__defined_recv_method?"
+                | "undef_method"
                 | "eval"
                 // `autoload(:Foo, "path")` / `autoload?(:Foo)`
                 // top-level forms — Phase 1 of issue #224. The
@@ -709,6 +710,44 @@ impl Vm {
                     let hit = self.responds_to(recv, *sid, false);
                     return Some(Ok(if hit { Value::new_str("method") } else { Value::Nil }));
                 }
+                Some(Ok(Value::Nil))
+            }
+            // `undef :name` inside instance_eval — ast.rs lowers
+            // undef to a bare `undef_method` call, which arrives
+            // here with an OBJECT self (class-body forms have a
+            // Class self and fall through — `return None` — to the
+            // class intrinsics arm in dispatch.rs). Tombstone the
+            // name(s) on the object's eigenclass so lookup stops
+            // there: rack's rewindable_input spec builds a
+            // non-rewindable IO via
+            // `io.instance_eval { undef :rewind }`.
+            "undef_method" => {
+                if self.bare_builtin_user_override("undef_method") {
+                    return None;
+                }
+                let self_val = self.frames.last().map(|f| f.self_val.clone());
+                let Some(Value::Object(oid)) = self_val else {
+                    return None;
+                };
+                let mut sids = Vec::with_capacity(args.len());
+                for arg in args {
+                    let sid = match arg {
+                        Value::Sym(s) => *s,
+                        Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                        other => {
+                            let inspected = other.to_inspect(&self.heap, &self.interner);
+                            return Some(Err(self.trap(RubyError::TypeError {
+                                msg: format!("{} is not a symbol nor a string", inspected),
+                            })));
+                        }
+                    };
+                    sids.push(sid);
+                }
+                let sc = self.heap.ensure_singleton_class(oid);
+                for sid in sids {
+                    sc.undefed.borrow_mut().insert(sid);
+                }
+                self.method_gen = self.method_gen.wrapping_add(1);
                 Some(Ok(Value::Nil))
             }
             "__defined_const?" => {
@@ -4064,7 +4103,7 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
         "open3" => &[("Open3", true)],
         "shellwords" => &[("Shellwords", true)],
         "weakref" => &[("WeakRef", false)],
-        "cgi" | "cgi/util" | "cgi/escape" => &[("CGI", false)],
+        "cgi" | "cgi/util" | "cgi/escape" | "cgi/cookie" => &[("CGI", false)],
         // `ipaddr`: Sinatra 4 + rack-protection 4 `require 'ipaddr'`
         // at module-load time. Class-body usage is constant-check
         // shape (`when IPAddr`, `rescue IPAddr::InvalidAddressError`)
@@ -4240,7 +4279,7 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         // require + rescue-class references resolve.
         | "timeout"
         | "open3" | "shellwords" | "weakref"
-        | "cgi" | "cgi/util" | "cgi/escape"
+        | "cgi" | "cgi/util" | "cgi/escape" | "cgi/cookie"
         | "ipaddr"
         // `openssl`: rack-session's cookie / encryptor `require
         // 'openssl'` at module-load time but only call

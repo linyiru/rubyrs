@@ -99,15 +99,24 @@ class Time
   # here — documented divergence for hosts in other zones
   # (minitest's skip_until/fail_after only compare dates, where
   # this is exact).
-  def self.utc(year, month = 1, day = 1, hour = 0, min = 0, sec = 0)
+  # `Time.local` keeps the local FLAVOUR (under TZ=UTC CRuby still
+  # renders it "+0000"); `Time.utc` carries the UTC flavour
+  # (renders "UTC", utc? true). Same single clock either way —
+  # only the flavour bit differs (see initialize).
+  def self.local(year, month = 1, day = 1, hour = 0, min = 0, sec = 0)
     days = days_from_civil(year, month, day)
     new(days * 86_400 + hour * 3600 + min * 60 + sec, 0)
   end
 
+  def self.utc(year, month = 1, day = 1, hour = 0, min = 0, sec = 0)
+    t = local(year, month, day, hour, min, sec)
+    t.instance_variable_set(:@local, false)
+    t
+  end
+
   class << self
     alias_method :gm, :utc
-    alias_method :local, :utc
-    alias_method :mktime, :utc
+    alias_method :mktime, :local
   end
 
   # Howard Hinnant's `days_from_civil` — the inverse of `decompose`'s
@@ -139,6 +148,18 @@ class Time
   # too — the preamble must compile without the regex Cargo feature
   # (wasm32-wasip1 / Tier-1 minimal), and a `/.../` literal there is a
   # load-time SyntaxError.
+  # `Time.httpdate(str)` — parse the RFC 7231 IMF-fixdate shape
+  # Time#httpdate emits ("Sun, 06 Nov 1994 08:49:37 GMT"). Strict
+  # on that one format, like CRuby's lib/time.rb (which also
+  # accepts the obsolete RFC 850/asctime forms — out of subset
+  # until a consumer needs them).
+  def self.httpdate(str)
+    m = /\A\s*(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat),\s+(\d{2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s+GMT\s*\z/.match(str)
+    raise ArgumentError, "not RFC 2616 compliant date: #{str.inspect}" unless m
+    mon = MONTH_ABBR.index(m[2]) + 1
+    utc(m[3].to_i, mon, m[1].to_i, m[4].to_i, m[5].to_i, m[6].to_i)
+  end
+
   def self.parse(str, _now = nil)
     s = str.to_s.strip
     # Host fast path (`__rubyrs_time_parse_iso`, vm/kernel.rs):

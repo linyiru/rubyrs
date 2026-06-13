@@ -326,3 +326,100 @@ module RubyrsYAMLParse
     parts
   end
 end
+
+# ---- dump side -------------------------------------------------
+#
+# A block-style emitter whose output ROUND-TRIPS through the parser
+# above (that's the contract rack's MockRequest specs exercise:
+# `env.to_yaml` in the app, `YAML.unsafe_load(res.body)` in the
+# assertion). Strings are always double-quoted with the same escape
+# set parse_double_quoted understands. NOT CRuby-psych-byte-
+# compatible (key order is insertion order, no line wrapping), and
+# arbitrary objects emit as their `inspect` STRING — a documented
+# placeholder, fine for env values (rack.input handles) that the
+# specs never assert on.
+module RubyrsYAMLDump
+  module_function
+
+  def document(obj)
+    case obj
+    when Hash
+      obj.empty? ? "--- {}\n" : "---#{mapping(obj, 0)}\n"
+    when Array
+      obj.empty? ? "--- []\n" : "---#{sequence(obj, 0)}\n"
+    else
+      "--- #{scalar_str(obj)}\n"
+    end
+  end
+
+  def mapping(hash, indent)
+    pad = " " * indent
+    lines = hash.map do |k, v|
+      key = scalar_str(k)
+      "#{pad}#{key}:#{nested(v, indent)}"
+    end
+    "\n" + lines.join("\n")
+  end
+
+  def sequence(arr, indent)
+    pad = " " * indent
+    lines = arr.map { |v| "#{pad}-#{nested(v, indent)}" }
+    "\n" + lines.join("\n")
+  end
+
+  def nested(v, indent)
+    case v
+    when Hash
+      v.empty? ? " {}" : mapping(v, indent + 2)
+    when Array
+      v.empty? ? " []" : sequence(v, indent + 2)
+    else
+      " #{scalar_str(v)}"
+    end
+  end
+
+  def scalar_str(v)
+    case v
+    when String then quote(v)
+    when Symbol then quote(v.to_s)
+    when Integer, Float then v.to_s
+    when true then "true"
+    when false then "false"
+    when nil then "~"
+    else quote(v.inspect)
+    end
+  end
+
+  def quote(s)
+    out = +'"'
+    s.each_char do |c|
+      out << case c
+             when '"' then '\\"'
+             when "\\" then "\\\\"
+             when "\n" then "\\n"
+             when "\t" then "\\t"
+             when "\r" then "\\r"
+             when "\0" then "\\0"
+             else c
+             end
+    end
+    out << '"'
+    out
+  end
+end
+
+module YAML
+  class << self
+    def dump(obj, *_args)
+      RubyrsYAMLDump.document(obj)
+    end
+  end
+end
+
+# CRuby's psych adds Object#to_yaml universally; the emitter above
+# covers the scalar/collection subset and stringifies the rest.
+class Object
+  def to_yaml(*_args)
+    YAML.dump(self)
+  end
+end

@@ -165,18 +165,29 @@ class StringIO
 
   # ----- read side -----
 
-  def read(length = nil)
+  # `read(N, outbuf)` second arg: the result is REPLACED into
+  # outbuf and outbuf itself is returned (same object — rack's
+  # multipart parser reuses one buffer across chunk reads). On the
+  # EOF-nil path the buffer is cleared, matching CRuby.
+  def read(length = nil, outbuf = nil)
     return nil if length && length < 0
-    if length.nil?
-      result = @str[@pos..] || ""
-      @pos = @str.length
-      result
+    result =
+      if length.nil?
+        r = @str[@pos..] || ""
+        @pos = @str.length
+        r
+      else
+        slice = @str[@pos, length] || ""
+        @pos += slice.length
+        # `read(N)` on EOF returns nil; on partial returns whatever's
+        # left. Mirrors CRuby for the cases gem helpers care about.
+        slice.empty? && length > 0 ? nil : slice
+      end
+    if outbuf
+      outbuf.replace(result || "")
+      result.nil? ? nil : outbuf
     else
-      slice = @str[@pos, length] || ""
-      @pos += slice.length
-      # `read(N)` on EOF returns nil; on partial returns whatever's
-      # left. Mirrors CRuby for the cases gem helpers care about.
-      slice.empty? && length > 0 ? nil : slice
+      result
     end
   end
 

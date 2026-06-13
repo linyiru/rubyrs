@@ -352,6 +352,50 @@ impl Vm {
     ///     so `|pair|` blocks and `&:sym` to_proc work.
     ///
     /// `find` returns the same pair Array it yielded.
+    /// `select!` / `keep_if` / `reject!` / `delete_if` — in-place
+    /// pair filter (rack's Headers subclass supers into all four).
+    /// `keep_on_truthy` is the polarity (select!/keep_if keep on
+    /// truthy; reject!/delete_if drop on truthy).
+    /// `nil_when_unchanged`: select!/reject! return nil when
+    /// nothing was removed; keep_if/delete_if always return self.
+    /// DIVERGENCE on `break`: commit-on-normal-completion (the
+    /// receiver is left untouched), same scratch-Vec shape as
+    /// transform_keys! — documented in SUBSET.md.
+    fn iter_hash_filter_in_place(
+        &mut self,
+        id: ObjId,
+        keep_on_truthy: bool,
+        nil_when_unchanged: bool,
+        block: ObjId,
+    ) -> Result<Value, Trap> {
+        let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+        let mut g = PinGuard::new(self);
+        g.pin(Value::Hash(id));
+        g.pin(Value::Block(block));
+        for (k, v) in &snapshot {
+            if k.is_gc_heap_ref() { g.pin(k.clone()); }
+            if v.is_gc_heap_ref() { g.pin(v.clone()); }
+        }
+        let pre_frames = g.vm.frames.len();
+        let mut kept: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
+        let mut early: Option<Value> = None;
+        for (k, v) in snapshot {
+            let step = g.vm.step_block(block, vec![k.clone(), v.clone()], pre_frames);
+            let r = match step? {
+                BlockStep::MethodReturn => return Ok(Value::Nil),
+                BlockStep::Break(r) => { early = Some(r); break; }
+                BlockStep::Value(r) => r,
+            };
+            if r.is_truthy() == keep_on_truthy {
+                kept.push((k, v));
+            }
+        }
+        if let Some(e) = early { return Ok(e); }
+        let changed = kept.len() != g.vm.heap.hash(id).len();
+        *g.vm.heap.hash_mut(id) = kept;
+        Ok(if changed || !nil_when_unchanged { Value::Hash(id) } else { Value::Nil })
+    }
+
     pub(crate) fn iter_hash_filter(&mut self, id: ObjId, mode: IterMode, block: ObjId) -> Result<Value, Trap> {
         let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
         let mut g = PinGuard::new(self);
@@ -4254,6 +4298,10 @@ impl Vm {
 
             (Value::Hash(id), "select", []) | (Value::Hash(id), "filter", []) => Some(self.iter_hash_filter(*id, IterMode::Select, block)?),
             (Value::Hash(id), "reject", []) => Some(self.iter_hash_filter(*id, IterMode::Reject, block)?),
+            (Value::Hash(id), "select!", []) | (Value::Hash(id), "filter!", []) => Some(self.iter_hash_filter_in_place(*id, true, true, block)?),
+            (Value::Hash(id), "keep_if", []) => Some(self.iter_hash_filter_in_place(*id, true, false, block)?),
+            (Value::Hash(id), "reject!", []) => Some(self.iter_hash_filter_in_place(*id, false, true, block)?),
+            (Value::Hash(id), "delete_if", []) => Some(self.iter_hash_filter_in_place(*id, false, false, block)?),
             (Value::Hash(id), "find", []) | (Value::Hash(id), "detect", []) => Some(self.iter_hash_filter(*id, IterMode::Find, block)?),
             (Value::Hash(id), "any?", []) => Some(self.iter_hash_filter(*id, IterMode::Any, block)?),
             (Value::Hash(id), "all?", []) => Some(self.iter_hash_filter(*id, IterMode::All, block)?),
