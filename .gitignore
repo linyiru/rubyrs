@@ -44,3 +44,6 @@ __pycache__/
 lcov.info
 target/llvm-cov-target/
 target/llvm-cov/
+# Raw profiles from manual `RUSTFLAGS=-C instrument-coverage` runs —
+# they land in the cwd/crate dirs (llvm-cov keeps its own under target/).
+*.profraw
