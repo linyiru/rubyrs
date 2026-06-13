@@ -31,6 +31,18 @@ t("slice! re")   { x = +"hello"; [x.slice!(/l+o/), x, $~ && $~[0]] }
 t("slice! cap")  { x = +"hello"; [x.slice!(/l(l)o/, 1), x] }
 t("slice! miss") { x = +"abc"; [x.slice!(/zz/), x] }
 t("slice! 0arg") { begin; (+"abc").slice!; rescue ArgumentError => e; e.message; end }
+t("slice! 3arg") { begin; (+"abc").slice!(0, 1, 2); rescue ArgumentError => e; e.message; end }
+t("slice! re-name"){ begin; (+"hello").slice!(/l/, "x"); rescue IndexError => e; e.message; end }
+t("slice! re typ") { begin; (+"hello").slice!(/l/, []); rescue TypeError => e; e.class; end }
+t("slice! frozen"){ begin; "abc".freeze.slice!(0); rescue FrozenError, RuntimeError => e; e.class; end }
+t("slice! beginl"){ x = +"hello"; [x.slice!(..2), x] }
+t("slice! endl")  { x = +"hello"; [x.slice!(2..), x] }
+t("slice! emptys"){ x = +"abc"; [x.slice!(""), x] }
+t("slice! re cap0"){ x = +"hello"; [x.slice!(/l(l)o/, 0), x] }
+t("slice! re capN"){ x = +"hello"; [x.slice!(/l(l)o/, 5), x] }
+t("slice! nm str") { x = +"foo bar"; [x.slice!(/(?<w>\w+)/, "w"), x] }
+t("slice! nm sym") { x = +"foo bar"; [x.slice!(/(?<w>\w+)/, :w), x] }
+t("slice! nm grp") { x = +"k=v"; [x.slice!(/(?<k>\w+)=(?<v>\w+)/, "v"), x] }
 
 # String#index(regexp[, offset]) + rindex(str, offset)
 s = "a;b;c;d"
@@ -38,7 +50,9 @@ t("idx re")      { s.index(/;/) }
 t("idx re off")  { [s.index(/[;]/, 3), s.index(/z/, 2)] }
 t("idx re $~")   { s.index(/(;)./); [$1, $~ && $~[0]] }
 t("rindex off")  { [s.rindex(";", 4), s.rindex(";", 0), s.rindex("", 3)] }
+t("rindex neg")  { [s.rindex(";", -2), s.rindex(";", -99)] }
 t("idx fancy")   { "foobar".index(/foo(?=bar)/) }
+t("idx re neg")  { [s.index(/;/, -3), s.index(/;/, -99), s.index(/;/, 99)] }
 
 # String#scrub / scrub!
 t("scrub!")      { x = +"ab\xFFc"; [x.scrub!, x] }
@@ -49,6 +63,9 @@ t("scrub")       { x = "ab\xFFc"; [x.scrub, x.valid_encoding?] }
 # regex captures through the dual engine (String#[] / case-eq)
 t("bracket fancy") { "ab1c"[/ab.(?=c)/] }
 t("bracket cap")   { "x: 42"[/x: (\d+)/, 1] }
+t("bracket name")  { "key=val"[/(?<k>\w+)=(?<v>\w+)/, "v"] }
+t("bracket sym")   { "key=val"[/(?<k>\w+)=/, :k] }
+t("bracket noname"){ begin; "hi"[/h/, "z"]; rescue IndexError => e; e.message; end }
 t("case-eq fancy") { case "foobar"; when /foo(?=bar)/ then "hit #{$~[0]}"; else "miss"; end }
 t("eq3 backref")   { /(\w+) bb \1/ === "aa bb aa" }
 

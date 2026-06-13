@@ -1006,3 +1006,21 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Marshal.load over real CRuby 4.8 bytes (common-tag subset) +
 // binary-mode whole-buffer handle read transparency.
 #[test] fn marshal_load_binary() { run_diff("marshal_load_binary"); }
+// rack self-suite batch 1: defined?(recv.m) guards, public-flip of
+// inherited module_function methods, def-self.x stays public,
+// remove_method eigenclass bridge, bare warn/fail user override,
+// Hash-subclass super into initialize, respond_to? super, Regexp
+// encoding-flag constants. (zero require — runs in every build.)
+#[test] fn rack_spec_vm_fixes() { run_diff("rack_spec_vm_fixes"); }
+// rack self-suite batch 3 core (zero require): Hash assoc/rassoc/
+// shift/value?/select!/keep_if/reject!/delete_if, String slice!/
+// index(regexp)/rindex(off)/scrub!, dual-engine captures, undef in
+// instance_eval, Struct-subclass member resolution (+ the GC
+// superclass-chain root-hole reproducer).
+#[test] fn string_hash_core_ops() { run_diff("string_hash_core_ops"); }
+// rack self-suite batch 2 library surface (requires stringio /
+// tempfile / yaml / cgi/cookie / time): IO#read(len, outbuf),
+// Tempfile byte reads, IO.pipe, YAML round-trip, CGI::Cookie,
+// Time.httpdate parse + utc flavour.
+#[cfg(feature = "stdlib")]
+#[test] fn rack_spec_lib_fixes() { run_diff("rack_spec_lib_fixes"); }

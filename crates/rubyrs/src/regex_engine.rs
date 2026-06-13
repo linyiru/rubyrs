@@ -573,6 +573,23 @@ impl CompiledRegex {
         }
     }
 
+    /// Absolute group index (0 = whole match, 1..N = capture groups)
+    /// of the named capture group `name`, or `None` if no group has
+    /// that name. `capture_names()` yields one `Option<&str>` per
+    /// group in index order (group 0 + the unnamed groups are `None`),
+    /// so `position` lands on the matching absolute index — exactly the
+    /// `n` semantics `str_bracket_regex` / `slice!` already use for the
+    /// Integer form. Lets `String#[](regexp, name)` / `#slice!(regexp,
+    /// name)` resolve a String/Symbol capture reference against the
+    /// PATTERN (independent of any match), so an unknown name is
+    /// CRuby's `IndexError: undefined group name reference: <name>`.
+    pub(crate) fn capture_name_index(&self, name: &str) -> Option<usize> {
+        match self.engine() {
+            Engine::Native(r) => r.capture_names().position(|n| n == Some(name)),
+            Engine::Fancy(r) => r.capture_names().position(|n| n == Some(name)),
+        }
+    }
+
     /// Engine-agnostic capture iteration for `String#scan` (no-block).
     /// Returns one entry per non-overlapping match; each entry holds the
     /// capture groups `0..captures_len` as owned Strings (`None` for an

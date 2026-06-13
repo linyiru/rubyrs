@@ -2266,6 +2266,31 @@ impl Vm {
                 {
                     return Ok(Some(self.str_bracket_regex(&s, re, *n)?));
                 }
+                // `String#[](regexp, name)` — String/Symbol second arg
+                // is a NAMED capture reference (CRuby), resolved to its
+                // group index so str_bracket_regex's Integer path runs.
+                // Unknown name → IndexError, validated against the
+                // pattern before the match.
+                #[cfg(feature = "regex")]
+                if (name == "[]" || name == "slice") && args.len() == 2
+                    && let Value::Regex(re) = &args[0]
+                    && matches!(&args[1], Value::Str(_) | Value::Sym(_))
+                {
+                    let gname = match &args[1] {
+                        Value::Str(rs) => rs.to_string_lossy(),
+                        Value::Sym(sid) => self.interner.resolve(*sid).to_string(),
+                        _ => unreachable!(),
+                    };
+                    let idx = match re.capture_name_index(&gname) {
+                        Some(i) => i as i64,
+                        None => {
+                            return Err(self.trap(RubyError::IndexError {
+                                msg: format!("undefined group name reference: {gname}"),
+                            }));
+                        }
+                    };
+                    return Ok(Some(self.str_bracket_regex(&s, re, idx)?));
+                }
                 // Float→Int coerce on the 1-arg index form. CRuby's
                 // `String#[]` treats Float via `to_int` (truncates
                 // toward zero); rubyrs's match arm only bound
@@ -2447,8 +2472,40 @@ impl Vm {
                     }
                     #[cfg(feature = "regex")]
                     if let Value::Regex(re) = &args[0] {
+                        // CRuby resolves a String/Symbol second arg as
+                        // a NAMED capture reference against the pattern;
+                        // an unknown name is IndexError (not TypeError),
+                        // resolved before the match runs. A resolved name
+                        // becomes its absolute group index, reusing the
+                        // Integer-`n` span logic below.
                         let n = match args.get(1) {
                             Some(Value::Int(n)) => *n,
+                            Some(Value::Str(gname)) => {
+                                let gname = gname.to_string_lossy();
+                                match re.capture_name_index(&gname) {
+                                    Some(idx) => idx as i64,
+                                    None => {
+                                        return Err(self.trap(RubyError::IndexError {
+                                            msg: format!(
+                                                "undefined group name reference: {gname}",
+                                            ),
+                                        }));
+                                    }
+                                }
+                            }
+                            Some(Value::Sym(sid)) => {
+                                let gname = self.interner.resolve(*sid).to_string();
+                                match re.capture_name_index(&gname) {
+                                    Some(idx) => idx as i64,
+                                    None => {
+                                        return Err(self.trap(RubyError::IndexError {
+                                            msg: format!(
+                                                "undefined group name reference: {gname}",
+                                            ),
+                                        }));
+                                    }
+                                }
+                            }
                             Some(other) => {
                                 return Err(self.trap(RubyError::TypeError {
                                     msg: format!(
