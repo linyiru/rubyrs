@@ -52,6 +52,12 @@ File.open(path) do |f|
   t("file rest buf")  { r = f.read(nil, buf); [r, buf] }
   t("file eof buf")   { r = f.read(2, buf); [r, buf] }
 end
+# set_encoding / binmode on the File veneer (rack's multipart generator
+# does `File.open(p, 'rb') { |f| f.set_encoding(Encoding::BINARY) }`).
+File.open(path) do |f|
+  t("file set_enc")   { f.set_encoding(Encoding::BINARY); f.external_encoding.to_s }
+  t("file binmode")   { f.binmode; [f.binmode?, f.read.encoding.to_s] }
+end
 File.delete(path)
 
 # 2b — File class predicates + mtime + seek/pos family (Rack::Files

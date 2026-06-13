@@ -311,6 +311,25 @@ class File
     @__io_buf ? @__io_buf.encoding : Encoding::UTF_8
   end
 
+  # `set_encoding(ext[, int])` / `binmode` — re-tag the buffered
+  # content's encoding. rack's multipart generator opens a part with
+  # `File.open(path, 'rb') { |f| f.set_encoding(Encoding::BINARY); ... }`.
+  # The veneer reads bytes up front, so this only adjusts the tag and
+  # returns self (CRuby returns the IO).
+  def set_encoding(ext, *_rest)
+    @__io_buf.force_encoding(ext) if @__io_buf
+    self
+  end
+
+  def binmode
+    @__io_buf.force_encoding(Encoding::BINARY) if @__io_buf
+    self
+  end
+
+  def binmode?
+    @__io_buf ? @__io_buf.encoding == Encoding::BINARY : false
+  end
+
   # Like #gets but raises EOFError at end of file instead of
   # returning nil (CRuby IO#readline). Discovery: P3 Jekyll spike —
   # `utils.rb#has_yaml_header?` does `File.open(f, "rb", &:readline)`
