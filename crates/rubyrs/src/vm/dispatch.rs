@@ -11768,6 +11768,17 @@ impl Vm {
             self.stack.push(Value::Class(eigen));
             return Ok(());
         }
+        // Array / Proc per-instance eigenclass (the `heap_singletons`
+        // side-table — twin of the Object/Hash/Str arms above). rack's
+        // spec_response does `body.singleton_class.class_eval{alias <<
+        // call}` on a Proc body so `response.write` can `<<` to it.
+        if &*name == "singleton_class" && args.is_empty()
+            && matches!(&recv, Value::Block(_) | Value::Array(_))
+        {
+            let eigen = self.ensure_heap_singleton(&recv);
+            self.stack.push(Value::Class(eigen));
+            return Ok(());
+        }
         // `class << self; self; end` with a String self desugars to
         // this call (minitest's Object#stub on a String value).
         if &*name == "singleton_class" && args.is_empty()

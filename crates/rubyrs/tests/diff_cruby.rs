@@ -1061,6 +1061,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // native dispatch intact. rack Deflater/Lock/ContentLength define
 // :close/:each on Array/Proc bodies.
 #[test] fn singleton_method_builtins() { run_diff("singleton_method_builtins"); }
+// Proc#singleton_class / Array#singleton_class → per-instance eigenclass
+// (heap_singletons); class_eval installs methods + aliases native #call.
+// rack spec_response `body.singleton_class.class_eval{alias << call}`.
+#[test] fn heap_singleton_class() { run_diff("heap_singleton_class"); }
 // Zlib veneer over flate2 (stdlib): gzip/deflate round-trips,
 // GzipWriter/Reader, auto-inflate. rack Deflater + Static.
 #[cfg(feature = "stdlib")]
