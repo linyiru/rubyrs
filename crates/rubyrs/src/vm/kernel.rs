@@ -1457,6 +1457,46 @@ impl Vm {
                         Some(Ok(Value::Array(id)))
                     }
                     _ => {
+                        // CRuby's `Array(obj)` coerces via `to_ary`
+                        // then `to_a` before wrapping in `[obj]`
+                        // (rb_Array: rb_check_array_type →
+                        // rb_check_to_array → `[val]`). A user object
+                        // exposing either (e.g. Rack::Response#to_a →
+                        // `[status, headers, body]`) is expanded; this
+                        // also backs `[*obj]` / `a, b = *obj`, which
+                        // desugar through `Array(obj)`. We consult the
+                        // method TABLE only — native primitives (Range
+                        // etc.) aren't there, so they keep the `[obj]`
+                        // fallback, a pre-existing gap left untouched.
+                        let recv = args[0].clone();
+                        for conv in ["to_ary", "to_a"] {
+                            let mid = self.interner.intern(conv);
+                            let m = match self.class_of(&recv) {
+                                Value::Class(cls) => self.lookup_method_uncached(&cls, mid),
+                                _ => None,
+                            };
+                            let Some(m) = m else { continue };
+                            let pre = self.frames.len();
+                            let mut g = PinGuard::new(self);
+                            g.pin(recv.clone());
+                            if let Err(t) = g.vm.invoke_method(m, recv.clone(), vec![]) {
+                                return Some(Err(t));
+                            }
+                            if let Err(t) = g.vm.dispatch_until(pre) {
+                                return Some(Err(t));
+                            }
+                            // Only an Array result is accepted; nil (or
+                            // a non-Array from a misbehaving override)
+                            // falls through to the next conversion and
+                            // ultimately the `[obj]` wrap — lenient vs
+                            // CRuby's TypeError on a non-Array, never
+                            // hit by real to_ary/to_a implementations.
+                            let got_array = matches!(g.vm.stack.last(), Some(Value::Array(_)));
+                            let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                            if got_array {
+                                return Some(Ok(r));
+                            }
+                        }
                         // GC rooting: `args` was drained out of
                         // `self.stack` in `do_call`, so `args[0]` is
                         // a Rust local — NOT in the root set

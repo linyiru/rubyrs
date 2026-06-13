@@ -362,6 +362,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn file_read_encoding() { run_diff("file_read_encoding"); }
 #[test] fn lifecycle_hook_super() { run_diff("lifecycle_hook_super"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
+// Kernel#Array(obj) coerces via to_ary→to_a before [obj]; backs
+// [*obj] / `a, b = *obj` splat. rack `status, h, body = *response`.
+#[test] fn array_coerce_splat() { run_diff("array_coerce_splat"); }
 // `raise Class, msg, backtrace` — the explicit 3rd arg is stamped on
 // the exception (`e.backtrace` returns it, incl. `[]`); 2-arg form
 // keeps the call-site backtrace. rack ShowExceptions "unknown
