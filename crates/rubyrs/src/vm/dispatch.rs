@@ -6387,6 +6387,30 @@ impl Vm {
                 return Ok(());
             }
         }
+        // Array / Proc per-instance eigenclass (heap_singletons twin
+        // of the String/Hash gates above). A user `def arr.close` /
+        // `proc.define_singleton_method(:each)` overrides the native
+        // dispatch below. rack's Deflater/Lock + ContentLength.
+        if self.any_heap_singletons && !force_primitive && !no_recv && argc < self.stack.len() {
+            let ridx = self.stack.len() - 1 - argc;
+            let m = match self.stack.get(ridx) {
+                Some(Value::Array(id)) | Some(Value::Block(id)) => {
+                    let key = id.0 as usize;
+                    self.heap_singletons
+                        .get(&key)
+                        .map(|(_, sc)| sc.clone())
+                        .and_then(|sc| self.lookup_method_uncached(&sc, name_id))
+                }
+                _ => None,
+            };
+            if let Some(m) = m {
+                let split = self.stack.len() - argc;
+                let args: Vec<Value> = self.stack.drain(split..).collect();
+                let recv = self.stack.pop().expect("ICE: heap-singleton recv");
+                self.invoke_method(m, recv, args)?;
+                return Ok(());
+            }
+        }
         if self.any_hash_singletons && !force_primitive && !no_recv && argc < self.stack.len() {
             let ridx = self.stack.len() - 1 - argc;
             if let Some(Value::Hash(hid)) = self.stack.get(ridx) {
@@ -17044,6 +17068,50 @@ impl Vm {
         });
         self.str_singletons.insert(key, (s.clone(), sc.clone()));
         self.any_str_singletons = true;
+        self.method_gen = self.method_gen.wrapping_add(1);
+        sc
+    }
+
+    /// Per-instance eigenclass for a heap object (`Array` / `Proc`),
+    /// keyed by its `ObjId` — the heap twin of `ensure_str_singleton`.
+    /// Superclass is the receiver's builtin class so unfound names
+    /// fall through (the do_call probe returns None and continues to
+    /// the native dispatch). The stored `Value` roots the object so
+    /// its id can't be swept + reused under the key.
+    pub(crate) fn ensure_heap_singleton(&mut self, recv: &crate::value::Value) -> Rc<Class> {
+        use crate::value::Value;
+        let (key, base_name): (usize, &str) = match recv {
+            Value::Array(id) => (id.0 as usize, "Array"),
+            Value::Block(id) => (id.0 as usize, "Proc"),
+            _ => unreachable!("ensure_heap_singleton: unsupported receiver"),
+        };
+        if let Some((_, sc)) = self.heap_singletons.get(&key) {
+            return sc.clone();
+        }
+        let base = self.classes.get(&self.interner.intern(base_name)).cloned();
+        let sc = Rc::new(Class {
+            name: format!("#<Class:#<{base_name}>>"),
+            is_module: false,
+            ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            superclass: std::cell::RefCell::new(base),
+            includes: std::cell::RefCell::new(Vec::new()),
+            prepends: std::cell::RefCell::new(Vec::new()),
+            singleton_prepends: std::cell::RefCell::new(Vec::new()),
+            singleton_includes: std::cell::RefCell::new(Vec::new()),
+            singleton_view: std::cell::RefCell::new(None),
+            singleton_target: std::cell::RefCell::new(None),
+            undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
+            anon_serial: std::cell::Cell::new(0),
+            class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+            assigned_name: std::cell::RefCell::new(None),
+            #[cfg(feature = "cext")]
+            cext_alloc_func: std::cell::Cell::new(None),
+        });
+        self.heap_singletons.insert(key, (recv.clone(), sc.clone()));
+        self.any_heap_singletons = true;
         self.method_gen = self.method_gen.wrapping_add(1);
         sc
     }

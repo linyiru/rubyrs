@@ -1028,6 +1028,18 @@ pub(crate) struct Vm {
     /// is the set-once dispatch gate, same as `any_hash_singletons`.
     pub(crate) str_singletons: crate::intern::FxHashMap<usize, (std::rc::Rc<crate::value::RStr>, Rc<Class>)>,
     pub(crate) any_str_singletons: bool,
+    /// Per-instance eigenclasses for HEAP objects keyed by their
+    /// `ObjId.0` — currently `Array` and `Proc`/`Block`, the two
+    /// `define_singleton_method` / `def obj.x` targets the String
+    /// table's pattern didn't cover (Hash carries its eigenclass on
+    /// the heap struct). The stored `Value` roots the object so the
+    /// id can't be swept + reused under the key (the str table holds
+    /// the `Rc<RStr>` for the same reason). `any_heap_singletons` is
+    /// the set-once dispatch gate. rack's Deflater/Lock define
+    /// `:close` on an Array body; ContentLength defines `:each` on a
+    /// Proc body.
+    pub(crate) heap_singletons: crate::intern::FxHashMap<usize, (crate::value::Value, Rc<Class>)>,
+    pub(crate) any_heap_singletons: bool,
     /// `Encoding.default_external` (E3): the tag File.read stamps
     /// when no `encoding:` argument is given. CRuby's process-wide
     /// default; ours starts at UTF-8 and is set through the
@@ -1694,6 +1706,8 @@ impl Vm {
             any_hash_singletons: false,
             str_singletons: crate::intern::FxHashMap::default(),
             any_str_singletons: false,
+            heap_singletons: crate::intern::FxHashMap::default(),
+            any_heap_singletons: false,
             default_external: crate::value::EncodingTag::Utf8,
             default_internal: None,
             module_refinements: crate::intern::FxHashMap::default(),

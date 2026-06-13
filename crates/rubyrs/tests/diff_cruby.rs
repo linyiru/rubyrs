@@ -1033,6 +1033,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // ASCII-8BIT receivers index by bytes + keep the tag, instead of the
 // UTF-8-lossy char view that mangled StringIO/Zlib over binary data.
 #[test] fn string_binary_slice() { run_diff("string_binary_slice"); }
+// Per-instance singleton methods on Array / Proc (heap_singletons
+// side-table): define_singleton_method + `def obj.x`, per-instance,
+// native dispatch intact. rack Deflater/Lock/ContentLength define
+// :close/:each on Array/Proc bodies.
+#[test] fn singleton_method_builtins() { run_diff("singleton_method_builtins"); }
 // Zlib veneer over flate2 (stdlib): gzip/deflate round-trips,
 // GzipWriter/Reader, auto-inflate. rack Deflater + Static.
 #[cfg(feature = "stdlib")]

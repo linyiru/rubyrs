@@ -758,6 +758,14 @@ impl Vm {
         {
             return true;
         }
+        // Array / Proc per-instance eigenclass (heap_singletons twin).
+        if self.any_heap_singletons
+            && let Value::Array(id) | Value::Block(id) = recv
+            && let Some((_, sc)) = self.heap_singletons.get(&(id.0 as usize))
+            && self.lookup_method_uncached(sc, name_id).is_some()
+        {
+            return true;
+        }
         let name: &str = self.interner.resolve(name_id);
         // Kernel's PRIVATE builtin surface — `respond_to?(name,
         // true)` must report the no-recv builtins dispatch actually

@@ -622,6 +622,14 @@ impl Vm {
         for (_, sc) in self.str_singletons.values() {
             roots.push(crate::value::Value::Class(sc.clone()));
         }
+        // Array/Proc per-instance eigenclasses: root both the
+        // eigenclass (its methods capture closures) AND the keyed
+        // object itself — the side-table holds the Value precisely so
+        // the id can't be swept and reused under the stale key.
+        for (obj, sc) in self.heap_singletons.values() {
+            roots.push(obj.clone());
+            roots.push(crate::value::Value::Class(sc.clone()));
+        }
         if let Some(v) = &self.last_uncaught_exception {
             roots.push(v.clone());
         }

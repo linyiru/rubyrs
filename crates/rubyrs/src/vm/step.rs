@@ -2915,6 +2915,30 @@ impl Vm {
                     self.stack.push(Value::Sym(name_id));
                     return Ok(true);
                 }
+                // Array / Proc receivers: per-instance eigenclass via
+                // the heap_singletons side-table (twin of the String
+                // arm above). rack's Lock does `def body.close` on an
+                // Array body.
+                if matches!(&recv, Value::Array(_) | Value::Block(_)) {
+                    let sc = self.ensure_heap_singleton(&recv);
+                    let proto = &self.protos[p_idx as usize];
+                    let params = proto.params.clone();
+                    let fixed_arity = Self::fixed_arity_for_proto(proto, params.len());
+                    let m = Rc::new(Method {
+                        params,
+                        proto_idx: p_idx as usize,
+                        fixed_arity,
+                        defining_class: Some(Rc::downgrade(&sc)),
+                        visibility: std::cell::Cell::new(Visibility::Public),
+                        closure: None,
+                        builtin: None,
+                        original_name: Some(name_id),
+                    });
+                    sc.methods.borrow_mut().insert(name_id, m);
+                    self.method_gen = self.method_gen.wrapping_add(1);
+                    self.stack.push(Value::Sym(name_id));
+                    return Ok(true);
+                }
                 let obj_id = match recv {
                     Value::Object(id) => id,
                     other => {
@@ -3530,6 +3554,26 @@ impl Vm {
                         });
                         cls.singleton_methods.borrow_mut().insert(name_id, m);
                         Value::Class(cls.clone())
+                    }
+                    // Array / Proc receivers: per-instance eigenclass
+                    // via the heap_singletons side-table. rack's
+                    // Deflater closes over an Array body with
+                    // `body.define_singleton_method(:close) { ... }`;
+                    // ContentLength does it with `:each` on a Proc.
+                    Value::Array(_) | Value::Block(_) => {
+                        let sc = self.ensure_heap_singleton(&recv);
+                        let m = Rc::new(Method {
+                            params,
+                            proto_idx,
+                            fixed_arity: None,
+                            defining_class: Some(Rc::downgrade(&sc)),
+                            visibility: std::cell::Cell::new(Visibility::Public),
+                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                            builtin: None,
+                            original_name: Some(name_id),
+                        });
+                        sc.methods.borrow_mut().insert(name_id, m);
+                        recv.clone()
                     }
                     other => {
                         return Err(self.trap(RubyError::TypeError {
