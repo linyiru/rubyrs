@@ -176,6 +176,38 @@ class Time
     utc(year.to_i, mon + 1, day.to_i, hh.to_i, mm.to_i, ss.to_i)
   end
 
+  # `Time.rfc2822(str)` / `Time.rfc822` — parse the RFC 2822 date the
+  # `#rfc2822` formatter emits ("Sat, 13 Jun 2026 19:00:10 +0000") and,
+  # since the day-of-week prefix is optional and the zone may be GMT,
+  # the RFC 7231 httpdate shape too. rack's ConditionalGet parses both
+  # If-Modified-Since and Last-Modified with `Time.rfc2822(...) rescue
+  # nil`, so a missing method silently disabled every 304. NO regex
+  # literal: the Time preamble loads unconditionally and a literal
+  # would break the no-`regex` / wasm builds (CI smoke caught this for
+  # httpdate) — the zone is parsed with string ops.
+  def self.rfc2822(str)
+    parts = str.to_s.split(" ")
+    # Drop an optional leading "Dow," token.
+    parts.shift if parts[0] && parts[0].end_with?(",")
+    bad = lambda { raise ArgumentError, "not RFC 2822 compliant date: #{str.inspect}" }
+    bad.call unless parts.length >= 5
+    day, mon_abbr, year, hms, zone = parts[0], parts[1], parts[2], parts[3], parts[4]
+    mon = MONTH_ABBR.index(mon_abbr)
+    bad.call unless mon
+    hh, mm, ss = hms.to_s.split(":")
+    bad.call if hh.nil? || mm.nil?
+    t = utc(year.to_i, mon + 1, day.to_i, hh.to_i, mm.to_i, (ss || "0").to_i)
+    # Numeric "+HHMM" / "-HHMM" offset → shift to UTC. GMT / UTC / Z /
+    # +0000 are zero. Parsed without a regex (see note above).
+    if zone && zone.length == 5 && (zone[0] == "+" || zone[0] == "-") &&
+       zone[1..].each_char.all? { |c| c >= "0" && c <= "9" }
+      off = zone[1, 2].to_i * 3600 + zone[3, 2].to_i * 60
+      off = -off if zone[0] == "+" # east of UTC: subtract to normalise
+      t += off
+    end
+    t
+  end
+
   def self.parse(str, _now = nil)
     s = str.to_s.strip
     # Host fast path (`__rubyrs_time_parse_iso`, vm/kernel.rs):

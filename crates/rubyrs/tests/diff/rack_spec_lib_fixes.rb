@@ -124,6 +124,12 @@ t("cookie multi")  { CGI::Cookie.new("name" => "m", "value" => %w[v1 v2]).to_a }
 t("httpdate parse") { Time.httpdate("Thu, 31 Oct 2021 07:28:00 GMT") }
 t("httpdate bad")   { begin; Time.httpdate("nope"); rescue ArgumentError; :argerr; end }
 t("utc flavour")    { [Time.utc(2021, 1, 2).utc?, Time.utc(2021, 1, 2).to_s] }
+# Time.rfc2822 parse (rack ConditionalGet's If-Modified-Since): GMT,
+# numeric offset, and the httpdate shape it's also fed.
+t("rfc2822 gmt")    { Time.rfc2822("Thu, 31 Oct 2021 07:28:00 GMT").to_i }
+t("rfc2822 off")    { Time.rfc2822("Wed, 05 Oct 2011 22:26:12 -0000").to_i }
+t("rfc2822 east")   { Time.rfc2822("Mon, 01 Jan 2024 00:00:00 +0900").to_i }
+t("rfc2822 bad")    { begin; Time.rfc2822("nope"); rescue ArgumentError; :argerr; end }
 
 # 8 — undef inside instance_eval
 sio = StringIO.new("q")
