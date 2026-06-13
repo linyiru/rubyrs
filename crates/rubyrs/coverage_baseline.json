@@ -68,7 +68,7 @@
     "crates/rubyrs/src/vm/bignum.rs": 82,
     "crates/rubyrs/src/vm/cext.rs": 84,
     "crates/rubyrs/src/vm/dispatch.rs": 84,
-    "crates/rubyrs/src/vm/fileops.rs": 80,
+    "crates/rubyrs/src/vm/fileops.rs": 79,
     "crates/rubyrs/src/vm/gc.rs": 90,
     "crates/rubyrs/src/vm/hash.rs": 93,
     "crates/rubyrs/src/vm/iter.rs": 88,
