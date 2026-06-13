@@ -319,6 +319,16 @@ impl Vm {
                 let mut snap: Vec<(String, Value)> = Vec::new();
                 if let Some(frame) = self.frames.last() {
                     let proto_idx = frame.proto_idx;
+                    // Capture the frame's locals storage ONCE (clone the
+                    // shared cell / note the stack base) so the per-slot
+                    // read below doesn't re-borrow `self.frames` — a
+                    // re-borrow would force an unwrap of `frames.last()`,
+                    // which the panic-budget ratchet counts.
+                    let shared = frame.locals.as_shared().cloned();
+                    let stack_base = match &frame.locals {
+                        crate::vm::Locals::Stack(b) => Some(*b as usize),
+                        crate::vm::Locals::Shared(_) => None,
+                    };
                     let n = self.protos[proto_idx].n_locals as usize;
                     for slot in 0..n {
                         let name = self.protos[proto_idx]
@@ -329,16 +339,15 @@ impl Vm {
                         if name.is_empty() {
                             continue;
                         }
-                        let frame = self.frames.last().unwrap();
-                        let val = match &frame.locals {
-                            crate::vm::Locals::Shared(rc) => {
-                                rc.borrow().get(slot).cloned().unwrap_or(Value::Nil)
-                            }
-                            crate::vm::Locals::Stack(base) => self
-                                .locals_arena
-                                .get(*base as usize + slot)
+                        let val = if let Some(rc) = &shared {
+                            rc.borrow().get(slot).cloned().unwrap_or(Value::Nil)
+                        } else if let Some(base) = stack_base {
+                            self.locals_arena
+                                .get(base + slot)
                                 .cloned()
-                                .unwrap_or(Value::Nil),
+                                .unwrap_or(Value::Nil)
+                        } else {
+                            Value::Nil
                         };
                         snap.push((name, val));
                     }
