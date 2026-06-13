@@ -8,7 +8,15 @@ class Dir
   # System temp directory — TMPDIR/TMP/TEMP override, else the POSIX
   # default /tmp (rubyrs targets Unix; no Windows temp probing).
   def self.tmpdir
-    (ENV["TMPDIR"] || ENV["TMP"] || ENV["TEMP"] || "/tmp").dup
+    # CRuby strips a trailing slash (ENV["TMPDIR"] is often
+    # "/var/folders/.../T/"); leaving it breaks path-prefix matching —
+    # rack's Sendfile builds an x-accel-mapping regex from
+    # "#{Dir.tmpdir}/" and a doubled slash never matches the served
+    # path. Also avoids the doubled slash in our own mktmpdir join.
+    dir = (ENV["TMPDIR"] || ENV["TMP"] || ENV["TEMP"] || "/tmp").to_s
+    dir = dir.chomp("/")
+    dir = "/tmp" if dir.empty?
+    dir
   end
 
   @@__mktmpdir_seq = 0

@@ -89,6 +89,11 @@ File.delete(fpath)
 # returns the path. spec_directory builds its scratch tree this way.
 t("mktmpdir blk")  { inner = nil; r = Dir.mktmpdir("rk") { |d| inner = d; File.directory?(d) }; [r, File.directory?(inner)] }
 t("mktmpdir path") { d = Dir.mktmpdir; ok = File.directory?(d); Dir.rmdir(d); ok }
+# Dir.tmpdir has NO trailing slash (CRuby), so a "#{Dir.tmpdir}/"
+# prefix doesn't double the separator — rack's Sendfile x-accel-mapping
+# regex depends on this; and mktmpdir's join stays single-slash.
+t("tmpdir noslash"){ Dir.tmpdir.end_with?("/") }
+t("mktmpdir 1slash"){ d = Dir.mktmpdir; ok = !d.include?("//"); Dir.rmdir(d); ok }
 
 # 3 — Tempfile surface
 # Array basename [prefix, suffix] + encoding kwarg (rack's UploadedFile
