@@ -20,6 +20,7 @@ require "tempfile"
 require "yaml"
 require "cgi/cookie"
 require "time"
+require "uri"
 
 def t(l); r = begin; yield.inspect; rescue => e; "#{e.class}: #{e.message[0, 70]}"; end; puts "#{l}: #{r}"; end
 
@@ -98,6 +99,12 @@ tf.close!
 
 # 4 — IO.pipe
 t("pipe") { r, w = IO.pipe; w.write("zz\nq"); w.close; out = [r.gets, r.read]; r.close; out }
+
+# 4b — Kernel#URI (require "uri" installs it; rack's Recursive uses
+# `URI(url)`). String -> parsed URI; an existing URI is returned as-is.
+t("URI str")  { u = URI("http://example.com/a?b=1"); [u.scheme, u.host, u.path, u.query] }
+t("URI idem") { u = URI("http://x/"); URI(u).equal?(u) }
+t("URI bad")  { begin; URI(42); rescue ArgumentError => e; e.class.name; end }
 
 # 5 — YAML round-trip (loose: our emitter isn't psych-byte-equal,
 # but load(dump(x)) must reproduce x on both runtimes)

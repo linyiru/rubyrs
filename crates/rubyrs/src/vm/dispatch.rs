@@ -6478,6 +6478,13 @@ impl Vm {
                     | "hash"
                     | "itself"
                     | "object_id"
+                    // Shallow-copy universals: `dup`/`clone` are
+                    // handled in the explicit-recv arm only, so a bare
+                    // `dup` inside an instance method (rack's
+                    // Recursive#call does `dup._call(env)`) raised
+                    // NoMethodError. Route to self.dup like the rest.
+                    | "dup"
+                    | "clone"
             )
         {
             let self_val = self.frames.last()

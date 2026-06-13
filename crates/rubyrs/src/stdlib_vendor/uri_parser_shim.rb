@@ -296,4 +296,20 @@ module URI
   end
 end
 
+# `Kernel#URI(arg)` — the global conversion function `require "uri"`
+# installs. Returns its arg unchanged if already a URI, else parses a
+# String. rack's Recursive#ForwardRequest does `@url = URI(url)`.
+module Kernel
+  def URI(uri)
+    if uri.is_a?(URI::Generic)
+      uri
+    elsif uri.respond_to?(:to_str)
+      URI.parse(uri.to_str)
+    else
+      raise ArgumentError, "bad argument (expected URI object or URI string)"
+    end
+  end
+  module_function :URI
+end
+
 end # `unless defined?(URI::DEFAULT_PARSER)`
