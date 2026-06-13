@@ -1024,3 +1024,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Time.httpdate parse + utc flavour.
 #[cfg(feature = "stdlib")]
 #[test] fn rack_spec_lib_fixes() { run_diff("rack_spec_lib_fixes"); }
+// File class predicates (zero require, covers vm/fileops.rs):
+// File.readable?/writable?/executable?/size?/mtime over a real /tmp
+// file. Rack::Files gates serving on file?/readable? and emits
+// Last-Modified from mtime; clears spec_files/spec_static/spec_cascade.
+#[test] fn file_predicate_methods() { run_diff("file_predicate_methods"); }

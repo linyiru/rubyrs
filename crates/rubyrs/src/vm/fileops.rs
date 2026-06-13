@@ -791,6 +791,79 @@ impl Vm {
                     Err(e) => return Err(self.trap(io_error(&e, Some(Path::new(&path))))),
                 }
             }
+            // `File.readable?(path)` — Rack::Files gates serving on
+            // `File.file?(path) && File.readable?(path)`. Portable
+            // R_OK check WITHOUT libc (the dashboard / CI builds lack
+            // the `_http_server` feature that pulls libc in): a
+            // successful read-only open IS the OS `access(2)` R_OK
+            // test and honours chmod-000 / ownership / ACLs — the
+            // negative-permission serve spec expects 403.
+            ("readable?", [p]) => {
+                self.check_filesystem_io_allowed("File.readable?", None)?;
+                let path = path_arg(p)?;
+                self.check_filesystem_io_allowed("File.readable?", Some(Path::new(&path)))?;
+                Value::Bool(std::fs::File::open(&path).is_ok())
+            }
+            // `File.writable?` / `File.executable?` — permission-bit
+            // predicates (Unix mode); not effective-uid-aware but
+            // matches CRuby for normally-owned files. Missing path →
+            // false (CRuby never raises here).
+            ("writable?", [p]) | ("executable?", [p]) => {
+                let op = if name == "writable?" {
+                    "File.writable?"
+                } else {
+                    "File.executable?"
+                };
+                self.check_filesystem_io_allowed(op, None)?;
+                let path = path_arg(p)?;
+                self.check_filesystem_io_allowed(op, Some(Path::new(&path)))?;
+                let bit: u32 = if name == "writable?" { 0o222 } else { 0o111 };
+                let ok = match std::fs::metadata(&path) {
+                    #[cfg(unix)]
+                    Ok(m) => {
+                        use std::os::unix::fs::PermissionsExt;
+                        m.permissions().mode() & bit != 0
+                    }
+                    #[cfg(not(unix))]
+                    Ok(m) => name == "writable?" && !m.permissions().readonly(),
+                    Err(_) => false,
+                };
+                Value::Bool(ok)
+            }
+            // `File.size?(path)` — nil when the file is absent OR
+            // zero-length, else the byte size (CRuby's truthy-size
+            // helper; Rack::Files uses it to decide whether to emit a
+            // body / Content-Length).
+            ("size?", [p]) => {
+                self.check_filesystem_io_allowed("File.size?", None)?;
+                let path = path_arg(p)?;
+                self.check_filesystem_io_allowed("File.size?", Some(Path::new(&path)))?;
+                match std::fs::metadata(&path) {
+                    Ok(m) if m.len() > 0 => Value::Int(m.len() as i64),
+                    _ => Value::Nil,
+                }
+            }
+            // `File.__mtime_f(path)` — native epoch seconds (Float,
+            // incl. sub-second) backing the preamble's `File.mtime`,
+            // which wraps it via `Time.at`. Time is a Ruby-level class
+            // (preamble/time.rb), so — exactly like `Time.now` — the
+            // native side returns the raw clock value and Ruby builds
+            // the object. Raises the CRuby Errno on a missing path.
+            ("__mtime_f", [p]) => {
+                self.check_filesystem_io_allowed("File.mtime", None)?;
+                let path = path_arg(p)?;
+                self.check_filesystem_io_allowed("File.mtime", Some(Path::new(&path)))?;
+                match std::fs::metadata(&path).and_then(|m| m.modified()) {
+                    Ok(t) => {
+                        let secs = t
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64())
+                            .unwrap_or_else(|e| -e.duration().as_secs_f64());
+                        Value::Float(secs)
+                    }
+                    Err(e) => return Err(self.trap(io_error(&e, Some(Path::new(&path))))),
+                }
+            }
             ("basename", [p]) => {
                 let path = path_arg(p)?;
                 Value::new_str(ruby_basename(&path).to_string())

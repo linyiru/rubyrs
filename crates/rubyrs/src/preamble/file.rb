@@ -110,6 +110,16 @@ class File
     open(fd_or_path, *args)
   end
 
+  # `File.mtime(path)` — last-modified Time. The epoch seconds come
+  # from the native `__mtime_f` primitive (Float, sub-second); Time
+  # is a Ruby-level class (preamble/time.rb), so the object is built
+  # here via `Time.at`, mirroring how `Time.now` wraps its native
+  # clock read. Rack::Files emits it as Last-Modified and compares it
+  # against If-Modified-Since (`File.mtime(path).httpdate`).
+  def self.mtime(path)
+    Time.at(__mtime_f(path))
+  end
+
   # --- instance surface (operates on the buffered content) ---
 
   # @!visibility private
@@ -208,6 +218,36 @@ class File
     else
       result
     end
+  end
+
+  # Byte-cursor positioning over the buffered content. Rack::Files
+  # serves Range requests with `file.seek(range.begin)` then chunked
+  # `file.read(n)` (lib/rack/files.rb#each_range_part), so seek must
+  # honour the BINARY/byte offsets the read cursor already uses.
+  # `whence` ∈ {SEEK_SET=0, SEEK_CUR=1, SEEK_END=2}; seek returns 0.
+  def seek(amount, whence = 0)
+    base =
+      case whence
+      when 1 then @__io_pos           # IO::SEEK_CUR
+      when 2 then @__io_buf.bytesize  # IO::SEEK_END
+      else 0                          # IO::SEEK_SET
+      end
+    @__io_pos = base + amount
+    0
+  end
+
+  def pos
+    @__io_pos
+  end
+  alias_method :tell, :pos
+
+  def pos=(n)
+    @__io_pos = n
+  end
+
+  def rewind
+    @__io_pos = 0
+    0
   end
 
   def gets(sep = "\n")

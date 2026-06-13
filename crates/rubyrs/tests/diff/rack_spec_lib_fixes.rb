@@ -53,6 +53,30 @@ File.open(path) do |f|
 end
 File.delete(path)
 
+# 2b — File class predicates + mtime + seek/pos family (Rack::Files
+# gates serving on File.file?/readable? and serves Range requests via
+# seek + chunked read; mtime drives Last-Modified / If-Modified-Since).
+fpath = "/tmp/rubyrs-rack-file-#{Process.pid}"
+File.binwrite(fpath, "0123456789")
+t("file readable?")     { File.readable?(fpath) }
+t("file writable?")     { File.writable?(fpath) }
+t("file executable?")   { File.executable?(fpath) }
+t("file readable miss") { File.readable?(fpath + "-nope") }
+t("file size?")         { File.size?(fpath) }
+t("file size? miss")    { File.size?(fpath + "-nope") }
+t("file size? zero")    { File.binwrite(fpath + "-e", ""); r = File.size?(fpath + "-e"); File.delete(fpath + "-e"); r }
+t("file mtime class")   { File.mtime(fpath).class }
+t("file mtime istime")  { File.mtime(fpath).is_a?(Time) }
+t("file mtime diff0")   { File.mtime(fpath) - File.mtime(fpath) }
+File.open(fpath) do |f|
+  t("file seek set")  { f.seek(3); f.read(4) }
+  t("file seek cur")  { f.seek(2); f.seek(2, 1); f.read(2) }
+  t("file seek end")  { f.seek(-2, 2); f.read }
+  t("file pos/tell")  { f.rewind; f.read(5); [f.pos, f.tell] }
+  t("file pos=")      { f.pos = 7; f.read }
+end
+File.delete(fpath)
+
 # 3 — Tempfile surface
 tf = Tempfile.new("rack-lib-fix")
 tf << "ab\ncd\n"
