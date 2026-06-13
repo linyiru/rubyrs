@@ -872,6 +872,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn gsub_hash() { run_diff("gsub_hash"); }
 #[test] fn hash_delete_block() { run_diff("hash_delete_block"); }
 #[test] fn string_casecmp() { run_diff("string_casecmp"); }
+// Case methods (upcase/downcase/capitalize/swapcase + `!`) raise
+// ArgumentError "input string invalid" on encoding-invalid receivers
+// (CRuby); valid strings convert. rack MethodOverride upcase-rescue.
+#[test] fn case_invalid_encoding() { run_diff("case_invalid_encoding"); }
 #[test] fn string_each_char() { run_diff("string_each_char"); }
 // Set's richer surface lives in the stdlib-gated `stdlib_vendor/set.rb`
 // (the default build ships only a minimal Set), so gate this fixture the

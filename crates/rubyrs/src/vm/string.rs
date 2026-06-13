@@ -174,6 +174,37 @@ fn chomp_paragraph_keep_len(bytes: &[u8]) -> usize {
 /// gap covers both the option form (`:turkic` etc.) AND the
 /// default case-fold for non-ASCII letters; full Unicode
 /// support is gated on ADR 0020 Tier-2 Encoding.
+/// CRuby's case methods (`upcase`/`downcase`/`capitalize`/`swapcase`
+/// and their `!` forms) raise `ArgumentError: input string invalid`
+/// when the receiver's bytes are invalid for its encoding — e.g. a
+/// UTF-8 string holding a stray `\xFF`. rack's `MethodOverride` leans
+/// on this: it does `method.to_s.upcase rescue ArgumentError` and
+/// writes "Invalid string for method" to `rack.errors`. Binary
+/// (ASCII-8BIT) strings are byte soup and always valid, so they pass
+/// through (the case arms convert ASCII letters byte-wise for those).
+/// A no-op for the common case (valid strings), so this only adds the
+/// missing raise without touching successful conversions.
+fn case_validity_guard(a: &crate::value::RStr) -> Result<(), RubyError> {
+    use crate::value::EncodingTag;
+    let b = a.content.borrow();
+    let valid = match a.encoding.get() {
+        EncodingTag::Binary => true,
+        EncodingTag::Utf8 => std::str::from_utf8(&b).is_ok(),
+        EncodingTag::UsAscii => b.iter().all(|&x| x < 0x80),
+        #[cfg(feature = "_encoding_full")]
+        EncodingTag::Other(idx) => crate::encoding_full::valid(idx, &b),
+        #[cfg(not(feature = "_encoding_full"))]
+        EncodingTag::Other(_) => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(RubyError::ArgumentError {
+            msg: "input string invalid".into(),
+        })
+    }
+}
+
 fn capitalize_ascii(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
@@ -487,6 +518,7 @@ pub(crate) fn string_call(
         }
         (Value::Str(a), "empty?", []) => Some(Value::Bool(a.borrow().is_empty())),
         (Value::Str(a), "upcase", []) => {
+            case_validity_guard(a)?;
             // Registry-tagged strings get real per-encoding case
             // mapping (decode → Unicode case → re-encode, original
             // bytes kept for unmappables); the lossy route below
@@ -501,6 +533,7 @@ pub(crate) fn string_call(
             Some(Value::new_str(a.to_string_lossy().to_uppercase()))
         }
         (Value::Str(a), "downcase", []) => {
+            case_validity_guard(a)?;
             #[cfg(feature = "_encoding_full")]
             if let crate::value::EncodingTag::Other(idx) = a.encoding.get()
                 && let Some(out) = crate::encoding_full::case_other(
@@ -516,6 +549,7 @@ pub(crate) fn string_call(
         // subset). Empty string is a no-op. First non-letter
         // (digit / punctuation) stays as-is.
         (Value::Str(a), "capitalize", []) => {
+            case_validity_guard(a)?;
             #[cfg(feature = "_encoding_full")]
             if let crate::value::EncodingTag::Other(idx) = a.encoding.get()
                 && let Some(out) = crate::encoding_full::case_other(
@@ -528,6 +562,7 @@ pub(crate) fn string_call(
         // `String#swapcase` — every letter has its case
         // flipped; non-letters pass through.
         (Value::Str(a), "swapcase", []) => {
+            case_validity_guard(a)?;
             #[cfg(feature = "_encoding_full")]
             if let crate::value::EncodingTag::Other(idx) = a.encoding.get()
                 && let Some(out) = crate::encoding_full::case_other(
@@ -563,6 +598,7 @@ pub(crate) fn string_call(
                     msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
                 });
             }
+            case_validity_guard(a)?;
             let new_bytes = a.with_str_lossy(|s| s.to_uppercase().into_bytes());
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
@@ -577,6 +613,7 @@ pub(crate) fn string_call(
                     msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
                 });
             }
+            case_validity_guard(a)?;
             let new_bytes = a.with_str_lossy(|s| s.to_lowercase().into_bytes());
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
@@ -591,6 +628,7 @@ pub(crate) fn string_call(
                     msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
                 });
             }
+            case_validity_guard(a)?;
             let new_bytes = a.with_str_lossy(|s| capitalize_ascii(s).into_bytes());
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
@@ -605,6 +643,7 @@ pub(crate) fn string_call(
                     msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
                 });
             }
+            case_validity_guard(a)?;
             let new_bytes = a.with_str_lossy(|s| swapcase_ascii(s).into_bytes());
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
