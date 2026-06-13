@@ -11,6 +11,7 @@
     "crates/rubyrs/src/rouge_ir.rs": "behind the `_rouge_native` Cargo feature (Track C AST\u2192IR compiler); default CI build excludes (same shape as rouge_native below)",
     "crates/rubyrs/src/rouge_native.rs": "behind the `_rouge_native` Cargo feature (carmine rouge accelerator); default CI build excludes (same shape as json_native above)",
     "crates/rubyrs/src/yaml_native.rs": "behind the `_yaml_native` Cargo feature (native translation of the blessed YAML loader); default CI build excludes (same shape as rouge_native above)",
+    "crates/rubyrs/src/zlib_native.rs": "behind the `stdlib` Cargo feature (flate2-backed Zlib Deflate/Inflate/Gzip primitives for the zlib veneer); default CI build excludes (same shape as http_server / sqlite above)",
     "crates/rubyrs/src/sqlite.rs": "behind the `_sqlite` Cargo feature (rusqlite + bundled libsqlite3 + SQLite3::Database/Statement surface, ADR 0027); default CI build excludes (same shape as http_server / stdlib / fiber / json_native above)",
     "crates/rubyrs/src/vm/cext_wasi.rs": "cfg(target_os = \"wasi\") gated; only compiled on wasm32-wasip1, not on the Linux coverage runner",
     "crates/rubyrs/src/vm/fiber.rs": "behind the `_fiber` Cargo feature; the default CI coverage run uses default features (matches the http_server / stdlib pattern above)",

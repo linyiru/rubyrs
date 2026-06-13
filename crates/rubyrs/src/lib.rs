@@ -41,6 +41,8 @@ mod http_server;
 mod intern;
 #[cfg(feature = "_json_native")]
 mod json_native;
+#[cfg(feature = "stdlib")]
+mod zlib_native;
 #[cfg(feature = "_rouge_native")]
 pub(crate) mod rouge_native;
 #[cfg(feature = "_rouge_native")]

@@ -212,6 +212,82 @@ impl Vm {
 
     pub(crate) fn builtin_call(&mut self, name: &str, args: &[Value]) -> Option<Result<Value, Trap>> {
         match name {
+            // --- Zlib host primitives (stdlib_vendor/zlib.rb veneer).
+            // Bytes in via Value::Str, level/mtime via Value::Int.
+            // Decompress failures surface as Zlib::DataError. ---
+            #[cfg(feature = "stdlib")]
+            "__zlib_deflate" | "__zlib_deflate_zlib" => {
+                let (Some(Value::Str(s)), Some(Value::Int(lvl))) = (args.first(), args.get(1))
+                else {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "Zlib.deflate: expected (String, Integer)".into(),
+                    })));
+                };
+                let data = s.content.borrow().to_vec();
+                let out = if name == "__zlib_deflate" {
+                    crate::zlib_native::deflate_raw(&data, *lvl)
+                } else {
+                    crate::zlib_native::deflate_zlib(&data, *lvl)
+                };
+                Some(Ok(Value::new_str_bytes_binary(out)))
+            }
+            #[cfg(feature = "stdlib")]
+            "__zlib_inflate" | "__zlib_inflate_zlib" | "__zlib_inflate_auto" => {
+                let Some(Value::Str(s)) = args.first() else {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "Zlib.inflate: expected String".into(),
+                    })));
+                };
+                let data = s.content.borrow().to_vec();
+                let r = match name {
+                    "__zlib_inflate" => crate::zlib_native::inflate_raw(&data),
+                    "__zlib_inflate_zlib" => crate::zlib_native::inflate_zlib(&data),
+                    _ => crate::zlib_native::inflate_auto(&data),
+                };
+                Some(match r {
+                    Ok(out) => Ok(Value::new_str_bytes_binary(out)),
+                    Err(e) => Err(self.trap(RubyError::HostException {
+                        class_name: "Zlib::DataError".into(),
+                        message: e,
+                    })),
+                })
+            }
+            #[cfg(feature = "stdlib")]
+            "__zlib_gzip" => {
+                let (Some(Value::Str(s)), Some(Value::Int(lvl)), Some(Value::Int(mtime))) =
+                    (args.first(), args.get(1), args.get(2))
+                else {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "Zlib gzip: expected (String, Integer, Integer)".into(),
+                    })));
+                };
+                let data = s.content.borrow().to_vec();
+                let out = crate::zlib_native::gzip(&data, *lvl, *mtime as u32);
+                Some(Ok(Value::new_str_bytes_binary(out)))
+            }
+            #[cfg(feature = "stdlib")]
+            "__zlib_gunzip" => {
+                let Some(Value::Str(s)) = args.first() else {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "Zlib gunzip: expected String".into(),
+                    })));
+                };
+                let data = s.content.borrow().to_vec();
+                Some(match crate::zlib_native::gunzip(&data) {
+                    Ok((out, mtime)) => {
+                        self.maybe_gc();
+                        if let Err(e) = self.check_alloc() {
+                            return Some(Err(e));
+                        }
+                        let arr = vec![Value::new_str_bytes_binary(out), Value::Int(mtime as i64)];
+                        Ok(Value::Array(self.heap.alloc(HeapObj::Array(arr.into()))))
+                    }
+                    Err(e) => Err(self.trap(RubyError::HostException {
+                        class_name: "Zlib::GzipFile::Error".into(),
+                        message: e,
+                    })),
+                })
+            }
             "puts" => {
                 if let Some(target) = self.stdio_redirect("$stdout", true) {
                     return Some(self.forward_stdio_call(target, "puts", args));

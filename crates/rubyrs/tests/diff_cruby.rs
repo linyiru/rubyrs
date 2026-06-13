@@ -1029,3 +1029,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // file. Rack::Files gates serving on file?/readable? and emits
 // Last-Modified from mtime; clears spec_files/spec_static/spec_cascade.
 #[test] fn file_predicate_methods() { run_diff("file_predicate_methods"); }
+// BINARY String#[] byte-slicing (zero require, covers vm/string.rs):
+// ASCII-8BIT receivers index by bytes + keep the tag, instead of the
+// UTF-8-lossy char view that mangled StringIO/Zlib over binary data.
+#[test] fn string_binary_slice() { run_diff("string_binary_slice"); }
+// Zlib veneer over flate2 (stdlib): gzip/deflate round-trips,
+// GzipWriter/Reader, auto-inflate. rack Deflater + Static.
+#[cfg(feature = "stdlib")]
+#[test] fn zlib_roundtrip() { run_diff("zlib_roundtrip"); }

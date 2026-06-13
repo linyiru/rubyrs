@@ -145,6 +145,10 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         // primitive. rack's spec_directory builds a scratch tree with
         // Dir.mktmpdir's block form (auto-removed on exit).
         "tmpdir" => Some(include_str!("stdlib_vendor/tmpdir.rb")),
+        // Zlib: Deflate/Inflate + GzipWriter/GzipReader over the
+        // flate2-backed host primitives. rack's Deflater emits gzip
+        // responses; Static serves `.gz` files via GzipReader.
+        "zlib" => Some(include_str!("stdlib_vendor/zlib.rb")),
         "set" => Some(include_str!("stdlib_vendor/set.rb")),
         "stringio" => Some(include_str!("stdlib_vendor/stringio.rb")),
         "strscan" => Some(include_str!("stdlib_vendor/strscan.rb")),

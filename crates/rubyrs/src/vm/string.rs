@@ -2320,6 +2320,67 @@ impl Vm {
                         return self.string_collection_call(s.clone(), name, &coerced);
                     }
                 }
+                // BINARY-encoded receiver: index / slice by BYTES and
+                // keep the ASCII-8BIT tag. The char path below routes
+                // through `to_string_lossy`, which U+FFFD-mangles
+                // non-UTF-8 bytes — that corrupted StringIO#read and
+                // Zlib over binary streams (gzip bodies). CRuby treats
+                // ASCII-8BIT as 1 byte = 1 char. Int / (Int,len) /
+                // Range only; other arg shapes fall through.
+                if (name == "[]" || name == "slice")
+                    && s.encoding.get() == crate::value::EncodingTag::Binary
+                {
+                    let bytes = s.content.borrow();
+                    let blen = bytes.len() as i64;
+                    let norm = |i: i64| if i < 0 { blen + i } else { i };
+                    match args {
+                        [Value::Int(i)] => {
+                            let idx = norm(*i);
+                            return Ok(Some(if idx < 0 || idx >= blen {
+                                Value::Nil
+                            } else {
+                                Value::new_str_bytes_binary(vec![bytes[idx as usize]])
+                            }));
+                        }
+                        [Value::Int(st), Value::Int(ln)] => {
+                            let start = norm(*st);
+                            if start < 0 || start > blen || *ln < 0 {
+                                return Ok(Some(Value::Nil));
+                            }
+                            let end = (start + *ln).min(blen);
+                            return Ok(Some(Value::new_str_bytes_binary(
+                                bytes[start as usize..end as usize].to_vec(),
+                            )));
+                        }
+                        [Value::Range(rid)] => {
+                            let r = self.heap.range(*rid);
+                            let excl = r.exclusive;
+                            let bi = match &r.begin {
+                                Value::Int(a) => *a,
+                                Value::Nil => 0,
+                                _ => return Ok(None),
+                            };
+                            let ei = match &r.end {
+                                Value::Int(c) => *c,
+                                Value::Nil => blen,
+                                _ => return Ok(None),
+                            };
+                            let start = norm(bi);
+                            if start < 0 || start > blen {
+                                return Ok(Some(Value::Nil));
+                            }
+                            let mut end = norm(ei);
+                            if !excl {
+                                end += 1;
+                            }
+                            let end = end.clamp(start, blen);
+                            return Ok(Some(Value::new_str_bytes_binary(
+                                bytes[start as usize..end as usize].to_vec(),
+                            )));
+                        }
+                        _ => {}
+                    }
+                }
                 if (name == "[]" || name == "slice") && args.len() == 1 {
                     let chars: Vec<char> = s.to_string_lossy().chars().collect();
                     let len = chars.len() as i64;

@@ -114,7 +114,7 @@ regex = ["dep:regex", "dep:fancy-regex", "dep:regex-syntax"]
 # available to scripts. The full-features build is the only
 # place Tier 1 core grows a Tier 3 surface; the default build
 # stays minimal per ADR 0017.
-stdlib = []
+stdlib = ["dep:flate2"]
 # `sass` enables in-process SCSS/Sass compilation via the pure-Rust
 # `grass` crate (ADR 0019-style Tier-3 battery — a Rust crate behind
 # a feature, surfaced to Ruby). With it OFF, `RubyrsSass.compile`
@@ -294,6 +294,10 @@ tikv-jemallocator = { version = "0.6", optional = true }
 # the registry ships the CRuby encoding that MATCHES the WHATWG
 # table (Windows-31J) and declines the other (documented).
 encoding_rs = { version = "0.8", optional = true }
+# `flate2` (pure-Rust miniz_oxide backend — wasm-safe) backs the
+# `stdlib` Zlib surface: Zlib::Deflate/Inflate + GzipWriter/Reader,
+# which rack's Deflater (gzip responses) and Static (serve .gz) need.
+flate2 = { version = "1", optional = true }
 regex = { version = "1", optional = true }
 # `regex-syntax` is already in the tree as `regex`'s own parser —
 # depending on it directly (same 0.8 line, so it dedupes to one
