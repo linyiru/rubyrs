@@ -39,6 +39,14 @@ t("dir rmdir")     { Dir.rmdir(dd); File.directory?(dd) }
 bl = fp + "-broken"
 File.symlink(fp + "-no-such-target", bl)
 t("stat broken")   { begin; File.stat(bl); rescue SystemCallError => e; e.class; end }
+# File.expand_path is purely LEXICAL — it must NOT resolve the symlink
+# (that's realpath's job). rack's Sendfile compares expand_path(to_path)
+# against an unresolved File.join, so a canonicalize here broke it.
+File.binwrite(fp + "-tgt", "x")
+sl = fp + "-elink"
+File.symlink(fp + "-tgt", sl)
+t("expand keeps link") { File.expand_path(sl) == sl }
+File.delete(sl); File.delete(fp + "-tgt")
 File.delete(bl)
 lp = fp + "-loop"
 File.symlink(File.basename(lp), lp)

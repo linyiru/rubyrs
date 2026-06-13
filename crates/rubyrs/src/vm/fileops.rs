@@ -1175,12 +1175,17 @@ impl Vm {
                 // the same helper so scope-check and visible
                 // string stay in lockstep).
                 let resolved = crate::lexically_resolve_path(&joined);
-                let final_path = if wide_open {
-                    std::fs::canonicalize(&resolved).unwrap_or(resolved)
-                } else {
-                    resolved
-                };
-                Value::new_str(final_path.to_string_lossy().into_owned())
+                // CRuby's File.expand_path is purely LEXICAL — it
+                // never touches the filesystem or resolves symlinks
+                // (that is File.realpath's job). The old wide-open
+                // branch canonicalized, which on macOS rewrote
+                // `/var` → `/private/var` (and `/tmp` → `/private/tmp`)
+                // and broke every path-equality test: rack's Sendfile
+                // sets the x-sendfile header to
+                // `File.expand_path(body.to_path)` and the spec
+                // compares it against the UNRESOLVED
+                // `File.join(Dir.tmpdir, name)`.
+                Value::new_str(resolved.to_string_lossy().into_owned())
             }
             _ => return Ok(None),
         }))
