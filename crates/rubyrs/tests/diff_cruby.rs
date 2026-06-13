@@ -882,6 +882,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn bigdecimal_basic() { run_diff_gem("bigdecimal_basic", "bigdecimal"); }
 #[test] fn gsub_hash() { run_diff("gsub_hash"); }
 #[test] fn hash_delete_block() { run_diff("hash_delete_block"); }
+// Hash#flatten(level) / #fetch_values (KeyError on miss) /
+// #compare_by_identity? — rack Headers supers into these.
+#[test] fn hash_flatten_fetch_values() { run_diff("hash_flatten_fetch_values"); }
 #[test] fn string_casecmp() { run_diff("string_casecmp"); }
 // Case methods (upcase/downcase/capitalize/swapcase + `!`) raise
 // ArgumentError "input string invalid" on encoding-invalid receivers

@@ -21,7 +21,7 @@ use super::{value_cmp_v_heap, PinGuard, Vm};
 /// currently being flattened — returns `false` if a member is already on
 /// it (a self-referential array), which the caller turns into the
 /// ArgumentError CRuby raises ("tried to flatten recursive array").
-fn flatten_rec(
+pub(crate) fn flatten_rec(
     heap: &crate::heap::Heap,
     src: &[Value],
     depth: Option<i64>,

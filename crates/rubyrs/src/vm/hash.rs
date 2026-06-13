@@ -322,6 +322,59 @@ impl Vm {
                         let nid = self.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
+                    // `fetch_values(*keys)` — like `values_at` but raises
+                    // KeyError on a missing key (no default fallback). rack
+                    // Headers#fetch_values supers here with downcased keys.
+                    ("fetch_values", keys) => {
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id)
+                            .iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        let mut out: Vec<Value> = Vec::with_capacity(keys.len());
+                        for key in keys {
+                            match pairs.iter().find(|(hk, _)| hk.ruby_eql(key, &self.heap)) {
+                                Some((_, v)) => out.push(v.clone()),
+                                None => {
+                                    return Err(self.trap(RubyError::KeyError {
+                                        msg: format!("key not found: {}",
+                                            key.to_inspect(&self.heap, &self.interner)),
+                                    }));
+                                }
+                            }
+                        }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(out.into()));
+                        Some(Value::Array(nid))
+                    }
+                    // rubyrs never sets the compare-by-identity bit (the
+                    // `compare_by_identity` mutator raises), so this is
+                    // always false. rack Headers exposes it for parity.
+                    ("compare_by_identity?", []) => Some(Value::Bool(false)),
+                    // `Hash#flatten(level = 1)` == `to_a.flatten(level)`:
+                    // `to_a` is `[[k, v], ...]`, so level 1 spreads the
+                    // pairs (`[k, v, k, v, ...]`) and leaves array VALUES
+                    // nested; level 2 peels one more level. Equivalent to
+                    // flattening each `[k, v]` pair at depth `level - 1`,
+                    // which avoids allocating intermediate pair arrays.
+                    ("flatten", many) if many.len() <= 1
+                        && matches!(many.first(), None | Some(Value::Int(_))) => {
+                        let level = match many.first() {
+                            Some(Value::Int(n)) => *n,
+                            _ => 1,
+                        };
+                        let inner_depth = if level < 0 { None } else { Some(level - 1) };
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id)
+                            .iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        let mut out: Vec<Value> = Vec::with_capacity(pairs.len() * 2);
+                        let mut changed = false;
+                        let mut stack: Vec<ObjId> = Vec::new();
+                        for (k, v) in pairs {
+                            super::array::flatten_rec(
+                                &self.heap, &[k, v], inner_depth,
+                                &mut out, &mut changed, &mut stack);
+                        }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(out.into()));
+                        Some(Value::Array(nid))
+                    }
                     // No-block `each_key` / `each_value` → Enumerator; the
                     // block forms live in collection_call_block (iter.rs).
                     ("each_key", []) | ("each_value", []) => {
