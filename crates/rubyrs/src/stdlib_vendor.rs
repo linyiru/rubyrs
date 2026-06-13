@@ -149,6 +149,13 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         // flate2-backed host primitives. rack's Deflater emits gzip
         // responses; Static serves `.gz` files via GzipReader.
         "zlib" => Some(include_str!("stdlib_vendor/zlib.rb")),
+        // ERB: CRuby's erb.rb + erb/compiler.rb merged + trimmed to
+        // the new/compile/result surface. rack's ShowExceptions /
+        // ShowStatus render their HTML via `ERB.new(tmpl).result(
+        // binding)` — the binding carries the handler method's locals
+        // (exception, path, frames, ...), which Kernel#binding now
+        // captures. The Compiler is verbatim so output is byte-exact.
+        "erb" => Some(include_str!("stdlib_vendor/erb.rb")),
         "set" => Some(include_str!("stdlib_vendor/set.rb")),
         "stringio" => Some(include_str!("stdlib_vendor/stringio.rb")),
         "strscan" => Some(include_str!("stdlib_vendor/strscan.rb")),

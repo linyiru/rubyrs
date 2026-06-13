@@ -1049,3 +1049,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // GzipWriter/Reader, auto-inflate. rack Deflater + Static.
 #[cfg(feature = "stdlib")]
 #[test] fn zlib_roundtrip() { run_diff("zlib_roundtrip"); }
+// ERB (vendored erb.rb + verbatim erb/compiler.rb): ERB.new(str)
+// .result(binding) — template reads the handler's locals via the
+// captured binding + calls a method on the captured self. rack
+// ShowExceptions / ShowStatus render their HTML this way.
+#[cfg(feature = "stdlib")]
+#[test] fn erb_render() { run_diff("erb_render"); }
