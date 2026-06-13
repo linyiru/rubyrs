@@ -60,3 +60,23 @@ puts ["abc"].pack("H*").bytes.inspect    # [0xab, 0xc0]
 
 # `*` vs explicit count.
 puts "\x12\x34\x56\x78".unpack1("H4")    # only 4 nibbles
+
+# --- Base64 ('m' = RFC2045: newline every 60 chars + trailing
+#     newline; 'm0' = RFC4648: no breaks). rack's basic-auth reader
+#     does `creds.unpack1('m')`; its test builds the header with
+#     `[user_pass].pack('m*')`. ---
+puts ["user:pass"].pack("m")             # "dXNlcjpwYXNz\n"
+puts ["user:pass"].pack("m*")            # same as m
+puts ["user:pass"].pack("m0")            # no trailing newline
+puts ["Hello, World!"].pack("m0")
+puts [("a" * 50)].pack("m").inspect      # 60-char wrap + trailing \n
+puts "dXNlcjpwYXNz\n".unpack1("m")       # "user:pass"
+puts "dXNlcjpwYXNz".unpack("m").inspect  # ["user:pass"]
+# whitespace/newlines are ignored on decode (RFC2045).
+puts "dXNl\ncjpw YXNz".unpack1("m")      # "user:pass"
+
+# Round-trip across lengths + the empty/edge cases, both modes.
+["", "a", "ab", "abc", "abcd", "any carnal pleasure.", "x" * 100].each do |s|
+  puts([s].pack("m").unpack1("m") == s)
+  puts([s].pack("m0").unpack1("m") == s)
+end

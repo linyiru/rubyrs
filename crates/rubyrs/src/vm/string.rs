@@ -4024,6 +4024,84 @@ fn parse_directive(it: &mut std::str::Chars<'_>) -> Option<(char, Option<usize>)
     Some((dir, count))
 }
 
+/// Standard Base64 alphabet (RFC 4648), used by the `m` pack/unpack
+/// directive and `require "base64"`.
+const BASE64_TBL: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Raw Base64 of `input` (no line breaks). Pads with `=` to a
+/// multiple of 4.
+fn base64_raw(input: &[u8]) -> String {
+    let mut s = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        s.push(BASE64_TBL[(b0 >> 2) as usize] as char);
+        s.push(BASE64_TBL[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        s.push(if chunk.len() > 1 {
+            BASE64_TBL[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        s.push(if chunk.len() > 2 {
+            BASE64_TBL[(b2 & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    s
+}
+
+/// `Array#pack("m")` encoder. `rfc2045` (the default `m` / `m*` / `mN`
+/// form) inserts a newline every 60 output chars AND appends a
+/// trailing newline (CRuby); `m0` (rfc2045 = false) is plain RFC 4648
+/// with no breaks. Empty input → "" in both modes (matches CRuby).
+pub(crate) fn base64_encode(input: &[u8], rfc2045: bool) -> String {
+    let raw = base64_raw(input);
+    if !rfc2045 || raw.is_empty() {
+        return raw;
+    }
+    let mut out = String::with_capacity(raw.len() + raw.len() / 60 + 1);
+    let mut i = 0;
+    while i < raw.len() {
+        let end = (i + 60).min(raw.len());
+        out.push_str(&raw[i..end]);
+        out.push('\n');
+        i = end;
+    }
+    out
+}
+
+/// `String#unpack("m")` decoder — tolerant Base64: skips any
+/// non-alphabet byte (whitespace / newlines, as RFC 2045 mandates)
+/// and stops at the first `=` padding.
+pub(crate) fn base64_decode(input: &[u8]) -> Vec<u8> {
+    let mut rev = [255u8; 256];
+    for (i, &c) in BASE64_TBL.iter().enumerate() {
+        rev[c as usize] = i as u8;
+    }
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for &c in input {
+        if c == b'=' {
+            break;
+        }
+        let v = rev[c as usize];
+        if v == 255 {
+            continue;
+        }
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    out
+}
+
 /// Subset of CRuby's `String#unpack` — see the per-directive
 /// table in the call-site comment. Returns Err with a CRuby-
 /// ish message on unsupported directives or malformed input.
@@ -4146,6 +4224,16 @@ pub(crate) fn unpack_bytes(input: &[u8], fmt: &str) -> Result<Vec<Value>, String
                     _ => unreachable!(),
                 };
                 out.push(Value::new_str_bytes(s_bytes));
+            }
+            'm' => {
+                // Base64 (RFC 2045/4648). Decodes the REST of the
+                // input (no per-element count), skipping whitespace
+                // and stopping at padding, and yields the single
+                // decoded String. rack's basic-auth reader does
+                // `credentials.unpack1('m')`.
+                let decoded = base64_decode(&input[i..]);
+                i = input.len();
+                out.push(Value::new_str_bytes(decoded));
             }
             // Whitespace inside the format is ignored, per CRuby.
             ' ' | '\t' | '\n' => {}
@@ -4275,6 +4363,20 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
                     let pad: u8 = if dir == 'A' { b' ' } else { 0 };
                     out.extend(std::iter::repeat_n(pad, want - bytes.len()));
                 }
+            }
+            'm' => {
+                // Base64-encode the next String. `m0` → plain RFC 4648
+                // (no breaks); `m` / `m*` / `mN` → RFC 2045 (newline
+                // every 60 chars + trailing newline, CRuby default).
+                // rack's basic-auth test builds the header with
+                // `["user:pass"].pack("m*")`.
+                let v = values.get(vi).cloned().unwrap_or_else(|| Value::new_str(""));
+                vi += 1;
+                let bytes: Vec<u8> = match v {
+                    Value::Str(s) => s.borrow().clone(),
+                    _ => return Err("pack: expected String for m".into()),
+                };
+                out.extend_from_slice(base64_encode(&bytes, n != 0).as_bytes());
             }
             ' ' | '\t' | '\n' => {}
             _ => return Err(format!("unsupported pack/unpack directive '{}'", dir)),
