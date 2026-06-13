@@ -54,3 +54,11 @@ p c
 # inspect / to_s
 p Tot.new.add(1).inspect
 puts t.to_s
+# Array#to_ary — implicit array-coercion protocol. Returns self, and
+# respond_to?(:to_ary) must agree (rack's BodyProxy delegates that
+# query to its wrapped body).
+arr = [1, 2, 3]
+p arr.to_ary
+p arr.to_ary.equal?(arr)
+p arr.respond_to?(:to_ary)
+p [].respond_to?(:to_ary)

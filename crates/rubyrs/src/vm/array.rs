@@ -1577,7 +1577,12 @@ impl Vm {
                         }
                         Some(acc)
                     }
-                    ("to_a", []) => Some(Value::Array(id)),
+                    // `to_a` / `to_ary` both return the receiver (an
+                    // Array already IS an Array). `to_ary` is the
+                    // implicit array-coercion protocol respond_to? must
+                    // report — rack's BodyProxy delegates
+                    // `respond_to?(:to_ary)` to its wrapped body.
+                    ("to_a", []) | ("to_ary", []) => Some(Value::Array(id)),
                     // `arr.dup` / `arr.clone` — shallow copy. CRuby's
                     // `clone` also preserves the frozen flag; Tier-1
                     // Arrays don't model `freeze` beyond a no-op

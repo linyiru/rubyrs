@@ -885,7 +885,7 @@ impl Vm {
                 "count" | "sum" | "min" | "max" | "sort" | "tally" |
                 "combination" | "permutation" | "assoc" | "rassoc" | "pack" |
                 "inject" | "reduce" |
-                "to_a" | "reverse" | "uniq" | "compact" |
+                "to_a" | "to_ary" | "reverse" | "uniq" | "compact" |
                 "flatten" | "join" |
                 "+" | "-" | "concat" | "replace" | "clear" | "take" | "drop" |
                 "find_index" | "index" |
