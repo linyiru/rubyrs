@@ -19,4 +19,39 @@ t("mtime class")   { File.mtime(fp).class }
 t("mtime istime")  { File.mtime(fp).is_a?(Time) }
 t("mtime diff0")   { File.mtime(fp) - File.mtime(fp) }
 t("mtime miss")    { begin; File.mtime(fp + "-nope"); rescue SystemCallError => e; e.is_a?(Errno::ENOENT); end }
+
+# File.stat -> File::Stat query surface (Rack::Directory listing).
+t("stat size")     { File.stat(fp).size }
+t("stat file?")    { s = File.stat(fp); [s.file?, s.directory?] }
+t("stat mtime cls"){ File.stat(fp).mtime.class }
+t("stat dir")      { s = File.stat("."); [s.directory?, s.file?] }
+t("stat miss")     { begin; File.stat(fp + "-nope"); rescue SystemCallError => e; e.class; end }
+
+# Dir.mkdir / rmdir / foreach (native).
+dd = fp + "-d"
+t("dir mkdir")     { Dir.mkdir(dd); File.directory?(dd) }
+t("dir foreach")   { File.binwrite("#{dd}/a", "1"); File.binwrite("#{dd}/b", "2"); ns = []; Dir.foreach(dd) { |e| ns << e }; ns.sort }
+File.delete("#{dd}/a"); File.delete("#{dd}/b")
+t("dir rmdir")     { Dir.rmdir(dd); File.directory?(dd) }
+
+# Symlink: broken target -> ENOENT, self-referential -> ELOOP, both
+# of which Rack::Directory's listing rescues to skip the entry.
+bl = fp + "-broken"
+File.symlink(fp + "-no-such-target", bl)
+t("stat broken")   { begin; File.stat(bl); rescue SystemCallError => e; e.class; end }
+File.delete(bl)
+lp = fp + "-loop"
+File.symlink(File.basename(lp), lp)
+t("stat eloop")    { begin; File.stat(lp); rescue SystemCallError => e; e.class; end }
+File.delete(lp)
+
+# mkfifo: a FIFO is not a regular file, so Rack serves 404. stat must
+# NOT block (access(2)-based readable?, never opens the pipe).
+ff = fp + "-fifo"
+File.mkfifo(ff)
+t("fifo not file") { s = File.stat(ff); [s.file?, s.directory?, s.readable?] }
+File.delete(ff)
+
+# chmod (last — it mutates fp's perms): set 0600, read the mode back.
+t("chmod mode")    { File.chmod(0o600, fp); File.stat(fp).mode & 0o777 }
 File.delete(fp)

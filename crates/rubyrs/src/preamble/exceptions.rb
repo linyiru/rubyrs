@@ -412,6 +412,15 @@ module Errno
   class EINVAL < SystemCallError; end
   ## No space left on device.
   class ENOSPC < SystemCallError; end
+  ## Too many levels of symbolic links — a circular / excessively
+  ## deep symlink chain. Rack::Directory's listing does
+  ## `File.stat(entry) rescue Errno::ENOENT, Errno::ELOOP` to skip a
+  ## bad link; without the class the rescue can't name it and the
+  ## ELOOP HostException escapes, aborting the whole listing.
+  class ELOOP < SystemCallError; end
+  ## Directory not empty — Dir.rmdir / Dir.delete on a populated
+  ## directory.
+  class ENOTEMPTY < SystemCallError; end
   ## Broken pipe.
   class EPIPE < SystemCallError; end
   ## Connection refused.

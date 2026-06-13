@@ -120,6 +120,39 @@ class File
     Time.at(__mtime_f(path))
   end
 
+  # `File.stat(path)` → File::Stat (FOLLOWS symlinks). The native
+  # `__stat_raw` returns the metadata tuple; the Stat object exposes
+  # the CRuby query surface Rack::Directory reaches for (mtime / size /
+  # directory? / file? / readable?). mtime wraps via Time.at, mirroring
+  # Time.now. A missing path (incl. a broken symlink's target) raises
+  # Errno::ENOENT from the primitive — Rack turns that into a 404.
+  def self.stat(path)
+    Stat.new(__stat_raw(path))
+  end
+
+  # Buffered metadata snapshot. The native tuple order is fixed by
+  # `File.__stat_raw` (vm/fileops.rs).
+  class Stat
+    def initialize(raw)
+      @size, @mtime_f, @dir, @file, @mode, @symlink,
+        @readable, @writable, @executable = raw
+    end
+
+    attr_reader :size, :mode
+
+    def mtime
+      Time.at(@mtime_f)
+    end
+
+    def directory?  ; @dir;        end
+    def file?       ; @file;       end
+    def symlink?    ; @symlink;    end
+    def readable?   ; @readable;   end
+    def writable?   ; @writable;   end
+    def executable? ; @executable; end
+    def zero?       ; @size == 0;  end
+  end
+
   # --- instance surface (operates on the buffered content) ---
 
   # @!visibility private

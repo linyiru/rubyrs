@@ -2538,6 +2538,17 @@ class Dir
       0
     end
   end
+
+  ## `Dir.foreach(path) { |entry| ... }` — yield each directory entry
+  ## (including "." and "..") via the host `Dir.entries` primitive.
+  ## Rack::Directory lists a folder by iterating it. Non-block form
+  ## returns an Enumerator over the same names. Returns nil (CRuby).
+  def self.foreach(path)
+    names = Dir.entries(path)
+    return names.each unless block_given?
+    names.each { |e| yield e }
+    nil
+  end
 end
 ## RubyrsSass — anchor for the `RubyrsSass.compile(scss) -> css` host
 ## primitive (wired in vm/dispatch.rs to crate::sass::compile, the

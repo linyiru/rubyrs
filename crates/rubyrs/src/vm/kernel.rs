@@ -4254,7 +4254,7 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         "uri" | "uri/generic" | "uri/common"
         | "set" | "logger" | "forwardable"
         | "singleton" | "delegate" | "ostruct"
-        | "pathname" | "tempfile" | "stringio" | "strscan" | "fileutils"
+        | "pathname" | "tempfile" | "tmpdir" | "stringio" | "strscan" | "fileutils"
         | "digest" | "digest/md5" | "digest/sha1" | "digest/sha2"
         | "base64" | "securerandom"
         | "json" | "yaml" | "date" | "time" | "csv"

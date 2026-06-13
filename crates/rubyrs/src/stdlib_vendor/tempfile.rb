@@ -12,6 +12,13 @@
 # scope: encoding modes, real IO inheritance to subprocesses beyond
 # path-based access, auto-finalizer unlink (close!/unlink are
 # explicit — minitest always calls them).
+#
+# CRuby's lib/tempfile.rb `require 'tmpdir'` at the top, so code that
+# requires "tempfile" transitively gains Dir.mktmpdir (rack's
+# spec_directory / spec_files use it without requiring tmpdir
+# directly). Mirror that transitive load.
+require "tmpdir"
+
 class Tempfile
   @@seq = 0
 

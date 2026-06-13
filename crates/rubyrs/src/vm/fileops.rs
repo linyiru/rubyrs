@@ -12,6 +12,47 @@ use crate::value::Value;
 
 use super::Vm;
 
+/// Which `access(2)` permission to probe.
+#[derive(Clone, Copy)]
+enum AccessMode {
+    Read,
+    Write,
+    Exec,
+}
+
+/// `File.readable?/writable?/executable?` — effective-uid access
+/// check. Uses `access(2)` on Unix (libc is a plain unix dep): it
+/// does NOT open the file, so it can't block on a FIFO with no
+/// writer (Rack::Directory probes `stat.readable?` on every listed
+/// entry, including pipes) and it honours ownership / ACLs the way
+/// CRuby's `File.readable?` does. Missing path → false. Non-Unix
+/// falls back to a coarse metadata/read-only check.
+fn fs_access(path: &str, mode: AccessMode) -> bool {
+    #[cfg(unix)]
+    {
+        let amode = match mode {
+            AccessMode::Read => libc::R_OK,
+            AccessMode::Write => libc::W_OK,
+            AccessMode::Exec => libc::X_OK,
+        };
+        match std::ffi::CString::new(path.as_bytes()) {
+            Ok(c) => unsafe { libc::access(c.as_ptr(), amode) == 0 },
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match std::fs::metadata(path) {
+            Ok(m) => match mode {
+                AccessMode::Read => true,
+                AccessMode::Write => !m.permissions().readonly(),
+                AccessMode::Exec => false,
+            },
+            Err(_) => false,
+        }
+    }
+}
+
 /// Match a single glob path-segment pattern (`*`, `?`, literals)
 /// against a filename. `*` matches any run of non-`/` chars, `?` one
 /// char. (Brace/bracket classes `{a,b}` / `[..]` are not yet
@@ -791,44 +832,22 @@ impl Vm {
                     Err(e) => return Err(self.trap(io_error(&e, Some(Path::new(&path))))),
                 }
             }
-            // `File.readable?(path)` — Rack::Files gates serving on
-            // `File.file?(path) && File.readable?(path)`. Portable
-            // R_OK check WITHOUT libc (the dashboard / CI builds lack
-            // the `_http_server` feature that pulls libc in): a
-            // successful read-only open IS the OS `access(2)` R_OK
-            // test and honours chmod-000 / ownership / ACLs — the
-            // negative-permission serve spec expects 403.
-            ("readable?", [p]) => {
-                self.check_filesystem_io_allowed("File.readable?", None)?;
-                let path = path_arg(p)?;
-                self.check_filesystem_io_allowed("File.readable?", Some(Path::new(&path)))?;
-                Value::Bool(std::fs::File::open(&path).is_ok())
-            }
-            // `File.writable?` / `File.executable?` — permission-bit
-            // predicates (Unix mode); not effective-uid-aware but
-            // matches CRuby for normally-owned files. Missing path →
-            // false (CRuby never raises here).
-            ("writable?", [p]) | ("executable?", [p]) => {
-                let op = if name == "writable?" {
-                    "File.writable?"
-                } else {
-                    "File.executable?"
+            // `File.readable?/writable?/executable?(path)` — Rack::Files
+            // gates serving on `File.file?(path) && File.readable?(path)`
+            // and Rack::Directory probes `readable?` on every listed
+            // entry. Routes through access(2) (see `fs_access`): does
+            // not open the file, so it can't block on a FIFO, and it's
+            // effective-uid-aware (chmod-000 → false → 403/404).
+            ("readable?", [p]) | ("writable?", [p]) | ("executable?", [p]) => {
+                let (op, mode) = match name {
+                    "readable?" => ("File.readable?", AccessMode::Read),
+                    "writable?" => ("File.writable?", AccessMode::Write),
+                    _ => ("File.executable?", AccessMode::Exec),
                 };
                 self.check_filesystem_io_allowed(op, None)?;
                 let path = path_arg(p)?;
                 self.check_filesystem_io_allowed(op, Some(Path::new(&path)))?;
-                let bit: u32 = if name == "writable?" { 0o222 } else { 0o111 };
-                let ok = match std::fs::metadata(&path) {
-                    #[cfg(unix)]
-                    Ok(m) => {
-                        use std::os::unix::fs::PermissionsExt;
-                        m.permissions().mode() & bit != 0
-                    }
-                    #[cfg(not(unix))]
-                    Ok(m) => name == "writable?" && !m.permissions().readonly(),
-                    Err(_) => false,
-                };
-                Value::Bool(ok)
+                Value::Bool(fs_access(&path, mode))
             }
             // `File.size?(path)` — nil when the file is absent OR
             // zero-length, else the byte size (CRuby's truthy-size
@@ -863,6 +882,113 @@ impl Vm {
                     }
                     Err(e) => return Err(self.trap(io_error(&e, Some(Path::new(&path))))),
                 }
+            }
+            // `File.__stat_raw(path)` — metadata tuple backing the
+            // preamble File::Stat. FOLLOWS symlinks (File.stat
+            // semantics; a broken link → ENOENT, which Rack::Directory
+            // turns into a 404). Tuple: [size, mtime_f, dir?, file?,
+            // mode, symlink?(false — target was followed), readable?,
+            // writable?, executable?]; the Ruby Stat wraps mtime via
+            // Time.at and exposes the query surface.
+            ("__stat_raw", [p]) => {
+                self.check_filesystem_io_allowed("File.stat", None)?;
+                let path = path_arg(p)?;
+                self.check_filesystem_io_allowed("File.stat", Some(Path::new(&path)))?;
+                let m = std::fs::metadata(&path)
+                    .map_err(|e| self.trap(io_error(&e, Some(Path::new(&path)))))?;
+                let size = m.len() as i64;
+                let mtime_f = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                #[cfg(unix)]
+                let mode = {
+                    use std::os::unix::fs::PermissionsExt;
+                    (m.permissions().mode() & 0o7777) as i64
+                };
+                #[cfg(not(unix))]
+                let mode: i64 = if m.permissions().readonly() { 0o444 } else { 0o644 };
+                // access(2)-based — never opens, so a FIFO entry in a
+                // listed directory can't block the stat.
+                let readable = fs_access(&path, AccessMode::Read);
+                let writable = fs_access(&path, AccessMode::Write);
+                let executable = fs_access(&path, AccessMode::Exec);
+                let arr = vec![
+                    Value::Int(size),
+                    Value::Float(mtime_f),
+                    Value::Bool(m.is_dir()),
+                    Value::Bool(m.is_file()),
+                    Value::Int(mode),
+                    Value::Bool(false),
+                    Value::Bool(readable),
+                    Value::Bool(writable),
+                    Value::Bool(executable),
+                ];
+                self.maybe_gc();
+                self.check_alloc()?;
+                Value::Array(self.heap.alloc(HeapObj::Array(arr.into())))
+            }
+            // `File.chmod(mode, *paths)` — set permission bits, returns
+            // the path count (CRuby). spec_directory chmod-0's a file
+            // to assert the 403/unreadable path. Unix mode application.
+            ("chmod", [mode, rest @ ..]) if !rest.is_empty() => {
+                self.check_filesystem_io_allowed("File.chmod", None)?;
+                let Value::Int(m) = mode else {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into Integer",
+                            mode.type_name()
+                        ),
+                    }));
+                };
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    for p in rest {
+                        let path = path_arg(p)?;
+                        self.check_filesystem_io_allowed("File.chmod", Some(Path::new(&path)))?;
+                        let perm = std::fs::Permissions::from_mode((*m as u32) & 0o7777);
+                        std::fs::set_permissions(&path, perm)
+                            .map_err(|e| self.trap(io_error(&e, Some(Path::new(&path)))))?;
+                    }
+                }
+                Value::Int(rest.len() as i64)
+            }
+            // `File.symlink(old, new)` — create a symbolic link, returns
+            // 0 (CRuby). spec_directory links to a missing target to
+            // exercise the broken-symlink → 404 branch. Unix-only.
+            #[cfg(unix)]
+            ("symlink", [old, new]) => {
+                self.check_filesystem_io_allowed("File.symlink", None)?;
+                let oldp = path_arg(old)?;
+                let newp = path_arg(new)?;
+                self.check_filesystem_io_allowed("File.symlink", Some(Path::new(&newp)))?;
+                std::os::unix::fs::symlink(&oldp, &newp)
+                    .map_err(|e| self.trap(io_error(&e, Some(Path::new(&newp)))))?;
+                Value::Int(0)
+            }
+            // `File.mkfifo(path[, mode])` — named pipe via libc::mkfifo
+            // (libc is a plain unix dependency). Returns 0 (CRuby).
+            // spec_directory creates one to assert Rack::Directory
+            // serves 404 for a non-regular file (Stat#file? == false).
+            #[cfg(unix)]
+            ("mkfifo", [p]) | ("mkfifo", [p, _]) => {
+                self.check_filesystem_io_allowed("File.mkfifo", None)?;
+                let path = path_arg(p)?;
+                self.check_filesystem_io_allowed("File.mkfifo", Some(Path::new(&path)))?;
+                let cpath = std::ffi::CString::new(path.as_bytes()).map_err(|_| {
+                    self.trap(RubyError::ArgumentError {
+                        msg: "string contains null byte".into(),
+                    })
+                })?;
+                let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o666) };
+                if rc != 0 {
+                    let e = std::io::Error::last_os_error();
+                    return Err(self.trap(io_error(&e, Some(Path::new(&path)))));
+                }
+                Value::Int(0)
             }
             ("basename", [p]) => {
                 let path = path_arg(p)?;
@@ -1167,6 +1293,32 @@ impl Vm {
                     }
                 }
             }
+            // `Dir.mkdir(path[, mode])` — create a single directory.
+            // Mode is accepted but ignored (the host umask applies, as
+            // with CRuby's 0o777 default); tmpdir.rb's `Dir.mktmpdir`
+            // builds its scratch dir through this. Returns 0 (CRuby);
+            // a missing parent / existing path surfaces as the Errno.
+            ("mkdir", [p]) | ("mkdir", [p, _]) => {
+                self.check_filesystem_io_allowed("Dir.mkdir", None)?;
+                let path = str_arg(p)?;
+                self.check_filesystem_io_allowed("Dir.mkdir", Some(Path::new(&path)))?;
+                match std::fs::create_dir(&path) {
+                    Ok(()) => Value::Int(0),
+                    Err(e) => return Err(self.trap(io_error(&e, Some(Path::new(&path))))),
+                }
+            }
+            // `Dir.rmdir` / `Dir.delete` / `Dir.unlink` — remove an
+            // EMPTY directory (CRuby raises Errno::ENOTEMPTY otherwise,
+            // which `std::fs::remove_dir` mirrors). Returns 0.
+            ("rmdir", [p]) | ("delete", [p]) | ("unlink", [p]) => {
+                self.check_filesystem_io_allowed("Dir.rmdir", None)?;
+                let path = str_arg(p)?;
+                self.check_filesystem_io_allowed("Dir.rmdir", Some(Path::new(&path)))?;
+                match std::fs::remove_dir(&path) {
+                    Ok(()) => Value::Int(0),
+                    Err(e) => return Err(self.trap(io_error(&e, Some(Path::new(&path))))),
+                }
+            }
             _ => return Ok(None),
         }))
     }
@@ -1390,7 +1542,23 @@ fn io_errno(e: &std::io::Error) -> (&'static str, &'static str) {
             21 => return ("Errno::EISDIR", "Is a directory"),
             22 => return ("Errno::EINVAL", "Invalid argument"),
             28 => return ("Errno::ENOSPC", "No space left on device"),
-            _ => {}
+            _ => {
+                // ELOOP's number differs by platform (62 macOS / 40
+                // Linux), so compare against libc's constant rather
+                // than a literal. A circular/self-referential symlink
+                // (rack's spec_directory links 'foo' -> 'foo') stat'd
+                // during a directory listing must raise Errno::ELOOP so
+                // Rack::Directory's `rescue Errno::ENOENT, Errno::ELOOP`
+                // skips the entry instead of 500-ing.
+                #[cfg(unix)]
+                if code == libc::ELOOP {
+                    return ("Errno::ELOOP", "Too many levels of symbolic links");
+                }
+                #[cfg(unix)]
+                if code == libc::ENOTEMPTY {
+                    return ("Errno::ENOTEMPTY", "Directory not empty");
+                }
+            }
         }
     }
     match e.kind() {

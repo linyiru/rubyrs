@@ -141,6 +141,10 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         // capability applies). minitest's diff pipeline + the
         // capture_subprocess_io reopen target.
         "tempfile" => Some(include_str!("stdlib_vendor/tempfile.rb")),
+        // Tmpdir: Dir.tmpdir + Dir.mktmpdir over the native Dir.mkdir
+        // primitive. rack's spec_directory builds a scratch tree with
+        // Dir.mktmpdir's block form (auto-removed on exit).
+        "tmpdir" => Some(include_str!("stdlib_vendor/tmpdir.rb")),
         "set" => Some(include_str!("stdlib_vendor/set.rb")),
         "stringio" => Some(include_str!("stdlib_vendor/stringio.rb")),
         "strscan" => Some(include_str!("stdlib_vendor/strscan.rb")),

@@ -77,6 +77,12 @@ File.open(fpath) do |f|
 end
 File.delete(fpath)
 
+# 2c — Dir.mktmpdir (require "tempfile" pulls in tmpdir, as in CRuby).
+# Block form yields a real dir and removes it on exit; non-block
+# returns the path. spec_directory builds its scratch tree this way.
+t("mktmpdir blk")  { inner = nil; r = Dir.mktmpdir("rk") { |d| inner = d; File.directory?(d) }; [r, File.directory?(inner)] }
+t("mktmpdir path") { d = Dir.mktmpdir; ok = File.directory?(d); Dir.rmdir(d); ok }
+
 # 3 — Tempfile surface
 tf = Tempfile.new("rack-lib-fix")
 tf << "ab\ncd\n"
