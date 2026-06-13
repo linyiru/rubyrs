@@ -85,3 +85,15 @@ e = StringScanner.new("")
 puts e.eos?                                     # true
 puts e.scan(/x/).inspect                        # nil
 puts e.scan(/\z/).inspect                       # "" (zero-width hit)
+
+# --- string= replaces the buffer and resets pos (rack's multipart
+#     parser rebases with `@sbuf.string = @sbuf.rest`) ---
+ss = StringScanner.new("abcdef")
+ss.scan(/abc/)
+puts ss.rest                                    # "def"
+ss.string = ss.rest                             # rebase to "def", pos 0
+puts ss.string                                  # "def"
+puts ss.pos                                     # 0
+puts ss.scan(/de/).inspect                      # "de"
+puts (ss.string = "fresh")                      # setter returns its arg
+puts [ss.string, ss.pos].inspect                # ["fresh", 0]

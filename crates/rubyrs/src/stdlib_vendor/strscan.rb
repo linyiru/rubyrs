@@ -49,6 +49,17 @@ class StringScanner
     @str
   end
 
+  # `scanner.string = s` — replace the scanned string and reset the
+  # scan position to 0 (CRuby). rack's multipart parser rebases its
+  # buffer with `@sbuf.string = @sbuf.rest` after consuming a chunk.
+  def string=(s)
+    @str = s.to_s
+    @pos = 0
+    @last_md = nil
+    @match_pos = nil
+    s
+  end
+
   def pos
     @pos
   end
