@@ -1033,6 +1033,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // ASCII-8BIT receivers index by bytes + keep the tag, instead of the
 // UTF-8-lossy char view that mangled StringIO/Zlib over binary data.
 #[test] fn string_binary_slice() { run_diff("string_binary_slice"); }
+// eval(src, binding) self-dispatch: Kernel#binding captures self,
+// eval runs with it (method + ivar dispatch). rack Builder.new_from_string.
+#[test] fn eval_binding_self() { run_diff("eval_binding_self"); }
 // Per-instance singleton methods on Array / Proc (heap_singletons
 // side-table): define_singleton_method + `def obj.x`, per-instance,
 // native dispatch intact. rack Deflater/Lock/ContentLength define

@@ -187,18 +187,14 @@ module Marshal
   end
 end
 
-# Binding — Tier-1 opaque context token. CRuby's Binding captures
-# the full lexical environment for later eval; rubyrs has no
-# eval-in-binding, so `binding` returns an inert marker instance.
-# It exists because real code stores one in an ivar as a "context
-# I might inspect later" breadcrumb (minitest's BetterError test
-# fixture does `@bad_ivar = binding` inside set_backtrace) — and
-# because Marshal must REJECT it (no _dump_data), which is what
-# routes such exceptions into minitest's neuter chain. Calling
-# eval/local_variables on it raises NoMethodError (honest absence).
+# Binding — captures the calling scope for later `eval`. The class is
+# defined here so the instance exists (and Marshal still REJECTs it —
+# no _dump_data — routing such exceptions into minitest's neuter
+# chain). The `Kernel#binding` factory itself is a NATIVE builtin
+# (vm/kernel.rs) so it can capture the live frame's self + lexical
+# class into @__self / @__lexical_class — `eval(src, binding)` reads
+# those to run with the captured self (rack's Builder.new_from_string
+# evals a rackup script against `builder.instance_eval { binding }`).
+# Outer local-variable capture is a follow-up.
 class Binding
-end
-
-def binding
-  Binding.new
 end

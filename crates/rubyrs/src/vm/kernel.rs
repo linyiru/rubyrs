@@ -288,6 +288,40 @@ impl Vm {
                     })),
                 })
             }
+            // `Kernel#binding` — capture the CALLER's scope (self +
+            // lexical class) into a Binding instance so `eval(src,
+            // binding)` runs with that self. The self-dispatch layer
+            // (rack's Builder.new_from_string evals a rackup script —
+            // `run`/`use`/`map` — against `builder.instance_eval {
+            // binding }`). Outer local-variable capture is a follow-up.
+            "binding" if args.is_empty() => {
+                let self_val = self
+                    .frames
+                    .last()
+                    .map(|f| f.self_val.clone())
+                    .unwrap_or(Value::Nil);
+                let lex = self.class_stack.last().cloned();
+                let Some(bcls) = self.classes.get(&self.interner.intern("Binding")).cloned()
+                else {
+                    return Some(Ok(Value::Nil));
+                };
+                self.maybe_gc();
+                if let Err(e) = self.check_alloc() {
+                    return Some(Err(e));
+                }
+                let mut ivars = crate::intern::FxHashMap::default();
+                ivars.insert(self.interner.intern("@__self"), self_val);
+                if let Some(c) = lex {
+                    ivars.insert(self.interner.intern("@__lexical_class"), Value::Class(c));
+                }
+                let id = self.heap.alloc(HeapObj::Instance(crate::value::Instance {
+                    class: bcls,
+                    ivars,
+                    singleton_class: None,
+                    frozen: std::cell::Cell::new(false),
+                }));
+                Some(Ok(Value::Object(id)))
+            }
             "puts" => {
                 if let Some(target) = self.stdio_redirect("$stdout", true) {
                     return Some(self.forward_stdio_call(target, "puts", args));
@@ -3055,11 +3089,17 @@ impl Vm {
                     let owned = src.to_string_lossy();
                     Some(self.eval_string(&owned, "(eval)", /*synthetic=*/true))
                 }
-                // Common 2-arg shape: `eval(src, binding)` — drop
-                // binding silently per the documented divergence.
-                [Value::Str(src), _binding] => {
+                // 2-arg `eval(src, binding)`: when the 2nd arg is a
+                // Binding, run with its captured self (else drop it,
+                // the old divergence).
+                [Value::Str(src), binding] => {
                     let owned = src.to_string_lossy();
-                    Some(self.eval_string(&owned, "(eval)", /*synthetic=*/true))
+                    match self.extract_binding_ctx(binding) {
+                        Some((self_o, cctx)) => Some(self.eval_string_full(
+                            &owned, "(eval)", true, cctx, Some(self_o),
+                        )),
+                        None => Some(self.eval_string(&owned, "(eval)", true)),
+                    }
                 }
                 // 3-arg / 4-arg with filename: validate file arg
                 // type FIRST (CRuby raises TypeError, not
@@ -3091,14 +3131,22 @@ impl Vm {
                         ),
                     })))
                 }
-                [Value::Str(src), _binding, Value::Str(file)]
-                | [Value::Str(src), _binding, Value::Str(file), _] => {
+                [Value::Str(src), binding, Value::Str(file)]
+                | [Value::Str(src), binding, Value::Str(file), _] => {
                     let owned = src.to_string_lossy();
                     let fname = file.to_string_lossy();
                     // `synthetic=false`: caller supplied the
                     // filename explicitly. Pass through to keep
-                    // `__FILE__` stable across repeated evals.
-                    Some(self.eval_string(&owned, &fname, /*synthetic=*/false))
+                    // `__FILE__` stable across repeated evals. A
+                    // Binding 2nd arg runs with its captured self
+                    // (rack's Builder.new_from_string: `eval(rackup,
+                    // builder_binding, path)`).
+                    match self.extract_binding_ctx(binding) {
+                        Some((self_o, cctx)) => Some(self.eval_string_full(
+                            &owned, &fname, false, cctx, Some(self_o),
+                        )),
+                        None => Some(self.eval_string(&owned, &fname, false)),
+                    }
                 }
                 _ => Some(Err(self.trap(RubyError::ArgumentError {
                     msg: format!(
@@ -3843,6 +3891,29 @@ impl Vm {
     /// stays stable across repeated evals — including the edge case
     /// where the caller deliberately passes the literal default
     /// string as a filename.
+    /// If `v` is a `Kernel#binding`-produced Binding instance, return
+    /// its captured `(self, lexical_class)` for `eval(src, binding)`.
+    /// `None` for any other value (including the old inert Binding).
+    fn extract_binding_ctx(
+        &mut self,
+        v: &Value,
+    ) -> Option<(Value, Option<std::rc::Rc<crate::value::Class>>)> {
+        let Value::Object(id) = v else { return None };
+        let self_sym = self.interner.intern("@__self");
+        let lex_sym = self.interner.intern("@__lexical_class");
+        match self.heap.get(*id) {
+            crate::heap::HeapObj::Instance(inst) if inst.class.name == "Binding" => {
+                let self_o = inst.ivars.get(&self_sym).cloned()?;
+                let cctx = match inst.ivars.get(&lex_sym) {
+                    Some(Value::Class(c)) => Some(c.clone()),
+                    _ => None,
+                };
+                Some((self_o, cctx))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn eval_string(
         &mut self,
         source: &str,
@@ -3867,6 +3938,24 @@ impl Vm {
         filename: &str,
         synthetic: bool,
         class_ctx: Option<std::rc::Rc<crate::value::Class>>,
+    ) -> Result<Value, Trap> {
+        self.eval_string_full(source, filename, synthetic, class_ctx, None)
+    }
+
+    /// `eval_string_with_class_ctx` plus a `self_override` — the eval'd
+    /// toplevel runs with `self` set to it. Backs `eval(src, binding)`:
+    /// a Binding captures the calling scope's `self`, and method calls
+    /// in the eval'd source (rack's Builder `new_from_string` evals a
+    /// rackup script that calls `run`/`use`/`map` on the builder) must
+    /// dispatch against that self. (Outer LOCAL-variable capture is a
+    /// follow-up; this is the self-dispatch layer.)
+    pub(crate) fn eval_string_full(
+        &mut self,
+        source: &str,
+        filename: &str,
+        synthetic: bool,
+        class_ctx: Option<std::rc::Rc<crate::value::Class>>,
+        self_override: Option<Value>,
     ) -> Result<Value, Trap> {
         // Fast-fail BEFORE any parse / AST / compile work when
         // the frame cap is already exhausted. CPU-bound parse of
@@ -3981,9 +4070,10 @@ impl Vm {
             locals: crate::vm::Locals::Shared(std::rc::Rc::new(std::cell::RefCell::new(
                 super::vec_nil(self.protos[entry].n_locals as usize)
             ))),
-            self_val: match &class_ctx {
-                Some(cls) => Value::Class(cls.clone()),
-                None => Value::Nil,
+            self_val: match (&self_override, &class_ctx) {
+                (Some(s), _) => s.clone(),
+                (None, Some(cls)) => Value::Class(cls.clone()),
+                (None, None) => Value::Nil,
             },
             base_sp: self.stack.len(),
             // NOT is_class_body even with a ctx: that flag drives
