@@ -482,6 +482,14 @@ impl Heap {
             Slot::Dead => panic!("ICE: use-after-free ObjId({})", id.0),
         }
     }
+    /// Non-panicking liveness probe. `true` iff the slot currently
+    /// holds a `Live` object. Used by side-tables keyed on `ObjId`
+    /// (e.g. `Vm::binding_locals`) to prune entries for objects that
+    /// have been swept — before their slot is recycled by a later
+    /// `alloc`, which would otherwise alias the stale entry.
+    pub(crate) fn is_live(&self, id: ObjId) -> bool {
+        matches!(self.slots.get(id.0 as usize), Some(Slot::Live(_)))
+    }
     pub(crate) fn get_mut(&mut self, id: ObjId) -> &mut HeapObj {
         match &mut self.slots[id.0 as usize] {
             Slot::Live(o) => o,

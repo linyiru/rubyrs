@@ -1036,6 +1036,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // eval(src, binding) self-dispatch: Kernel#binding captures self,
 // eval runs with it (method + ivar dispatch). rack Builder.new_from_string.
 #[test] fn eval_binding_self() { run_diff("eval_binding_self"); }
+// eval(src, binding) local-variable capture: Kernel#binding snapshots
+// the caller's named locals; eval re-seeds them (lambda-wrap parse).
+// rack ShowExceptions/ShowStatus ERB `template.result(binding)`.
+#[test] fn eval_binding_lvar() { run_diff("eval_binding_lvar"); }
 // Per-instance singleton methods on Array / Proc (heap_singletons
 // side-table): define_singleton_method + `def obj.x`, per-instance,
 // native dispatch intact. rack Deflater/Lock/ContentLength define

@@ -13660,6 +13660,7 @@ impl Vm {
             let proto = Proto {
                 name: "<callable-forwarder>".to_string(),
                 params: Vec::new(),
+                local_names: Vec::new(),
                 n_required_positional: 0,
                 n_required_post: 0,
                 rest_param: None,
@@ -13758,6 +13759,7 @@ impl Vm {
             let proto = Proto {
                 name: "<method-compose-forwarder>".to_string(),
                 params: Vec::new(),
+                local_names: Vec::new(),
                 n_required_positional: 0,
                 n_required_post: 0,
                 rest_param: None,
@@ -16850,6 +16852,7 @@ impl Vm {
             let proto = Proto {
                 name: format!("<attr-reader:{}>", sym_name),
                 params: vec![],
+                local_names: Vec::new(),
                 n_required_positional: 0,
                 n_required_post: 0,
                 rest_param: None,
@@ -16889,6 +16892,7 @@ impl Vm {
             let proto = Proto {
                 name: format!("<attr-writer:{}>", setter),
                 params: vec!["val".to_string()],
+                local_names: vec!["val".to_string()],
                 n_required_positional: 1,
                 n_required_post: 0,
                 rest_param: None,
@@ -16946,6 +16950,7 @@ impl Vm {
             // the alias arity-permissive (matches primitive
             // dispatch, which is variadic).
             params: vec!["args".to_string()],
+            local_names: vec!["args".to_string()],
             n_required_positional: 0,
             n_required_post: 0,
             rest_param: Some("args".to_string()),
@@ -17129,6 +17134,7 @@ impl Vm {
         let proto = Proto {
             name: format!("<kernel-alias-forwarder:{}>", self.interner.resolve(orig_id)),
             params: vec!["args".to_string()],
+            local_names: vec!["args".to_string()],
             n_required_positional: 0,
             n_required_post: 0,
             rest_param: Some("args".to_string()),
@@ -17178,6 +17184,7 @@ impl Vm {
         let proto = Proto {
             name: format!("<lifecycle-noop:{}>", self.interner.resolve(orig_id)),
             params: vec!["args".to_string()],
+            local_names: vec!["args".to_string()],
             n_required_positional: 0,
             n_required_post: 0,
             rest_param: Some("args".to_string()),

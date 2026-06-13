@@ -767,6 +767,15 @@ pub(crate) struct Proto {
     /// define_method-as-method binder's by-position math).
     pub(crate) block_param_slot: Option<u16>,
     pub(crate) n_locals: u16,
+    /// Slot → source name for each local variable (length `n_locals`;
+    /// `""` for synthetic/unnamed slots). Retained so `Kernel#binding`
+    /// can snapshot the live frame's named locals by name, and
+    /// `eval(src, binding)` can seed them back as same-slot params so
+    /// the eval'd source resolves them. (Empty on protos compiled
+    /// before this was populated is impossible — `build` always fills
+    /// it.) Discovery: rack's ShowExceptions/ShowStatus ERB templates
+    /// reference the calling method's locals via `result(binding)`.
+    pub(crate) local_names: Vec<String>,
     /// `true` when `code` contains an `Op::CreateBlock` — i.e. running
     /// this proto can capture the frame's locals cell into a
     /// `BlockHandle` (block literal, `proc`/`lambda`/`->`,

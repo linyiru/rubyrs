@@ -1145,8 +1145,16 @@ impl ProtoBuilder {
             .code
             .iter()
             .any(|op| matches!(op, Op::CreateBlock(..)));
+        // Slot → name table (inverts the compile-time name→slot map) so
+        // Kernel#binding can snapshot the frame's named locals.
+        let mut local_names = vec![String::new(); self.n_locals as usize];
+        for (nm, &slot) in &self.locals {
+            if let Some(entry) = local_names.get_mut(slot as usize) {
+                *entry = nm.clone();
+            }
+        }
         Proto {
-            name, params, n_required_positional,
+            name, params, n_required_positional, local_names,
             n_required_post: 0,
             rest_param: None,
             kw_param_defaults: vec![],

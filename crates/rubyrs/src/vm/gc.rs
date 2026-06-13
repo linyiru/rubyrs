@@ -630,6 +630,13 @@ impl Vm {
             roots.push(obj.clone());
             roots.push(crate::value::Value::Class(sc.clone()));
         }
+        // Kernel#binding local snapshots: the captured Values are
+        // reachable only from here until the Binding is eval'd.
+        for snap in self.binding_locals.values() {
+            for (_, v) in snap {
+                roots.push(v.clone());
+            }
+        }
         if let Some(v) = &self.last_uncaught_exception {
             roots.push(v.clone());
         }
@@ -750,6 +757,18 @@ impl Vm {
             }
         }
         let pending_frees = self.heap.collect(&roots);
+        // Prune `binding_locals` entries whose Binding object was just
+        // swept. The snapshot Values were roots (above), so they kept
+        // the binding's *contents* alive — but the binding Instance
+        // itself isn't rooted by this table, so it can die here. Drop
+        // the stale entry NOW, before the freed slot is recycled by a
+        // later `alloc` (which would alias the snapshot onto an
+        // unrelated new object).
+        if !self.binding_locals.is_empty() {
+            let heap = &self.heap;
+            self.binding_locals
+                .retain(|&id, _| heap.is_live(crate::value::ObjId(id as u32)));
+        }
         // Run TypedData dfree callbacks AFTER `collect` has
         // returned and the &mut Heap borrow is released (review #2
         // on PR #19). Conservative shape — even though
@@ -902,5 +921,45 @@ mod tests {
         // live_count can only stay or decrease — and with no
         // allocations and no roots, it stays at 0.
         assert!(vm.heap.live_count <= before);
+    }
+
+    #[test]
+    fn maybe_gc_prunes_dead_binding_locals_and_roots_live_snapshots() {
+        // `binding_locals` (Kernel#binding's local snapshots) must
+        // (a) keep its captured Values alive across a sweep, and
+        // (b) drop entries for Binding objects that have themselves
+        // been swept — before the freed slot is recycled.
+        let mut vm = mk_vm();
+        vm.stress_gc = true;
+        // A live Binding-shaped object, rooted via a global so the
+        // sweep keeps it; its binding_locals entry must be RETAINED.
+        let live = vm.heap.alloc(crate::heap::HeapObj::Array(Vec::new().into()));
+        let g = vm.interner.intern("$keep");
+        vm.globals.insert(g, Value::Array(live));
+        // A snapshot Value reachable ONLY through binding_locals — the
+        // GC root loop must keep it alive.
+        let snap_val = vm.heap.alloc(crate::heap::HeapObj::Array(Vec::new().into()));
+        vm.binding_locals
+            .insert(live.0 as usize, vec![("x".to_string(), Value::Array(snap_val))]);
+        // A dead Binding: never rooted, so the sweep frees its slot;
+        // its binding_locals entry must be PRUNED.
+        let dead = vm.heap.alloc(crate::heap::HeapObj::Array(Vec::new().into()));
+        let dead_key = dead.0 as usize;
+        vm.binding_locals.insert(dead_key, vec![("y".to_string(), Value::Nil)]);
+
+        vm.maybe_gc();
+
+        assert!(
+            vm.binding_locals.contains_key(&(live.0 as usize)),
+            "live binding's locals were pruned"
+        );
+        assert!(
+            !vm.binding_locals.contains_key(&dead_key),
+            "dead binding's locals were not pruned"
+        );
+        assert!(
+            vm.heap.is_live(snap_val),
+            "snapshot value was swept despite the binding_locals root"
+        );
     }
 }

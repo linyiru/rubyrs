@@ -1040,6 +1040,15 @@ pub(crate) struct Vm {
     /// Proc body.
     pub(crate) heap_singletons: crate::intern::FxHashMap<usize, (crate::value::Value, Rc<Class>)>,
     pub(crate) any_heap_singletons: bool,
+    /// `Kernel#binding` local snapshots, keyed by the Binding
+    /// instance's `ObjId`: the (name, value) of each NAMED local in
+    /// the capturing frame. `eval(src, binding)` re-seeds them as
+    /// same-order params so the eval'd source resolves them (rack's
+    /// ShowExceptions/ShowStatus ERB templates read the calling
+    /// method's locals). A snapshot (read-only): writes in the eval'd
+    /// source don't propagate back (CRuby's binding is live; ERB
+    /// doesn't rely on write-back). GC roots the captured Values.
+    pub(crate) binding_locals: crate::intern::FxHashMap<usize, Vec<(String, crate::value::Value)>>,
     /// `Encoding.default_external` (E3): the tag File.read stamps
     /// when no `encoding:` argument is given. CRuby's process-wide
     /// default; ours starts at UTF-8 and is set through the
@@ -1708,6 +1717,7 @@ impl Vm {
             any_str_singletons: false,
             heap_singletons: crate::intern::FxHashMap::default(),
             any_heap_singletons: false,
+            binding_locals: crate::intern::FxHashMap::default(),
             default_external: crate::value::EncodingTag::Utf8,
             default_internal: None,
             module_refinements: crate::intern::FxHashMap::default(),

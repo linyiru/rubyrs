@@ -15,6 +15,13 @@ use crate::value::Value;
 
 use super::{PinGuard, Vm};
 
+/// `(captured_self, lexical_class, named-local snapshot)` — the
+/// context `extract_binding_ctx` recovers from a `Binding` instance.
+type BindingCtx = (Value, Option<std::rc::Rc<crate::value::Class>>, Vec<(String, Value)>);
+/// `(body, leading-param names, slot seed, registered source)` — the
+/// compile inputs `prepare_eval_body` produces for `eval_string_full`.
+type EvalBody = (crate::ast::SExpr, Vec<String>, Vec<(String, Value)>, String);
+
 impl Vm {
     pub(crate) fn is_builtin_name(name: &str) -> bool {
         // Keep this list in sync with the match arms in `builtin_call`
@@ -305,6 +312,37 @@ impl Vm {
                 else {
                     return Some(Ok(Value::Nil));
                 };
+                // Snapshot the capturing frame's NAMED locals (slot →
+                // value) so `eval(src, binding)` can re-seed them. The
+                // `binding` builtin runs inline in the caller's frame,
+                // so `frames.last()` IS the method whose locals we want.
+                let mut snap: Vec<(String, Value)> = Vec::new();
+                if let Some(frame) = self.frames.last() {
+                    let proto_idx = frame.proto_idx;
+                    let n = self.protos[proto_idx].n_locals as usize;
+                    for slot in 0..n {
+                        let name = self.protos[proto_idx]
+                            .local_names
+                            .get(slot)
+                            .cloned()
+                            .unwrap_or_default();
+                        if name.is_empty() {
+                            continue;
+                        }
+                        let frame = self.frames.last().unwrap();
+                        let val = match &frame.locals {
+                            crate::vm::Locals::Shared(rc) => {
+                                rc.borrow().get(slot).cloned().unwrap_or(Value::Nil)
+                            }
+                            crate::vm::Locals::Stack(base) => self
+                                .locals_arena
+                                .get(*base as usize + slot)
+                                .cloned()
+                                .unwrap_or(Value::Nil),
+                        };
+                        snap.push((name, val));
+                    }
+                }
                 self.maybe_gc();
                 if let Err(e) = self.check_alloc() {
                     return Some(Err(e));
@@ -320,6 +358,9 @@ impl Vm {
                     singleton_class: None,
                     frozen: std::cell::Cell::new(false),
                 }));
+                if !snap.is_empty() {
+                    self.binding_locals.insert(id.0 as usize, snap);
+                }
                 Some(Ok(Value::Object(id)))
             }
             "puts" => {
@@ -3095,8 +3136,8 @@ impl Vm {
                 [Value::Str(src), binding] => {
                     let owned = src.to_string_lossy();
                     match self.extract_binding_ctx(binding) {
-                        Some((self_o, cctx)) => Some(self.eval_string_full(
-                            &owned, "(eval)", true, cctx, Some(self_o),
+                        Some((self_o, cctx, locals)) => Some(self.eval_string_full(
+                            &owned, "(eval)", true, cctx, Some(self_o), locals,
                         )),
                         None => Some(self.eval_string(&owned, "(eval)", true)),
                     }
@@ -3142,8 +3183,8 @@ impl Vm {
                     // (rack's Builder.new_from_string: `eval(rackup,
                     // builder_binding, path)`).
                     match self.extract_binding_ctx(binding) {
-                        Some((self_o, cctx)) => Some(self.eval_string_full(
-                            &owned, &fname, false, cctx, Some(self_o),
+                        Some((self_o, cctx, locals)) => Some(self.eval_string_full(
+                            &owned, &fname, false, cctx, Some(self_o), locals,
                         )),
                         None => Some(self.eval_string(&owned, &fname, false)),
                     }
@@ -3892,15 +3933,19 @@ impl Vm {
     /// where the caller deliberately passes the literal default
     /// string as a filename.
     /// If `v` is a `Kernel#binding`-produced Binding instance, return
-    /// its captured `(self, lexical_class)` for `eval(src, binding)`.
-    /// `None` for any other value (including the old inert Binding).
-    fn extract_binding_ctx(
-        &mut self,
-        v: &Value,
-    ) -> Option<(Value, Option<std::rc::Rc<crate::value::Class>>)> {
+    /// its captured `(self, lexical_class, locals)` for
+    /// `eval(src, binding)`. `locals` is the snapshot of the capturing
+    /// frame's named locals (empty when none were live). `None` for any
+    /// other value (including the old inert Binding).
+    fn extract_binding_ctx(&mut self, v: &Value) -> Option<BindingCtx> {
         let Value::Object(id) = v else { return None };
         let self_sym = self.interner.intern("@__self");
         let lex_sym = self.interner.intern("@__lexical_class");
+        let locals = self
+            .binding_locals
+            .get(&(id.0 as usize))
+            .cloned()
+            .unwrap_or_default();
         match self.heap.get(*id) {
             crate::heap::HeapObj::Instance(inst) if inst.class.name == "Binding" => {
                 let self_o = inst.ivars.get(&self_sym).cloned()?;
@@ -3908,7 +3953,7 @@ impl Vm {
                     Some(Value::Class(c)) => Some(c.clone()),
                     _ => None,
                 };
-                Some((self_o, cctx))
+                Some((self_o, cctx, locals))
             }
             _ => None,
         }
@@ -3939,7 +3984,7 @@ impl Vm {
         synthetic: bool,
         class_ctx: Option<std::rc::Rc<crate::value::Class>>,
     ) -> Result<Value, Trap> {
-        self.eval_string_full(source, filename, synthetic, class_ctx, None)
+        self.eval_string_full(source, filename, synthetic, class_ctx, None, vec![])
     }
 
     /// `eval_string_with_class_ctx` plus a `self_override` — the eval'd
@@ -3949,6 +3994,70 @@ impl Vm {
     /// rackup script that calls `run`/`use`/`map` on the builder) must
     /// dispatch against that self. (Outer LOCAL-variable capture is a
     /// follow-up; this is the self-dispatch layer.)
+    /// Parse + translate an eval source into a body `SExpr`, applying
+    /// the Binding-locals wrap when `local_seed` is non-empty. Returns
+    /// `(prog, compile_params, effective_seed, registered_source)`:
+    /// - `prog` is the body to compile (the lambda's spliced body when
+    ///   seeded, else the raw program).
+    /// - `compile_params` pre-declares the seeded local names as
+    ///   leading slots (empty when unseeded / on fallback).
+    /// - `effective_seed` is the snapshot to write into those slots
+    ///   (empty on fallback so we never seed mismatched slots).
+    /// - `registered_source` is the text whose spans the compiled
+    ///   bytecode indexes into (the wrapped source when seeded).
+    ///
+    /// `Err(msg)` is a hard SyntaxError from the UNSEEDED parse; a
+    /// failed wrap silently degrades to the unseeded path.
+    fn prepare_eval_body(
+        source: &str,
+        local_seed: &[(String, Value)],
+    ) -> Result<EvalBody, String> {
+        fn parse_tr(src: &str) -> Result<crate::ast::SExpr, String> {
+            let pr = ruby_prism::parse(src.as_bytes());
+            let mut errs = pr.errors().peekable();
+            if errs.peek().is_some() {
+                return Err(crate::error::format_prism_errors(src, errs));
+            }
+            let (prog, ast_errors) =
+                crate::ast::tr_with_errors_on_source(&pr.node(), pr.source());
+            if !ast_errors.is_empty() {
+                return Err(ast_errors.join("; "));
+            }
+            Ok(prog)
+        }
+        // Splice the body out of a single top-level lambda literal —
+        // either the bare `Expr::Lambda` or a one-statement `__seq__`
+        // wrapping it.
+        fn lambda_body(prog: &crate::ast::SExpr) -> Option<Vec<crate::ast::SExpr>> {
+            use crate::ast::Expr;
+            match &prog.node {
+                Expr::Lambda { body, .. } => Some(body.clone()),
+                Expr::Call { receiver: None, name, args, .. }
+                    if name == "__seq__" && args.len() == 1 =>
+                {
+                    if let Expr::Lambda { body, .. } = &args[0].node {
+                        Some(body.clone())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+        if !local_seed.is_empty() {
+            let names: Vec<String> = local_seed.iter().map(|(n, _)| n.clone()).collect();
+            let wrapped = format!("->({}) {{\n{}\n}}", names.join(", "), source);
+            if let Ok(prog) = parse_tr(&wrapped)
+                && let Some(body) = lambda_body(&prog)
+            {
+                return Ok((crate::ast::seq(body), names, local_seed.to_vec(), wrapped));
+            }
+            // Fall through: the wrap failed (illegal param name, etc.).
+        }
+        let prog = parse_tr(source)?;
+        Ok((prog, vec![], vec![], source.to_string()))
+    }
+
     pub(crate) fn eval_string_full(
         &mut self,
         source: &str,
@@ -3956,27 +4065,35 @@ impl Vm {
         synthetic: bool,
         class_ctx: Option<std::rc::Rc<crate::value::Class>>,
         self_override: Option<Value>,
+        // Named locals captured by the `Binding` (slot-ordered, parallel
+        // names+values). When non-empty they become the eval proto's
+        // leading params (so the compiler resolves those identifiers as
+        // local reads, not method calls) and seed the eval frame's
+        // locals. Empty for bare `eval` / `class_eval`.
+        local_seed: Vec<(String, Value)>,
     ) -> Result<Value, Trap> {
         // Fast-fail BEFORE any parse / AST / compile work when
         // the frame cap is already exhausted. CPU-bound parse of
         // a large untrusted eval string shouldn't run just to
         // fail at the frame push at the bottom.
         self.check_frames()?;
-        let parse_result = ruby_prism::parse(source.as_bytes());
-        let mut parse_errors = parse_result.errors().peekable();
-        if parse_errors.peek().is_some() {
-            let msg = crate::error::format_prism_errors(source, parse_errors);
-            return Err(self.trap(RubyError::SyntaxError { msg }));
-        }
-        let (prog, ast_errors) = crate::ast::tr_with_errors_on_source(
-            &parse_result.node(),
-            parse_result.source(),
-        );
-        if !ast_errors.is_empty() {
-            return Err(self.trap(RubyError::SyntaxError {
-                msg: ast_errors.join("; "),
-            }));
-        }
+        // When the eval carries Binding-captured locals, parse the
+        // source WRAPPED in a lambda whose params are those local
+        // names — that makes prism resolve bare `foo` references as
+        // local-variable reads (its local-vs-method decision is made
+        // at parse time and can't be retrofitted post-AST). We then
+        // splice out the lambda's body and compile it standalone with
+        // the same names as leading params; the frame's slots
+        // 0..N are seeded from the snapshot below. On any wrap/parse
+        // failure (e.g. a capture name that isn't a legal param) we
+        // fall back to the plain unseeded parse — worst case the old
+        // method-call divergence, never a crash.
+        let (prog, compile_params, effective_seed, registered_source) =
+            match Self::prepare_eval_body(source, &local_seed) {
+                Ok(t) => t,
+                Err(msg) => return Err(self.trap(RubyError::SyntaxError { msg })),
+            };
+        let source: &str = &registered_source;
         // Cap-aware compile: `compile_proto` interns method names,
         // locals, constants, and other symbols from the eval'd
         // source. Unlike top-level / require source (which is host-
@@ -4030,7 +4147,7 @@ impl Vm {
         let source_rc: std::rc::Rc<str> = std::rc::Rc::from(source);
         self.sources.insert(filename_rc.clone(), source_rc);
         let entry = crate::compiler::compile_proto(
-            "<eval>".into(), vec![], &[prog], filename_rc.clone(),
+            "<eval>".into(), compile_params, &[prog], filename_rc.clone(),
             &mut self.protos, &mut self.interner, &mut self.cache_counter,
         );
         if let Some(max) = cap_at_entry
@@ -4064,11 +4181,22 @@ impl Vm {
             self.class_stack.push(cls.clone());
             self.class_visibility_stack.push(crate::value::Visibility::Public);
         }
+        // Seed the eval frame's locals from the Binding snapshot. The
+        // seeded names were compiled as the leading params (slots
+        // 0..local_seed.len()), so slot K holds local_seed[K]; any
+        // locals the eval'd source itself introduces take later slots
+        // and stay Nil.
+        let mut seeded = super::vec_nil(self.protos[entry].n_locals as usize);
+        for (i, (_, v)) in effective_seed.iter().enumerate() {
+            if let Some(slot) = seeded.get_mut(i) {
+                *slot = v.clone();
+            }
+        }
         self.frames.push(super::Frame {
             proto_idx: entry,
             ip: 0,
             locals: crate::vm::Locals::Shared(std::rc::Rc::new(std::cell::RefCell::new(
-                super::vec_nil(self.protos[entry].n_locals as usize)
+                seeded
             ))),
             self_val: match (&self_override, &class_ctx) {
                 (Some(s), _) => s.clone(),
