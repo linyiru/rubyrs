@@ -1056,6 +1056,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // the caller's named locals; eval re-seeds them (lambda-wrap parse).
 // rack ShowExceptions/ShowStatus ERB `template.result(binding)`.
 #[test] fn eval_binding_lvar() { run_diff("eval_binding_lvar"); }
+// eval(src, binding) preserves the source's line numbers (the
+// locals-capturing lambda wrap goes on the source's first line, not a
+// new one) + strips a leading BOM. rack Builder.parse_file __LINE__.
+#[test] fn eval_binding_line() { run_diff("eval_binding_line"); }
 // Per-instance singleton methods on Array / Proc (heap_singletons
 // side-table): define_singleton_method + `def obj.x`, per-instance,
 // native dispatch intact. rack Deflater/Lock/ContentLength define

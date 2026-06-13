@@ -4095,7 +4095,20 @@ impl Vm {
         }
         if !local_seed.is_empty() {
             let names: Vec<String> = local_seed.iter().map(|(n, _)| n.clone()).collect();
-            let wrapped = format!("->({}) {{\n{}\n}}", names.join(", "), source);
+            // Place the source on the SAME line as the lambda header
+            // (no leading newline) so its line numbers are preserved —
+            // `__LINE__` and backtrace lines stay correct (rack's
+            // Builder.parse_file checks `__LINE__`). A leading UTF-8
+            // BOM is stripped first: CRuby's eval ignores one, and the
+            // wrap would otherwise shove it mid-source where prism
+            // can't (rack's BOM rackup fixture). The trailing `\n}`
+            // closes on its own line so a source ending in a line
+            // comment doesn't swallow the brace. (A magic comment on
+            // the source's first line is still displaced past column 0
+            // and thus ignored — a documented eval-in-binding gap, not
+            // regressed by this wrap.)
+            let body_src = source.strip_prefix('\u{feff}').unwrap_or(source);
+            let wrapped = format!("->({}) {{ {}\n}}", names.join(", "), body_src);
             if let Ok(prog) = parse_tr(&wrapped)
                 && let Some(body) = lambda_body(&prog)
             {
