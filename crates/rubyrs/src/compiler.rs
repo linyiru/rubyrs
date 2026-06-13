@@ -985,17 +985,15 @@ fn compile_call_arm(
                 // `SomeClass.exception(msg)`. CRuby builds the
                 // exception with the MESSAGE ONLY (via `#exception`,
                 // not `#new` — works for both a class and an existing
-                // instance, which has no `.new`), then applies the
-                // optional 3rd backtrace arg separately. Passing the
+                // instance, which has no `.new`). Passing the
                 // backtrace into the constructor (the old `.new(msg,
                 // backtrace)`) raised ArgumentError on any exception
                 // whose initialize takes 0..1 — rack's QueryParser
                 // does `raise InvalidParameterError, e.message,
-                // e.backtrace`. The backtrace arg is dropped here; the
-                // raised frame's own backtrace stands in (a documented
-                // minor divergence vs CRuby's preserved chain).
+                // e.backtrace`.
+                let sp = args[0].span;
                 let exc_call = SExpr {
-                    span: args[0].span,
+                    span: sp,
                     node: Expr::Call {
                         receiver: Some(Box::new(args[0].clone())),
                         name: "exception".to_string(),
@@ -1003,7 +1001,53 @@ fn compile_call_arm(
                         kwargs_trailing: false,
                     },
                 };
-                compile_expr(b, &exc_call, protos, interner, cc);
+                if args.len() >= 3 {
+                    // Explicit 3rd backtrace arg: CRuby stamps it onto
+                    // the exception (so `e.backtrace` returns it, not
+                    // the raise-site frames). Desugar to
+                    // `__re = Cls.exception(msg); __re.set_backtrace(
+                    // bt); __re` — the sequence's value is the
+                    // exception, which `Op::Raise` then raises. The
+                    // stored `@backtrace` is non-nil even for `[]`, so
+                    // `unwind_with_exception`'s "already set" guard
+                    // leaves it intact (rack's ShowExceptions renders
+                    // "unknown location" for the empty-backtrace case).
+                    let tmp = "__raise_exc_bt";
+                    let set_bt = SExpr {
+                        span: sp,
+                        node: Expr::Call {
+                            receiver: Some(Box::new(SExpr {
+                                span: sp,
+                                node: Expr::LVarRead(tmp.to_string()),
+                            })),
+                            name: "set_backtrace".to_string(),
+                            args: vec![args[2].clone()],
+                            kwargs_trailing: false,
+                        },
+                    };
+                    let seq = SExpr {
+                        span: sp,
+                        node: Expr::Call {
+                            receiver: None,
+                            name: "__seq__".to_string(),
+                            args: vec![
+                                SExpr {
+                                    span: sp,
+                                    node: Expr::LVarWrite(
+                                        tmp.to_string(),
+                                        Box::new(exc_call),
+                                    ),
+                                },
+                                set_bt,
+                                SExpr { span: sp, node: Expr::LVarRead(tmp.to_string()) },
+                            ],
+                            kwargs_trailing: false,
+                        },
+                    };
+                    compile_expr(b, &seq, protos, interner, cc);
+                } else {
+                    compile_expr(b, &exc_call, protos, interner, cc);
+                }
             }
         }
         b.emit(Op::Raise);

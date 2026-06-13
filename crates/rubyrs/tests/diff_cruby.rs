@@ -362,6 +362,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn file_read_encoding() { run_diff("file_read_encoding"); }
 #[test] fn lifecycle_hook_super() { run_diff("lifecycle_hook_super"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
+// `raise Class, msg, backtrace` — the explicit 3rd arg is stamped on
+// the exception (`e.backtrace` returns it, incl. `[]`); 2-arg form
+// keeps the call-site backtrace. rack ShowExceptions "unknown
+// location" + QueryParser re-raise-with-backtrace.
+#[test] fn raise_explicit_backtrace() { run_diff("raise_explicit_backtrace"); }
 #[test] fn user_sort() { run_diff("user_sort"); }
 #[test] fn hash_enumerable() { run_diff("hash_enumerable"); }
 #[test] fn kernel_p() { run_diff("kernel_p"); }
