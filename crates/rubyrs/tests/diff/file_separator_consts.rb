@@ -21,3 +21,9 @@ puts "parts=#{parts.inspect}"
 
 # Joining with SEPARATOR is the standard portable shape.
 puts ["a", "b", "c"].join(File::SEPARATOR)
+
+# `File::NULL` — the null device path (POSIX "/dev/null"). rack's
+# spec_etag opens it to build a zero-length sendfile body; pre-fix
+# this raised `NameError: uninitialized constant File::NULL`.
+puts "null=#{File::NULL.inspect}"
+puts "null-read=#{File.read(File::NULL).inspect}"

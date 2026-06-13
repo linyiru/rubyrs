@@ -2479,6 +2479,10 @@ class File
   ALT_SEPARATOR = nil
   PATH_SEPARATOR = ":"
   Separator = SEPARATOR
+  ## The null device. POSIX value (Windows is "NUL"); rubyrs Tier 1
+  ## is POSIX-only. rack's spec_etag opens `File::NULL` to build a
+  ## zero-length sendfile body; CRuby exposes it on File.
+  NULL = "/dev/null"
   ## POSIX open(2) flag constants. CRuby exposes these (via
   ## File::Constants) so user code can OR them when opening
   ## files. rubyrs doesn't open files in Tier 1, but
