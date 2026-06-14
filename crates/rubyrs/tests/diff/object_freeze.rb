@@ -1,11 +1,11 @@
 # Object#freeze for user-class instances. CRuby's freeze flips
 # a per-object flag that `frozen?` reads; mutation surfaces
-# FrozenError. rubyrs's implementation wires up the read/write
-# surface against a per-Instance Cell<bool>. Full mutation
-# guards (FrozenError on ivar set, singleton method install)
-# are deferred — adding the freeze/frozen? read/write is what
-# unblocks gem patterns like `EmptyMapping.new.freeze` on
-# construction.
+# FrozenError. rubyrs wires the read/write surface against a
+# per-Instance Cell<bool>, AND every instance-variable write
+# (`@x = v` / `@x += 1` / instance_variable_set) raises
+# FrozenError on a frozen receiver — rack Builder#freeze_app
+# freezes the app + middleware, so a frozen handler that sets
+# `@x` during a request must 500.
 
 class Foo
   def initialize(x); @x = x; end
@@ -66,3 +66,21 @@ rescue FrozenError => e
   caught = e.message[/can't modify frozen \w+/]
 end
 puts "mut_blocked=#{caught.inspect}"
+
+# 10. Plain ivar assignment (`@x = v` / StoreIvar) and the
+# `@x += 1` IncIvar fast path also raise on a frozen receiver —
+# the rack freeze_app shape (a method body setting `@a = 1`).
+class Counter
+  def initialize; @n = 0; end
+  def set;  @a = 1;  end
+  def bump; @n += 1; end
+end
+froz = Counter.new.freeze
+m1 = (froz.set rescue $!.message[/can't modify frozen \w+/])
+puts "store_ivar=#{m1.inspect}"
+m2 = (froz.bump rescue $!.message[/can't modify frozen \w+/])
+puts "inc_ivar=#{m2.inspect}"
+# A non-frozen Counter mutates fine.
+ok = Counter.new
+ok.set; ok.bump
+puts "unfrozen=#{ok.instance_variable_get(:@a)},#{ok.instance_variable_get(:@n)}"

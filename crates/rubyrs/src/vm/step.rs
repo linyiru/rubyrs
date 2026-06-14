@@ -919,6 +919,32 @@ impl Vm {
 
 
 
+    /// Raise FrozenError if `self_val` is a frozen object — CRuby's
+    /// guard on every instance-variable write. Shared by the
+    /// StoreIvar / IncIvar / IncIvarNoPush ops so the three ivar-write
+    /// paths stay consistent. A no-op for non-frozen / class /
+    /// primitive receivers. rack Builder#freeze_app relies on this:
+    /// a frozen handler that sets `@x` during a request must 500.
+    pub(crate) fn frozen_ivar_guard(&mut self, self_val: &Value) -> Result<(), Trap> {
+        let frozen = match self_val {
+            Value::Object(id) => self.heap.instance(*id).frozen.get(),
+            Value::Hash(id) => self.heap.hash_frozen(*id),
+            Value::Array(id) => self.heap.array_frozen(*id),
+            _ => false,
+        };
+        if !frozen {
+            return Ok(());
+        }
+        let cls_name = match self.class_of(self_val) {
+            Value::Class(c) => c.name.clone(),
+            _ => "Object".to_string(),
+        };
+        let shown = self.inspect_value(self_val)?;
+        Err(self.trap(crate::error::RubyError::FrozenError {
+            msg: format!("can't modify frozen {}: {}", cls_name, shown),
+        }))
+    }
+
     /// Execute one op; returns Ok(false) if we just popped the last frame.
     /// `_proto_idx` is reserved for future per-op span lookup; with the
     /// global interner, ops no longer need it for string resolution.
@@ -1298,6 +1324,7 @@ impl Vm {
             Op::StoreIvar(name_id) => {
                 let v = self.stack.pop().expect("ICE: StoreIvar stack underflow");
                 let self_val = self.frames.last().expect("ICE: StoreIvar no frame").self_val.clone();
+                self.frozen_ivar_guard(&self_val)?;
                 match &self_val {
                     Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, v); }
                     Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v); }
@@ -1350,6 +1377,7 @@ impl Vm {
                 // ivars routed via `Value::Class` so the same
                 // pattern in a class method bumps the right table.
                 let self_val = self.frames.last().expect("ICE: IncIvarNoPush no frame").self_val.clone();
+                self.frozen_ivar_guard(&self_val)?;
                 let cur = match &self_val {
                     Value::Object(id) => self.heap.instance(*id).ivars.get(&name_id).cloned(),
                     Value::Class(c) => c.ivars.borrow().get(&name_id).cloned(),
@@ -1379,6 +1407,7 @@ impl Vm {
                 // `@x = @x + 1` fast path, expression form. Same as
                 // IncIvarNoPush but leaves the new value on stack.
                 let self_val = self.frames.last().expect("ICE: IncIvar no frame").self_val.clone();
+                self.frozen_ivar_guard(&self_val)?;
                 let cur = match &self_val {
                     Value::Object(id) => self.heap.instance(*id).ivars.get(&name_id).cloned(),
                     Value::Class(c) => c.ivars.borrow().get(&name_id).cloned(),
