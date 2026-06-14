@@ -2174,7 +2174,40 @@ impl Vm {
                     Ok(Value::Nil)
                 }
             }
-            _ => Ok(Value::Nil),
+            // `dig_step` is only ever reached with a key still to
+            // consume, so a non-nil intermediate that isn't a Hash /
+            // Array is the CRuby TypeError —
+            //   `{"a"=>"1"}.dig("a", 1)` => "String does not have
+            //   #dig method" (spec_headers#test_dig). A user object
+            // that defines its own `dig` is dispatched to instead
+            // (one key at a time — the common nested case).
+            other => {
+                if let Value::Object(oid) = other {
+                    let dig_id = self.interner.intern("dig");
+                    let cls = self.heap.class_of(*oid);
+                    if let Some(m) = self.lookup_method_uncached(&cls, dig_id) {
+                        let pre_frames = self.frames.len();
+                        let mut g = PinGuard::new(self);
+                        g.pin(other.clone());
+                        g.pin(key.clone());
+                        g.vm.invoke_method(m, other.clone(), vec![key.clone()])?;
+                        g.vm.dispatch_until(pre_frames)?;
+                        let result = g.vm.stack.pop().unwrap_or(Value::Nil);
+                        return Ok(result);
+                    }
+                }
+                let cname = match other {
+                    Value::Object(oid) => self
+                        .heap
+                        .class_of(*oid)
+                        .effective_name()
+                        .unwrap_or_else(|| "Object".to_string()),
+                    _ => crate::vm::numeric::class_name_for_error(other).to_string(),
+                };
+                Err(self.trap(crate::error::RubyError::TypeError {
+                    msg: format!("{cname} does not have #dig method"),
+                }))
+            }
         }
     }
 

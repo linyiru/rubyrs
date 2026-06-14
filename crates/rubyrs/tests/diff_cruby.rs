@@ -597,6 +597,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn hash_subclass_default() { run_diff("hash_subclass_default"); }
 #[test] fn hash_subclass_transform_override() { run_diff("hash_subclass_transform_override"); }
 #[test] fn clone_preserves_singleton() { run_diff("clone_preserves_singleton"); }
+#[test] fn dig_typeerror_nondiggable() { run_diff("dig_typeerror_nondiggable"); }
 #[test] fn undef_inherited_singleton() { run_diff("undef_inherited_singleton"); }
 #[test] fn frame_locals_pool() { run_diff("frame_locals_pool"); }
 #[test] fn locals_stack_arena() { run_diff("locals_stack_arena"); }
