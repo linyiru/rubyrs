@@ -1008,6 +1008,22 @@ impl Vm {
                         let ivars = self.heap.hash_ivars_clone(id);
                         // `clone` preserves the frozen bit; `dup` resets it.
                         let keep_frozen = name == "clone" && self.heap.hash_frozen(id);
+                        // `clone` also copies the per-instance singleton
+                        // class (so `def h.foo` survives `h.clone`);
+                        // `dup` drops it. CRuby: `h.dup.foo` → NoMethodError,
+                        // `h.clone.foo` → works. (spec_headers#test_dup_and_clone)
+                        let singleton_class = if name == "clone" {
+                            if let crate::heap::HeapObj::Hash(h) = self.heap.get(id) {
+                                h.singleton_class
+                                    .as_ref()
+                                    .map(|sc| std::rc::Rc::new(sc.shallow_copy()))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        let has_singleton = singleton_class.is_some();
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
                         if let Some(bid) = default_block {
@@ -1021,7 +1037,7 @@ impl Vm {
                             class_tag,
                             ivars,
                             index: None,
-                singleton_class: None,
+                            singleton_class,
                             frozen: std::cell::Cell::new(keep_frozen),
                         }));
                         if default_block.is_some() {
@@ -1029,6 +1045,15 @@ impl Vm {
                         }
                         if default_value.is_some() {
                             g.vm.heap.hash_set_default_value(nid, default_value);
+                        }
+                        if has_singleton {
+                            // Keep the global gate + method-cache
+                            // generation in sync, matching the
+                            // `ensure_hash_singleton` install path —
+                            // otherwise dispatch's fast path would
+                            // skip the cloned eigenclass.
+                            g.vm.any_hash_singletons = true;
+                            g.vm.method_gen = g.vm.method_gen.wrapping_add(1);
                         }
                         Some(Value::Hash(nid))
                     }

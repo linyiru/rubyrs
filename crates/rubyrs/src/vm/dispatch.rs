@@ -11256,9 +11256,21 @@ impl Vm {
                 #[cfg(feature = "bignum")]
                 Value::BigInt(_) => recv.clone(),
                 Value::Object(oid) => {
-                    let (cls, ivars) = match self.heap.get(*oid) {
+                    // `clone` copies the per-instance singleton class
+                    // (so `def o.foo` survives) AND the frozen bit;
+                    // `dup` drops both. CRuby parity.
+                    let is_clone = &*name == "clone";
+                    let (cls, ivars, singleton_class, frozen) = match self.heap.get(*oid) {
                         crate::heap::HeapObj::Instance(inst) => {
-                            (inst.class.clone(), inst.ivars.clone())
+                            let sc = if is_clone {
+                                inst.singleton_class
+                                    .as_ref()
+                                    .map(|sc| std::rc::Rc::new(sc.shallow_copy()))
+                            } else {
+                                None
+                            };
+                            let frozen = is_clone && inst.frozen.get();
+                            (inst.class.clone(), inst.ivars.clone(), sc, frozen)
                         }
                         // TypedData (cext-allocated) carries no
                         // ivar table on the rubyrs side; punt to
@@ -11279,8 +11291,8 @@ impl Vm {
                     let new_id = self.heap.alloc(HeapObj::Instance(crate::value::Instance {
                         class: cls,
                         ivars,
-                        singleton_class: None,
-            frozen: std::cell::Cell::new(false),
+                        singleton_class,
+                        frozen: std::cell::Cell::new(frozen),
                     }));
                     Value::Object(new_id)
                 }

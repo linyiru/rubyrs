@@ -673,6 +673,38 @@ impl Class {
         }
     }
 
+    /// Field-by-field shallow copy: fresh `RefCell` tables whose
+    /// entries are `Rc`-shared with `self` (method bodies, includes,
+    /// consts stay shared, but the maps themselves are independent so
+    /// inserting into the copy doesn't mutate the original). Used by
+    /// `Object#clone` / `Hash#clone` to give the copy its OWN
+    /// singleton class — CRuby's `clone` copies the singleton class
+    /// (and thus its singleton methods), where `dup` drops it.
+    pub(crate) fn shallow_copy(&self) -> Class {
+        use std::cell::{Cell, RefCell};
+        Class {
+            name: self.name.clone(),
+            is_module: self.is_module,
+            ivars: RefCell::new(self.ivars.borrow().clone()),
+            methods: RefCell::new(self.methods.borrow().clone()),
+            singleton_methods: RefCell::new(self.singleton_methods.borrow().clone()),
+            superclass: RefCell::new(self.superclass.borrow().clone()),
+            includes: RefCell::new(self.includes.borrow().clone()),
+            prepends: RefCell::new(self.prepends.borrow().clone()),
+            singleton_prepends: RefCell::new(self.singleton_prepends.borrow().clone()),
+            singleton_includes: RefCell::new(self.singleton_includes.borrow().clone()),
+            singleton_view: RefCell::new(self.singleton_view.borrow().clone()),
+            singleton_target: RefCell::new(self.singleton_target.borrow().clone()),
+            undefed: RefCell::new(self.undefed.borrow().clone()),
+            anon_serial: Cell::new(self.anon_serial.get()),
+            class_vars: RefCell::new(self.class_vars.borrow().clone()),
+            consts: RefCell::new(self.consts.borrow().clone()),
+            assigned_name: RefCell::new(self.assigned_name.borrow().clone()),
+            #[cfg(feature = "cext")]
+            cext_alloc_func: Cell::new(self.cext_alloc_func.get()),
+        }
+    }
+
     /// Effective display name: the structural `name` if non-empty,
     /// otherwise the lazily-stamped `assigned_name` (set on first
     /// const-assignment per CRuby). Returns `None` for a class that
