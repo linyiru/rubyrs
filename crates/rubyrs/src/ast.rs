@@ -4220,10 +4220,20 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     //   end
     // Without a predicate (`case; when cond; ...; end`) each
     // condition is evaluated as a plain boolean (no === call).
-    // The predicate is re-evaluated per condition, which is fine
-    // for side-effect-free predicates (the common case).
+    //
+    // The subject is bound to a fresh local so it's evaluated EXACTLY
+    // ONCE (CRuby evaluates the case subject a single time, then matches
+    // each `when` against it with `===`). Each `when` comparison reads
+    // that local. Previously the translated subject was cloned into
+    // every `when`, re-evaluating a side-effecting predicate per
+    // condition — e.g. rack's multipart `case consume_boundary` advanced
+    // the StringScanner once per `when`, mis-parsing the body.
     if let Some(n) = node.as_case_node() {
-        let predicate = n.predicate().map(|p| tr(ctx, &p));
+        let subj_local = n.predicate().map(|_| ctx.fresh_pm());
+        let subj_value = n.predicate().map(|p| tr(ctx, &p));
+        let predicate: Option<SExpr> = subj_local
+            .as_ref()
+            .map(|name| sp(node, Expr::LVarRead(name.clone())));
         let conditions: Vec<_> = n.conditions().iter().collect();
         let else_body: Vec<SExpr> = match n.else_clause() {
             Some(en) => en.statements()
@@ -4316,10 +4326,23 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // If the chain is empty (no when clauses at all), just
         // produce nil. Otherwise the single accumulated If is
         // the result.
-        if acc.is_empty() {
-            return sp(node, Expr::LVarRead("nil".into()));
-        }
-        return acc.into_iter().next().unwrap();
+        let chain = if acc.is_empty() {
+            sp(node, Expr::LVarRead("nil".into()))
+        } else {
+            acc.into_iter().next().unwrap()
+        };
+        // Prepend the once-only subject binding (when there is a
+        // predicate) so the if-chain reads the bound local.
+        return match (subj_local, subj_value) {
+            (Some(name), Some(val)) => {
+                let seq = vec![
+                    sp(node, Expr::LVarWrite(name, Box::new(val))),
+                    chain,
+                ];
+                sp(node, seq_inner(seq))
+            }
+            _ => chain,
+        };
     }
     if let Some(n) = node.as_unless_node() {
         let cond = Box::new(tr(ctx, &n.predicate()));

@@ -599,6 +599,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn clone_preserves_singleton() { run_diff("clone_preserves_singleton"); }
 #[test] fn dig_typeerror_nondiggable() { run_diff("dig_typeerror_nondiggable"); }
 #[test] fn hash_native_instance_methods() { run_diff("hash_native_instance_methods"); }
+#[test] fn case_subject_eval_once() { run_diff("case_subject_eval_once"); }
 #[test] fn binary_string_length_replace() { run_diff("binary_string_length_replace"); }
 #[test] fn sub_gsub_byte_faithful() { run_diff("sub_gsub_byte_faithful"); }
 #[cfg(feature = "stdlib")]
