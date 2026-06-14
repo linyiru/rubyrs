@@ -712,6 +712,7 @@ pub(crate) struct LastMatch {
 /// `LastMatch::binary`. Holds the raw subject and the byte span of
 /// each capture group (parallel to `LastMatch::caps`), so a consumer
 /// can slice the original bytes and tag the result ASCII-8BIT.
+#[cfg(feature = "regex")]
 #[derive(Debug, Clone)]
 pub(crate) struct BinaryCaps {
     pub(crate) input: Box<[u8]>,
