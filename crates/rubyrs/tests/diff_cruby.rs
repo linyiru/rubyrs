@@ -611,6 +611,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn zlib_streaming() { run_diff("zlib_streaming"); }
 #[cfg(feature = "stdlib")]
 #[test] fn uri_decode_www_form() { run_diff("uri_decode_www_form"); }
+#[cfg(feature = "stdlib")]
+#[test] fn uri_parse_invalid_authority() { run_diff("uri_parse_invalid_authority"); }
 #[test] fn class_singleton_class() { run_diff("class_singleton_class"); }
 #[cfg(feature = "regex")]
 #[test] fn string_bracket_regex() { run_diff("string_bracket_regex"); }

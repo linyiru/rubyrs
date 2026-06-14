@@ -244,8 +244,22 @@ module URI
     # documented gap, no rack-spec consumer).
     SPLIT_RE = %r{\A(?:([A-Za-z][A-Za-z0-9+.\-]*):)?(?://([^/?\#]*))?([^?\#]*)(?:\?([^\#]*))?(?:\#(.*))?\z}m
 
+    # Characters that may appear UNESCAPED anywhere in an RFC 2396 URI
+    # reference: unreserved + reserved + the escape `%` + fragment `#`
+    # + IPv6 host brackets `[` `]`. CRuby's parser rejects everything
+    # else (raw non-ASCII — which must be %-encoded — plus spaces,
+    # controls, `<>{}|\^"` etc.) with InvalidURIError. rack's Lint
+    # relies on this: `URI.parse("http://#{SERVER_NAME}/")` must raise
+    # for a non-ASCII SERVER_NAME so it's flagged "not a valid
+    # authority".
+    URI_ALLOWED_RE = /\A[A-Za-z0-9\-_.!~*'();\/?:@&=+$,%\#\[\]]*\z/
+
     def parse(uri)
-      m = SPLIT_RE.match(uri.to_s)
+      s = uri.to_s
+      unless URI_ALLOWED_RE.match?(s)
+        raise InvalidURIError, "bad URI (is not URI?): #{s.inspect}"
+      end
+      m = SPLIT_RE.match(s)
       raise InvalidURIError, "bad URI (is not URI?): #{uri.inspect}" unless m
       scheme = m[1]
       authority = m[2]
