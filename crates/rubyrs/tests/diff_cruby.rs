@@ -1160,3 +1160,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // boolean restricts to the receiver's own methods. Surfaced by stdlib
 // fileutils.rb's `private_instance_methods & methods(false)` table build.
 #[test] fn methods_regular_arg() { run_diff("methods_regular_arg"); }
+
+// `# shareable_constant_value` magic comment (ShareableConstantNode):
+// no Ractor model, so the wrapper unwraps to the inner constant write.
+// Surfaced by stdlib time.rb.
+#[test] fn shareable_constant_value() { run_diff("shareable_constant_value"); }

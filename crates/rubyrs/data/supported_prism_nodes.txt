@@ -132,6 +132,7 @@ RestParameterNode
 RetryNode
 ReturnNode
 SelfNode
+ShareableConstantNode
 SingletonClassNode
 SourceFileNode
 SourceLineNode

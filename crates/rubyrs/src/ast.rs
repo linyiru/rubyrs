@@ -2838,6 +2838,14 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     // and class lookup wins on read. This is a deliberate rubyrs
     // divergence from CRuby (CRuby warns "already initialized" and
     // reassigns); see `Vm::constants` for the precedence rationale.
+    // `# shareable_constant_value: ...` magic comment — Prism wraps the
+    // constant write it governs in a `ShareableConstantNode`. rubyrs has
+    // no Ractor-shareability model, so the frozen-ness it would enforce
+    // is a no-op here; translate the inner write directly. Surfaced by
+    // stdlib time.rb (`# shareable_constant_value: literal`).
+    if let Some(n) = node.as_shareable_constant_node() {
+        return tr(ctx, &n.write());
+    }
     if let Some(n) = node.as_constant_write_node() {
         return sp(node, Expr::ConstWrite(cid_to_string(n.name()), false, Box::new(tr(ctx, &n.value()))));
     }
