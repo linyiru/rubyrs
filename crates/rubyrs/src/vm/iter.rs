@@ -703,6 +703,30 @@ impl Vm {
                 msg: format!("can't modify frozen Hash: {}", shown),
             }));
         }
+        // A Hash / Array SUBCLASS that OVERRIDES `transform_keys` /
+        // `transform_values` must run ITS override, not the native arm
+        // below — this function runs BEFORE user-method lookup in
+        // `do_call_block`, so without this an override is silently
+        // shadowed. Concretely: `Rack::Headers#transform_keys` /
+        // `#transform_values` re-downcase keys via their own `[]=`, but
+        // the native Hash arms skipped that (spec_headers). Scoped to
+        // these two transforms (the confirmed-affected methods); a
+        // broader probe regressed block-form `fetch` whose deferred
+        // dispatch has a separate issue. Only defers when an override
+        // actually exists on the subclass chain.
+        if matches!(name, "transform_keys" | "transform_values") {
+            let override_tag = match recv {
+                Value::Hash(id) => self.heap.hash_class_tag(*id),
+                Value::Array(id) => self.heap.array_class_tag(*id),
+                _ => None,
+            };
+            if let Some(tag) = override_tag {
+                let nid = self.interner.intern(name);
+                if self.lookup_method_uncached(&tag, nid).is_some() {
+                    return Ok(None);
+                }
+            }
+        }
         // Object#itself with a block — CRuby ignores the block
         // and returns the receiver unchanged. Sits next to the
         // tap/then/yield_self block path so the universal-arm
