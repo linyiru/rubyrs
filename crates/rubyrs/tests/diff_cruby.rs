@@ -608,6 +608,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "stdlib")]
 #[test] fn strscan_binary_capture() { run_diff("strscan_binary_capture"); }
 #[test] fn string_match_binary() { run_diff("string_match_binary"); }
+#[test] fn regexp_union_flags() { run_diff("regexp_union_flags"); }
 #[test] fn visibility_method_explicit_recv() { run_diff("visibility_method_explicit_recv"); }
 #[test] fn exception_cause() { run_diff("exception_cause"); }
 #[test] fn bare_warn_singleton_override() { run_diff("bare_warn_singleton_override"); }

@@ -5821,7 +5821,16 @@ impl Vm {
         for v in &parts_iter {
             match v {
                 Value::Str(s) => chunks.push(regex::escape(&s.to_string_lossy())),
-                Value::Regex(r) => chunks.push(r.as_str().to_string()),
+                // Each Regexp member contributes its `#to_s` form
+                // `(?on-off:source)`, NOT the bare source — so a
+                // member's own flags (esp. `/x` extended mode, where
+                // literal whitespace in the source is insignificant)
+                // stay scoped to that member in the combined pattern.
+                // Bare `source` would let an `/x` member's spaces turn
+                // significant under the union's default mode (rack's
+                // ipv6 `Regexp.union` of `/x` parts — ` :: ` must mean
+                // `::`, not space-colon-colon-space).
+                Value::Regex(r) => chunks.push(r.to_s_string()),
                 other => {
                     return Err(self.trap(RubyError::TypeError {
                         msg: format!("no implicit conversion of {} into String", other.type_name()),
