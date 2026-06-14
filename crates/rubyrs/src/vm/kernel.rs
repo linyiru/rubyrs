@@ -295,6 +295,68 @@ impl Vm {
                     })),
                 })
             }
+            // ----- stateful streaming gzip/inflate handles -----
+            // Back Zlib::GzipWriter's incremental write/flush/finish and
+            // Zlib::Inflate's stateful inflate (rack Deflater :sync path).
+            #[cfg(feature = "stdlib")]
+            "__zlib_gz_deflate_new" => {
+                let (Some(Value::Int(lvl)), Some(Value::Int(mtime))) =
+                    (args.first(), args.get(1))
+                else {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "gz_deflate_new: expected (Integer, Integer)".into(),
+                    })));
+                };
+                let id = crate::zlib_native::gz_deflate_new(*lvl, *mtime as u32);
+                Some(Ok(Value::Int(id as i64)))
+            }
+            #[cfg(feature = "stdlib")]
+            "__zlib_gz_deflate_push" => {
+                let (Some(Value::Int(id)), Some(Value::Str(s)), Some(Value::Int(flush))) =
+                    (args.first(), args.get(1), args.get(2))
+                else {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "gz_deflate_push: expected (Integer, String, Integer)".into(),
+                    })));
+                };
+                let data = s.content.borrow().to_vec();
+                let out = crate::zlib_native::gz_deflate_push(*id as u64, &data, *flush);
+                Some(Ok(Value::new_str_bytes_binary(out)))
+            }
+            #[cfg(feature = "stdlib")]
+            "__zlib_inflate_stream_new" => {
+                let Some(Value::Int(wbits)) = args.first() else {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "inflate_stream_new: expected Integer".into(),
+                    })));
+                };
+                let id = crate::zlib_native::inflate_stream_new(*wbits);
+                Some(Ok(Value::Int(id as i64)))
+            }
+            #[cfg(feature = "stdlib")]
+            "__zlib_inflate_stream_push" => {
+                let (Some(Value::Int(id)), Some(Value::Str(s))) = (args.first(), args.get(1))
+                else {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "inflate_stream_push: expected (Integer, String)".into(),
+                    })));
+                };
+                let data = s.content.borrow().to_vec();
+                Some(match crate::zlib_native::inflate_stream_push(*id as u64, &data) {
+                    Ok(out) => Ok(Value::new_str_bytes_binary(out)),
+                    Err(e) => Err(self.trap(RubyError::HostException {
+                        class_name: "Zlib::DataError".into(),
+                        message: e,
+                    })),
+                })
+            }
+            #[cfg(feature = "stdlib")]
+            "__zlib_stream_free" => {
+                if let Some(Value::Int(id)) = args.first() {
+                    crate::zlib_native::stream_free(*id as u64);
+                }
+                Some(Ok(Value::Nil))
+            }
             // `Kernel#binding` — capture the CALLER's scope (self +
             // lexical class) into a Binding instance so `eval(src,
             // binding)` runs with that self. The self-dispatch layer

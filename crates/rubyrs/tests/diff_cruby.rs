@@ -603,6 +603,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_dump() { run_diff("string_dump"); }
 #[test] fn string_count() { run_diff("string_count"); }
 #[test] fn string_ord() { run_diff("string_ord"); }
+#[cfg(feature = "stdlib")]
+#[test] fn zlib_streaming() { run_diff("zlib_streaming"); }
 #[test] fn class_singleton_class() { run_diff("class_singleton_class"); }
 #[cfg(feature = "regex")]
 #[test] fn string_bracket_regex() { run_diff("string_bracket_regex"); }

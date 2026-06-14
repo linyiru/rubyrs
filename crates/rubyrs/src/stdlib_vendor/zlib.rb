@@ -101,17 +101,18 @@ module Zlib
 
     def initialize(window_bits = MAX_WBITS, *_rest)
       @wbits = window_bits
+      # Stateful native decompressor (opened lazily on first inflate)
+      # so a stream fed in CHUNKS — e.g. rack's Deflater consumer
+      # reading one sync-flushed gzip part at a time — decodes
+      # incrementally, returning whatever is decodable so far. A
+      # single `inflate(whole_stream)` still returns the full result
+      # (one push decodes everything).
+      @stream = nil
     end
 
     def inflate(str)
-      data = str.to_s.b
-      if @wbits < 0
-        __zlib_inflate(data)
-      elsif @wbits > 15
-        __zlib_inflate_auto(data)
-      else
-        __zlib_inflate_zlib(data)
-      end
+      @stream ||= __zlib_inflate_stream_new(@wbits)
+      __zlib_inflate_stream_push(@stream, str.to_s.b)
     end
 
     def <<(str)
@@ -119,12 +120,24 @@ module Zlib
       self
     end
 
+    # No buffered tail in this model — the incremental pushes already
+    # returned all decodable output. Free the native handle.
     def finish
+      __zlib_stream_free(@stream) if @stream
+      @stream = nil
       "".b
     end
 
     def close
+      __zlib_stream_free(@stream) if @stream
+      @stream = nil
       "".b
+    end
+
+    def reset
+      __zlib_stream_free(@stream) if @stream
+      @stream = nil
+      self
     end
   end
 
@@ -151,16 +164,42 @@ module Zlib
     def initialize(io, level = DEFAULT_COMPRESSION, _strategy = DEFAULT_STRATEGY, **_opts)
       @io = io
       @level = level || DEFAULT_COMPRESSION
-      @buf = +"".b
       @mtime = nil
       @closed = false
+      @finished = false
+      # Lazily opened on first write/flush/finish so the header mtime
+      # reflects a `gzip.mtime = …` set after construction (CRuby
+      # contract; rack's Deflater sets it before the first write).
+      @stream = nil
     end
 
     attr_accessor :mtime
 
+    # Streaming gzip: each `write` feeds the native compressor and
+    # forwards whatever compressed bytes it produces, and `flush`
+    # emits a Z_SYNC_FLUSH boundary the reader can decode immediately
+    # (rack's Deflater calls `write` then `flush` per chunk with
+    # `:sync` true). Buffering everything until `finish` would defeat
+    # streaming — a client that stops reading early would still see
+    # the whole body compressed (spec_deflater "client aborts").
+    def open_stream
+      return @stream if @stream
+      mt = if @mtime.nil?
+             Time.now.to_i
+           elsif @mtime.respond_to?(:to_i)
+             @mtime.to_i
+           else
+             @mtime
+           end
+      @stream = __zlib_gz_deflate_new(@level, mt)
+    end
+    private :open_stream
+
     def write(data)
       s = data.to_s
-      @buf << s.b
+      open_stream
+      out = __zlib_gz_deflate_push(@stream, s.b, 0) # NO_FLUSH
+      @io.write(out) unless out.empty?
       s.bytesize
     end
 
@@ -179,26 +218,24 @@ module Zlib
       nil
     end
 
-    # Buffered: the real gzip member is emitted at close, so flush is
-    # a no-op (the decompressed content is identical either way).
     def flush(_flush = SYNC_FLUSH)
+      open_stream
+      out = __zlib_gz_deflate_push(@stream, "".b, 1) # SYNC_FLUSH
+      @io.write(out) unless out.empty?
       self
     end
 
-    # `finish` emits the gzip member but, unlike `close`, leaves the
-    # underlying IO OPEN (CRuby contract). rack's Deflater calls
-    # `gzip.finish` in an ensure, and the spec asserts the wrapped
-    # app body is NOT closed — so finish must not cascade a close.
+    # `finish` emits the final deflate block + gzip trailer (CRC +
+    # ISIZE) but, unlike `close`, leaves the underlying IO OPEN (CRuby
+    # contract). rack's Deflater calls `gzip.finish` in an ensure, and
+    # the spec asserts the wrapped app body is NOT closed — so finish
+    # must not cascade a close.
     def finish
       unless @finished
-        mt = if @mtime.nil?
-               Time.now.to_i
-             elsif @mtime.respond_to?(:to_i)
-               @mtime.to_i
-             else
-               @mtime
-             end
-        @io.write(__zlib_gzip(@buf, @level, mt))
+        open_stream
+        out = __zlib_gz_deflate_push(@stream, "".b, 2) # FINISH (frees handle)
+        @io.write(out) unless out.empty?
+        @stream = nil
         @finished = true
       end
       @io
