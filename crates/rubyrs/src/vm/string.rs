@@ -1824,11 +1824,13 @@ pub(crate) fn string_call(
         // match" rather than raising). rack's request IP filter does
         // `trusted_proxies.match?(ip)` where `ip` can be nil for some
         // forwarded entries (spec_request "deals with proxies").
+        #[cfg(feature = "regex")]
         (Value::Regex(_), "match?", [Value::Nil]) => Some(Value::Bool(false)),
         // `Regexp#match?(str, pos)` — start the match attempt at
         // character offset `pos` (negative counts from the end). No
         // `$~` update. Searches the suffix from `pos`; out-of-range pos
         // is no match. (rack's request parser probes with a position.)
+        #[cfg(feature = "regex")]
         (Value::Regex(re), "match?", [Value::Str(s), Value::Int(pos)]) => {
             let lossy = s.to_string_lossy();
             let char_len = lossy.chars().count() as i64;

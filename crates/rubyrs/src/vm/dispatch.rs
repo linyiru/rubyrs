@@ -8797,9 +8797,16 @@ impl Vm {
             let ret = if args.len() == 1 {
                 args[0].clone()
             } else {
-                self.maybe_gc();
-                self.check_alloc()?;
-                let id = self.heap.alloc(HeapObj::Array(args.to_vec().into()));
+                // Pin the args across the alloc — they may be heap
+                // Strings, and the alloc can trigger a collect.
+                let elems = args.to_vec();
+                let mut g = crate::vm::PinGuard::new(self);
+                for a in &elems {
+                    g.pin(a.clone());
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let id = g.vm.heap.alloc(HeapObj::Array(elems.clone().into()));
                 Value::Array(id)
             };
             self.stack.push(ret);
