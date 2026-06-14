@@ -1151,3 +1151,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // ShowExceptions / ShowStatus render their HTML this way.
 #[cfg(feature = "stdlib")]
 #[test] fn erb_render() { run_diff("erb_render"); }
+
+// Ruby 3.1 hash/keyword value-omission shorthand `{x:}` / `foo(x:)`.
+// Surfaced by bridgetown-core, which uses the shorthand heavily.
+#[test] fn hash_value_shorthand() { run_diff("hash_value_shorthand"); }

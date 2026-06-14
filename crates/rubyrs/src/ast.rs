@@ -898,7 +898,7 @@ fn tr_kwhash(
     let mut buf: Vec<(SExpr, SExpr)> = Vec::new();
     for el in kh.elements().iter() {
         if let Some(an) = el.as_assoc_node() {
-            buf.push((tr(ctx, &an.key()), tr(ctx, &an.value())));
+            buf.push((tr(ctx, &an.key()), tr_assoc_value(ctx, &an)));
         } else if let Some(spn) = el.as_assoc_splat_node() {
             // `**h` keyword splat, OR anonymous `**` forwarding
             // (Ruby 3.2+: `def m(**); n(**); end`) where the splat
@@ -2373,6 +2373,20 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             rescue: vec![],
             ensure: None,
         })
+}
+
+/// Translate an `AssocNode`'s value, unwrapping the Ruby 3.1
+/// value-shorthand form. In `{x:, y:}` / `foo(x:, y:)` Prism gives the
+/// AssocNode an `ImplicitNode` value wrapping the synthesized binding
+/// read (`LocalVariableReadNode` / `CallNode`). Unwrap it so the value
+/// is the variable/method read, mirroring CRuby's desugar to
+/// `{x: x, y: y}`. Surfaced by bridgetown-core, which leans on the
+/// shorthand heavily.
+pub(crate) fn tr_assoc_value(ctx: &mut TranslationCtx<'_>, an: &ruby_prism::AssocNode<'_>) -> SExpr {
+    if let Some(imp) = an.value().as_implicit_node() {
+        return tr(ctx, &imp.value());
+    }
+    tr(ctx, &an.value())
 }
 
 pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
@@ -4585,7 +4599,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let has_splat = n.elements().iter().any(|e| e.as_assoc_splat_node().is_some());
         if !has_splat {
             let pairs: Vec<(SExpr, SExpr)> = n.elements().iter().filter_map(|e| {
-                e.as_assoc_node().map(|a| (tr(ctx, &a.key()), tr(ctx, &a.value())))
+                e.as_assoc_node().map(|a| (tr(ctx, &a.key()), tr_assoc_value(ctx, &a)))
             }).collect();
             return sp(node, Expr::HashLit(pairs));
         }
@@ -4593,7 +4607,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let mut buf: Vec<(SExpr, SExpr)> = Vec::new();
         for el in n.elements().iter() {
             if let Some(an) = el.as_assoc_node() {
-                buf.push((tr(ctx, &an.key()), tr(ctx, &an.value())));
+                buf.push((tr(ctx, &an.key()), tr_assoc_value(ctx, &an)));
             } else if let Some(spn) = el.as_assoc_splat_node()
                 && let Some(inner) = spn.value() {
                     if !buf.is_empty() {
