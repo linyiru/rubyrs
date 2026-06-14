@@ -902,6 +902,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // ArgumentError "input string invalid" on encoding-invalid receivers
 // (CRuby); valid strings convert. rack MethodOverride upcase-rescue.
 #[test] fn case_invalid_encoding() { run_diff("case_invalid_encoding"); }
+// A frozen String's mutation FrozenError renders the receiver's
+// inspect (`"y"`), not raw bytes — shared with String#inspect.
+#[test] fn string_frozen_message() { run_diff("string_frozen_message"); }
 #[test] fn string_each_char() { run_diff("string_each_char"); }
 // Set's richer surface lives in the stdlib-gated `stdlib_vendor/set.rb`
 // (the default build ships only a minimal Set), so gate this fixture the

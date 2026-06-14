@@ -595,7 +595,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "upcase!", []) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             case_validity_guard(a)?;
@@ -610,7 +610,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "downcase!", []) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             case_validity_guard(a)?;
@@ -625,7 +625,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "capitalize!", []) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             case_validity_guard(a)?;
@@ -640,7 +640,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "swapcase!", []) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             case_validity_guard(a)?;
@@ -655,7 +655,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "reverse!", []) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             // reverse! always mutates (even when palindrome —
@@ -804,7 +804,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "strip!", []) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             let new_bytes = {
@@ -821,7 +821,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "lstrip!", []) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             let new_bytes = {
@@ -867,7 +867,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "chomp!", args) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             // Validate arg shape BEFORE consulting the receiver
@@ -907,7 +907,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "rstrip!", []) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             let new_bytes = {
@@ -1062,7 +1062,7 @@ pub(crate) fn string_call(
             let bang = name == "scrub!";
             if bang && a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             let rep = match args2.first() {
@@ -1156,7 +1156,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "sub!", [Value::Str(pat), Value::Str(repl)]) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             let a_ref = a.to_string_lossy();
@@ -1175,7 +1175,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "gsub!", [Value::Str(pat), Value::Str(repl)]) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             let a_ref = a.to_string_lossy();
@@ -1195,7 +1195,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "sub!", [Value::Regex(re), Value::Str(repl)]) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             let a_ref = a.to_string_lossy();
@@ -1221,7 +1221,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "gsub!", [Value::Regex(re), Value::Str(repl)]) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             let a_ref = a.to_string_lossy();
@@ -1401,7 +1401,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "tr!", [Value::Str(from), Value::Str(to)]) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             let a_ref = a.to_string_lossy();
@@ -1481,7 +1481,7 @@ pub(crate) fn string_call(
             || (rest.len() == 1 && matches!(rest[0], Value::Str(_))) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             let a_str = a.to_string_lossy();
@@ -1564,7 +1564,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "delete_prefix!", [Value::Str(pre)]) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             let s = a.to_string_lossy();
@@ -1580,7 +1580,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "delete_suffix!", [Value::Str(suf)]) => {
             if a.frozen.get() {
                 return Err(RubyError::FrozenError {
-                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
                 });
             }
             let s = a.to_string_lossy();
@@ -2110,7 +2110,7 @@ impl Vm {
                 let check_unfrozen = |vm: &Vm| -> Result<(), Trap> {
                     if s.frozen.get() {
                         Err(vm.trap(RubyError::FrozenError {
-                            msg: format!("can't modify frozen String: {:?}", s.content.borrow()),
+                            msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(&s)),
                         }))
                     } else {
                         Ok(())
@@ -2567,7 +2567,7 @@ impl Vm {
                     }
                     if s.frozen.get() {
                         return Err(self.trap(RubyError::FrozenError {
-                            msg: format!("can't modify frozen String: {:?}", s.content.borrow()),
+                            msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(&s)),
                         }));
                     }
                     #[cfg(feature = "regex")]

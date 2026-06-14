@@ -1467,6 +1467,41 @@ pub(crate) fn inspect_escape_utf8_bytes_into(bytes: &[u8], out: &mut String) {
 }
 
 
+/// Ruby `String#inspect` of an `RStr` (quoted + escaped, encoding-
+/// aware). Shared by `Value::to_inspect`'s Str arm and the String
+/// FrozenError messages so the two can't drift — CRuby's FrozenError
+/// renders the receiver's inspect (`"y"`), not its raw bytes.
+pub(crate) fn rstr_inspect(s: &crate::value::RStr) -> String {
+    let mut out = String::new();
+    out.push('"');
+    match s.encoding.get() {
+        crate::value::EncodingTag::Binary => {
+            inspect_escape_bytes_into(&s.content.borrow(), &mut out);
+        }
+        #[cfg(feature = "_encoding_full")]
+        crate::value::EncodingTag::Other(idx) => {
+            let b = s.content.borrow();
+            match crate::encoding_full::char_chunks(idx, &b) {
+                Some(chunks) => inspect_escape_chunks_into(&chunks, &mut out),
+                None => inspect_escape_bytes_into(&b, &mut out),
+            }
+        }
+        #[cfg(not(feature = "_encoding_full"))]
+        crate::value::EncodingTag::Other(_) => {
+            inspect_escape_bytes_into(&s.content.borrow(), &mut out);
+        }
+        _ => {
+            let b = s.content.borrow();
+            if std::str::from_utf8(&b).is_ok() {
+                inspect_escape_into(&s.to_string_lossy(), &mut out);
+            } else {
+                inspect_escape_utf8_bytes_into(&b, &mut out);
+            }
+        }
+    }
+    out.push('"');
+    out
+}
 /// Escape `raw` for inclusion in a Ruby `String#inspect`/`#to_inspect`
 /// representation, appending to `out` (caller wraps in the `"` quotes).
 ///
@@ -1768,46 +1803,11 @@ impl Value {
     }
     pub(crate) fn to_inspect(&self, heap: &Heap, interner: &Interner) -> String {
         match self {
-            Value::Str(s) => {
-                // Both `Array#inspect` (this path, via to_inspect on
-                // each element) and `String#inspect` (the primitive
-                // arm in vm/string.rs) share the same escape rules —
-                // funnel both through the shared helpers so they
-                // can't drift apart. BINARY-tagged strings take the
-                // byte-escape route (CRuby shows \xNN, not lossy
-                // chars).
-                let mut out = String::new();
-                out.push('"');
-                match s.encoding.get() {
-                    crate::value::EncodingTag::Binary => {
-                        inspect_escape_bytes_into(&s.content.borrow(), &mut out);
-                    }
-                    #[cfg(feature = "_encoding_full")]
-                    crate::value::EncodingTag::Other(idx) => {
-                        let b = s.content.borrow();
-                        match crate::encoding_full::char_chunks(idx, &b) {
-                            Some(chunks) => inspect_escape_chunks_into(&chunks, &mut out),
-                            None => inspect_escape_bytes_into(&b, &mut out),
-                        }
-                    }
-                    #[cfg(not(feature = "_encoding_full"))]
-                    crate::value::EncodingTag::Other(_) => {
-                        inspect_escape_bytes_into(&s.content.borrow(), &mut out);
-                    }
-                    _ => {
-                        let b = s.content.borrow();
-                        if std::str::from_utf8(&b).is_ok() {
-                            inspect_escape_into(&s.to_string_lossy(), &mut out);
-                        } else {
-                            // UTF-8 tag with invalid bytes: per-byte
-                            // \xNN for the bad runs (CRuby shape).
-                            inspect_escape_utf8_bytes_into(&b, &mut out);
-                        }
-                    }
-                }
-                out.push('"');
-                out
-            },
+            // `Array#inspect` (this path, per element) and
+            // `String#inspect` (the primitive arm in vm/string.rs) plus
+            // the FrozenError messages all funnel through `rstr_inspect`
+            // so the escape rules can't drift.
+            Value::Str(s) => rstr_inspect(s),
             Value::Sym(id) => symbol_inspect(interner.resolve(*id)),
             Value::Nil => "nil".into(),
             // Range#inspect joins the endpoints via `#inspect`, not
