@@ -603,6 +603,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_dump() { run_diff("string_dump"); }
 #[test] fn string_count() { run_diff("string_count"); }
 #[test] fn string_ord() { run_diff("string_ord"); }
+#[test] fn warn_uplevel() { run_diff("warn_uplevel"); }
 #[cfg(feature = "stdlib")]
 #[test] fn zlib_streaming() { run_diff("zlib_streaming"); }
 #[cfg(feature = "stdlib")]

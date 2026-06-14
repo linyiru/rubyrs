@@ -1983,14 +1983,20 @@ impl Vm {
                 Some(Ok(Value::Nil))
             }
             "warn" => {
-                // Tier-1 2c: `Kernel#warn(*msgs)` writes each
-                // argument + "\n" to `Vm::stderr`. CRuby joins
-                // multiple args with newlines (one terminator
-                // each, including trailing); `warn` accepts any
-                // arity. Tier-1 simplification: ignores the
-                // `uplevel:` / `category:` kwargs CRuby exposes
-                // (not in the rubyrs subset yet) — positional
-                // args only.
+                // `Kernel#warn(*msgs, uplevel: nil, category: nil)`
+                // writes each message + "\n" to `Vm::stderr`. CRuby
+                // honours two keywords:
+                //   - `uplevel:` prefixes the FIRST message with the
+                //     location `uplevel` frames up from the warn call
+                //     site, as `"path:line: warning: "` (just
+                //     `"warning: "` when that points beyond the stack);
+                //   - `category: :deprecated` is SUPPRESSED by default
+                //     (`Warning[:deprecated]` is false without
+                //     `-W:deprecated`), so the message is dropped.
+                // rubyrs flattens kwargs into a trailing positional
+                // Hash, so peel a trailing Hash whose keys are all
+                // `:uplevel`/`:category` (a Hash with other keys is a
+                // real message — `warn({a: 1})`).
                 //
                 // USER OVERRIDE WINS: a `warn` defined on self's
                 // method chain (or, for a Class/Module self, its
@@ -2007,27 +2013,79 @@ impl Vm {
                 if self.bare_builtin_user_override("warn") {
                     return None;
                 }
-                if let Some(target) = self.stdio_redirect("$stderr", true) {
-                    // Render to one buffer, forward as a single
-                    // write — same shape as the redirected `p`.
-                    let mut buf = String::new();
-                    for arg in args {
-                        let s = arg.to_display(&self.heap, &self.interner);
-                        buf.push_str(&s);
-                        if !s.ends_with('\n') {
-                            buf.push('\n');
+                let mut msgs: &[Value] = args;
+                let mut uplevel: Option<i64> = None;
+                let mut category: Option<String> = None;
+                if let Some(Value::Hash(hid)) = args.last() {
+                    let pairs = self.heap.hash(*hid).clone();
+                    let all_kw = !pairs.is_empty()
+                        && pairs.iter().all(|(k, _)| matches!(k, Value::Sym(s)
+                            if matches!(&**self.interner.resolve(*s), "uplevel" | "category")));
+                    if all_kw {
+                        for (k, v) in &pairs {
+                            if let Value::Sym(s) = k {
+                                match &**self.interner.resolve(*s) {
+                                    "uplevel" => {
+                                        if let Value::Int(n) = v { uplevel = Some(*n); }
+                                    }
+                                    "category" => {
+                                        if let Value::Sym(cs) = v {
+                                            category = Some(self.interner.resolve(*cs).to_string());
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
+                        msgs = &args[..args.len() - 1];
                     }
+                }
+                if category.as_deref() == Some("deprecated") {
+                    return Some(Ok(Value::Nil)); // suppressed by default
+                }
+                if msgs.is_empty() {
+                    return Some(Ok(Value::Nil));
+                }
+                // Resolve the `uplevel:` location prefix (first line only).
+                let prefix: Option<String> = uplevel.map(|lvl| {
+                    let lvl = lvl.max(0) as usize;
+                    let loc = self.frames.len().checked_sub(1 + lvl).map(|i| {
+                        let f = &self.frames[i];
+                        let proto = &self.protos[f.proto_idx];
+                        let op_ip = if f.ip == 0 { 0 } else { f.ip - 1 };
+                        let span = proto
+                            .op_spans
+                            .get(op_ip)
+                            .copied()
+                            .unwrap_or(crate::error::Span::ZERO);
+                        let line = match self.sources.get(proto.filename.as_ref()) {
+                            Some(src) => crate::error::line_col(src, span.byte_offset).0,
+                            None => 0,
+                        };
+                        format!("{}:{}", proto.filename, line)
+                    });
+                    match loc {
+                        Some(l) => format!("{l}: warning: "),
+                        None => "warning: ".to_string(),
+                    }
+                });
+                let mut buf = String::new();
+                for (i, arg) in msgs.iter().enumerate() {
+                    if i == 0 && let Some(p) = &prefix {
+                        buf.push_str(p);
+                    }
+                    let s = arg.to_display(&self.heap, &self.interner);
+                    buf.push_str(&s);
+                    if !s.ends_with('\n') {
+                        buf.push('\n');
+                    }
+                }
+                if let Some(target) = self.stdio_redirect("$stderr", true) {
+                    // Forward as a single write — same shape as the
+                    // redirected `p`.
                     return Some(self.forward_stdio_call(target, "write", &[Value::new_str(buf)]));
                 }
-                for arg in args {
-                    let s = arg.to_display(&self.heap, &self.interner);
-                    if s.ends_with('\n') {
-                        let _ = write!(self.stderr, "{s}");
-                    } else {
-                        let _ = writeln!(self.stderr, "{s}");
-                    }
-                }
+                let _ = write!(self.stderr, "{buf}");
                 Some(Ok(Value::Nil))
             }
             "exit!" => {
