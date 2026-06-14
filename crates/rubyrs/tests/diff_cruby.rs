@@ -594,6 +594,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn regex_binary_bytes() { run_diff("regex_binary_bytes"); }
 #[test] fn object_singleton_super() { run_diff("object_singleton_super"); }
 #[test] fn bare_super_forwarding() { run_diff("bare_super_forwarding"); }
+#[test] fn hash_subclass_default() { run_diff("hash_subclass_default"); }
 #[test] fn undef_inherited_singleton() { run_diff("undef_inherited_singleton"); }
 #[test] fn frame_locals_pool() { run_diff("frame_locals_pool"); }
 #[test] fn locals_stack_arena() { run_diff("locals_stack_arena"); }

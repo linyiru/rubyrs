@@ -5473,23 +5473,35 @@ impl Vm {
     }
     if name_id == new_id
         && let Value::Class(cls) = &recv
-        && cls.name.as_str() == "Hash"
+        && (cls.name.as_str() == "Hash" || class_inherits_named(cls, "Hash"))
+        // A Hash SUBCLASS that defines its own `initialize` runs it via
+        // the generic Class#new path; only inherit the native default-
+        // setting when the subclass relies on Hash#initialize (e.g.
+        // Rack::Headers, which has no `initialize`). The `def self.new`
+        // override precedence was already handled upstream.
+        && {
+            let init_id = self.interner.intern("initialize");
+            self.lookup_method_uncached(cls, init_id).is_none()
+        }
     {
-        // `Hash.new` without a block. CRuby shapes:
+        // `Hash.new` (and Hash-subclass.new) without a block. CRuby:
         //   - 0 args: empty Hash, no default
         //   - 1 arg:  empty Hash with scalar default; missing-
         //             key lookup returns this value as-is (not
         //             cached into the Hash).
         //   - 2+ args: ArgumentError
-        // The block-form (`Hash.new { |h, k| ... }`) routes
-        // through `do_call_block` and has its own intercept
-        // (which raises ArgumentError when a scalar default is
-        // also given — CRuby refuses both at once).
+        // A subclass constructs a TAGGED instance of itself (so
+        // `Rack::Headers.new('1')['x']` returns '1'); the literal
+        // Hash class tags None. The block-form (`Hash.new { |h, k|
+        // ... }`) routes through `do_call_block` and has its own
+        // intercept (which raises ArgumentError when a scalar default
+        // is also given — CRuby refuses both at once).
         if args.len() > 1 {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
             }));
         }
+        let class_tag = if cls.name.as_str() == "Hash" { None } else { Some(cls.clone()) };
         let default = args.first().cloned();
         // Pin the default across maybe_gc — if it's a heap
         // value (Array / Hash / String), it could be a
@@ -5500,7 +5512,16 @@ impl Vm {
         if let Some(v) = &default { g.pin(v.clone()); }
         g.vm.maybe_gc();
         g.vm.check_alloc()?;
-        let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
+        let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj {
+            pairs: Vec::new(),
+            default_block: None,
+            default_value: None,
+            class_tag,
+            ivars: crate::intern::FxHashMap::default(),
+            index: None,
+            singleton_class: None,
+            frozen: std::cell::Cell::new(false),
+        }));
         if default.is_some() {
             g.vm.heap.hash_set_default_value(hid, default);
         }
@@ -15324,7 +15345,7 @@ impl Vm {
         }
         if &*name == "new"
             && let Some(Value::Class(cls)) = &recv
-            && cls.name.as_str() == "Hash"
+            && (cls.name.as_str() == "Hash" || class_inherits_named(cls, "Hash"))
         {
             // Same precedence rule as `do_call`'s Hash.new no-
             // block path: a user `def self.new` on Hash (reopened
@@ -15346,27 +15367,48 @@ impl Vm {
                 let target_self = Value::Class(cls.clone());
                 return self.invoke_method_with_block(m, target_self, args, Some(block));
             }
-            if !args.is_empty() {
-                return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+            // The native default-block path applies only when the
+            // (sub)class inherits Hash#initialize. A subclass with its
+            // own `initialize` falls through to the generic Class#new
+            // dispatch below (which runs that initialize with the
+            // block). The literal Hash class always qualifies.
+            let init_id = self.interner.intern("initialize");
+            if self.lookup_method_uncached(cls, init_id).is_none() {
+                if !args.is_empty() {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                    }));
+                }
+                // A subclass constructs a TAGGED instance of itself (so
+                // `Rack::Headers.new { |h,k| ... }['x']` runs the
+                // default block); the literal Hash class tags None.
+                let class_tag = if cls.name.as_str() == "Hash" { None } else { Some(cls.clone()) };
+                // GC rooting: `block` was popped from the stack into a
+                // Rust-local ObjId above. Until `hash_set_default_block`
+                // installs it into the new Hash (which IS a GC root via
+                // `self.stack.push` below), the block is unreachable
+                // from the standard roots (stack / frames / pinned).
+                // `maybe_gc` could sweep it between the alloc and the
+                // store, leaving `hash_set_default_block` pointing at a
+                // freed slot. Pin across both maybe_gc + alloc.
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Block(block));
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj {
+                    pairs: Vec::new(),
+                    default_block: None,
+                    default_value: None,
+                    class_tag,
+                    ivars: crate::intern::FxHashMap::default(),
+                    index: None,
+                    singleton_class: None,
+                    frozen: std::cell::Cell::new(false),
                 }));
+                g.vm.heap.hash_set_default_block(hid, Some(block));
+                g.vm.stack.push(Value::Hash(hid));
+                return Ok(());
             }
-            // GC rooting: `block` was popped from the stack into a
-            // Rust-local ObjId above. Until `hash_set_default_block`
-            // installs it into the new Hash (which IS a GC root via
-            // `self.stack.push` below), the block is unreachable
-            // from the standard roots (stack / frames / pinned).
-            // `maybe_gc` could sweep it between the alloc and the
-            // store, leaving `hash_set_default_block` pointing at a
-            // freed slot. Pin across both maybe_gc + alloc.
-            let mut g = PinGuard::new(self);
-            g.pin(Value::Block(block));
-            g.vm.maybe_gc();
-            g.vm.check_alloc()?;
-            let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
-            g.vm.heap.hash_set_default_block(hid, Some(block));
-            g.vm.stack.push(Value::Hash(hid));
-            return Ok(());
         }
         // `Array.new(size) { |i| block }` — CRuby's three-arg
         // intercept on the block-form path. Builds a fresh Array
