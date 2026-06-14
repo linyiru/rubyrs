@@ -216,8 +216,18 @@ impl RStr {
     /// String" semantic). The shortcut means the canonical builtin
     /// path and dispatch's primitive fast-path stay in lock-step
     /// without one of them silently winning a perf round.
+    ///
+    /// ASCII-8BIT (BINARY) strings count every byte as one char
+    /// (`length == bytesize`) regardless of whether the bytes form
+    /// valid UTF-8 — CRuby semantics. This matters for binary payloads
+    /// (e.g. multipart file uploads read through StringIO): treating a
+    /// binary buffer as UTF-8 would under-count, desyncing byte-offset
+    /// arithmetic that consumers do with `length`.
     pub fn char_count(&self) -> usize {
         let bytes = self.content.borrow();
+        if matches!(self.encoding.get(), EncodingTag::Binary) {
+            return bytes.len();
+        }
         if bytes.is_ascii() {
             bytes.len()
         } else {

@@ -1123,18 +1123,37 @@ pub(crate) fn string_call(
         // separately-dispatched path; not handled here.
         #[cfg(feature = "regex")]
         (Value::Str(a), "sub", [Value::Regex(re), Value::Str(repl)]) => {
-            let a_ref = a.to_string_lossy();
             let repl_ref = repl.to_string_lossy();
             let repl_xlated = ruby_backref_to_dollar(&repl_ref);
+            // BINARY (ASCII-8BIT) subjects replace byte-wise so the raw
+            // bytes survive — a lossy UTF-8 round-trip would expand each
+            // invalid byte to a 3-byte U+FFFD, corrupting AND growing the
+            // result (rack strips a trailing boundary from a binary file
+            // body via `body.sub(@body_regex_at_end, '')`). Scoped to
+            // ASCII-8BIT: a genuinely UTF-8-tagged-but-invalid receiver
+            // would RAISE ArgumentError in CRuby, not byte-replace.
+            if matches!(a.encoding.get(), crate::value::EncodingTag::Binary)
+                && let Some(out) = re.replace_bytes(&a.content.borrow(), repl_xlated.as_bytes())
+            {
+                check(out.len())?;
+                return Ok(Some(with_tag(Value::new_str_bytes(out), a.encoding.get())));
+            }
+            let a_ref = a.to_string_lossy();
             let out = re.replace(&a_ref, repl_xlated.as_str()).into_owned();
             check(out.len())?;
             Some(Value::new_str(out))
         }
         #[cfg(feature = "regex")]
         (Value::Str(a), "gsub", [Value::Regex(re), Value::Str(repl)]) => {
-            let a_ref = a.to_string_lossy();
             let repl_ref = repl.to_string_lossy();
             let repl_xlated = ruby_backref_to_dollar(&repl_ref);
+            if matches!(a.encoding.get(), crate::value::EncodingTag::Binary)
+                && let Some(out) = re.replace_all_bytes(&a.content.borrow(), repl_xlated.as_bytes())
+            {
+                check(out.len())?;
+                return Ok(Some(with_tag(Value::new_str_bytes(out), a.encoding.get())));
+            }
+            let a_ref = a.to_string_lossy();
             let out = re.replace_all(&a_ref, repl_xlated.as_str()).into_owned();
             check(out.len())?;
             Some(Value::new_str(out))
@@ -2231,6 +2250,14 @@ impl Vm {
                         Value::Str(o) => {
                             let new_content = o.borrow().clone();
                             *s.borrow_mut() = new_content;
+                            // CRuby `replace` adopts the source's
+                            // encoding too — `buf.replace(binary_str)`
+                            // makes `buf` ASCII-8BIT. The 2-arg
+                            // `IO#read(n, buf)` form relies on this so
+                            // the output buffer comes back binary
+                            // (rack's multipart parser reads into a
+                            // reused outbuf).
+                            s.encoding.set(o.encoding.get());
                         }
                         other => return Err(self.trap(RubyError::TypeError {
                             msg: format!("no implicit conversion of {} into String", other.type_name()),
@@ -3172,7 +3199,7 @@ impl Vm {
                         // preserves bytes + tag (the `pair.split("=")`
                         // QueryParser shape). Empty / `" "` seps fall
                         // through to the char path below.
-                        if split_wants_bytes(&s) {
+                        if wants_byte_faithful(&s) {
                             let sep_b = sep.content.borrow();
                             if !sep_b.is_empty() && &sep_b[..] != b" " {
                                 let elems = byte_split_values(
@@ -3269,7 +3296,7 @@ impl Vm {
                         // Byte-faithful path (binary / invalid-UTF-8 +
                         // non-empty, non-AWK sep) — the QueryParser
                         // `pair.split("=", 2)` shape.
-                        if split_wants_bytes(&s) {
+                        if wants_byte_faithful(&s) {
                             let sep_b = sep.content.borrow();
                             if !sep_b.is_empty() && &sep_b[..] != b" " {
                                 let elems = byte_split_values(
@@ -3957,7 +3984,13 @@ fn byte_split_values(
 /// True when a String#split should take the byte-faithful path: the
 /// receiver isn't valid UTF-8 for its tag (BINARY, or a UTF-8 tag with
 /// invalid bytes). Valid UTF-8 (incl. ASCII) keeps the char path.
-fn split_wants_bytes(s: &crate::value::RStr) -> bool {
+/// True when `String#split` must operate byte-faithfully rather than via
+/// a lossy UTF-8 view: an ASCII-8BIT (BINARY) receiver, or a receiver
+/// whose bytes aren't valid UTF-8. The lossy path would turn every
+/// invalid byte into a 3-byte U+FFFD, corrupting and growing the chunks.
+/// (`sub`/`gsub` gate on ASCII-8BIT only — CRuby raises on a
+/// UTF-8-tagged-but-invalid receiver there rather than byte-replacing.)
+fn wants_byte_faithful(s: &crate::value::RStr) -> bool {
     use crate::value::EncodingTag;
     s.encoding.get() == EncodingTag::Binary
         || std::str::from_utf8(&s.content.borrow()).is_err()

@@ -777,6 +777,22 @@ impl CompiledRegex {
         }
     }
 
+    /// Byte-level `String#sub` for a BINARY subject — preserves the raw
+    /// bytes instead of round-tripping through a lossy UTF-8 view (which
+    /// turns every invalid byte into a 3-byte U+FFFD, corrupting and
+    /// GROWING binary payloads such as rack multipart file bodies).
+    /// `None` ⇒ no byte engine, caller falls back to the UTF-8 path.
+    /// `replacement` is in the regex crate's `$N` backref form.
+    pub(crate) fn replace_bytes(&self, haystack: &[u8], replacement: &[u8]) -> Option<Vec<u8>> {
+        Some(self.bytes_engine()?.replace(haystack, replacement).into_owned())
+    }
+
+    /// Byte-level `String#gsub` for a BINARY subject — replace all.
+    /// Same discipline as `replace_bytes`.
+    pub(crate) fn replace_all_bytes(&self, haystack: &[u8], replacement: &[u8]) -> Option<Vec<u8>> {
+        Some(self.bytes_engine()?.replace_all(haystack, replacement).into_owned())
+    }
+
     /// Collect match positions + per-group spans, eagerly, in
     /// engine-agnostic owned form. Used by
     /// `String#split(regex[, limit])` so the split walker can
