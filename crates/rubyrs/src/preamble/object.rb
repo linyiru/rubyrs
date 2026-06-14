@@ -78,6 +78,25 @@ class Object < BasicObject
   private :respond_to_missing?
 end
 
+# Re-parent the exception hierarchy onto Object. preamble/exceptions.rb
+# loads BEFORE this file (so RuntimeError/etc. resolve while the rest of
+# the preamble loads), which means `class Exception` could not default
+# its superclass to the not-yet-defined Object and was created as a ROOT
+# (superclass = nil). Now that Object exists, reopen `Exception < Object`
+# to match CRuby — `Exception.ancestors` becomes
+# `[Exception, Object, Kernel, BasicObject]`. Without this, exception
+# INSTANCES never resolve Ruby-level Object/Kernel methods (only the
+# VM-special-cased natives like `frozen?`), so anything mixed into Object
+# afterwards — e.g. minitest's `must_*` expectations on a rescued
+# exception — is invisible. The reopen sets the superclass via the normal
+# class-definition path (nil → Object only; it never clobbers an existing
+# parent) AND runs the const-/method-generation invalidation that
+# exception dispatch caching depends on. The whole subtree
+# (StandardError < Exception, ...) shares the one Exception object, so a
+# single reopen re-parents the lot.
+class Exception < Object
+end
+
 ## Phase C.1 Numeric / Rational class shells. CRuby's chain is
 ## `Rational < Numeric < Object`; the actual arithmetic is wired
 ## via primitive dispatch arms in the VM (numeric.rs / dispatch.rs),

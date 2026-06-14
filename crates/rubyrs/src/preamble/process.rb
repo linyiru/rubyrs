@@ -326,7 +326,20 @@ class RubyrsPipeReader
       else
         chunk = buf.byteslice(pos, length) || ""
         @state[:pos] = pos + chunk.bytesize
-        chunk.bytesize == 0 && length > 0 ? nil : chunk
+        if chunk.bytesize == 0 && length > 0
+          # Empty buffer. While the write end is still OPEN this is
+          # "no data available yet", NOT end-of-stream — a real pipe
+          # blocks here. The in-memory shim can't block (single-thread,
+          # ADR 0017), but returning "" rather than nil keeps emptiness
+          # distinct from EOF: a reader that declared a content-length
+          # (rack multipart's BoundedIO) then sees empty *content* and
+          # raises EmptyContentError, instead of mistaking it for a
+          # truncated body (EOFError). Once the writer closes, an empty
+          # buffer is genuine EOF → nil.
+          @state[:wclosed] ? nil : ""
+        else
+          chunk
+        end
       end
     if outbuf
       outbuf.replace(result || "")
@@ -374,6 +387,11 @@ class RubyrsPipeReader
 
   def close
     @closed = true
+    # Signal the write end: further writes must fail with EPIPE, the way
+    # a real pipe behaves once its read end is gone (rack's multipart
+    # "rejects insanely long boundaries" test relies on this to unblock
+    # the producer thread after Rack shuts the reader down).
+    @state[:rclosed] = true
     nil
   end
 
@@ -390,6 +408,10 @@ class RubyrsPipeWriter
 
   def write(*args)
     raise IOError, "closed stream" if @closed
+    # Writing to a pipe whose read end has been closed is Errno::EPIPE
+    # in CRuby — surface the same so producers terminate (and rescue it)
+    # instead of buffering forever.
+    raise Errno::EPIPE, "Broken pipe" if @state[:rclosed]
     total = 0
     args.each do |a|
       s = a.to_s
@@ -397,6 +419,18 @@ class RubyrsPipeWriter
       total += s.bytesize
     end
     total
+  end
+
+  # Non-blocking write. The in-memory buffer never actually blocks, so a
+  # write always completes — except against a closed read end, where
+  # CRuby raises Errno::EPIPE even with `exception: false` (that flag
+  # only suppresses EAGAIN/EWOULDBLOCK, never EPIPE).
+  def write_nonblock(s, exception: true)
+    raise IOError, "closed stream" if @closed
+    raise Errno::EPIPE, "Broken pipe" if @state[:rclosed]
+    str = s.to_s
+    @state[:buf] << str.b
+    str.bytesize
   end
 
   def <<(s)
