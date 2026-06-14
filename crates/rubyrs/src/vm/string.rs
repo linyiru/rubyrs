@@ -3820,58 +3820,6 @@ pub(crate) fn str_succ(s: &str) -> String {
     }
 }
 
-#[cfg(feature = "regex")]
-/// `String#split(regex[, limit])` shared core. Walks the
-/// `CompiledRegex::split_matches` output and emits a
-/// `Vec<Value>` matching CRuby's `split` semantics. Each
-/// element is either a `Value::Str` (chunk between matches or
-/// participating capture group) or a `Value::Nil` (capture
-/// group that didn't participate in the match — e.g. an `|`
-/// alternative arm that wasn't taken). Code-review #357 round 1
-/// corrected the doc — the previous claim of `Vec<Value::Str>`
-/// missed the `Nil` capture-group case.
-///
-///   - Each pre-match chunk is pushed as its own element.
-///   - For each match, any captured groups are pushed after
-///     the chunk preceding the match (CRuby's "split keeps
-///     parenthesised groups" rule).
-///   - After all matches, the post-tail chunk is pushed.
-///
-/// Limit handling:
-///   - `limit == 0`: drop trailing empty fields (including
-///     the post-tail empty if the last match ended at EOS).
-///   - `limit > 0`: `limit` bounds the number of CHUNKS /
-///     matches processed (we emit at most `limit - 1` matches
-///     before the unsplit remainder), NOT the final array
-///     length. Captured groups from processed matches are
-///     still emitted between the surrounding chunks, so the
-///     result can have MORE than `limit` elements when the
-///     pattern has captures (per CRuby docs: "captured groups
-///     will be returned as well, but are not counted towards
-///     the limit"). For non-capturing patterns this collapses
-///     to "at most `limit` fields". No captures are emitted
-///     from the truncating match itself — the remainder is
-///     pushed verbatim. Code-review #357 round 4 clarified
-///     this contract.
-///   - `limit < 0`: emit all fields, keep trailing empties.
-///
-/// Zero-width matches (e.g. lookaround patterns like the
-/// sinatra `/:(?=\d|in )/`) are accepted; the underlying
-/// engines' iter cursors handle zero-width loop avoidance
-/// internally, so we don't force an extra char step here.
-///
-/// (TRY_RUNS pass-14 layer #18.)
-#[cfg(feature = "regex")]
-/// `String#split(regex)` that PRESERVES the receiver's bytes and
-/// encoding. Valid UTF-8 receivers take the lossless fast path (chunks
-/// tagged UTF-8 — the common case, unchanged). Binary / invalid-UTF-8
-/// receivers are split via a Latin-1 round-trip: each byte ⇆ a
-/// U+00..FF char, so the regex still matches ASCII separators at the
-/// right positions and every chunk re-encodes to its EXACT original
-/// bytes, then re-tagged with the receiver's encoding. Without this,
-/// `with_str_lossy` U+FFFD-mangled high bytes and dropped the tag — so
-/// rack's MethodOverride `_method=\xBF` lost its invalid byte and the
-/// subsequent `.upcase` no longer raised ArgumentError.
 /// First index of `needle` in `hay`, or `None`. Tiny, used by the
 /// byte-faithful string-split path.
 fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -3936,6 +3884,17 @@ fn split_wants_bytes(s: &crate::value::RStr) -> bool {
         || std::str::from_utf8(&s.content.borrow()).is_err()
 }
 
+#[cfg(feature = "regex")]
+/// `String#split(regex)` that PRESERVES the receiver's bytes and
+/// encoding. Valid UTF-8 receivers take the lossless fast path (chunks
+/// tagged UTF-8 — the common case, unchanged). Binary / invalid-UTF-8
+/// receivers are split via a Latin-1 round-trip: each byte ⇆ a
+/// U+00..FF char, so the regex still matches ASCII separators at the
+/// right positions and every chunk re-encodes to its EXACT original
+/// bytes, then re-tagged with the receiver's encoding. Without this,
+/// `with_str_lossy` U+FFFD-mangled high bytes and dropped the tag — so
+/// rack's MethodOverride `_method=\xBF` lost its invalid byte and the
+/// subsequent `.upcase` no longer raised ArgumentError.
 fn regex_split_values(
     s: &std::rc::Rc<crate::value::RStr>,
     re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
@@ -3968,6 +3927,47 @@ fn regex_split_values(
         .collect()
 }
 
+#[cfg(feature = "regex")]
+/// `String#split(regex[, limit])` shared core. Walks the
+/// `CompiledRegex::split_matches` output and emits a
+/// `Vec<Value>` matching CRuby's `split` semantics. Each
+/// element is either a `Value::Str` (chunk between matches or
+/// participating capture group) or a `Value::Nil` (capture
+/// group that didn't participate in the match — e.g. an `|`
+/// alternative arm that wasn't taken). Code-review #357 round 1
+/// corrected the doc — the previous claim of `Vec<Value::Str>`
+/// missed the `Nil` capture-group case.
+///
+///   - Each pre-match chunk is pushed as its own element.
+///   - For each match, any captured groups are pushed after
+///     the chunk preceding the match (CRuby's "split keeps
+///     parenthesised groups" rule).
+///   - After all matches, the post-tail chunk is pushed.
+///
+/// Limit handling:
+///   - `limit == 0`: drop trailing empty fields (including
+///     the post-tail empty if the last match ended at EOS).
+///   - `limit > 0`: `limit` bounds the number of CHUNKS /
+///     matches processed (we emit at most `limit - 1` matches
+///     before the unsplit remainder), NOT the final array
+///     length. Captured groups from processed matches are
+///     still emitted between the surrounding chunks, so the
+///     result can have MORE than `limit` elements when the
+///     pattern has captures (per CRuby docs: "captured groups
+///     will be returned as well, but are not counted towards
+///     the limit"). For non-capturing patterns this collapses
+///     to "at most `limit` fields". No captures are emitted
+///     from the truncating match itself — the remainder is
+///     pushed verbatim. Code-review #357 round 4 clarified
+///     this contract.
+///   - `limit < 0`: emit all fields, keep trailing empties.
+///
+/// Zero-width matches (e.g. lookaround patterns like the
+/// sinatra `/:(?=\d|in )/`) are accepted; the underlying
+/// engines' iter cursors handle zero-width loop avoidance
+/// internally, so we don't force an extra char step here.
+///
+/// (TRY_RUNS pass-14 layer #18.)
 fn regex_split_into_values(
     re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
     src: &str,
