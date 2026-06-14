@@ -1155,3 +1155,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Ruby 3.1 hash/keyword value-omission shorthand `{x:}` / `foo(x:)`.
 // Surfaced by bridgetown-core, which uses the shorthand heavily.
 #[test] fn hash_value_shorthand() { run_diff("hash_value_shorthand"); }
+
+// `methods(false)` / `singleton_methods(false)` — optional regular/all
+// boolean restricts to the receiver's own methods. Surfaced by stdlib
+// fileutils.rb's `private_instance_methods & methods(false)` table build.
+#[test] fn methods_regular_arg() { run_diff("methods_regular_arg"); }

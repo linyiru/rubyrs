@@ -9428,9 +9428,17 @@ impl Vm {
         // individually). De-dups by SymId, sorted by interner
         // string order for determinism.
         if matches!(&*name, "methods" | "public_methods" | "private_methods" | "protected_methods")
-            && args.is_empty()
+            && (args.is_empty() || args.len() == 1)
         {
             use crate::value::Visibility;
+            // Optional `regular` boolean (`methods(false)`): CRuby returns
+            // only the receiver's OWN methods (no ancestor walk) when
+            // falsy. Absent / truthy → the full inherited set. Surfaced
+            // by stdlib fileutils.rb (`private_instance_methods & methods(false)`).
+            let include_inherited = match args.first() {
+                None => true,
+                Some(v) => v.is_truthy(),
+            };
             let pred: fn(Visibility) -> bool = match &*name {
                 "methods" => |v| matches!(v, Visibility::Public | Visibility::Protected),
                 "public_methods" => |v| v == Visibility::Public,
@@ -9447,6 +9455,7 @@ impl Vm {
                     c: &std::rc::Rc<crate::value::Class>,
                     out: &mut Vec<(crate::intern::SymId, Visibility)>,
                     visited: &mut Vec<*const crate::value::Class>,
+                    recurse: bool,
                 ) {
                     let ptr = std::rc::Rc::as_ptr(c);
                     if visited.contains(&ptr) { return; }
@@ -9456,14 +9465,15 @@ impl Vm {
                             out.push((*k, m.visibility.get()));
                         }
                     }
+                    if !recurse { return; }
                     for inc in c.includes.borrow().iter() {
-                        walk(inc, out, visited);
+                        walk(inc, out, visited, recurse);
                     }
                     if let Some(sup) = c.superclass.borrow().clone() {
-                        walk(&sup, out, visited);
+                        walk(&sup, out, visited, recurse);
                     }
                 }
-                walk(&cls, &mut pairs, &mut visited);
+                walk(&cls, &mut pairs, &mut visited, include_inherited);
                 for (sid, vis) in pairs {
                     if pred(vis) { names.push(sid); }
                 }
@@ -9514,6 +9524,7 @@ impl Vm {
                     for k in current.singleton_methods.borrow().keys() {
                         if !names.contains(k) { names.push(*k); }
                     }
+                    if !include_inherited { break; }
                     let parent = current.superclass.borrow().clone();
                     match parent {
                         Some(p) => current = p,
@@ -9539,7 +9550,13 @@ impl Vm {
         // Receivers without an eigenclass installed return an
         // empty Array. Class receivers report their own
         // singleton-method table (class methods).
-        if &*name == "singleton_methods" && args.is_empty() {
+        // Optional `all` boolean (`singleton_methods(false)`): CRuby
+        // excludes modules mixed in via `extend` when falsy. rubyrs's
+        // Class/Object eigenclass walk already reports only the
+        // directly-installed singleton methods for the common cases, so
+        // the arg is accepted and the same set returned. Surfaced by
+        // stdlib fileutils.rb (`singleton_methods(false)`).
+        if &*name == "singleton_methods" && (args.is_empty() || args.len() == 1) {
             let mut names: Vec<crate::intern::SymId> = Vec::new();
             match &recv {
                 Value::Object(id) => {
