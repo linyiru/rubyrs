@@ -184,15 +184,22 @@ class StringIO
     return nil if length && length < 0
     result =
       if length.nil?
+        # Full read returns the source string's encoding (CRuby).
         r = @str[@pos..] || ""
         @pos = @str.length
         r
       else
         slice = @str[@pos, length] || ""
         @pos += slice.length
+        # A length-limited `read(N)` always returns ASCII-8BIT in CRuby
+        # (a fixed byte count may split a multibyte char), regardless of
+        # the source encoding. rack's multipart parser relies on this:
+        # it reads a UTF-8-tagged-but-binary body in bufsize chunks and
+        # scans them byte-wise — a UTF-8 tag would make the bytes lossy.
+        slice = slice.dup.force_encoding(Encoding::ASCII_8BIT)
         # `read(N)` on EOF returns nil; on partial returns whatever's
         # left. Mirrors CRuby for the cases gem helpers care about.
-        slice.empty? && length > 0 ? nil : slice
+        slice.bytesize == 0 && length > 0 ? nil : slice
       end
     if outbuf
       outbuf.replace(result || "")

@@ -601,6 +601,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn hash_native_instance_methods() { run_diff("hash_native_instance_methods"); }
 #[test] fn binary_string_length_replace() { run_diff("binary_string_length_replace"); }
 #[test] fn sub_gsub_byte_faithful() { run_diff("sub_gsub_byte_faithful"); }
+#[cfg(feature = "stdlib")]
+#[test] fn stringio_binary_read() { run_diff("stringio_binary_read"); }
 #[test] fn undef_inherited_singleton() { run_diff("undef_inherited_singleton"); }
 #[test] fn frame_locals_pool() { run_diff("frame_locals_pool"); }
 #[test] fn locals_stack_arena() { run_diff("locals_stack_arena"); }
