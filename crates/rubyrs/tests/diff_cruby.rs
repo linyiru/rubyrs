@@ -605,6 +605,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn regexp_match_pos() { run_diff("regexp_match_pos"); }
 #[test] fn visibility_method_explicit_recv() { run_diff("visibility_method_explicit_recv"); }
 #[test] fn exception_cause() { run_diff("exception_cause"); }
+#[test] fn dup_clone_initialize_copy() { run_diff("dup_clone_initialize_copy"); }
 #[test] fn binary_string_length_replace() { run_diff("binary_string_length_replace"); }
 #[test] fn sub_gsub_byte_faithful() { run_diff("sub_gsub_byte_faithful"); }
 #[cfg(feature = "stdlib")]

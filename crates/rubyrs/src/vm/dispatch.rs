@@ -9708,7 +9708,25 @@ impl Vm {
                 frozen: std::cell::Cell::new(false),
             }));
             drop(g);
-            self.stack.push(Value::Object(new_id));
+            // CRuby `dup` invokes the `initialize_copy` hook (via
+            // initialize_dup) AFTER the shallow ivar copy, so a class can
+            // deep-copy mutable ivars. The default impl just copies ivars
+            // (already done), so only dispatch a class's OWN
+            // initialize_copy. rack's Rack::Request#initialize_copy dups
+            // @env, so `req.dup.env` must be a distinct hash.
+            let copied = Value::Object(new_id);
+            let ic = self.interner.intern("initialize_copy");
+            let cls = self.heap.class_of(new_id);
+            if let Some(m) = self.lookup_method_uncached(&cls, ic) {
+                let pre = self.frames.len();
+                let mut g2 = crate::vm::PinGuard::new(self);
+                g2.pin(copied.clone());
+                g2.pin(recv.clone());
+                g2.vm.invoke_method(m, copied.clone(), vec![recv.clone()])?;
+                g2.vm.dispatch_until(pre)?;
+                g2.vm.stack.pop(); // discard initialize_copy's return value
+            }
+            self.stack.push(copied);
             return Ok(());
         }
         if &*name == "instance_variable_get" && args.len() == 1 {
@@ -11413,6 +11431,29 @@ impl Vm {
                     }));
                 }
             };
+            // CRuby `dup`/`clone` invoke the `initialize_copy` hook (via
+            // initialize_dup / initialize_clone) AFTER the shallow copy,
+            // so a class can deep-copy mutable ivars. The default impl
+            // just copies ivars — already done above — so only dispatch
+            // when the class defines its OWN `initialize_copy`. Both the
+            // copy and the original are pinned across the re-entrant
+            // call. (rack's Rack::Request#initialize_copy dups @env, so
+            // `req.dup.env` must be a distinct hash.)
+            if let (Value::Object(new_oid), Value::Object(_)) = (&copied, &recv) {
+                let cls = self.heap.class_of(*new_oid);
+                let ic = self.interner.intern("initialize_copy");
+                if let Some(m) = self.lookup_method_uncached(&cls, ic) {
+                    let pre = self.frames.len();
+                    let copy_val = copied.clone();
+                    let orig = recv.clone();
+                    let mut g = crate::vm::PinGuard::new(self);
+                    g.pin(copy_val.clone());
+                    g.pin(orig.clone());
+                    g.vm.invoke_method(m, copy_val, vec![orig])?;
+                    g.vm.dispatch_until(pre)?;
+                    g.vm.stack.pop(); // discard initialize_copy's return value
+                }
+            }
             self.stack.push(copied);
             return Ok(());
         }
