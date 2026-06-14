@@ -206,7 +206,12 @@ impl Vm {
         let self_val = self.frames.last().map(|f| f.self_val.clone());
         match &self_val {
             Some(Value::Object(oid)) => {
-                let cls = self.heap.instance(*oid).class.clone();
+                // `class_of` (not the bare real class) so a PER-INSTANCE
+                // singleton override is seen too — rack's test helper
+                // does `req.define_singleton_method(:warn)` to capture
+                // deprecation warnings, and `Request#values_at` calls
+                // bare `warn`; that must hit the singleton, not Kernel.
+                let cls = self.heap.class_of(*oid);
                 self.lookup_method_uncached(&cls, id).is_some()
             }
             Some(Value::Class(c)) => {
