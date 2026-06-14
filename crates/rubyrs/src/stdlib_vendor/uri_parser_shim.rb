@@ -170,34 +170,16 @@ module URI
 
   def self.decode_www_form_component(str, enc = Encoding::UTF_8)
     str = str.to_s
-    bytes = str.bytes
-    out = []
-    i = 0
-    n = bytes.length
-    while i < n
-      b = bytes[i]
-      if b == 0x25 # %
-        c1 = bytes[i + 1]
-        c2 = bytes[i + 2]
-        d1 = c1 && HEX_VAL[c1]
-        d2 = c2 && HEX_VAL[c2]
-        # CRuby validates the whole string against
-        # %-followed-by-two-hex before decoding; the in-loop check
-        # is equivalent (and O(n) — the spec pins the
-        # catastrophic-backtracking regression from CRuby's old
-        # regex validator, ruby-lang #5149).
-        raise ArgumentError, "invalid %-encoding (#{str})" if d1.nil? || d2.nil?
-        out << (d1 * 16 + d2)
-        i += 3
-      elsif b == 0x2B # +
-        out << 0x20
-        i += 1
-      else
-        out << b
-        i += 1
-      end
-    end
-    out.pack("C*").force_encoding(enc)
+    # Native byte scan: `%XX` → byte, `+` → space, else verbatim.
+    # Returns nil when a `%` lacks two trailing hex digits — CRuby
+    # validates %-followed-by-two-hex up front (O(n), pinning the
+    # catastrophic-backtracking regression of its old regex validator,
+    # ruby-lang #5149); the native loop is the equivalent check. The
+    # pure-Ruby fallback built an Array of byte Integers and looped in
+    # Ruby (~256ns/byte → a 128 MB POST body took tens of seconds).
+    decoded = __uri_decode_www_form(str)
+    raise ArgumentError, "invalid %-encoding (#{str})" if decoded.nil?
+    decoded.force_encoding(enc)
   end
 
   class Error < StandardError; end

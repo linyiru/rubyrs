@@ -357,6 +357,66 @@ impl Vm {
                 }
                 Some(Ok(Value::Nil))
             }
+            // `URI.decode_www_form_component` hot path: `%XX` → byte,
+            // `+` → space, else verbatim. The pure-Ruby fallback
+            // materialized the whole input as an Array of byte Integers
+            // and looped in Ruby (~256ns/byte — a 128 MB POST body took
+            // tens of seconds); this is a Rust byte scan (~CRuby speed).
+            // Returns the decoded bytes (BINARY) on success, or `nil`
+            // when a `%` is not followed by two hex digits — the caller
+            // raises ArgumentError with the original string in the msg.
+            // Reachable only through the stdlib `uri` veneer.
+            #[cfg(feature = "stdlib")]
+            "__uri_decode_www_form" => {
+                let Some(Value::Str(s)) = args.first() else {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "__uri_decode_www_form: expected String".into(),
+                    })));
+                };
+                #[inline]
+                fn hex_val(b: u8) -> Option<u8> {
+                    match b {
+                        b'0'..=b'9' => Some(b - b'0'),
+                        b'a'..=b'f' => Some(b - b'a' + 10),
+                        b'A'..=b'F' => Some(b - b'A' + 10),
+                        _ => None,
+                    }
+                }
+                let bytes = s.content.borrow();
+                let n = bytes.len();
+                let mut out: Vec<u8> = Vec::with_capacity(n);
+                let mut i = 0usize;
+                let mut invalid = false;
+                while i < n {
+                    let b = bytes[i];
+                    if b == b'%' {
+                        match (
+                            bytes.get(i + 1).copied().and_then(hex_val),
+                            bytes.get(i + 2).copied().and_then(hex_val),
+                        ) {
+                            (Some(h1), Some(h2)) => {
+                                out.push(h1 * 16 + h2);
+                                i += 3;
+                            }
+                            _ => {
+                                invalid = true;
+                                break;
+                            }
+                        }
+                    } else if b == b'+' {
+                        out.push(b' ');
+                        i += 1;
+                    } else {
+                        out.push(b);
+                        i += 1;
+                    }
+                }
+                Some(Ok(if invalid {
+                    Value::Nil
+                } else {
+                    Value::new_str_bytes_binary(out)
+                }))
+            }
             // `Kernel#binding` — capture the CALLER's scope (self +
             // lexical class) into a Binding instance so `eval(src,
             // binding)` runs with that self. The self-dispatch layer
