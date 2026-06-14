@@ -905,6 +905,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // A frozen String's mutation FrozenError renders the receiver's
 // inspect (`"y"`), not raw bytes — shared with String#inspect.
 #[test] fn string_frozen_message() { run_diff("string_frozen_message"); }
+// String#split (regex + literal sep) preserves bytes + encoding for
+// BINARY / invalid-UTF-8 receivers (no U+FFFD mangle). rack
+// QueryParser `_method=\xBF` → MethodOverride upcase-raise.
+#[test] fn string_split_binary() { run_diff("string_split_binary"); }
 #[test] fn string_each_char() { run_diff("string_each_char"); }
 // Set's richer surface lives in the stdlib-gated `stdlib_vendor/set.rb`
 // (the default build ships only a minimal Set), so gate this fixture the

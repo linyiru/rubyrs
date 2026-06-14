@@ -3088,6 +3088,21 @@ impl Vm {
                         Some(Value::Array(id))
                     }
                     ("split", [Value::Str(sep)]) => {
+                        // Byte-faithful path for binary / invalid-UTF-8
+                        // receivers with a non-empty, non-AWK sep —
+                        // preserves bytes + tag (the `pair.split("=")`
+                        // QueryParser shape). Empty / `" "` seps fall
+                        // through to the char path below.
+                        if split_wants_bytes(&s) {
+                            let sep_b = sep.content.borrow();
+                            if !sep_b.is_empty() && &sep_b[..] != b" " {
+                                let elems = byte_split_values(
+                                    &s.content.borrow(), &sep_b, 0, s.encoding.get());
+                                self.maybe_gc();
+                                let id = self.heap.alloc(HeapObj::Array(elems.into()));
+                                return Ok(Some(Value::Array(id)));
+                            }
+                        }
                         let sep_s = sep.to_string_lossy();
                         let src = s.to_string_lossy();
                         let elems: Vec<Value> = if sep_s.is_empty() {
@@ -3155,29 +3170,36 @@ impl Vm {
                     // (TRY_RUNS pass-14 layer #18.)
                     #[cfg(feature = "regex")]
                     ("split", [Value::Regex(re)]) => {
-                        // `with_str_lossy` borrows through the
-                        // RStr's content cell without owning a
-                        // copy when the bytes are valid UTF-8 —
-                        // matches the existing fast-path pattern
-                        // used by `include?`/`match?` etc.
-                        // Code-review #357 round 5.
-                        let elems = s.with_str_lossy(|src| {
-                            regex_split_into_values(re, src, 0)
-                        });
+                        // Byte-faithful for binary / invalid-UTF-8
+                        // receivers (preserves bytes + tag); lossless
+                        // fast path for valid UTF-8. See
+                        // `regex_split_values`.
+                        let elems = regex_split_values(&s, re, 0);
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     #[cfg(feature = "regex")]
                     ("split", [Value::Regex(re), Value::Int(limit)]) => {
-                        let elems = s.with_str_lossy(|src| {
-                            regex_split_into_values(re, src, *limit)
-                        });
+                        let elems = regex_split_values(&s, re, *limit);
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     ("split", [Value::Str(sep), Value::Int(limit)]) => {
+                        // Byte-faithful path (binary / invalid-UTF-8 +
+                        // non-empty, non-AWK sep) — the QueryParser
+                        // `pair.split("=", 2)` shape.
+                        if split_wants_bytes(&s) {
+                            let sep_b = sep.content.borrow();
+                            if !sep_b.is_empty() && &sep_b[..] != b" " {
+                                let elems = byte_split_values(
+                                    &s.content.borrow(), &sep_b, *limit, s.encoding.get());
+                                self.maybe_gc();
+                                let id = self.heap.alloc(HeapObj::Array(elems.into()));
+                                return Ok(Some(Value::Array(id)));
+                            }
+                        }
                         // `split(sep, limit)` — CRuby semantics:
                         //   limit > 0  : at most `limit` fields; the last
                         //                holds the unsplit remainder; no
@@ -3840,6 +3862,112 @@ pub(crate) fn str_succ(s: &str) -> String {
 ///
 /// (TRY_RUNS pass-14 layer #18.)
 #[cfg(feature = "regex")]
+/// `String#split(regex)` that PRESERVES the receiver's bytes and
+/// encoding. Valid UTF-8 receivers take the lossless fast path (chunks
+/// tagged UTF-8 — the common case, unchanged). Binary / invalid-UTF-8
+/// receivers are split via a Latin-1 round-trip: each byte ⇆ a
+/// U+00..FF char, so the regex still matches ASCII separators at the
+/// right positions and every chunk re-encodes to its EXACT original
+/// bytes, then re-tagged with the receiver's encoding. Without this,
+/// `with_str_lossy` U+FFFD-mangled high bytes and dropped the tag — so
+/// rack's MethodOverride `_method=\xBF` lost its invalid byte and the
+/// subsequent `.upcase` no longer raised ArgumentError.
+/// First index of `needle` in `hay`, or `None`. Tiny, used by the
+/// byte-faithful string-split path.
+fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > hay.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Byte-faithful `String#split(literal_sep, limit)` for binary /
+/// invalid-UTF-8 receivers with a NON-empty separator (the `" "`
+/// AWK form and empty-sep form stay on the char path). Splits the raw
+/// bytes on the raw separator bytes — preserving every byte and the
+/// receiver's encoding — so rack's QueryParser `pair.split("=", 2)`
+/// on a `_method=\xBF` (BINARY) pair keeps the invalid byte instead of
+/// U+FFFD-mangling it. CRuby limit semantics: `>0` caps the field
+/// count (last field is the unsplit remainder), `0` drops trailing
+/// empties, `<0` keeps them.
+fn byte_split_values(
+    bytes: &[u8],
+    sep: &[u8],
+    limit: i64,
+    enc: crate::value::EncodingTag,
+) -> Vec<Value> {
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    let mut start = 0usize;
+    if limit > 0 {
+        while (chunks.len() as i64) + 1 < limit {
+            match find_subslice(&bytes[start..], sep) {
+                Some(pos) => {
+                    chunks.push(bytes[start..start + pos].to_vec());
+                    start += pos + sep.len();
+                }
+                None => break,
+            }
+        }
+        chunks.push(bytes[start..].to_vec());
+    } else {
+        while let Some(pos) = find_subslice(&bytes[start..], sep) {
+            chunks.push(bytes[start..start + pos].to_vec());
+            start += pos + sep.len();
+        }
+        chunks.push(bytes[start..].to_vec());
+        if limit == 0 {
+            while chunks.last().map(|c| c.is_empty()).unwrap_or(false) {
+                chunks.pop();
+            }
+        }
+    }
+    chunks
+        .into_iter()
+        .map(|c| with_tag(Value::new_str_bytes_binary(c), enc))
+        .collect()
+}
+
+/// True when a String#split should take the byte-faithful path: the
+/// receiver isn't valid UTF-8 for its tag (BINARY, or a UTF-8 tag with
+/// invalid bytes). Valid UTF-8 (incl. ASCII) keeps the char path.
+fn split_wants_bytes(s: &crate::value::RStr) -> bool {
+    use crate::value::EncodingTag;
+    s.encoding.get() == EncodingTag::Binary
+        || std::str::from_utf8(&s.content.borrow()).is_err()
+}
+
+fn regex_split_values(
+    s: &std::rc::Rc<crate::value::RStr>,
+    re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
+    limit: i64,
+) -> Vec<Value> {
+    use crate::value::EncodingTag;
+    let enc = s.encoding.get();
+    {
+        let b = s.content.borrow();
+        if std::str::from_utf8(&b).is_ok() && enc != EncodingTag::Binary {
+            let src = String::from_utf8_lossy(&b);
+            return regex_split_into_values(re, &src, limit);
+        }
+    }
+    // Latin-1 decode (1 byte → 1 char) so the split is byte-faithful.
+    let latin1: String = s.content.borrow().iter().map(|&byte| byte as char).collect();
+    let raw = regex_split_into_values(re, &latin1, limit);
+    raw.into_iter()
+        .map(|v| match v {
+            Value::Str(cs) => {
+                // The chunk is a Latin-1 substring; recover its bytes
+                // from the chars (each is U+00..FF) and re-tag with the
+                // receiver's encoding.
+                let chunk = String::from_utf8_lossy(&cs.content.borrow()).into_owned();
+                let bytes: Vec<u8> = chunk.chars().map(|c| c as u32 as u8).collect();
+                with_tag(Value::new_str_bytes_binary(bytes), enc)
+            }
+            other => other,
+        })
+        .collect()
+}
+
 fn regex_split_into_values(
     re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
     src: &str,
