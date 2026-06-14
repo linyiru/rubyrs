@@ -37,6 +37,31 @@ tv = h.transform_values { |v| v * 10 }
 p tv.class.name          # "DownHash"
 p tv.values.sort         # [10, 20]
 
+# the `!` (in-place) variants must also run the override — a subclass
+# whose non-bang transform delegates to its own `transform_keys!`
+# (like Rack::Headers) would otherwise hit the native bang arm and skip
+# the re-downcasing.
+class BangHash < Hash
+  def []=(k, v)
+    super(k.to_s.downcase, v)
+  end
+
+  def transform_keys!
+    each_key.to_a.each do |k|
+      v = self[k]
+      delete(k)
+      self[yield k] = v
+    end
+    self
+  end
+end
+
+bh = BangHash.new
+bh["A"] = 1
+bh.transform_keys! { |k| "Z#{k.upcase}" }
+p bh.keys                # ["za"]   (re-downcased by override's []=)
+p bh["za"]               # 1
+
 # a subclass WITHOUT an override keeps native behaviour
 class PlainSub < Hash; end
 ps = PlainSub.new

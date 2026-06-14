@@ -710,11 +710,15 @@ impl Vm {
         // shadowed. Concretely: `Rack::Headers#transform_keys` /
         // `#transform_values` re-downcase keys via their own `[]=`, but
         // the native Hash arms skipped that (spec_headers). Scoped to
-        // these two transforms (the confirmed-affected methods); a
-        // broader probe regressed block-form `fetch` whose deferred
-        // dispatch has a separate issue. Only defers when an override
-        // actually exists on the subclass chain.
-        if matches!(name, "transform_keys" | "transform_values") {
+        // these transforms (incl. their `!` variants — Rack::Headers
+        // overrides `transform_keys!` too, and its non-bang form calls
+        // `dup.transform_keys!`); a broader probe regressed block-form
+        // `fetch`, whose deferred dispatch has a separate issue. Only
+        // defers when an override actually exists on the subclass chain.
+        if matches!(
+            name,
+            "transform_keys" | "transform_values" | "transform_keys!" | "transform_values!"
+        ) {
             let override_tag = match recv {
                 Value::Hash(id) => self.heap.hash_class_tag(*id),
                 Value::Array(id) => self.heap.array_class_tag(*id),
