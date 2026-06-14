@@ -2404,6 +2404,13 @@ impl Vm {
                     if !self.fast_index_hash_set_safe {
                         return false;
                     }
+                    // A frozen Hash must raise FrozenError on `[]=`.
+                    // Defer to the slow path, where
+                    // hash_collection_call's central frozen guard
+                    // raises it (this fast path returns bool).
+                    if self.heap.hash_frozen(id) {
+                        return false;
+                    }
                     // The canonical arm's byte cap only fires when
                     // `max_value_bytes` is set (embed-only); rather
                     // than duplicate the cap logic, capped Vms take
@@ -5142,6 +5149,7 @@ impl Vm {
             ivars: crate::intern::FxHashMap::default(),
             index: None,
                 singleton_class: None,
+            frozen: std::cell::Cell::new(false),
         }));
         g.vm.stack.push(Value::Hash(hid));
         return Ok(ClassOutcome::Handled);
@@ -16804,6 +16812,7 @@ impl Vm {
                 ivars: crate::intern::FxHashMap::default(),
                 index: None,
                 singleton_class: None,
+                frozen: std::cell::Cell::new(false),
             }));
             return Ok(Value::Hash(id));
         }

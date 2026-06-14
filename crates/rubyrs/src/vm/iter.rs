@@ -691,6 +691,18 @@ impl Vm {
                 msg: format!("can't modify frozen Array: {}", shown),
             }));
         }
+        // Hash twin: block-form mutators (reject! / select! / keep_if /
+        // delete_if / transform_values! / transform_keys!) dispatch
+        // here, so they need the frozen check too.
+        if let Value::Hash(id) = recv
+            && super::hash::is_hash_mutator(name)
+            && self.heap.hash_frozen(*id)
+        {
+            let shown = self.inspect_value(recv)?;
+            return Err(self.trap(crate::error::RubyError::FrozenError {
+                msg: format!("can't modify frozen Hash: {}", shown),
+            }));
+        }
         // Object#itself with a block — CRuby ignores the block
         // and returns the receiver unchanged. Sits next to the
         // tap/then/yield_self block path so the universal-arm

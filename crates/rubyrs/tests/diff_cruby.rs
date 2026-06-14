@@ -889,6 +889,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Hash#flatten(level) / #fetch_values (KeyError on miss) /
 // #compare_by_identity? — rack Headers supers into these.
 #[test] fn hash_flatten_fetch_values() { run_diff("hash_flatten_fetch_values"); }
+// Hash#freeze enforcement (twin of array_freeze): every mutator
+// (incl. []=, block forms) raises FrozenError; clone preserves frozen,
+// dup resets.
+#[test] fn hash_freeze() { run_diff("hash_freeze"); }
 #[test] fn string_casecmp() { run_diff("string_casecmp"); }
 // Case methods (upcase/downcase/capitalize/swapcase + `!`) raise
 // ArgumentError "input string invalid" on encoding-invalid receivers

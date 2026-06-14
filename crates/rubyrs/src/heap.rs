@@ -385,6 +385,10 @@ pub(crate) struct HashObj {
     /// behind the VM-level `any_hash_singletons` gate so plain
     /// Hash traffic pays nothing.
     pub(crate) singleton_class: Option<Rc<Class>>,
+    /// CRuby's per-object frozen bit (the Hash twin of
+    /// `ArrayObj.frozen`). `freeze` sets it; every mutating method
+    /// then raises FrozenError. `clone` copies it; `dup` resets it.
+    pub(crate) frozen: std::cell::Cell<bool>,
 }
 
 /// `ruby_hash(key)` → pair positions, keyed directly on the 64-bit
@@ -422,6 +426,7 @@ impl HashObj {
             ivars: crate::intern::FxHashMap::default(),
             index: None,
             singleton_class: None,
+            frozen: std::cell::Cell::new(false),
         }
     }
 }
@@ -638,6 +643,13 @@ impl Heap {
     }
     pub(crate) fn set_array_frozen(&self, id: ObjId) {
         if let HeapObj::Array(a) = self.get(id) { a.frozen.set(true); }
+    }
+    /// CRuby's frozen bit for a Hash (the Hash twin of `array_frozen`).
+    pub(crate) fn hash_frozen(&self, id: ObjId) -> bool {
+        if let HeapObj::Hash(h) = self.get(id) { h.frozen.get() } else { false }
+    }
+    pub(crate) fn set_hash_frozen(&self, id: ObjId) {
+        if let HeapObj::Hash(h) = self.get(id) { h.frozen.set(true); }
     }
     pub(crate) fn hash(&self, id: ObjId) -> &Vec<(Value, Value)> {
         if let HeapObj::Hash(h) = self.get(id) { &h.pairs } else { panic!("ICE: heap slot is not a Hash") }

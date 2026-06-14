@@ -8,6 +8,23 @@ use crate::value::{ObjId, Value};
 
 use super::{PinGuard, Vm};
 
+/// Hash methods that mutate the receiver in place — CRuby raises
+/// FrozenError on each when the receiver is frozen. Centralised so
+/// the frozen guards in `hash_collection_call` (non-block forms) and
+/// `collection_call_block` (block forms) stay in sync. (`[]=` covers
+/// the explicit `h.[]=(k, v)` / `h.store`; the `h[k] = v` assignment
+/// syntax routes through Op::CallAset / the `[]=` fast path, guarded
+/// separately.)
+pub(crate) fn is_hash_mutator(name: &str) -> bool {
+    matches!(
+        name,
+        "[]=" | "store" | "delete" | "delete_if" | "reject!" | "select!"
+            | "filter!" | "keep_if" | "clear" | "merge!" | "update" | "replace"
+            | "shift" | "compact!" | "transform_values!" | "transform_keys!"
+            | "compare_by_identity"
+    )
+}
+
 impl Vm {
     /// Hash#X methods that don't take a block. Block-form
     /// methods (each / map / sort_by / etc.) still live in
@@ -18,15 +35,28 @@ impl Vm {
         name: &str,
         args: &[Value],
     ) -> Result<Option<Value>, Trap> {
+        // Frozen guard (the Hash twin of array_collection_call's): every
+        // mutating method raises FrozenError on a frozen Hash,
+        // unconditionally. One central name-keyed check keeps all
+        // mutators consistent. rack Headers freezes nothing, but
+        // `{}.freeze` enforcement is core Ruby parity.
+        if is_hash_mutator(name) && self.heap.hash_frozen(id) {
+            let shown = self.inspect_value(&Value::Hash(id))?;
+            return Err(self.trap(crate::error::RubyError::FrozenError {
+                msg: format!("can't modify frozen Hash: {}", shown),
+            }));
+        }
         Ok(
                 match (name, args) {
                     ("length", []) | ("size", []) => Some(Value::Int(self.heap.hash(id).len() as i64)),
-                    // `freeze` / `frozen?` — same pattern as Array.
-                    // No-ops; tilt's `EMPTY_HASH = {}.freeze` relies on
-                    // freeze being chainable (returning the receiver).
-                    // Wrong-arity raises ArgumentError, matching CRuby.
-                    ("freeze", []) => Some(Value::Hash(id)),
-                    ("frozen?", []) => Some(Value::Bool(false)),
+                    // `freeze` flips the frozen bit (chainable, returns
+                    // self); `frozen?` reads it. Wrong-arity raises
+                    // ArgumentError, matching CRuby.
+                    ("freeze", []) => {
+                        self.heap.set_hash_frozen(id);
+                        Some(Value::Hash(id))
+                    }
+                    ("frozen?", []) => Some(Value::Bool(self.heap.hash_frozen(id))),
                     ("freeze" | "frozen?", many) => {
                         return Err(self.trap(crate::error::RubyError::ArgumentError {
                             msg: format!("wrong number of arguments (given {}, expected 0)", many.len()),
@@ -976,6 +1006,8 @@ impl Vm {
                         // its instance state (CRuby copies both).
                         let class_tag = self.heap.hash_class_tag(id);
                         let ivars = self.heap.hash_ivars_clone(id);
+                        // `clone` preserves the frozen bit; `dup` resets it.
+                        let keep_frozen = name == "clone" && self.heap.hash_frozen(id);
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
                         if let Some(bid) = default_block {
@@ -990,6 +1022,7 @@ impl Vm {
                             ivars,
                             index: None,
                 singleton_class: None,
+                            frozen: std::cell::Cell::new(keep_frozen),
                         }));
                         if default_block.is_some() {
                             g.vm.heap.hash_set_default_block(nid, default_block);
