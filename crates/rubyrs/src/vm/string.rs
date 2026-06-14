@@ -2501,6 +2501,81 @@ impl Vm {
                         _ => {}
                     }
                 }
+                // UTF-8-tagged but byte-INVALID receiver: char-index by
+                // UTF-8 boundaries while preserving the EXACT bytes. The
+                // generic char path below routes through to_string_lossy,
+                // which expands each invalid byte to a 3-byte U+FFFD —
+                // corrupting AND growing the slice. rack reads multipart
+                // bodies as UTF-8-tagged binary (`File.read`), and
+                // StringIO#read slices them with `@str[pos, len]`; the
+                // lossy grow bloated the parsed body. Keeps the receiver
+                // encoding. Int / (Int,len) / Range only.
+                if (name == "[]" || name == "slice")
+                    && matches!(
+                        args,
+                        [Value::Int(_)]
+                            | [Value::Int(_), Value::Int(_)]
+                            | [Value::Range(_)]
+                    )
+                    && s.encoding.get() != crate::value::EncodingTag::Binary
+                    && std::str::from_utf8(&s.content.borrow()).is_err()
+                {
+                    let bytes = s.content.borrow();
+                    let starts = utf8_char_byte_starts(&bytes);
+                    let nchars = (starts.len() - 1) as i64;
+                    let tag = s.encoding.get();
+                    let norm = |i: i64| if i < 0 { nchars + i } else { i };
+                    let mk = |c0: usize, c1: usize| {
+                        with_tag(
+                            Value::new_str_bytes(bytes[starts[c0]..starts[c1]].to_vec()),
+                            tag,
+                        )
+                    };
+                    match args {
+                        [Value::Int(i)] => {
+                            let idx = norm(*i);
+                            return Ok(Some(if idx < 0 || idx >= nchars {
+                                Value::Nil
+                            } else {
+                                mk(idx as usize, idx as usize + 1)
+                            }));
+                        }
+                        [Value::Int(st), Value::Int(ln)] => {
+                            let start = norm(*st);
+                            if start < 0 || start > nchars || *ln < 0 {
+                                return Ok(Some(Value::Nil));
+                            }
+                            let end = (start + *ln).min(nchars);
+                            return Ok(Some(mk(start as usize, end as usize)));
+                        }
+                        [Value::Range(rid)] => {
+                            let r = self.heap.range(*rid);
+                            let excl = r.exclusive;
+                            let bi = match &r.begin {
+                                Value::Int(a) => *a,
+                                Value::Nil => 0,
+                                _ => return Ok(None),
+                            };
+                            let endless_end = matches!(&r.end, Value::Nil);
+                            let ei = match &r.end {
+                                Value::Int(c) => *c,
+                                Value::Nil => nchars,
+                                _ => return Ok(None),
+                            };
+                            let start = norm(bi);
+                            if start < 0 || start > nchars {
+                                return Ok(Some(Value::Nil));
+                            }
+                            let mut end = if endless_end { nchars } else { norm(ei) };
+                            if !excl && !endless_end {
+                                end += 1;
+                            }
+                            let end = end.clamp(start, nchars);
+                            return Ok(Some(mk(start as usize, end as usize)));
+                        }
+                        _ => {}
+                    }
+                }
                 if (name == "[]" || name == "slice") && args.len() == 1 {
                     let chars: Vec<char> = s.to_string_lossy().chars().collect();
                     let len = chars.len() as i64;
@@ -3994,6 +4069,42 @@ fn wants_byte_faithful(s: &crate::value::RStr) -> bool {
     use crate::value::EncodingTag;
     s.encoding.get() == EncodingTag::Binary
         || std::str::from_utf8(&s.content.borrow()).is_err()
+}
+
+/// Byte offset of each character's start, for CHAR-indexed slicing that
+/// preserves the EXACT bytes of a UTF-8-tagged-but-invalid buffer. A
+/// well-formed UTF-8 sequence is one character (advance by its length);
+/// a lone/invalid byte is one character of one byte — matching CRuby's
+/// lenient counting (`"\xC3".length == 1`). The returned vector has
+/// `char_count + 1` entries: index `i` is char `i`'s first byte and the
+/// final entry is `bytes.len()` (so `bytes[starts[i]..starts[j]]` is the
+/// slice of chars `i..j`). Used by `String#[]` / `#slice` to avoid the
+/// lossy `to_string_lossy` path that expands each bad byte to a 3-byte
+/// U+FFFD (corrupting + growing binary payloads read as UTF-8).
+fn utf8_char_byte_starts(bytes: &[u8]) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(bytes.len() + 1);
+    let mut i = 0;
+    while i < bytes.len() {
+        starts.push(i);
+        let b = bytes[i];
+        let seq = if b < 0x80 {
+            1
+        } else if b & 0xE0 == 0xC0 {
+            2
+        } else if b & 0xF0 == 0xE0 {
+            3
+        } else if b & 0xF8 == 0xF0 {
+            4
+        } else {
+            1 // continuation byte or invalid lead → its own 1-byte char
+        };
+        let well_formed = seq > 1
+            && i + seq <= bytes.len()
+            && (1..seq).all(|k| bytes[i + k] & 0xC0 == 0x80);
+        i += if well_formed { seq } else { 1 };
+    }
+    starts.push(bytes.len());
+    starts
 }
 
 #[cfg(feature = "regex")]
