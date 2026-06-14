@@ -2212,6 +2212,7 @@ impl Vm {
                     m_start: oc.m_start,
                     m_end: oc.m_end,
                     named: oc.named,
+                    binary: None,
                 });
                 Ok(true)
             }
@@ -11084,6 +11085,18 @@ impl Vm {
                             } else {
                                 bound[..m_start].chars().count() as i64
                             };
+                            // For a BINARY subject keep the raw bytes +
+                            // per-group spans so positional captures
+                            // ($1.., MatchData) rebuild byte-faithfully
+                            // instead of through `caps`'s lossy strings.
+                            let binary = if byte_offsets {
+                                Some(crate::vm::BinaryCaps {
+                                    input: s.content.borrow().to_vec().into_boxed_slice(),
+                                    group_spans: oc.group_spans.clone(),
+                                })
+                            } else {
+                                None
+                            };
                             self.save_match_scope_on_write();
                             self.last_match = Some(crate::vm::LastMatch {
                                 whole: oc.whole,
@@ -11092,6 +11105,7 @@ impl Vm {
                                 m_start,
                                 m_end: oc.m_end,
                                 named: oc.named,
+                                binary,
                             });
                             Value::Int(char_idx)
                         }

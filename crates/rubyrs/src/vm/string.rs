@@ -2723,6 +2723,7 @@ impl Vm {
                                 m_start: abs_start,
                                 m_end: abs_end,
                                 named: oc.named,
+                                binary: None,
                             });
                             result
                         }
@@ -2829,6 +2830,7 @@ impl Vm {
                             m_start: oc.m_start,
                             m_end: oc.m_end,
                             named: oc.named,
+                            binary: None,
                         });
                         return Ok(Some(match span {
                             None => Value::Nil,
@@ -3867,6 +3869,7 @@ impl Vm {
             m_start: oc.m_start,
             m_end: oc.m_end,
             named: oc.named,
+            binary: None,
         });
         Ok(match picked {
             Some(s) => Value::new_str(s),

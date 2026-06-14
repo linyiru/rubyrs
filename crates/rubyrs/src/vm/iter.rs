@@ -895,6 +895,7 @@ impl Vm {
                         m_start,
                         m_end,
                         named: oc.named,
+                        binary: None,
                     });
                     let r = match g.vm.step_block1(block, Value::new_str(whole), pre_frames)? {
                         // Non-local `return` from the block —

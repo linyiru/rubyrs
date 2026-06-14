@@ -119,14 +119,29 @@ impl Vm {
     /// surface, including named-capture access (`$~[:name]`).
     pub(crate) fn materialize_last_match(&mut self) -> Result<Value, Trap> {
         let extracted = self.scoped_last_match().map(|lm| {
-            let caps: Vec<Value> = lm
-                .caps
-                .iter()
-                .map(|c| match c {
-                    Some(s) => Value::new_str(s.clone()),
-                    None => Value::Nil,
-                })
-                .collect();
+            // BINARY subject: rebuild positional captures from the raw
+            // bytes + spans, tagged ASCII-8BIT, so an invalid byte in a
+            // group (e.g. a multipart filename) survives instead of
+            // being U+FFFD-mangled by `caps`'s lossy strings. (`@whole` /
+            // pre/post stay lossy — the String-typed materialize path —
+            // a documented gap; positional `[n]` is what rack reads.)
+            let caps: Vec<Value> = if let Some(bc) = &lm.binary {
+                bc.group_spans
+                    .iter()
+                    .map(|span| match span {
+                        Some((a, b)) => Value::new_str_bytes_binary(bc.input[*a..*b].to_vec()),
+                        None => Value::Nil,
+                    })
+                    .collect()
+            } else {
+                lm.caps
+                    .iter()
+                    .map(|c| match c {
+                        Some(s) => Value::new_str(s.clone()),
+                        None => Value::Nil,
+                    })
+                    .collect()
+            };
             let ctx = MatchDataContext {
                 pre_match: lm.input.get(..lm.m_start).map(|s| s.to_string()),
                 post_match: lm.input.get(lm.m_end..).map(|s| s.to_string()),
@@ -186,6 +201,7 @@ impl Vm {
                     m_start: oc.m_start,
                     m_end: oc.m_end,
                     named: oc.named.clone(),
+                    binary: None,
                 });
                 let ctx = MatchDataContext {
                     pre_match: Some(pre),

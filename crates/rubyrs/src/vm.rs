@@ -696,6 +696,26 @@ pub(crate) struct LastMatch {
     /// from `$~`, e.g. a `StringScanner`'s `@src[:name]`) can resolve
     /// named groups. Empty for patterns without named captures.
     pub(crate) named: Vec<(String, Option<String>)>,
+    /// `Some` only when the match ran against an ASCII-8BIT (BINARY)
+    /// subject. Carries the raw subject bytes + per-group byte spans so
+    /// positional captures can be rebuilt byte-faithfully (and tagged
+    /// ASCII-8BIT) instead of through `caps`'s lossy `from_utf8_lossy`
+    /// strings, which mangle invalid bytes to U+FFFD. `None` leaves the
+    /// proven UTF-8 path (`whole`/`caps`/`input`) completely untouched.
+    /// rack's multipart parser scans a binary body with a StringScanner
+    /// and reads `@sbuf[1]` (the content-disposition head, which may
+    /// contain an invalid filename byte).
+    pub(crate) binary: Option<BinaryCaps>,
+}
+
+/// Byte-faithful capture data for a BINARY-subject match — see
+/// `LastMatch::binary`. Holds the raw subject and the byte span of
+/// each capture group (parallel to `LastMatch::caps`), so a consumer
+/// can slice the original bytes and tag the result ASCII-8BIT.
+#[derive(Debug, Clone)]
+pub(crate) struct BinaryCaps {
+    pub(crate) input: Box<[u8]>,
+    pub(crate) group_spans: Vec<Option<(usize, usize)>>,
 }
 
 /// Per-defining-module list of `(target_class, refinement_holder)` pairs

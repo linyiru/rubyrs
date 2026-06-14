@@ -1886,9 +1886,20 @@ impl Vm {
                 {
                     let n: usize = name[1..].parse().unwrap_or(0);
                     let v = match self.scoped_last_match() {
-                        Some(m) if n >= 1 => match m.caps.get(n - 1) {
-                            Some(Some(cap)) => Value::new_str(cap.clone()),
-                            _ => Value::Nil,
+                        // BINARY subject: rebuild the capture from raw
+                        // bytes + span (ASCII-8BIT) so an invalid byte
+                        // survives, instead of the lossy `caps` string.
+                        Some(m) if n >= 1 => match &m.binary {
+                            Some(bc) => match bc.group_spans.get(n - 1) {
+                                Some(Some((a, b))) => {
+                                    Value::new_str_bytes_binary(bc.input[*a..*b].to_vec())
+                                }
+                                _ => Value::Nil,
+                            },
+                            None => match m.caps.get(n - 1) {
+                                Some(Some(cap)) => Value::new_str(cap.clone()),
+                                _ => Value::Nil,
+                            },
                         },
                         _ => Value::Nil,
                     };
@@ -1905,7 +1916,12 @@ impl Vm {
                 match &*name {
                     "$&" => {
                         let v = match self.scoped_last_match() {
-                            Some(m) => Value::new_str(m.whole.clone()),
+                            Some(m) => match &m.binary {
+                                Some(bc) => Value::new_str_bytes_binary(
+                                    bc.input[m.m_start..m.m_end].to_vec(),
+                                ),
+                                None => Value::new_str(m.whole.clone()),
+                            },
                             None => Value::Nil,
                         };
                         self.stack.push(v);
@@ -1916,9 +1932,19 @@ impl Vm {
                         // successful match — `nil` if no match or no
                         // group participated.
                         let v = match self.scoped_last_match() {
-                            Some(m) => m.caps.iter().rev().find_map(|c| c.as_ref())
-                                .map(|s| Value::new_str(s.clone()))
-                                .unwrap_or(Value::Nil),
+                            Some(m) => match &m.binary {
+                                // BINARY: last participating group's span.
+                                Some(bc) => bc
+                                    .group_spans
+                                    .iter()
+                                    .rev()
+                                    .find_map(|s| *s)
+                                    .map(|(a, b)| Value::new_str_bytes_binary(bc.input[a..b].to_vec()))
+                                    .unwrap_or(Value::Nil),
+                                None => m.caps.iter().rev().find_map(|c| c.as_ref())
+                                    .map(|s| Value::new_str(s.clone()))
+                                    .unwrap_or(Value::Nil),
+                            },
                             None => Value::Nil,
                         };
                         self.stack.push(v);
