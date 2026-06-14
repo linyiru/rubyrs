@@ -1334,11 +1334,16 @@ impl Vm {
                         } else { Ok(Value::Int(*f as i64)) }
                     }
                     (Value::Str(s), None) => {
+                        // Auto-detect base (radix 0): handles the
+                        // `0x`/`0b`/`0o`/`0d` prefixes, leading-`0`
+                        // octal, underscore separators, and sign —
+                        // same strict parser as the 2-arg form, where
+                        // plain `parse::<i64>()` accepted only bare
+                        // decimal.
                         let raw = s.to_string_lossy();
-                        let trimmed = raw.trim();
-                        match trimmed.parse::<i64>() {
-                            Ok(n) => Ok(Value::Int(n)),
-                            Err(_) => Err(RubyError::ArgumentError {
+                        match strict_parse_integer(&raw, 0) {
+                            Some(n) => Ok(Value::Int(n)),
+                            None => Err(RubyError::ArgumentError {
                                 msg: format!("invalid value for Integer(): \"{}\"", raw),
                             }),
                         }
@@ -5024,6 +5029,15 @@ fn strict_parse_integer(raw: &str, radix: i64) -> Option<i64> {
         if prefix_r != 0 && (radix == 0 || radix as u32 == prefix_r) {
             effective_r = prefix_r;
             body = &body[2..];
+        } else if radix == 0 {
+            // Leading `0` with no explicit base prefix → OCTAL in
+            // auto-detect mode (CRuby `Integer("010")` == 8). Keep the
+            // `0` as a digit so the underscore/digit loop below
+            // validates octal-ness (`"08"` → error) and a following
+            // underscore stays legal (`"0_10"` == 8). An explicit
+            // radix (`Integer("010", 10)`) skips this — the `0` is a
+            // plain base-10 digit there.
+            effective_r = 8;
         }
     }
     // After all prefix handling, the body must have at least one
