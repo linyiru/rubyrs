@@ -52,6 +52,11 @@ class Tempfile
     @flushed = false
     @closed = false
     @pos = 0
+    # `binmode?` reflects whether `binmode` was explicitly requested
+    # (CRuby: a tempfile opened with `encoding:` is NOT in binmode
+    # until `binmode` is called). rack's UploadedFile checks this to
+    # report whether an upload was opened in binary mode.
+    @binmode = false
   end
 
   attr_reader :path
@@ -117,11 +122,12 @@ class Tempfile
   end
 
   def binmode
+    @binmode = true
     self
   end
 
   def binmode?
-    true
+    @binmode
   end
 
   def fsync
