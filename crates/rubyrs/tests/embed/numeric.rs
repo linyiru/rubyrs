@@ -3834,12 +3834,13 @@ fn integer_divmod_bigint_result_survives_stress_gc() {
 #[test]
 fn float_domain_error_class_and_rescue_chain() {
     // FloatDomainError sits at FloatDomainError < RangeError <
-    // StandardError < Exception. Verify (a) the class is exposed
-    // to Ruby code (preamble loaded), (b) the ancestor chain is
-    // correct, (c) `rescue FloatDomainError`, `rescue RangeError`,
-    // and a bare `rescue` all catch a NaN-divmod trap, (d)
-    // `Float::INFINITY.to_i` / `Float::NAN.to_i` raise it (and
-    // not the silent `as i64` clamp), (e) the embed host sees
+    // StandardError < Exception < Object < Kernel < BasicObject
+    // (Exception descends from Object, matching CRuby). Verify (a)
+    // the class is exposed to Ruby code (preamble loaded), (b) the
+    // ancestor chain is correct, (c) `rescue FloatDomainError`,
+    // `rescue RangeError`, and a bare `rescue` all catch a NaN-divmod
+    // trap, (d) `Float::INFINITY.to_i` / `Float::NAN.to_i` raise it
+    // (and not the silent `as i64` clamp), (e) the embed host sees
     // the `Uncaught { class_name: "FloatDomainError" }` shape.
     let mut rt = rubyrs::Runtime::new();
     let buf = SharedBuf::new();
@@ -3850,7 +3851,7 @@ fn float_domain_error_class_and_rescue_chain() {
     ).expect("eval");
     assert_eq!(
         buf.snapshot().trim(),
-        "[FloatDomainError, RangeError, StandardError, Exception]",
+        "[FloatDomainError, RangeError, StandardError, Exception, Object, Kernel, BasicObject]",
     );
 
     for (script, rescue_class, expected) in [
