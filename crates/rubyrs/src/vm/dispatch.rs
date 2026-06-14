@@ -13713,6 +13713,7 @@ impl Vm {
                 // shared captured cell — it must never be considered
                 // for the Locals::Stack representation.
                 creates_block: true,
+                frozen_string_literal: false,
                 code: vec![
                     Op::LoadLocal(0),
                     Op::LoadLocal(1),
@@ -13811,6 +13812,7 @@ impl Vm {
                 // locals live in a shared captured cell — never
                 // Stack-eligible.
                 creates_block: true,
+                frozen_string_literal: false,
                 code: vec![
                     Op::LoadLocal(0),                   // [outer]
                     Op::LoadLocal(1),                   // [outer, inner]
@@ -16903,6 +16905,7 @@ impl Vm {
                 block_param: None,
                 n_locals: 0,
                 creates_block: false,
+                frozen_string_literal: false,
                 code: vec![Op::LoadIvar(ivar_id), Op::Return],
                 op_spans: vec![Span::ZERO; 2],
                 filename: "<attr_accessor>".into(),
@@ -16943,6 +16946,7 @@ impl Vm {
                 block_param: None,
                 n_locals: 1,
                 creates_block: false,
+                frozen_string_literal: false,
                 code: vec![Op::LoadLocal(0), Op::Dup, Op::StoreIvar(ivar_id), Op::Return],
                 op_spans: vec![Span::ZERO; 4],
                 filename: "<attr_accessor>".into(),
@@ -17001,6 +17005,7 @@ impl Vm {
             block_param: None,
             n_locals: 1,
             creates_block: false,
+            frozen_string_literal: false,
             code: vec![
                 Op::LoadSelf,
                 Op::LoadLocal(0),
@@ -17185,6 +17190,7 @@ impl Vm {
             block_param: None,
             n_locals: 1,
             creates_block: false,
+            frozen_string_literal: false,
             code: vec![
                 Op::LoadLocal(0),
                 Op::ApplyCallNoRecv(orig_id, u16::MAX),
@@ -17235,6 +17241,7 @@ impl Vm {
             block_param: None,
             n_locals: 1,
             creates_block: false,
+            frozen_string_literal: false,
             code: vec![Op::LoadNil, Op::Return],
             op_spans: vec![Span::ZERO; 2],
             filename: "<lifecycle-noop>".into(),

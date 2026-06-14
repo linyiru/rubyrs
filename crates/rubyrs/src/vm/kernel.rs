@@ -3768,10 +3768,14 @@ impl Vm {
         // "already loading"; the partially-defined module is visible
         // to the re-entrant require).
         self.loaded_features.insert(canon.clone());
+        let fsl_start = self.protos.len();
         let entry = crate::compiler::compile_proto(
             "<require>".into(), vec![], &[prog], filename_rc,
             &mut self.protos, &mut self.interner, &mut self.cache_counter,
         );
+        if crate::compiler::detect_frozen_string_literal(&source) {
+            crate::compiler::mark_frozen_string_literal(&mut self.protos, fsl_start);
+        }
         let cc = self.cache_counter as usize;
         self.ensure_call_caches(cc);
         // Push a fresh top-level frame for the loaded body and run
@@ -4150,6 +4154,13 @@ impl Vm {
         // failure (e.g. a capture name that isn't a legal param) we
         // fall back to the plain unseeded parse — worst case the old
         // method-call divergence, never a crash.
+        // Detect `# frozen_string_literal: true` on the ORIGINAL eval
+        // source (the lambda-wrap shadows `source` below and would push
+        // the magic comment off line 1 where the scanner can't see it).
+        // The wrapped body's literals still compile into this eval's
+        // proto range, so stamping the range freezes them regardless of
+        // the wrap. rack Builder.parse_file evals frozen.ru this way.
+        let fsl = crate::compiler::detect_frozen_string_literal(source);
         let (prog, compile_params, effective_seed, registered_source) =
             match Self::prepare_eval_body(source, &local_seed) {
                 Ok(t) => t,
@@ -4208,10 +4219,14 @@ impl Vm {
         let filename_rc: std::rc::Rc<str> = std::rc::Rc::from(effective_filename.as_str());
         let source_rc: std::rc::Rc<str> = std::rc::Rc::from(source);
         self.sources.insert(filename_rc.clone(), source_rc);
+        let fsl_start = self.protos.len();
         let entry = crate::compiler::compile_proto(
             "<eval>".into(), compile_params, &[prog], filename_rc.clone(),
             &mut self.protos, &mut self.interner, &mut self.cache_counter,
         );
+        if fsl {
+            crate::compiler::mark_frozen_string_literal(&mut self.protos, fsl_start);
+        }
         if let Some(max) = cap_at_entry
             && self.interner.len() > max {
             // Don't leave the orphan source entry behind when we

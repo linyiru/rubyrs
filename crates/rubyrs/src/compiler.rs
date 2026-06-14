@@ -1199,6 +1199,10 @@ impl ProtoBuilder {
         }
         Proto {
             name, params, n_required_positional, local_names,
+            // Default false; the parse entries (file load / require /
+            // eval) stamp `true` across the whole proto range when the
+            // source carried a `# frozen_string_literal: true` comment.
+            frozen_string_literal: false,
             n_required_post: 0,
             rest_param: None,
             kw_param_defaults: vec![],
@@ -2107,6 +2111,49 @@ pub(crate) fn compile_proto(
     filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
 ) -> usize {
     compile_proto_at(name, params, body, filename, protos, interner, cc, vec![])
+}
+
+/// Detect a `# frozen_string_literal: true` magic comment. CRuby
+/// recognises it only on the first line — or the second line when the
+/// first is a shebang — so we scan just the leading comment line(s)
+/// and stop at the first code line, avoiding false positives from a
+/// license header that merely mentions the directive. Returns `true`
+/// only for an explicit `true` value (`false` / absent → mutable
+/// literals). The parse entries pass this to
+/// `mark_frozen_string_literal` over the proto range they compiled.
+pub(crate) fn detect_frozen_string_literal(src: &str) -> bool {
+    for (i, line) in src.lines().enumerate() {
+        let t = line.trim_start();
+        if i == 0 && t.starts_with("#!") {
+            continue; // shebang — magic comment may follow on line 2
+        }
+        let Some(comment) = t.strip_prefix('#') else {
+            return false; // first non-comment line → magic-comment region ended
+        };
+        if let Some(pos) = comment.find("frozen_string_literal:") {
+            let after = comment[pos + "frozen_string_literal:".len()..].trim_start();
+            let val: String = after.chars().take_while(|c| c.is_alphanumeric()).collect();
+            return val == "true";
+        }
+        // A comment without the directive (e.g. `# encoding: utf-8`)
+        // — keep scanning the next leading comment line, but only a
+        // couple deep before bailing (magic comments live at the top).
+        if i >= 1 {
+            return false;
+        }
+    }
+    false
+}
+
+/// Stamp `frozen_string_literal = true` onto every proto in
+/// `protos[start..]` — the range a parse entry just compiled for one
+/// source. Called when `detect_frozen_string_literal` is true so the
+/// file's methods / blocks all inherit the file-level setting without
+/// threading a flag through every `compile_*` signature.
+pub(crate) fn mark_frozen_string_literal(protos: &mut [Proto], start: usize) {
+    for p in &mut protos[start..] {
+        p.frozen_string_literal = true;
+    }
 }
 
 /// Same as `compile_proto` but seeds the new proto's `class_path`

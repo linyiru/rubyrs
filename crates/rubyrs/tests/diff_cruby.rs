@@ -378,6 +378,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // keeps the call-site backtrace. rack ShowExceptions "unknown
 // location" + QueryParser re-raise-with-backtrace.
 #[test] fn raise_explicit_backtrace() { run_diff("raise_explicit_backtrace"); }
+// `# frozen_string_literal: true` freezes plain string literals
+// (interp stays mutable; eval has its own setting). rack
+// Builder.parse_file frozen.ru rackup asserts `'frozen'.frozen?`.
+#[test] fn frozen_string_literal() { run_diff("frozen_string_literal"); }
 #[test] fn user_sort() { run_diff("user_sort"); }
 #[test] fn hash_enumerable() { run_diff("hash_enumerable"); }
 #[test] fn kernel_p() { run_diff("kernel_p"); }

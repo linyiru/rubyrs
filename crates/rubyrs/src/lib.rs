@@ -3270,10 +3270,16 @@ self.eval_inner(
             });
         }
         let _t_compile = std::time::Instant::now();
+        let fsl_start = self.vm.protos.len();
         let entry = compiler::compile_proto(
             "<main>".into(), vec![], &[prog], filename_rc,
             &mut self.vm.protos, &mut self.vm.interner, &mut self.vm.cache_counter,
         );
+        // `# frozen_string_literal: true` → freeze plain string
+        // literals across every proto this source produced.
+        if compiler::detect_frozen_string_literal(source) {
+            compiler::mark_frozen_string_literal(&mut self.vm.protos, fsl_start);
+        }
         STARTUP_PROF_COMPILE_NS.fetch_add(_t_compile.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         let cache_count = self.vm.cache_counter as usize;
         self.vm.ensure_call_caches(cache_count);

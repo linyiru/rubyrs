@@ -948,14 +948,23 @@ impl Vm {
     /// Execute one op; returns Ok(false) if we just popped the last frame.
     /// `_proto_idx` is reserved for future per-op span lookup; with the
     /// global interner, ops no longer need it for string resolution.
-    pub(crate) fn step(&mut self, op: Op, _proto_idx: usize) -> Result<bool, Trap> {
+    pub(crate) fn step(&mut self, op: Op, proto_idx: usize) -> Result<bool, Trap> {
         self.check_fuel()?;
         match op {
             Op::LoadConstInt(i) => self.stack.push(Value::Int(i)),
             Op::LoadConstFloat(f) => self.stack.push(Value::Float(f)),
             Op::LoadConstStr(id) => {
                 let s = self.interner.resolve(id).clone();
-                self.stack.push(Value::new_str(s.to_string()));
+                let v = Value::new_str(s.to_string());
+                // `# frozen_string_literal: true`: plain literals push
+                // frozen. (Interpolated strings don't reach this op, so
+                // they stay mutable — CRuby semantics.)
+                if self.protos[proto_idx].frozen_string_literal
+                    && let Value::Str(rs) = &v
+                {
+                    rs.frozen.set(true);
+                }
+                self.stack.push(v);
             }
             Op::LoadConstStrBytes(idx) => {
                 // Binary-literal pool lives on the current proto
@@ -964,11 +973,14 @@ impl Vm {
                 // independent String — mutations via `<<` /
                 // `concat` shouldn't bleed into the pool entry that
                 // future loads share.
-                let bytes: Vec<u8> = {
-                    let proto_idx = self.frames.last().expect("ICE: LoadConstStrBytes no frame").proto_idx;
-                    self.protos[proto_idx].byte_literals[idx as usize].to_vec()
-                };
-                self.stack.push(Value::new_str_bytes(bytes));
+                let bytes: Vec<u8> = self.protos[proto_idx].byte_literals[idx as usize].to_vec();
+                let v = Value::new_str_bytes(bytes);
+                if self.protos[proto_idx].frozen_string_literal
+                    && let Value::Str(rs) = &v
+                {
+                    rs.frozen.set(true);
+                }
+                self.stack.push(v);
             }
             #[cfg(feature = "bignum")]
             Op::LoadBigInt(id) => {

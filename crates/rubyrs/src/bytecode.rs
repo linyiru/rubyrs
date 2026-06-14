@@ -776,6 +776,15 @@ pub(crate) struct Proto {
     /// it.) Discovery: rack's ShowExceptions/ShowStatus ERB templates
     /// reference the calling method's locals via `result(binding)`.
     pub(crate) local_names: Vec<String>,
+    /// `true` when the source file (or eval string) carried a
+    /// `# frozen_string_literal: true` magic comment. Plain string
+    /// literals (`Op::LoadConstStr` / `LoadConstStrBytes`) executed in
+    /// this proto are then pushed FROZEN. Set on every proto compiled
+    /// from a file with the comment (the parse entries stamp the whole
+    /// proto range). `false` by default. Interpolated strings stay
+    /// mutable (CRuby semantics). Discovery: rack's spec_builder
+    /// frozen.ru rackup asserts `'frozen'.frozen?`.
+    pub(crate) frozen_string_literal: bool,
     /// `true` when `code` contains an `Op::CreateBlock` — i.e. running
     /// this proto can capture the frame's locals cell into a
     /// `BlockHandle` (block literal, `proc`/`lambda`/`->`,
