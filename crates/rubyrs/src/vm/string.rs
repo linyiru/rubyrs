@@ -1820,6 +1820,11 @@ pub(crate) fn string_call(
             };
             Some(Value::Bool(matched))
         }
+        // `Regexp#match?(nil)` → false (CRuby treats nil as "no
+        // match" rather than raising). rack's request IP filter does
+        // `trusted_proxies.match?(ip)` where `ip` can be nil for some
+        // forwarded entries (spec_request "deals with proxies").
+        (Value::Regex(_), "match?", [Value::Nil]) => Some(Value::Bool(false)),
         // `Regexp#match?(str, pos)` — start the match attempt at
         // character offset `pos` (negative counts from the end). No
         // `$~` update. Searches the suffix from `pos`; out-of-range pos
