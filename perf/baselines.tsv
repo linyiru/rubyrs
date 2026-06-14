@@ -326,4 +326,11 @@ crates/rubyrs/benches/string_interp.rb	8400	700	200k InterpolatedStr; Op::Interp
 # workload, so the old ceiling no longer has real headroom. Same
 # one-page-over pattern as the 2026-06-09 gc_churn bump. 8400
 # gives ~2% headroom over the observed peak.
-crates/rubyrs/benches/hash_mutate.rb	8400	880	200k Hash[]= overwrites + 1k Hash[] reads
+# hash_mutate RSS bumped 8400 → 8700 on 2026-06-14 — observed CI 8412
+# KB (12 KB / 0.14% over) after the byte-faithful binary-string +
+# StringIO/Tempfile vendored-Ruby fixes grew the preamble ~100 KB
+# (the base RSS every workload carries). The other 8400-cohort
+# workloads measured 8048-8112 and still have headroom; only
+# hash_mutate (highest heap peak) crossed. 8700 gives ~290 KB / 3.4%
+# headroom over the observed peak for run-to-run jitter.
+crates/rubyrs/benches/hash_mutate.rb	8700	880	200k Hash[]= overwrites + 1k Hash[] reads
