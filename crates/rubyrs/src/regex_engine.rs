@@ -123,6 +123,16 @@ pub struct CompiledRegex {
     /// formatting render this, never the flag-prefixed string fed
     /// to the engine.
     source: Box<str>,
+    /// Memoized DUPLICATE named-capture groups: `(name, [group
+    /// indices])` for any name written on 2+ groups (legal in
+    /// Ruby/Oniguruma — `(?<a>X)|(?<a>Y)` — but fancy-regex keeps
+    /// every group's value while collapsing the NAME onto one group,
+    /// so `m[:a]` would resolve to a non-participating arm). Parsed
+    /// LAZILY from `source` on first named-capture access and ONLY
+    /// trusted when the parsed group count matches the engine's — see
+    /// `duplicate_named_groups`. Empty (the common case) means no dup
+    /// names, so the named-capture path is byte-for-byte unchanged.
+    dup_named: std::cell::OnceCell<Vec<(String, Vec<usize>)>>,
 }
 
 /// Validates the pattern and constructs a `CompiledRegex` whose
@@ -164,6 +174,7 @@ pub(crate) fn compile_with_flags(
             engine_pattern: prepared.into(),
             ruby_flags,
             source: bare_source.into(),
+            dup_named: std::cell::OnceCell::new(),
         }),
         // Syntax the linear engine rejects (lookaround,
         // backrefs) → eager fancy-regex build, pre-filling the
@@ -191,6 +202,7 @@ pub(crate) fn compile_with_flags(
                     engine_pattern: "".into(),
                     ruby_flags,
                     source: bare_source.into(),
+                    dup_named: std::cell::OnceCell::new(),
                 })
             }
             Err(fancy_err) => {
@@ -608,6 +620,33 @@ impl CompiledRegex {
         }
     }
 
+    /// Names written on 2+ capture groups (`(?<a>X)|(?<a>Y)`), each
+    /// paired with ALL its 1-based group indices. Memoized. The
+    /// source parse is TRUSTED only when its total group count equals
+    /// the engine's (`total_caps` is the engine `captures_len`,
+    /// i.e. 1 + group count); on any mismatch — or no duplicate name —
+    /// the result is empty and the named-capture path is unchanged.
+    /// `build_named_captures` uses this to resolve a collapsed name to
+    /// the arm that actually participated.
+    fn duplicate_named_groups(&self, total_caps: usize) -> &[(String, Vec<usize>)] {
+        self.dup_named.get_or_init(|| {
+            let base_extended = self.ruby_flags & RB_EXTENDED != 0;
+            let (count, names) = parse_capture_groups(&self.source, base_extended);
+            if count + 1 != total_caps {
+                return Vec::new();
+            }
+            let mut grouped: Vec<(String, Vec<usize>)> = Vec::new();
+            for (name, idx) in names {
+                match grouped.iter_mut().find(|(n, _)| *n == name) {
+                    Some(slot) => slot.1.push(idx),
+                    None => grouped.push((name, vec![idx])),
+                }
+            }
+            grouped.retain(|(_, idxs)| idxs.len() >= 2);
+            grouped
+        })
+    }
+
     /// Engine-agnostic capture iteration for `String#scan` (no-block).
     /// Returns one entry per non-overlapping match; each entry holds the
     /// capture groups `0..captures_len` as owned Strings (`None` for an
@@ -739,11 +778,11 @@ impl CompiledRegex {
         let group_spans = (1..caps.len())
             .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
             .collect();
-        let named = re
-            .capture_names()
-            .enumerate()
-            .filter_map(|(i, n)| n.map(|name| (name.to_string(), caps.get(i).map(lossy))))
-            .collect();
+        let named = build_named_captures(
+            re.capture_names(),
+            self.duplicate_named_groups(caps.len()),
+            |i| caps.get(i).map(lossy),
+        );
         Some(Some(OwnedCaptures {
             whole: lossy(m0),
             m_start: m0.start(),
@@ -904,15 +943,11 @@ impl CompiledRegex {
                     let group_spans = (1..caps.len())
                         .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
                         .collect();
-                    let named = r
-                        .capture_names()
-                        .enumerate()
-                        .filter_map(|(i, n)| {
-                            n.map(|name| {
-                                (name.to_string(), caps.get(i).map(|m| m.as_str().to_string()))
-                            })
-                        })
-                        .collect();
+                    let named = build_named_captures(
+                        r.capture_names(),
+                        self.duplicate_named_groups(caps.len()),
+                        |i| caps.get(i).map(|m| m.as_str().to_string()),
+                    );
                     Ok(Some(OwnedCaptures {
                         whole: m0.as_str().to_string(),
                         m_start: m0.start(),
@@ -937,15 +972,11 @@ impl CompiledRegex {
                     let group_spans = (1..caps.len())
                         .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
                         .collect();
-                    let named = r
-                        .capture_names()
-                        .enumerate()
-                        .filter_map(|(i, n)| {
-                            n.map(|name| {
-                                (name.to_string(), caps.get(i).map(|m| m.as_str().to_string()))
-                            })
-                        })
-                        .collect();
+                    let named = build_named_captures(
+                        r.capture_names(),
+                        self.duplicate_named_groups(caps.len()),
+                        |i| caps.get(i).map(|m| m.as_str().to_string()),
+                    );
                     Ok(Some(OwnedCaptures {
                         whole: m0.as_str().to_string(),
                         m_start: m0.start(),
@@ -984,13 +1015,11 @@ impl CompiledRegex {
                     let group_spans = (1..caps.len())
                         .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
                         .collect();
-                    let named = r
-                        .capture_names()
-                        .enumerate()
-                        .filter_map(|(i, n)| {
-                            n.map(|name| (name.to_string(), caps.get(i).map(|m| m.as_str().to_string())))
-                        })
-                        .collect();
+                    let named = build_named_captures(
+                        r.capture_names(),
+                        self.duplicate_named_groups(caps.len()),
+                        |i| caps.get(i).map(|m| m.as_str().to_string()),
+                    );
                     out.push(OwnedCaptures {
                         whole: m0.as_str().to_string(),
                         m_start: m0.start(),
@@ -1014,13 +1043,11 @@ impl CompiledRegex {
                     let group_spans = (1..caps.len())
                         .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
                         .collect();
-                    let named = r
-                        .capture_names()
-                        .enumerate()
-                        .filter_map(|(i, n)| {
-                            n.map(|name| (name.to_string(), caps.get(i).map(|m| m.as_str().to_string())))
-                        })
-                        .collect();
+                    let named = build_named_captures(
+                        r.capture_names(),
+                        self.duplicate_named_groups(caps.len()),
+                        |i| caps.get(i).map(|m| m.as_str().to_string()),
+                    );
                     out.push(OwnedCaptures {
                         whole: m0.as_str().to_string(),
                         m_start: m0.start(),
@@ -1071,6 +1098,226 @@ pub(crate) struct OwnedCaptures {
     pub(crate) group_spans: Vec<Option<(usize, usize)>>,
     /// `(name, matched | None)` for each NAMED capture group.
     pub(crate) named: Vec<(String, Option<String>)>,
+}
+
+/// Build the `(name, value)` list from a `capture_names()` iterator
+/// and a group-value accessor, resolving DUPLICATE group names
+/// correctly. Ruby/Oniguruma allows several groups to share a name
+/// (e.g. rack's `(?<host>\[(?<address>...)\]|(?<address>...))`); the
+/// linear `regex` crate rejects that so such patterns run on
+/// fancy-regex, which keeps every group's POSITION/value but the
+/// duplicate name resolves to the LAST group that PARTICIPATED — not
+/// the textually-last group, which for an alternation is `nil`.
+/// So: dedup to one entry per name, a later matched value overrides,
+/// and a later `nil` never clobbers an earlier match.
+fn build_named_captures<'a>(
+    names: impl Iterator<Item = Option<&'a str>>,
+    dup_named: &[(String, Vec<usize>)],
+    get: impl Fn(usize) -> Option<String>,
+) -> Vec<(String, Option<String>)> {
+    let mut out: Vec<(String, Option<String>)> = Vec::new();
+    for (i, n) in names.enumerate() {
+        let Some(name) = n else { continue };
+        let val = get(i);
+        if let Some(slot) = out.iter_mut().find(|(nm, _)| nm == name) {
+            if val.is_some() {
+                slot.1 = val;
+            }
+        } else {
+            out.push((name.to_string(), val));
+        }
+    }
+    // Augment names the engine collapsed onto a single group: resolve
+    // each from ALL its group indices, taking the LAST that
+    // participated (CRuby/Oniguruma semantics). Empty unless the
+    // source carried a duplicate name AND the parse was trusted, so
+    // single-named patterns are untouched.
+    for (name, indices) in dup_named {
+        let resolved = indices.iter().filter_map(|&idx| get(idx)).last();
+        if let Some(slot) = out.iter_mut().find(|(nm, _)| nm == name) {
+            slot.1 = resolved;
+        } else {
+            out.push((name.clone(), resolved));
+        }
+    }
+    out
+}
+
+/// Best-effort scan of a regex SOURCE for capturing-group structure:
+/// returns `(total capturing groups, [(name, 1-based group index)])`.
+/// Group indices follow the standard open-paren order that both the
+/// `regex` crate and fancy-regex use. Skipped from the count: char
+/// classes (`[...]`, where `(` is literal), escapes (`\(`), inline
+/// comments (`(?#...)`), non-capturing / lookaround / atomic / flag
+/// groups (`(?:`, `(?=`, `(?!`, `(?<=`, `(?<!`, `(?>`, `(?x-mi:`)).
+/// Only plain `(` and the named forms `(?<name>` / `(?'name'` /
+/// `(?P<name>` add a group.
+///
+/// EXTENDED (`/x`) mode is tracked through nested flag groups
+/// (`base_extended` is the regexp's own `x` flag) so that an `x`-mode
+/// `#`-to-end-of-line comment — which can itself contain parens, as in
+/// rack's `# ... (except square brackets) ...` — is skipped rather
+/// than miscounted.
+///
+/// HEURISTIC — the caller verifies `total + 1 == engine group count`
+/// and discards the result on any mismatch, so a miscount can only
+/// degrade to the unaugmented path, never corrupt a capture.
+fn parse_capture_groups(src: &str, base_extended: bool) -> (usize, Vec<(String, usize)>) {
+    let b = src.as_bytes();
+    let mut i = 0usize;
+    let mut group = 0usize;
+    let mut names: Vec<(String, usize)> = Vec::new();
+    let mut in_class = false;
+    let mut class_start = false;
+    // Stack of the EXTENDED flag for each open group scope; the top is
+    // the current mode. One entry pushed per group open, popped on `)`.
+    let mut ext: Vec<bool> = vec![base_extended];
+    let extended = |ext: &[bool]| *ext.last().unwrap_or(&base_extended);
+    let read_until = |start: usize, term: u8| -> Option<(String, usize)> {
+        let mut j = start;
+        while j < b.len() && b[j] != term {
+            j += 1;
+        }
+        if j >= b.len() {
+            return None;
+        }
+        std::str::from_utf8(&b[start..j]).ok().map(|s| (s.to_string(), j))
+    };
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\\' {
+            i += 2;
+            continue;
+        }
+        if in_class {
+            // First char after `[` (or `[^`) may be a literal `]`.
+            if c == b']' && !class_start {
+                in_class = false;
+            }
+            class_start = c == b'^' && class_start;
+            i += 1;
+            continue;
+        }
+        // `/x` comment: `#` to end of line (outside a class). The comment
+        // body is uninterpreted — its parens do not open groups.
+        if c == b'#' && extended(&ext) {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        match c {
+            b'[' => {
+                in_class = true;
+                class_start = true;
+                i += 1;
+            }
+            b')' => {
+                if ext.len() > 1 {
+                    ext.pop();
+                }
+                i += 1;
+            }
+            b'(' if b.get(i + 1) == Some(&b'?') => {
+                let after = b.get(i + 2).copied();
+                let is_lookbehind =
+                    after == Some(b'<') && matches!(b.get(i + 3), Some(&x) if x == b'=' || x == b'!');
+                if after == Some(b'<') && !is_lookbehind {
+                    group += 1;
+                    ext.push(extended(&ext));
+                    match read_until(i + 3, b'>') {
+                        Some((name, j)) => {
+                            names.push((name, group));
+                            i = j + 1;
+                        }
+                        None => return (group, names),
+                    }
+                } else if after == Some(b'\'') {
+                    group += 1;
+                    ext.push(extended(&ext));
+                    match read_until(i + 3, b'\'') {
+                        Some((name, j)) => {
+                            names.push((name, group));
+                            i = j + 1;
+                        }
+                        None => return (group, names),
+                    }
+                } else if after == Some(b'P') && b.get(i + 3) == Some(&b'<') {
+                    group += 1;
+                    ext.push(extended(&ext));
+                    match read_until(i + 4, b'>') {
+                        Some((name, j)) => {
+                            names.push((name, group));
+                            i = j + 1;
+                        }
+                        None => return (group, names),
+                    }
+                } else if after == Some(b'#') {
+                    // `(?#comment)` — skip to the closing paren.
+                    let mut j = i + 3;
+                    while j < b.len() && b[j] != b')' {
+                        if b[j] == b'\\' {
+                            j += 1;
+                        }
+                        j += 1;
+                    }
+                    i = j + 1;
+                } else if matches!(after, Some(b'=') | Some(b'!') | Some(b'>'))
+                    || is_lookbehind
+                {
+                    // Lookaround / atomic group — non-capturing, mode
+                    // unchanged. Push a scope so its `)` balances.
+                    ext.push(extended(&ext));
+                    i += 2;
+                } else {
+                    // Flag group/directive: `(?flags:` / `(?flags-neg:`
+                    // (a non-capturing scope) or `(?flags)` / `(?flags-neg)`
+                    // (an inline directive for the REST of the current
+                    // scope). `(?:` is the flagless scope form. Parse the
+                    // flag spec to track `x`.
+                    let mut j = i + 2;
+                    let mut new_ext = extended(&ext);
+                    let mut sign = true; // before the `-`
+                    while j < b.len() {
+                        match b[j] {
+                            b'x' => {
+                                new_ext = sign;
+                            }
+                            b'-' => sign = false,
+                            b'i' | b'm' | b's' | b'a' | b'd' | b'u' | b'n' => {}
+                            b':' => {
+                                // Scope: push the new mode; body parsed normally.
+                                ext.push(new_ext);
+                                j += 1;
+                                break;
+                            }
+                            b')' => {
+                                // Inline directive: applies to the rest of
+                                // the CURRENT scope; no new group.
+                                if let Some(top) = ext.last_mut() {
+                                    *top = new_ext;
+                                }
+                                j += 1;
+                                break;
+                            }
+                            _ => break, // not a flag spec — bail defensively
+                        }
+                        j += 1;
+                    }
+                    i = j;
+                }
+            }
+            b'(' => {
+                group += 1;
+                ext.push(extended(&ext));
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    (group, names)
 }
 
 /// Hand-rolled because `regex::Regex` and `fancy_regex::Regex`
