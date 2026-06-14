@@ -2819,19 +2819,6 @@ impl Vm {
                 // (toplevel singleton has no well-defined target)
                 // we fall back to installing on `toplevel_methods`.
                 let proto = &self.protos[p_idx as usize];
-                // Install ALWAYS lands on `cls.singleton_methods`
-                // (see line below), so `defining_class` must match
-                // wherever the method physically lives — not the
-                // `effective_install_class`. When `cls` IS the
-                // eigenclass shell (rare: `def self.foo` inside
-                // `singleton_class.class_eval`), the method lives
-                // on the shell's `singleton_methods` (a meta-meta
-                // table); pointing `defining_class` at the
-                // underlying real class would break `super_lookup`
-                // because the method isn't in the real class's
-                // singleton chain. Keep `cls` as-is.
-                // (Code-review #253 round 2 #2.)
-                let defining_class = self.class_stack.last().map(Rc::downgrade);
                 // Singleton defs are ALWAYS Public — CRuby's
                 // visibility modes (`private` / `protected` /
                 // `module_function`) only apply to instance
@@ -2844,6 +2831,45 @@ impl Vm {
                 let vis = Visibility::Public;
                 let params = proto.params.clone();
                 let fixed_arity = Self::fixed_arity_for_proto(proto, params.len());
+                // `defining_class` MUST match wherever the method
+                // physically lives — `super_lookup` finds it in the
+                // receiver's ancestry (`Rc::ptr_eq`) and resumes
+                // after it. Compute the install target FIRST, then
+                // derive `defining_class` from it. Three cases:
+                //   - inside a class body → that class's
+                //     `singleton_methods` (when `cls` IS an eigenclass
+                //     shell from `singleton_class.class_eval`, the
+                //     method lives on the shell's own singleton table
+                //     and `defining_class` is the shell, not the real
+                //     class — keep `cls` as-is, code-review #253);
+                //   - no class body, runtime self is a Class →
+                //     `def self.x` inside a method, install on the
+                //     class's singleton table;
+                //   - no class body, runtime self is an Object →
+                //     `def self.x` inside a method/block body (e.g.
+                //     minitest's `it` block does `def self.env;
+                //     super; end`): install on the object's eigenclass
+                //     `methods` table. PRE-FIX BUG: `defining_class`
+                //     was taken from `class_stack.last()` while the
+                //     method landed on the eigenclass, so `super` from
+                //     the singleton method couldn't locate its start
+                //     point → spurious "no superclass method".
+                enum SingInstall { Singleton(Rc<Class>), Eigen(Rc<Class>), Toplevel }
+                let install = if let Some(cls) = self.class_stack.last().cloned() {
+                    SingInstall::Singleton(cls)
+                } else {
+                    match self.frames.last().map(|f| f.self_val.clone()) {
+                        Some(Value::Class(c)) => SingInstall::Singleton(c.effective_install_class()),
+                        Some(Value::Object(oid)) => {
+                            SingInstall::Eigen(self.heap.ensure_singleton_class(oid))
+                        }
+                        _ => SingInstall::Toplevel,
+                    }
+                };
+                let defining_class = match &install {
+                    SingInstall::Singleton(c) | SingInstall::Eigen(c) => Some(Rc::downgrade(c)),
+                    SingInstall::Toplevel => None,
+                };
                 let m = Rc::new(Method {
                     params,
                     proto_idx: p_idx as usize,
@@ -2854,32 +2880,15 @@ impl Vm {
                 builtin: None,
                 original_name: Some(name_id),
                 });
-                if let Some(cls) = self.class_stack.last() {
-                    cls.singleton_methods.borrow_mut().insert(name_id, m);
-                } else {
-                    // `class << self; def x; end` inside a METHOD
-                    // body — there's no class_stack entry, but the
-                    // runtime self tells us whose eigenclass to
-                    // target (CRuby semantics). minitest's
-                    // i_suck_and_my_tests_are_order_dependent!
-                    // does exactly this with self = the test
-                    // Class. Object receivers route through the
-                    // same eigenclass `def obj.x` uses; only a
-                    // true toplevel (main) self falls back to
-                    // toplevel_methods.
-                    let self_val = self.frames.last().map(|f| f.self_val.clone());
-                    match self_val {
-                        Some(Value::Class(c)) => {
-                            let anchor = c.effective_install_class();
-                            anchor.singleton_methods.borrow_mut().insert(name_id, m);
-                        }
-                        Some(Value::Object(oid)) => {
-                            let sc = self.heap.ensure_singleton_class(oid);
-                            sc.methods.borrow_mut().insert(name_id, m);
-                        }
-                        _ => {
-                            self.toplevel_methods.insert(name_id, m);
-                        }
+                match &install {
+                    SingInstall::Singleton(c) => {
+                        c.singleton_methods.borrow_mut().insert(name_id, m);
+                    }
+                    SingInstall::Eigen(c) => {
+                        c.methods.borrow_mut().insert(name_id, m);
+                    }
+                    SingInstall::Toplevel => {
+                        self.toplevel_methods.insert(name_id, m);
                     }
                 }
                 self.method_gen = self.method_gen.wrapping_add(1);

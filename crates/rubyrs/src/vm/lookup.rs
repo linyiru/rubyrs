@@ -741,30 +741,47 @@ impl Vm {
         if self.host_fns.contains_key(&name_id) {
             return true;
         }
-        // Hash per-instance eigenclass methods.
+        // Hash per-instance eigenclass methods. A user method on the
+        // eigenclass makes the instance respond; a tombstone
+        // (`obj.singleton_class.undef_method(:to_hash)`) makes it NOT
+        // respond even though an ancestor (native Hash) defines the
+        // name — CRuby's undef shadows the inherited method. The
+        // native-responds check below would otherwise report true.
         if self.any_hash_singletons
             && let Value::Hash(hid) = recv
             && let crate::heap::HeapObj::Hash(h) = self.heap.get(*hid)
             && let Some(sc) = &h.singleton_class
-            && self.lookup_method_uncached(sc, name_id).is_some()
         {
-            return true;
+            if self.lookup_method_uncached(sc, name_id).is_some() {
+                return true;
+            }
+            if sc.undefed.borrow().contains(&name_id) {
+                return false;
+            }
         }
         // String per-instance eigenclass methods (side-table twin).
         if self.any_str_singletons
             && let Value::Str(s) = recv
             && let Some((_, sc)) = self.str_singletons.get(&(std::rc::Rc::as_ptr(s) as usize))
-            && self.lookup_method_uncached(sc, name_id).is_some()
         {
-            return true;
+            if self.lookup_method_uncached(sc, name_id).is_some() {
+                return true;
+            }
+            if sc.undefed.borrow().contains(&name_id) {
+                return false;
+            }
         }
         // Array / Proc per-instance eigenclass (heap_singletons twin).
         if self.any_heap_singletons
             && let Value::Array(id) | Value::Block(id) = recv
             && let Some((_, sc)) = self.heap_singletons.get(&(id.0 as usize))
-            && self.lookup_method_uncached(sc, name_id).is_some()
         {
-            return true;
+            if self.lookup_method_uncached(sc, name_id).is_some() {
+                return true;
+            }
+            if sc.undefed.borrow().contains(&name_id) {
+                return false;
+            }
         }
         let name: &str = self.interner.resolve(name_id);
         // Kernel's PRIVATE builtin surface — `respond_to?(name,
