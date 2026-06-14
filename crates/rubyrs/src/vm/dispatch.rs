@@ -4500,6 +4500,26 @@ impl Vm {
                             }
                         }
                     }
+                    // Native Hash methods (`[]`, `merge`, `dig`, ...)
+                    // live in dispatch arms, not the Hash method table,
+                    // so the walk above can't see them. CRuby lists them
+                    // on Hash AND every subclass; append them for any
+                    // class in Hash's ancestry so reflection parity
+                    // holds — `Rack::Headers`'s override set must be a
+                    // subset of `Hash.public_instance_methods`
+                    // (spec_headers#test_public_interface). Public-only,
+                    // so the private/protected variants skip this
+                    // (gate on the public-allowing `allow`).
+                    if allow(Visibility::Public)
+                        && (cls.name == "Hash" || class_inherits_named(&cls, "Hash"))
+                    {
+                        for nm in Self::NATIVE_HASH_METHODS {
+                            let sid = self.interner.intern(nm);
+                            if !sids.contains(&sid) && !dead.contains(&sid) {
+                                sids.push(sid);
+                            }
+                        }
+                    }
                 } else {
                     for (k, m) in cls.methods.borrow().iter() {
                         if allow(m.visibility.get()) {

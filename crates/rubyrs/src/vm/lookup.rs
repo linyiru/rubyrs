@@ -595,6 +595,30 @@ impl Vm {
         "yield_self",
     ];
 
+    /// Hash's own instance methods (CRuby 3.4 `Hash.instance_methods
+    /// (false)`). These live in native dispatch arms, not the Hash
+    /// class's method table, so the `instance_methods` reflection walk
+    /// can't see them. Appended for any class in Hash's ancestry so
+    /// `Hash.public_instance_methods` (and a subclass's) report them —
+    /// rack's `Rack::Headers` test asserts its override set is a subset
+    /// of `Hash.public_instance_methods` (spec_headers#test_public_interface).
+    pub(crate) const NATIVE_HASH_METHODS: &'static [&'static str] = &[
+        "<", "<=", "==", ">", ">=", "[]", "[]=", "any?", "assoc",
+        "clear", "compact", "compact!", "compare_by_identity",
+        "compare_by_identity?", "deconstruct_keys", "default",
+        "default=", "default_proc", "default_proc=", "delete",
+        "delete_if", "dig", "each", "each_key", "each_pair",
+        "each_value", "empty?", "eql?", "except", "fetch",
+        "fetch_values", "filter", "filter!", "flatten", "freeze",
+        "has_key?", "has_value?", "hash", "include?", "inspect",
+        "invert", "keep_if", "key", "key?", "keys", "length", "member?",
+        "merge", "merge!", "rassoc", "rehash", "reject", "reject!",
+        "replace", "select", "select!", "shift", "size", "slice",
+        "store", "to_a", "to_h", "to_hash", "to_proc", "to_s",
+        "transform_keys", "transform_keys!", "transform_values",
+        "transform_values!", "update", "value?", "values", "values_at",
+    ];
+
     pub(crate) fn universal_arm_name(name: &str) -> bool {
         matches!(name,
             "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?" | "eql?"
