@@ -41,6 +41,23 @@ pub(crate) struct ProtoBuilder {
     /// EscapedParams) layering setup on Base#initialize(app,
     /// options = {}).
     pub(crate) method_rest_slot: Option<u16>,
+    /// Slot of the `&block` parameter, when the method declares one.
+    /// Bare `super` must forward it AS A BLOCK (not as a positional
+    /// arg) — the old "LoadLocal each slot 0..count" forwarding passed
+    /// it positionally, so `def m(a, &b); super; end` over-counted args.
+    pub(crate) method_block_slot: Option<u16>,
+    /// Count of POSITIONAL parameter slots (required + optional +
+    /// post-rest), EXCLUDING the rest / kw / kw-rest / block slots.
+    /// Bare `super` forwards exactly these as positionals (splatting
+    /// the rest in the middle when present).
+    pub(crate) method_n_positional: u16,
+    /// Count of post-rest required positionals (`def m(*a, b, c)` → 2).
+    /// Needed so bare `super` forwards `[pre…, *rest, post…]` in order.
+    pub(crate) method_n_post_rest: u16,
+    /// True when the method declares keyword params or a `**kwrest`.
+    /// Bare `super` forwarding of kwargs is not modelled yet, so these
+    /// methods fall back to the legacy (approximate) slot-dump path.
+    pub(crate) method_has_kw: bool,
     /// True iff this builder is compiling a real method body
     /// (the proto bound to an `Op::DefMethod` /
     /// `Op::DefSingletonMethod`). Distinct from `method_name`
@@ -497,6 +514,9 @@ fn compile_def_arm(
         b.filename.clone(), protos, interner, cc, /*is_method=*/true,
         b.class_path.clone(),
         rest_slot_for_super,
+        n_required_post,
+        /*has_kw=*/ !kw_params.is_empty() || kw_rest.is_some(),
+        /*has_block=*/ block_param.is_some(),
         kw_computed_prologue,
     );
     if let Some(rname) = rest {
@@ -1131,6 +1151,10 @@ impl ProtoBuilder {
             method_name: None,
             method_param_count: 0,
             method_rest_slot: None,
+            method_block_slot: None,
+            method_n_positional: 0,
+            method_n_post_rest: 0,
+            method_has_kw: false,
             is_method_body: false,
             loop_break_jumps: vec![],
             loop_next_jumps: vec![],
@@ -1749,37 +1773,48 @@ pub(crate) fn compile_expr(
                     b.emit(Op::Super(name_id, argc));
                 }
                 None => {
-                    // Forwarding form — push each enclosing-method
-                    // param from its local slot. Params are
-                    // always slots `0..method_param_count`
-                    // (`ProtoBuilder::new` assigns them in order).
-                    //
-                    // Single-rest fast path: when the surrounding
-                    // method has ONLY a rest parameter (`def m(*)`,
-                    // `def m(*args)`) — `method_rest_slot ==
-                    // Some(0) && method_param_count == 1` — CRuby's
-                    // bare-super forwarding splats the rest array
-                    // out as individual positional args to the
-                    // parent. Without this, the captured Array is
-                    // passed as a single argument, so a parent
-                    // declared `def initialize(app, opts = {})`
-                    // sees `app == [orig_app, orig_opts]` (the
-                    // whole Array). Hit by rack-protection-4.2.1's
-                    // HostAuthorization / EscapedParams, both of
-                    // which layer setup via `def initialize(*);
-                    // super; @x = ...; end`. Emit ApplySuper so the
-                    // VM op spreads the Array's elements as args
-                    // (same semantics as `super(*args)`).
-                    if b.method_param_count == 1
-                        && b.method_rest_slot == Some(0)
-                    {
-                        b.emit(Op::LoadLocal(0));
-                        b.emit(Op::ApplySuper(name_id));
-                    } else {
-                        for i in 0..b.method_param_count {
+                    // Forwarding form (bare `super`) — re-pass the
+                    // enclosing method's args AS RECEIVED: positionals
+                    // (splatting the rest), and the `&block` as a block
+                    // (NOT a positional). `simple` excludes the cases
+                    // not yet modelled (kwargs, post-rest `*a, b`),
+                    // which fall back to the legacy slot-dump.
+                    let simple = !b.method_has_kw && b.method_n_post_rest == 0;
+                    if simple && let Some(rs) = b.method_rest_slot {
+                        // Rest present → assemble `[pre…, *rest]` and
+                        // splat via ApplySuper. A single `*rest`
+                        // (`def m(*); super; end`) reduces to exactly
+                        // the old fast path. With a `&block`, push it
+                        // first so ApplySuperBlock sees `[block, array]`.
+                        if let Some(bs) = b.method_block_slot {
+                            b.emit(Op::LoadLocal(bs));
+                        }
+                        emit_super_forward_array(b, interner, rs);
+                        if b.method_block_slot.is_some() {
+                            b.emit(Op::ApplySuperBlock(name_id));
+                        } else {
+                            b.emit(Op::ApplySuper(name_id));
+                        }
+                    } else if simple && let Some(bs) = b.method_block_slot {
+                        // No rest, but a `&block`: forward positionals
+                        // + the block (the old path passed the block
+                        // slot positionally → arg over-count).
+                        b.emit(Op::LoadLocal(bs));
+                        for i in 0..b.method_n_positional {
                             b.emit(Op::LoadLocal(i));
                         }
-                        b.emit(Op::Super(name_id, b.method_param_count as u8));
+                        b.emit(Op::NewArray(b.method_n_positional));
+                        b.emit(Op::ApplySuperBlock(name_id));
+                    } else {
+                        // Positional slot-dump. Pure positional uses the
+                        // positional count; the kw / post-rest fallback
+                        // dumps every slot (approximate — those shapes
+                        // are rare with bare super).
+                        let n = if simple { b.method_n_positional } else { b.method_param_count };
+                        for i in 0..n {
+                            b.emit(Op::LoadLocal(i));
+                        }
+                        b.emit(Op::Super(name_id, n as u8));
                     }
                 }
             }
@@ -1825,17 +1860,22 @@ pub(crate) fn compile_expr(
                     b.emit(Op::NewArray(arg_exprs.len() as u16));
                 }
                 None => {
-                    // Forwarding form. A lone `*rest` param IS the args
-                    // Array already (spread its elements), matching the
-                    // bare-super rest fast-path; otherwise gather each
-                    // param slot into a fresh Array.
-                    if b.method_param_count == 1 && b.method_rest_slot == Some(0) {
-                        b.emit(Op::LoadLocal(0));
+                    // Forwarding form: assemble the POSITIONAL args
+                    // Array (splatting the rest), EXCLUDING the
+                    // method's `&block` slot — the literal block above
+                    // replaces it (CRuby: `super do…end` passes the
+                    // literal block). A lone `*rest` reduces to the
+                    // rest Array itself. kw / post-rest fall back to
+                    // the legacy slot-dump (rare).
+                    let simple = !b.method_has_kw && b.method_n_post_rest == 0;
+                    if simple && let Some(rs) = b.method_rest_slot {
+                        emit_super_forward_array(b, interner, rs);
                     } else {
-                        for i in 0..b.method_param_count {
+                        let n = if simple { b.method_n_positional } else { b.method_param_count };
+                        for i in 0..n {
                             b.emit(Op::LoadLocal(i));
                         }
-                        b.emit(Op::NewArray(b.method_param_count));
+                        b.emit(Op::NewArray(n));
                     }
                 }
             }
@@ -2156,6 +2196,27 @@ pub(crate) fn mark_frozen_string_literal(protos: &mut [Proto], start: usize) {
     }
 }
 
+/// Emit ops leaving the bare-`super` POSITIONAL forwarding args as a
+/// single Array on the stack: `[pre-rest…] + rest`, splatting the
+/// enclosing method's rest param. `rs` is the rest slot. There's no
+/// dedicated splat-concat op, so we build the pre-rest piece as an
+/// Array and join the rest with `Array#+` (the same shape the
+/// `super(a, *rest)` AST desugar uses). The caller then feeds the
+/// Array to `Op::ApplySuper` / `Op::ApplySuperBlock`, which splats it.
+/// Only called when the method has NO post-rest positionals (`*a, b`)
+/// — those fall back to the legacy path at the call sites.
+fn emit_super_forward_array(b: &mut ProtoBuilder, interner: &mut Interner, rs: u16) {
+    let plus_id = interner.intern("+");
+    // pre-rest positionals → `[pre…]`
+    for i in 0..rs {
+        b.emit(Op::LoadLocal(i));
+    }
+    b.emit(Op::NewArray(rs));
+    // `+ rest` (already an Array)
+    b.emit(Op::LoadLocal(rs));
+    b.emit(Op::Call(plus_id, 1, u16::MAX));
+}
+
 /// Same as `compile_proto` but seeds the new proto's `class_path`
 /// with the parent's lexical nesting. Used by the `Expr::Class`
 /// arm to thread `module Foo; class Bar; ...; end; end`'s path
@@ -2169,7 +2230,7 @@ pub(crate) fn compile_proto_at(
     class_path: Vec<String>,
 ) -> usize {
     let n_req = params.len() as u16;
-    compile_proto_kind(name, params, n_req, vec![], body, filename, protos, interner, cc, /*is_method=*/false, class_path, None, vec![])
+    compile_proto_kind(name, params, n_req, vec![], body, filename, protos, interner, cc, /*is_method=*/false, class_path, None, /*n_required_post=*/0, /*has_kw=*/false, /*has_block=*/false, vec![])
 }
 
 /// Same as `compile_proto` but tags the resulting builder as a
@@ -2190,6 +2251,13 @@ pub(crate) fn compile_proto_kind(
     filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
     is_method: bool, class_path: Vec<String>,
     rest_slot_for_super: Option<u16>,
+    // Bare-`super` forwarding layout: count of post-rest required
+    // positionals, and whether the method declares keyword params /
+    // `**kwrest` / a `&block`. (Pre-rest positional count is derived
+    // from `n_required_positional` + the optional count.)
+    n_required_post: u16,
+    has_kw: bool,
+    has_block: bool,
     // `(kw_idx, kw_slot, computed_default_expr)` triples — one per
     // kwarg with a computed (non-literal) default. The kw prologue
     // emits `Op::JumpIfKwArgGiven(kw_idx, _)` plus the default-eval
@@ -2204,6 +2272,17 @@ pub(crate) fn compile_proto_kind(
         b.method_param_count = params.len() as u16;
         b.is_method_body = true;
         b.method_rest_slot = rest_slot_for_super;
+        // Bare-super forwarding layout (see ProtoBuilder fields).
+        let n_optional = default_exprs.iter().filter(|d| d.is_some()).count() as u16;
+        b.method_n_positional = n_required_positional + n_optional + n_required_post;
+        b.method_n_post_rest = n_required_post;
+        b.method_has_kw = has_kw;
+        // `&block` is the LAST entry in `effective_params`.
+        b.method_block_slot = if has_block {
+            Some((params.len() as u16).saturating_sub(1))
+        } else {
+            None
+        };
     }
     // Default-arg prologue. For each optional positional slot:
     // skip to `skip:` if the caller supplied it; otherwise eval
@@ -2307,6 +2386,10 @@ pub(crate) fn compile_block(
         method_name: parent.method_name.clone(),
         method_param_count: parent.method_param_count,
         method_rest_slot: parent.method_rest_slot,
+        method_block_slot: parent.method_block_slot,
+        method_n_positional: parent.method_n_positional,
+        method_n_post_rest: parent.method_n_post_rest,
+        method_has_kw: parent.method_has_kw,
         // Blocks are NOT method bodies — `return` inside one
         // unwinds non-locally to the enclosing method
         // (Op::ReturnMethod), not just the block frame.
