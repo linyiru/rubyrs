@@ -601,12 +601,15 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn hash_native_instance_methods() { run_diff("hash_native_instance_methods"); }
 #[test] fn case_subject_eval_once() { run_diff("case_subject_eval_once"); }
 #[test] fn string_slice_utf8_invalid() { run_diff("string_slice_utf8_invalid"); }
+#[test] fn file_path_coercion() { run_diff("file_path_coercion"); }
 #[test] fn binary_string_length_replace() { run_diff("binary_string_length_replace"); }
 #[test] fn sub_gsub_byte_faithful() { run_diff("sub_gsub_byte_faithful"); }
 #[cfg(feature = "stdlib")]
 #[test] fn stringio_binary_read() { run_diff("stringio_binary_read"); }
 #[cfg(feature = "stdlib")]
 #[test] fn tempfile_binmode() { run_diff("tempfile_binmode"); }
+#[cfg(feature = "stdlib")]
+#[test] fn tempfile_to_path() { run_diff("tempfile_to_path"); }
 #[test] fn undef_inherited_singleton() { run_diff("undef_inherited_singleton"); }
 #[test] fn frame_locals_pool() { run_diff("frame_locals_pool"); }
 #[test] fn locals_stack_arena() { run_diff("locals_stack_arena"); }

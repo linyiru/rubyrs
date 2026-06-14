@@ -445,6 +445,31 @@ impl Vm {
     /// handled call, `Ok(None)` if the method name isn't in
     /// our subset so dispatch can keep walking.
     pub(crate) fn file_class_dispatch(&mut self, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
+        // Pre-coerce path-like Object arguments (Pathname / Tempfile /
+        // anything with `to_path` or `to_str`) to Strings up-front, so
+        // every File method accepts them like CRuby. This runs BEFORE
+        // the `&self`-capturing `path_arg` closure below, since the
+        // coercion re-enters the interpreter (`&mut self`). Non-Object
+        // args, and objects without a conversion, pass through unchanged
+        // — the per-method logic then handles or rejects them. Motivating
+        // case: rack's spec_multipart does `File.extname(tempfile)`.
+        let coerced_storage: Vec<Value>;
+        let args: &[Value] = if args.iter().any(|a| matches!(a, Value::Object(_))) {
+            let mut out = Vec::with_capacity(args.len());
+            for (i, a) in args.iter().enumerate() {
+                if matches!(a, Value::Object(_))
+                    && let Some(s) = self.coerce_path_string(a, &args[i + 1..])?
+                {
+                    out.push(Value::new_str(s));
+                } else {
+                    out.push(a.clone());
+                }
+            }
+            coerced_storage = out;
+            &coerced_storage
+        } else {
+            args
+        };
         let path_arg = |a: &Value| -> Result<String, Trap> {
             match a {
                 Value::Str(s) => Ok(s.to_string_lossy()),

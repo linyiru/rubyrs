@@ -61,6 +61,14 @@ class Tempfile
 
   attr_reader :path
 
+  # CRuby's Tempfile responds to `to_path` (delegated to the underlying
+  # File), so `File.extname(tempfile)` / `File.open(tempfile)` and other
+  # path-coercing APIs accept it. rack's multipart spec does
+  # `File.extname(env["rack.tempfiles"][0])` on the Tempfile.
+  def to_path
+    @path
+  end
+
   def write(s)
     s = s.to_s
     @buf << s
