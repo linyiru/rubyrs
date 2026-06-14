@@ -3075,6 +3075,31 @@ impl Vm {
                             Some(Value::Int(bytes[i as usize] as i64))
                         }
                     }
+                    ("ord", []) => {
+                        // CRuby `String#ord`: the Integer codepoint of
+                        // the FIRST character in the receiver's
+                        // encoding; ArgumentError on an empty string.
+                        // A BINARY string has byte-sized "characters",
+                        // so its first byte IS the codepoint (the
+                        // common_logger `c.ord` over a `[^[:print:]]`
+                        // match can see a high byte). Other encodings
+                        // decode the first UTF-8 scalar.
+                        let bytes = s.content.borrow();
+                        if bytes.is_empty() {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "empty string".to_string(),
+                            }));
+                        }
+                        if matches!(s.encoding.get(), crate::value::EncodingTag::Binary) {
+                            Some(Value::Int(bytes[0] as i64))
+                        } else {
+                            drop(bytes);
+                            match s.to_string_lossy().chars().next() {
+                                Some(c) => Some(Value::Int(c as i64)),
+                                None => Some(Value::Int(s.content.borrow()[0] as i64)),
+                            }
+                        }
+                    }
                     ("split", []) => {
                         // No-arg `split` matches CRuby's `split(nil)`:
                         // splits on runs of whitespace, drops the

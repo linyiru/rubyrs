@@ -206,6 +206,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn singleton_class_body_more() { run_diff("singleton_class_body_more"); }
 #[test] fn singleton_class_conditional_def() { run_diff("singleton_class_conditional_def"); }
 #[test] fn singleton_class_bare_call() { run_diff("singleton_class_bare_call"); }
+#[test] fn singleton_class_expr_value() { run_diff("singleton_class_expr_value"); }
 #[test] fn integer_size() { run_diff("integer_size"); }
 #[test] fn class_public_methods() { run_diff("class_public_methods"); }
 #[test] fn runtime_attr_accessor() { run_diff("runtime_attr_accessor"); }
@@ -601,6 +602,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn p0_each_yield_composability() { run_diff("p0_each_yield_composability"); }
 #[test] fn string_dump() { run_diff("string_dump"); }
 #[test] fn string_count() { run_diff("string_count"); }
+#[test] fn string_ord() { run_diff("string_ord"); }
 #[test] fn class_singleton_class() { run_diff("class_singleton_class"); }
 #[cfg(feature = "regex")]
 #[test] fn string_bracket_regex() { run_diff("string_bracket_regex"); }
