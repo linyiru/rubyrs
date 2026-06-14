@@ -43,6 +43,16 @@ class Exception
     @backtrace
   end
 
+  # `Exception#cause` — the exception that was being handled when this
+  # one was raised, or nil. rubyrs doesn't thread the implicit `$!`
+  # cause chain through `raise`, so this returns `@cause` (nil unless a
+  # caller set it explicitly) — matching CRuby for the common
+  # raised-directly case. minitest's `assert_raises` calls `#cause` on
+  # the caught exception, so the method must at least exist.
+  def cause
+    @cause
+  end
+
   # `Exception#dup` — exceptions can be VM-bridged shapes (the
   # stack-guard's SystemStackError) that the universal Object#dup
   # arm doesn't model; rebuild via the class constructor and carry
