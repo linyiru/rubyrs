@@ -8753,6 +8753,58 @@ impl Vm {
             self.stack.push(recv);
             return Ok(());
         }
+        // `public` / `private` / `protected` with symbol args on an
+        // EXPLICIT Class/Module receiver (e.g. `obj.singleton_class.send(
+        // :public, :foo)`) — flip the named INSTANCE method(s)'
+        // visibility. The bareword / class-body forms are handled in the
+        // implicit-self section; this is the explicit-receiver runtime
+        // form. rack's request spec re-publicises a `forwarded_*` helper
+        // on the request's singleton class.
+        if let Some(vis) = visibility_from_name(&name)
+            && !args.is_empty()
+            && let Value::Class(cls) = &recv
+        {
+            let cls = cls.clone();
+            for a in &args {
+                let mid: SymId = match a {
+                    Value::Sym(s) => *s,
+                    Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                    _ => continue,
+                };
+                // Own-table hit → flip in place; otherwise install a
+                // fresh copy of the resolved (inherited) method with the
+                // new visibility (NOT the shared Rc — see the implicit
+                // arm's note on the Method.visibility Cell trap).
+                let own = cls.methods.borrow().get(&mid).cloned();
+                if let Some(m) = own {
+                    m.visibility.set(vis);
+                } else if let Some(m) = self.lookup_method_uncached(&cls, mid) {
+                    let copy = std::rc::Rc::new(crate::value::Method {
+                        params: m.params.clone(),
+                        proto_idx: m.proto_idx,
+                        fixed_arity: m.fixed_arity,
+                        defining_class: Some(std::rc::Rc::downgrade(&cls)),
+                        visibility: std::cell::Cell::new(vis),
+                        closure: m.closure.clone(),
+                        original_name: m.original_name,
+                        builtin: m.builtin.clone(),
+                    });
+                    cls.methods.borrow_mut().insert(mid, copy);
+                }
+            }
+            self.method_gen = self.method_gen.wrapping_add(1);
+            // CRuby return: single arg → the arg, multiple → array.
+            let ret = if args.len() == 1 {
+                args[0].clone()
+            } else {
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::Array(args.to_vec().into()));
+                Value::Array(id)
+            };
+            self.stack.push(ret);
+            return Ok(());
+        }
         // `Foo.attr_accessor(:x)` / `Foo.singleton_class.send(
         // :attr_accessor, :x)` — the explicit-receiver runtime form
         // of the attr_* family (the bareword class-body form is
