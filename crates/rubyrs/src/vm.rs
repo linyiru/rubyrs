@@ -237,6 +237,14 @@ pub(crate) struct Frame {
     /// invokes from non-iterating callers — currently unused, but
     /// the field allows future opt-in).
     pub(crate) block_writeback: Option<(Rc<RefCell<Vec<Value>>>, u16)>,
+    /// Set on block frames from the running `BlockHandle`'s
+    /// `captured_yield_block` (the block belonging to the method that
+    /// lexically encloses this block). `Op::Yield` reads it as the
+    /// fallback when the lexical owner method is no longer on the stack
+    /// — the escaped-closure case where `lexical_owner_of_top` finds no
+    /// live method frame. `None` on method / class-body / toplevel
+    /// frames and on blocks whose enclosing method had no block.
+    pub(crate) captured_yield_block: Option<ObjId>,
 }
 
 /// The cold half of `Frame` — exception-handling and `while`-loop

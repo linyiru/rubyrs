@@ -589,6 +589,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn private_self_receiver() { run_diff("private_self_receiver"); }
 #[test] fn method_call_block() { run_diff("method_call_block"); }
 #[test] fn yield_through_nested_block() { run_diff("yield_through_nested_block"); }
+#[test] fn yield_in_escaped_closure() { run_diff("yield_in_escaped_closure"); }
 #[test] fn frame_locals_pool() { run_diff("frame_locals_pool"); }
 #[test] fn locals_stack_arena() { run_diff("locals_stack_arena"); }
 #[test] fn class_singleton_fast_path() { run_diff("class_singleton_fast_path"); }

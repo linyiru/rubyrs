@@ -51,6 +51,7 @@ impl Vm {
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: None,
+            captured_yield_block: None,
         });
         self.dispatch()?;
         Ok(self.stack.pop().unwrap_or(Value::Nil))
@@ -588,6 +589,14 @@ impl Vm {
                 // when it reaches the slot.
                 roots.push(Value::Block(id));
             }
+            // A block frame running an escaped closure forwards
+            // `yield` to a block whose defining method has returned;
+            // root it while the frame executes (the heap Block mark
+            // also walks it, but a directly-called closure result may
+            // not be otherwise held).
+            if let Some(id) = f.captured_yield_block {
+                roots.push(Value::Block(id));
+            }
             // `BeginBaseline.saved_dollar_bang` snapshots the
             // dynamically-scoped `$!` at Op::EnterBegin; once an
             // inner `raise` REPLACES the global, the snapshot can be
@@ -652,6 +661,7 @@ impl Vm {
                 }
                 if let Some(v) = &f.swap_return { roots.push(v.clone()); }
                 if let Some(id) = f.block_arg { roots.push(Value::Block(id)); }
+                if let Some(id) = f.captured_yield_block { roots.push(Value::Block(id)); }
                 if let Some(aux) = &f.aux {
                     for b in &aux.begin_rescue_depths {
                         roots.push(b.saved_dollar_bang.clone());

@@ -1086,6 +1086,12 @@ impl Heap {
                     }
                     drop(captured);
                     Heap::visit_value(&bh.self_val, &mut self.marks, &mut worklist);
+                    // The yield-block this block forwards to (escaped
+                    // closure case): nothing else roots it once the
+                    // defining method has returned, so mark it here.
+                    if let Some(yb) = bh.captured_yield_block {
+                        Heap::visit_value(&Value::Block(yb), &mut self.marks, &mut worklist);
+                    }
                 }
                 Slot::Live(HeapObj::BoundMethod { recv, method, .. }) => {
                     // Walk the captured receiver. The method name

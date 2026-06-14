@@ -1964,6 +1964,7 @@ mod tests {
             rest_slot: None,
             kw_rest_slot: None,
             captured_is_method_scope: false,
+            captured_yield_block: None,
         };
         let body_id = heap.alloc(HeapObj::Block(body_block));
         // Allocate a Fiber pointing at the body.

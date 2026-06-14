@@ -3811,6 +3811,7 @@ impl Vm {
             aux: None,
             pending_yield: false,
             block_writeback: None,
+            captured_yield_block: None,
         });
         // Dispatch loop. We can't just call `dispatch_until` and
         // bail on the first method_return: a non-local `return`
@@ -4300,6 +4301,7 @@ impl Vm {
             aux: None,
             pending_yield: false,
             block_writeback: None,
+            captured_yield_block: None,
         });
         // Same dispatch-loop shape as compile_and_run_source;
         // a non-local `return` defined INSIDE the eval'd string

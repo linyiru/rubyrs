@@ -12483,6 +12483,7 @@ impl Vm {
             aux: None,
             pending_yield: false,
             block_writeback: None,
+            captured_yield_block: None,
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
         // the first last_match write inside this method scope.
@@ -12601,6 +12602,7 @@ impl Vm {
             aux: None,
             pending_yield: false,
             block_writeback: None,
+            captured_yield_block: None,
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
         // the first last_match write inside this method scope.
@@ -12698,6 +12700,7 @@ impl Vm {
             aux: None,
             pending_yield: false,
             block_writeback: None,
+            captured_yield_block: None,
         });
         Ok(true)
     }
@@ -12757,6 +12760,7 @@ impl Vm {
             aux: None,
             pending_yield: false,
             block_writeback: None,
+            captured_yield_block: None,
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
         // the first last_match write inside this method scope.
@@ -13077,6 +13081,7 @@ impl Vm {
                 }),
                 pending_yield: false,
                 block_writeback: None,
+                captured_yield_block: None,
             });
             // $~ scoping is LAZY now — save_match_scope_on_write fires on
             // the first last_match write inside this method scope.
@@ -13113,6 +13118,7 @@ impl Vm {
                 aux: None,
                 pending_yield: false,
                 block_writeback: None,
+                captured_yield_block: None,
             });
             // $~ scoping is LAZY now — save_match_scope_on_write fires on
             // the first last_match write inside this method scope.
@@ -13451,6 +13457,7 @@ impl Vm {
             kw_given_mask,
             aux: None, pending_yield: false,
             block_writeback: None,
+            captured_yield_block: None,
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
         // the first last_match write inside this method scope.
@@ -13641,6 +13648,7 @@ impl Vm {
             kw_given_mask: 0,
             aux: None, pending_yield: false,
             block_writeback: None,
+            captured_yield_block: None,
         });
         Ok(())
     }
@@ -13767,6 +13775,8 @@ impl Vm {
             // a method scope; its proto is `creates_block` anyway so
             // the share path never sees it.
             captured_is_method_scope: false,
+            // No lexical method, so `yield` inside it is meaningless.
+            captured_yield_block: None,
         }));
         Ok(id)
     }
@@ -13856,6 +13866,8 @@ impl Vm {
             // Synthetic compose-forwarder scratch Vec, not a method
             // scope; proto is `creates_block` regardless.
             captured_is_method_scope: false,
+            // No lexical method, so `yield` inside it is meaningless.
+            captured_yield_block: None,
         }));
         Ok(id)
     }
@@ -13981,10 +13993,10 @@ impl Vm {
     /// the Frame it pushes are byte-identical to the general path.
     pub(crate) fn invoke_block1(&mut self, block_id: ObjId, arg: Value) -> Result<(), Trap> {
         self.check_frames()?;
-        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope) = {
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope, captured_yield_block) = {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
-             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope)
+             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block)
         };
         if rest_slot.is_some() || kw_rest_slot.is_some() || n_params > 1
             || !self.protos[proto_idx].block_kw_params.is_empty()
@@ -14018,6 +14030,7 @@ impl Vm {
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: true, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: writeback,
+            captured_yield_block,
         });
         Ok(())
     }
@@ -14032,10 +14045,10 @@ impl Vm {
     /// path with the exact Vec the old call sites built.
     pub(crate) fn invoke_block2(&mut self, block_id: ObjId, a: Value, b: Value) -> Result<(), Trap> {
         self.check_frames()?;
-        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope) = {
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope, captured_yield_block) = {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
-             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope)
+             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block)
         };
         if rest_slot.is_some() || kw_rest_slot.is_some() || n_params != 2
             || !self.protos[proto_idx].block_kw_params.is_empty()
@@ -14068,6 +14081,7 @@ impl Vm {
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: true, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: writeback,
+            captured_yield_block,
         });
         Ok(())
     }
@@ -14077,10 +14091,10 @@ impl Vm {
         // Snapshot what we need out of the block's heap slot before
         // taking any `&mut self` action. BlockHandle.captured is a
         // shared `Rc<RefCell<Vec<Value>>>` — cheap to clone.
-        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope) = {
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope, captured_yield_block) = {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
-             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope)
+             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block)
         };
         // `|**opts|` keyword-rest: peel the trailing kwargs Hash off
         // the args BEFORE positional binding (so it doesn't land in
@@ -14392,6 +14406,7 @@ impl Vm {
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: true, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: writeback,
+            captured_yield_block,
         });
         Ok(())
     }

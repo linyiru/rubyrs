@@ -427,6 +427,20 @@ pub struct BlockHandle {
     /// { |n| total += n } }` case). Set at `Op::CreateBlock` from
     /// whether the creating frame `is_block`.
     pub(crate) captured_is_method_scope: bool,
+    /// The block that `yield` inside this block must invoke — i.e. the
+    /// block passed to the METHOD that lexically encloses this block at
+    /// creation time. Captured at `Op::CreateBlock`: when the creating
+    /// frame is a method/class-body/toplevel its `block_arg`; when the
+    /// creating frame is itself a block, that block frame's own
+    /// `captured_yield_block` (so the binding propagates through nested
+    /// blocks). `Op::Yield` falls back to this when the lexical owner
+    /// method is no longer on the stack — the ESCAPED-closure case
+    /// (`def m(&blk); ->(){ yield }; end` returned then called later),
+    /// where the live-frame walk (`lexical_owner_of_top`) finds no
+    /// method frame to read `block_arg` from. `None` when no enclosing
+    /// method had a block. GC: rooted via the heap block walk alongside
+    /// `captured` / `self_val`.
+    pub(crate) captured_yield_block: Option<ObjId>,
 }
 
 #[derive(Debug)]

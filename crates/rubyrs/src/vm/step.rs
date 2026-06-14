@@ -2343,7 +2343,7 @@ impl Vm {
                 // closures captured during that invocation thus
                 // hold a Rc to the per-invocation Vec, isolated
                 // from subsequent iterations.
-                let (captured, self_val, captured_is_method_scope) = {
+                let (captured, self_val, captured_is_method_scope, captured_yield_block) = {
                     let f = self.frames.last().expect("ICE: CreateBlock no frame");
                     let captured = match &f.locals {
                         crate::vm::Locals::Shared(rc) => rc.clone(),
@@ -2355,10 +2355,23 @@ impl Vm {
                             unreachable!("ICE: CreateBlock in a Locals::Stack frame")
                         }
                     };
+                    // `yield` inside this block resolves to the block of
+                    // the lexically-enclosing METHOD. Capture it now so an
+                    // ESCAPED closure (whose defining method has already
+                    // returned) can still yield: a method/class-body/
+                    // toplevel creating frame contributes its own
+                    // `block_arg`; a block creating frame propagates the
+                    // binding it already holds (nested blocks share the
+                    // enclosing method's block). See `Op::Yield`.
+                    let captured_yield_block = if f.is_block {
+                        f.captured_yield_block
+                    } else {
+                        f.block_arg
+                    };
                     // A non-block creating frame (method / class body /
                     // toplevel) means `captured` is a real outer scope
                     // → the block's outer-write share path is sound.
-                    (captured, f.self_val.clone(), !f.is_block)
+                    (captured, f.self_val.clone(), !f.is_block, captured_yield_block)
                 };
                 // Capture the lexical class for `@@cvar` resolution. For
                 // a block created inside another block this returns the
@@ -2381,6 +2394,7 @@ impl Vm {
                     rest_slot,
                     kw_rest_slot,
                     captured_is_method_scope,
+                    captured_yield_block,
                 }));
                 self.stack.push(Value::Block(id));
             }
@@ -2457,19 +2471,34 @@ impl Vm {
                 // (`lexical_owner_of_top` shortcuts a non-block top
                 // frame to itself — required for Locals::Stack method
                 // frames, identical behaviour for Shared ones.)
-                let yielding_idx = self.lexical_owner_of_top();
-                let yielding_idx = match yielding_idx {
-                    Some(idx) => idx,
-                    None => return Err(self.trap(RubyError::RuntimeError {
-                        msg: "no block given (yield)".to_string(),
-                    })),
-                };
-                let block = self.frames[yielding_idx].block_arg;
-                let block = match block {
-                    Some(b) => b,
-                    None => return Err(self.trap(RubyError::RuntimeError {
-                        msg: "no block given (yield)".to_string(),
-                    })),
+                // Primary: the lexical owner method is still on the
+                // stack — read its `block_arg` directly (the common
+                // `def f; xs.each { yield }; end` synchronous case),
+                // and use its frame index for the pending_yield /
+                // break bookkeeping below.
+                //
+                // Fallback (ESCAPED CLOSURE): the block executing the
+                // yield outlived its defining method (`def m(&blk);
+                // ->(){ yield }; end` returned, the lambda is called
+                // later). The live-frame walk then finds no method
+                // frame, so use the yield-block captured at the
+                // block's creation and threaded onto its frame
+                // (`captured_yield_block`, propagated through nested
+                // blocks); CRuby keeps the same binding alive via the
+                // closure's captured cref. With no live yielding
+                // method, the yield site for break / Fiber-resume
+                // bookkeeping is the top (block) frame itself.
+                let owner = self.lexical_owner_of_top();
+                let (block, yielding_idx) = match owner
+                    .and_then(|idx| self.frames[idx].block_arg.map(|b| (b, idx)))
+                {
+                    Some(pair) => pair,
+                    None => match self.frames.last().and_then(|f| f.captured_yield_block) {
+                        Some(b) => (b, self.frames.len() - 1),
+                        None => return Err(self.trap(RubyError::RuntimeError {
+                            msg: "no block given (yield)".to_string(),
+                        })),
+                    },
                 };
                 // Static argc for `Op::Yield(n)`; for `Op::ApplyYield`
                 // (`yield(*x)`), pop the combined args Array and expand
@@ -3837,6 +3866,7 @@ impl Vm {
                     base_sp: self.stack.len(),
                     is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
                     block_writeback: None,
+                    captured_yield_block: None,
                 });
             }
             Op::NewArray(n) => {
