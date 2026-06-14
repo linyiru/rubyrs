@@ -1588,6 +1588,14 @@ pub(crate) struct Vm {
     pub(crate) basic_object_builtin_metas: std::collections::HashMap<crate::intern::SymId, std::rc::Rc<crate::value::BuiltinMeta>>,
     /// Cached `BasicObject` SymId — same role as `kernel_class_sym`.
     pub(crate) basic_object_class_sym: Option<crate::intern::SymId>,
+    /// Reflection metadata for native `Module` instance methods
+    /// (`name`, …) so `Module.instance_method(:name).bind_call(mod)`
+    /// resolves — zeitwerk's `RealModName` captures `Module#name` this
+    /// way to read a module's real name past any override. Same
+    /// off-table design as `kernel_builtin_metas`.
+    pub(crate) module_builtin_metas: std::collections::HashMap<crate::intern::SymId, std::rc::Rc<crate::value::BuiltinMeta>>,
+    /// Cached `Module` SymId — same role as `kernel_class_sym`.
+    pub(crate) module_class_sym: Option<crate::intern::SymId>,
     /// Cached index into `protos` of the callable→Block
     /// forwarder. Lazily built on first `&callable` coercion in
     /// `do_call_block` (BoundMethod, CurriedProc, ...). The
@@ -1859,6 +1867,8 @@ impl Vm {
             kernel_class_sym: None,
             basic_object_builtin_metas: std::collections::HashMap::new(),
             basic_object_class_sym: None,
+            module_builtin_metas: std::collections::HashMap::new(),
+            module_class_sym: None,
         }
     }
 

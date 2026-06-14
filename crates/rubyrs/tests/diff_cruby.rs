@@ -1165,3 +1165,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // no Ractor model, so the wrapper unwraps to the inner constant write.
 // Surfaced by stdlib time.rb.
 #[test] fn shareable_constant_value() { run_diff("shareable_constant_value"); }
+
+// `Module.instance_method(:name).bind_call(mod)` — native Module#name is
+// exposed through reflection so zeitwerk's RealModName can capture it.
+#[test] fn module_name_reflection() { run_diff("module_name_reflection"); }

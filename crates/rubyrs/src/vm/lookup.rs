@@ -1751,6 +1751,53 @@ impl Vm {
         }
     }
 
+    /// `Module` instance-method builtins — native reflection methods
+    /// (currently `name`) that module/class instances respond to but
+    /// which live in Rust dispatch, not the method table. Registered
+    /// off-table (like Kernel's) in `module_builtin_metas` so
+    /// `Module.instance_method(:name)` resolves without polluting
+    /// `Module.instance_methods`. Motivating case: zeitwerk's
+    /// `RealModName` does `Module.instance_method(:name).bind_call(mod)`.
+    pub(crate) fn install_module_builtins(&mut self) {
+        // Unlike Kernel/BasicObject, the `Module` (and `Class`) class
+        // shells are created lazily on first reference, not in the
+        // preamble — so they're absent at install time. Cache the sym
+        // anyway; `module_builtin_method` resolves the class lazily at
+        // call time, by when any `Module.instance_method(...)` site has
+        // forced the shell into existence.
+        let mod_sym = self.interner.intern("Module");
+        self.module_class_sym = Some(mod_sym);
+        // `Module#name` — CRuby arity 0, no params, source_location nil
+        // (C-defined). Mirror the nil source by passing `None`.
+        type ModuleEntry =
+            (&'static str, i64, &'static [(&'static str, Option<&'static str>)]);
+        let entries: &[ModuleEntry] = &[
+            ("name", 0, &[]),
+        ];
+        for (name, arity, params) in entries {
+            let name_id = self.interner.intern(name);
+            let parameters: Vec<(&'static str, Option<String>)> = params
+                .iter()
+                .map(|(k, n)| (*k, n.map(|s| s.to_string())))
+                .collect();
+            let meta = std::rc::Rc::new(BuiltinMeta {
+                name_id,
+                arity: *arity,
+                parameters,
+                source_label: None,
+                source_line: 0,
+            });
+            self.module_builtin_metas.insert(name_id, meta);
+        }
+    }
+
+    /// Same as `kernel_builtin_method` but for the `Module` registry.
+    pub(crate) fn module_builtin_method(&self, name_id: SymId) -> Option<Rc<Method>> {
+        let meta = self.module_builtin_metas.get(&name_id)?.clone();
+        let cls = self.classes.get(&self.module_class_sym?)?.clone();
+        Some(Self::materialise_builtin_method(meta, &cls))
+    }
+
     /// Materialise the synth Method for a Kernel builtin (or None
     /// if `name_id` isn't a registered builtin). Used by the
     /// `Kernel.instance_method(:foo)` arm to wrap a UnboundMethod
@@ -1808,6 +1855,18 @@ impl Vm {
             && let Some(bo) = self.classes.get(&bsym)
             && class_is_a(cls, bo)
             && let Some(m) = self.basic_object_builtin_method(name_id)
+        {
+            return Some(m);
+        }
+        // Module reflection builtins (`name`, …) — only when `cls`
+        // itself is `Module` or `Class` (the only classes whose
+        // instances are modules). `class_is_a(cls, Module)` is true
+        // exactly for those two; user classes inherit from Object, not
+        // Module, so they don't over-match.
+        if let Some(msym) = self.module_class_sym
+            && let Some(module_cls) = self.classes.get(&msym)
+            && class_is_a(cls, module_cls)
+            && let Some(m) = self.module_builtin_method(name_id)
         {
             return Some(m);
         }

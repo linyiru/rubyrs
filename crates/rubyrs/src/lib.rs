@@ -2231,6 +2231,7 @@ impl Runtime {
                         if step == preamble_cache::STEP_INSTALL_BUILTINS {
                             self.vm.install_kernel_builtins();
                             self.vm.install_basic_object_builtins();
+                            self.vm.install_module_builtins();
                         } else {
                             self.run_compiled(step as usize)
                                 .expect("ICE: preamble cache replay failed");
@@ -2330,6 +2331,7 @@ impl Runtime {
         // `invoke_method_with_block`.
         self.vm.install_kernel_builtins();
         self.vm.install_basic_object_builtins();
+        self.vm.install_module_builtins();
         // Order-significant host step: record its slot in the
         // replay program (the installs intern method names, so a
         // cache replay must run them at exactly this point).
