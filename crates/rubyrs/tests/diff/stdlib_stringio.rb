@@ -87,3 +87,12 @@ c = StringIO.new
 puts c.closed?                     # false
 c.close
 puts c.closed?                     # true
+
+# binmode — no-op returning self (StringIO is always byte-oriented).
+# rack's RewindableInput / Multipart / Lint call `io.binmode`. CRuby
+# has `binmode` but NOT `binmode?`, so respond_to? must mirror that.
+b = StringIO.new("data")
+puts b.binmode.equal?(b)           # true (returns self)
+puts b.read                        # "data" (still usable after binmode)
+puts b.respond_to?(:binmode)       # true
+puts b.respond_to?(:binmode?)      # false

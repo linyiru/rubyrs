@@ -134,6 +134,17 @@ class StringIO
     v
   end
 
+  # `StringIO#binmode` — a no-op that returns self (CRuby: StringIO is
+  # always byte-oriented, so binmode has nothing to do). Real callers:
+  # rack's RewindableInput / Multipart::Parser / UploadedFile (and the
+  # Lint test suite) call `io.binmode` on a StringIO. NOTE: CRuby's
+  # StringIO has `binmode` but NOT `binmode?`, so we deliberately omit
+  # the latter — Rack::Lint's `respond_to?(:binmode?) && !binmode?`
+  # check must stay false (a StringIO is never reported "not binary").
+  def binmode
+    self
+  end
+
   def print(*args)
     args.each { |a| write(a.to_s) }
     nil
