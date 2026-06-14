@@ -2359,6 +2359,46 @@ impl Vm {
                         return self.string_collection_call(s.clone(), name, &coerced);
                     }
                 }
+                // `String#byteslice(range)` — slice by BYTE offsets,
+                // PRESERVING the receiver's encoding tag (CRuby keeps
+                // the original encoding even when the cut lands inside
+                // a multibyte char). The Int / (Int,len) forms are
+                // handled in `string_call`; the Range form needs heap
+                // access for the Range bounds, so it lives here. A
+                // non-Int/Nil endpoint falls through.
+                if name == "byteslice"
+                    && let [Value::Range(rid)] = args
+                {
+                    let bytes = s.content.borrow();
+                    let blen = bytes.len() as i64;
+                    let norm = |i: i64| if i < 0 { blen + i } else { i };
+                    let r = self.heap.range(*rid);
+                    let excl = r.exclusive;
+                    let bi = match &r.begin {
+                        Value::Int(a) => *a,
+                        Value::Nil => 0,
+                        _ => return Ok(None),
+                    };
+                    let ei = match &r.end {
+                        Value::Int(c) => *c,
+                        Value::Nil => blen,
+                        _ => return Ok(None),
+                    };
+                    let start = norm(bi);
+                    if start < 0 || start > blen {
+                        return Ok(Some(Value::Nil));
+                    }
+                    let mut end = norm(ei);
+                    if !excl {
+                        end += 1; // inclusive; a Nil end (→ blen) clamps below
+                    }
+                    let end = end.clamp(start, blen);
+                    let slice = bytes[start as usize..end as usize].to_vec();
+                    return Ok(Some(with_tag(
+                        Value::new_str_bytes(slice),
+                        s.encoding.get(),
+                    )));
+                }
                 // BINARY-encoded receiver: index / slice by BYTES and
                 // keep the ASCII-8BIT tag. The char path below routes
                 // through `to_string_lossy`, which U+FFFD-mangles
