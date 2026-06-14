@@ -214,4 +214,52 @@ impl Vm {
             }
         }
     }
+
+    /// `String#match` / `Regexp#match` against an ASCII-8BIT (BINARY)
+    /// subject — runs the byte engine so the match works at all (a
+    /// lossy UTF-8 `bound` both breaks byte-level patterns like
+    /// `/\xC3/n` AND U+FFFD-mangles captures) and the captures come
+    /// back byte-faithful. Returns `Ok(None)` when there's no byte
+    /// engine (Unicode-needing / fancy pattern), so the caller falls
+    /// back to the lossy `do_regexp_match`. Sets `$~` (with the binary
+    /// span data) and reuses `materialize_last_match`, which already
+    /// rebuilds positional captures from the raw bytes.
+    pub(crate) fn do_regexp_match_binary(
+        &mut self,
+        re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
+        s: &std::rc::Rc<crate::value::RStr>,
+    ) -> Result<Option<Value>, Trap> {
+        let (owned, input): (Option<crate::regex_engine::OwnedCaptures>, Vec<u8>) = {
+            let bytes = s.content.borrow();
+            match re.captures_owned_bytes(&bytes) {
+                Some(o) => (o, bytes.to_vec()),
+                None => return Ok(None),
+            }
+        };
+        self.save_match_scope_on_write();
+        match owned {
+            None => {
+                self.last_match = None;
+                Ok(Some(Value::Nil))
+            }
+            Some(oc) => {
+                let input_lossy = String::from_utf8_lossy(&input).into_owned();
+                self.last_match = Some(crate::vm::LastMatch {
+                    whole: oc.whole,
+                    caps: oc.groups,
+                    input: input_lossy,
+                    m_start: oc.m_start,
+                    m_end: oc.m_end,
+                    named: oc.named,
+                    binary: Some(crate::vm::BinaryCaps {
+                        input: input.into_boxed_slice(),
+                        group_spans: oc.group_spans,
+                    }),
+                });
+                // materialize_last_match reads `binary` → byte-faithful
+                // positional captures, ASCII-8BIT tagged.
+                Ok(Some(self.materialize_last_match()?))
+            }
+        }
+    }
 }

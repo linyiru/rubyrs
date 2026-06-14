@@ -2341,10 +2341,18 @@ impl Vm {
                     };
                     let regex_arg = coerced.as_ref().unwrap_or(&args[0]);
                     if let Value::Regex(re) = regex_arg {
-                        let bound = s.to_string_lossy();
                         // Shared with `Regexp#match` — runs the match,
                         // sets `$~`, materialises MatchData (or Nil).
                         let re = re.clone();
+                        // BINARY subject: byte engine + byte-faithful
+                        // captures (a lossy bound would break byte
+                        // patterns and U+FFFD-mangle captures).
+                        if matches!(s.encoding.get(), crate::value::EncodingTag::Binary)
+                            && let Some(v) = self.do_regexp_match_binary(&re, &s)?
+                        {
+                            return Ok(Some(v));
+                        }
+                        let bound = s.to_string_lossy();
                         return Ok(Some(self.do_regexp_match(&re, bound)?));
                     }
                     return Ok(None);

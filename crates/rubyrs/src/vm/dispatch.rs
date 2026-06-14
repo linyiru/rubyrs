@@ -10969,8 +10969,16 @@ impl Vm {
             let result = match &args[0] {
                 Value::Str(s) => {
                     let re = re.clone();
-                    let bound = s.to_string_lossy();
-                    self.do_regexp_match(&re, bound)?
+                    // BINARY subject: byte engine + byte-faithful captures
+                    // (symmetric with the String#match arm).
+                    if matches!(s.encoding.get(), crate::value::EncodingTag::Binary)
+                        && let Some(v) = self.do_regexp_match_binary(&re, s)?
+                    {
+                        v
+                    } else {
+                        let bound = s.to_string_lossy();
+                        self.do_regexp_match(&re, bound)?
+                    }
                 }
                 Value::Nil => {
                     self.save_match_scope_on_write();
