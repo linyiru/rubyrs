@@ -1820,6 +1820,26 @@ pub(crate) fn string_call(
             };
             Some(Value::Bool(matched))
         }
+        // `Regexp#match?(str, pos)` — start the match attempt at
+        // character offset `pos` (negative counts from the end). No
+        // `$~` update. Searches the suffix from `pos`; out-of-range pos
+        // is no match. (rack's request parser probes with a position.)
+        (Value::Regex(re), "match?", [Value::Str(s), Value::Int(pos)]) => {
+            let lossy = s.to_string_lossy();
+            let char_len = lossy.chars().count() as i64;
+            let cpos = if *pos < 0 { char_len + *pos } else { *pos };
+            let matched = if cpos < 0 || cpos > char_len {
+                false
+            } else {
+                let byte_off = lossy
+                    .char_indices()
+                    .nth(cpos as usize)
+                    .map(|(b, _)| b)
+                    .unwrap_or(lossy.len());
+                re.is_match(&lossy[byte_off..])
+            };
+            Some(Value::Bool(matched))
+        }
         // Regex#source — the raw pattern string.
         #[cfg(feature = "regex")]
         (Value::Regex(re), "source", []) => Some(Value::new_str(re.as_str().to_string())),
