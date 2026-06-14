@@ -941,7 +941,15 @@ pub(crate) fn string_call(
         // bool without populating any match-data side state.
         #[cfg(feature = "regex")]
         (Value::Str(a), "match?", [Value::Regex(re)]) => {
-            Some(Value::Bool(a.with_str_lossy(|s| re.is_match(s))))
+            // BINARY subjects match byte-wise (CRuby ASCII-8BIT); fall
+            // back to the UTF-8 engine when there's no byte engine.
+            let matched = if matches!(a.encoding.get(), crate::value::EncodingTag::Binary) {
+                re.is_match_bytes(&a.content.borrow())
+                    .unwrap_or_else(|| a.with_str_lossy(|s| re.is_match(s)))
+            } else {
+                a.with_str_lossy(|s| re.is_match(s))
+            };
+            Some(Value::Bool(matched))
         }
         // String#match with a String needle — CRuby treats the
         // needle as a regex pattern (`Regexp.new(needle)` + match).
@@ -1785,7 +1793,13 @@ pub(crate) fn string_call(
         // Regex#match? mirror — same semantics either side.
         #[cfg(feature = "regex")]
         (Value::Regex(re), "match?", [Value::Str(s)]) => {
-            Some(Value::Bool(s.with_str_lossy(|s| re.is_match(s))))
+            let matched = if matches!(s.encoding.get(), crate::value::EncodingTag::Binary) {
+                re.is_match_bytes(&s.content.borrow())
+                    .unwrap_or_else(|| s.with_str_lossy(|s| re.is_match(s)))
+            } else {
+                s.with_str_lossy(|s| re.is_match(s))
+            };
+            Some(Value::Bool(matched))
         }
         // Regex#source — the raw pattern string.
         #[cfg(feature = "regex")]

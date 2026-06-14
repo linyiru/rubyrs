@@ -99,6 +99,17 @@ pub struct CompiledRegex {
     /// program, no DFA) and pre-filling keeps the error point at
     /// Regexp construction, same as before.
     engine: std::cell::OnceCell<Engine>,
+    /// Byte-oriented engine for matching BINARY (ASCII-8BIT) subjects,
+    /// built lazily from `engine_pattern` with Unicode disabled
+    /// (`(?-u)`), so `\x80`-`\xff` and `.`/`\w` operate on raw bytes —
+    /// CRuby's behaviour for an ASCII-8BIT regexp / subject. `Some` is
+    /// the built engine; `None` means it couldn't be built (the
+    /// pattern needs Unicode, e.g. `\x{1234}`, or it's the fancy path)
+    /// and the caller falls back to the UTF-8 engine. Only consulted
+    /// for binary-encoded String subjects — UTF-8 matching is
+    /// untouched. Motivation: rack Lint's `value.b !~ /[\x80-\xff]/n`
+    /// over CGI env values.
+    bytes_engine: std::cell::OnceCell<Option<regex::bytes::Regex>>,
     /// The fully-prepared engine pattern (charclass-octal
     /// rewrite + `(?m)` prefix + any inline `(?is)` Ruby-flag
     /// prefix already applied) fed to `regex::Regex::new` at
@@ -149,6 +160,7 @@ pub(crate) fn compile_with_flags(
     match regex_syntax::Parser::new().parse(&prepared) {
         Ok(_) => Ok(CompiledRegex {
             engine: std::cell::OnceCell::new(),
+            bytes_engine: std::cell::OnceCell::new(),
             engine_pattern: prepared.into(),
             ruby_flags,
             source: bare_source.into(),
@@ -168,8 +180,14 @@ pub(crate) fn compile_with_flags(
                 }
                 let cell = std::cell::OnceCell::new();
                 let _ = cell.set(Engine::Fancy(re));
+                // No bytes engine for the fancy path (lookaround /
+                // backrefs have no byte-oriented build); binary
+                // subjects fall back to the UTF-8 engine.
+                let bytes_cell = std::cell::OnceCell::new();
+                let _ = bytes_cell.set(None);
                 Ok(CompiledRegex {
                     engine: cell,
+                    bytes_engine: bytes_cell,
                     engine_pattern: "".into(),
                     ruby_flags,
                     source: bare_source.into(),
@@ -667,6 +685,73 @@ impl CompiledRegex {
             Engine::Native(r) => r.is_match(haystack),
             Engine::Fancy(r) => r.is_match(haystack).unwrap_or(false),
         }
+    }
+
+    /// Lazily build (and cache) the byte-oriented engine for matching
+    /// BINARY subjects — Unicode disabled, so the pattern's `\x80`..`\xff`
+    /// / `.` / `\w` operate on raw bytes (CRuby ASCII-8BIT semantics).
+    /// `None` when it can't be built (the prepared pattern needs Unicode,
+    /// e.g. a `\x{NNNN}` > 0xFF escape, or it's the fancy path with an
+    /// empty `engine_pattern`); callers then fall back to the UTF-8 engine.
+    fn bytes_engine(&self) -> Option<&regex::bytes::Regex> {
+        self.bytes_engine
+            .get_or_init(|| {
+                if self.engine_pattern.is_empty() {
+                    return None;
+                }
+                regex::bytes::RegexBuilder::new(&self.engine_pattern)
+                    .unicode(false)
+                    .build()
+                    .ok()
+            })
+            .as_ref()
+    }
+
+    /// `match?` over a BINARY subject. `None` ⇒ no byte engine (caller
+    /// falls back to the UTF-8 path); `Some(bool)` ⇒ the byte-level
+    /// match verdict.
+    pub(crate) fn is_match_bytes(&self, haystack: &[u8]) -> Option<bool> {
+        Some(self.bytes_engine()?.is_match(haystack))
+    }
+
+    /// `=~` / `match` over a BINARY subject — byte-level captures. The
+    /// OUTER `Option` distinguishes "no byte engine, fall back"
+    /// (`None`) from "byte engine ran" (`Some`); the inner `Option` is
+    /// the match (`None` ⇒ no match). Spans are BYTE offsets (= char
+    /// offsets for ASCII-8BIT). Captured substrings are rendered
+    /// lossily into the `String`-shaped `OwnedCaptures` — exact for the
+    /// common valid-byte case; a documented divergence for `$~`
+    /// pre/post-match over genuinely invalid UTF-8.
+    pub(crate) fn captures_owned_bytes(&self, haystack: &[u8]) -> Option<Option<OwnedCaptures>> {
+        let re = self.bytes_engine()?;
+        let caps = match re.captures(haystack) {
+            Some(c) => c,
+            None => return Some(None),
+        };
+        let m0 = match caps.get(0) {
+            Some(m) => m,
+            None => return Some(None),
+        };
+        let lossy = |m: regex::bytes::Match<'_>| {
+            String::from_utf8_lossy(m.as_bytes()).into_owned()
+        };
+        let groups = (1..caps.len()).map(|i| caps.get(i).map(lossy)).collect();
+        let group_spans = (1..caps.len())
+            .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
+            .collect();
+        let named = re
+            .capture_names()
+            .enumerate()
+            .filter_map(|(i, n)| n.map(|name| (name.to_string(), caps.get(i).map(lossy))))
+            .collect();
+        Some(Some(OwnedCaptures {
+            whole: lossy(m0),
+            m_start: m0.start(),
+            m_end: m0.end(),
+            groups,
+            group_spans,
+            named,
+        }))
     }
 
     /// `String#sub` — first match. `replacement` is in the

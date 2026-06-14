@@ -10916,15 +10916,39 @@ impl Vm {
                 #[cfg(feature = "regex")]
                 (Value::Regex(re), Value::Str(s)) | (Value::Str(s), Value::Regex(re)) => {
                     let bound = s.to_string_lossy();
+                    // BINARY (ASCII-8BIT) subjects match at the BYTE
+                    // level (CRuby semantics): `/[\x80-\xff]/n` must see
+                    // raw high bytes, and the returned index is a BYTE
+                    // offset (each byte is a "char"). Falls back to the
+                    // UTF-8 engine when there's no byte engine (Unicode-
+                    // needing pattern / fancy path). rack Lint's CGI
+                    // env-value `value.b !~ /[\x80-\xff]/n` check.
+                    let is_binary =
+                        matches!(s.encoding.get(), crate::value::EncodingTag::Binary);
+                    let bytes_owned = if is_binary {
+                        re.captures_owned_bytes(&s.content.borrow())
+                    } else {
+                        None
+                    };
                     // Engine-agnostic — handles both the linear and
                     // fancy-regex backends (Mustermann's `/\A...\Z/`
                     // routes force fancy). Fancy errors only on a
                     // match-time blow-up; surface as a trap.
-                    let owned = re.captures_owned(&bound).map_err(|e| {
-                        self.trap(RubyError::RuntimeError {
-                            msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
-                        })
-                    })?;
+                    let (owned, byte_offsets) = match bytes_owned {
+                        Some(o) => (o, true),
+                        None => {
+                            let o = re.captures_owned(&bound).map_err(|e| {
+                                self.trap(RubyError::RuntimeError {
+                                    msg: format!(
+                                        "regex match failed: {} (pattern: /{}/)",
+                                        e,
+                                        re.as_str()
+                                    ),
+                                })
+                            })?;
+                            (o, false)
+                        }
+                    };
                     match owned {
                         Some(oc) => {
                             let m_start = oc.m_start;
@@ -10935,7 +10959,13 @@ impl Vm {
                             // pre_match/post_match (they add this offset to
                             // a char-based position). The byte `m_start` is
                             // still stored for internal pre/post slicing.
-                            let char_idx = bound[..m_start].chars().count() as i64;
+                            // For a BINARY subject the byte offset IS the
+                            // char index (ASCII-8BIT: 1 byte = 1 char).
+                            let char_idx = if byte_offsets {
+                                m_start as i64
+                            } else {
+                                bound[..m_start].chars().count() as i64
+                            };
                             self.save_match_scope_on_write();
                             self.last_match = Some(crate::vm::LastMatch {
                                 whole: oc.whole,
