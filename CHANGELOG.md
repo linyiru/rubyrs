@@ -1815,3 +1815,7 @@ won't be fixed until we have a clear use case demanding parity.
 
 Initial PoC and milestones leading up to this point. All work pre-tag is
 in the commit log; the changelog is canonical from here forward.
+
+[unreleased]: https://github.com/linyiru/rubyrs/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/linyiru/rubyrs/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/linyiru/rubyrs/releases/tag/v0.1.0
