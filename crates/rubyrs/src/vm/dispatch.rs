@@ -6597,6 +6597,15 @@ impl Vm {
                     // NoMethodError. Route to self.dup like the rest.
                     | "dup"
                     | "clone"
+                    // Stringify universals: a bare `inspect` / `to_s`
+                    // inside an instance method (e.g. a `pretty_inspect`
+                    // that delegates to `inspect`, or a `to_s` override
+                    // calling `super`-like bare `to_s`) is dispatched
+                    // on `self`. The explicit-recv path honours a user
+                    // `def inspect` / `def to_s` override first, then
+                    // falls to the universal default.
+                    | "inspect"
+                    | "to_s"
             )
         {
             let self_val = self.frames.last()

@@ -303,6 +303,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn regex_freeze() { run_diff("regex_freeze"); }
 #[test] fn class_allocate() { run_diff("class_allocate"); }
 #[test] fn bare_class_methods() { run_diff("bare_class_methods"); }
+#[test] fn bare_inspect_to_s() { run_diff("bare_inspect_to_s"); }
 #[test] fn class_self_const() { run_diff("class_self_const"); }
 #[test] fn class_self_cvar() { run_diff("class_self_cvar"); }
 #[test] fn class_self_if_modifier() { run_diff("class_self_if_modifier"); }
