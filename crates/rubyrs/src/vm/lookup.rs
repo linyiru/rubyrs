@@ -2140,13 +2140,28 @@ impl Vm {
         cls: &Rc<crate::value::Class>,
         args: Vec<Value>,
     ) -> Result<(), crate::error::Trap> {
+        self.super_builtin_class_new_with_block(cls, args, None)
+    }
+
+    /// `super_builtin_class_new` that also forwards a block to
+    /// `initialize` — `Class#new` passes its block through to
+    /// `initialize`. Backs the `super(*a, &b)` (ApplySuperBlock) shape
+    /// of a `def self.new(*a, &b); super(*a, &b); end` override, e.g.
+    /// concurrent-ruby's `SafeInitialization#new` `extend`ed onto
+    /// `Concurrent::Delay`.
+    pub(crate) fn super_builtin_class_new_with_block(
+        &mut self,
+        cls: &Rc<crate::value::Class>,
+        args: Vec<Value>,
+        block: Option<crate::value::ObjId>,
+    ) -> Result<(), crate::error::Trap> {
         let obj = self.alloc_default_instance(cls)?;
         self.pinned.push(obj.clone());
         let init_id = self.interner.intern("initialize");
         let ruby_init = self.lookup_method_uncached(cls, init_id);
         if let Some(m) = ruby_init {
             let pre_frames = self.frames.len();
-            if let Err(t) = self.invoke_method(m, obj.clone(), args) {
+            if let Err(t) = self.invoke_method_with_block(m, obj.clone(), args, block) {
                 self.pinned.pop();
                 return Err(t);
             }

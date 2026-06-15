@@ -2372,6 +2372,27 @@ impl Vm {
                         let nm = self.interner.resolve(name_id).clone();
                         let cur_self = self.frames.last().map(|f| f.self_val.clone());
                         match (&*nm, cur_self) {
+                            // `super(*a, &b)` to the builtin `Class#new` —
+                            // twin of the no-block arm in
+                            // `super_call_with_lifecycle_noop`. A
+                            // `def self.new(*a, &b); super(*a, &b); end`
+                            // override (or one `extend`ed via a module,
+                            // e.g. concurrent-ruby's `SafeInitialization`
+                            // on `Concurrent::Delay`) resolves super to
+                            // the inline allocator; allocate + run
+                            // initialize (forwarding the block) and yield
+                            // the instance.
+                            ("new", Some(Value::Class(cls))) => {
+                                self.super_builtin_class_new_with_block(&cls, args, block_id)?;
+                            }
+                            ("allocate", Some(Value::Class(cls))) => {
+                                let obj = self.alloc_default_instance(&cls)?;
+                                self.stack.push(obj);
+                            }
+                            ("initialize", Some(Value::Object(_))) => {
+                                // BasicObject#initialize no-op (nil).
+                                self.stack.push(Value::Nil);
+                            }
                             ("send" | "__send__" | "public_send", Some(obj @ Value::Object(_))) => {
                                 let mut args = args;
                                 if args.is_empty() {

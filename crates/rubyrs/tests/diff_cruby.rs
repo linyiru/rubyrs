@@ -1250,3 +1250,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // extend'd singleton methods, and instance methods. Surfaced by faraday's
 // `Request = Struct.new(…){ extend MiddlewareRegistry }` + reopen.
 #[test] fn reopen_struct_in_module() { run_diff("reopen_struct_in_module"); }
+
+// `super(*a, &b)` from a `new` defined in an EXTENDED module reaches the
+// builtin Class#new (allocate + initialize, block forwarded). Surfaced by
+// concurrent-ruby's SafeInitialization on Concurrent::Delay.
+#[test] fn super_class_new_extended_module() { run_diff("super_class_new_extended_module"); }
