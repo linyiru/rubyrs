@@ -1278,3 +1278,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // singleton receiver) routes to the real eigenclass body. Surfaced by
 // stdlib net/http.rb (`class << HTTP; alias …`).
 #[test] fn class_lt_lt_const_alias() { run_diff("class_lt_lt_const_alias"); }
+
+// `Module#const_defined?(name, false)` — own-only (no ancestor walk).
+// Surfaced by stdlib uri/common.rb's `remove_const … if const_defined?(…, false)`.
+#[test] fn const_defined_inherit_false() { run_diff("const_defined_inherit_false"); }

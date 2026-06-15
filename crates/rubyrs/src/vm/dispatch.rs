@@ -8853,6 +8853,34 @@ impl Vm {
                     msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
                 })),
             };
+            // `const_defined?(name, inherit = true)`. When `inherit` is
+            // falsy AND the name is a bare symbol (no `::` path), check
+            // ONLY the receiver's own constant table — not the superclass
+            // chain, not Object/top-level. The full `resolve_const_path`
+            // walks ancestors, which would report an inherited constant
+            // (or a same-named global) as defined; CRuby's own-only form
+            // must not. Surfaced by stdlib uri/common.rb, whose
+            // `remove_const(sym) if const_defined?(sym, false)` loop
+            // tripped when the walk reported `URI::SCHEME` defined before
+            // it was const_set. Mirrors the own-only check in the
+            // `const_source_location` arm above.
+            let inherit = match args.get(1) {
+                None => true,
+                Some(v) => v.is_truthy(),
+            };
+            if !inherit && !split {
+                let key_str = match cls.effective_name().as_deref() {
+                    Some("Object") | None => const_name.clone(),
+                    Some(on) => format!("{}::{}", on, const_name),
+                };
+                let key = self.interner.intern(&key_str);
+                let short = self.interner.intern(&const_name);
+                let found = self.classes.contains_key(&key)
+                    || self.constants.contains_key(&key)
+                    || cls.consts.borrow().contains_key(&short);
+                self.stack.push(Value::Bool(found));
+                return Ok(());
+            }
             let cls_clone = cls.clone();
             let outcome = self.resolve_const_path(&cls_clone, &const_name, split);
             match outcome {
