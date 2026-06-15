@@ -625,6 +625,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn singleton_mixin() { run_diff("singleton_mixin"); }
 #[cfg(feature = "stdlib")]
 #[test] fn fileutils_reflection() { run_diff("fileutils_reflection"); }
+#[test] fn class_try_convert() { run_diff("class_try_convert"); }
 #[test] fn toplevel_self_main() { run_diff("toplevel_self_main"); }
 #[test] fn visibility_method_explicit_recv() { run_diff("visibility_method_explicit_recv"); }
 #[test] fn exception_cause() { run_diff("exception_cause"); }

@@ -5075,6 +5075,44 @@ impl Vm {
             msg: "can't create instance of singleton class".into(),
         }));
     }
+    // `Hash.try_convert(obj)` / `Array.try_convert` / `String.try_convert`
+    // — return `obj` when it's already the target type, else its
+    // `to_hash`/`to_ary`/`to_str` coercion, else `nil` (the object isn't
+    // implicitly convertible). rake/task.rb:278 does
+    // `if opts = Hash.try_convert(args) and !opts.empty?`.
+    if name == "try_convert"
+        && args.len() == 1
+        && let Value::Class(cls) = &recv
+    {
+        let conv_name = match cls.name.as_str() {
+            "Hash" => Some("to_hash"),
+            "Array" => Some("to_ary"),
+            "String" => Some("to_str"),
+            _ => None,
+        };
+        if let Some(conv_name) = conv_name {
+            // `args.len() == 1` was checked above, so element 0 exists.
+            let obj = args.into_vec().remove(0);
+            let already = match conv_name {
+                "to_hash" => matches!(&obj, Value::Hash(_)),
+                "to_ary" => matches!(&obj, Value::Array(_)),
+                _ => matches!(&obj, Value::Str(_)),
+            };
+            if already {
+                self.stack.push(obj);
+            } else {
+                let conv_id = self.interner.intern(conv_name);
+                if self.responds_to(&obj, conv_id, false) {
+                    // `obj.to_hash` — its result (or TypeError) is the answer.
+                    self.stack.push(obj);
+                    self.do_call(conv_id, 0, /*no_recv=*/ false, u16::MAX)?;
+                } else {
+                    self.stack.push(Value::Nil);
+                }
+            }
+            return Ok(ClassOutcome::Handled);
+        }
+    }
     // `Hash[...]` class-method constructor. CRuby has three
     // call shapes:
     //   - `Hash[]`               → empty Hash
