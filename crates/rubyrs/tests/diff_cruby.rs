@@ -1291,3 +1291,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // superclass chain. Surfaced by net/http's `if URI === uri` (URI::Generic
 // includes URI).
 #[test] fn module_case_equality_include() { run_diff("module_case_equality_include"); }
+
+// `require "io/console"` — lenient load-time stdlib stub (returns true
+// then false, `IO` stays defined). Surfaced by the `console` gem
+// (samovar → bridgetown CLI).
+#[test] fn require_io_console() { run_diff("require_io_console"); }

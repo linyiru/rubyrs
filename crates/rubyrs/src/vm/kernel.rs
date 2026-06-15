@@ -4970,6 +4970,13 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         // readiness methods directly and does its own host-side DNS — so
         // these are lenient no-op shells just to satisfy the require.
         | "io/wait" | "resolv"
+        // `io/console`: required at load time by the `console` gem's
+        // terminal output (samovar → bridgetown CLI). Its only real
+        // method use (`IO#winsize`) is on the TTY-only xterm path, never
+        // reached for non-tty/piped output — so a lenient no-op shell
+        // satisfies the require; `IO#winsize`/`#raw` etc. raise
+        // NoMethodError (feature-absent contract) if ever called.
+        | "io/console"
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util" | "cgi/escape" | "cgi/cookie"
         | "ipaddr"
