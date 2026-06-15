@@ -78,3 +78,4 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0026 — Omakase blessed-gem menu](0026-omakase-blessed-gem-menu.md)
 - [0027 — `_sqlite` battery — single-conn rusqlite wrapper + Sequel-lite DSL](0027-battery-sqlite.md)
 - [0028 — `_socket` battery — blocking std::net TCP backing pure-Ruby Net::HTTP](0028-battery-socket.md)
+- [0029 — `_openssl` battery — rustls TLS-client slice for Net::HTTP https](0029-battery-openssl.md)
