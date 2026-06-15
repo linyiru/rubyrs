@@ -651,6 +651,15 @@ fn compile_multiwrite_arm(
 ) {
     use crate::ast::MultiWriteTarget as MWT;
     compile_expr(b, value, protos, interner, cc);
+    // The VALUE of a massign expression is the ORIGINAL RHS, NOT the
+    // coerced destructuring Array: `(a, b = nil)` evaluates to `nil`,
+    // `(a, b = 42)` to `42`, `(a, b = [1, 2])` to `[1, 2]`. Keep a copy
+    // of the RHS beneath the coerced Array and restore it at the end
+    // (the `Pop` after the stores). Without this, `while (x, y =
+    // queue.shift)` looped forever — `shift` returning nil coerced to
+    // `[]` (truthy) instead of staying nil (zeitwerk's eager-load
+    // directory queue, `actual_eager_load_dir`).
+    b.emit(Op::Dup);
     // Coerce the RHS to an Array (CRuby massign semantics) so the
     // per-target `[]` / `__mw_splat` / `__mw_post` calls below see an
     // Array even when the RHS is nil / a scalar / a `to_ary`-shaped
@@ -825,6 +834,10 @@ fn compile_multiwrite_arm(
             }
         }
     }
+    // Drop the coerced destructuring Array; the original RHS copy
+    // (Dup'd above) is now the expression's value — CRuby massign
+    // semantics.
+    b.emit(Op::Pop);
 }
 
 /// Compile the body of `Expr::Begin` — the `begin / rescue /
