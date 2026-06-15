@@ -499,6 +499,15 @@ module Errno
   ## distinct from rubyrs's ResourceExhausted (which is the
   ## VM-level cap on heap object count, not a host malloc fail).
   class ENOMEM < SystemCallError; end
+  ## Operation already in progress — a non-blocking connect() on a
+  ## socket whose handshake is already underway. faraday's net_http
+  ## adapter lists this in its retry/error set (net_http.rb:18); without
+  ## the class the constant reference aborts adapter load.
+  class EALREADY < SystemCallError; end
+  ## Software caused connection abort — the local side aborted an
+  ## established connection. Sibling of ECONNRESET/ECONNREFUSED in
+  ## faraday's net_http exception set.
+  class ECONNABORTED < SystemCallError; end
 end
 
 ## `SecurityError` — raised by CRuby when SAFE-level checks

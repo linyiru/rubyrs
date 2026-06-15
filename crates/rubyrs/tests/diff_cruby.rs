@@ -1269,3 +1269,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `String#clear` — in-place empty, returns self, keeps encoding,
 // FrozenError-aware. Surfaced by net/protocol's rbuf_flush.
 #[test] fn string_clear() { run_diff("string_clear"); }
+
+// `Errno::EALREADY` / `ECONNABORTED` — the two socket Errno classes
+// rubyrs was missing from faraday-net_http's exception list.
+#[test] fn errno_ealready_econnaborted() { run_diff("errno_ealready_econnaborted"); }
