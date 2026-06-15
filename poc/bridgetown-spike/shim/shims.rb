@@ -25,6 +25,20 @@ module Bundler
   def self.reset!; end
 end
 
+# WALL: `Gem::Deprecate` is part of the unvendored rubygems runtime.
+# addressable's idna/pure.rb does `extend Gem::Deprecate` then
+# `deprecate :foo, :bar, 2023, 1` to wrap methods with a deprecation
+# notice. For the spike a no-op `deprecate` (leave the method as-is) is
+# faithful enough — the deprecation warning is cosmetic.
+module Gem
+  module Deprecate
+    def deprecate(*); self; end
+    def rubygems_deprecate(*); self; end
+    def rubygems_deprecate_command(*); self; end
+    def skip_during; yield if block_given?; end
+  end
+end
+
 # Satisfy `require "bundler/shared_helpers"` / `require "bundler"` with the
 # shim above instead of the unvendored gem.
 module Kernel

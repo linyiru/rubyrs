@@ -5,16 +5,19 @@ G = "/Users/linyiru/.rbenv/versions/3.4.1/lib/ruby/gems/3.4.0/gems"
 $LP = $LOAD_PATH
 [
   "bridgetown-core-2.2.1", "bridgetown-foundation-2.2.1", "addressable-2.8.7",
-  "amazing_print-1.8.1", "bigdecimal-3.1.8", "csv-3.3.2", "erubi-1.13.1",
+  "amazing_print-1.8.1", "csv-3.3.2", "erubi-1.13.1",
   "faraday-2.12.2", "faraday-follow_redirects-0.5.0", "freyia-0.6.2",
   "i18n-1.14.7", "kramdown-2.5.2", "kramdown-parser-gfm-1.1.0",
   "liquid-5.4.0", "listen-3.10.0", "rack-3.1.10", "rackup-2.2.1",
   "rake-13.2.1", "roda-3.105.0", "rouge-4.7.0", "samovar-2.4.1",
   "serbea-2.4.1", "signalize-1.3.1",
   "streamlined-0.6.2", "tilt-2.7.0", "zeitwerk-2.7.1",
-  "public_suffix-6.0.1", "concurrent-ruby-1.3.6",
+  "public_suffix-6.0.1",
   "hash_with_dot_access-2.2.0", "inclusive-1.1.0", "dry-inflector-1.3.1",
 ].each { |g| $LP.unshift("#{G}/#{g}/lib") }
+# concurrent-ruby's require_path is lib/concurrent-ruby (not lib), so
+# `require "concurrent/map"` resolves under that subdir.
+$LP.unshift("#{G}/concurrent-ruby-1.3.6/lib/concurrent-ruby")
 
 # Curated pure-Ruby stdlib subset (find, fileutils) that rubyrs doesn't
 # vendor. We expose ONLY these, not the whole stdlib dir, so heavyweight

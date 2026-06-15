@@ -32,24 +32,42 @@ the top of `bt-probe.rb`.
 5. `securerandom` — dropped to rubyrs' native stub (real gem uses
    `begin/rescue` inside `class << self`, see walls).
 
-**Progress (2026-06-14, round 2):** after the upstream eigenclass-body
-work (`class << expr` now executes for real), zeitwerk fully **loads,
-runs `Loader#setup`, and eager-loads** — it walks `bridgetown-foundation`'s
-`lib/` tree. Two VM fixes this round carried it there: `Dir.each_child`
-(zeitwerk's directory walk) and the require-scope fix (a required file's
-top-level `def`s now land on Object, not the enclosing class body).
+**Progress (2026-06-15, round 4):** zeitwerk's implicit-namespace
+directory autovivification now works end to end — `require "bridgetown-core"`
+boots **all the way through** bridgetown-foundation → liquid → kramdown →
+rouge → listen → i18n → concurrent-ruby and into **faraday**. The require
+chain runs through zeitwerk's decorated `Kernel#require`
+(`core_ext/kernel.rb`) cleanly.
 
-**Current wall (frontier):** zeitwerk autovivifies implicit-namespace
-**directories** by registering `Module#autoload(:CoreExt, "<dir>")` and
-intercepting the fired `require "<dir>"` in its own decorated
-`Kernel#require` (zeitwerk/core_ext/kernel.rb) — when the path is a
-directory it calls `loader.__on_dir_autoloaded` (creates the module)
-instead of file-loading. rubyrs' autoload-fired / native `require` does
-**not** dispatch through a Ruby-level `Kernel#require` override, so the
-raw require hits the directory → `RuntimeError: read … Is a directory`.
-Honouring a user-defined `Kernel#require` (at least for the
-autoload-trigger path) is the next wall — invasive, since `require` is
-perf-critical and deeply wired.
+VM fixes that carried it here (all landed with diff_cruby coverage):
+- **require honours a user `Kernel#require` override** (the upstream
+  campaign): autoload-fired AND explicit requires now route through it,
+  so zeitwerk's directory autovivification fires.
+- **`const_get(name, false)` fires autoloads through the override** —
+  zeitwerk's eager_load descends namespace dirs via `const_get`, a path
+  that previously bypassed the override and hit `require "<dir>"`.
+- **`Kernel.method_defined?` answers honestly** — was blanket-true, which
+  broke the `alias_method … unless method_defined?` guard idiom.
+- **`class << self` with if/elsif/case-wrapped defs** → routed to the
+  real eigenclass body (listen's MonotonicTime).
+- **`super(key, ...)`** argument forwarding (faraday's Headers#fetch).
+- `Dir.each_child`, the require-scope fix (round-3), etc.
+
+Shim/probe additions this round: `Gem::Deprecate` no-op (addressable);
+drop the bigdecimal gem (use rubyrs' vendored one, the gem wants
+`bigdecimal.so`); concurrent-ruby's real `lib/concurrent-ruby` require
+path.
+
+**Current wall (frontier):** faraday's `Options` value-object DSL —
+`ProxyOptions = Options.new(:uri, :user, :password) do … memoized(:user)
+{ … } end` where `class Options < Struct`. rubyrs' preamble `Struct.new`
+builds the generated class with `Class.new` (superclass Object), so it
+does NOT inherit `Options`'s class methods (`memoized`, `from`). CRuby's
+`Struct`-subclass factory makes `Options.new(*members)` a subclass of
+`Options`. Fixing this needs the dual `new` semantics (factory when the
+receiver has no members yet, instance creation once it does) — an
+intricate, high-blast-radius preamble change (Struct underpins rack and
+many gems), deferred to its own isolated effort.
 
 ## VM fixes this spike drove (landed, with diff_cruby coverage)
 
