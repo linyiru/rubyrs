@@ -163,13 +163,15 @@ panic / RSS ratchets) on every commit:
 rubyrs = { git = "https://github.com/linyiru/rubyrs" }
 ```
 
-History note: the crates.io entries (`rubyrs@0.1.0`,
-`rubyrs-cext@0.1.0`, published 2026-05-25) are name-registration
+History note: rubyrs's first crates.io entries (`rubyrs@0.1.0`,
+`rubyrs-cext@0.1.0`, published 2026-05-25) were name-registration
 placeholders from before the Jekyll-era work, and the
 [`v0.1.0` git tag](https://github.com/linyiru/rubyrs/releases/tag/v0.1.0)
-predates it too (263 fixtures vs today's 585). The next tagged
-release will be the first one published to crates.io as a real
-artifact; until then, git `master` is the source of truth. The
+predates them too (263 fixtures vs today's 585).
+[`v0.2.0`](https://github.com/linyiru/rubyrs/releases/tag/v0.2.0)
+(2026-06-14) is the first real published artifact — pin
+`rubyrs = "0.2"` for a stable release, or depend on git `master`
+(kept green on every commit) to track the latest. The
 sibling engine crates extracted from this work ARE current on
 crates.io: [carmine](https://crates.io/crates/carmine)
 (rouge-compatible highlighting),

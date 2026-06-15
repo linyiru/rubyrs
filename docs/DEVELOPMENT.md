@@ -308,7 +308,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-rubyrs = "0.1"
+rubyrs = "0.2"
 ```
 
 Use:
