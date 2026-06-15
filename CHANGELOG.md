@@ -110,6 +110,23 @@ holding off concurrent SIGINT during close).
 
 ### Fixed
 
+- **Stack overflow at startup in debug builds on small main-thread
+  stacks** (issue #356 — our first user-filed issue 🎉). Constructing
+  a `Runtime` parses + compiles the always-on preamble through the
+  recursive AST→IR translator (`ast::tr`); unoptimised (debug) frames
+  carry every match arm's locals, so the startup stack high-water
+  reached ~2 MB and overflowed the **1 MB default main-thread stack on
+  Windows** (Linux/macOS get 8 MB, and release builds shrink the
+  frames — so both were unaffected, matching the report that release
+  worked and `[profile.dev.package.rubyrs] opt-level = 3` was a
+  viable workaround). `ast::tr` now grows the native stack on demand
+  via `stacker::maybe_grow`, bounding the high-water to ~380 KB
+  regardless of AST depth. The guard is a cheap stack-pointer compare
+  on the common path (no measurable perf change to `Runtime::new`) and
+  is native-only — wasm keeps plain recursion. A `windows-latest` CI
+  job runs the reporter's exact scenario in a debug build as a
+  regression guard.
+
 - **ADR 0023 Risk #1 — `body.close` on client disconnect** now
   actually fires. v6 documented the `FiberResponseBody::drop`
   intent; v7 (Phase 5b) wires `SuppressInterruptGuard` around

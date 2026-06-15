@@ -2389,7 +2389,59 @@ pub(crate) fn tr_assoc_value(ctx: &mut TranslationCtx<'_>, an: &ruby_prism::Asso
     tr(ctx, &an.value())
 }
 
+/// Minimum native stack (bytes) that must remain before `tr`
+/// recursion is allowed to continue on the current stack; below this
+/// `maybe_grow` switches to a fresh heap segment. It must exceed the
+/// stack one `tr_impl` invocation consumes between two recursive `tr`
+/// calls in a debug build (its own frame — every match arm's locals —
+/// plus the iterator/collect/closure frames), so the guard trips with
+/// headroom rather than overshooting into an overflow. 128 KB clears
+/// that with margin: measured startup high-water (preamble compile)
+/// drops from ~2 MB to ~380 KB, well under the 1 MB default
+/// main-thread stack on Windows (issue #356). The residual floor is
+/// the prologue plus Prism's own C parser recursion (source→AST,
+/// which this guard doesn't cover) — both far below any realistic
+/// main-thread stack, so guarding only `tr` is sufficient. Raising
+/// the red zone doesn't lower that floor; it just trips the guard
+/// sooner. On a roomy 8 MB main thread the guard never trips and
+/// costs only a stack-pointer compare per node.
+#[cfg(not(target_family = "wasm"))]
+const TR_RED_ZONE: usize = 128 * 1024;
+/// Size of each fresh stack segment `maybe_grow` allocates when the
+/// red zone is hit.
+#[cfg(not(target_family = "wasm"))]
+const TR_STACK_GROW: usize = 2 * 1024 * 1024;
+
+/// Stack-growth guard around the recursive AST→IR translator.
+///
+/// `tr_impl` recurses structurally over the Prism AST; in unoptimised
+/// (debug) builds every frame carries the locals of *all* match arms,
+/// so each level of nesting costs several KB of native stack. The
+/// always-on preamble is compiled through this path at
+/// `Runtime::new`, and a deeply nested expression there could blow a
+/// small thread stack — notably the 1 MB default *main-thread* stack
+/// on Windows, where debug embedders overflowed at startup while
+/// release (smaller frames) ran fine. See issue #356.
+///
+/// `stacker::maybe_grow` is a cheap stack-pointer check on the common
+/// path; only when fewer than `TR_RED_ZONE` bytes remain does it
+/// heap-allocate a fresh `TR_STACK_GROW`-byte segment and continue the
+/// recursion there, so the native thread stack stays bounded
+/// regardless of AST depth. wasm has a link-time-fixed stack and psm
+/// can't switch stacks, so there we fall back to plain recursion
+/// (unchanged behaviour).
 pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        stacker::maybe_grow(TR_RED_ZONE, TR_STACK_GROW, move || tr_impl(ctx, node))
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        tr_impl(ctx, node)
+    }
+}
+
+fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     let span = node_span(node);
     if let Some(n) = node.as_program_node() {
         let stmts: Vec<SExpr> = n.statements().body().iter().map(|c| tr(ctx, &c)).collect();

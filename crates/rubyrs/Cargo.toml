@@ -396,6 +396,20 @@ rubyrs-cext = { path = "../rubyrs-cext", version = "0.1.0", optional = true }
 [target.'cfg(not(target_os = "wasi"))'.dependencies]
 libloading = { workspace = true, optional = true }
 
+# `stacker` grows the native stack on demand inside the AST→IR
+# translator (`ast::tr`). `tr` is one large function that recurses
+# structurally over the Prism AST; in unoptimised (debug) builds each
+# frame carries every arm's locals, costing several KB per nesting
+# level. The always-on preamble is compiled through this path at
+# `Runtime::new`, so a deeply nested AST could overflow a small thread
+# stack — notably the 1 MB default *main-thread* stack on Windows,
+# where debug embedders overflowed at startup while release (smaller
+# frames) ran fine. See issue #356. Native-only: wasm has a
+# link-time-fixed stack and psm can't switch stacks there, so `ast::tr`
+# falls back to plain recursion under `cfg(target_family = "wasm")`.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+stacker = "0.1"
+
 # ADR 0025 Phase 1 — POSIX signal handling for `Config::install_signal_handler`.
 # `signal-hook::flag::register` is documented async-signal-safe (atomic store
 # only); it's the minimal-surface choice over hand-rolling `sigaction`.
