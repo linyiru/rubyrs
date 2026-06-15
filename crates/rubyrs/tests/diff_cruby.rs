@@ -617,6 +617,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn strscan_scan_until() { run_diff("strscan_scan_until"); }
 #[cfg(feature = "stdlib")]
 #[test] fn strscan_linear_scaling() { run_diff("strscan_linear_scaling"); }
+#[cfg(feature = "stdlib")]
+#[test] fn query_parse_linear_scaling() { run_diff("query_parse_linear_scaling"); }
 #[test] fn visibility_method_explicit_recv() { run_diff("visibility_method_explicit_recv"); }
 #[test] fn exception_cause() { run_diff("exception_cause"); }
 #[test] fn bare_warn_singleton_override() { run_diff("bare_warn_singleton_override"); }
