@@ -389,6 +389,19 @@ pub(crate) struct HashObj {
     /// `ArrayObj.frozen`). `freeze` sets it; every mutating method
     /// then raises FrozenError. `clone` copies it; `dup` resets it.
     pub(crate) frozen: std::cell::Cell<bool>,
+    /// `Hash#compare_by_identity` flag. When set, CRuby compares keys
+    /// by `equal?` (object identity) instead of `eql?`/`hash`. In
+    /// rubyrs's Tier-1 Hash model, object/class/module/symbol keys
+    /// ALREADY compare by identity (their `ruby_eql`/`ruby_hash` are
+    /// pointer/ id based), so the realistic identity-map use — keys
+    /// that are Module/Class objects, e.g. zeitwerk's
+    /// `Zeitwerk::Cref::Map` — behaves correctly with the flag alone.
+    /// Primitive-value keys (String/Array contents) keep value
+    /// semantics here, a documented divergence (full identity hashing
+    /// would need an object-id-keyed index threaded through the hot
+    /// path). `compare_by_identity?` reflects this bit; `clone`/`dup`
+    /// preserve it (CRuby copies the flag on both).
+    pub(crate) by_identity: std::cell::Cell<bool>,
 }
 
 /// `ruby_hash(key)` → pair positions, keyed directly on the 64-bit
@@ -427,6 +440,7 @@ impl HashObj {
             index: None,
             singleton_class: None,
             frozen: std::cell::Cell::new(false),
+            by_identity: std::cell::Cell::new(false),
         }
     }
 }

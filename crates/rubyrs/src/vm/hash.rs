@@ -374,10 +374,27 @@ impl Vm {
                         let nid = self.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
-                    // rubyrs never sets the compare-by-identity bit (the
-                    // `compare_by_identity` mutator raises), so this is
-                    // always false. rack Headers exposes it for parity.
-                    ("compare_by_identity?", []) => Some(Value::Bool(false)),
+                    // `compare_by_identity` flips the bit and returns
+                    // self (chainable). Identity-comparison semantics
+                    // already hold for object/class/module/symbol keys
+                    // in rubyrs's Hash; the flag is what
+                    // `compare_by_identity?` reports and what dup/clone
+                    // propagate. Primitive-value keys keep value
+                    // semantics — documented Tier-1 divergence (see the
+                    // `HashObj.by_identity` field). Frozen guard is via
+                    // `is_hash_mutator` above (CRuby raises FrozenError).
+                    // Motivating case: zeitwerk's `Zeitwerk::Cref::Map`
+                    // (`@map = {}; @map.compare_by_identity`), keyed by
+                    // Module objects.
+                    ("compare_by_identity", []) => {
+                        if let HeapObj::Hash(h) = self.heap.get(id) {
+                            h.by_identity.set(true);
+                        }
+                        Some(Value::Hash(id))
+                    }
+                    ("compare_by_identity?", []) => Some(Value::Bool(
+                        matches!(self.heap.get(id), HeapObj::Hash(h) if h.by_identity.get()),
+                    )),
                     // `Hash#flatten(level = 1)` == `to_a.flatten(level)`:
                     // `to_a` is `[[k, v], ...]`, so level 1 spreads the
                     // pairs (`[k, v, k, v, ...]`) and leaves array VALUES
@@ -1008,6 +1025,12 @@ impl Vm {
                         let ivars = self.heap.hash_ivars_clone(id);
                         // `clone` preserves the frozen bit; `dup` resets it.
                         let keep_frozen = name == "clone" && self.heap.hash_frozen(id);
+                        // `compare_by_identity` survives BOTH dup and
+                        // clone (CRuby copies the flag on each).
+                        let by_identity = matches!(
+                            self.heap.get(id),
+                            crate::heap::HeapObj::Hash(h) if h.by_identity.get()
+                        );
                         // `clone` also copies the per-instance singleton
                         // class (so `def h.foo` survives `h.clone`);
                         // `dup` drops it. CRuby: `h.dup.foo` → NoMethodError,
@@ -1039,6 +1062,7 @@ impl Vm {
                             index: None,
                             singleton_class,
                             frozen: std::cell::Cell::new(keep_frozen),
+                            by_identity: std::cell::Cell::new(by_identity),
                         }));
                         if default_block.is_some() {
                             g.vm.heap.hash_set_default_block(nid, default_block);

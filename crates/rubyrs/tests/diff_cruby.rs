@@ -157,6 +157,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_basics() { run_diff("string_basics"); }
 #[test] fn array_basics() { run_diff("array_basics"); }
 #[test] fn hash_basics() { run_diff("hash_basics"); }
+#[test] fn hash_compare_by_identity() { run_diff("hash_compare_by_identity"); }
 #[test] fn index_fast_path() { run_diff("index_fast_path"); }
 #[test] fn hash_key_fast_path() { run_diff("hash_key_fast_path"); }
 #[cfg(feature = "stdlib")]

@@ -5180,6 +5180,7 @@ impl Vm {
             index: None,
                 singleton_class: None,
             frozen: std::cell::Cell::new(false),
+            by_identity: std::cell::Cell::new(false),
         }));
         g.vm.stack.push(Value::Hash(hid));
         return Ok(ClassOutcome::Handled);
@@ -5551,6 +5552,7 @@ impl Vm {
             index: None,
             singleton_class: None,
             frozen: std::cell::Cell::new(false),
+            by_identity: std::cell::Cell::new(false),
         }));
         if default.is_some() {
             g.vm.heap.hash_set_default_value(hid, default);
@@ -15687,6 +15689,7 @@ impl Vm {
                     index: None,
                     singleton_class: None,
                     frozen: std::cell::Cell::new(false),
+                    by_identity: std::cell::Cell::new(false),
                 }));
                 g.vm.heap.hash_set_default_block(hid, Some(block));
                 g.vm.stack.push(Value::Hash(hid));
@@ -17185,6 +17188,7 @@ impl Vm {
                 index: None,
                 singleton_class: None,
                 frozen: std::cell::Cell::new(false),
+                by_identity: std::cell::Cell::new(false),
             }));
             return Ok(Value::Hash(id));
         }
