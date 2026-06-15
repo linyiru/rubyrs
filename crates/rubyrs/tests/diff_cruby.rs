@@ -1233,3 +1233,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `super(key, ...)` — Ruby 3.0 argument forwarding in an explicit-args
 // super call. Surfaced by faraday's Utils::Headers#fetch.
 #[test] fn super_forwarding_args() { run_diff("super_forwarding_args"); }
+
+// String-form `class_eval` / `module_eval` captures the caller's local
+// binding (bare identifiers resolve to enclosing-method locals) while
+// `def` still installs onto the receiver class. Surfaced by faraday's
+// Options.memoized.
+#[test] fn class_eval_string_locals() { run_diff("class_eval_string_locals"); }

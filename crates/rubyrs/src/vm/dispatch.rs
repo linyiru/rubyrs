@@ -8230,7 +8230,18 @@ impl Vm {
             // cls, def installs onto cls. (Previously landed at
             // toplevel — documented divergence, removed; minitest's
             // infect_an_assertion was the forcing consumer.)
-            let v = self.eval_string_with_class_ctx(&src, &filename, synthetic, Some(cls.clone()))?;
+            //
+            // Seed the eval with the CALLER's local binding: CRuby's
+            // string-form class_eval sees the enclosing scope's locals
+            // (verified: `def m(key); class_eval("p key"); end` prints
+            // the arg). faraday's `Options.memoized` relies on this —
+            // its `class_eval(<<~RUBY) { remove_method(key) … }` reads
+            // the `key` method local inside the string. The seed names
+            // become leading local slots (so the compiler resolves them
+            // as locals, not method calls) and the class_stack push
+            // still routes `def` onto cls.
+            let seed = self.snapshot_caller_named_locals();
+            let v = self.eval_string_full(&src, &filename, synthetic, Some(cls.clone()), None, seed)?;
             if self.suppress_call_result_push {
                 self.suppress_call_result_push = false;
             } else {

@@ -4267,6 +4267,45 @@ impl Vm {
         }
     }
 
+    /// Snapshot the current (caller) frame's NAMED locals as
+    /// slot-ordered `(name, value)` pairs — the local binding a
+    /// string-form `class_eval` / `module_eval` runs against (CRuby
+    /// gives the eval'd source the caller's local scope). Same walk the
+    /// `Kernel#binding` builtin uses; `frames.last()` is the caller
+    /// because class_eval is handled inline in `do_call`, not as a
+    /// method with its own frame.
+    pub(crate) fn snapshot_caller_named_locals(&self) -> Vec<(String, Value)> {
+        let mut snap: Vec<(String, Value)> = Vec::new();
+        if let Some(frame) = self.frames.last() {
+            let proto_idx = frame.proto_idx;
+            let shared = frame.locals.as_shared().cloned();
+            let stack_base = match &frame.locals {
+                crate::vm::Locals::Stack(b) => Some(*b as usize),
+                crate::vm::Locals::Shared(_) => None,
+            };
+            let n = self.protos[proto_idx].n_locals as usize;
+            for slot in 0..n {
+                let name = self.protos[proto_idx]
+                    .local_names
+                    .get(slot)
+                    .cloned()
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    continue;
+                }
+                let val = if let Some(rc) = &shared {
+                    rc.borrow().get(slot).cloned().unwrap_or(Value::Nil)
+                } else if let Some(base) = stack_base {
+                    self.locals_arena.get(base + slot).cloned().unwrap_or(Value::Nil)
+                } else {
+                    Value::Nil
+                };
+                snap.push((name, val));
+            }
+        }
+        snap
+    }
+
     pub(crate) fn eval_string(
         &mut self,
         source: &str,
