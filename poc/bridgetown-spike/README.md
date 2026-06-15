@@ -69,18 +69,23 @@ request middleware. Two more VM fixes this round carried it:
 - **`ruby2_keywords` no-op class-body intrinsic** — faraday's
   `RackBuilder::Handler`.
 
-**Current wall (frontier):** `require "faraday"` (standalone, no zeitwerk)
-fails at `faraday/request/authorization.rb:54` —
-`Faraday::Request.register_middleware` is undefined. `Request = Struct.new(…)
-do extend MiddlewareRegistry; … end` should make `register_middleware` a
-class method, but in the full faraday load `MiddlewareRegistry` ends up
-absent from `Request`'s singleton ancestors (the `extend` adds nothing).
-**Every minimal reproduction passes** (inline, cross-file, with
-`def self.x` / `alias_method` / `private` / `remove_method` in the block),
-so it's a subtle constant-resolution-or-singleton interaction specific to
-faraday's full load — needs dedicated fresh debugging, not more
-tail-of-session probing. Clean standalone repro:
-`ruby -e 'require "faraday"'` on rubyrs.
+**Progress (2026-06-15, round 7):** the faraday `register_middleware`
+wall is **FIXED** — root cause was that `module Faraday; Request =
+Struct.new(…) { extend MiddlewareRegistry }` named/keyed the anon struct
+class by the BARE name "Request", so the later `class Request` reopen
+(authorization.rb), which keys by the qualified "Faraday::Request",
+minted a fresh empty class and dropped the struct members + the extend.
+Fixed in `Op::StoreConst` (scope-qualify the anon-class name). faraday
+now loads end to end (request middleware, response logging via a `pp`
+shim). Shim/probe additions: `pp` → `pretty_inspect` no-op; samovar's
+CLI dep chain (mapping, console, fiber-annotation, fiber-local).
+
+**Current wall (frontier):** concurrent-ruby's `SafeInitialization` —
+`module SafeInitialization; def new(*a, &b); super(*a, &b); ensure …; end;
+end`, `extend`ed onto `Concurrent::Delay`. `Delay.new` → the module's
+`new` → `super` should reach the builtin `Class#new`, but rubyrs raises
+`super: no superclass method 'new'`. A distinct VM gap (super-to-builtin-
+`Class#new` from an extended-module method), not the struct/const bug.
 
 ## VM fixes this spike drove (landed, with diff_cruby coverage)
 

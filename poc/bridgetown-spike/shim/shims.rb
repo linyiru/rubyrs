@@ -39,6 +39,15 @@ module Gem
   end
 end
 
+# WALL: `pp` (pretty-print stdlib) isn't vendored. faraday's logging
+# formatter requires it for `Object#pretty_inspect`. A plain inspect (+ the
+# trailing newline pp adds) is faithful enough for the load + the log path.
+module Kernel
+  def pretty_inspect
+    "#{inspect}\n"
+  end
+end
+
 # Satisfy `require "bundler/shared_helpers"` / `require "bundler"` with the
 # shim above instead of the unvendored gem.
 module Kernel
@@ -46,8 +55,8 @@ module Kernel
   def require(name)
     # WALL: the real rubygems.rb / bundler are unvendored and pull in a
     # large C-backed surface. rubyrs already exposes a minimal `Gem`
-    # namespace; treat these as already-loaded.
-    return true if name == "bundler/shared_helpers" || name == "bundler" || name == "rubygems"
+    # namespace; treat these as already-loaded. `pp` is stubbed above.
+    return true if name == "bundler/shared_helpers" || name == "bundler" || name == "rubygems" || name == "pp"
     __bt_orig_require(name)
   end
 end
