@@ -1191,3 +1191,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `Dir.each_child(path)` — block + Enumerator forms, excluding "."/"..".
 // zeitwerk's Loader::Helpers walks autoload directories this way.
 #[test] fn dir_each_child() { run_diff("dir_each_child"); }
+
+// A required file's body runs at top-level lexical nesting: its top-level
+// `def`s become global functions even when the `require` sits inside a
+// class body. Surfaced by mustermann's `require 'delegate'` inside
+// Hanami::Router (DelegateClass must be global, not a Router method).
+#[test] fn require_inside_class_body() { run_diff("require_inside_class_body"); }

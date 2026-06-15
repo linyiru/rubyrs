@@ -3994,6 +3994,21 @@ impl Vm {
         // frames.len() perspective once dispatch_until returns Ok.
         let depth_before = self.frames.len();
         let stack_before = self.stack.len();
+        // A required file's body runs at top-level lexical nesting, like
+        // CRuby — its `def`s land on Object (a private global function),
+        // NOT on whatever class body the `require` call sits inside.
+        // `Op::DefMethod` resolves its target from `class_stack.last()`,
+        // so we must hide the caller's class-body context (and the
+        // parallel visibility / module_function stacks) for the duration
+        // of the required body, restoring them on every exit path below.
+        // Without this, `require "delegate"` from inside a `class Foo`
+        // body defined `DelegateClass` on `Foo` instead of Object —
+        // mustermann's `class NodeTranslator < DelegateClass(Node)`
+        // (loaded inside Hanami::Router's class body) then raised
+        // NoMethodError.
+        let saved_class_stack = std::mem::take(&mut self.class_stack);
+        let saved_visibility_stack = std::mem::take(&mut self.class_visibility_stack);
+        let saved_modfn_stack = std::mem::take(&mut self.module_function_active_stack);
         // A required file's top-level `self` is the `main` object, like
         // CRuby — so top-level `self.extend Module` in a required file
         // works (rake/dsl_definition.rb:196 `self.extend Rake::DSL`).
@@ -4037,6 +4052,9 @@ impl Vm {
             // unwound past us).
             if let Err(trap) = self.dispatch_until(depth_before) {
                 self.loaded_features.remove(&canon);
+                self.class_stack = saved_class_stack;
+                self.class_visibility_stack = saved_visibility_stack;
+                self.module_function_active_stack = saved_modfn_stack;
                 return Err(trap);
             }
             if self.method_return.is_none() {
@@ -4118,6 +4136,13 @@ impl Vm {
             // inside required file body since we capped at
             // depth_before + 1).
         }
+        // Restore the caller's definee stacks now that the required
+        // body has finished (normally or via an unwind that stayed
+        // below our <main> frame). All remaining exit paths are past
+        // this point, so a single restore covers them.
+        self.class_stack = saved_class_stack;
+        self.class_visibility_stack = saved_visibility_stack;
+        self.module_function_active_stack = saved_modfn_stack;
         // If method_return is still set, the unwind targeted our
         // <main> or above — let the outer dispatch finish it.
         if self.method_return.is_some() {
