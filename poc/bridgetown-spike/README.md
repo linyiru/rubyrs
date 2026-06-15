@@ -58,16 +58,29 @@ drop the bigdecimal gem (use rubyrs' vendored one, the gem wants
 `bigdecimal.so`); concurrent-ruby's real `lib/concurrent-ruby` require
 path.
 
-**Current wall (frontier):** faraday's `Options` value-object DSL —
-`ProxyOptions = Options.new(:uri, :user, :password) do … memoized(:user)
-{ … } end` where `class Options < Struct`. rubyrs' preamble `Struct.new`
-builds the generated class with `Class.new` (superclass Object), so it
-does NOT inherit `Options`'s class methods (`memoized`, `from`). CRuby's
-`Struct`-subclass factory makes `Options.new(*members)` a subclass of
-`Options`. Fixing this needs the dual `new` semantics (factory when the
-receiver has no members yet, instance creation once it does) — an
-intricate, high-blast-radius preamble change (Struct underpins rack and
-many gems), deferred to its own isolated effort.
+**Progress (2026-06-15, round 6):** the user's Struct subclass-as-factory
+(double-new) commit cleared the `Options` frontier; faraday now loads
+through its `Options`/`memoized` DSL, `rack_builder`, and into the
+request middleware. Two more VM fixes this round carried it:
+- **string-form `class_eval`/`module_eval` captures the caller's local
+  binding** — faraday's `Options.memoized` does
+  `class_eval("…remove_method(key)…def #{key}…")` reading the `key`
+  method local inside the string.
+- **`ruby2_keywords` no-op class-body intrinsic** — faraday's
+  `RackBuilder::Handler`.
+
+**Current wall (frontier):** `require "faraday"` (standalone, no zeitwerk)
+fails at `faraday/request/authorization.rb:54` —
+`Faraday::Request.register_middleware` is undefined. `Request = Struct.new(…)
+do extend MiddlewareRegistry; … end` should make `register_middleware` a
+class method, but in the full faraday load `MiddlewareRegistry` ends up
+absent from `Request`'s singleton ancestors (the `extend` adds nothing).
+**Every minimal reproduction passes** (inline, cross-file, with
+`def self.x` / `alias_method` / `private` / `remove_method` in the block),
+so it's a subtle constant-resolution-or-singleton interaction specific to
+faraday's full load — needs dedicated fresh debugging, not more
+tail-of-session probing. Clean standalone repro:
+`ruby -e 'require "faraday"'` on rubyrs.
 
 ## VM fixes this spike drove (landed, with diff_cruby coverage)
 
