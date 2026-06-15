@@ -110,6 +110,14 @@ class Set
     self
   end
 
+  # Replace the contents with the elements of `enum` (CRuby
+  # Set#replace). Returns self.
+  def replace(enum)
+    clear
+    merge(enum)
+    self
+  end
+
   # Difference — elements in self that aren't in enum.
   def -(enum)
     result = Set.new
