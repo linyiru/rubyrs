@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-14
+
 ### Release highlights
 
 Two big arcs landed since 0.1.0: **true async streaming for the

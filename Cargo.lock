@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "rubund"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "rubyrs",
@@ -1643,7 +1643,7 @@ dependencies = [
 
 [[package]]
 name = "rubyrs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "carmine",
@@ -1682,14 +1682,14 @@ dependencies = [
 
 [[package]]
 name = "rubyrs-cext"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "rubyrs-gapscan"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ruby-prism",
  "rubyrs",
@@ -1698,14 +1698,14 @@ dependencies = [
 
 [[package]]
 name = "rubyrs-spec-extract"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ruby-prism",
 ]
 
 [[package]]
 name = "rubyrs-wasm-embed"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "wasmtime",
  "wasmtime-wasi",
@@ -1713,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "rubyrs-wasm-timer"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "rusqlite"
