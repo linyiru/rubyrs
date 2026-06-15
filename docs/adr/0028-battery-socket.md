@@ -14,6 +14,22 @@ Bridgetown / Hanami boot path. ADR 0019's placement question for
 `net/http` was answered (see "Context") as **Tier 3, pure-Ruby
 `Net::HTTP` on a native socket battery**; this ADR specs that battery.
 
+**Phase 1 discovery ran** (`poc/net-http-spike/FINDINGS.md`,
+2026-06-15): real `net/http` 0.6.0 + `net/protocol` completes a GET
+end-to-end on rubyrs against a recording socket. It **refines §2**:
+the happy-path surface is **4 host-fns** (`connect`/`write`/`read`/
+`close`) — `read`/`write` are the `_nonblock` pair, and a **blocking**
+`std::net` `read` (with the read-timeout deadline) means the host-fn
+never returns `:wait_readable`, so the `to_io`/`wait_readable`/
+`wait_writable`/`io/wait` sub-surface drops out entirely (a concrete
+win for the §1 blocking choice). `setsockopt(TCP_NODELAY)` folds into
+`connect` (set `nodelay(true)`), dropping the `setsockopt` host-fn.
+Phase 1 also surfaced **prerequisites to land first** (own commits):
+`String#chop` + `String#clear` (Tier-1 core), `Errno::EALREADY` +
+`ECONNABORTED` (Tier-1), the `class << <Const>; alias` parser routing,
+and a **separate URI blocker** (rubyrs's URI stub is insufficient AND
+the real `uri` gem fails to load — its own follow-up, not this battery).
+
 ## Context
 
 ### Where net/http lands (the placement decision this ADR implements)

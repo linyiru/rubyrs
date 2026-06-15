@@ -1,0 +1,206 @@
+# Recording TCPSocket shim for the net/http discovery spike (ADR 0028
+# Phase 1). Stands in for the future `_socket` native battery: it logs
+# EVERY method net/protocol's BufferedIO + net/http drive on the socket,
+# and feeds back a canned HTTP/1.1 response so a real request completes.
+# The point is to enumerate the exact host-fn surface Phase 3 must
+# implement — not to be a real socket.
+
+$NH_CALLS = Hash.new(0)   # method name => call count (the host-fn surface)
+
+# WALL (core Tier-1 gap, unrelated to the socket battery): rubyrs is
+# missing `String#chop` (net/protocol's `readline` does
+# `readuntil("\n").chop`). Trivial 1-liner to add to rubyrs core. Shim
+# it here so the spike can finish mapping the read path.
+class String
+  def chop
+    return self if empty?
+    return self[0...-2] if self[-2, 2] == "\r\n"
+    self[0...-1]
+  end
+  # Also missing: `String#clear` (net/protocol rbuf_flush does
+  # `@rbuf.clear` to empty its read buffer in place). Core Tier-1 gap.
+  def clear ; replace(""); end
+end
+$NH_NET_HTTP_CALLS = Hash.new(0)  # Net::HTTP public surface faraday drives
+
+def nh_log(m)
+  $NH_CALLS[m] += 1
+end
+
+# Canned response the recording socket plays back to net/http's reader.
+CANNED_RESPONSE = (+"HTTP/1.1 200 OK\r\n") <<
+  "Content-Type: text/plain\r\n" <<
+  "Content-Length: 13\r\n" <<
+  "Connection: close\r\n" <<
+  "\r\n" <<
+  "hello, world!"
+
+# Stub the load-time requires net/protocol + net/http pull that rubyrs
+# doesn't vendor, so the real net/http.rb can load and run.
+module Kernel
+  alias_method :__nh_orig_require, :require unless private_method_defined?(:__nh_orig_require) || method_defined?(:__nh_orig_require)
+  def require(name)
+    case name
+    when "socket", "io/wait", "resolv", "openssl", "net/https", "uri", "pp"
+      return true   # surface provided by the shim below / not exercised
+    end
+    __nh_orig_require(name)
+  end
+end
+
+# WALL (separate from the socket battery): rubyrs's URI stub lacks
+# `URI()` / `URI::HTTP` / parsing, and the real `uri` gem fails to load
+# (`URI::SCHEME not defined`, uri/common.rb:37). net/http needs URI only
+# to split host/port/path/query — provide the minimal surface so the
+# spike can reach the socket layer. (URI is its own future battery/canon
+# question, NOT part of ADR 0028.)
+module URI
+  class Generic
+    attr_accessor :scheme, :host, :port, :path, :query   # net/http update_uri mutates these
+    # Two construction forms net/http uses:
+    #   URI::HTTP.new("http://h/p?q")                              (1 string)
+    #   URI::HTTP.new(scheme, userinfo, host, port, reg, path, …)  (9 comps)
+    def initialize(*a)
+      if a.size == 1 && a[0].is_a?(String)
+        s = a[0]
+        m = s.match(%r{\A(\w+)://([^/:]+)(?::(\d+))?(/[^?]*)?(?:\?(.*))?\z})
+        raise "bad uri #{s.inspect}" unless m
+        @scheme = m[1]; @host = m[2]
+        @port = (m[3] || (@scheme == "https" ? 443 : 80)).to_i
+        @path = (m[4] || "/"); @query = m[5]
+      else
+        @scheme, _userinfo, @host, @port, _reg, @path, _opaque, @query, _frag = a
+        @port ||= (@scheme == "https" ? 443 : 80)
+        @path = "/" if @path.nil? || @path.empty?
+      end
+    end
+    def request_uri ; @query ? "#{@path}?#{@query}" : @path; end
+    def hostname ; @host; end
+    def default_port ; @scheme == "https" ? 443 : 80; end
+    def find_proxy(*) ; nil; end   # no proxy env in the spike
+    def dup ; self; end
+    def to_s ; "#{@scheme}://#{@host}#{request_uri}"; end
+  end
+  class HTTP  < Generic; end
+  class HTTPS < Generic; end
+  def self.parse(s) ; HTTP.new(s); end
+  # net/http guards on `URI === uri_or_path`; the shim classes don't
+  # include the URI module, so give URI a `===` that recognises them.
+  def self.===(o) ; o.is_a?(Generic); end
+end
+def URI(s) ; s.is_a?(URI::Generic) ? s : URI::HTTP.new(s.to_s); end
+
+# A minimal IO-ish object net/protocol's `@io.to_io.wait_readable` path
+# expects. The recording socket returns one of these from `to_io`.
+class RecordingWaitable
+  def wait_readable(*) ; nh_log("to_io.wait_readable"); true; end
+  def wait_writable(*) ; nh_log("to_io.wait_writable"); true; end
+end
+
+# The recording socket. TCPSocket.open/new returns one of these.
+class RecordingSocket
+  def initialize(host, port)
+    nh_log("connect(host,port)")
+    @host = host
+    @port = port
+    @read_buf = CANNED_RESPONSE.dup
+    @written = +""
+    @closed = false
+    @waitable = RecordingWaitable.new
+  end
+
+  # --- the net/protocol BufferedIO read path ---
+  def read_nonblock(maxlen, buf = nil, exception: true)
+    nh_log("read_nonblock")
+    if @read_buf.empty?
+      return nil if exception == false   # net/protocol treats nil as EOF
+      raise EOFError
+    end
+    chunk = @read_buf.slice!(0, maxlen)
+    if buf
+      buf.replace(chunk)
+      return buf
+    end
+    chunk
+  end
+
+  # --- the net/protocol BufferedIO write path ---
+  def write_nonblock(str, exception: true)
+    nh_log("write_nonblock")
+    @written << str.to_s
+    str.to_s.bytesize
+  end
+
+  # net/http sometimes writes via plain write (header/body split paths)
+  def write(*strs)
+    nh_log("write")
+    n = 0
+    strs.each { |s| @written << s.to_s; n += s.to_s.bytesize }
+    n
+  end
+
+  def <<(s) ; nh_log("<<"); @written << s.to_s; self; end
+
+  def to_io      ; nh_log("to_io"); @waitable; end
+  def eof?       ; nh_log("eof?"); @read_buf.empty?; end
+  def closed?    ; nh_log("closed?"); @closed; end
+  def close      ; nh_log("close"); @closed = true; nil; end
+  def flush      ; nh_log("flush"); self; end
+  def sync       ; nh_log("sync"); true; end
+  def sync=(v)   ; nh_log("sync="); v; end
+  def setsockopt(*) ; nh_log("setsockopt"); 0; end
+  def peeraddr(*)   ; nh_log("peeraddr"); ["AF_INET", @port, @host, "127.0.0.1"]; end
+  def local_address ; nh_log("local_address"); nil; end
+  def remote_address; nh_log("remote_address"); nil; end
+
+  # Catch-all so we DISCOVER any method we didn't anticipate rather than
+  # crash — the unknown call is logged with a `?` marker for FINDINGS.
+  def method_missing(m, *args, &blk)
+    nh_log("UNHANDLED:#{m}")
+    nil
+  end
+  def respond_to_missing?(m, include_all = false) ; true; end
+end
+
+# TCPSocket factory net/http uses.
+class TCPSocket
+  def self.open(host, port, *rest)
+    nh_log("TCPSocket.open")
+    RecordingSocket.new(host, port)
+  end
+  def self.new(host, port, *rest)
+    nh_log("TCPSocket.new")
+    RecordingSocket.new(host, port)
+  end
+end
+
+class SocketError < StandardError; end
+
+# net/http does `s.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)`.
+# The real `_socket` battery will expose these (or net/http.rb will be
+# trimmed to drop the TCP_NODELAY tweak). Spike provides the constants.
+module Socket
+  IPPROTO_TCP = 6
+  TCP_NODELAY = 1
+  AF_INET     = 2
+  SOCK_STREAM = 1
+end
+
+# WALL (rubyrs Errno hierarchy incomplete): faraday-net_http builds an
+# exception list referencing these Errno classes; several aren't defined
+# in rubyrs. The `_socket` battery's error-mapping (ADR 0028 §4) needs
+# the connect/read/write subset; faraday wants a wider list. Define any
+# missing ones as SystemCallError subclasses for the spike.
+parent = defined?(SystemCallError) ? SystemCallError : StandardError
+%i[EADDRNOTAVAIL EALREADY ECONNABORTED ECONNREFUSED ECONNRESET
+   EHOSTUNREACH EINVAL ENETUNREACH EPIPE ETIMEDOUT].each do |name|
+  already = (Errno.const_defined?(name) rescue false)
+  next if already
+  Errno.const_set(name, Class.new(parent))
+  $NH_CALLS["MISSING_ERRNO:#{name}"] += 1
+end
+
+# faraday's logging formatter requires "pp" for Object#pretty_inspect.
+module Kernel
+  def pretty_inspect ; "#{inspect}\n"; end
+end
