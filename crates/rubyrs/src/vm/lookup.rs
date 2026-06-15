@@ -695,7 +695,7 @@ impl Vm {
             "capitalize!" | "swapcase!" |
             "strip" | "lstrip" | "rstrip" |
             "strip!" | "lstrip!" | "rstrip!" |
-            "chomp" | "chomp!" |
+            "chomp" | "chomp!" | "chop" |
             "tr!" | "squeeze!" |
             "center" | "ljust" | "rjust" |
             "include?" | "start_with?" | "end_with?" |

@@ -1261,3 +1261,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // concurrent-ruby's native loader relies on the LoadError to pick its
 // pure-Ruby fallback.
 #[test] fn require_missing_subpath_loaderror() { run_diff("require_missing_subpath_loaderror"); }
+
+// `String#chop` — \r\n pair / last UTF-8 char / empty-safe; non-mutating.
+// Surfaced by net/protocol's readline (ADR 0028 Phase 1 prerequisite).
+#[test] fn string_chop() { run_diff("string_chop"); }

@@ -103,6 +103,30 @@ fn chomp_default(bytes: &[u8]) -> Vec<u8> {
     bytes[..chomp_default_keep_len(bytes)].to_vec()
 }
 
+/// `String#chop` keep-length: drop a trailing `\r\n` pair, else the last
+/// CHARACTER. For UTF-8 that means backing over continuation bytes to the
+/// last char's lead byte; Binary / US-ASCII / other encodings chop one
+/// byte (full multibyte-width chop for `Other` is ADR 0020 Tier-2
+/// territory). Empty string keeps 0.
+fn chop_keep_len(bytes: &[u8], tag: crate::value::EncodingTag) -> usize {
+    let n = bytes.len();
+    if n == 0 {
+        return 0;
+    }
+    if bytes.ends_with(b"\r\n") {
+        return n - 2;
+    }
+    if matches!(tag, crate::value::EncodingTag::Utf8) {
+        let mut i = n - 1;
+        while i > 0 && (bytes[i] & 0xC0) == 0x80 {
+            i -= 1;
+        }
+        i
+    } else {
+        n - 1
+    }
+}
+
 /// Allocation-free sibling of `chomp_default`: returns the
 /// number of leading bytes to keep. Used by `chomp!` to avoid
 /// allocating a fresh `Vec<u8>` for the common no-change case.
@@ -903,6 +927,11 @@ pub(crate) fn string_call(
                 a.borrow_mut().truncate(keep_len);
                 Some(Value::Str(a.clone()))
             }
+        }
+        (Value::Str(a), "chop", []) => {
+            let bytes = a.borrow();
+            let keep = chop_keep_len(&bytes, a.encoding.get());
+            Some(with_tag(Value::new_str_bytes(bytes[..keep].to_vec()), a.encoding.get()))
         }
         (Value::Str(a), "rstrip!", []) => {
             if a.frozen.get() {
