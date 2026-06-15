@@ -2,10 +2,22 @@
 
 ## Status
 
-Proposed (2026-06). Fourth per-battery ADR after 0022 (`_http_server`),
-0027 (`_sqlite`), 0028 (`_socket`), following the ADR 0019 v3 Rule 7
-template. The sibling-battery half ADR 0028 §Context flagged: it specs
-the consuming side of the `_socket` → TLS handle hand-off.
+Accepted — **Phase 2/3 SHIPPED** (2026-06, `184f21fc`). Fourth
+per-battery ADR after 0022 (`_http_server`), 0027 (`_sqlite`), 0028
+(`_socket`), following the ADR 0019 v3 Rule 7 template. The
+sibling-battery half ADR 0028 §Context flagged: it specs the consuming
+side of the `_socket` → TLS handle hand-off.
+
+**Shipped:** `crates/rubyrs/src/openssl.rs` (4 host fns over rustls 0.23
++ ring + webpki-roots) + `preamble/openssl.rb` (the
+`OpenSSL::SSL::SSLSocket`/`SSLContext` MRI-shape veneer). The
+cross-battery seam `socket::take_stream` (ADR 0019 Rule 5) hands the
+connected `TcpStream` to the TLS session. cfg-gated behind `_openssl`
+(implies `_socket`), wired into `everything`. End-to-end validated:
+rubyrs + the real `net/http` + `uri` gems → `status=200` over a real
+loopback TLS server. Regression test: `tests/openssl_battery.rs`
+(rcgen self-signed cert + rustls `ServerConnection`) — full client-stack
+roundtrip + a handshake-fails-against-plaintext-peer negative test.
 
 Driven by the same Bridgetown / Hanami boot path as ADR 0028: faraday's
 net_http adapter does `require 'net/https'`, and any `https://` URL drives
