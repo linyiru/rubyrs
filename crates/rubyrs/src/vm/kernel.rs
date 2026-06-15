@@ -3561,6 +3561,20 @@ impl Vm {
         if segs.is_empty() {
             return false;
         }
+        // Only a SINGLE-segment require (`require "rack"`) lenient-matches
+        // a same-named existing constant. A multi-segment path
+        // (`require "concurrent/concurrent_ruby_ext"`) names a specific
+        // sub-FILE — matching it against just its first segment's module
+        // (`Concurrent`) wrongly reports success for a file that doesn't
+        // exist, where CRuby raises LoadError. concurrent-ruby's native
+        // loader does `require "concurrent/concurrent_ruby_ext" rescue
+        // LoadError` to PICK its pure-Ruby fallback; a false success made
+        // it believe the C extension loaded and then reference the
+        // undefined `Concurrent::CAtomicBoolean`. CRuby-faithful: a
+        // missing `a/b` require LoadErrors, it doesn't no-op against `A`.
+        if segs.len() > 1 {
+            return false;
+        }
         for seg in &segs {
             if seg.is_empty() || *seg == "." || *seg == ".." {
                 return false;

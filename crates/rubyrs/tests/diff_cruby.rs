@@ -1255,3 +1255,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // builtin Class#new (allocate + initialize, block forwarded). Surfaced by
 // concurrent-ruby's SafeInitialization on Concurrent::Delay.
 #[test] fn super_class_new_extended_module() { run_diff("super_class_new_extended_module"); }
+
+// A missing multi-segment require (`require "foo/bar"`) raises LoadError
+// instead of being lenient-satisfied by a same-named top-level module.
+// concurrent-ruby's native loader relies on the LoadError to pick its
+// pure-Ruby fallback.
+#[test] fn require_missing_subpath_loaderror() { run_diff("require_missing_subpath_loaderror"); }
