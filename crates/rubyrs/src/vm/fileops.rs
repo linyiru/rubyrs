@@ -1071,6 +1071,17 @@ impl Vm {
                 let path = path_arg(p)?;
                 Value::new_str(ruby_dirname(&path))
             }
+            // `File.split(path)` == `[File.dirname(path),
+            // File.basename(path)]`. Pure string op. zeitwerk's
+            // loader splits autoload paths this way.
+            ("split", [p]) => {
+                let path = path_arg(p)?;
+                let dir = Value::new_str(ruby_dirname(&path));
+                let base = Value::new_str(ruby_basename(&path).to_string());
+                self.maybe_gc();
+                self.check_alloc()?;
+                Value::Array(self.heap.alloc(HeapObj::Array(vec![dir, base].into())))
+            }
             ("extname", [p]) => {
                 let path = path_arg(p)?;
                 let p = Path::new(&path);
