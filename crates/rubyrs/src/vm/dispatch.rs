@@ -17260,8 +17260,17 @@ impl Vm {
             {
                 let lookup_id = self.interner.intern(&lookup);
                 if let Some(al_path) = self.autoloads_scoped.remove(&lookup_id) {
-                    match self.builtin_call("require", &[Value::new_str(al_path)]) {
-                        Some(Ok(_)) => {
+                    // Route through a user `Kernel#require` override when
+                    // one is defined — same as `fire_pending_autoload`.
+                    // `const_get(cname, false)` / `const_defined?` reach
+                    // autoloads through THIS path (not the bare-const
+                    // Op::LoadConst path), so without this they bypassed
+                    // zeitwerk's require decoration and ran the raw
+                    // builtin `require "<dir>"` → "Is a directory".
+                    // zeitwerk's eager_load uses `const_get(cname, false)`
+                    // to descend implicit-namespace directories.
+                    match self.invoke_require_for_autoload(Value::new_str(al_path)) {
+                        Ok(_) => {
                             if let Some(c) = self.classes.get(&lookup_id).cloned() {
                                 hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
                             } else if let Some(v) = self.constants.get(&lookup_id).cloned() {
@@ -17273,8 +17282,7 @@ impl Vm {
                         // require itself trapped (LoadError, a syntax
                         // error in the target, …) — surface it rather
                         // than masking as "uninitialized constant".
-                        Some(Err(t)) => return ConstPathOutcome::Trap(t),
-                        None => {} // unreachable: "require" is a builtin
+                        Err(t) => return ConstPathOutcome::Trap(t),
                     }
                 }
             }

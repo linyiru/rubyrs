@@ -1213,3 +1213,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // class body. Surfaced by mustermann's `require 'delegate'` inside
 // Hanami::Router (DelegateClass must be global, not a Router method).
 #[test] fn require_inside_class_body() { run_diff("require_inside_class_body"); }
+
+// `const_get(name, false)` fires a registered autoload through a user
+// `Kernel#require` override — zeitwerk's eager_load descends implicit-
+// namespace directories this way (Bridgetown / Hanami boot path).
+#[test] fn const_get_autoload_override() { run_diff("const_get_autoload_override"); }
