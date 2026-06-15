@@ -13,22 +13,21 @@ Run: `target/release/rubyrs poc/hanami-spike/hr-probe.rb`
 ## How far it gets
 
 `require "hanami/router"` loads `rack` + `rack/utils` cleanly, then
-descends into `mustermann/rails` → `mustermann/ast/*`. Two walls there,
-both in the **mustermann + URI + forwardable** interaction — the same
-territory the Sinatra spike bridged with vendored mustermann patches:
+descends into `mustermann/rails` → `mustermann/ast/*`.
 
-1. **`DelegateClass(...)` not defined inside the full require chain.**
-   rubyrs vendors `delegate` (incl. the `DelegateClass` Kernel factory)
-   and it resolves fine in isolation, but in the full `hanami/router`
-   require ordering the `delegate` require is satisfied before the
-   factory is installed — `mustermann/ast/translator.rb`'s
-   `class NodeTranslator < DelegateClass(Node)` then raises NoMethodError.
-2. **`URI::RFC2396_Parser` surface gaps** — mustermann's `Versions`
-   DSL (`version('2.3') { on(?:) { … } }`) routes through rubyrs'
-   vendored `forwardable`, and `def_single_delegator` mis-targets the
-   `on` DSL call against `URI::RFC2396_Parser` (whose rubyrs stub lacks
-   the method). This is the mustermann/forwardable/URI depth the
-   Sinatra spike already documented.
+1. **`DelegateClass(...)` — FIXED (2026-06-14, round 2).** The root
+   cause was that mustermann does `require 'delegate'` inside
+   `Hanami::Router`'s class body, and rubyrs ran the required file's
+   `def DelegateClass` in the caller's class scope (→ defined on Router)
+   instead of at top-level. Fixed by `fix(require): run a required
+   file's body at top-level lexical nesting` — `DelegateClass` now lands
+   globally, and `class NodeTranslator < DelegateClass(Node)` loads.
+2. **Current wall: `URI::RFC2396_Parser` surface gaps.** mustermann's
+   `Versions` DSL (`version('2.3') { on(?:) { … } }`) routes through
+   rubyrs' vendored `forwardable`, and `def_single_delegator` mis-targets
+   the `on` DSL call against `URI::RFC2396_Parser` (whose rubyrs stub
+   lacks the method). Same mustermann/forwardable/URI depth the Sinatra
+   spike bridged with vendored patches.
 
 The full `require "hanami"` path was not probed past these — it needs
 the whole dry-rb stack plus zeitwerk, and zeitwerk hits the same

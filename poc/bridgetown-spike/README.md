@@ -32,15 +32,24 @@ the top of `bt-probe.rb`.
 5. `securerandom` — dropped to rubyrs' native stub (real gem uses
    `begin/rescue` inside `class << self`, see walls).
 
-**Current wall (frontier):** zeitwerk's
-`zeitwerk/explicit_namespace.rb` opens `class << self` with a body that
-contains a nested `module Synchronized … end` and `internal def …`
-(a method-call-wrapped `def`). rubyrs' `class << self` translator
-supports `def` / `attr_*` / `alias` / `prepend` / const + cvar
-assignment, but NOT nested module/class definitions or arbitrary
-statements run with `self` = the eigenclass. This is a documented
-subset limitation, not a quick fix — it needs the singleton-class body
-to execute with proper eigenclass `self`.
+**Progress (2026-06-14, round 2):** after the upstream eigenclass-body
+work (`class << expr` now executes for real), zeitwerk fully **loads,
+runs `Loader#setup`, and eager-loads** — it walks `bridgetown-foundation`'s
+`lib/` tree. Two VM fixes this round carried it there: `Dir.each_child`
+(zeitwerk's directory walk) and the require-scope fix (a required file's
+top-level `def`s now land on Object, not the enclosing class body).
+
+**Current wall (frontier):** zeitwerk autovivifies implicit-namespace
+**directories** by registering `Module#autoload(:CoreExt, "<dir>")` and
+intercepting the fired `require "<dir>"` in its own decorated
+`Kernel#require` (zeitwerk/core_ext/kernel.rb) — when the path is a
+directory it calls `loader.__on_dir_autoloaded` (creates the module)
+instead of file-loading. rubyrs' autoload-fired / native `require` does
+**not** dispatch through a Ruby-level `Kernel#require` override, so the
+raw require hits the directory → `RuntimeError: read … Is a directory`.
+Honouring a user-defined `Kernel#require` (at least for the
+autoload-trigger path) is the next wall — invasive, since `require` is
+perf-critical and deeply wired.
 
 ## VM fixes this spike drove (landed, with diff_cruby coverage)
 
