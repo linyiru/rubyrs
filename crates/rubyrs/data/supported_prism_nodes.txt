@@ -51,6 +51,7 @@ ConstantPathOperatorWriteNode
 ConstantPathOrWriteNode
 ConstantPathWriteNode
 ConstantReadNode
+ConstantTargetNode
 ConstantWriteNode
 DefNode
 DefinedNode

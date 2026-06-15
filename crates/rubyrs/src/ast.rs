@@ -623,6 +623,16 @@ pub(crate) enum MultiWriteTarget {
     /// `[..., recv, val]` on the stack, then dispatches the
     /// `name=` setter with arity 1 and pops the return.
     Call { receiver: Box<SExpr>, name: String },
+    /// `CONST` on the LHS of a multi-write — `MAJOR, MINOR, *REST =
+    /// ...` (rake/version.rb:6). Emits the same `Op::StoreConst`
+    /// (plus the class-path-prefixed alias) a plain `CONST = ...`
+    /// would; only bare ConstantTargetNode is handled (not the
+    /// `Foo::BAR` ConstantPath form — rarer; would need the parent
+    /// cref resolved).
+    Const(String),
+    /// `*REST` splat into a constant. Same store as `Const`, fed the
+    /// gathered rest Array.
+    SplatConst(String),
     /// `obj[idx, ...] = …` — `[]=` index-write target.
     /// Surfaced by `arr[0], arr[1] = a, b` / `h[k1], h[k2] = a, b`
     /// shapes. Args can be empty (`arr[] = v` — append) but
@@ -3304,6 +3314,8 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 targets.push(MultiWriteTarget::Ivar(cid_to_string(ivt.name())));
             } else if let Some(gvt) = tgt.as_global_variable_target_node() {
                 targets.push(MultiWriteTarget::Global(cid_to_string(gvt.name())));
+            } else if let Some(ct) = tgt.as_constant_target_node() {
+                targets.push(MultiWriteTarget::Const(cid_to_string(ct.name())));
             } else if let Some(call_tgt) = tgt.as_call_target_node() {
                 // `obj.attr = …` setter target. Prism's
                 // CallTargetNode carries the receiver + name
@@ -3356,6 +3368,12 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             // #301.)
                             targets.push(MultiWriteTarget::SplatGlobal(
                                 cid_to_string(gvt.name()),
+                            ));
+                        } else if let Some(ct) = expr.as_constant_target_node() {
+                            // `MAJOR, MINOR, BUILD, *OTHER = ...`
+                            // (rake/version.rb:6) — splat into a const.
+                            targets.push(MultiWriteTarget::SplatConst(
+                                cid_to_string(ct.name()),
                             ));
                         } else if let Some(call_tgt) = expr.as_call_target_node() {
                             // `*recv.attr` — splat into an attribute

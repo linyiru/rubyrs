@@ -66,6 +66,7 @@ impl Vm {
                 | "__rubyrs_signal_trap"
                 | "__rubyrs_stdout_write"
                 | "__rubyrs_stderr_write"
+                | "__rubyrs_exe_path"
                 | "__method__"
                 | "__callee__"
                 | "block_given?"
@@ -949,7 +950,7 @@ impl Vm {
                         "puts" | "p" | "pp" | "print" | "require" | "load" |
                         "sprintf" | "format" | "__time_now_raw" | "__rubyrs_time_parse_iso" | "sleep" |
                         "exit" | "exit!" | "abort" | "warn" | "at_exit" | "__rubyrs_signal_trap" |
-                        "__rubyrs_stdout_write" | "__rubyrs_stderr_write" |
+                        "__rubyrs_stdout_write" | "__rubyrs_stderr_write" | "__rubyrs_exe_path" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
                         "eval" | "caller" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?" |
@@ -1991,6 +1992,18 @@ impl Vm {
                     })));
                 }
                 Some(Ok(Value::Nil))
+            }
+            "__rubyrs_exe_path" => {
+                // Path to the running rubyrs executable. RbConfig uses
+                // it to populate bindir / ruby_install_name and
+                // `RbConfig.ruby` HONESTLY (rubyrs IS the interpreter),
+                // rather than inventing a path — rake's file_utils.rb
+                // computes `RUBY = File.join(bindir, ruby_install_name +
+                // EXEEXT)` at load. `nil` if the OS can't report it.
+                match std::env::current_exe() {
+                    Ok(p) => Some(Ok(Value::new_str(p.to_string_lossy().into_owned()))),
+                    Err(_) => Some(Ok(Value::Nil)),
+                }
             }
             "warn" => {
                 // `Kernel#warn(*msgs, uplevel: nil, category: nil)`

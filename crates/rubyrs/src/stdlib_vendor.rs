@@ -132,6 +132,10 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         "etc" => Some(include_str!("stdlib_vendor/etc.rb")),
         "timeout" => Some(include_str!("stdlib_vendor/timeout.rb")),
         "monitor" => Some(include_str!("stdlib_vendor/monitor.rb")),
+        // Singleton: `.instance` memoisation + privatised `.new` via the
+        // `included` hook. Was a bare empty module; rake/early_time.rb
+        // (`include Singleton`) needs the real behaviour.
+        "singleton" => Some(include_str!("stdlib_vendor/singleton.rb")),
         // OptionParser: declarative-on + parse! subset (minitest's
         // process_args). Replaces the old lenient shell, which
         // accepted the DSL but parsed nothing — minitest then
@@ -145,6 +149,10 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         // primitive. rack's spec_directory builds a scratch tree with
         // Dir.mktmpdir's block form (auto-removed on exit).
         "tmpdir" => Some(include_str!("stdlib_vendor/tmpdir.rb")),
+        // FileUtils reflection veneer (commands / options_of / ...) over
+        // the native fileops primitives. rake's FileUtilsExt iterates
+        // these at load to generate verbose/noop-aware wrappers.
+        "fileutils" => Some(include_str!("stdlib_vendor/fileutils.rb")),
         // Zlib: Deflate/Inflate + GzipWriter/GzipReader over the
         // flate2-backed host primitives. rack's Deflater emits gzip
         // responses; Static serves `.gz` files via GzipReader.

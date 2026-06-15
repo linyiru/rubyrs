@@ -215,7 +215,31 @@ ARGV = []
 # absent-loud: a script needing "bindir" etc. should fail visibly
 # rather than act on an invented path.
 module RbConfig
-  CONFIG = { "host_os" => "rubyrs" }
+  # host_os = "rubyrs": consumers branch on /mswin|mingw/-style probes
+  # (minitest's diff-tool discovery) and a neutral value routes them
+  # down the POSIX path. The interpreter-path keys are derived from the
+  # REAL running executable (`__rubyrs_exe_path`) so they're honest
+  # rather than invented — rake's file_utils.rb computes
+  # `RUBY = File.join(bindir, ruby_install_name + EXEEXT)` at load, and
+  # rubyrs IS the interpreter that `RUBY` should point at. When the OS
+  # can't report the exe path, fall back to a bare "rubyrs" name (still
+  # non-nil, so the load-time `+`/`File.join` arithmetic doesn't crash).
+  __exe = (__rubyrs_exe_path rescue nil)
+  CONFIG = {
+    "host_os"           => "rubyrs",
+    "EXEEXT"            => "",
+    "bindir"            => (__exe ? File.dirname(__exe) : "."),
+    "ruby_install_name" => (__exe ? File.basename(__exe) : "rubyrs"),
+    "RUBY_INSTALL_NAME" => (__exe ? File.basename(__exe) : "rubyrs"),
+  }
+
+  # `RbConfig.ruby` — full path to the running interpreter (CRuby
+  # exposes this; rake/test tooling calls it). Honest exe path, or the
+  # bare name as a last resort.
+  def self.ruby
+    __exe = (__rubyrs_exe_path rescue nil)
+    __exe || "rubyrs"
+  end
 end
 
 # `Kernel#system` lives in the Rust builtin table (vm/kernel.rs)

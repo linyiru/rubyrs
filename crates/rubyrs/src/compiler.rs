@@ -664,6 +664,7 @@ fn compile_multiwrite_arm(
         MWT::SplatLocal(_)
             | MWT::SplatIvar(_)
             | MWT::SplatGlobal(_)
+            | MWT::SplatConst(_)
             | MWT::SplatCall { .. }
     ));
 
@@ -699,6 +700,23 @@ fn compile_multiwrite_arm(
             MWT::SplatGlobal(name) => {
                 let id = interner.intern(name);
                 b.emit(Op::StoreGlobal(id));
+            }
+            MWT::Const(name) | MWT::SplatConst(name) => {
+                // Mirror `Expr::ConstWrite`: store the bare name AND,
+                // inside a class/module body, a class-path-prefixed
+                // alias (`Rake::Version::MAJOR`) so external resolution
+                // finds it. The Dup+two-stores net-consumes exactly one
+                // stack value, same as the single-store targets.
+                let id = interner.intern(name);
+                let prefixed_id = (!b.class_path.is_empty() && !name.contains("::"))
+                    .then(|| interner.intern(&format!("{}::{}", b.class_path.join("::"), name)));
+                if prefixed_id.is_some() {
+                    b.emit(Op::Dup);
+                }
+                b.emit(Op::StoreConst(id));
+                if let Some(pid) = prefixed_id {
+                    b.emit(Op::StoreConst(pid));
+                }
             }
             MWT::SplatCall { receiver, name } => {
                 // Stack: [..., rest_array]. Same dispatch shape

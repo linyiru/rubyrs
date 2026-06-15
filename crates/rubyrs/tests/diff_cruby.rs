@@ -619,6 +619,12 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn strscan_linear_scaling() { run_diff("strscan_linear_scaling"); }
 #[cfg(feature = "stdlib")]
 #[test] fn query_parse_linear_scaling() { run_diff("query_parse_linear_scaling"); }
+#[test] fn multi_assign_constants() { run_diff("multi_assign_constants"); }
+#[test] fn rbconfig_interpreter() { run_diff("rbconfig_interpreter"); }
+#[cfg(feature = "stdlib")]
+#[test] fn singleton_mixin() { run_diff("singleton_mixin"); }
+#[cfg(feature = "stdlib")]
+#[test] fn fileutils_reflection() { run_diff("fileutils_reflection"); }
 #[test] fn visibility_method_explicit_recv() { run_diff("visibility_method_explicit_recv"); }
 #[test] fn exception_cause() { run_diff("exception_cause"); }
 #[test] fn bare_warn_singleton_override() { run_diff("bare_warn_singleton_override"); }
