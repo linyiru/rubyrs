@@ -7578,7 +7578,43 @@ impl Vm {
                                 return Ok(());
                             }
                             None => {
+                                // The source method may be a CLASS-LEVEL
+                                // BUILTIN (`new`/`allocate`) rather than a
+                                // Ruby-defined singleton method — those
+                                // live in Rust dispatch, not
+                                // `singleton_methods`, so the lookup above
+                                // misses them. concurrent-ruby's
+                                // LockFreeStack::Node does
+                                // `singleton_class.send :alias_method, :[],
+                                // :new` to make `Node[...]` an alias of
+                                // `Node.new(...)`. Synthesise a
+                                // builtin-forwarding Method (re-enters
+                                // `do_call(:new, ...)` at call time, per
+                                // `invoke_method_with_block_inner`).
                                 let old_name = self.interner.resolve(old_id).to_string();
+                                if matches!(old_name.as_str(), "new" | "allocate") {
+                                    let meta = std::rc::Rc::new(crate::value::BuiltinMeta {
+                                        name_id: old_id,
+                                        arity: -1,
+                                        parameters: vec![("rest", None)],
+                                        source_label: None,
+                                        source_line: 0,
+                                    });
+                                    let fwd = std::rc::Rc::new(crate::value::Method {
+                                        params: vec!["args".to_string()],
+                                        proto_idx: 0,
+                                        fixed_arity: None,
+                                        defining_class: Some(std::rc::Rc::downgrade(&real)),
+                                        visibility: std::cell::Cell::new(crate::value::Visibility::Public),
+                                        closure: None,
+                                        original_name: Some(old_id),
+                                        builtin: Some(meta),
+                                    });
+                                    real.singleton_methods.borrow_mut().insert(new_id, fwd);
+                                    self.method_gen = self.method_gen.wrapping_add(1);
+                                    self.stack.push(Value::Class(target.clone()));
+                                    return Ok(());
+                                }
                                 return Err(self.trap(RubyError::NameError {
                                     msg: format!(
                                         "undefined method '{}' for class '{}'",
@@ -9433,6 +9469,37 @@ impl Vm {
                                 // call resolves fine.
                                 synth.visibility.set(Visibility::Private);
                                 real.singleton_methods.borrow_mut().insert(new_id, synth);
+                                self.method_gen = self.method_gen.wrapping_add(1);
+                                self.stack.push(Value::Sym(new_id));
+                                return Ok(());
+                            }
+                            // Class-level builtins (`new`/`allocate`) also
+                            // live in Rust dispatch, not the singleton
+                            // table. concurrent-ruby's LockFreeStack::Node
+                            // does `singleton_class.send :alias_method,
+                            // :[], :new` to make `Node[...]` a constructor
+                            // shorthand. Synthesise a builtin-forwarding
+                            // Method (re-enters `do_call(:new, ...)` at
+                            // call time — invoke_method_with_block_inner).
+                            if matches!(&*old_name_rc, "new" | "allocate") {
+                                let meta = std::rc::Rc::new(crate::value::BuiltinMeta {
+                                    name_id: old_id,
+                                    arity: -1,
+                                    parameters: vec![("rest", None)],
+                                    source_label: None,
+                                    source_line: 0,
+                                });
+                                let fwd = std::rc::Rc::new(crate::value::Method {
+                                    params: vec!["args".to_string()],
+                                    proto_idx: 0,
+                                    fixed_arity: None,
+                                    defining_class: Some(std::rc::Rc::downgrade(&real)),
+                                    visibility: std::cell::Cell::new(Visibility::Public),
+                                    closure: None,
+                                    original_name: Some(old_id),
+                                    builtin: Some(meta),
+                                });
+                                real.singleton_methods.borrow_mut().insert(new_id, fwd);
                                 self.method_gen = self.method_gen.wrapping_add(1);
                                 self.stack.push(Value::Sym(new_id));
                                 return Ok(());

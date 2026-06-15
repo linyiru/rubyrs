@@ -1296,3 +1296,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // then false, `IO` stays defined). Surfaced by the `console` gem
 // (samovar → bridgetown CLI).
 #[test] fn require_io_console() { run_diff("require_io_console"); }
+
+// `singleton_class.send :alias_method, :[], :new` — aliasing the
+// class-level builtin `new`/`allocate` into a singleton method.
+// Surfaced by concurrent-ruby's LockFreeStack::Node (`Node[nil, nil]`).
+#[test] fn singleton_alias_class_new() { run_diff("singleton_alias_class_new"); }
