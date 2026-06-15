@@ -339,6 +339,23 @@ impl Vm {
         Ok(id)
     }
 
+    /// Lazily materialise the `$LOADED_FEATURES` / `$"` Array — the
+    /// script-visible list of loaded file paths. Twin of
+    /// `ensure_load_path`; GC-rooted via `Vm.loaded_features_list`.
+    /// `compile_and_run_source` pushes each loaded path here, and
+    /// script reads (`$LOADED_FEATURES.last` / `.reject!`) return this
+    /// same Array.
+    pub(crate) fn ensure_loaded_features_list(&mut self) -> Result<crate::value::ObjId, Trap> {
+        if let Some(id) = self.loaded_features_list {
+            return Ok(id);
+        }
+        self.maybe_gc();
+        self.check_alloc()?;
+        let id = self.heap.alloc(HeapObj::Array(Vec::new().into()));
+        self.loaded_features_list = Some(id);
+        Ok(id)
+    }
+
     /// The class that owns the current `@@cvar` context, if any.
     /// Resolution mirrors CRuby's "current cref" walk:
     ///   - frame.self_val is `Value::Class(c)` (class body or
@@ -2007,6 +2024,13 @@ impl Vm {
                     // `Vm::ruby_source_candidates`).
                     "$LOAD_PATH" | "$:" => {
                         let id = self.ensure_load_path()?;
+                        Value::Array(id)
+                    }
+                    // `$LOADED_FEATURES` / `$"` — the Array of loaded
+                    // file paths. Lazily materialised; populated by
+                    // `compile_and_run_source` on each require/load.
+                    "$LOADED_FEATURES" | "$\"" => {
+                        let id = self.ensure_loaded_features_list()?;
                         Value::Array(id)
                     }
                     _ => self.globals.get(&name_id).cloned().unwrap_or(Value::Nil),

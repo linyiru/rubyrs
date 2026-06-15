@@ -806,6 +806,11 @@ impl Vm {
         if let Some(id) = self.load_path {
             roots.push(Value::Array(id));
         }
+        // `$LOADED_FEATURES` Array (lazily allocated; twin of
+        // `load_path`). String elements visited via the Array walk.
+        if let Some(id) = self.loaded_features_list {
+            roots.push(Value::Array(id));
+        }
         for m in self.toplevel_methods.values() {
             if let Some(cl) = &m.closure {
                 for v in cl.captured.borrow().iter() { roots.push(v.clone()); }

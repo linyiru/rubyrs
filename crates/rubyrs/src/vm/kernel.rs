@@ -3971,6 +3971,28 @@ impl Vm {
         // "already loading"; the partially-defined module is visible
         // to the re-entrant require).
         self.loaded_features.insert(canon.clone());
+        // Mirror the loaded path into the script-visible
+        // `$LOADED_FEATURES` Array. zeitwerk's `Kernel#require`
+        // wrapper reads `$LOADED_FEATURES.last` to recover the
+        // abspath it just loaded, and its unload path does
+        // `$LOADED_FEATURES.reject! { ... }`. Dedup by path string so
+        // a `load` re-run (which clears the Set entry to force a
+        // re-execute) doesn't append a duplicate. The Set above stays
+        // the require-dedup authority; this Array is the read/mutate
+        // view. (`Value::Str` is Rc-backed, not a GC ObjId, so no
+        // rooting is needed across the push.)
+        {
+            let path_str = canon.to_string_lossy().into_owned();
+            let lf_id = self.ensure_loaded_features_list()?;
+            let already = matches!(self.heap.get(lf_id), HeapObj::Array(arr)
+                if arr.iter().any(|v| matches!(v, Value::Str(s) if s.borrow().as_slice() == path_str.as_bytes())));
+            if !already {
+                let sval = Value::new_str(path_str);
+                if let HeapObj::Array(arr) = self.heap.get_mut(lf_id) {
+                    arr.push(sval);
+                }
+            }
+        }
         let fsl_start = self.protos.len();
         let entry = crate::compiler::compile_proto(
             "<require>".into(), vec![], &[prog], filename_rc,

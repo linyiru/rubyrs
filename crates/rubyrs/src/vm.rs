@@ -837,6 +837,17 @@ pub(crate) struct Vm {
     /// land in the same heap Array the require dispatcher
     /// later reads from. GC-rooted in `maybe_gc`.
     pub(crate) load_path: Option<ObjId>,
+    /// `$LOADED_FEATURES` / `$"` — the Array of canonical paths of
+    /// files already loaded via `require` / `load`. Lazily
+    /// materialised (same as `load_path`); each successful
+    /// `compile_and_run_source` pushes the canonical path. Exposed so
+    /// script code can read it (`$LOADED_FEATURES.last` to find the
+    /// just-loaded file — zeitwerk's `Kernel#require` wrapper does
+    /// this) and mutate it (`reject!` during reloading/unload). The
+    /// internal `loaded_features` Set remains the require-dedup
+    /// authority; this Array is the script-visible view. GC-rooted in
+    /// `maybe_gc`.
+    pub(crate) loaded_features_list: Option<ObjId>,
     pub(crate) host_fns: HashMap<SymId, HostFnSlot>,
     /// C-ext singleton-method dispatch table. Indexed by
     /// `(class joined name, method SymId)`. Populated by
@@ -1723,6 +1734,7 @@ impl Vm {
             main_obj: None,
             toplevel_cvars: HashMap::new(),
             load_path: None,
+            loaded_features_list: None,
             host_fns: HashMap::new(),
             #[cfg(feature = "cext")]
             cext_class_methods: HashMap::new(),

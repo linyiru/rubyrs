@@ -908,6 +908,10 @@ struct PostPreambleSnapshot {
     /// produced by user `$LOAD_PATH << ...` can't outlive the
     /// heap truncation that just dropped its target slot.
     load_path: Option<value::ObjId>,
+    /// `vm.loaded_features_list` as of preamble completion (twin of
+    /// `load_path`). `reset()` restores this so a stale `ObjId`
+    /// produced by a user require can't outlive the heap truncation.
+    loaded_features_list: Option<value::ObjId>,
     /// `vm.protos.len()` at preamble completion. `reset()`
     /// truncates `vm.protos` back to this length.
     ///
@@ -1232,6 +1236,7 @@ impl PostPreambleSnapshot {
             method_gen: rt.vm.method_gen,
             const_gen: rt.vm.const_gen,
             load_path: rt.vm.load_path,
+            loaded_features_list: rt.vm.loaded_features_list,
             protos_len: rt.vm.protos.len(),
             classes: rt.vm.classes.clone(),
             constants: rt.vm.constants.clone(),
@@ -1869,6 +1874,7 @@ impl Runtime {
         // `vm.load_path` as a stale `Some(id)` would let the
         // next `$LOAD_PATH` access return an out-of-range index.
         self.vm.load_path = snapshot.load_path;
+        self.vm.loaded_features_list = snapshot.loaded_features_list;
         // --- Call-cache state ---
         // Truncate `call_caches` back to its post-preamble length
         // and restore `cache_counter` so the compiler's next
