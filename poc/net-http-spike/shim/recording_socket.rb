@@ -29,54 +29,16 @@ module Kernel
   alias_method :__nh_orig_require, :require unless private_method_defined?(:__nh_orig_require) || method_defined?(:__nh_orig_require)
   def require(name)
     case name
-    when "socket", "io/wait", "resolv", "openssl", "net/https", "uri", "pp"
+    when "socket", "io/wait", "resolv", "openssl", "net/https", "pp"
       return true   # surface provided by the shim below / not exercised
     end
     __nh_orig_require(name)
   end
 end
 
-# WALL (separate from the socket battery): rubyrs's URI stub lacks
-# `URI()` / `URI::HTTP` / parsing, and the real `uri` gem fails to load
-# (`URI::SCHEME not defined`, uri/common.rb:37). net/http needs URI only
-# to split host/port/path/query — provide the minimal surface so the
-# spike can reach the socket layer. (URI is its own future battery/canon
-# question, NOT part of ADR 0028.)
-module URI
-  class Generic
-    attr_accessor :scheme, :host, :port, :path, :query   # net/http update_uri mutates these
-    # Two construction forms net/http uses:
-    #   URI::HTTP.new("http://h/p?q")                              (1 string)
-    #   URI::HTTP.new(scheme, userinfo, host, port, reg, path, …)  (9 comps)
-    def initialize(*a)
-      if a.size == 1 && a[0].is_a?(String)
-        s = a[0]
-        m = s.match(%r{\A(\w+)://([^/:]+)(?::(\d+))?(/[^?]*)?(?:\?(.*))?\z})
-        raise "bad uri #{s.inspect}" unless m
-        @scheme = m[1]; @host = m[2]
-        @port = (m[3] || (@scheme == "https" ? 443 : 80)).to_i
-        @path = (m[4] || "/"); @query = m[5]
-      else
-        @scheme, _userinfo, @host, @port, _reg, @path, _opaque, @query, _frag = a
-        @port ||= (@scheme == "https" ? 443 : 80)
-        @path = "/" if @path.nil? || @path.empty?
-      end
-    end
-    def request_uri ; @query ? "#{@path}?#{@query}" : @path; end
-    def hostname ; @host; end
-    def default_port ; @scheme == "https" ? 443 : 80; end
-    def find_proxy(*) ; nil; end   # no proxy env in the spike
-    def dup ; self; end
-    def to_s ; "#{@scheme}://#{@host}#{request_uri}"; end
-  end
-  class HTTP  < Generic; end
-  class HTTPS < Generic; end
-  def self.parse(s) ; HTTP.new(s); end
-  # net/http guards on `URI === uri_or_path`; the shim classes don't
-  # include the URI module, so give URI a `===` that recognises them.
-  def self.===(o) ; o.is_a?(Generic); end
-end
-def URI(s) ; s.is_a?(URI::Generic) ? s : URI::HTTP.new(s.to_s); end
+# NOTE: `uri` is no longer shimmed — the REAL `uri` gem now loads and
+# parses on rubyrs (after the const_defined?(name,false) + String#delete!
+# fixes). The probe puts uri-1.0.2 on $LOAD_PATH; net/http uses it directly.
 
 # A minimal IO-ish object net/protocol's `@io.to_io.wait_readable` path
 # expects. The recording socket returns one of these from `to_io`.

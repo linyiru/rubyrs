@@ -7,7 +7,7 @@
 G = "/Users/linyiru/.rbenv/versions/3.4.1/lib/ruby/gems/3.4.0/gems"
 $LP = $LOAD_PATH
 [
-  "net-http-0.6.0", "net-protocol-0.2.2",
+  "net-http-0.6.0", "net-protocol-0.2.2", "uri-1.0.2",
   "faraday-2.12.2", "faraday-net_http-3.4.4", "ruby2_keywords-0.0.5",
 ].each { |g| $LP.unshift("#{G}/#{g}/lib") }
 # net/http.rb now parses UNPATCHED — the `class << HTTP; alias` wall was

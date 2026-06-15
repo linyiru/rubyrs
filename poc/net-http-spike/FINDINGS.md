@@ -96,7 +96,24 @@ diff_cruby one-liners), not bundled into the battery PR.
 
 ---
 
-## 3. URI is a SEPARATE blocker (not ADR 0028 scope)
+## 3. URI — RESOLVED (the real `uri` gem now loads + parses)
+
+> **Update (2026-06-15):** the URI blocker below is **CLEARED**. Three
+> core fixes landed and the **real, unmodified `uri` 1.0.2 gem now loads
+> and parses URLs on rubyrs** — the net/http spike runs against it with
+> **no URI shim**:
+> - `fix(const): const_defined?(name, false)` — own-only check unblocked
+>   the gem's load-time `remove_const … if const_defined?(sym, false)`.
+> - `feat(string): String#delete!` — `uri/generic.rb`'s `query=`.
+> - `fix(dispatch): Module#=== honours included modules` — net/http's
+>   `if URI === uri` guard (`URI::Generic` includes URI).
+>
+> So URI did NOT need a vendored canon — getting the real gem to load was
+> three small Tier-1 fixes (Rule 6 canonical, the faithful outcome).
+> Discovery probe: `poc/uri-spike/uri-probe.rb`. The original analysis
+> follows for the record.
+
+### (original) URI is a SEPARATE blocker (not ADR 0028 scope)
 
 net/http needs a real `URI`. rubyrs today:
 
