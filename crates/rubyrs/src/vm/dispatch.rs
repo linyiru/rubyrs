@@ -3996,6 +3996,26 @@ impl Vm {
                     self.invoke_method(m, bm_recv, args.into_vec())?;
                     return Ok(CallableOutcome::Handled);
                 }
+                // No table Method — the BoundMethod wraps a Kernel
+                // global builtin (`method(:print)` / `:puts` / `:p`;
+                // zeitwerk's logging test does `loader.logger =
+                // method(:print)`). Route through `builtin_call`: the
+                // builtin acts on its args / global state independent
+                // of the (private) receiver, matching CRuby's
+                // `Method#call` invoking the bound Kernel method.
+                // Universal methods (class / inspect / to_s) aren't in
+                // `builtin_call` and fall through to the explicit-
+                // receiver `do_call` below.
+                let bm_name = self.interner.resolve(bm_name_id).to_string();
+                if let Some(res) = self.builtin_call(&bm_name, &args) {
+                    let v = res?;
+                    if self.suppress_call_result_push {
+                        self.suppress_call_result_push = false;
+                    } else {
+                        self.stack.push(v);
+                    }
+                    return Ok(CallableOutcome::Handled);
+                }
                 let argc = args.len();
                 self.stack.push(bm_recv);
                 for a in args {
