@@ -2416,7 +2416,15 @@ impl Vm {
                     let captured_yield_block = if f.is_block {
                         f.captured_yield_block
                     } else {
-                        f.block_arg
+                        // A method/class-body/toplevel creating frame
+                        // contributes its own `block_arg`. A
+                        // `define_method` body has `block_arg: None`
+                        // (its caller's block is hidden) but may carry
+                        // a LEXICALLY-captured yield-block — fall back
+                        // to it so a nested block inside the
+                        // define_method body (`[..].map { yield }`)
+                        // still reaches the enclosing method's block.
+                        f.block_arg.or(f.captured_yield_block)
                     };
                     // A non-block creating frame (method / class body /
                     // toplevel) means `captured` is a real outer scope
@@ -3575,9 +3583,9 @@ impl Vm {
                 let id = if let Value::Block(id) = bv { id } else {
                     panic!("ICE: DefMethodBlock without Block on stack");
                 };
-                let (proto_idx, captured, param_start, n_params) = {
+                let (proto_idx, captured, param_start, n_params, captured_yield_block) = {
                     let bh = self.heap.block(id);
-                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
+                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block)
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
@@ -3597,7 +3605,7 @@ impl Vm {
                     fixed_arity: None,
                     defining_class,
                     visibility: std::cell::Cell::new(vis),
-                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
                 builtin: None,
                 original_name: Some(name_id),
                 });
@@ -3639,9 +3647,9 @@ impl Vm {
                 };
                 let recv = self.stack.pop()
                     .expect("ICE: DefObjectSingletonMethodBlock no receiver on stack");
-                let (proto_idx, captured, param_start, n_params) = {
+                let (proto_idx, captured, param_start, n_params, captured_yield_block) = {
                     let bh = self.heap.block(block_id);
-                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
+                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block)
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
@@ -3663,7 +3671,7 @@ impl Vm {
                             fixed_arity: None,
                             defining_class: Some(Rc::downgrade(&sc)),
                             visibility: std::cell::Cell::new(Visibility::Public),
-                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
                             builtin: None,
                             original_name: Some(name_id),
                         });
@@ -3677,7 +3685,7 @@ impl Vm {
                             fixed_arity: None,
                             defining_class: Some(Rc::downgrade(cls)),
                             visibility: std::cell::Cell::new(Visibility::Public),
-                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
                             builtin: None,
                             original_name: Some(name_id),
                         });
@@ -3697,7 +3705,7 @@ impl Vm {
                             fixed_arity: None,
                             defining_class: Some(Rc::downgrade(&sc)),
                             visibility: std::cell::Cell::new(Visibility::Public),
-                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
                             builtin: None,
                             original_name: Some(name_id),
                         });

@@ -737,6 +737,7 @@ impl Vm {
             for m in cls.methods.borrow().values() {
                 if let Some(cl) = &m.closure {
                     for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+                    if let Some(b) = cl.captured_yield_block { roots.push(Value::Block(b)); }
                 }
             }
             // `singleton_class.class_eval { define_method(...) }`
@@ -748,6 +749,7 @@ impl Vm {
             for m in cls.singleton_methods.borrow().values() {
                 if let Some(cl) = &m.closure {
                     for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+                    if let Some(b) = cl.captured_yield_block { roots.push(Value::Block(b)); }
                 }
             }
             // The eigenclass shell itself isn't in `self.classes`
@@ -761,11 +763,13 @@ impl Vm {
                 for m in shell.methods.borrow().values() {
                     if let Some(cl) = &m.closure {
                         for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+                    if let Some(b) = cl.captured_yield_block { roots.push(Value::Block(b)); }
                     }
                 }
                 for m in shell.singleton_methods.borrow().values() {
                     if let Some(cl) = &m.closure {
                         for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+                    if let Some(b) = cl.captured_yield_block { roots.push(Value::Block(b)); }
                     }
                 }
                 for v in shell.ivars.borrow().values() { roots.push(v.clone()); }
@@ -814,6 +818,7 @@ impl Vm {
         for m in self.toplevel_methods.values() {
             if let Some(cl) = &m.closure {
                 for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+                if let Some(b) = cl.captured_yield_block { roots.push(Value::Block(b)); }
             }
         }
         let pending_frees = self.heap.collect(&roots);

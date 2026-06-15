@@ -13449,7 +13449,16 @@ impl Vm {
                 }),
                 pending_yield: false,
                 block_writeback: None,
-                captured_yield_block: None,
+                // Restore the LEXICALLY-captured yield-block (the block
+                // active where this `define_method` body was created)
+                // so `yield` inside it resolves — CRuby treats the
+                // body as a Proc, where `yield` reaches the enclosing
+                // method's block, not the CALLER's (`block_arg` stays
+                // None above). `None` when the enclosing scope had no
+                // block → `yield` raises. (zeitwerk's test
+                // `OnTeardown#on_teardown` registers a teardown via
+                // `define_singleton_method(:teardown) { yield; super() }`.)
+                captured_yield_block: cl.captured_yield_block,
             });
             // $~ scoping is LAZY now — save_match_scope_on_write fires on
             // the first last_match write inside this method scope.
@@ -15426,9 +15435,9 @@ impl Vm {
                 // the existing match below which raises
                 // NoMethodError / ArgumentError as appropriate.
             }
-            let (proto_idx, captured, param_start, n_params) = {
+            let (proto_idx, captured, param_start, n_params, captured_yield_block) = {
                 let bh = self.heap.block(block);
-                (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
+                (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block)
             };
             let proto = &self.protos[proto_idx];
             let params = proto.params.clone();
@@ -15451,7 +15460,7 @@ impl Vm {
                         fixed_arity: None,
                         defining_class: Some(std::rc::Rc::downgrade(&sc)),
                         visibility: std::cell::Cell::new(crate::value::Visibility::Public),
-                        closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                        closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
                         builtin: None,
                         original_name: Some(name_sym),
                     });
@@ -15465,7 +15474,7 @@ impl Vm {
                         fixed_arity: None,
                         defining_class: Some(std::rc::Rc::downgrade(&c)),
                         visibility: std::cell::Cell::new(crate::value::Visibility::Public),
-                        closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                        closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
                         builtin: None,
                         original_name: Some(name_sym),
                     });
@@ -15603,9 +15612,9 @@ impl Vm {
                     self.stack.push(Value::Sym(installed));
                     return Ok(());
                 }
-                let (proto_idx, captured, param_start, n_params) = {
+                let (proto_idx, captured, param_start, n_params, captured_yield_block) = {
                     let bh = self.heap.block(block);
-                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
+                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block)
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
@@ -15622,7 +15631,7 @@ impl Vm {
                     // (Code-review #253 round 1 #1.)
                     defining_class: Some(std::rc::Rc::downgrade(&target_cls.effective_install_class())),
                     visibility: std::cell::Cell::new(vis),
-                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
                     builtin: None,
                     original_name: Some(name_sym),
                 });
@@ -16553,6 +16562,7 @@ impl Vm {
                         captured: bh.captured.clone(),
                         param_start: bh.param_start,
                         n_params: bh.n_params,
+                        captured_yield_block: bh.captured_yield_block,
                     },
                 })
             }

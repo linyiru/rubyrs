@@ -959,6 +959,18 @@ pub struct MethodClosure {
     pub(crate) captured: Rc<RefCell<Vec<Value>>>,
     pub(crate) param_start: u16,
     pub(crate) n_params: u16,
+    /// The yield-block the source block lexically captured (the
+    /// `block_arg` of the method that ran `define_method`), copied
+    /// from the `BlockHandle` at install time. CRuby treats a
+    /// `define_method` body as a Proc: `yield` inside it does NOT
+    /// reach the CALLER's block (so the invocation frame keeps
+    /// `block_arg: None`), but DOES reach the block active where the
+    /// define_method block was created. Restored onto the invocation
+    /// frame's `captured_yield_block` so that lexical `yield`
+    /// resolves; `None` (→ LocalJumpError on `yield`) when the
+    /// enclosing scope had no block. GC-rooted wherever `captured`
+    /// is.
+    pub(crate) captured_yield_block: Option<ObjId>,
 }
 
 /// Serde bridge for the LITERAL subset of `Value` — only the shapes

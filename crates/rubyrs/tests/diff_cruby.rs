@@ -168,6 +168,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn caller_locations() { run_diff("caller_locations"); }
 #[test] fn class_object_instance_dispatch() { run_diff("class_object_instance_dispatch"); }
 #[test] fn metaclass_alias_undef() { run_diff("metaclass_alias_undef"); }
+#[test] fn define_method_lexical_yield() { run_diff("define_method_lexical_yield"); }
 #[test] fn encoding_defaults() { run_diff("encoding_defaults"); }
 #[test] fn define_method_runtime_name() { run_diff("define_method_runtime_name"); }
 #[test] fn undef_listing_and_sym_blockpass() { run_diff("undef_listing_and_sym_blockpass"); }

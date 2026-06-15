@@ -2394,6 +2394,7 @@ mod tests {
                 captured: Rc::new(RefCell::new(vec![Value::Array(captured)])),
                 param_start: 0,
                 n_params: 0,
+                captured_yield_block: None,
             }),
             builtin: None,
             original_name: None,
