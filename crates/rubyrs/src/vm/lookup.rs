@@ -2227,6 +2227,17 @@ impl Vm {
                             self.stack.push(Value::Nil);
                             return Ok(());
                         }
+                        // `super` from an overridden `include` /
+                        // `extend` / `prepend` → the builtin
+                        // `Module#include` etc. (no Ruby-defined super
+                        // on the chain; the mechanics live in Rust
+                        // dispatch). concurrent-ruby's
+                        // `Concurrent::ReInclude` is extended onto a
+                        // module and overrides `include(*modules)` with
+                        // `result = super(*modules); …; result`.
+                        ("include" | "extend" | "prepend", Some(Value::Class(cls))) => {
+                            return self.do_module_inclusion(cls, &nm, &args);
+                        }
                         // `super` from a `respond_to?` override →
                         // Object#respond_to? (a do_call recogniser,
                         // no table Method above the override).

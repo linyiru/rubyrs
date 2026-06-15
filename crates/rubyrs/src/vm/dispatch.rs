@@ -7646,128 +7646,7 @@ impl Vm {
             }
             if matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty()
                 && let Value::Class(target) = &self_val {
-                    let is_prepend = &*name == "prepend";
-                    let is_include = &*name == "include";
-                    let target_cls = target.clone();
-                    let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
-                    // CRuby processes `include M1, M2, ...` args
-                    // RIGHT-to-LEFT — M2 inserts first, then M1.
-                    // Each insert goes to the head of the chain, so
-                    // M1 (last inserted) ends up at the head and
-                    // M1.included fires LAST. Hook fire order also
-                    // mirrors this iteration. Single-arg cases are
-                    // unaffected. PR #347 documented follow-up.
-                    //
-                    // All three keywords iterate args right-to-left
-                    // to match CRuby: `extend M1, M2` (and the same
-                    // for include / prepend) processes M2 first so
-                    // M1 ends up at the chain head and its hook
-                    // fires LAST. Branch on the index inside the
-                    // loop instead of allocating a boxed iterator —
-                    // include/prepend/extend is hot enough that a
-                    // heap alloc per call is wasteful.
-                    let reverse_args = is_prepend || is_include || (&*name == "extend");
-                    let n_args = args.len();
-                    // Eigenclass-shell (real `class << M` body, self =
-                    // the metaclass): `include Mod` includes Mod into
-                    // the metaclass — i.e. Mod's instance methods
-                    // become M's SINGLETON methods. In rubyrs's flat
-                    // model that's M.singleton_includes (the same
-                    // chain `M.extend Mod` feeds), so route an
-                    // include-on-a-shell there. `extend`/`prepend` on
-                    // a shell keep their own eigenclass-object
-                    // semantics (the shell's own chains). zeitwerk's
-                    // `class << self; include RealModName; end` makes
-                    // `real_mod_name` a class method of the module.
-                    let shell_real = target_cls
-                        .singleton_target
-                        .borrow()
-                        .as_ref()
-                        .and_then(std::rc::Weak::upgrade);
-                    let include_redirect = is_include && shell_real.is_some();
-                    for idx in 0..n_args {
-                        let a = if reverse_args { &args[n_args - 1 - idx] } else { &args[idx] };
-                        let src = match a {
-                            Value::Class(c) => c.clone(),
-                            _ => return Err(self.trap(RubyError::TypeError {
-                                msg: format!(
-                                    "wrong argument type {} (expected Module)",
-                                    a.type_name(),
-                                ),
-                            })),
-                        };
-                        // CRuby last-{included,prepended}-wins:
-                        // push to the front so it's checked first
-                        // by the lookup walk (which goes head-to-
-                        // tail). `prepend` and `include` route into
-                        // separate chains — `lookup_method_uncached`
-                        // walks prepends BEFORE the class's own
-                        // methods, and includes AFTER.
-                        //
-                        // Idempotency is PER-CHAIN for include /
-                        // prepend (distinct insertion slots), not
-                        // full ancestor-chain: `include M; prepend M`
-                        // on the same target must succeed at both
-                        // steps. The check still walks transitively
-                        // within the chain — so `include
-                        // ContainsM; include M` (where ContainsM
-                        // includes M) skips the second include
-                        // because M is reachable via the include
-                        // chain. PR #347 documented follow-up.
-                        //
-                        // `Klass.extend(M)` (and bareword `extend M`
-                        // inside a class body, which this no-recv
-                        // arm handles) — see the explicit-receiver
-                        // arm below for the singleton_includes
-                        // rationale. Same fix; just a second site.
-                        let is_extend = !is_include && !is_prepend;
-                        let already_reachable = if include_redirect {
-                            shell_real.as_ref().unwrap()
-                                .singleton_includes.borrow().iter()
-                                .any(|m| std::rc::Rc::ptr_eq(m, &src))
-                        } else if is_extend {
-                            target_cls.singleton_includes.borrow().iter().any(|m| std::rc::Rc::ptr_eq(m, &src))
-                        } else {
-                            super::class_reaches_via_chain(&target_cls, &src, is_prepend)
-                        };
-                        if !already_reachable {
-                            let mut chain = if include_redirect {
-                                shell_real.as_ref().unwrap().singleton_includes.borrow_mut()
-                            } else if is_prepend {
-                                target_cls.prepends.borrow_mut()
-                            } else if is_extend {
-                                target_cls.singleton_includes.borrow_mut()
-                            } else {
-                                target_cls.includes.borrow_mut()
-                            };
-                            chain.insert(0, src.clone());
-                            drop(chain);
-                            // include/prepend changes the cref-ancestor
-                            // constant walk (`const_via_ancestors`) —
-                            // invalidate the const ICs.
-                            self.bump_const_gen();
-                        }
-                        // CRuby fires the `included` / `prepended`
-                        // hook on EVERY include/prepend call — even
-                        // when the chain mutation is a no-op
-                        // (idempotent re-include). The hook isn't
-                        // gated on chain change; it's documented as
-                        // "called whenever a module is included in
-                        // another module". For `extend` the hook is
-                        // `Module.extended(target)`.
-                        fire_hooks.push(src);
-                    }
-                    self.method_gen = self.method_gen.wrapping_add(1);
-                    let hook_name = if is_prepend {
-                        "prepended"
-                    } else if is_include {
-                        "included"
-                    } else {
-                        "extended"
-                    };
-                    self.fire_inclusion_hooks(&fire_hooks, &Value::Class(target_cls), hook_name)?;
-                    self.stack.push(self_val.clone());
-                    return Ok(());
+                    return self.do_module_inclusion(target.clone(), &name, &args);
                 }
             // `private` / `protected` / `public` inside a class
             // body. With no args, switch the current visibility
@@ -17963,6 +17842,100 @@ impl Vm {
     /// with_overridden_include) needs SOME method behind
     /// `inherited`; CRuby ships real empty defaults, rubyrs fires
     /// hooks VM-side, so the alias source is synthesised here.
+    /// Builtin `Module#include` / `#extend` / `#prepend` mechanics —
+    /// chain insertion (head, idempotent per-chain), const-IC / method
+    /// gen bumps, and hook firing (`included`/`extended`/`prepended`).
+    /// Pushes the target module onto the stack (CRuby returns self).
+    ///
+    /// Extracted so `super` can reach it: concurrent-ruby's
+    /// `Concurrent::ReInclude` (extended onto a module) overrides
+    /// `include(*modules)` and calls `super(*modules)`, which must hit
+    /// the builtin `Module#include` — there's no Ruby-defined super on
+    /// the chain, so the super-lifecycle path routes here.
+    pub(crate) fn do_module_inclusion(
+        &mut self,
+        target_cls: Rc<Class>,
+        name: &str,
+        args: &[Value],
+    ) -> Result<(), Trap> {
+        let is_prepend = name == "prepend";
+        let is_include = name == "include";
+        let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
+        // CRuby processes `include M1, M2, ...` args RIGHT-to-LEFT — M2
+        // inserts first, then M1. Each insert goes to the head of the
+        // chain, so M1 (last inserted) ends up at the head and
+        // M1.included fires LAST. All three keywords iterate
+        // right-to-left to match CRuby.
+        let reverse_args = is_prepend || is_include || (name == "extend");
+        let n_args = args.len();
+        // Eigenclass-shell (real `class << M` body, self = the
+        // metaclass): `include Mod` makes Mod's instance methods M's
+        // SINGLETON methods — i.e. M.singleton_includes (the same chain
+        // `M.extend Mod` feeds). `extend`/`prepend` on a shell keep
+        // their own eigenclass-object semantics.
+        let shell_real = target_cls
+            .singleton_target
+            .borrow()
+            .as_ref()
+            .and_then(std::rc::Weak::upgrade);
+        let include_redirect = is_include && shell_real.is_some();
+        for idx in 0..n_args {
+            let a = if reverse_args { &args[n_args - 1 - idx] } else { &args[idx] };
+            let src = match a {
+                Value::Class(c) => c.clone(),
+                _ => return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "wrong argument type {} (expected Module)",
+                        a.type_name(),
+                    ),
+                })),
+            };
+            // CRuby last-{included,prepended}-wins: push to the front so
+            // it's checked first by the lookup walk. Idempotency is
+            // PER-CHAIN for include / prepend (distinct insertion slots).
+            let is_extend = !is_include && !is_prepend;
+            let already_reachable = if include_redirect {
+                shell_real.as_ref().unwrap()
+                    .singleton_includes.borrow().iter()
+                    .any(|m| std::rc::Rc::ptr_eq(m, &src))
+            } else if is_extend {
+                target_cls.singleton_includes.borrow().iter().any(|m| std::rc::Rc::ptr_eq(m, &src))
+            } else {
+                super::class_reaches_via_chain(&target_cls, &src, is_prepend)
+            };
+            if !already_reachable {
+                let mut chain = if include_redirect {
+                    shell_real.as_ref().unwrap().singleton_includes.borrow_mut()
+                } else if is_prepend {
+                    target_cls.prepends.borrow_mut()
+                } else if is_extend {
+                    target_cls.singleton_includes.borrow_mut()
+                } else {
+                    target_cls.includes.borrow_mut()
+                };
+                chain.insert(0, src.clone());
+                drop(chain);
+                // include/prepend changes the cref-ancestor constant
+                // walk (`const_via_ancestors`) — invalidate the const ICs.
+                self.bump_const_gen();
+            }
+            // CRuby fires the hook on EVERY call — even an idempotent
+            // re-include. For `extend` the hook is `Module.extended`.
+            fire_hooks.push(src);
+        }
+        self.method_gen = self.method_gen.wrapping_add(1);
+        let hook_name = if is_prepend {
+            "prepended"
+        } else if is_include {
+            "included"
+        } else {
+            "extended"
+        };
+        self.fire_inclusion_hooks(&fire_hooks, &Value::Class(target_cls.clone()), hook_name)?;
+        self.stack.push(Value::Class(target_cls));
+        Ok(())
+    }
+
     pub(crate) fn synth_noop_method(&mut self, cls: &Rc<Class>, orig_id: SymId) -> Rc<crate::value::Method> {
         use crate::bytecode::{Op, Proto};
         use crate::error::Span;

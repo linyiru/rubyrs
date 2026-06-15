@@ -1301,3 +1301,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // class-level builtin `new`/`allocate` into a singleton method.
 // Surfaced by concurrent-ruby's LockFreeStack::Node (`Node[nil, nil]`).
 #[test] fn singleton_alias_class_new() { run_diff("singleton_alias_class_new"); }
+
+// `super` from an overridden `include`/`extend` reaching the builtin
+// `Module#include`. Surfaced by concurrent-ruby's `Concurrent::ReInclude`
+// (Bridgetown boot path).
+#[test] fn super_module_include() { run_diff("super_module_include"); }
