@@ -80,12 +80,26 @@ now loads end to end (request middleware, response logging via a `pp`
 shim). Shim/probe additions: `pp` → `pretty_inspect` no-op; samovar's
 CLI dep chain (mapping, console, fiber-annotation, fiber-local).
 
-**Current wall (frontier):** concurrent-ruby's `SafeInitialization` —
-`module SafeInitialization; def new(*a, &b); super(*a, &b); ensure …; end;
-end`, `extend`ed onto `Concurrent::Delay`. `Delay.new` → the module's
-`new` → `super` should reach the builtin `Class#new`, but rubyrs raises
-`super: no superclass method 'new'`. A distinct VM gap (super-to-builtin-
-`Class#new` from an extended-module method), not the struct/const bug.
+**Progress (2026-06-15, round 8):** concurrent-ruby clears. Two VM fixes:
+- **`super(*a, &b)` → builtin `Class#new` from an `extend`ed module's
+  `new`** — `Op::ApplySuperBlock` now handles the `new`/`allocate`/
+  `initialize` fall-through (block-aware), like its no-block twin.
+  concurrent-ruby's `SafeInitialization` on `Concurrent::Delay`.
+- **a missing multi-segment `require` LoadErrors** instead of being
+  lenient-satisfied by a same-named parent module — `require
+  "concurrent/concurrent_ruby_ext"` was matching the `Concurrent` module
+  and reporting success, so concurrent thought its C ext loaded and
+  referenced the C-only `Concurrent::CAtomicBoolean`. Now the
+  `rescue LoadError` picks the pure-Ruby fallback.
+
+**Current wall (frontier):** faraday's net_http adapter
+(`faraday.rb:20 require "faraday/net_http"`) needs the stdlib `net/http`
+(it references `Net::HTTPBadResponse` / `Net::ProtocolError` / … at
+class-body load time). rubyrs doesn't vendor `net/http` (TCP sockets +
+HTTP protocol) — a substantial stdlib, not a quick shim. faraday only
+USES it at request time, so a namespace+exception shim would let the
+adapter load; a faithful one needs real sockets. Distinct from the VM
+work above (a vendored-stdlib decision).
 
 ## VM fixes this spike drove (landed, with diff_cruby coverage)
 

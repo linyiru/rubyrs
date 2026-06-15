@@ -15,6 +15,7 @@ $LP = $LOAD_PATH
   "public_suffix-6.0.1",
   "hash_with_dot_access-2.2.0", "inclusive-1.1.0", "dry-inflector-1.3.1",
   "mapping-1.1.3", "console-1.36.0", "fiber-annotation-0.2.0", "fiber-local-1.1.0",
+  "faraday-net_http-3.4.4",
 ].each { |g| $LP.unshift("#{G}/#{g}/lib") }
 # concurrent-ruby's require_path is lib/concurrent-ruby (not lib), so
 # `require "concurrent/map"` resolves under that subdir.
