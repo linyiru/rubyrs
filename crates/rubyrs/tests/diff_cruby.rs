@@ -1315,3 +1315,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // those defined directly in M. Surfaced by bridgetown-foundation's
 // `Bridgetown::Refinements` (includes the refine-holding modules).
 #[test] fn using_refinement_via_include() { run_diff("using_refinement_via_include"); }
+
+// Reopening `module X`/`class X` with a pending autoload fires the
+// autoload first (CRuby semantics). Surfaced by bridgetown-foundation's
+// zeitwerk-autoloaded `RefineExt` namespace.
+#[test] fn reopen_fires_autoload() { run_diff("reopen_fires_autoload"); }

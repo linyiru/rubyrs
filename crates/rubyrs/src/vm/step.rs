@@ -1847,25 +1847,50 @@ impl Vm {
                         // compiles out. Discovery: P3 Jekyll spike —
                         // `post_reader.rb` reads
                         // `Document::DATE_FILENAME_MATCHER` cold.
+                        //
+                        // LOOP until resolved or no autoload fires: a
+                        // candidate can be a MULTI-LEVEL autoload chain
+                        // where firing the outer autoload registers a
+                        // fresh NESTED one. Bridgetown's
+                        // `Bridgetown::FrontMatter::RubyFrontMatter`
+                        // first fires `autoload :FrontMatter` (loads
+                        // front_matter.rb), which only THEN declares
+                        // `autoload :RubyFrontMatter` — a single firing
+                        // pass left RubyFrontMatter pending and missed.
+                        // Each `fire_pending_autoload` consumes one
+                        // pending entry (it `.remove`s before requiring),
+                        // so the loop is bounded and terminates when a
+                        // pass fires nothing new.
                         #[cfg(not(target_os = "wasi"))]
-                        {
+                        loop {
+                            // Resolve from already-loaded entries first
+                            // (also catches the const a prior iteration's
+                            // require just defined).
+                            for s2 in &chain {
+                                if let Some(c) = self.classes.get(s2).cloned() {
+                                    self.stack.push(Value::Class(c));
+                                    return Ok(true);
+                                }
+                                if let Some(cv) = self.constants.get(s2).cloned() {
+                                    self.stack.push(cv);
+                                    return Ok(true);
+                                }
+                            }
+                            // Fire one pending autoload across the
+                            // candidates; stop when a full pass fires none.
+                            let mut fired = false;
                             for sym in &chain {
                                 let cand = self.interner.resolve(*sym).to_string();
                                 if self.fire_pending_autoload(&cand)? {
-                                    for s2 in &chain {
-                                        if let Some(c) = self.classes.get(s2).cloned() {
-                                            self.stack.push(Value::Class(c));
-                                            return Ok(true);
-                                        }
-                                        if let Some(cv) = self.constants.get(s2).cloned() {
-                                            self.stack.push(cv);
-                                            return Ok(true);
-                                        }
-                                    }
+                                    fired = true;
+                                    break;
                                 }
                             }
-                            // requires ran but defined no candidate —
-                            // fall through to the NameError below.
+                            if !fired {
+                                // requires ran but defined no candidate —
+                                // fall through to the NameError below.
+                                break;
+                            }
                         }
                         // ENV fallback: when the chain walk fails to
                         // find any user-defined constant matching the
@@ -3919,6 +3944,29 @@ impl Vm {
                 // added in a reopen land on the same class.
                 let table_key = if qual_id.0 == u32::MAX { name_id } else { qual_id };
                 let name_str = self.interner.resolve(table_key).to_string();
+                // Reopening a constant that has a PENDING AUTOLOAD must
+                // fire the autoload first (CRuby semantics): `module X`
+                // where `X` is autoloaded loads the existing definition
+                // — and any nested autoloads that load registers —
+                // BEFORE reopening. bridgetown-foundation's object.rb
+                // opens `module Bridgetown::Foundation::RefineExt`,
+                // which zeitwerk autoloads to a DIRECTORY; firing that
+                // dir-autoload is what registers the sibling refine_ext
+                // files (hash/module/string/deep_duplicatable). Without
+                // this, opening the module minted a fresh empty shell,
+                // the siblings never registered, and `eager_load`
+                // skipped them (only the explicitly-required object.rb
+                // loaded). Gate on THIS exact constant being pending
+                // (not a parent prefix) so opening a genuinely-fresh
+                // nested module doesn't spuriously fire an ancestor's
+                // autoload.
+                #[cfg(not(target_os = "wasi"))]
+                if !self.classes.contains_key(&table_key)
+                    && (self.autoloads_toplevel.contains_key(&table_key)
+                        || self.autoloads_scoped.contains_key(&table_key))
+                {
+                    self.fire_pending_autoload(&name_str)?;
+                }
                 // First-define vs reopen: CRuby fires the
                 // `inherited` callback only on the first
                 // `class B < A` definition, not on reopens.
