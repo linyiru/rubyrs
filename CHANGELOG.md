@@ -798,6 +798,7 @@ breaking-change semantics, see the `### Changed` entries.
   types, user-class identity, name lookup, the meta level
   (`Animal.class == Class`), and class-name dispatch inside a
   rescue handler. Byte-identical to CRuby.
+- **`Object#respond_to?(name)`** for duck-typed feature
   detection. Accepts either a `Symbol` (`:length`) or a
   `String` (`"length"`). For `Value::Object` receivers walks
   the class chain via `lookup_method_uncached` — the precise
@@ -1809,6 +1810,7 @@ won't be fixed until we have a clear use case demanding parity.
 - Specialised `Op::BinOp(BinOpKind)` for `+ - * / % == != < <= > >=` —
   Int+Int fast path avoids generic method dispatch
 - 1M-fizzbuzz: 0.67 s → 0.44 s (2.3× of CRuby's interpreter)
+
 ## [0.0.x — development]
 
 Initial PoC and milestones leading up to this point. All work pre-tag is
