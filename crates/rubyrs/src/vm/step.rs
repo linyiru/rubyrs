@@ -339,6 +339,21 @@ impl Vm {
         Ok(id)
     }
 
+    /// Location (`file`, `line`) of the op CURRENTLY executing in the
+    /// top frame — the dispatch loop already advanced `ip` past it, so
+    /// the live op is `ip - 1`. Used by `Op::DefClass` / `DefModule` /
+    /// `StoreConst` to stamp `const_source_locations`. `None` when the
+    /// source text isn't tracked (no line resolvable).
+    pub(crate) fn current_op_location(&self) -> Option<(std::rc::Rc<str>, u32)> {
+        let f = self.frames.last()?;
+        let proto = &self.protos[f.proto_idx];
+        let op_idx = f.ip.checked_sub(1)?;
+        let span = proto.op_spans.get(op_idx).copied()?;
+        let src = self.sources.get(proto.filename.as_ref())?;
+        let line = crate::error::line_col(src, span.byte_offset).0;
+        Some((proto.filename.clone(), line))
+    }
+
     /// Lazily materialise the `$LOADED_FEATURES` / `$"` Array — the
     /// script-visible list of loaded file paths. Twin of
     /// `ensure_load_path`; GC-rooted via `Vm.loaded_features_list`.
@@ -1492,6 +1507,14 @@ impl Vm {
                     self.name_anon_class(cls, &qualified);
                 }
                 self.constants.insert(name_id, v);
+                // Stamp the assignment location (first write wins, so a
+                // `class Foo; end`'s DefClass location is preserved over
+                // the nested-scope StoreConst the compiler also emits).
+                if !self.const_source_locations.contains_key(&name_id)
+                    && let Some(loc) = self.current_op_location()
+                {
+                    self.const_source_locations.insert(name_id, loc);
+                }
                 self.bump_const_gen();
             }
             Op::LoadConst(name_id) => {
@@ -3824,6 +3847,16 @@ impl Vm {
                 // `class B < A` definition, not on reopens.
                 // Snapshot before the entry()-or_insert.
                 let was_fresh = !self.classes.contains_key(&table_key);
+                // Stamp the definition location on FIRST define (CRuby's
+                // `const_source_location` reports where `class`/`module`
+                // first opened; reopens don't move it). `current_op_location`
+                // reads the executing DefClass op's span.
+                if was_fresh
+                    && !self.const_source_locations.contains_key(&table_key)
+                    && let Some(loc) = self.current_op_location()
+                {
+                    self.const_source_locations.insert(table_key, loc);
+                }
                 // A class/module definition (fresh OR reopen — a reopen
                 // can still change what nested bare names resolve to via
                 // its body) invalidates the constant ICs.

@@ -735,6 +735,15 @@ pub(crate) struct Vm {
     /// emit "already initialized constant" and reassign). If you
     /// need to shadow a class with a constant, pick a different name.
     pub(crate) constants: FxHashMap<SymId, Value>,
+    /// Definition location (`file`, `line`) of each user-defined
+    /// class/module/value constant, keyed by the same qualified-name
+    /// `SymId` the `classes` / `constants` tables use. Recorded at
+    /// `Op::DefClass` / `Op::DefModule` / `Op::StoreConst` (first
+    /// definition wins, matching CRuby — reopens don't move it).
+    /// Read by `Module#const_source_location`. `Rc<str>` filename is
+    /// not a GC object, so no rooting. Snapshot/reset-managed like
+    /// `constants` so embed resets don't leak user entries.
+    pub(crate) const_source_locations: FxHashMap<SymId, (std::rc::Rc<str>, u32)>,
     /// Files already loaded via `require_relative` — keyed by
     /// canonical path. Suppresses re-loading on subsequent calls
     /// the same way CRuby's `$LOADED_FEATURES` does. The Set
@@ -1720,6 +1729,7 @@ impl Vm {
             interner,
             classes: FxHashMap::default(),
             constants: FxHashMap::default(),
+            const_source_locations: FxHashMap::default(),
             #[cfg(not(target_os = "wasi"))]
             loaded_features: std::collections::HashSet::new(),
             #[cfg(not(target_os = "wasi"))]

@@ -940,6 +940,10 @@ struct PostPreambleSnapshot {
     /// preamble constant (e.g. `Exception = 1`) — the snapshot's
     /// original Class value is restored, not just left.
     constants: crate::intern::FxHashMap<intern::SymId, value::Value>,
+    /// `vm.const_source_locations` as of preamble completion.
+    /// `reset()` clones and replaces so user class/const definition
+    /// locations don't leak across embed resets.
+    const_source_locations: crate::intern::FxHashMap<intern::SymId, (std::rc::Rc<str>, u32)>,
     /// `vm.toplevel_methods` as of preamble completion.
     /// Restored by clone-and-replace so a user `def foo; ...` —
     /// or a redefinition of a preamble-supplied toplevel method —
@@ -1240,6 +1244,7 @@ impl PostPreambleSnapshot {
             protos_len: rt.vm.protos.len(),
             classes: rt.vm.classes.clone(),
             constants: rt.vm.constants.clone(),
+            const_source_locations: rt.vm.const_source_locations.clone(),
             toplevel_methods: rt.vm.toplevel_methods.clone(),
             class_states,
             sources: rt.vm.sources.clone(),
@@ -1266,6 +1271,7 @@ impl PostPreambleSnapshot {
     fn restore_baseline_maps_into(&self, vm: &mut vm::Vm) {
         vm.classes.clone_from(&self.classes);
         vm.constants.clone_from(&self.constants);
+        vm.const_source_locations.clone_from(&self.const_source_locations);
         vm.toplevel_methods.clone_from(&self.toplevel_methods);
         vm.sources.clone_from(&self.sources);
         // Per-class RefCells — see `PostPreambleSnapshot::class_states`

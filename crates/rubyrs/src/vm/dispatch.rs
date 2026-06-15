@@ -8843,6 +8843,62 @@ impl Vm {
                 ConstPathOutcome::Trap(t) => return Err(t),
             }
         }
+        // `Module#const_source_location(name)` — `[file, line]` where
+        // the constant was defined (recorded at DefClass/DefModule/
+        // StoreConst), `nil` for a constant with no tracked location
+        // (core / C-defined, or a registered-but-untriggered autoload),
+        // NameError for an undefined constant. Resolves against the
+        // tables directly so it does NOT fire autoloads (CRuby
+        // doesn't). zeitwerk reads it for warnings/error messages and
+        // its test suite asserts the location of `Zeitwerk::Loader`.
+        if &*name == "const_source_location"
+            && let Value::Class(owner) = &recv
+            && args.len() == 1
+        {
+            let const_name = match &args[0] {
+                Value::Sym(s) => self.interner.resolve(*s).to_string(),
+                Value::Str(s) => s.to_string_lossy(),
+                other => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into String", other.type_name()),
+                })),
+            };
+            let key_str = match owner.effective_name().as_deref() {
+                Some("Object") | None => const_name.clone(),
+                Some(on) => format!("{}::{}", on, const_name),
+            };
+            let key = self.interner.intern(&key_str);
+            // CRuby contract: Ruby-defined → [file, line]; C-defined
+            // core → [] (empty Array); registered-but-untriggered
+            // autoload / undefined → nil. rubyrs's preamble is its
+            // "C-defined core", so a preamble-located constant maps to
+            // the empty-Array form.
+            let short_key = self.interner.intern(&const_name);
+            let result: Value = if let Some((file, line)) = self.const_source_locations.get(&key).cloned() {
+                if file.starts_with("<rubyrs:preamble") {
+                    let id = self.heap.alloc(HeapObj::Array(Vec::new().into()));
+                    Value::Array(id)
+                } else {
+                    let arr = vec![Value::new_str(file.to_string()), Value::Int(line as i64)];
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let id = self.heap.alloc(HeapObj::Array(arr.into()));
+                    Value::Array(id)
+                }
+            } else if self.classes.contains_key(&key)
+                || self.constants.contains_key(&key)
+                || owner.consts.borrow().contains_key(&short_key)
+            {
+                // Defined but no tracked location (native core) → [].
+                let id = self.heap.alloc(HeapObj::Array(Vec::new().into()));
+                Value::Array(id)
+            } else {
+                // Untriggered autoload or undefined → nil (CRuby does
+                // NOT raise for an undefined-but-valid constant name).
+                Value::Nil
+            };
+            self.stack.push(result);
+            return Ok(());
+        }
         if matches!(&*name, "private_constant" | "public_constant" | "deprecate_constant")
             && let Value::Class(_) = &recv {
             self.stack.push(recv);
