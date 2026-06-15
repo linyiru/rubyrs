@@ -568,6 +568,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn file_open_read() { run_diff("file_open_read"); }
 #[test] fn string_index_multibyte() { run_diff("string_index_multibyte"); }
 #[test] fn autoload_scoped() { run_diff("autoload_scoped"); }
+#[test] fn const_autovivified_module() { run_diff("const_autovivified_module"); }
+#[test] fn require_override_autoload() { run_diff("require_override_autoload"); }
 #[test] fn require_openssl_zlib_stub() { run_diff("require_openssl_zlib_stub"); }
 #[test] fn super_to_primitive() { run_diff("super_to_primitive"); }
 #[test] fn fancy_regex_captures() { run_diff("fancy_regex_captures"); }

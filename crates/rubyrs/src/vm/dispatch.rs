@@ -7315,10 +7315,17 @@ impl Vm {
                     // const name — it can't form a useful `::`
                     // prefix, and the scoped trigger only consults
                     // qualified `Owner::Const` lookups anyway.
-                    let key = if owner.name.is_empty() || owner.name == "Object" {
-                        const_name
-                    } else {
-                        format!("{}::{}", owner.name, const_name)
+                    // Key by EFFECTIVE name: an autovivified / anon
+                    // namespace (zeitwerk's implicit-namespace modules)
+                    // has an empty structural `name` but
+                    // `effective_name() == "Admin"`, so the scoped
+                    // autoload registers under "Admin::User" — the key
+                    // `fire_pending_autoload` looks up. Keying by the
+                    // structural `name` put it under bare "User", which
+                    // the constant-reference autoload walk never matched.
+                    let key = match owner.effective_name().as_deref() {
+                        None | Some("Object") => const_name,
+                        Some(on) => format!("{}::{}", on, const_name),
                     };
                     let key_id = self.interner.intern(&key);
                     self.autoloads_scoped.insert(key_id, path);
@@ -7351,10 +7358,9 @@ impl Vm {
                         _ => None,
                     };
                     if let Some(cn) = const_name {
-                        let key = if owner.name.is_empty() || owner.name == "Object" {
-                            cn
-                        } else {
-                            format!("{}::{}", owner.name, cn)
+                        let key = match owner.effective_name().as_deref() {
+                            None | Some("Object") => cn,
+                            Some(on) => format!("{}::{}", on, cn),
                         };
                         if self.interner.contains(&key) {
                             let key_id = self.interner.intern(&key);
@@ -8743,10 +8749,9 @@ impl Vm {
                         }));
                     }
                 };
-                let key = if owner.name.is_empty() || owner.name == "Object" {
-                    const_name
-                } else {
-                    format!("{}::{}", owner.name, const_name)
+                let key = match owner.effective_name().as_deref() {
+                    None | Some("Object") => const_name,
+                    Some(on) => format!("{}::{}", on, const_name),
                 };
                 let key_id = self.interner.intern(&key);
                 self.autoloads_scoped.insert(key_id, path);
@@ -8775,10 +8780,9 @@ impl Vm {
                     _ => None,
                 };
                 if let Some(cn) = const_name {
-                    let key = if owner.name.is_empty() || owner.name == "Object" {
-                        cn
-                    } else {
-                        format!("{}::{}", owner.name, cn)
+                    let key = match owner.effective_name().as_deref() {
+                        None | Some("Object") => cn,
+                        Some(on) => format!("{}::{}", on, cn),
                     };
                     if self.interner.contains(&key) {
                         let key_id = self.interner.intern(&key);
@@ -16894,14 +16898,46 @@ impl Vm {
                 .remove(&pid)
                 .or_else(|| self.autoloads_scoped.remove(&pid));
             if let Some(path) = path {
-                return match self.builtin_call("require", &[Value::new_str(path)]) {
-                    Some(Ok(_)) => Ok(true),
-                    Some(Err(t)) => Err(t),
-                    None => Ok(false), // unreachable: "require" is a builtin
-                };
+                self.invoke_require_for_autoload(Value::new_str(path))?;
+                return Ok(true);
             }
         }
         Ok(false)
+    }
+
+    /// Run `require(path)` for a firing autoload. When user code has
+    /// defined a `Kernel#require` override (zeitwerk decorates it to
+    /// intercept autoloads — autovivifying namespace DIRECTORIES,
+    /// firing `on_load` callbacks, updating its registry), dispatch
+    /// THROUGH that override instead of the builtin; otherwise call
+    /// the builtin directly. Without this, an autoload registered on a
+    /// directory path (zeitwerk's implicit namespaces) fired the raw
+    /// builtin `require "<dir>"` → "Is a directory".
+    ///
+    /// The override itself calls `zeitwerk_original_require` for real
+    /// `.rb` files, which routes to the builtin (the alias forwarder
+    /// is name `zeitwerk_original_require`, not `require`, so there is
+    /// no re-entry here).
+    fn invoke_require_for_autoload(&mut self, path: Value) -> Result<Value, Trap> {
+        let require_id = self.interner.intern("require");
+        let main = self.main_object();
+        let user_require = match &main {
+            Value::Object(id) => {
+                let cls = self.heap.class_of(*id);
+                self.lookup_method_uncached(&cls, require_id)
+            }
+            _ => None,
+        };
+        if let Some(m) = user_require {
+            let pre = self.frames.len();
+            self.invoke_method(m, main, vec![path])?;
+            self.dispatch_until(pre)?;
+            return Ok(self.stack.pop().unwrap_or(Value::Nil));
+        }
+        match self.builtin_call("require", &[path]) {
+            Some(r) => r,
+            None => Ok(Value::Bool(false)), // unreachable: "require" is a builtin
+        }
     }
 
     /// CRuby names an anonymous class/module on its FIRST
@@ -17008,14 +17044,21 @@ impl Vm {
                 _ => String::new(),
             }
         }
+        // EFFECTIVE name as the starting scope: an autovivified / anon
+        // module (`Admin = Module.new` — zeitwerk's implicit
+        // namespaces) has an empty structural `name` but
+        // `effective_name() == "Admin"`, so `Admin.const_get(:User)` /
+        // `Admin.const_defined?(:User)` must look under "Admin::User",
+        // not bare "User". For named classes the two coincide.
+        let start_name = start_cls.effective_name().unwrap_or_default();
         let (mut scope_name, segments): (String, Vec<&str>) =
             if split_on_double_colon && path.starts_with("::") {
                 // Leading `::` rebases to Object's toplevel scope.
                 ("Object".to_string(), path[2..].split("::").collect())
             } else if split_on_double_colon && path.contains("::") {
-                (start_cls.name.clone(), path.split("::").collect())
+                (start_name.clone(), path.split("::").collect())
             } else {
-                (start_cls.name.clone(), vec![path])
+                (start_name, vec![path])
             };
         // CRuby reports the FULL original path in the
         // wrong-name message when the structural issue is
@@ -17508,6 +17551,27 @@ impl Vm {
     pub(crate) fn synth_primitive_forwarder(&mut self, cls: &Rc<Class>, orig_id: SymId) -> Rc<crate::value::Method> {
         use crate::bytecode::{Op, Proto};
         use crate::error::Span;
+        // Kernel GLOBAL builtins (require/puts/print/...) are dispatched
+        // by `builtin_call`, not receiver-primitive dispatch, so an
+        // alias of one needs the no-recv → builtin_call forwarder, not
+        // ApplyCallPrimitive (which dispatches on the receiver and
+        // raised NoMethodError). Surfaced once zeitwerk's autoload
+        // override actually invoked `zeitwerk_original_require`
+        // (`alias_method :zeitwerk_original_require, :require`).
+        let is_kernel_global = {
+            let name = self.interner.resolve(orig_id);
+            matches!(
+                name.as_ref(),
+                "sleep" | "rand" | "srand" | "exit" | "exit!" | "abort"
+                | "puts" | "print" | "p" | "pp" | "warn"
+                | "sprintf" | "format" | "caller" | "at_exit"
+                | "require" | "require_relative" | "load" | "system"
+                | "raise" | "fail"
+            )
+        };
+        if is_kernel_global {
+            return self.synth_kernel_forwarder(cls, orig_id);
+        }
         let proto = Proto {
             name: format!("<primitive-alias-forwarder:{}>", self.interner.resolve(orig_id)),
             // `args` is the rest-arg name; proto.params lists it so
