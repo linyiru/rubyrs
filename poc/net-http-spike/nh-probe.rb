@@ -10,18 +10,9 @@ $LP = $LOAD_PATH
   "net-http-0.6.0", "net-protocol-0.2.2",
   "faraday-2.12.2", "faraday-net_http-3.4.4", "ruby2_keywords-0.0.5",
 ].each { |g| $LP.unshift("#{G}/#{g}/lib") }
-
-# Patched net/http.rb (`class << HTTP` → `class << self`; see FINDINGS
-# "class << <Const> alias" wall — semantically identical here). Built at
-# runtime under /tmp (copy the gem's net/ tree so net/http.rb's
-# require_relative submodules resolve, then overwrite http.rb with the
-# patched version) so we don't commit machine-specific symlinks.
-system("rm", "-rf", "/tmp/nh-patched")
-system("mkdir", "-p", "/tmp/nh-patched/net")
-system("cp", "-R", "#{G}/net-http-0.6.0/lib/net/.", "/tmp/nh-patched/net/")
-src = File.read("#{G}/net-http-0.6.0/lib/net/http.rb")
-File.write("/tmp/nh-patched/net/http.rb", src.gsub("class << HTTP", "class << self"))
-$LP.unshift("/tmp/nh-patched")   # wins over the gem for "net/http"
+# net/http.rb now parses UNPATCHED — the `class << HTTP; alias` wall was
+# fixed in rubyrs (feat(parser): alias in class << <Const>). No vendor
+# patch needed; the real gem net/http.rb loads directly.
 $LP.unshift(File.expand_path("shim", __dir__))
 
 require "recording_socket"

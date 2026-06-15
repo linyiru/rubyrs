@@ -7,21 +7,9 @@
 
 $NH_CALLS = Hash.new(0)   # method name => call count (the host-fn surface)
 
-# WALL (core Tier-1 gap, unrelated to the socket battery): rubyrs is
-# missing `String#chop` (net/protocol's `readline` does
-# `readuntil("\n").chop`). Trivial 1-liner to add to rubyrs core. Shim
-# it here so the spike can finish mapping the read path.
-class String
-  def chop
-    return self if empty?
-    return self[0...-2] if self[-2, 2] == "\r\n"
-    self[0...-1]
-  end
-  # Also missing: `String#clear` (net/protocol rbuf_flush does
-  # `@rbuf.clear` to empty its read buffer in place). Core Tier-1 gap.
-  def clear ; replace(""); end
-end
-$NH_NET_HTTP_CALLS = Hash.new(0)  # Net::HTTP public surface faraday drives
+# NOTE: `String#chop`, `String#clear`, and `Errno::EALREADY` /
+# `ECONNABORTED` were the spike's discovered Tier-1 gaps — now LANDED in
+# rubyrs core (feat(string)/feat(errno)), so no longer shimmed here.
 
 def nh_log(m)
   $NH_CALLS[m] += 1
@@ -186,19 +174,8 @@ module Socket
   SOCK_STREAM = 1
 end
 
-# WALL (rubyrs Errno hierarchy incomplete): faraday-net_http builds an
-# exception list referencing these Errno classes; several aren't defined
-# in rubyrs. The `_socket` battery's error-mapping (ADR 0028 §4) needs
-# the connect/read/write subset; faraday wants a wider list. Define any
-# missing ones as SystemCallError subclasses for the spike.
-parent = defined?(SystemCallError) ? SystemCallError : StandardError
-%i[EADDRNOTAVAIL EALREADY ECONNABORTED ECONNREFUSED ECONNRESET
-   EHOSTUNREACH EINVAL ENETUNREACH EPIPE ETIMEDOUT].each do |name|
-  already = (Errno.const_defined?(name) rescue false)
-  next if already
-  Errno.const_set(name, Class.new(parent))
-  $NH_CALLS["MISSING_ERRNO:#{name}"] += 1
-end
+# (The Errno classes faraday-net_http references — EALREADY, ECONNABORTED,
+# … — now all exist in rubyrs core; the spike no longer stubs them.)
 
 # faraday's logging formatter requires "pp" for Object#pretty_inspect.
 module Kernel

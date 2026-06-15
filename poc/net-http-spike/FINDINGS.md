@@ -16,6 +16,15 @@ three ways (`Net::HTTP.start{…}.request`, `Net::HTTP.get`, faraday
 body="hello, world!"`. Reproduce: `target/release/rubyrs
 poc/net-http-spike/nh-probe.rb`.
 
+> **Status update (post-Phase-1):** the four Tier-1 prerequisites in §2
+> are **LANDED in rubyrs core** — `feat(string): String#chop`,
+> `feat(string): String#clear`, `feat(errno): Errno::EALREADY +
+> ECONNABORTED`, `feat(parser): alias in class << <Const>`. The spike now
+> runs against the **real, unpatched** net/http 0.6.0 with **no
+> String/Errno shims and no vendor patch** — the only remaining shims are
+> the recording socket, the minimal URI (§3, separate track), the
+> `Socket::*` setsockopt constants, and `pp`/`pretty_inspect`.
+
 ---
 
 ## 1. The socket host-fn surface (THE deliverable → ADR 0028 §2)
