@@ -917,6 +917,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn fileops_write() { run_diff("fileops_write"); }
 #[test] fn errno_rescue() { run_diff("errno_rescue"); }
 #[test] fn fileutils_cp_array() { run_diff("fileutils_cp_array"); }
+#[cfg(unix)]
+#[test] fn fileutils_ln_s() { run_diff("fileutils_ln_s"); }
 #[test] fn fileutils_cp_r_mv() { run_diff("fileutils_cp_r_mv"); }
 #[test] fn file_write_mode() { run_diff("file_write_mode"); }
 #[test] fn file_fnmatch_globstar() { run_diff("file_fnmatch_globstar"); }

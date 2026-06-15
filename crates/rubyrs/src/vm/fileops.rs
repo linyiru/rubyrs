@@ -1449,6 +1449,38 @@ impl Vm {
                 }
                 a.clone()
             }
+            // `FileUtils.ln_s(src, dest, force: false)` — create a
+            // symbolic link `dest` → `src` (twin of File.symlink, but
+            // with FileUtils' dest-is-a-directory and multi-source
+            // joining, like `cp`). `ln_sf` forces (removes an existing
+            // dest first). Returns nil (CRuby). Unix-only. zeitwerk's
+            // eager-load / ruby-compatibility tests link fixture
+            // directories this way.
+            #[cfg(unix)]
+            ("ln_s" | "ln_sf" | "symlink", [src, dst]) => {
+                let force = name == "ln_sf";
+                self.check_filesystem_io_allowed("FileUtils.ln_s", None)?;
+                let srcs = paths(self, src)?;
+                let d = paths(self, dst)?.into_iter().next().unwrap_or_default();
+                let into_dir = matches!(src, Value::Array(_)) || Path::new(&d).is_dir();
+                for s in &srcs {
+                    let dest = if into_dir {
+                        Path::new(&d)
+                            .join(Path::new(s).file_name().unwrap_or_default())
+                            .to_string_lossy()
+                            .into_owned()
+                    } else {
+                        d.clone()
+                    };
+                    self.check_filesystem_io_allowed("FileUtils.ln_s", Some(Path::new(&dest)))?;
+                    if force {
+                        let _ = std::fs::remove_file(&dest);
+                    }
+                    std::os::unix::fs::symlink(s, &dest)
+                        .map_err(|e| self.trap(io_error(&e, Some(Path::new(&dest)))))?;
+                }
+                Value::Int(0)
+            }
             ("cp" | "copy", [src, dst]) => {
                 self.check_filesystem_io_allowed("FileUtils.cp", None)?;
                 let srcs = paths(self, src)?;
