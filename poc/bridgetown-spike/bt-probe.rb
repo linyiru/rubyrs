@@ -16,6 +16,9 @@ $LP = $LOAD_PATH
   "hash_with_dot_access-2.2.0", "inclusive-1.1.0", "dry-inflector-1.3.1",
   "mapping-1.1.3", "console-1.36.0", "fiber-annotation-0.2.0", "fiber-local-1.1.0",
   "faraday-net_http-3.4.4",
+  # Real net/http stack — now backed by the _socket + _openssl batteries
+  # (ADR 0028/0029), so faraday's net_http adapter loads unshimmed.
+  "net-http-0.6.0", "net-protocol-0.2.2", "uri-1.0.2", "ruby2_keywords-0.0.5",
 ].each { |g| $LP.unshift("#{G}/#{g}/lib") }
 # concurrent-ruby's require_path is lib/concurrent-ruby (not lib), so
 # `require "concurrent/map"` resolves under that subdir.
@@ -47,4 +50,19 @@ rescue Exception => e
   puts "P1-ERR: #{e.class}: #{e.message}"
   (e.backtrace || []).first(15).each { |f| puts "  #{f}" }
   exit 1
+end
+
+puts "== phase 2: Bridgetown.configuration =="
+begin
+  cfg = Bridgetown.configuration(
+    root_dir: "/tmp", source: "/tmp", destination: "/tmp/_site", quiet: true
+  )
+  puts "P2 OK: #{cfg.class}"
+rescue Exception => e
+  puts "P2-ERR: #{e.class}: #{e.message}"
+  (e.backtrace || []).first(8).each { |f| puts "  #{f}" }
+  # Frontier (2026-06-15): zeitwerk `eager_load` loads only one of the
+  # five bridgetown/foundation/refine_ext/*.rb files, so
+  # `Bridgetown::Refinements` lacks `DeepDuplicatable` and
+  # `configuration.rb`'s `starting_defaults.deep_dup` → NoMethodError.
 end
