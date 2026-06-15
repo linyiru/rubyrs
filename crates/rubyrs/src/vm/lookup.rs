@@ -696,7 +696,7 @@ impl Vm {
             "strip" | "lstrip" | "rstrip" |
             "strip!" | "lstrip!" | "rstrip!" |
             "chomp" | "chomp!" | "chop" |
-            "tr!" | "squeeze!" |
+            "tr!" | "squeeze!" | "delete" | "delete!" |
             "center" | "ljust" | "rjust" |
             "include?" | "start_with?" | "end_with?" |
             "delete_prefix" | "delete_suffix" | "delete_prefix!" | "delete_suffix!" |

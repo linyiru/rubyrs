@@ -3355,6 +3355,33 @@ impl Vm {
                             .collect();
                         Some(Value::new_str(out))
                     }
+                    ("delete!", [Value::Str(set)]) => {
+                        // Destructive `delete` — remove matching chars IN
+                        // PLACE; return self if anything changed, nil if
+                        // not (CRuby). FrozenError-aware. Surfaced by
+                        // stdlib uri/generic.rb's `query=` (`x.delete!`).
+                        check_unfrozen(self)?;
+                        let src = s.to_string_lossy();
+                        let set_s = set.to_string_lossy();
+                        let (set_chars, negated) = match parse_tr_set(&set_s, true) {
+                            Ok(t) => t,
+                            Err(msg) => return Err(self.trap(RubyError::ArgumentError {
+                                msg: msg.to_string(),
+                            })),
+                        };
+                        let setref: std::collections::HashSet<char> = set_chars.into_iter().collect();
+                        let out: String = src.chars()
+                            .filter(|c| setref.contains(c) == negated)
+                            .collect();
+                        if out == src {
+                            Some(Value::Nil)
+                        } else {
+                            let enc = s.encoding.get();
+                            *s.borrow_mut() = out.into_bytes();
+                            s.encoding.set(enc);
+                            Some(Value::Str(s.clone()))
+                        }
+                    }
                     ("lines", []) | ("lines", [Value::Str(_)]) => {
                         // `String#lines` — split into lines KEEPING the
                         // separator ("\n" by default). `text.lines`.
