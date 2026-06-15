@@ -1244,3 +1244,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // kwargs into the rest param); returns nil. Surfaced by faraday's
 // RackBuilder::Handler.
 #[test] fn ruby2_keywords_noop() { run_diff("ruby2_keywords_noop"); }
+
+// Reopening a `Struct.new`-created class assigned to a constant inside a
+// module reopens the SAME class (scoped name/key), preserving members,
+// extend'd singleton methods, and instance methods. Surfaced by faraday's
+// `Request = Struct.new(…){ extend MiddlewareRegistry }` + reopen.
+#[test] fn reopen_struct_in_module() { run_diff("reopen_struct_in_module"); }

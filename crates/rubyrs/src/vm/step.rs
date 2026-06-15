@@ -1503,7 +1503,32 @@ impl Vm {
                 // qualified maps so `C::X` / `C::Inner::Leaf` reads
                 // resolve.
                 if let Value::Class(cls) = &v {
-                    let qualified = self.interner.resolve(name_id).to_string();
+                    let bare = self.interner.resolve(name_id).to_string();
+                    // CRuby names an anon class with its FULL qualified
+                    // path: `module Faraday; X = Struct.new` ⇒
+                    // `X.name == "Faraday::X"`, and registers it under
+                    // that scoped key — NOT the bare name. Qualify with
+                    // the enclosing scope (class_stack top) so:
+                    //   (a) a later reopen (`class Faraday::X` /
+                    //       `module Faraday; class X`), whose DefClass
+                    //       keys by the qualified name, finds and REOPENS
+                    //       this same class instead of minting a fresh
+                    //       empty one — faraday's `Request = Struct.new(…)
+                    //       { extend MiddlewareRegistry }` then
+                    //       `module Faraday; class Request` (authorization.rb)
+                    //       was dropping the struct members + the extend;
+                    //   (b) the bare name doesn't leak to the top level.
+                    // Skip when name_id is already qualified (compiler-
+                    // emitted `Foo::Bar = …`) or at top level (no scope).
+                    let qualified = match self.class_stack.last() {
+                        Some(scope) if !bare.contains("::") => {
+                            match scope.effective_name() {
+                                Some(sn) if !sn.is_empty() => format!("{}::{}", sn, bare),
+                                _ => bare.clone(),
+                            }
+                        }
+                        _ => bare.clone(),
+                    };
                     self.name_anon_class(cls, &qualified);
                 }
                 self.constants.insert(name_id, v);
