@@ -517,6 +517,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_partition_insert_delete() { run_diff("string_partition_insert_delete"); }
 // Struct: keyword_init, block form, to_h/[]/each, inspect.
 #[test] fn struct_features() { run_diff("struct_features"); }
+#[test] fn struct_subclass_factory() { run_diff("struct_subclass_factory"); }
 // Ruby 3.2 Data.define — immutable value objects.
 #[test] fn data_define() { run_diff("data_define"); }
 // `Set[...]` constructor (stdlib-vendored Set surface).

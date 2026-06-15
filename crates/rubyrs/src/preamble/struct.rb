@@ -40,7 +40,15 @@ class Struct
     # the splat (Struct.new has no kwparams). Peel it off the attr list.
     opts = attrs.last.is_a?(Hash) ? attrs.pop : {}
     kw_init = opts[:keyword_init]
-    cls = Class.new
+    # When `self` is a Struct SUBCLASS used as a factory
+    # (`class Options < Struct; Options.new(:uri) do … end; end` —
+    # faraday's Options), the generated class must INHERIT `self` so it
+    # picks up the subclass's own class methods (`Options.options_method`)
+    # and instance methods. CRuby:
+    # `Options.new(:uri).ancestors.include?(Options)` is true. Plain
+    # `Struct.new(:a)` keeps the flat parent-Object shape unchanged.
+    is_subclass_factory = !equal?(Struct)
+    cls = is_subclass_factory ? Class.new(self) : Class.new
     # Store attrs on the class itself as a class-level ivar
     # so the captured-in-block reference survives GC. Pure
     # block-captures of the `attrs` Array were getting swept
@@ -154,6 +162,19 @@ class Struct
       nm ? "#<struct #{nm} #{pairs.join(', ')}>" : "#<struct #{pairs.join(', ')}>"
     end
     cls.define_method(:to_s) { inspect }
+    # Double-new: with `cls < Options < Struct`, an un-shadowed
+    # `cls.new(values)` would re-resolve `new` up the chain to Struct's
+    # FACTORY `self.new` and try to build YET ANOTHER subclass (treating
+    # the values as member names). Shadow it with an instance builder so
+    # `cls.new(*values)` allocates + initializes — the same effect the
+    # flat parent-Object generated class gets for free from Object#new.
+    if is_subclass_factory
+      cls.define_singleton_method(:new) do |*a, &b|
+        obj = allocate
+        obj.send(:initialize, *a, &b)
+        obj
+      end
+    end
     # Block form: `Struct.new(:a) { def helper; …; end }` — evaluate the
     # block in the new class so it can define methods / constants.
     cls.class_eval(&block) if block
