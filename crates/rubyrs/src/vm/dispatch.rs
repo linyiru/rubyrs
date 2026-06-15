@@ -7488,6 +7488,17 @@ impl Vm {
                 self.stack.push(self_val);
                 return Ok(());
             }
+            // `ruby2_keywords(:m, …)` — Ruby 2.7+ flags a `*args` method
+            // to preserve a trailing keyword hash through delegation.
+            // rubyrs already collects trailing kwargs into the rest
+            // param as a Hash (verified: `def m(*a); a; end; m(1, k: 2)`
+            // → `[1, {k: 2}]`), so the flag is a no-op here. Returns nil
+            // (CRuby). Surfaced by faraday's RackBuilder::Handler.
+            if &*name == "ruby2_keywords"
+                && let Value::Class(_) = &self_val {
+                self.stack.push(Value::Nil);
+                return Ok(());
+            }
             // `private_class_method` / `public_class_method` accept
             // any number of method-name args (Symbol or String) and
             // return the receiver. Flips the named singleton

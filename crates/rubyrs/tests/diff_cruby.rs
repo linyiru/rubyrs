@@ -1239,3 +1239,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `def` still installs onto the receiver class. Surfaced by faraday's
 // Options.memoized.
 #[test] fn class_eval_string_locals() { run_diff("class_eval_string_locals"); }
+
+// `ruby2_keywords(:m)` is a no-op (rubyrs already collects trailing
+// kwargs into the rest param); returns nil. Surfaced by faraday's
+// RackBuilder::Handler.
+#[test] fn ruby2_keywords_noop() { run_diff("ruby2_keywords_noop"); }
