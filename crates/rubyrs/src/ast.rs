@@ -4302,6 +4302,47 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 tr(ctx, c)
             }
         };
+        // `super(key, ...)` — Ruby 3.0 argument forwarding in an
+        // EXPLICIT-args super call (distinct from bare `super`, which
+        // forwards the caller's own args implicitly). Same desugar as
+        // the regular-call forwarding path: leading positionals +
+        // Array(`*` rest sentinel) + the kwsplat chunk, assembled into
+        // one Array and routed through `Op::ApplySuper`, with the block
+        // (`&` sentinel) forwarded. Surfaced by faraday's
+        // `Utils::Headers#fetch` (`def fetch(key, ...); super(key, ...); end`).
+        if arg_nodes.iter().any(|c| c.as_forwarding_arguments_node().is_some()) {
+            let mut chunks: Vec<SExpr> = Vec::new();
+            let mut buf: Vec<SExpr> = Vec::new();
+            for c in &arg_nodes {
+                if c.as_forwarding_arguments_node().is_some() {
+                    if !buf.is_empty() {
+                        chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
+                    }
+                    chunks.push(sp(node, Expr::Call {
+                        receiver: None,
+                        name: "Array".into(),
+                        args: vec![sp(node, Expr::LVarRead("*".to_string()))],
+                        kwargs_trailing: false,
+                    }));
+                    chunks.push(kwsplat_chunk(node, sp(node, Expr::LVarRead("__kw_rest_anon".to_string()))));
+                } else {
+                    buf.push(tr_super_arg(ctx, c));
+                }
+            }
+            if !buf.is_empty() {
+                chunks.push(sp(node, Expr::ArrayLit(buf)));
+            }
+            let mut it = chunks.into_iter();
+            let first = it.next().unwrap_or_else(|| sp(node, Expr::ArrayLit(vec![])));
+            let acc = it.fold(first, |lhs, rhs| sp(node, Expr::Call {
+                receiver: Some(Box::new(lhs)),
+                name: "+".into(),
+                args: vec![rhs], kwargs_trailing: false }));
+            return sp(node, Expr::SuperApply {
+                args: Box::new(acc),
+                block_arg: super_block_arg.or_else(|| Some(Box::new(sp(node, Expr::LVarRead("&".to_string()))))),
+            });
+        }
         let has_splat = arg_nodes.iter().any(|c| c.as_splat_node().is_some());
         // `super(args) do … end` — a block LITERAL (not `&proc`). The
         // splat-free arg form is the common shape; a splat combined

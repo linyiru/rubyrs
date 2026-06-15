@@ -1228,3 +1228,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // chain — routed to the real eigenclass-body op (the desugar bails on
 // elsif). Surfaced by listen's MonotonicTime on the Bridgetown boot path.
 #[test] fn singleton_class_elsif_case_def() { run_diff("singleton_class_elsif_case_def"); }
+
+// `super(key, ...)` — Ruby 3.0 argument forwarding in an explicit-args
+// super call. Surfaced by faraday's Utils::Headers#fetch.
+#[test] fn super_forwarding_args() { run_diff("super_forwarding_args"); }
