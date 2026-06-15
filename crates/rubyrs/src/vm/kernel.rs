@@ -3994,13 +3994,17 @@ impl Vm {
         // frames.len() perspective once dispatch_until returns Ok.
         let depth_before = self.frames.len();
         let stack_before = self.stack.len();
+        // A required file's top-level `self` is the `main` object, like
+        // CRuby — so top-level `self.extend Module` in a required file
+        // works (rake/dsl_definition.rb:196 `self.extend Rake::DSL`).
+        let main_self = self.main_object();
         self.frames.push(super::Frame {
             proto_idx: entry,
             ip: 0,
             locals: crate::vm::Locals::Shared(std::rc::Rc::new(std::cell::RefCell::new(
                 super::vec_nil(self.protos[entry].n_locals as usize)
             ))),
-            self_val: Value::Nil,
+            self_val: main_self,
             base_sp: self.stack.len(),
             is_class_body: false,
             swap_return: None,
@@ -4473,6 +4477,12 @@ impl Vm {
                 *slot = v.clone();
             }
         }
+        // Top-level `self` for a require'd file / bare `eval` (no
+        // self-override, no class context) is the `main` object, like
+        // CRuby — so `self.extend Module` at a required file's top level
+        // works (rake/dsl_definition.rb). instance_eval / class_eval
+        // keep their explicit self / class context.
+        let main_self = self.main_object();
         self.frames.push(super::Frame {
             proto_idx: entry,
             ip: 0,
@@ -4482,7 +4492,7 @@ impl Vm {
             self_val: match (&self_override, &class_ctx) {
                 (Some(s), _) => s.clone(),
                 (None, Some(cls)) => Value::Class(cls.clone()),
-                (None, None) => Value::Nil,
+                (None, None) => main_self,
             },
             base_sp: self.stack.len(),
             // NOT is_class_body even with a ctx: that flag drives

@@ -6420,7 +6420,7 @@ impl Vm {
                 .expect("ICE: do_call(no_recv) with empty frames")
                 .self_val
                 .clone();
-            if matches!(self_val, Value::Nil)
+            if (matches!(self_val, Value::Nil) || self.is_main_self(&self_val))
                 && !self.host_fns.contains_key(&name_id)
                 && let Some(m) = self.lookup_toplevel_method_cache_hit(cache_id)
                 && self.try_invoke_fixed_method_from_stack(m, self_val, argc, None)?
@@ -6608,7 +6608,8 @@ impl Vm {
             let self_val = self.frames.last()
                 .expect("ICE: do_call(no_recv) with empty frames")
                 .self_val.clone();
-            let can_try_toplevel_fast_path = matches!(self_val, Value::Nil)
+            let can_try_toplevel_fast_path = (matches!(self_val, Value::Nil)
+                || self.is_main_self(&self_val))
                 && !self.host_fns.contains_key(&name_id)
                 && !Self::is_builtin_name(&name)
                 && !matches!(&*name, "send" | "__send__" | "method" | "__dir__");
@@ -11581,6 +11582,12 @@ impl Vm {
         // but also BoundMethod / UnboundMethod / CurriedProc /
         // future heap variants we add without a custom default.
         if (&*name == "to_s" || &*name == "inspect") && args.is_empty() {
+            // The top-level `main` object renders as "main" (CRuby),
+            // not the generic `#<Object:0xHEX>`.
+            if self.is_main_self(&recv) {
+                self.stack.push(Value::new_str("main".to_string()));
+                return Ok(());
+            }
             // Range has no primitive to_s/inspect arm of its own.
             // Without this short-circuit the universal
             // `#<Range:0xHEX>` form below would silently win for

@@ -814,6 +814,14 @@ pub(crate) struct Vm {
     /// fall through to this table.
     pub(crate) globals: FxHashMap<SymId, Value>,
     pub(crate) toplevel_methods: FxHashMap<SymId, Rc<Method>>,
+    /// The top-level `main` object — the `self` of a script's (and a
+    /// required file's / bare `eval`'s) top level, matching CRuby where
+    /// `self` there is a singleton Object (not nil). Created lazily on
+    /// first top-level frame AFTER `Object` exists (so the preamble,
+    /// which runs before `Object` is defined, keeps `self = nil`), then
+    /// reused so `self.extend Module` accumulates on the one main across
+    /// evals. GC-rooted in the mark phase. `None` until materialised.
+    pub(crate) main_obj: Option<ObjId>,
     /// Toplevel `@@foo` fallback. CRuby raises RuntimeError on
     /// class-variable use outside a class body; rubyrs takes the
     /// lenient route consistent with our ivar / global handling.
@@ -1712,6 +1720,7 @@ impl Vm {
             cache_counter: 0,
             globals: FxHashMap::default(),
             toplevel_methods: FxHashMap::default(),
+            main_obj: None,
             toplevel_cvars: HashMap::new(),
             load_path: None,
             host_fns: HashMap::new(),

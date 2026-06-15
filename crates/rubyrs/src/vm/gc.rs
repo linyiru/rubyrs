@@ -40,14 +40,52 @@ enum PathTrapKind {
 use super::{vec_nil, Frame, Vm};
 
 impl Vm {
+    /// The top-level `main` object — `self` at a script's top level
+    /// (and in a required file / bare `eval`). CRuby makes this a
+    /// singleton `Object`; rubyrs materialises it LAZILY once `Object`
+    /// exists. The preamble runs before `Object` is defined, so it
+    /// keeps `self = nil` (returns `Value::Nil` here); every later
+    /// top-level frame shares the one main, so `self.extend Module`
+    /// accumulates across evals. Rooted by the GC mark phase via
+    /// `main_obj`, so it survives the frame-clear between evals.
+    pub(crate) fn main_object(&mut self) -> Value {
+        if let Some(id) = self.main_obj {
+            return Value::Object(id);
+        }
+        let object_sym = self.interner.intern("Object");
+        let Some(cls) = self.classes.get(&object_sym).cloned() else {
+            return Value::Nil;
+        };
+        let id = self.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
+            class: cls,
+            ivars: crate::intern::FxHashMap::default(),
+            singleton_class: None,
+            frozen: std::cell::Cell::new(false),
+        }));
+        self.main_obj = Some(id);
+        Value::Object(id)
+    }
+
+    /// True when `v` is the top-level `main` object. The no-receiver
+    /// dispatch historically treated `Value::Nil` as "top-level main
+    /// self" (toplevel_methods take precedence over Kernel there);
+    /// now that `main` is a real Object, the same gates must also
+    /// recognise it. Preamble code (before `main` exists) still runs
+    /// with `self = nil`, so those gates check BOTH.
+    #[inline]
+    pub(crate) fn is_main_self(&self, v: &Value) -> bool {
+        matches!(v, Value::Object(id) if self.main_obj == Some(*id))
+    }
+
     pub(crate) fn run(&mut self, entry: usize) -> Result<Value, Trap> {
         let proto = &self.protos[entry];
         let n_locals = proto.n_locals as usize;
+        let main_self = self.main_object();
         self.frames.push(Frame {
             proto_idx: entry,
             ip: 0,
             locals: crate::vm::Locals::Shared(Rc::new(RefCell::new(vec_nil(n_locals)))),
-            self_val: Value::Nil,
+            self_val: main_self,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: None,
@@ -575,6 +613,13 @@ impl Vm {
         // `Locals::Stack` frame's slots in one pass, INCLUDING values
         // parked there mid call-setup before their frame is pushed.
         for v in &self.locals_arena { roots.push(v.clone()); }
+        // The top-level `main` object persists across evals (so
+        // `self.extend` accumulates) even when the frame stack — which
+        // would otherwise root it via `self_val` — is cleared between
+        // evals. Root it directly.
+        if let Some(id) = self.main_obj {
+            roots.push(Value::Object(id));
+        }
         for f in &self.frames {
             roots.push(f.self_val.clone());
             // Stack frames' slots were covered by the arena walk above.
