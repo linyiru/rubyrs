@@ -81,6 +81,8 @@ mod sass;
 mod sqlite;
 #[cfg(feature = "_socket")]
 mod socket;
+#[cfg(feature = "_openssl")]
+mod openssl;
 mod signals;
 // `stdlib_vendor` is unconditionally available so the "always-on"
 // shim source (currently the URI parser shim that rack/utils.rb
@@ -149,6 +151,11 @@ pub use sqlite::register_host_fns as register_sqlite_host_fns;
 /// (ADR 0028). The outbound TCP-client battery backing `Net::HTTP`.
 #[cfg(feature = "_socket")]
 pub use socket::register_host_fns as register_socket_host_fns;
+/// Register `_openssl` host fns + the `OpenSSL::SSL::SSLSocket` preamble
+/// (ADR 0029). The rustls TLS-client slice backing `Net::HTTP` https;
+/// layers TLS over a `_socket` connection.
+#[cfg(feature = "_openssl")]
+pub use openssl::register_host_fns as register_openssl_host_fns;
 
 use std::io::Write;
 use std::path::Path;

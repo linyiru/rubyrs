@@ -101,6 +101,12 @@ class TCPSocket
 
   def closed?; @closed; end
 
+  # The opaque `_socket` handle — read by the `_openssl` battery's
+  # `SSLSocket#connect`, which TAKES the underlying TcpStream to layer
+  # TLS over it (ADR 0029 §2 hand-off). After the take this socket is
+  # defunct and `close` no-ops (the stream is owned by `_openssl`).
+  def __rubyrs_handle; @handle; end
+
   def close
     return nil if @closed
     __rubyrs_socket_close(@handle)

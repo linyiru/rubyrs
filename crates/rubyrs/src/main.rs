@@ -427,6 +427,10 @@ fn main() {
     // Outbound network stays gated by `Config::allow_network_io`.
     #[cfg(feature = "_socket")]
     rubyrs::register_socket_host_fns(&mut rt);
+    // `_openssl` battery: rustls TLS-client slice (OpenSSL::SSL::SSLSocket)
+    // backing Net::HTTP https, layered over a `_socket` connection. ADR 0029.
+    #[cfg(feature = "_openssl")]
+    rubyrs::register_openssl_host_fns(&mut rt);
     let result = rt.eval_file(path);
     trace.at("eval_done");
     match result {

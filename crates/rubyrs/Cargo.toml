@@ -247,6 +247,10 @@ _sqlite = ["dep:rusqlite", "dep:lru"]
 # `TCPSocket` veneer + `Net::HTTP`. NOT in cli-defaults — outbound
 # network is the strongest sandbox-default-off capability.
 _socket = ["dep:libc"]
+# `_openssl` — TLS-client slice (rustls) backing Net::HTTP https per
+# ADR 0029. Depends on `_socket` (Rule 5 flat intra-Tier-3 dep — it
+# takes a connected TcpStream from the socket battery to layer TLS).
+_openssl = ["_socket", "dep:rustls", "dep:webpki-roots", "dep:rustls-pki-types"]
 # `cli-defaults` — Bun-class fresh-install bundle per ADR 0019
 # v3 line 313. Discharges the "`cargo install rubyrs` Just Works"
 # promise the menu was sized around. `_sqlite` + `_http_server`
@@ -265,7 +269,7 @@ cli-defaults = ["stdlib", "_sqlite", "_http_server", "sass", "mimalloc"]
 # `everything` — kitchen sink for embedders who want every
 # available battery pre-wired. ADR 0019 v3 line 314's "Bun-
 # class CLI / Edge runtime" target. ≤ 150 MB stripped.
-everything = ["cli-defaults", "_json_native", "_fiber", "_encoding_full", "_socket"]
+everything = ["cli-defaults", "_json_native", "_fiber", "_encoding_full", "_socket", "_openssl"]
 # `_http_server` enables the inbound HTTP server battery per
 # ADR 0022 v4. Pulls in hyper + tokio (current-thread runtime)
 # + http-body-util + bytes for the wire-protocol side; the
@@ -379,6 +383,12 @@ lru = { version = "0.16", optional = true }
 # libc is preferred over nix here — minimal API surface
 # (3 syscalls), no extra dep tree.
 libc = { version = "0.2", optional = true }
+# `_openssl` battery (ADR 0029): rustls TLS-client slice for Net::HTTP
+# https. `ring` provider (no C toolchain / NASM), bundled webpki-roots
+# (no system-cert dep). `tls12` on for real-world endpoint compat.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+webpki-roots = { version = "0.26", optional = true }
+rustls-pki-types = { version = "1", optional = true }
 # Brings `num_integer::Integer::div_rem` into scope so we can do
 # one division step (returning quotient + remainder) instead of
 # separate `/` and `%` divisions inside `Integer#digits`'s loop.
@@ -453,3 +463,6 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
+# Self-signed cert generation for the `_openssl` battery integration
+# test's loopback TLS server (tests/openssl_battery.rs). Dev-only.
+rcgen = "0.13"

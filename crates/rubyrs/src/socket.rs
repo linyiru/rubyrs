@@ -46,6 +46,17 @@ thread_local! {
     static NEXT_HANDLE: Cell<i64> = const { Cell::new(1) };
 }
 
+/// Remove and return the `TcpStream` for `handle` — the single declared
+/// cross-battery seam (ADR 0029 §2 / ADR 0019 Rule 5). The `_openssl`
+/// battery calls this to TAKE a connected socket and layer rustls TLS
+/// over it; ownership transfers, so the original `TCPSocket` becomes
+/// defunct (its `close` no-ops). Returns `None` if the handle is unknown
+/// (already closed / transferred).
+#[cfg(feature = "_openssl")]
+pub(crate) fn take_stream(handle: i64) -> Option<TcpStream> {
+    SOCKET_CONNS.with(|m| m.borrow_mut().remove(&handle).map(|st| st.stream))
+}
+
 fn arg_err(msg: &str) -> Trap {
     Trap { err: RubyError::ArgumentError { msg: msg.to_string() }, backtrace: vec![] }
 }
