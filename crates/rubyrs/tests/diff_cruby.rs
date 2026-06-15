@@ -1306,3 +1306,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `Module#include`. Surfaced by concurrent-ruby's `Concurrent::ReInclude`
 // (Bridgetown boot path).
 #[test] fn super_module_include() { run_diff("super_module_include"); }
+
+// Ruby 3.x anonymous splat forwarding (`def m(*); yield(*); end` /
+// `other(*)`). Surfaced by bridgetown-core's erb_templates.rb.
+#[test] fn anon_splat_forward() { run_diff("anon_splat_forward"); }

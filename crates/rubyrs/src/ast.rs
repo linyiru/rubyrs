@@ -3895,9 +3895,16 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             // shape. No new opcode needed.
             1 => {
                 let only = &arg_nodes[0];
-                if let Some(sn) = only.as_splat_node()
-                    && let Some(inner) = sn.expression() {
-                    let inner_expr = tr(ctx, &inner);
+                if let Some(sn) = only.as_splat_node() {
+                    // `*val`, OR anonymous `*` forwarding (`def m(*);
+                    // yield(*); end`) where the splat has no expression
+                    // — read the reserved `"*"` rest sentinel `def m(*)`
+                    // bound. erb_templates.rb's `def capture(*);
+                    // yield(*); end` hits this.
+                    let inner_expr = match sn.expression() {
+                        Some(inner) => tr(ctx, &inner),
+                        None => sp(span_node, Expr::LVarRead("*".to_string())),
+                    };
                     return Some(Box::new(sp(span_node, Expr::Call {
                         receiver: None,
                         name: "Array".into(),
@@ -3918,8 +3925,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 let mut chunks: Vec<SExpr> = Vec::new();
                 let mut buf: Vec<SExpr> = Vec::new();
                 for n in &arg_nodes {
-                    if let Some(sn) = n.as_splat_node()
-                        && let Some(inner) = sn.expression() {
+                    if let Some(sn) = n.as_splat_node() {
                         if !buf.is_empty() {
                             chunks.push(sp(span_node, Expr::ArrayLit(std::mem::take(&mut buf))));
                         }
@@ -3930,8 +3936,12 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         // `[:first, 5, :last]`, matching CRuby. Without
                         // the wrap, scalars/nil would push bare values
                         // and `Array#+` would TypeError on the non-
-                        // Array RHS.
-                        let inner_expr = tr(ctx, &inner);
+                        // Array RHS. Anonymous `*` (no expression) reads
+                        // the reserved `"*"` rest sentinel.
+                        let inner_expr = match sn.expression() {
+                            Some(inner) => tr(ctx, &inner),
+                            None => sp(span_node, Expr::LVarRead("*".to_string())),
+                        };
                         chunks.push(sp(span_node, Expr::Call {
                             receiver: None,
                             name: "Array".into(),
