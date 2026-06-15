@@ -278,6 +278,52 @@ jobs:
         # `cargo build --features trace-startup` path properly.
         run: cargo check --release --target wasm32-wasip1 --no-default-features --features trace-startup -p rubyrs
 
+  windows-stack-smoke:
+    name: Windows debug stack smoke (issue #356)
+    # Regression guard for issue #356. Constructing a Runtime in a
+    # *debug* build compiles the always-on preamble through the
+    # recursive `ast::tr`; unoptimised frames are large, and the
+    # Windows default *main-thread* stack is only 1 MB (vs 8 MB on
+    # Linux/macOS), so startup overflowed for debug library embedders
+    # until `stacker::maybe_grow` was added to `ast::tr`. The
+    # ubuntu/macos `test` matrix can't catch a regression here — their
+    # 8 MB main thread hides it — so this job runs the reporter's exact
+    # scenario on a real Windows main thread and fails if the process
+    # aborts (stack overflow → non-zero exit).
+    runs-on: windows-latest
+    # Don't inherit the workflow's `-D warnings`: the crate has never
+    # been lint-cleaned on Windows, and a stray cfg-unused warning would
+    # mask what this job actually checks — that startup doesn't overflow
+    # the 1 MB main-thread stack. Compile *errors* still fail the build,
+    # surfacing genuine portability breaks.
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: ./.github/actions/setup-rust-toolchain
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build + run preamble stack smoke (debug, reporter's features)
+        # DEBUG on purpose — the overflow only manifests in unoptimised
+        # builds (release shrinks the frames below the 1 MB limit).
+        # `--no-default-features --features std-sink` mirrors the exact
+        # dependency shape from the issue. A clean exit (0) means
+        # Runtime::with_config + eval completed without overflowing the
+        # Windows main-thread stack; a stack overflow aborts with a
+        # non-zero code and fails the job.
+        run: cargo run -p rubyrs --example preamble_stack_smoke --no-default-features --features std-sink
+
   panic-budget:
     name: Panic budget (per-file ratchet)
     runs-on: ubuntu-latest
