@@ -79,6 +79,8 @@ pub mod regex_engine;
 mod sass;
 #[cfg(feature = "_sqlite")]
 mod sqlite;
+#[cfg(feature = "_socket")]
+mod socket;
 mod signals;
 // `stdlib_vendor` is unconditionally available so the "always-on"
 // shim source (currently the URI parser shim that rack/utils.rb
@@ -143,6 +145,10 @@ pub use liquid_native::register_host_fns as register_liquid_native_host_fns;
 /// shape. See `sqlite::register_host_fns`.
 #[cfg(feature = "_sqlite")]
 pub use sqlite::register_host_fns as register_sqlite_host_fns;
+/// Register `_socket` host fns + the pure-Ruby `TCPSocket` preamble
+/// (ADR 0028). The outbound TCP-client battery backing `Net::HTTP`.
+#[cfg(feature = "_socket")]
+pub use socket::register_host_fns as register_socket_host_fns;
 
 use std::io::Write;
 use std::path::Path;
@@ -580,6 +586,31 @@ pub struct Config {
     #[cfg(feature = "_sqlite")]
     pub sqlite_max_result_bytes: Option<usize>,
 
+    /// Master gate for the `_socket` battery's outbound TCP reach
+    /// (ADR 0028 §2), parallel to `allow_filesystem_io`. Default
+    /// `false` — Tier 1's "no network by default" stays the
+    /// embed/sandbox default even when `_socket` is compiled in. A
+    /// `TCPSocket.new` / `Net::HTTP` connect traps `SocketError`
+    /// when this is false.
+    #[cfg(feature = "_socket")]
+    pub allow_network_io: bool,
+
+    /// Host[:port] allowlist for the `_socket` battery (ADR 0028 §2;
+    /// ADR 0019 Rule 4 runtime sub-rule for deviation class `a`).
+    /// When `Some(hosts)`, a connect to a host outside the list traps
+    /// `SecurityError`. When `None`, no host restriction beyond the
+    /// `allow_network_io` master gate. Entries match the literal host
+    /// the caller passed (`"example.com"` or `"example.com:443"`).
+    #[cfg(feature = "_socket")]
+    pub socket_allow_hosts: Option<Vec<String>>,
+
+    /// Heap-cap on total bytes read from one socket (ADR 0028 §2,
+    /// class-`f` deviation). `Net::HTTP` assembles response bodies in
+    /// Ruby; this bounds a runaway / unbounded-stream server. `None`
+    /// (default) is unbounded, matching CRuby.
+    #[cfg(feature = "_socket")]
+    pub socket_max_read_bytes: Option<usize>,
+
     /// Seed `$LOAD_PATH` with these paths at Runtime construction.
     /// The provided vector becomes the initial `$LOAD_PATH` in
     /// the SAME order — `paths[0]` lands at `$LOAD_PATH[0]`,
@@ -689,6 +720,12 @@ impl Default for Config {
             sqlite_allow_paths: None,
             #[cfg(feature = "_sqlite")]
             sqlite_max_result_bytes: None,
+            #[cfg(feature = "_socket")]
+            allow_network_io: false,
+            #[cfg(feature = "_socket")]
+            socket_allow_hosts: None,
+            #[cfg(feature = "_socket")]
+            socket_max_read_bytes: None,
             // No seeded `$LOAD_PATH` by default — `require` only
             // resolves against the caller-source dir + its parent
             // until a script does `$LOAD_PATH.unshift(...)`.
@@ -1652,6 +1689,14 @@ impl Runtime {
                     .collect()
             });
             self.vm.sqlite_max_result_bytes = cfg.sqlite_max_result_bytes;
+        }
+        // Socket battery config: outbound-network master gate +
+        // host allowlist + per-socket read cap (ADR 0028 §2).
+        #[cfg(feature = "_socket")]
+        {
+            self.vm.allow_network_io = cfg.allow_network_io;
+            self.vm.socket_allow_hosts = cfg.socket_allow_hosts;
+            self.vm.socket_max_read_bytes = cfg.socket_max_read_bytes;
         }
     }
 

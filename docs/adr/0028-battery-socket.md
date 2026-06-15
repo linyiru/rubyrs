@@ -6,6 +6,18 @@ Proposed (2026-06). Not yet accepted. Third per-battery ADR after
 ADR 0022 (`_http_server`) and ADR 0027 (`_sqlite`), following the
 ADR 0019 v3 Rule 7 template both established.
 
+**Phase 3 SHIPPED (2026-06-15):** `_socket` feature + `src/socket.rs`
+(4 host fns: connect/write/read/close, blocking `std::net`, `libc`-only
+dep) + `preamble/socket.rb` (the `TCPSocket` veneer + `Socket` sockopt
+constants + `SocketError`) + `Config`/`Vm` fields (`allow_network_io`,
+`socket_allow_hosts`, `socket_max_read_bytes`) + `register_socket_host_fns`
++ CLI wiring. `io/wait` / `resolv` added as lenient stubs (net/protocol
+load-time requires). Validated end to end (`tests/socket_battery.rs`):
+the `TCPSocket` veneer round-trips over a loopback server, the
+`allow_network_io` gate blocks by default, AND the **real `net/http` +
+`uri` complete a GET over the battery** against a loopback HTTP server.
+Phase 6 (`_openssl` / `https`) + Phase 7 (parity fixtures) remain.
+
 Driven by the Bridgetown boot spike (`poc/bridgetown-spike/`):
 `require "bridgetown-core"` reaches `require "faraday"`, which
 unconditionally requires its `net_http` adapter, which requires the

@@ -1175,6 +1175,18 @@ pub(crate) struct Vm {
     /// `SQLite3::TooBigException` when the running total exceeds.
     #[cfg(feature = "_sqlite")]
     pub(crate) sqlite_max_result_bytes: Option<usize>,
+    /// Mirror of `Config::allow_network_io` — `_socket` battery
+    /// master gate (ADR 0028 §2). Checked by `socket::check_connect_allowed`.
+    #[cfg(feature = "_socket")]
+    pub(crate) allow_network_io: bool,
+    /// Mirror of `Config::socket_allow_hosts` — `_socket` host
+    /// allowlist (ADR 0028 §2 / ADR 0019 Rule 4).
+    #[cfg(feature = "_socket")]
+    pub(crate) socket_allow_hosts: Option<Vec<String>>,
+    /// Mirror of `Config::socket_max_read_bytes` — `_socket`
+    /// per-socket read cap (ADR 0028 §2, class-`f`).
+    #[cfg(feature = "_socket")]
+    pub(crate) socket_max_read_bytes: Option<usize>,
     /// Per-eval working counter; `Some(0)` means exhausted, `None`
     /// means unlimited. Re-anchored at each `Runtime::eval` entry
     /// from `Runtime::fuel_budget` (which `apply_config` writes
@@ -1824,6 +1836,12 @@ impl Vm {
             allowed_paths: None,
             #[cfg(feature = "_sqlite")]
             sqlite_allow_paths: None,
+            #[cfg(feature = "_socket")]
+            allow_network_io: false,
+            #[cfg(feature = "_socket")]
+            socket_allow_hosts: None,
+            #[cfg(feature = "_socket")]
+            socket_max_read_bytes: None,
             #[cfg(feature = "_sqlite")]
             sqlite_max_result_bytes: None,
             fuel: None,

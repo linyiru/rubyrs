@@ -344,6 +344,16 @@ fn main() {
         sqlite_allow_paths: None,
         #[cfg(feature = "_sqlite")]
         sqlite_max_result_bytes: None,
+        // CLI binary: outbound network allowed — `rubyrs script.rb`
+        // behaves like `ruby script.rb` (Net::HTTP works). Embedders
+        // running untrusted scripts keep the secure-by-default `false`
+        // and opt in / narrow via `Config::socket_allow_hosts`.
+        #[cfg(feature = "_socket")]
+        allow_network_io: true,
+        #[cfg(feature = "_socket")]
+        socket_allow_hosts: None,
+        #[cfg(feature = "_socket")]
+        socket_max_read_bytes: None,
         // CLI binary: no seeded `$LOAD_PATH` — scripts opt in
         // explicitly via `$LOAD_PATH.unshift(...)`, matching
         // CRuby's `ruby script.rb` shape (CRuby's gem env
@@ -412,6 +422,11 @@ fn main() {
     // host fns per ADR 0027 §"Capability host-fns consumed".
     #[cfg(feature = "_sqlite")]
     rubyrs::register_sqlite_host_fns(&mut rt);
+    // `_socket` battery: the pure-Ruby `TCPSocket` veneer + 4 host fns
+    // (connect/write/read/close) backing Net::HTTP, per ADR 0028.
+    // Outbound network stays gated by `Config::allow_network_io`.
+    #[cfg(feature = "_socket")]
+    rubyrs::register_socket_host_fns(&mut rt);
     let result = rt.eval_file(path);
     trace.at("eval_done");
     match result {

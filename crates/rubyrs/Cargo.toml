@@ -241,6 +241,12 @@ _liquid_native = ["dep:liquidus"]
 # Ruby-side load form is `require "rubyrs/sqlite"` to avoid
 # shadowing the MRI `sqlite3` gem.
 _sqlite = ["dep:rusqlite", "dep:lru"]
+# `_socket` — outbound TCP-client battery per ADR 0028. Blocking
+# `std::net` (no async runtime → no class-`g` deviation), `libc`
+# only for a couple of errno refinements. Backs the pure-Ruby
+# `TCPSocket` veneer + `Net::HTTP`. NOT in cli-defaults — outbound
+# network is the strongest sandbox-default-off capability.
+_socket = ["dep:libc"]
 # `cli-defaults` — Bun-class fresh-install bundle per ADR 0019
 # v3 line 313. Discharges the "`cargo install rubyrs` Just Works"
 # promise the menu was sized around. `_sqlite` + `_http_server`
@@ -259,7 +265,7 @@ cli-defaults = ["stdlib", "_sqlite", "_http_server", "sass", "mimalloc"]
 # `everything` — kitchen sink for embedders who want every
 # available battery pre-wired. ADR 0019 v3 line 314's "Bun-
 # class CLI / Edge runtime" target. ≤ 150 MB stripped.
-everything = ["cli-defaults", "_json_native", "_fiber", "_encoding_full"]
+everything = ["cli-defaults", "_json_native", "_fiber", "_encoding_full", "_socket"]
 # `_http_server` enables the inbound HTTP server battery per
 # ADR 0022 v4. Pulls in hyper + tokio (current-thread runtime)
 # + http-body-util + bytes for the wire-protocol side; the

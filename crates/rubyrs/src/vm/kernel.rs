@@ -4964,6 +4964,12 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         // model). The vendored stub defines the constants so the
         // require + rescue-class references resolve.
         | "timeout"
+        // `io/wait` (IO#wait_readable / #wait_writable) and `resolv`
+        // (DNS resolver): net/protocol requires both at load time, but
+        // the `_socket` battery's blocking TCPSocket veneer provides the
+        // readiness methods directly and does its own host-side DNS — so
+        // these are lenient no-op shells just to satisfy the require.
+        | "io/wait" | "resolv"
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util" | "cgi/escape" | "cgi/cookie"
         | "ipaddr"
