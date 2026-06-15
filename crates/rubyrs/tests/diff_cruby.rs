@@ -1223,3 +1223,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Kernel sentinel) so the `alias_method … unless method_defined?` guard
 // idiom works — zeitwerk's require wrapper and require-intercepting shims.
 #[test] fn kernel_method_defined() { run_diff("kernel_method_defined"); }
+
+// `class << self` whose defs are wrapped in an if/ELSIF/else or case/when
+// chain — routed to the real eigenclass-body op (the desugar bails on
+// elsif). Surfaced by listen's MonotonicTime on the Bridgetown boot path.
+#[test] fn singleton_class_elsif_case_def() { run_diff("singleton_class_elsif_case_def"); }

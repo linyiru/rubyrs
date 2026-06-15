@@ -1509,6 +1509,21 @@ fn singleton_body_needs_real_eval(body_nodes: &[Node<'_>]) -> bool {
         if bn.as_module_node().is_some() || bn.as_class_node().is_some() {
             return true;
         }
+        // Control-flow wrapping defs — `if/elsif/else def …`,
+        // `unless`, `case/when def …`. The per-statement desugar only
+        // admits a single `if`/`else` of pure defs and BAILS on an
+        // `elsif` chain (or `case`); the real-body path compiles the
+        // whole body into its own proto and runs it with self = the
+        // metaclass, so every def lands on the singleton table no
+        // matter how it's nested. Surfaced by listen's
+        // `MonotonicTime` (`class << self; if defined?(...) … elsif …
+        // else … end`) on the Bridgetown boot path.
+        if bn.as_if_node().is_some()
+            || bn.as_unless_node().is_some()
+            || bn.as_case_node().is_some()
+        {
+            return true;
+        }
         if let Some(call) = bn.as_call_node()
             && call.receiver().is_none()
         {
