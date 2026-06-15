@@ -1218,3 +1218,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `Kernel#require` override — zeitwerk's eager_load descends implicit-
 // namespace directories this way (Bridgetown / Hanami boot path).
 #[test] fn const_get_autoload_override() { run_diff("const_get_autoload_override"); }
+
+// `Kernel.method_defined?` answers honestly (not blanket-true for the
+// Kernel sentinel) so the `alias_method … unless method_defined?` guard
+// idiom works — zeitwerk's require wrapper and require-intercepting shims.
+#[test] fn kernel_method_defined() { run_diff("kernel_method_defined"); }

@@ -16630,9 +16630,19 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
     };
     match sentinel {
         Some(s) => vm.responds_to(&s, sid, true),
-        // Aggregate / opaque primitives: keep the previously-
-        // permissive answer so the gem helper path doesn't trip
-        // on Kernel-shared method probes.
+        // `Kernel` is modeled as a sentinel "primitive" (it hosts the
+        // inline-dispatched builtins rather than a real method table),
+        // but it must NOT answer `true` for arbitrary names — the
+        // `unless method_defined?(:x)`-guard idiom (zeitwerk's require
+        // wrapper, bundler, and any `alias_method … unless
+        // method_defined?` shim) breaks when a not-yet-defined name
+        // reports defined. Consult the registered Kernel builtins
+        // instead, so `Kernel.method_defined?(:made_up)` is false while
+        // the genuine reflectable builtins still report true.
+        None if cls.name == "Kernel" => vm.kernel_builtin_method(sid).is_some(),
+        // Other aggregate / opaque primitives (Array/Hash/Proc/…): keep
+        // the previously-permissive answer; they have no method table to
+        // consult and the gem helper path relies on it.
         None => is_primitive_class_name(&cls.name),
     }
 }
