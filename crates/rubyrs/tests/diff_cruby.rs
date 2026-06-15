@@ -165,6 +165,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn object_dup_regex_sym_hash_default() { run_diff("object_dup_regex_sym_hash_default"); }
 #[test] fn stdio_argv_surface() { run_diff("stdio_argv_surface"); }
 #[test] fn loaded_features() { run_diff("loaded_features"); }
+#[test] fn caller_locations() { run_diff("caller_locations"); }
 #[test] fn class_object_instance_dispatch() { run_diff("class_object_instance_dispatch"); }
 #[test] fn metaclass_alias_undef() { run_diff("metaclass_alias_undef"); }
 #[test] fn encoding_defaults() { run_diff("encoding_defaults"); }

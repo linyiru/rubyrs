@@ -44,6 +44,78 @@ class ThreadError < StandardError
 end
 
 class Thread
+  # `Thread::Backtrace::Location` — one entry of `caller_locations`.
+  # CRuby's are produced by the C backtrace machinery and can't be
+  # user-instantiated; rubyrs builds them in the pure-Ruby
+  # `Kernel#caller_locations` below by parsing `caller`'s strings, so
+  # `path` / `lineno` / `label` track whatever `caller` reports.
+  # (`label` is `caller`'s bare method name — rubyrs's `caller` does
+  # not yet prefix the defining class the way CRuby 3.4 does, a
+  # pre-existing divergence inherited here.)
+  class Backtrace
+    class Location
+      attr_reader :path, :lineno, :label
+
+      def initialize(path, lineno, label)
+        @path = path
+        @lineno = lineno
+        @label = label
+      end
+
+      # rubyrs has no separate load-path resolution for backtraces;
+      # `caller` already reports the path as written, so absolute and
+      # relative coincide here.
+      def absolute_path
+        @path
+      end
+
+      def base_label
+        @label
+      end
+
+      def to_s
+        "#{@path}:#{@lineno}:in '#{@label}'"
+      end
+
+      def inspect
+        to_s.inspect
+      end
+    end
+  end
+end
+
+module Kernel
+  # `caller_locations(start = 1, length = nil)` — like `caller` but
+  # returns `Thread::Backtrace::Location` objects instead of strings.
+  # Implemented over the native `caller`: the `+ 1` skips THIS wrapper
+  # frame so `start` is measured from the caller, matching CRuby.
+  # zeitwerk's loader uses `caller_locations(1, 1).first.path` to find
+  # the file that configured a loader.
+  def caller_locations(start = 1, length = nil)
+    raw =
+      if start.is_a?(Range)
+        b = start.begin
+        e = start.end
+        caller(Range.new(b ? b + 1 : 1, e ? e + 1 : nil, start.exclude_end?))
+      elsif length.nil?
+        caller(start + 1)
+      else
+        caller(start + 1, length)
+      end
+    return nil if raw.nil?
+    raw.map do |s|
+      m = s.match(/\A(?<path>.*):(?<lineno>\d+):in ['`](?<label>.*)'\z/)
+      if m
+        Thread::Backtrace::Location.new(m[:path], m[:lineno].to_i, m[:label])
+      else
+        Thread::Backtrace::Location.new(s, 0, "")
+      end
+    end
+  end
+  private :caller_locations
+end
+
+class Thread
   # DEFERRED-EXECUTION green thread (ADR 0017 Rule 4: no OS
   # threads). `Thread.new { ... }` captures the block; it runs — to
   # completion, inline — at the first `join` / `value` call. This
