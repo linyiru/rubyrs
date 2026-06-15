@@ -742,6 +742,53 @@ impl Class {
         }
     }
 
+    /// Lazily get-or-create this Class/Module's eigenclass shell —
+    /// the `Rc<Class>` returned by `Class#singleton_class` and used
+    /// as the `self` of a real `class << SomeClass; ...; end` body.
+    /// The shell carries `singleton_target = Some(Weak(self))`, so
+    /// `install_method` / the alias / visibility / include paths
+    /// redirect installs into `self.singleton_methods` rather than
+    /// the shell's own (empty) `methods` table. Caching on
+    /// `singleton_view` keeps identity stable
+    /// (`A.singleton_class.equal?(A.singleton_class)`). The shell's
+    /// `superclass` mirrors the real class's superclass — a Tier-1
+    /// approximation of CRuby's metaclass tower that keeps
+    /// `A.singleton_class.ancestors` reasonable without modelling
+    /// `#<Class:A> < #<Class:Object> < …`. Single source of truth
+    /// for both the `singleton_class` dispatch arm and
+    /// `Op::OpenSingletonClass`.
+    pub(crate) fn ensure_singleton_view(self: &Rc<Self>) -> Rc<Class> {
+        use std::cell::{Cell, RefCell};
+        let mut slot = self.singleton_view.borrow_mut();
+        if let Some(existing) = slot.as_ref() {
+            return existing.clone();
+        }
+        let shell_superclass = self.superclass.borrow().clone();
+        let v = Rc::new(Class {
+            name: format!("#<Class:{}>", self.name),
+            is_module: false,
+            undefed: RefCell::new(crate::intern::FxHashSet::default()),
+            anon_serial: Cell::new(0),
+            ivars: RefCell::new(crate::intern::FxHashMap::default()),
+            methods: RefCell::new(crate::intern::FxHashMap::default()),
+            singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
+            superclass: RefCell::new(shell_superclass),
+            includes: RefCell::new(Vec::new()),
+            prepends: RefCell::new(Vec::new()),
+            singleton_prepends: RefCell::new(Vec::new()),
+            singleton_includes: RefCell::new(Vec::new()),
+            singleton_view: RefCell::new(None),
+            singleton_target: RefCell::new(Some(Rc::downgrade(self))),
+            class_vars: RefCell::new(crate::intern::FxHashMap::default()),
+            consts: RefCell::new(crate::intern::FxHashMap::default()),
+            assigned_name: RefCell::new(None),
+            #[cfg(feature = "cext")]
+            cext_alloc_func: Cell::new(None),
+        });
+        *slot = Some(v.clone());
+        v
+    }
+
     /// Effective display name: the structural `name` if non-empty,
     /// otherwise the lazily-stamped `assigned_name` (set on first
     /// const-assignment per CRuby). Returns `None` for a class that

@@ -398,6 +398,21 @@ pub(crate) enum Expr {
     /// install an after-freeze guard layer in front of the
     /// class's own singleton methods.
     SingletonChainPrepend(Box<SExpr>),
+    /// `class << <expr>; body; end` run as a REAL eigenclass body
+    /// (self = the metaclass), as opposed to the def/attr/alias
+    /// desugar `tr_singleton_class` applies to the simple cases.
+    /// Emitted only for bodies the desugar can't express
+    /// faithfully — `include Mod`, nested `module`/`class`, and
+    /// `internal def` / `private def` keyword-wrapped defs, where
+    /// the body's statements (or runtime-indirected helpers like
+    /// zeitwerk's `internal`) depend on `self` being the
+    /// eigenclass. Compiles `body` into its own proto and emits
+    /// `Op::OpenSingletonClass`; `recv` is evaluated once in the
+    /// surrounding scope and left on the stack for the op to pop.
+    SingletonClassBody {
+        recv: Box<SExpr>,
+        body: Vec<SExpr>,
+    },
     /// Push a new `Visibility::Public` entry onto the runtime
     /// class_visibility_stack. Emitted by the SingletonClassNode
     /// translator at body start for EVERY `class << <expr>`
@@ -1483,6 +1498,41 @@ fn compile_find_pattern(
 }
 
 
+/// Decide whether a `class << recv` body must run as a REAL
+/// eigenclass body (`Expr::SingletonClassBody`, self = metaclass)
+/// rather than via the per-statement desugar. See the call site in
+/// `tr_singleton_class` for the rationale behind each shape.
+fn singleton_body_needs_real_eval(body_nodes: &[Node<'_>]) -> bool {
+    body_nodes.iter().any(|bn| {
+        // Nested namespace definition — the desugar has no way to
+        // place a `module`/`class` inside the metaclass.
+        if bn.as_module_node().is_some() || bn.as_class_node().is_some() {
+            return true;
+        }
+        if let Some(call) = bn.as_call_node()
+            && call.receiver().is_none()
+        {
+            let nm = cid_to_string(call.name());
+            // `include Mod` in the eigenclass body — must land on
+            // the metaclass, which the desugar misroutes.
+            if nm == "include" {
+                return true;
+            }
+            // A call wrapping a `def` — `internal def foo`,
+            // `private def foo`, `public def foo`, … The wrapper
+            // runs at runtime with self = the metaclass; only the
+            // real-body path keeps `def` and the wrapper's
+            // `private`/`alias_method` on the same (singleton) table.
+            if let Some(args) = call.arguments()
+                && args.arguments().iter().any(|a| a.as_def_node().is_some())
+            {
+                return true;
+            }
+        }
+        false
+    })
+}
+
 /// Extracted body of the `class << recv` (singleton-class) AST
 /// translation. Lives in its own function so its large local set
 /// (the per-body `out` / `then_body` / `else_body` Vecs, the
@@ -1503,6 +1553,34 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             }
             None => vec![],
         };
+        // Route the WHOLE body to the real eigenclass-body op
+        // (`Expr::SingletonClassBody`, self = the metaclass) when it
+        // contains a shape the per-statement desugar can't express
+        // faithfully:
+        //   - `include Mod` — must land on the metaclass (the real
+        //     class's `singleton_includes`), not its instance chain.
+        //   - a nested `module`/`class` definition.
+        //   - a call wrapping a `def`: `internal def foo`,
+        //     `private def foo`, `public def foo`, etc. The wrapper
+        //     (zeitwerk's `internal`, or the visibility keywords)
+        //     runs at RUNTIME with `self` = the metaclass and calls
+        //     `private`/`alias_method` on it — which only lands on
+        //     the same table the `def` did when `self` really is the
+        //     eigenclass. The desugar runs the body with `self` =
+        //     the enclosing module, so the def goes to the singleton
+        //     table but the wrapper's `private`/`alias_method` hit
+        //     the instance table — an unfixable mismatch.
+        // The def/attr/alias-only fast cases stay on the desugar
+        // (preserving the large body of sinatra/minitest/tilt tests
+        // that exercise it). Receiver-independent: works for
+        // `class << self`, `class << Const`, and `class << obj`.
+        if singleton_body_needs_real_eval(&body_nodes) {
+            let body: Vec<SExpr> = body_nodes.iter().map(|bn| tr(ctx, bn)).collect();
+            return sp(node, Expr::SingletonClassBody {
+                recv: Box::new(recv_expr),
+                body,
+            });
+        }
         // CRuby evaluates the `class << expr` receiver exactly
         // ONCE for the whole body. Naive desugar `def expr.foo;
         // def expr.bar; ...` would re-evaluate expr per def —

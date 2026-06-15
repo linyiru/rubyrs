@@ -4377,52 +4377,23 @@ impl Vm {
             // tables. (Code-review #253 round 1 #4 / #7 —
             // partial decline.)
             ("singleton_class", []) => {
-                let view = {
-                    let mut slot = cls.singleton_view.borrow_mut();
-                    if let Some(existing) = slot.as_ref() {
-                        existing.clone()
-                    } else {
-                        // Point the shell's superclass at the real
-                        // class's own superclass so
-                        // `A.singleton_class.ancestors.include?(Object)`
-                        // and `A.singleton_class.superclass`
-                        // both behave reasonably for code that
-                        // walks the metaclass chain — matches the
-                        // pre-PR Tier-1 stub's effective behavior
-                        // (the stub returned the receiver itself,
-                        // so `.superclass` was the real class's
-                        // superclass). NOT CRuby's exact metaclass
-                        // tower (`#<Class:A> < #<Class:Object> <
-                        // … < Class`), but a close-enough Tier-1
-                        // approximation that doesn't regress the
-                        // common idiom. (Code-review #253 round 9
-                        // #2.)
-                        let shell_superclass = cls.superclass.borrow().clone();
-                        let v = std::rc::Rc::new(crate::value::Class {
-                            name: format!("#<Class:{}>", cls.name),
-                            is_module: false,
-                            undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
-                            anon_serial: std::cell::Cell::new(0),
-                            ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-                            methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-                            singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-                            superclass: std::cell::RefCell::new(shell_superclass),
-                            includes: std::cell::RefCell::new(Vec::new()),
-                            prepends: std::cell::RefCell::new(Vec::new()),
-                            singleton_prepends: std::cell::RefCell::new(Vec::new()),
-                            singleton_includes: std::cell::RefCell::new(Vec::new()),
-                            singleton_view: std::cell::RefCell::new(None),
-                            singleton_target: std::cell::RefCell::new(Some(std::rc::Rc::downgrade(&cls))),
-                            class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            assigned_name: std::cell::RefCell::new(None),
-                            #[cfg(feature = "cext")]
-                            cext_alloc_func: std::cell::Cell::new(None),
-                        });
-                        *slot = Some(v.clone());
-                        v
-                    }
-                };
+                // Single source of truth for the eigenclass shell —
+                // see `Class::ensure_singleton_view`. The shell's
+                // superclass mirrors the real class's own superclass
+                // (a Tier-1 approximation of CRuby's metaclass
+                // tower, kept close enough that
+                // `A.singleton_class.ancestors.include?(Object)` and
+                // `A.singleton_class.superclass` behave reasonably).
+                // The shell redirects installs into
+                // `cls.singleton_methods` via `singleton_target`.
+                //
+                // KNOWN GAP — introspection on the shell (e.g.
+                // `A.singleton_class.instance_methods(false)`,
+                // `A.singleton_class.include?(Mod)`) operates on the
+                // shell's OWN tables; redirected installs are visible
+                // only via the real class's singleton-method dispatch
+                // chain. Documented Tier-1 divergence.
+                let view = cls.ensure_singleton_view();
                 self.stack.push(Value::Class(view));
                 Ok(true)
             }
@@ -7506,6 +7477,56 @@ impl Vm {
                     _ => None,
                 };
                 if let (Some(new_id), Some(old_id)) = (new_id_opt, old_id_opt) {
+                    // Eigenclass-shell (real `class << M` body, self =
+                    // the metaclass): `alias_method :new, :old` aliases
+                    // a SINGLETON method of the real class M. Resolve
+                    // `old` along M's singleton chain and install `new`
+                    // into M's singleton_methods — mirroring
+                    // `Op::AliasMethod`'s shell redirect. zeitwerk's
+                    // `internal` does exactly this (`alias_method
+                    // "#{m}_internal", m` after `def m` inside
+                    // `class << self`).
+                    if let Some(real) = target.singleton_target.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
+                        match self.lookup_class_singleton_method(&real, old_id) {
+                            Some(method) => {
+                                // Install a FRESH Method (shared body,
+                                // own visibility Cell) rather than the
+                                // shared Rc. CRuby aliases carry
+                                // independent visibility — zeitwerk's
+                                // `internal` does `private :m;
+                                // alias_method "#{m}_internal", :m;
+                                // public "#{m}_internal"`, and a later
+                                // `public` on the alias must not flip
+                                // the original `m` back to public via a
+                                // shared cell. defining_class stays the
+                                // source's so `super` from the alias
+                                // still walks the right chain.
+                                let aliased = std::rc::Rc::new(crate::value::Method {
+                                    params: method.params.clone(),
+                                    proto_idx: method.proto_idx,
+                                    fixed_arity: method.fixed_arity,
+                                    defining_class: method.defining_class.clone(),
+                                    visibility: std::cell::Cell::new(method.visibility.get()),
+                                    closure: method.closure.clone(),
+                                    original_name: method.original_name,
+                                    builtin: method.builtin.clone(),
+                                });
+                                real.singleton_methods.borrow_mut().insert(new_id, aliased);
+                                self.method_gen = self.method_gen.wrapping_add(1);
+                                self.stack.push(Value::Class(target.clone()));
+                                return Ok(());
+                            }
+                            None => {
+                                let old_name = self.interner.resolve(old_id).to_string();
+                                return Err(self.trap(RubyError::NameError {
+                                    msg: format!(
+                                        "undefined method '{}' for class '{}'",
+                                        old_name, target.name,
+                                    ),
+                                }));
+                            }
+                        }
+                    }
                     let m = self.lookup_method_uncached(target, old_id);
                     match m {
                         Some(method) => {
@@ -7550,6 +7571,23 @@ impl Vm {
                     // heap alloc per call is wasteful.
                     let reverse_args = is_prepend || is_include || (&*name == "extend");
                     let n_args = args.len();
+                    // Eigenclass-shell (real `class << M` body, self =
+                    // the metaclass): `include Mod` includes Mod into
+                    // the metaclass — i.e. Mod's instance methods
+                    // become M's SINGLETON methods. In rubyrs's flat
+                    // model that's M.singleton_includes (the same
+                    // chain `M.extend Mod` feeds), so route an
+                    // include-on-a-shell there. `extend`/`prepend` on
+                    // a shell keep their own eigenclass-object
+                    // semantics (the shell's own chains). zeitwerk's
+                    // `class << self; include RealModName; end` makes
+                    // `real_mod_name` a class method of the module.
+                    let shell_real = target_cls
+                        .singleton_target
+                        .borrow()
+                        .as_ref()
+                        .and_then(std::rc::Weak::upgrade);
+                    let include_redirect = is_include && shell_real.is_some();
                     for idx in 0..n_args {
                         let a = if reverse_args { &args[n_args - 1 - idx] } else { &args[idx] };
                         let src = match a {
@@ -7586,13 +7624,19 @@ impl Vm {
                         // arm below for the singleton_includes
                         // rationale. Same fix; just a second site.
                         let is_extend = !is_include && !is_prepend;
-                        let already_reachable = if is_extend {
+                        let already_reachable = if include_redirect {
+                            shell_real.as_ref().unwrap()
+                                .singleton_includes.borrow().iter()
+                                .any(|m| std::rc::Rc::ptr_eq(m, &src))
+                        } else if is_extend {
                             target_cls.singleton_includes.borrow().iter().any(|m| std::rc::Rc::ptr_eq(m, &src))
                         } else {
                             super::class_reaches_via_chain(&target_cls, &src, is_prepend)
                         };
                         if !already_reachable {
-                            let mut chain = if is_prepend {
+                            let mut chain = if include_redirect {
+                                shell_real.as_ref().unwrap().singleton_includes.borrow_mut()
+                            } else if is_prepend {
                                 target_cls.prepends.borrow_mut()
                             } else if is_extend {
                                 target_cls.singleton_includes.borrow_mut()
@@ -7807,6 +7851,16 @@ impl Vm {
                         if let Some(top) = self.class_visibility_stack.last_mut() {
                             *top = vis;
                         }
+                    } else if let Some(real) = cls.singleton_target.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
+                        // Eigenclass-shell (real `class << M` body):
+                        // `private :foo` / `public :foo` flip the
+                        // visibility of M's SINGLETON method `foo`
+                        // (e.g. zeitwerk `private :cpaths` after an
+                        // `attr_reader :cpaths`, and `internal`'s
+                        // `private`/`public` on the just-defined
+                        // method). Route through the singleton table
+                        // via the shared helper.
+                        self.apply_class_method_visibility(&real, &args, vis)?;
                     } else {
                         for a in &args {
                             let key: Option<SymId> = match a {
@@ -9520,13 +9574,15 @@ impl Vm {
                     self.interner.resolve(*a).cmp(self.interner.resolve(*b))
                 });
             } else if matches!(&*name, "methods" | "public_methods") {
-                // Class receiver — class-method chain. Singleton
-                // methods don't carry per-entry visibility in
-                // rubyrs's Class shape and are all public by default,
-                // so `public_methods` reports the same set as
-                // `methods` here; `private_methods` /
-                // `protected_methods` have no surface and fall
-                // through to an empty Array.
+                // Class receiver — class-method (singleton) chain.
+                // Singleton methods DO carry per-entry visibility
+                // (set by `private_class_method` and by `private`/
+                // `public` inside a real `class << self` body), so
+                // filter the class's own singleton_methods by `pred`
+                // — `methods` drops private entries, `public_methods`
+                // keeps only public. `private_methods` /
+                // `protected_methods` have no class-method surface
+                // and fall through to an empty Array.
                 if let Value::Class(cls) = &recv {
                 // Walk a prepended module's transitive includes /
                 // prepends — same shape as `walk_module` in
@@ -9560,8 +9616,10 @@ impl Vm {
                     for pre in current.singleton_prepends.borrow().iter() {
                         walk_mod(pre, &mut names, &mut mod_visited);
                     }
-                    for k in current.singleton_methods.borrow().keys() {
-                        if !names.contains(k) { names.push(*k); }
+                    for (k, m) in current.singleton_methods.borrow().iter() {
+                        if pred(m.visibility.get()) && !names.contains(k) {
+                            names.push(*k);
+                        }
                     }
                     if !include_inherited { break; }
                     let parent = current.superclass.borrow().clone();

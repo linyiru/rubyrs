@@ -3904,6 +3904,46 @@ impl Vm {
                     captured_yield_block: None,
                 });
             }
+            Op::OpenSingletonClass(p_idx) => {
+                // `class << <expr>; body; end` run as a REAL
+                // eigenclass body — self = the metaclass. The
+                // receiver was pushed by the compiler immediately
+                // before this op. Materialize its eigenclass, then
+                // open a class-body frame on it so `def`, `include`,
+                // `private`/`public`, `attr_*`, and `internal def`-
+                // style runtime indirection all consistently target
+                // the metaclass (= the real class's singleton tables
+                // via `singleton_target` redirect). See
+                // `Op::OpenSingletonClass` in bytecode.rs.
+                let recv = self.stack.pop()
+                    .expect("ICE: OpenSingletonClass without receiver slot");
+                let eigen: Rc<Class> = match &recv {
+                    Value::Class(cls) => cls.ensure_singleton_view(),
+                    Value::Object(id) => self.heap.ensure_singleton_class(*id),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "can't open singleton class of {} (only classes/modules and user-class instances are supported)",
+                                other.type_name(),
+                            ),
+                        }));
+                    }
+                };
+                self.class_stack.push(eigen.clone());
+                self.class_visibility_stack.push(Visibility::Public);
+                self.module_function_active_stack.push(false);
+                let proto = &self.protos[p_idx as usize];
+                let n_locals = proto.n_locals as usize;
+                self.frames.push(Frame {
+                    proto_idx: p_idx as usize, ip: 0,
+                    locals: crate::vm::Locals::Shared(Rc::new(RefCell::new(vec_nil(n_locals)))),
+                    self_val: Value::Class(eigen),
+                    base_sp: self.stack.len(),
+                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
+                    block_writeback: None,
+                    captured_yield_block: None,
+                });
+            }
             Op::NewArray(n) => {
                 self.maybe_gc();
                 self.check_alloc()?;

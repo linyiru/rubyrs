@@ -206,6 +206,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn singleton_class_body_more() { run_diff("singleton_class_body_more"); }
 #[test] fn singleton_class_conditional_def() { run_diff("singleton_class_conditional_def"); }
 #[test] fn singleton_class_bare_call() { run_diff("singleton_class_bare_call"); }
+#[test] fn singleton_class_real_body() { run_diff("singleton_class_real_body"); }
 #[test] fn singleton_class_expr_value() { run_diff("singleton_class_expr_value"); }
 #[test] fn integer_size() { run_diff("integer_size"); }
 #[test] fn class_public_methods() { run_diff("class_public_methods"); }

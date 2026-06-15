@@ -423,6 +423,30 @@ pub(crate) enum Op {
     /// raises TypeError, but rubyrs leniently keeps the
     /// first-defined kind. Documented divergence.
     DefModule(SymId, u32, SymId),
+    /// `class << <expr>; body; end` — REAL eigenclass-body
+    /// execution (as opposed to the AST-level desugar that
+    /// `tr_singleton_class` applies to the def/attr/alias-only
+    /// fast cases). Pops the receiver value pushed immediately
+    /// before this op, materializes its eigenclass (the
+    /// `singleton_view` shell for a Class/Module — whose
+    /// `singleton_target` redirects installs into the real
+    /// class's `singleton_methods`; the lazily-allocated
+    /// per-instance eigenclass for an Object), then pushes that
+    /// eigenclass onto `class_stack` and opens a class body
+    /// frame with `self = the eigenclass`. The body therefore
+    /// runs with `self` being the metaclass, so `def`, `include`,
+    /// `private`/`public`, `attr_*`, and `internal def`-style
+    /// runtime indirection all consistently target the metaclass
+    /// (= the real class's singleton tables). Emitted by
+    /// `tr_singleton_class` only for bodies that the desugar
+    /// cannot express faithfully (`include`, nested `module`,
+    /// `internal def` / `private def` keyword-wrapped defs). The
+    /// def/attr/alias-only fast cases still desugar. `u32` is the
+    /// body proto index. The body's frame carries
+    /// `is_class_body: true`, so the existing class-body return
+    /// arm pops `class_stack` / visibility / module_function and
+    /// pushes the eigenclass as the construct's value.
+    OpenSingletonClass(u32),
     NewArray(u16),
     NewHash(u16),
     /// Pops two values (begin, end). u8 nonzero = exclusive (`...`).

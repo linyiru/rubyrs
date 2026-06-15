@@ -1914,6 +1914,26 @@ pub(crate) fn compile_expr(
             // Like Op::AliasMethod, the handler pushes Nil itself;
             // no trailing LoadNil here.
         }
+        Expr::SingletonClassBody { recv, body } => {
+            // Real eigenclass body (self = metaclass). Compile the
+            // body into its own proto, evaluate the receiver in the
+            // SURROUNDING scope (so `class << self` reads the outer
+            // self, `class << Const` resolves the constant here),
+            // then emit the op that materializes the eigenclass and
+            // opens the class-body frame. The body proto inherits
+            // the surrounding lexical class_path so nested
+            // `module`/`class` and constant reads resolve against
+            // the enclosing namespace (CRuby scopes them under the
+            // metaclass, but the flat const model keeps them under
+            // the surrounding module — observably equivalent for the
+            // bare-name reads inside the body).
+            let proto_idx = compile_proto_at(
+                "<singleton class>".to_string(), vec![], body,
+                b.filename.clone(), protos, interner, cc, b.class_path.clone(),
+            );
+            compile_expr(b, recv, protos, interner, cc);
+            b.emit(Op::OpenSingletonClass(proto_idx as u32));
+        }
         Expr::SingletonChainPrepend(src) => {
             // Evaluate the module/class argument (`Module.new { ... }`,
             // a constant lookup, anything that lands a Value::Class
