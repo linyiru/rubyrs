@@ -708,7 +708,7 @@ impl Vm {
             "unpack" | "unpack1" | "bytes" | "getbyte" | "each_byte" |
             "match?" | "match" | "scan" | "index" | "rindex" | "=~" |
             "[]" | "slice" |
-            "<<" | "concat" | "prepend" | "replace" |
+            "<<" | "concat" | "prepend" | "replace" | "clear" |
             "freeze" | "frozen?" | "dup" | "+@" | "-@" | "dump" | "count" |
             "hash"
         )

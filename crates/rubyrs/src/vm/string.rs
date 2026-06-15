@@ -2300,6 +2300,14 @@ impl Vm {
                     *s.borrow_mut() = buf;
                     return Ok(Some(Value::Str(s)));
                 }
+                if name == "clear" && args.is_empty() {
+                    // `String#clear` — empty the buffer IN PLACE, return
+                    // self, keep the encoding tag. FrozenError-aware.
+                    // Surfaced by net/protocol's `rbuf_flush` (`@rbuf.clear`).
+                    check_unfrozen(self)?;
+                    s.borrow_mut().clear();
+                    return Ok(Some(Value::Str(s)));
+                }
                 if name == "replace" && args.len() == 1 {
                     check_unfrozen(self)?;
                     match &args[0] {

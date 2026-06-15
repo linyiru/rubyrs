@@ -1265,3 +1265,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `String#chop` — \r\n pair / last UTF-8 char / empty-safe; non-mutating.
 // Surfaced by net/protocol's readline (ADR 0028 Phase 1 prerequisite).
 #[test] fn string_chop() { run_diff("string_chop"); }
+
+// `String#clear` — in-place empty, returns self, keeps encoding,
+// FrozenError-aware. Surfaced by net/protocol's rbuf_flush.
+#[test] fn string_clear() { run_diff("string_clear"); }
