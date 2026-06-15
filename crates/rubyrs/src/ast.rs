@@ -1502,7 +1502,7 @@ fn compile_find_pattern(
 /// eigenclass body (`Expr::SingletonClassBody`, self = metaclass)
 /// rather than via the per-statement desugar. See the call site in
 /// `tr_singleton_class` for the rationale behind each shape.
-fn singleton_body_needs_real_eval(body_nodes: &[Node<'_>]) -> bool {
+fn singleton_body_needs_real_eval(body_nodes: &[Node<'_>], recv_is_self: bool) -> bool {
     body_nodes.iter().any(|bn| {
         // Nested namespace definition — the desugar has no way to
         // place a `module`/`class` inside the metaclass.
@@ -1522,6 +1522,23 @@ fn singleton_body_needs_real_eval(body_nodes: &[Node<'_>]) -> bool {
             || bn.as_unless_node().is_some()
             || bn.as_case_node().is_some()
         {
+            return true;
+        }
+        // `alias new old` inside `class << <Const>` / `class << obj`
+        // (NON-self receiver only). The per-statement desugar admits
+        // `alias` when the receiver is the literal `self` — and that
+        // self-path carries special logic (builtin-method alias
+        // forwarders + the Module-`new` fence the
+        // `class_self_alias_builtin` fixture pins), so leave it alone.
+        // For a non-self receiver the desugar BAILS ("`alias` only
+        // supported when receiver is `self`"); `class << HTTP; alias
+        // is_version_1_1? version_1_1?` (HTTP = the enclosing class — i.e.
+        // `class << self` written as a constant) hit that bail. Route it
+        // to the real eigenclass body, which runs with self = the
+        // metaclass so the alias lands on the singleton-method table
+        // regardless of how the receiver was spelled. Surfaced by stdlib
+        // net/http.rb (ADR 0028).
+        if !recv_is_self && bn.as_alias_method_node().is_some() {
             return true;
         }
         if let Some(call) = bn.as_call_node()
@@ -1589,7 +1606,7 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // (preserving the large body of sinatra/minitest/tilt tests
         // that exercise it). Receiver-independent: works for
         // `class << self`, `class << Const`, and `class << obj`.
-        if singleton_body_needs_real_eval(&body_nodes) {
+        if singleton_body_needs_real_eval(&body_nodes, matches!(&recv_expr.node, Expr::SelfExpr)) {
             let body: Vec<SExpr> = body_nodes.iter().map(|bn| tr(ctx, bn)).collect();
             return sp(node, Expr::SingletonClassBody {
                 recv: Box::new(recv_expr),

@@ -1273,3 +1273,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `Errno::EALREADY` / `ECONNABORTED` — the two socket Errno classes
 // rubyrs was missing from faraday-net_http's exception list.
 #[test] fn errno_ealready_econnaborted() { run_diff("errno_ealready_econnaborted"); }
+
+// `alias` inside `class << <Const>` / `class << <obj>` (non-self
+// singleton receiver) routes to the real eigenclass body. Surfaced by
+// stdlib net/http.rb (`class << HTTP; alias …`).
+#[test] fn class_lt_lt_const_alias() { run_diff("class_lt_lt_const_alias"); }
