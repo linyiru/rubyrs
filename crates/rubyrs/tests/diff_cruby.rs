@@ -174,6 +174,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn undef_listing_and_sym_blockpass() { run_diff("undef_listing_and_sym_blockpass"); }
 #[cfg(feature = "stdlib")]
 #[test] fn remove_const_forwardable_proc() { run_diff("remove_const_forwardable_proc"); }
+#[test] fn remove_const_pending_autoload() { run_diff("remove_const_pending_autoload"); }
 #[cfg(feature = "stdlib")]
 #[test] fn minitest_substrate_extras() { run_diff("minitest_substrate_extras"); }
 #[test] fn string_to_s_passthrough() { run_diff("string_to_s_passthrough"); }

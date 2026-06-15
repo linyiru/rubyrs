@@ -9041,6 +9041,28 @@ impl Vm {
                     return Ok(());
                 }
                 None => {
+                    // CRuby's `remove_const` also removes a PENDING
+                    // autoload (registered via `Module#autoload` but
+                    // never triggered), returning nil. zeitwerk's
+                    // reload/unload teardown removes autoload
+                    // constants this way — without this the teardown
+                    // raises NameError, aborts before the registry
+                    // is cleared, and every following test conflicts.
+                    let mut keys: Vec<crate::intern::SymId> = Vec::new();
+                    if matches!(owner.name.as_str(), "Object" | "Class" | "Module") {
+                        keys.push(self.interner.intern(&const_name));
+                    } else if let Some(owner_name) = owner.effective_name() {
+                        keys.push(self.interner.intern(&format!("{}::{}", owner_name, const_name)));
+                    }
+                    let mut removed_autoload = false;
+                    for k in keys {
+                        if self.autoloads_toplevel.remove(&k).is_some() { removed_autoload = true; }
+                        if self.autoloads_scoped.remove(&k).is_some() { removed_autoload = true; }
+                    }
+                    if removed_autoload {
+                        self.stack.push(Value::Nil);
+                        return Ok(());
+                    }
                     return Err(self.trap(RubyError::NameError {
                         msg: format!("constant {}::{} not defined", owner.name, const_name),
                     }));
