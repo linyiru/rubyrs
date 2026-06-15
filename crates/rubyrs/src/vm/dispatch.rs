@@ -11242,10 +11242,14 @@ impl Vm {
                     }
                 }
                 Value::Class(target) => {
-                    // Walk the argument's class chain looking for
-                    // an Rc-identical match with `target`. For
-                    // built-in receivers, look up the stub class
-                    // by interned type name.
+                    // `Mod === obj` ≡ `obj.is_a?(Mod)`. Walk the
+                    // argument's FULL ancestor chain (includes +
+                    // prepends + superclass) via `class_is_a`, not just
+                    // the superclass chain — otherwise a mixed-in module
+                    // never matches. `URI::Generic` does `include URI`,
+                    // so `URI === uri` must be true (net/http's
+                    // `if URI === uri_or_path` guard); likewise
+                    // `Comparable === 5` (Integer includes Comparable).
                     let start: Option<Rc<Class>> = match arg {
                         Value::Object(id) => Some(self.heap.class_of(*id)),
                         _ => {
@@ -11253,13 +11257,10 @@ impl Vm {
                             if let Value::Class(c) = class_val { Some(c) } else { None }
                         }
                     };
-                    let mut cur = start;
-                    let mut hit = false;
-                    while let Some(cls) = cur {
-                        if Rc::ptr_eq(&cls, target) { hit = true; break; }
-                        cur = cls.superclass.borrow().clone();
+                    match start {
+                        Some(cls) => super::class_is_a(&cls, target),
+                        None => false,
                     }
-                    hit
                 }
                 #[cfg(feature = "regex")]
                 Value::Regex(re) => match arg {

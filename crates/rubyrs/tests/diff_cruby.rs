@@ -1286,3 +1286,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `String#delete!` — destructive delete (in place, self|nil, FrozenError);
 // `delete`/`delete!` whitelisted. Surfaced by stdlib uri/generic.rb.
 #[test] fn string_delete_bang() { run_diff("string_delete_bang"); }
+
+// `Module#===` honours included modules (≡ is_a?), not just the
+// superclass chain. Surfaced by net/http's `if URI === uri` (URI::Generic
+// includes URI).
+#[test] fn module_case_equality_include() { run_diff("module_case_equality_include"); }
