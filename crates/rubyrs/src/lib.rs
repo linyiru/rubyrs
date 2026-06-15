@@ -2557,6 +2557,19 @@ class Dir
     names.each { |e| yield e }
     nil
   end
+
+  ## `Dir.each_child(path) { |basename| ... }` — like `foreach` but
+  ## EXCLUDES "." and ".." (uses the host `Dir.children` primitive).
+  ## Non-block form returns an Enumerator over the same names. Returns
+  ## nil (CRuby). zeitwerk's `Loader::Helpers#ls` walks an autoload
+  ## directory this way, so it gates every gem that autoloads via
+  ## zeitwerk (Bridgetown, Hanami).
+  def self.each_child(path)
+    names = Dir.children(path)
+    return names.each unless block_given?
+    names.each { |e| yield e }
+    nil
+  end
 end
 ## RubyrsSass — anchor for the `RubyrsSass.compile(scss) -> css` host
 ## primitive (wired in vm/dispatch.rs to crate::sass::compile, the

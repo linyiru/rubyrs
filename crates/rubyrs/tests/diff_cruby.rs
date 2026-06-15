@@ -1187,3 +1187,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `Module.instance_method(:name).bind_call(mod)` — native Module#name is
 // exposed through reflection so zeitwerk's RealModName can capture it.
 #[test] fn module_name_reflection() { run_diff("module_name_reflection"); }
+
+// `Dir.each_child(path)` — block + Enumerator forms, excluding "."/"..".
+// zeitwerk's Loader::Helpers walks autoload directories this way.
+#[test] fn dir_each_child() { run_diff("dir_each_child"); }
