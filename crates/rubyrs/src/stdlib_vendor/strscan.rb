@@ -43,7 +43,22 @@ class StringScanner
     # Start offset (into @str) of the last successful match, so
     # pre_match / post_match can be reconstructed.
     @match_pos = nil
+    refresh_byte_addressable
   end
+
+  # The native `__strscan_search` fast path addresses `@str` by BYTE
+  # offset, so it's only sound when the scanner's character index
+  # equals the byte index — i.e. an ASCII-8BIT buffer OR an ASCII-only
+  # string (every char is one byte). Cached because `ascii_only?` is
+  # O(n); recomputed only when `@str` is replaced/grown. A multipart
+  # body is always one of these two (binary data, or all-ASCII tagged
+  # UTF-8 after the empty-buffer + ASCII concat), so this is what keeps
+  # `scan_until` linear there; genuine multi-byte UTF-8 (ERB/rouge
+  # source) falls back to the slice path.
+  def refresh_byte_addressable
+    @byte_addressable = @str.encoding == Encoding::BINARY || @str.ascii_only?
+  end
+  private :refresh_byte_addressable
 
   def string
     @str
@@ -57,6 +72,7 @@ class StringScanner
     @pos = 0
     @last_md = nil
     @match_pos = nil
+    refresh_byte_addressable
     s
   end
 
@@ -147,14 +163,17 @@ class StringScanner
   def scan_until(regex)
     consumed = search_from_pos(regex)
     return nil if consumed.nil?
-    result = rest[0, consumed]
+    # `@str[@pos, consumed]` copies only the matched span (O(consumed));
+    # the old `rest[0, consumed]` first built `@str[@pos..]` (O(remaining))
+    # — the second O(n²) source after the slice in `search_from_pos`.
+    result = @str[@pos, consumed]
     @pos += consumed
     result
   end
 
   def check_until(regex)
     consumed = search_from_pos(regex)
-    consumed.nil? ? nil : rest[0, consumed]
+    consumed.nil? ? nil : @str[@pos, consumed]
   end
 
   def exist?(regex)
@@ -213,7 +232,14 @@ class StringScanner
   # --- grow ---
 
   def concat(str)
-    @str += str.to_s
+    s = str.to_s
+    @str += s
+    # Incremental refresh (O(appended), not O(@str)): the grown buffer
+    # stays byte-addressable iff it became ASCII-8BIT (any high byte
+    # flips the whole concat) or it was addressable and the addition is
+    # ASCII-only.
+    @byte_addressable =
+      @str.encoding == Encoding::BINARY || (@byte_addressable && s.ascii_only?)
     self
   end
   alias_method :<<, :concat
@@ -243,7 +269,27 @@ class StringScanner
   # hit, records the MatchData and returns the number of characters
   # from the current position through the END of the match (what
   # `scan_until` consumes); otherwise returns nil.
+  #
+  # For a BINARY buffer (rack multipart bodies; char index == byte
+  # index) the engine searches IN PLACE from `@pos` via the native
+  # `__strscan_search` hook — `@str[@pos..]` copies O(remaining) bytes
+  # on every call, which turns a multi-part `scan_until` loop into
+  # O(n²). `__strscan_search` returns the absolute match start (Integer)
+  # and sets `$~`, `nil` for no match, or `false` when there's no byte
+  # engine for the pattern (then we fall back to the slice path).
   def search_from_pos(regex)
+    if @byte_addressable
+      r = @str.__strscan_search(regex, @pos)
+      unless r == false
+        if r.nil?
+          @last_md = nil
+          return nil
+        end
+        @last_md = $~
+        @match_pos = r
+        return (r - @pos) + $~[0].length
+      end
+    end
     slice = @str[@pos..] || ""
     offset = slice =~ regex
     if offset.nil?

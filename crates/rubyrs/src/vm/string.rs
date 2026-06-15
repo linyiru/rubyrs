@@ -2320,6 +2320,23 @@ impl Vm {
                 // (`Regexp.new(arg)` then match); we handle that
                 // by compiling the String into a CompiledRegex on
                 // the fly before falling into the regex branch.
+                // StringScanner's non-slicing search hook (see
+                // stdlib_vendor/strscan.rb). `recv.__strscan_search(re,
+                // byte_pos)` searches `re` in `recv` from `byte_pos`
+                // WITHOUT copying the tail — the slice `@str[@pos..]`
+                // is what makes scan_until O(n²) on a big binary buffer
+                // (rack multipart). BINARY only; for char==byte the
+                // scanner's `@pos` is already a byte offset. Returns the
+                // absolute match start (Int), nil (no match), or false
+                // (no byte engine → scanner falls back to slicing).
+                #[cfg(feature = "regex")]
+                if name == "__strscan_search"
+                    && let [Value::Regex(re), Value::Int(pos)] = args
+                {
+                    let re = re.clone();
+                    let start = (*pos).max(0) as usize;
+                    return Ok(Some(self.do_strscan_search_binary(&re, &s, start)?));
+                }
                 #[cfg(feature = "regex")]
                 if name == "match" && args.len() == 1 {
                     // Coerce a String arg into a Regex via the
@@ -2565,6 +2582,76 @@ impl Vm {
                             Value::new_str_bytes(bytes[starts[c0]..starts[c1]].to_vec()),
                             tag,
                         )
+                    };
+                    match args {
+                        [Value::Int(i)] => {
+                            let idx = norm(*i);
+                            return Ok(Some(if idx < 0 || idx >= nchars {
+                                Value::Nil
+                            } else {
+                                mk(idx as usize, idx as usize + 1)
+                            }));
+                        }
+                        [Value::Int(st), Value::Int(ln)] => {
+                            let start = norm(*st);
+                            if start < 0 || start > nchars || *ln < 0 {
+                                return Ok(Some(Value::Nil));
+                            }
+                            let end = (start + *ln).min(nchars);
+                            return Ok(Some(mk(start as usize, end as usize)));
+                        }
+                        [Value::Range(rid)] => {
+                            let r = self.heap.range(*rid);
+                            let excl = r.exclusive;
+                            let bi = match &r.begin {
+                                Value::Int(a) => *a,
+                                Value::Nil => 0,
+                                _ => return Ok(None),
+                            };
+                            let endless_end = matches!(&r.end, Value::Nil);
+                            let ei = match &r.end {
+                                Value::Int(c) => *c,
+                                Value::Nil => nchars,
+                                _ => return Ok(None),
+                            };
+                            let start = norm(bi);
+                            if start < 0 || start > nchars {
+                                return Ok(Some(Value::Nil));
+                            }
+                            let mut end = if endless_end { nchars } else { norm(ei) };
+                            if !excl && !endless_end {
+                                end += 1;
+                            }
+                            let end = end.clamp(start, nchars);
+                            return Ok(Some(mk(start as usize, end as usize)));
+                        }
+                        _ => {}
+                    }
+                }
+                // ASCII-only (cached) receiver: character index == byte
+                // index, so slice the bytes directly — O(len). The
+                // generic char path below does
+                // `to_string_lossy().chars().collect()`, which is
+                // O(string-length) on EVERY call; rack multipart's
+                // `@str[@pos, consumed]` per part then makes the whole
+                // parse O(n²). Int / (Int,len) / Range; preserves the
+                // receiver's encoding tag.
+                if (name == "[]" || name == "slice")
+                    && matches!(
+                        args,
+                        [Value::Int(_)]
+                            | [Value::Int(_), Value::Int(_)]
+                            | [Value::Range(_)]
+                    )
+                    && s.encoding.get() != crate::value::EncodingTag::Binary
+                    && s.content.is_ascii_cached()
+                {
+                    let bytes = s.content.borrow();
+                    let nchars = bytes.len() as i64;
+                    let tag = s.encoding.get();
+                    let norm = |i: i64| if i < 0 { nchars + i } else { i };
+                    let mk = |c0: usize, c1: usize| {
+                        with_tag(Value::new_str_bytes(bytes[c0..c1].to_vec()), tag)
                     };
                     match args {
                         [Value::Int(i)] => {

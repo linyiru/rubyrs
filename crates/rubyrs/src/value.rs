@@ -35,6 +35,16 @@ use crate::intern::{FxHashMap, SymId};
 pub struct StrCell {
     bytes: RefCell<Vec<u8>>,
     hash_cache: Cell<u64>,
+    /// Cached ASCII-ness of the current content: -1 unknown, 0 not
+    /// ASCII-only, 1 ASCII-only. `bytes.is_ascii()` is O(n), and
+    /// `char_count` (String#length/#size) runs it on EVERY call — for
+    /// a long ASCII string scanned in a loop (rack multipart's
+    /// `StringScanner#eos?` → `@str.length` per part) that alone is
+    /// O(n²). Caching the content-only ASCII flag makes `length` O(1)
+    /// once computed; it's encoding-independent (ASCII content counts
+    /// the same in any ASCII-compatible encoding) so a `force_encoding`
+    /// never invalidates it — only a content write does.
+    ascii_cache: Cell<i8>,
 }
 
 impl StrCell {
@@ -43,6 +53,7 @@ impl StrCell {
         Self {
             bytes: RefCell::new(bytes),
             hash_cache: Cell::new(0),
+            ascii_cache: Cell::new(-1),
         }
     }
 
@@ -52,12 +63,28 @@ impl StrCell {
         self.bytes.borrow()
     }
 
-    /// Write access — clears the cached hash BEFORE handing out the
-    /// guard (see the invalidation contract above).
+    /// Write access — clears the cached hash AND ASCII flag BEFORE
+    /// handing out the guard (see the invalidation contract above).
     #[inline]
     pub fn borrow_mut(&self) -> std::cell::RefMut<'_, Vec<u8>> {
         self.hash_cache.set(0);
+        self.ascii_cache.set(-1);
         self.bytes.borrow_mut()
+    }
+
+    /// Is the content ASCII-only? Caches the O(n) scan; the cache is
+    /// reset by `borrow_mut`.
+    #[inline]
+    pub(crate) fn is_ascii_cached(&self) -> bool {
+        match self.ascii_cache.get() {
+            1 => true,
+            0 => false,
+            _ => {
+                let a = self.bytes.borrow().is_ascii();
+                self.ascii_cache.set(if a { 1 } else { 0 });
+                a
+            }
+        }
     }
 
     /// Cached `ruby_hash` for the current content, or 0 if not
@@ -228,7 +255,7 @@ impl RStr {
         if matches!(self.encoding.get(), EncodingTag::Binary) {
             return bytes.len();
         }
-        if bytes.is_ascii() {
+        if self.content.is_ascii_cached() {
             bytes.len()
         } else {
             String::from_utf8_lossy(&bytes).chars().count()

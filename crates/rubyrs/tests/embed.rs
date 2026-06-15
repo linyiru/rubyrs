@@ -46,6 +46,8 @@ mod rubund_validation;
 mod tier1_capability;
 #[path = "embed/m27_rubyrs_const.rs"]
 mod m27_rubyrs_const;
+#[path = "embed/strscan_native.rs"]
+mod strscan_native;
 
 use std::cell::RefCell;
 use std::io::Write;

@@ -262,4 +262,87 @@ impl Vm {
             }
         }
     }
+
+    /// StringScanner search over a BINARY buffer, starting at byte
+    /// offset `start`, WITHOUT copying the tail. The Ruby idiom
+    /// `@str[@pos..] =~ re` allocates an O(remaining) String on EVERY
+    /// scan, turning a multi-part `scan_until` loop into O(n²) (rack
+    /// multipart's 10 000-part body). Here we take a `&bytes[start..]`
+    /// SUBSLICE — an O(1) view in Rust — which ALSO gives the correct
+    /// StringScanner anchoring: `\A` / `^` anchor at the scan position
+    /// (the subslice start), exactly as CRuby's StringScanner does
+    /// (verified: `\A` matches at `@pos`, not byte 0). The byte engine
+    /// runs on the view; offsets are shifted back to absolute. Sets
+    /// `$~` (with binary span data so `$~[1]` etc. stay byte-faithful)
+    /// and returns:
+    /// * `Int(abs_start)` — match found; `$~` is set;
+    /// * `Nil` — no match at/after `start`; `$~` cleared;
+    /// * `Bool(false)` — no byte engine for this pattern, so the caller
+    ///   must fall back to the slice path.
+    pub(crate) fn do_strscan_search_binary(
+        &mut self,
+        re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
+        s: &std::rc::Rc<crate::value::RStr>,
+        start: usize,
+    ) -> Result<Value, Trap> {
+        let start = start.min(s.content.borrow().len());
+        // Returns: None ⇒ no byte engine; Some(None) ⇒ no match;
+        // Some(Some((abs_start, region_bytes, group_spans_rel, oc))).
+        // CRITICAL: copy only the MATCHED REGION (O(match-len)), never
+        // the whole buffer — a per-scan `to_vec()` of the full string
+        // would reintroduce the O(n²) we just removed.
+        type Hit = (usize, Vec<u8>, Vec<Option<(usize, usize)>>, crate::regex_engine::OwnedCaptures);
+        let extracted: Option<Option<Hit>> = {
+            let bytes = s.content.borrow();
+            // O(1) view, NOT a copy. `\A`/`^` anchor at `start`.
+            let sub = &bytes[start..];
+            match re.captures_owned_bytes(sub) {
+                None => None,
+                Some(None) => Some(None),
+                Some(Some(oc)) => {
+                    let region = sub[oc.m_start..oc.m_end].to_vec();
+                    // Re-base group spans onto the region (groups are
+                    // always within the overall match → no underflow).
+                    let base = oc.m_start;
+                    let spans = oc
+                        .group_spans
+                        .iter()
+                        .map(|sp| sp.map(|(a, b)| (a - base, b - base)))
+                        .collect();
+                    Some(Some((oc.m_start + start, region, spans, oc)))
+                }
+            }
+        };
+        self.save_match_scope_on_write();
+        match extracted {
+            None => Ok(Value::Bool(false)),
+            Some(None) => {
+                self.last_match = None;
+                Ok(Value::Nil)
+            }
+            Some(Some((abs_start, region, group_spans, oc))) => {
+                // `$~` is stored relative to the matched region (m_start
+                // = 0). StringScanner computes pre/post-match from its
+                // own `@str`/`@match_pos`, so it never reads `$~`'s
+                // absolute span; `$~[0]`/`$~[n]` stay byte-faithful via
+                // the region bytes. The ABSOLUTE match start is the
+                // return value (the scanner's `@match_pos`).
+                let match_len = region.len();
+                let input_lossy = String::from_utf8_lossy(&region).into_owned();
+                self.last_match = Some(crate::vm::LastMatch {
+                    whole: oc.whole,
+                    caps: oc.groups,
+                    input: input_lossy,
+                    m_start: 0,
+                    m_end: match_len,
+                    named: oc.named,
+                    binary: Some(crate::vm::BinaryCaps {
+                        input: region.into_boxed_slice(),
+                        group_spans,
+                    }),
+                });
+                Ok(Value::Int(abs_start as i64))
+            }
+        }
+    }
 }
