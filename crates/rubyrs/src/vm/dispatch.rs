@@ -14015,13 +14015,24 @@ impl Vm {
     /// into the active set keyed by `(Target.name, method_name)`, and
     /// registers the names in the dispatch gate.
     pub(crate) fn do_using(&mut self, module: &std::rc::Rc<Class>) {
-        let key = std::rc::Rc::as_ptr(module) as usize;
-        let Some(refs) = self.module_refinements.get(&key).cloned() else { return };
-        for (target, holder) in &refs {
-            let target_name = self.interner.intern(&target.name);
-            for (mname, m) in holder.methods.borrow().iter() {
-                self.active_refinements.insert((target_name, *mname), m.clone());
-                self.refined_method_names.insert(*mname);
+        // `using M` activates refinements defined directly in M AND in
+        // the modules M includes (transitively) — CRuby walks the
+        // refinement module's ancestors. bridgetown-foundation defines
+        // `refine ::Hash do … end` in `Foundation::RefineExt::
+        // DeepDuplicatable`, then `module Refinements; include
+        // …DeepDuplicatable; end`, and `Configuration` does `using
+        // Bridgetown::Refinements`. Walk `flatten_ancestors` (self +
+        // prepends + includes + superchain) so the inherited refinements
+        // activate, not just M's own.
+        for anc in super::flatten_ancestors(module) {
+            let key = std::rc::Rc::as_ptr(&anc) as usize;
+            let Some(refs) = self.module_refinements.get(&key).cloned() else { continue };
+            for (target, holder) in &refs {
+                let target_name = self.interner.intern(&target.name);
+                for (mname, m) in holder.methods.borrow().iter() {
+                    self.active_refinements.insert((target_name, *mname), m.clone());
+                    self.refined_method_names.insert(*mname);
+                }
             }
         }
     }

@@ -1310,3 +1310,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Ruby 3.x anonymous splat forwarding (`def m(*); yield(*); end` /
 // `other(*)`). Surfaced by bridgetown-core's erb_templates.rb.
 #[test] fn anon_splat_forward() { run_diff("anon_splat_forward"); }
+
+// `using M` activates refinements inherited via `include`, not just
+// those defined directly in M. Surfaced by bridgetown-foundation's
+// `Bridgetown::Refinements` (includes the refine-holding modules).
+#[test] fn using_refinement_via_include() { run_diff("using_refinement_via_include"); }
