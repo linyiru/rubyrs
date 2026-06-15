@@ -9231,6 +9231,38 @@ impl Vm {
                             return Ok(());
                         }
                         None => {
+                            // Kernel-private builtins (`require`,
+                            // `puts`, ...) have no table Method — but
+                            // they're callable as singleton methods
+                            // (`Kernel.require`), so synthesise a
+                            // no-recv forwarder into the real class's
+                            // singleton table, mirroring the non-shell
+                            // branch below. zeitwerk's core_ext/kernel
+                            // does `class << self; alias_method
+                            // :zeitwerk_original_require, :require; end`
+                            // inside `module Kernel`.
+                            let old_name_rc = self.interner.resolve(old_id).clone();
+                            if matches!(&*old_name_rc,
+                                "sleep" | "rand" | "srand" | "exit" | "exit!" | "abort"
+                                | "puts" | "print" | "p" | "pp" | "warn"
+                                | "sprintf" | "format" | "caller" | "at_exit"
+                                | "require" | "require_relative" | "load" | "system"
+                                | "raise" | "fail"
+                            ) {
+                                let synth = self.synth_kernel_forwarder(&real, old_id);
+                                // These Kernel builtins are PRIVATE in
+                                // CRuby, so the alias inherits private
+                                // visibility — an explicit-receiver
+                                // call (`Foo.my_require`) raises
+                                // NoMethodError, while zeitwerk's
+                                // implicit-self `zeitwerk_original_require`
+                                // call resolves fine.
+                                synth.visibility.set(Visibility::Private);
+                                real.singleton_methods.borrow_mut().insert(new_id, synth);
+                                self.method_gen = self.method_gen.wrapping_add(1);
+                                self.stack.push(Value::Sym(new_id));
+                                return Ok(());
+                            }
                             let old_name = self.interner.resolve(old_id).to_string();
                             // CRuby's alias_method NameError keeps
                             // the eigenclass shell name ("for class
