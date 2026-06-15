@@ -2205,6 +2205,37 @@ impl Vm {
                 drop(g);
                 self.do_call(name_id, argc, no_recv, cache_id)?;
             }
+            Op::CallBuiltinDirect(name_id) => {
+                // Pop the `*args` Array and invoke the Kernel builtin
+                // directly via `builtin_call`, bypassing `do_call` (and
+                // therefore any user override). See the op doc — this
+                // is the alias forwarder for a Kernel global, which
+                // must reach the original implementation without
+                // re-entering a redefined `require`. Pin the Array so
+                // heap-shaped args survive a load-triggered GC.
+                let arr_val = self.stack.pop().expect("ICE: CallBuiltinDirect without arg array");
+                let arr_id = match arr_val {
+                    Value::Array(id) => id,
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("no implicit conversion of {} into Array (splat arg)", other.type_name()),
+                    })),
+                };
+                let name = self.interner.resolve(name_id).to_string();
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(Value::Array(arr_id));
+                let elems: Vec<Value> = g.vm.heap.array(arr_id).clone();
+                let res = g.vm.builtin_call(&name, &elems);
+                drop(g);
+                match res {
+                    Some(Ok(v)) => self.stack.push(v),
+                    Some(Err(t)) => return Err(t),
+                    None => return Err(self.trap(RubyError::NoMethodError {
+                        kind: crate::error::NoMethodErrorKind::Missing,
+                        method: name,
+                        recv_type: std::borrow::Cow::Borrowed("Object"),
+                    })),
+                }
+            }
             Op::CallBlock(name_id, argc, cache_id) => {
                 self.do_call_block(name_id, argc as usize, false, cache_id)?;
             }

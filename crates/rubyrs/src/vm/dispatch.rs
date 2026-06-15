@@ -6674,7 +6674,20 @@ impl Vm {
             Some(self.stack.pop().expect("ICE: stack underflow before do_call receiver"))
         };
 
-        if no_recv && self.try_dispatch_no_recv_builtin_or_host(&name, name_id, &args)? {
+        // A user `Kernel#require` override (zeitwerk decorates require
+        // to intercept loads) wins over the builtin: skip the builtin
+        // dispatch so the call falls through to normal method lookup,
+        // which finds the override. The override's `orig_require` alias
+        // reaches the builtin via `Op::CallBuiltinDirect`, which
+        // bypasses do_call entirely — so there is no re-entry here and
+        // no recursion. Narrow to the load family; all other builtins
+        // keep their fast builtin path.
+        let require_overridden = no_recv
+            && matches!(&*name, "require" | "require_relative" | "load")
+            && self.bare_builtin_user_override(&name);
+        if no_recv && !require_overridden
+            && self.try_dispatch_no_recv_builtin_or_host(&name, name_id, &args)?
+        {
             return Ok(());
         }
         // Refinements: an active `using`'d refinement on the receiver's
@@ -17780,7 +17793,11 @@ impl Vm {
             frozen_string_literal: false,
             code: vec![
                 Op::LoadLocal(0),
-                Op::ApplyCallNoRecv(orig_id, u16::MAX),
+                // Direct builtin call — bypasses `do_call` so the alias
+                // reaches the ORIGINAL builtin even after `require` is
+                // redefined, and does NOT re-enter the override (which
+                // would recurse: override → alias → override → …).
+                Op::CallBuiltinDirect(orig_id),
                 Op::Return,
             ],
             op_spans: vec![Span::ZERO; 3],

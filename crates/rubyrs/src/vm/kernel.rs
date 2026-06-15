@@ -202,7 +202,7 @@ impl Vm {
     /// arms (warn / raise / fail), not as a general pre-gate —
     /// the broader builtin-shadowing question is the documented
     /// #491 own-table-early-gate design task.
-    fn bare_builtin_user_override(&mut self, name: &str) -> bool {
+    pub(crate) fn bare_builtin_user_override(&mut self, name: &str) -> bool {
         let id = self.interner.intern(name);
         let self_val = self.frames.last().map(|f| f.self_val.clone());
         match &self_val {

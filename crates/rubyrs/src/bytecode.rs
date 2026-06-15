@@ -447,6 +447,17 @@ pub(crate) enum Op {
     /// arm pops `class_stack` / visibility / module_function and
     /// pushes the eigenclass as the construct's value.
     OpenSingletonClass(u32),
+    /// Call a Kernel GLOBAL builtin (`require`/`puts`/...) DIRECTLY
+    /// via `builtin_call`, bypassing `do_call` and therefore any user
+    /// override of that name. Args come from a popped Array (the
+    /// `f(*args)` shape, like `ApplyCallNoRecv(_, u16::MAX)`). Emitted
+    /// only by `synth_kernel_forwarder` for an alias of a Kernel
+    /// builtin: CRuby's `alias_method :orig_require, :require`
+    /// captures the ORIGINAL implementation, so calling the alias must
+    /// reach the builtin even after `require` is redefined — and must
+    /// NOT re-enter the override (which would recurse, since the
+    /// override calls the alias).
+    CallBuiltinDirect(SymId),
     NewArray(u16),
     NewHash(u16),
     /// Pops two values (begin, end). u8 nonzero = exclusive (`...`).
