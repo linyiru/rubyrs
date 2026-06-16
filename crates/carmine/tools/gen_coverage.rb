@@ -742,6 +742,16 @@ class Recorder
   attr_reader :rules
   def initialize; @rules = []; end
   def rule(re, tok = nil, next_state = nil, &blk)
+    # A recursive subroutine (`\g<0>` — e.g. openedge balanced-brace preproc)
+    # is unmatchable by carmine's regex engines. Force the rule to a CALLBACK
+    # so carmine DECLINES (→ rouge), with the recursion over-approximated as
+    # `[\s\S]*?` so the callback's is-match detector still fires (a superset
+    # match → declines a superset → sound, never wrong).
+    if re.source =~ /\\g[<']/
+      approx = re.source.gsub(/\\g[<'][^>']*[>']/) { '[\s\S]*?' }
+      @rules << { kind: "callback", re: approx, opts: re.options }
+      return
+    end
     if blk
       @rules << classify_block(re, blk)
     else
