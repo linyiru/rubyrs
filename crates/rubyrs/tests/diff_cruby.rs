@@ -1357,3 +1357,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // block like `super(...)` (not slot-dumping the rest array as one
 // positional). Surfaced by signalize's `def self.signal_accessor(...)`.
 #[test] fn bare_super_dotdotdot() { run_diff("bare_super_dotdotdot"); }
+
+// Ruby 3.1+ `Class#subclasses` (immediate subclasses). Surfaced by
+// bridgetown-foundation's `Class#descendants` in Site.new.
+#[test] fn class_subclasses() { run_diff("class_subclasses"); }

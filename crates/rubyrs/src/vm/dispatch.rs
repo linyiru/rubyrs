@@ -4281,6 +4281,33 @@ impl Vm {
                 self.stack.push(Value::Array(id));
                 Ok(true)
             }
+            // Ruby 3.1+ `Class#subclasses` — IMMEDIATE subclasses (not
+            // transitive). rubyrs keeps no per-class subclass registry,
+            // so scan the named-class table for classes whose immediate
+            // superclass is `cls`. Misses anonymous (`Class.new`)
+            // subclasses and singleton shells — acceptable for the
+            // named-class consumers (bridgetown-foundation's
+            // `Class#descendants` recurses over `subclasses` to
+            // instantiate zeitwerk-loaded converter/generator classes).
+            ("subclasses", []) => {
+                let subs: Vec<Value> = self
+                    .classes
+                    .values()
+                    .filter(|c| {
+                        c.singleton_target.borrow().is_none()
+                            && c.superclass
+                                .borrow()
+                                .as_ref()
+                                .is_some_and(|sup| std::rc::Rc::ptr_eq(sup, &cls))
+                    })
+                    .map(|c| Value::Class(c.clone()))
+                    .collect();
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::Array(subs.into()));
+                self.stack.push(Value::Array(id));
+                Ok(true)
+            }
             ("include?", [Value::Class(m)]) => {
                 if !m.is_module {
                     return Err(self.trap(RubyError::TypeError {
