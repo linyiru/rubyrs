@@ -1365,6 +1365,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `Pathname#join`. Surfaced by bridgetown-core/collection.rb#relative_path.
 #[test] fn pathname_join() { run_diff("pathname_join"); }
 
+// Kernel#Pathname() + Pathname#{expand_path, basename(suffix), fnmatch?}
+// — the vendored Pathname surface Bridgetown's Site read path uses.
+#[test] fn pathname_read_path_methods() { run_diff("pathname_read_path_methods"); }
+
 // A lexically-scoped autoloaded constant wins over a same-named toplevel
 // constant. Surfaced by bridgetown's `register YAML` inside
 // `module …FrontMatter::Loaders` (binds `Loaders::YAML`, not `::YAML`).

@@ -91,12 +91,23 @@ class Pathname
     parts.inject(self) { |acc, part| acc + part }
   end
 
-  def basename
-    Pathname.new(File.basename(@path))
+  # `Pathname#basename(suffix = nil)` — optional suffix strips a
+  # trailing extension (`".*"` = any). Surfaced by bridgetown-core's
+  # `Resource::Base#basename_without_ext` (`relative_path.basename(".*")`).
+  def basename(suffix = nil)
+    Pathname.new(suffix ? File.basename(@path, suffix) : File.basename(@path))
   end
 
   def dirname
     Pathname.new(File.dirname(@path))
+  end
+
+  # `Pathname#expand_path(base = nil)` — absolute-path expansion
+  # (delegates to `File.expand_path`, optional base dir). Surfaced by
+  # bridgetown-core/model/repo_origin.rb#original_path.
+  def expand_path(base = nil)
+    expanded = base ? File.expand_path(@path, base.to_s) : File.expand_path(@path)
+    Pathname.new(expanded)
   end
 
   def parent
@@ -106,6 +117,14 @@ class Pathname
   def extname
     File.extname(@path)
   end
+
+  # `Pathname#fnmatch?(pattern, flags = 0)` — glob-match the path
+  # string (delegates to `File.fnmatch?`). Surfaced by bridgetown-core's
+  # `Resource::Destination#warn_on_rails_style_extension`.
+  def fnmatch?(pattern, flags = 0)
+    File.fnmatch?(pattern, @path, flags)
+  end
+  alias_method :fnmatch, :fnmatch?
 
   def absolute?
     @path.start_with?("/")
@@ -189,4 +208,17 @@ class Pathname
       results
     end
   end
+end
+
+module Kernel
+  # `Kernel#Pathname(arg)` — the conversion function the `pathname`
+  # stdlib mixes into Kernel: returns `arg` unchanged when it's already
+  # a Pathname, else `Pathname.new(arg)`. Private, so it's callable bare
+  # with an implicit receiver from any object. Surfaced by
+  # bridgetown-core/collection.rb#relative_model_path_for
+  # (`Pathname(absolute_path)`).
+  def Pathname(arg)
+    arg.is_a?(Pathname) ? arg : Pathname.new(arg)
+  end
+  private :Pathname
 end
