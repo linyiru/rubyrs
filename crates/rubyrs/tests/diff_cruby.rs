@@ -1369,6 +1369,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // — the vendored Pathname surface Bridgetown's Site read path uses.
 #[test] fn pathname_read_path_methods() { run_diff("pathname_read_path_methods"); }
 
+// `Numeric#nonzero?` (self / nil). Surfaced by signalize's `_dispose`.
+#[test] fn numeric_nonzero() { run_diff("numeric_nonzero"); }
+
 // A lexically-scoped autoloaded constant wins over a same-named toplevel
 // constant. Surfaced by bridgetown's `register YAML` inside
 // `module …FrontMatter::Loaders` (binds `Loaders::YAML`, not `::YAML`).

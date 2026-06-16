@@ -1086,6 +1086,9 @@ pub(crate) fn numeric_call(
         (Value::Int(a), "even?", []) => Some(Value::Bool(a % 2 == 0)),
         (Value::Int(a), "odd?", []) => Some(Value::Bool(a % 2 != 0)),
         (Value::Int(a), "zero?", []) => Some(Value::Bool(*a == 0)),
+        // `Numeric#nonzero?` — self if non-zero, else nil. Surfaced by
+        // signalize.rb's `_dispose` (`@_targets.nonzero?`).
+        (Value::Int(a), "nonzero?", []) => Some(if *a == 0 { Value::Nil } else { Value::Int(*a) }),
         (Value::Int(a), "positive?", []) => Some(Value::Bool(*a > 0)),
         (Value::Int(a), "negative?", []) => Some(Value::Bool(*a < 0)),
         // `Integer#bit_length` — number of bits required to
@@ -1374,6 +1377,7 @@ pub(crate) fn numeric_call(
         (Value::Float(a), "-@", []) => Some(Value::Float(-*a)),
         (Value::Float(a), "+@", []) => Some(Value::Float(*a)),
         (Value::Float(a), "zero?", []) => Some(Value::Bool(*a == 0.0)),
+        (Value::Float(a), "nonzero?", []) => Some(if *a == 0.0 { Value::Nil } else { Value::Float(*a) }),
         (Value::Float(a), "positive?", []) => Some(Value::Bool(*a > 0.0)),
         (Value::Float(a), "negative?", []) => Some(Value::Bool(*a < 0.0)),
         (Value::Float(a), "nan?", []) => Some(Value::Bool(a.is_nan())),
