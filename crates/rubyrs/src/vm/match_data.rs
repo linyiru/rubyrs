@@ -355,9 +355,10 @@ impl Vm {
     /// O(remaining) copy — that copy is what made kramdown's
     /// scan-at-every-position loop O(n²). Returns: `false` ⇒ no byte
     /// engine (scanner falls back to the slice path); `nil` ⇒ no
-    /// anchored match; `Int(len)` ⇒ matched byte/char length (with
-    /// `@byte_addressable` true, byte == char), with `$~` set so the
-    /// caller's `$~[0]` yields the matched substring.
+    /// anchored match; `Str(matched)` ⇒ the matched substring (with `$~`
+    /// also set so the scanner's `[]`/`matched`/captures still work). The
+    /// scanner advances `@pos` by `matched.length` — returning the string
+    /// rather than a length lets `scan`/`check` skip a `$~[0]` round-trip.
     pub(crate) fn do_strscan_match_at_binary(
         &mut self,
         re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
@@ -416,11 +417,11 @@ impl Vm {
             }
             Outcome::Bytes(region, group_spans, oc) => {
                 let match_len = region.len();
-                let input_lossy = String::from_utf8_lossy(&region).into_owned();
+                let matched = String::from_utf8_lossy(&region).into_owned();
                 self.last_match = Some(crate::vm::LastMatch {
                     whole: oc.whole,
                     caps: oc.groups,
-                    input: input_lossy,
+                    input: matched.clone(),
                     m_start: 0,
                     m_end: match_len,
                     named: oc.named,
@@ -429,7 +430,10 @@ impl Vm {
                         group_spans,
                     }),
                 });
-                Ok(Value::Int(match_len as i64))
+                // Return the matched substring directly (not the length):
+                // the scanner advances `@pos` by its `.length` and uses it
+                // as `scan`/`check`'s result, so it needn't re-read `$~[0]`.
+                Ok(Value::new_str(matched))
             }
             Outcome::Str(oc) => {
                 // ASCII view ⇒ byte len == char len; the matched span
@@ -438,13 +442,13 @@ impl Vm {
                 self.last_match = Some(crate::vm::LastMatch {
                     whole: oc.whole.clone(),
                     caps: oc.groups,
-                    input: oc.whole,
+                    input: oc.whole.clone(),
                     m_start: 0,
                     m_end: match_len,
                     named: oc.named,
                     binary: None,
                 });
-                Ok(Value::Int(match_len as i64))
+                Ok(Value::new_str(oc.whole))
             }
         }
     }

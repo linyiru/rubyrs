@@ -2390,12 +2390,17 @@ impl Vm {
                 // `byte_pos`; avoids the O(remaining) `@str[@pos..]` copy
                 // that made kramdown's per-position scan loop O(n²).
                 #[cfg(feature = "regex")]
-                if name == "__strscan_match_at"
-                    && let [Value::Regex(re), Value::Int(pos)] = args
-                {
-                    let re = re.clone();
-                    let start = (*pos).max(0) as usize;
-                    return Ok(Some(self.do_strscan_match_at_binary(&re, &s, start)?));
+                if name == "__strscan_match_at" && args.len() == 2 {
+                    if let [Value::Regex(re), Value::Int(pos)] = args {
+                        let re = re.clone();
+                        let start = (*pos).max(0) as usize;
+                        return Ok(Some(self.do_strscan_match_at_binary(&re, &s, start)?));
+                    }
+                    // Non-Regexp arg (e.g. csv's `scan("x")` probe): signal
+                    // "fall back to the Ruby slice path" with `false`, so the
+                    // scanner needn't pre-check `regex.is_a?(Regexp)` on every
+                    // hot call. The slice path then raises CRuby's TypeError.
+                    return Ok(Some(Value::Bool(false)));
                 }
                 #[cfg(feature = "regex")]
                 if name == "match" && args.len() == 1 {

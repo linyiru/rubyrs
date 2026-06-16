@@ -133,7 +133,28 @@ class StringScanner
 
   # --- anchored at the current position ---
 
+  # scan/check/skip/match? inline the native anchored match instead of
+  # going through `match_at_pos` (+ a `$~[0]` round-trip). kramdown's
+  # span parser calls these ~14× per character (≈200k times on a small
+  # page under `mark_highlighting`), so each saved Ruby dispatch /
+  # method-call frame is multiplied that many times — the native match
+  # itself is ~0.18µs, but the old `check → match_at_pos → __strscan…`
+  # chain plus `md[0]` cost ~1.2µs. `__strscan_match_at` returns the
+  # matched STRING directly (or nil / false-to-fall-back) and sets `$~`.
   def scan(regex)
+    if @byte_addressable
+      m = @str.__strscan_match_at(regex, @pos)
+      unless m == false
+        if m.nil?
+          @last_md = nil
+          return nil
+        end
+        @last_md = $~
+        @match_pos = @pos
+        @pos += m.length
+        return m
+      end
+    end
     md = match_at_pos(regex)
     return nil if md.nil?
     matched = md[0]
@@ -142,18 +163,40 @@ class StringScanner
   end
 
   def check(regex)
+    if @byte_addressable
+      m = @str.__strscan_match_at(regex, @pos)
+      unless m == false
+        if m.nil?
+          @last_md = nil
+          return nil
+        end
+        @last_md = $~
+        @match_pos = @pos
+        return m
+      end
+    end
     md = match_at_pos(regex)
     md.nil? ? nil : md[0]
   end
 
   def skip(regex)
-    md = match_at_pos(regex)
-    return nil if md.nil?
-    @pos += md[0].length
-    md[0].length
+    matched = scan(regex)
+    matched && matched.length
   end
 
   def match?(regex)
+    if @byte_addressable
+      m = @str.__strscan_match_at(regex, @pos)
+      unless m == false
+        if m.nil?
+          @last_md = nil
+          return nil
+        end
+        @last_md = $~
+        @match_pos = @pos
+        return m.length
+      end
+    end
     md = match_at_pos(regex)
     md.nil? ? nil : md[0].length
   end
@@ -250,32 +293,15 @@ class StringScanner
 
   private
 
-  # Try `regex` anchored at the current position. On a hit, records
-  # the MatchData (so `[]` / `matched` / `pre_match` work) and
-  # returns it; otherwise clears the last match and returns nil.
+  # COLD fallback for the anchored family (scan/check/skip/match?): the
+  # hot byte-addressable + Regexp path is inlined in those methods via the
+  # native `__strscan_match_at`. This handles the rest — a non-ASCII
+  # buffer (genuine multi-byte UTF-8, where char index != byte index) or a
+  # non-Regexp arg. The `slice =~ regex` on a non-Regexp raises the same
+  # TypeError CRuby does (csv probes `scan("x")` and rescues TypeError to
+  # decide STRING_SCANNER_SCAN_ACCEPT_STRING). Returns the MatchData on a
+  # hit (so `[]` / `matched` / `pre_match` work), or nil.
   def match_at_pos(regex)
-    # Native anchored match (no tail copy) when char index == byte index.
-    # `@str[@pos..]` copies O(remaining) chars on EVERY scan/check/skip;
-    # kramdown calls these at nearly every position, so the slice path is
-    # O(n²) over a document. __strscan_match_at runs the regex anchored at
-    # the byte offset @pos in place, sets $~, and returns the matched
-    # length (or nil / false-to-fall-back). See do_strscan_match_at_binary.
-    # Only the Regexp form takes the native anchored path; a non-Regexp
-    # arg falls through to `slice =~ regex` below, which raises the same
-    # TypeError CRuby does (csv probes `scan("x")` and rescues TypeError
-    # to decide STRING_SCANNER_SCAN_ACCEPT_STRING).
-    if @byte_addressable && regex.is_a?(Regexp)
-      r = @str.__strscan_match_at(regex, @pos)
-      unless r == false
-        if r.nil?
-          @last_md = nil
-          return nil
-        end
-        @last_md = $~
-        @match_pos = @pos
-        return @last_md
-      end
-    end
     slice = @str[@pos..] || ""
     if (slice =~ regex) == 0
       @last_md = $~
