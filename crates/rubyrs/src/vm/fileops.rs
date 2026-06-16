@@ -134,6 +134,28 @@ fn glob_walk(base: &Path, segs: &[String], results: &mut Vec<PathBuf>) {
         }
         return;
     }
+    // Literal segment (no `*`/`?` glob metachars — braces were already
+    // expanded by `expand_braces`, brackets are a documented gap): a
+    // single path-existence stat instead of `read_dir`+sort of the whole
+    // directory. This is the dominant cost for patterns with literal
+    // prefixes — e.g. bridgetown's `Gem.find_files_from_load_path("
+    // bridgetown-core/locale/en.*")` probes that 2-literal-segment glob
+    // across ~45 $LOAD_PATH dirs, and listing every gem-lib dir to find
+    // one literal name was ~16x CRuby (which stats the literal too). The
+    // entry name equals `seg`, so the hidden-file rule is moot.
+    if !seg.contains('*') && !seg.contains('?') {
+        let cand = base.join(seg);
+        if rest.is_empty() {
+            // The dirent exists (symlink_metadata doesn't follow, so a
+            // broken symlink still counts — same as `read_dir` listing it).
+            if cand.symlink_metadata().is_ok() {
+                results.push(cand);
+            }
+        } else if cand.is_dir() {
+            glob_walk(&cand, rest, results);
+        }
+        return;
+    }
     for (name, p) in sorted_entries(base) {
         if !glob_name_match(seg, &name) {
             continue;
