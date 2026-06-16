@@ -52,11 +52,18 @@ rescue Exception => e
   exit 1
 end
 
+# Minimal on-disk site so phases 2-4 exercise a real read/render/write.
+SITE = "/tmp/bt-probe-site"
+require "fileutils"
+FileUtils.rm_rf(SITE)
+FileUtils.mkdir_p("#{SITE}/src")
+File.write("#{SITE}/src/index.md", "---\nlayout: none\ntitle: Hello\n---\n# Hi\n\nA test page.\n")
+
 cfg = nil
 puts "== phase 2: Bridgetown.configuration =="
 begin
   cfg = Bridgetown.configuration(
-    root_dir: "/tmp", source: "/tmp", destination: "/tmp/_site", quiet: true
+    root_dir: SITE, source: "#{SITE}/src", destination: "#{SITE}/output", quiet: true
   )
   puts "P2 OK: #{cfg.class}"
 rescue Exception => e
@@ -64,6 +71,7 @@ rescue Exception => e
   (e.backtrace || []).first(8).each { |f| puts "  #{f}" }
 end
 
+site = nil
 puts "== phase 3: Bridgetown::Site.new(config) =="
 begin
   site = Bridgetown::Site.new(cfg)
@@ -71,4 +79,20 @@ begin
 rescue Exception => e
   puts "P3-ERR: #{e.class}: #{e.message}"
   (e.backtrace || []).first(8).each { |f| puts "  #{f}" }
+end
+
+puts "== phase 4: site.process (read -> render -> write) =="
+begin
+  site.process
+  out = Dir.glob("#{SITE}/output/**/*").select { |f| File.file?(f) }
+  puts "P4 OK: wrote #{out.size} file(s)"
+rescue Exception => e
+  puts "P4-ERR: #{e.class}: #{e.message}"
+  (e.backtrace || []).first(6).each { |f| puts "  #{f}" }
+  # Frontier (2026-06-15): the ERB template now COMPILES, EVALUATES and
+  # executes; render reaches serbea's `html_safe`, which does
+  # `self.class.new(self).tap { _1.instance_variable_set(:@html_safe, true) }`
+  # — rubyrs has no instance-variable storage on String values, so
+  # `instance_variable_set` on a (non-frozen) String wrongly raises
+  # FrozenError. Adding an ivar table to RubyString is the next step.
 end
