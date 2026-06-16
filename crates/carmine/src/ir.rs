@@ -103,6 +103,11 @@ pub(crate) enum IrOp {
         then_ops: Vec<IrOp>,
         else_ops: Vec<IrOp>,
     },
+    /// rouge `recurse(text)` — re-lex `text` (default whole match) with the
+    /// SAME lexer from a fresh `:root` stack, splicing the tokens in. (rouge:
+    /// `delegate(self.class, text)` → class `continue_lex` → `lex` → a fresh
+    /// instance from root.) The text expr must evaluate to a string.
+    Recurse(IrExpr),
 }
 
 /// A runtime ivar value on the native lexer (mirrors the tiny state
@@ -181,6 +186,14 @@ fn parse_op(v: &J, it: &mut dyn IrInterner) -> Result<IrOp, Error> {
                 .and_then(J::as_str)
                 .ok_or_else(|| bad("goto state"))?;
             IrOp::Goto(it.ir_state(s))
+        }
+        "recurse" => {
+            // `["recurse"]` defaults the text to the whole match (group 0).
+            let e = match t.get(1) {
+                None | Some(J::Null) => IrExpr::Group(0),
+                Some(e) => parse_expr(e)?,
+            };
+            IrOp::Recurse(e)
         }
         "iset" => {
             let name = t

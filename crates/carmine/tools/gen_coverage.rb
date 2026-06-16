@@ -278,6 +278,12 @@ module IrCompiler
       (args.size == 1 && int?(args[0])) ? ["pop", args[0].children[0]] : nil
     when :goto
       (args.size == 1 && sym?(args[0])) ? ["goto", args[0].children[0].to_s] : nil
+    when :recurse
+      # `recurse` / `recurse text` — re-lex with the same lexer. Bare → whole
+      # match; an arg must be a compilable value expr.
+      return ["recurse", ["g", 0]] if args.empty?
+      return nil unless args.size == 1
+      v = expr(args[0], mvar); v.nil? ? nil : ["recurse", v]
     end
   end
 

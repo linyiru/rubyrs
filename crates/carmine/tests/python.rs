@@ -192,6 +192,46 @@ fn ir_case_fold_condition() {
     );
 }
 
+/// `recurse` — re-lex a captured substring with the same table from a
+/// fresh :root and splice the tokens in (rouge's `recurse`/`delegate
+/// self.class`). The inner digits re-lex as Number; if they couldn't be
+/// lexed natively the recurse would propagate a decline.
+#[test]
+fn ir_recurse_self() {
+    let json = r##"{
+      "lexer": "recdemo",
+      "states": {"root": [
+        {"kind": "ir", "re": "\\[([0-9 ]+)\\]", "opts": 0, "ops": [
+          ["token", "Punctuation", ["lit", "["]],
+          ["recurse", ["g", 1]],
+          ["token", "Punctuation", ["lit", "]"]]
+        ]},
+        {"kind": "tok", "re": "[0-9]+", "opts": 0, "tok": "Literal.Number", "next": null},
+        {"kind": "tok", "re": "\\s+", "opts": 0, "tok": "Text", "next": null}
+      ]},
+      "shortnames": {"Punctuation": "p", "Literal.Number": "m", "Text": ""}
+    }"##;
+    let table = LexerTable::from_json(json).expect("recurse table compiles");
+    let mut lexer = Lexer::new(&table);
+    let toks = lexer.lex("[4 2]", &mut NoCallbacks).expect("recurse lex");
+    let names: Vec<&str> = table.token_names().collect();
+    let rendered: Vec<(String, String)> = toks
+        .iter()
+        .map(|(t, v)| (names[t.0 as usize].to_string(), v.clone()))
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![
+            ("Punctuation".to_string(), "[".to_string()),
+            // "4 2" re-lexed by the same table: Number, Text, Number
+            ("Literal.Number".to_string(), "4".to_string()),
+            ("Text".to_string(), " ".to_string()),
+            ("Literal.Number".to_string(), "2".to_string()),
+            ("Punctuation".to_string(), "]".to_string()),
+        ]
+    );
+}
+
 /// Conditional Action IR — a hand-written table exercising the op/
 /// expr/cond vocabulary end to end (Track C-1 engine side).
 #[test]

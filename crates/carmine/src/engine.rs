@@ -287,6 +287,26 @@ impl<'t> Lexer<'t> {
                     };
                     self.run_ir_ops(branch, groups)?;
                 }
+                IrOp::Recurse(e) => {
+                    // Re-lex the substring with a fresh sub-lexer on the SAME
+                    // table (rouge's `self.class.lex(text)` from :root), then
+                    // splice its tokens. A nil/empty text yields nothing.
+                    // `self.table` is an independent `&'t` borrow, so the sub
+                    // lexer doesn't conflict with `&mut self`.
+                    if let Some(EvalVal::Str(text)) = eval_expr(e, groups)
+                        && !text.is_empty()
+                    {
+                        // NoCallbacks: if the recursed content isn't fully
+                        // table-native, the sub-lex returns CallbackRequired
+                        // and `?` propagates it — the parent DECLINES rather
+                        // than emit wrong tokens (the drop-in contract).
+                        let mut sub = Lexer::new(self.table);
+                        let toks = sub.lex(&text, &mut NoCallbacks)?;
+                        for (t, v) in toks {
+                            self.emit(t, &v);
+                        }
+                    }
+                }
             }
         }
         Ok(())
