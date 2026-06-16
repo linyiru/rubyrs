@@ -16,7 +16,7 @@ use crate::parse::{Block, Span};
 use crate::{CodeHighlighter, Options};
 
 pub(crate) fn convert(
-    blocks: &[Block],
+    blocks: &[Block<'_>],
     opts: &Options,
     hl: &mut dyn CodeHighlighter,
     src_len: usize,
@@ -48,7 +48,7 @@ fn push_level_digit(out: &mut String, level: u8) {
 
 fn convert_blocks(
     out: &mut String,
-    blocks: &[Block],
+    blocks: &[Block<'_>],
     indent: usize,
     opts: &Options,
     hl: &mut dyn CodeHighlighter,
@@ -106,11 +106,15 @@ fn convert_blocks(
             Block::Code { lang, text } => {
                 // kramdown resolves a missing fence language to
                 // syntax_highlighter_opts[:default_lang]; the wrapper
-                // class uses the same resolved value.
-                let effective = lang
-                    .clone()
-                    .or_else(|| hl.default_lang().map(str::to_string));
-                if let Some(hl_lang) = &effective
+                // class uses the same resolved value. Resolve to an owned
+                // string so the `hl` borrow is released before the
+                // `&mut hl.highlight(...)` call below (the fence lang —
+                // the common case — borrows from `src` via the Cow).
+                let effective: Option<std::borrow::Cow<'_, str>> = match lang {
+                    Some(l) => Some(std::borrow::Cow::Borrowed(l.as_ref())),
+                    None => hl.default_lang().map(|d| std::borrow::Cow::Owned(d.to_string())),
+                };
+                if let Some(hl_lang) = effective.as_deref()
                     && let Some(hl_html) = hl.highlight(hl_lang, text)
                 {
                     // kramdown convert_codeblock with a syntax highlighter.
@@ -160,7 +164,7 @@ fn convert_blocks(
 ///   {pad}</li>
 fn emit_list(
     out: &mut String,
-    items: &[ListItem],
+    items: &[ListItem<'_>],
     ordered: bool,
     indent: usize,
     hl: &mut dyn CodeHighlighter,
@@ -190,7 +194,7 @@ fn emit_list(
     out.push_str(">\n");
 }
 
-fn convert_spans(out: &mut String, spans: &[Span], codespan_class: Option<&str>) {
+fn convert_spans(out: &mut String, spans: &[Span<'_>], codespan_class: Option<&str>) {
     for span in spans {
         match span {
             Span::Text(t) => escape_text(out, t),
@@ -332,6 +336,29 @@ pub(crate) fn gfm_slug(span_text: &str) -> Option<String> {
         }
     }
     if id.is_empty() { None } else { Some(id) }
+}
+
+/// Whether [`gfm_slug`] would produce `Some` for `span_text`, WITHOUT
+/// allocating the slug — the parser only needs the yes/no to decide
+/// whether to decline (the converter builds the real slug later). Mirrors
+/// `gfm_slug`'s char classification exactly: reject the same unsupported
+/// non-ASCII chars, and reject an all-deleted (would-be-empty) result.
+pub(crate) fn gfm_slug_ok(span_text: &str) -> bool {
+    let mut non_empty = false;
+    for ch in span_text.chars() {
+        match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' | ' ' | '\t' => non_empty = true,
+            c if c.is_ascii() => {} // ASCII punctuation: deleted
+            '\u{2018}' | '\u{2019}' | '\u{201C}' | '\u{201D}' | '\u{2013}' | '\u{2014}'
+            | '\u{2026}' => {}
+            '\u{4E00}'..='\u{9FFF}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{3040}'..='\u{30FF}'
+            | '\u{AC00}'..='\u{D7AF}' => non_empty = true,
+            _ => return false,
+        }
+    }
+    non_empty
 }
 
 /// Duplicate-id suffixing, shared by both algorithms (kramdown core's
