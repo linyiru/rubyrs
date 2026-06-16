@@ -1606,7 +1606,7 @@ fn next_trigger(hay: &[u8]) -> Option<usize> {
     {
         // SAFETY: bounded 16-byte loads (guarded by `+ 16 <= len`); NEON
         // is baseline on aarch64.
-        return unsafe { next_trigger_neon(hay) };
+        unsafe { next_trigger_neon(hay) }
     }
     #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
     {
