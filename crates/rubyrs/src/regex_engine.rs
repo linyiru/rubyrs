@@ -73,6 +73,15 @@ pub(crate) const RB_IGNORECASE: u8 = 1;
 pub(crate) const RB_EXTENDED: u8 = 2;
 pub(crate) const RB_MULTILINE: u8 = 4;
 
+/// Prepared-pattern length above which a fancy-regex (lookaround /
+/// backref / possessive) pattern defers its build to first use instead
+/// of eager-building at construction. Below it, eager build is cheap
+/// (<0.5ms) and keeps construction-time error reporting; above it the
+/// fancy compiler's super-linear cost dominates (the RFC3986 URI grammar
+/// at ~1.4KB takes ~12ms), so deferral is the win. Empirically the
+/// fancy compile stays sub-millisecond up to a few hundred chars.
+const LAZY_FANCY_THRESHOLD: usize = 256;
+
 /// A compiled Ruby regexp: the chosen linear-or-backtracking
 /// `Engine` plus the Ruby-level metadata the `Regexp` reflection
 /// methods need. `Value::Regex(Rc<CompiledRegex>)` is the single
@@ -176,10 +185,35 @@ pub(crate) fn compile_with_flags(
             source: bare_source.into(),
             dup_named: std::cell::OnceCell::new(),
         }),
-        // Syntax the linear engine rejects (lookaround,
-        // backrefs) → eager fancy-regex build, pre-filling the
-        // OnceCell. Keeps the construction-time error point for
-        // genuinely malformed patterns.
+        // Syntax the linear engine rejects (lookaround, backrefs,
+        // possessive quantifiers). For LARGE such patterns, DEFER the
+        // fancy-regex build to first use — `fancy_regex::Regex::new` is
+        // ~10-100x the native build for grammar-scale patterns (the
+        // 1.4KB RFC3986 URI grammar eager-builds in ~12ms vs the native
+        // engine's ~0.5ms; uri/rouge alone cost ~40ms of Bridgetown's
+        // require phase building patterns that are never matched at
+        // load). `engine()` builds native-then-fancy lazily, mirroring
+        // the linear path's deferral.
+        //
+        // SMALL patterns keep the EAGER build: it's cheap (<0.5ms) and
+        // preserves the construction-time RegexpError that the common
+        // `Regexp.new(str)` validation idiom relies on. Only the rare
+        // large-and-malformed pattern would shift its error to first
+        // match — and the lazy linear path already made that same
+        // resource-limit tradeoff.
+        Err(_) if prepared.len() > LAZY_FANCY_THRESHOLD => {
+            if std::env::var_os("RUBYRS_REGEX_STATS").is_some_and(|v| v == "2") {
+                eprintln!("[fancy-regex:lazy] /{}/", bare_source);
+            }
+            Ok(CompiledRegex {
+                engine: std::cell::OnceCell::new(),
+                bytes_engine: std::cell::OnceCell::new(),
+                engine_pattern: prepared.into(),
+                ruby_flags,
+                source: bare_source.into(),
+                dup_named: std::cell::OnceCell::new(),
+            })
+        }
         Err(syntax_err) => match fancy_regex::Regex::new(&prepared) {
             Ok(re) => {
                 // RUBYRS_REGEX_STATS=2: name every pattern that
@@ -521,7 +555,20 @@ impl CompiledRegex {
     fn engine(&self) -> &Engine {
         self.engine.get_or_init(|| match regex::Regex::new(&self.engine_pattern) {
             Ok(re) => Engine::Native(re),
-            Err(e) => panic!("regex build failed at first use for /{}/: {}", self.source, e),
+            // The native engine rejected it: either a large lookaround/
+            // backref/possessive pattern whose fancy build was DEFERRED
+            // (see `compile_with_flags`'s threshold arm), or a genuinely
+            // malformed pattern. Build fancy now; a fancy failure here is
+            // the deferred construction error surfacing at first match
+            // (the `Runtime::eval` boundary converts the panic to a
+            // RegexpError-shaped trap).
+            Err(native_err) => match fancy_regex::Regex::new(&self.engine_pattern) {
+                Ok(re) => Engine::Fancy(re),
+                Err(fancy_err) => panic!(
+                    "regex build failed at first use for /{}/: {} (also rejected by regex: {})",
+                    self.source, fancy_err, native_err
+                ),
+            },
         })
     }
 

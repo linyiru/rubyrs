@@ -1384,6 +1384,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // bridgetown-core's `ERBView#initialize`.
 #[test] fn string_encode_bang() { run_diff("string_encode_bang"); }
 
+// A large (>256 char) lookaround/possessive pattern whose fancy-regex
+// build is DEFERRED to first use must construct + match identically to
+// an eager build. Locks in the lazy-fancy compilation path.
+#[test] fn regex_large_lookaround_lazy() { run_diff("regex_large_lookaround_lazy"); }
+
 // A lexically-scoped autoloaded constant wins over a same-named toplevel
 // constant. Surfaced by bridgetown's `register YAML` inside
 // `module …FrontMatter::Loaders` (binds `Loaders::YAML`, not `::YAML`).
