@@ -342,6 +342,18 @@ module IrCompiler
       return nil unless re.is_a?(Regexp)
       return ["gmatch", g, re.source, re.options]
     end
+    # `/re/ =~ m[i]` (regex on left = MATCH2) / `m[i] =~ /re/` (MATCH3) — same
+    # gmatch semantics; locate the REGX side and the group side.
+    if %i[MATCH2 MATCH3].include?(n.type)
+      a, b = n.children
+      rx = (node?(a) && a.type == :REGX) ? a : ((node?(b) && b.type == :REGX) ? b : nil)
+      return nil if rx.nil?
+      gx = rx.equal?(a) ? b : a
+      g = group_index(gx, mvar); return nil if g.nil?
+      re = rx.children[0]
+      return nil unless re.is_a?(Regexp)
+      return ["gmatch", g, re.source, re.options]
+    end
     # `if m[i]` / `if name` (bare group-ref or alias) — group-presence truthiness.
     r = resolve_group(n, mvar)
     return ["gpresent", r[0]] unless r.nil?
