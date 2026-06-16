@@ -11,12 +11,12 @@
 
 use std::collections::HashMap;
 
-use crate::parse::ListItem;
-use crate::parse::{Block, Span};
+use crate::parse::{Ast, BlockKind, SpanKind};
 use crate::{CodeHighlighter, Options};
 
 pub(crate) fn convert(
-    blocks: &[Block<'_>],
+    ast: &Ast<'_>,
+    root: Option<u32>,
     opts: &Options,
     hl: &mut dyn CodeHighlighter,
     src_len: usize,
@@ -25,7 +25,7 @@ pub(crate) fn convert(
     // to skip the geometric regrowth on a fresh String.
     let mut out = String::with_capacity(src_len + src_len / 2 + 64);
     let mut used_ids: HashMap<String, u32> = HashMap::new();
-    convert_blocks(&mut out, blocks, 0, opts, hl, &mut used_ids);
+    convert_blocks(&mut out, ast, root, 0, opts, hl, &mut used_ids);
     out
 }
 
@@ -48,17 +48,21 @@ fn push_level_digit(out: &mut String, level: u8) {
 
 fn convert_blocks(
     out: &mut String,
-    blocks: &[Block<'_>],
+    ast: &Ast<'_>,
+    head: Option<u32>,
     indent: usize,
     opts: &Options,
     hl: &mut dyn CodeHighlighter,
     used_ids: &mut HashMap<String, u32>,
 ) {
-    for block in blocks {
-        match block {
+    let mut cur = head;
+    while let Some(idx) = cur {
+        let block = &ast.blocks[idx as usize];
+        cur = block.next;
+        match &block.kind {
             // kramdown emits a bare "\n" per blank-run, no indent.
-            Block::Blank => out.push('\n'),
-            Block::Heading {
+            BlockKind::Blank => out.push('\n'),
+            BlockKind::Heading {
                 level,
                 raw,
                 span_text,
@@ -82,28 +86,28 @@ fn convert_blocks(
                     out.push('"');
                 }
                 out.push('>');
-                convert_spans(out, spans, hl.codespan_class());
+                convert_spans(out, ast, *spans, hl.codespan_class());
                 out.push_str("</h");
                 push_level_digit(out, *level);
                 out.push_str(">\n");
             }
-            Block::Para(spans) => {
+            BlockKind::Para(spans) => {
                 push_pad(out, indent);
                 out.push_str("<p>");
-                convert_spans(out, spans, hl.codespan_class());
+                convert_spans(out, ast, *spans, hl.codespan_class());
                 out.push_str("</p>\n");
             }
-            Block::List { ordered, items } => {
-                emit_list(out, items, *ordered, indent, hl);
+            BlockKind::List { ordered, items } => {
+                emit_list(out, ast, *items, *ordered, indent, hl);
             }
-            Block::Quote(inner) => {
+            BlockKind::Quote(inner) => {
                 push_pad(out, indent);
                 out.push_str("<blockquote>\n");
-                convert_blocks(out, inner, indent + 2, opts, hl, used_ids);
+                convert_blocks(out, ast, *inner, indent + 2, opts, hl, used_ids);
                 push_pad(out, indent);
                 out.push_str("</blockquote>\n");
             }
-            Block::Code { lang, text } => {
+            BlockKind::Code { lang, text } => {
                 // kramdown resolves a missing fence language to
                 // syntax_highlighter_opts[:default_lang]; the wrapper
                 // class uses the same resolved value. Resolve to an owned
@@ -145,7 +149,7 @@ fn convert_blocks(
                     out.push_str("</code></pre>\n");
                 }
             }
-            Block::Hr => {
+            BlockKind::Hr => {
                 push_pad(out, indent);
                 out.push_str("<hr />\n");
             }
@@ -164,7 +168,8 @@ fn convert_blocks(
 ///   {pad}</li>
 fn emit_list(
     out: &mut String,
-    items: &[ListItem<'_>],
+    ast: &Ast<'_>,
+    items: Option<u32>,
     ordered: bool,
     indent: usize,
     hl: &mut dyn CodeHighlighter,
@@ -174,14 +179,17 @@ fn emit_list(
     out.push('<');
     out.push_str(tag);
     out.push_str(">\n");
-    for item in items {
+    let mut cur = items;
+    while let Some(idx) = cur {
+        let item = &ast.items[idx as usize];
+        cur = item.next;
         push_pad(out, indent + 2);
         out.push_str("<li>");
-        convert_spans(out, &item.spans, hl.codespan_class());
+        convert_spans(out, ast, item.spans, hl.codespan_class());
         match &item.child {
             Some((c_ord, c_items)) => {
                 out.push('\n');
-                emit_list(out, c_items, *c_ord, indent + 4, hl);
+                emit_list(out, ast, *c_items, *c_ord, indent + 4, hl);
                 push_pad(out, indent + 2);
                 out.push_str("</li>\n");
             }
@@ -194,21 +202,24 @@ fn emit_list(
     out.push_str(">\n");
 }
 
-fn convert_spans(out: &mut String, spans: &[Span<'_>], codespan_class: Option<&str>) {
-    for span in spans {
-        match span {
-            Span::Text(t) => escape_text(out, t),
-            Span::Em(inner) => {
+fn convert_spans(out: &mut String, ast: &Ast<'_>, head: Option<u32>, codespan_class: Option<&str>) {
+    let mut cur = head;
+    while let Some(idx) = cur {
+        let span = &ast.spans[idx as usize];
+        cur = span.next;
+        match &span.kind {
+            SpanKind::Text(t) => escape_text(out, t),
+            SpanKind::Em(inner) => {
                 out.push_str("<em>");
-                convert_spans(out, inner, codespan_class);
+                convert_spans(out, ast, *inner, codespan_class);
                 out.push_str("</em>");
             }
-            Span::Strong(inner) => {
+            SpanKind::Strong(inner) => {
                 out.push_str("<strong>");
-                convert_spans(out, inner, codespan_class);
+                convert_spans(out, ast, *inner, codespan_class);
                 out.push_str("</strong>");
             }
-            Span::Code(code) => {
+            SpanKind::Code(code) => {
                 match codespan_class {
                     Some(class) => {
                         out.push_str("<code class=\"");
@@ -220,11 +231,11 @@ fn convert_spans(out: &mut String, spans: &[Span<'_>], codespan_class: Option<&s
                 escape_text(out, code);
                 out.push_str("</code>");
             }
-            Span::Link { spans, href } => {
+            SpanKind::Link { spans, href } => {
                 out.push_str("<a href=\"");
                 escape_attr(out, href);
                 out.push_str("\">");
-                convert_spans(out, spans, codespan_class);
+                convert_spans(out, ast, *spans, codespan_class);
                 out.push_str("</a>");
             }
         }

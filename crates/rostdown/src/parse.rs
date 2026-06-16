@@ -7,37 +7,117 @@ use std::borrow::Cow;
 
 use crate::{Error, Options, typography};
 
-/// The element tree is a *borrowed* AST: every text field is a
-/// `Cow<'a, str>` that borrows directly from the input `src` whenever the
-/// rendered bytes are identical to the source bytes (the common case —
-/// prose, code, hrefs), and only materializes an owned `String` when a
-/// typography rewrite (`'`/`"`/`-`/`.`) or backslash escape mutates a
-/// char. The lifetime `'a` is tied to `src` inside `to_html`, so the AST
-/// never outlives the document it borrows from.
+/// The element tree is a *borrowed, flat-arena* AST.
+///
+/// Borrowed: every text field is a `Cow<'a, str>` that borrows directly
+/// from the input `src` whenever the rendered bytes are identical to the
+/// source bytes (the common case — prose, code, hrefs), and only
+/// materializes an owned `String` when a typography rewrite
+/// (`'`/`"`/`-`/`.`) or backslash escape mutates a char. The lifetime
+/// `'a` is tied to `src` inside `to_html`, so the AST never outlives the
+/// document it borrows from.
+///
+/// Flat-arena: there are no per-node `Vec`s. Spans, blocks and list items
+/// each live in one growable arena owned by [`Ast`], and node lists are
+/// *sibling-linked* — a list is the chain reached by following `next`
+/// from a start index, and a composite's children are the chain from its
+/// `first_child` index. The recursive inline parser interleaves a
+/// composite's children with the siblings that follow it, so a single
+/// contiguous range can't describe a list; the `next` link can. The
+/// arenas are three `Vec`s grown by `push`, so one render allocates a
+/// handful of buffers (amortized) instead of ~855 little node `Vec`s.
+///
+/// Backtracking: the inline parser speculatively recurses on an emphasis
+/// open and reverts (`parse_spans_until` → `None`) when no close is
+/// found. Each speculative recursion records `ast.spans.len()` first and
+/// `truncate`s back to it on revert, so abandoned nodes never leak into
+/// the arena or the output.
+#[derive(Debug, Default)]
+pub(crate) struct Ast<'a> {
+    pub(crate) blocks: Vec<BlockNode<'a>>,
+    pub(crate) spans: Vec<SpanNode<'a>>,
+    pub(crate) items: Vec<ItemNode<'a>>,
+}
+
+impl<'a> Ast<'a> {
+    fn new() -> Self {
+        Ast::default()
+    }
+
+    /// Pre-size the arenas from the source length so the hot top-level
+    /// parse rarely re-grows (each regrow is a realloc + memcpy of the
+    /// whole arena — the dominant cost once per-node `Vec`s are gone).
+    /// Heuristics from the bench corpus: spans dominate (~1 node / 12 B
+    /// of source — prose plus markup splits), blocks ~1 / 40 B, items
+    /// far rarer. Generous but bounded; a tiny doc still costs three
+    /// small `Vec`s, an over-estimate just over-reserves once.
+    fn with_capacity_for(src_len: usize) -> Self {
+        Ast {
+            blocks: Vec::with_capacity(src_len / 40 + 8),
+            spans: Vec::with_capacity(src_len / 12 + 16),
+            items: Vec::with_capacity(src_len / 256 + 4),
+        }
+    }
+
+    /// Push a span node and return its index. Not linked yet — the
+    /// caller (a [`Chain`]) sets `next`.
+    #[inline]
+    fn push_span(&mut self, kind: SpanKind<'a>) -> u32 {
+        let idx = self.spans.len() as u32;
+        self.spans.push(SpanNode { kind, next: None });
+        idx
+    }
+
+    #[inline]
+    fn push_block(&mut self, kind: BlockKind<'a>) -> u32 {
+        let idx = self.blocks.len() as u32;
+        self.blocks.push(BlockNode { kind, next: None });
+        idx
+    }
+
+    #[inline]
+    fn push_item(&mut self, item: ItemNode<'a>) -> u32 {
+        let idx = self.items.len() as u32;
+        self.items.push(item);
+        idx
+    }
+}
+
+/// One block in the flat arena plus its sibling link. `next == None`
+/// terminates a block list.
 #[derive(Debug)]
-pub(crate) enum Block<'a> {
+pub(crate) struct BlockNode<'a> {
+    pub(crate) kind: BlockKind<'a>,
+    pub(crate) next: Option<u32>,
+}
+
+#[derive(Debug)]
+pub(crate) enum BlockKind<'a> {
     /// A run of blank lines between blocks (renders as one `\n`).
     Blank,
     /// `raw` is the unparsed heading text — kramdown CORE derives
     /// `auto_ids` slugs from it. `span_text` is the parsed-tree text
     /// (typography applied, link text included, markup gone) — the GFM
-    /// parser's `generate_gfm_header_id` input.
+    /// parser's `generate_gfm_header_id` input. `spans` is the index of
+    /// the first child span (or `None` for an empty heading).
     Heading {
         level: u8,
         raw: Cow<'a, str>,
         span_text: Cow<'a, str>,
-        spans: Vec<Span<'a>>,
+        spans: Option<u32>,
     },
-    Para(Vec<Span<'a>>),
-    /// Tight list (no blank lines inside) — items are span runs
-    /// plus an optional trailing nested child list. Lazy
-    /// continuations join the item's spans with a literal newline
-    /// (kramdown's verbatim line joining).
+    /// Paragraph: index of the first child span (`None` ⇒ empty).
+    Para(Option<u32>),
+    /// Tight list (no blank lines inside) — `items` is the index of the
+    /// first [`ItemNode`]. Items are span runs plus an optional trailing
+    /// nested child list; lazy continuations join the item's spans with a
+    /// literal newline (kramdown's verbatim line joining).
     List {
         ordered: bool,
-        items: Vec<ListItem<'a>>,
+        items: Option<u32>,
     },
-    Quote(Vec<Block<'a>>),
+    /// Blockquote: index of the first child block (`None` ⇒ empty).
+    Quote(Option<u32>),
     Code {
         lang: Option<Cow<'a, str>>,
         text: Cow<'a, str>,
@@ -45,27 +125,80 @@ pub(crate) enum Block<'a> {
     Hr,
 }
 
+/// One tight-list item in the flat arena. `spans` is the first child
+/// span; `child` is the first item of an optional trailing nested list;
+/// `next` links to the following sibling item.
 #[derive(Debug)]
-pub(crate) struct ListItem<'a> {
-    pub(crate) spans: Vec<Span<'a>>,
-    /// Trailing nested list: `(ordered, items)`. Tight items carry
-    /// at most text-then-one-child in our subset; anything richer
+pub(crate) struct ItemNode<'a> {
+    pub(crate) spans: Option<u32>,
+    /// Trailing nested list: `(ordered, first_item_index)`. Tight items
+    /// carry at most text-then-one-child in our subset; anything richer
     /// (blank lines, content after the child) declines first.
-    pub(crate) child: Option<(bool, Vec<ListItem<'a>>)>,
+    pub(crate) child: Option<(bool, Option<u32>)>,
+    pub(crate) next: Option<u32>,
+    /// Lifetime tie: an `ItemNode` with all-`None` index fields would
+    /// otherwise be `'static`. Keeps `'a` bound to `src`.
+    _marker: std::marker::PhantomData<&'a str>,
+}
+
+/// One span in the flat arena plus its sibling link. `next == None`
+/// terminates a span chain (a span run, or a composite's children).
+#[derive(Debug)]
+pub(crate) struct SpanNode<'a> {
+    pub(crate) kind: SpanKind<'a>,
+    pub(crate) next: Option<u32>,
 }
 
 #[derive(Debug)]
-pub(crate) enum Span<'a> {
+pub(crate) enum SpanKind<'a> {
     /// Raw text (typography + escaping applied at conversion). Borrows a
     /// pristine `src` slice unless a rewrite forced materialization.
     Text(Cow<'a, str>),
-    Em(Vec<Span<'a>>),
-    Strong(Vec<Span<'a>>),
+    /// Emphasis: index of the first child span.
+    Em(Option<u32>),
+    /// Strong: index of the first child span.
+    Strong(Option<u32>),
     Code(Cow<'a, str>),
     Link {
-        spans: Vec<Span<'a>>,
+        /// Index of the first child span.
+        spans: Option<u32>,
         href: Cow<'a, str>,
     },
+}
+
+/// Builds a sibling-linked chain in one of the arenas: tracks the first
+/// and last index pushed so each new node's predecessor gets its `next`
+/// patched. `first()` returns the chain head for storing in a parent.
+///
+/// `Link` is the per-arena patch operation — given a node index, set its
+/// `next` field — so one `Chain` type serves spans, blocks and items.
+struct Chain {
+    first: Option<u32>,
+    last: Option<u32>,
+}
+
+impl Chain {
+    #[inline]
+    fn new() -> Self {
+        Chain { first: None, last: None }
+    }
+
+    /// Append `idx` to the chain, patching the previous tail's `next`
+    /// via `set_next`. The pushed node's own `next` must already be
+    /// `None` (the arena `push_*` helpers guarantee this).
+    #[inline]
+    fn link(&mut self, idx: u32, set_next: impl FnOnce(u32, u32)) {
+        match self.last {
+            None => self.first = Some(idx),
+            Some(prev) => set_next(prev, idx),
+        }
+        self.last = Some(idx);
+    }
+
+    #[inline]
+    fn first(&self) -> Option<u32> {
+        self.first
+    }
 }
 
 fn declined(what: &'static str) -> Error {
@@ -93,7 +226,10 @@ fn split_lines(src: &str) -> Vec<&str> {
     out
 }
 
-pub(crate) fn parse<'a>(src: &'a str, opts: &Options) -> Result<Vec<Block<'a>>, Error> {
+/// Parse `src` into a flat-arena [`Ast`]. The returned `root` is the
+/// index of the first top-level block (`None` for an empty document);
+/// the converter walks the arenas from there.
+pub(crate) fn parse<'a>(src: &'a str, opts: &Options) -> Result<(Ast<'a>, Option<u32>), Error> {
     let lines: Vec<&'a str> = split_lines(src);
     // A trailing "\n" yields one empty last element — drop it so it
     // doesn't read as a blank line.
@@ -101,7 +237,9 @@ pub(crate) fn parse<'a>(src: &'a str, opts: &Options) -> Result<Vec<Block<'a>>, 
         Some(&"") => &lines[..lines.len() - 1],
         _ => &lines[..],
     };
-    parse_blocks(src, lines, opts)
+    let mut ast = Ast::with_capacity_for(src.len());
+    let root = parse_blocks(&mut ast, src, lines, opts)?;
+    Ok((ast, root))
 }
 
 /// Byte offset of slice `s` within its backing string `src`. `s` MUST be
@@ -191,11 +329,19 @@ fn trim_end_ws(s: &str) -> &str {
 }
 
 fn parse_blocks<'a>(
+    ast: &mut Ast<'a>,
     src: &'a str,
     lines: &[&'a str],
     opts: &Options,
-) -> Result<Vec<Block<'a>>, Error> {
-    let mut out = Vec::new();
+) -> Result<Option<u32>, Error> {
+    let mut chain = Chain::new();
+    // Push `kind` into the block arena and link it as the next sibling.
+    macro_rules! emit_block {
+        ($kind:expr) => {{
+            let idx = ast.push_block($kind);
+            chain.link(idx, |p, n| ast.blocks[p as usize].next = Some(n));
+        }};
+    }
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
@@ -204,7 +350,7 @@ fn parse_blocks<'a>(
             while i < lines.len() && is_blank(lines[i]) {
                 i += 1;
             }
-            out.push(Block::Blank);
+            emit_block!(BlockKind::Blank);
             continue;
         }
 
@@ -224,17 +370,25 @@ fn parse_blocks<'a>(
                 // kramdown strips optional trailing hashes.
                 let text = trim_end_ws(text);
                 let text = trim_end_ws(text.trim_end_matches('#'));
-                let spans = parse_spans(text)?;
+                let spans = parse_spans(ast, text)?;
                 // span_text is the concatenation of child-span texts.
                 // The overwhelmingly common heading is plain prose — a
                 // single borrowed `Text` span — so reuse that slice
                 // instead of allocating; only mixed-markup headings
                 // concatenate into an owned `String`.
-                let span_text: Cow<'a, str> = match spans.as_slice() {
-                    [Span::Text(t)] => t.clone(),
+                let span_text: Cow<'a, str> = match spans {
+                    Some(first)
+                        if ast.spans[first as usize].next.is_none()
+                            && matches!(ast.spans[first as usize].kind, SpanKind::Text(_)) =>
+                    {
+                        match &ast.spans[first as usize].kind {
+                            SpanKind::Text(t) => t.clone(),
+                            _ => unreachable!(),
+                        }
+                    }
                     _ => {
                         let mut s = String::new();
-                        spans_raw_text(&spans, &mut s);
+                        spans_raw_text(ast, spans, &mut s);
                         Cow::Owned(s)
                     }
                 };
@@ -246,7 +400,7 @@ fn parse_blocks<'a>(
                 if opts.gfm && opts.auto_ids && !crate::html::gfm_slug_ok(&span_text) {
                     return Err(declined("heading-gfm-slug"));
                 }
-                out.push(Block::Heading {
+                emit_block!(BlockKind::Heading {
                     level,
                     // `text` is a trimmed sub-slice of the heading line —
                     // borrow it directly.
@@ -263,7 +417,7 @@ fn parse_blocks<'a>(
         // Horizontal rule: 3+ of the same marker, only that marker +
         // spaces on the line.
         if is_hr(line) {
-            out.push(Block::Hr);
+            emit_block!(BlockKind::Hr);
             i += 1;
             continue;
         }
@@ -294,52 +448,63 @@ fn parse_blocks<'a>(
             // `split_lines(src)` separated by exactly one `\n`, and a
             // closing fence always follows the last content line (else
             // we decline), so the `\n` after the last content line is
-            // present in `src`.
-            let mut body_lines: Vec<&'a str> = Vec::new();
+            // present in `src`. We scan with scalars (no per-fence
+            // `Vec<&str>`); the rare non-contiguous case re-walks the
+            // content-line range `lines[body_start..body_end]`.
+            let body_start = i;
+            let mut first_body: Option<&'a str> = None;
+            let mut prev_body: Option<&'a str> = None;
+            let mut last_body: &'a str = "";
             let mut contiguous = true;
             let mut closed = false;
             while i < lines.len() {
                 let l = lines[i];
                 if trim_end_ws(l) == fence {
                     closed = true;
-                    i += 1;
                     break;
                 }
-                if let Some(prev) = body_lines.last()
+                if let Some(prev) = prev_body
                     && offset_in(src, l) != offset_in(src, prev) + prev.len() + 1
                 {
                     // De-prefixed lines (fence inside a blockquote / list):
                     // not contiguous in `src`, so we must join an owned body.
                     contiguous = false;
                 }
-                body_lines.push(l);
+                if first_body.is_none() {
+                    first_body = Some(l);
+                }
+                prev_body = Some(l);
+                last_body = l;
                 i += 1;
+            }
+            let body_end = i; // exclusive: content lines are [body_start, body_end)
+            if closed {
+                i += 1; // consume the closing fence line
             }
             if !closed {
                 return Err(declined("unclosed-fence"));
             }
-            let text = match body_lines.first() {
+            let text = match first_body {
                 None => Cow::Borrowed(""),
-                Some(&first) if contiguous => {
+                Some(first) if contiguous => {
                     // body = src[first.start ..= the `\n` after last] —
                     // each content line plus one trailing newline. The
                     // closing fence guarantees that final `\n` exists.
-                    let last = *body_lines.last().expect("non-empty");
                     let start = offset_in(src, first);
-                    let end = offset_in(src, last) + last.len() + 1;
+                    let end = offset_in(src, last_body) + last_body.len() + 1;
                     Cow::Borrowed(&src[start..end])
                 }
                 Some(_) => {
                     // Non-contiguous: join each content line + `\n`.
                     let mut body = String::with_capacity(64);
-                    for l in &body_lines {
+                    for l in &lines[body_start..body_end] {
                         body.push_str(l);
                         body.push('\n');
                     }
                     Cow::Owned(body)
                 }
             };
-            out.push(Block::Code { lang, text });
+            emit_block!(BlockKind::Code { lang, text });
             continue;
         }
 
@@ -365,15 +530,34 @@ fn parse_blocks<'a>(
                     break;
                 }
             }
-            let mut blocks = parse_blocks(src, &inner, opts)?;
-            // A quote body never starts/ends with Blank markers.
-            while matches!(blocks.first(), Some(Block::Blank)) {
-                blocks.remove(0);
+            // A quote body never starts/ends with Blank markers — drop
+            // the leading/trailing `Blank` nodes from the recursed chain
+            // by walking past leading Blanks and stopping the chain
+            // before trailing ones, rather than mutating a Vec.
+            let mut head = parse_blocks(ast, src, &inner, opts)?;
+            // Drop leading Blanks.
+            while let Some(h) = head
+                && matches!(ast.blocks[h as usize].kind, BlockKind::Blank)
+            {
+                head = ast.blocks[h as usize].next;
             }
-            while matches!(blocks.last(), Some(Block::Blank)) {
-                blocks.pop();
+            // Cut the chain before any trailing run of Blanks: walk to the
+            // last non-Blank node and clear its `next`.
+            if let Some(h) = head {
+                let mut cur = h;
+                let mut last_keep = h;
+                loop {
+                    if !matches!(ast.blocks[cur as usize].kind, BlockKind::Blank) {
+                        last_keep = cur;
+                    }
+                    match ast.blocks[cur as usize].next {
+                        Some(n) => cur = n,
+                        None => break,
+                    }
+                }
+                ast.blocks[last_keep as usize].next = None;
             }
-            out.push(Block::Quote(blocks));
+            emit_block!(BlockKind::Quote(head));
             continue;
         }
 
@@ -386,8 +570,8 @@ fn parse_blocks<'a>(
         // (their content column is digits+2, not a fixed strip
         // width).
         if let Some(ordered) = list_marker(line) {
-            let items = parse_list_items(lines, &mut i, ordered)?;
-            out.push(Block::List { ordered, items });
+            let items = parse_list_items(ast, lines, &mut i, ordered)?;
+            emit_block!(BlockKind::List { ordered, items });
             continue;
         }
 
@@ -490,13 +674,15 @@ fn parse_blocks<'a>(
             // verbatim `src`, so the spans borrow directly.
             let start = offset_in(src, first_line);
             let end = offset_in(src, last_stripped) + last_stripped.len();
-            out.push(Block::Para(parse_spans(&src[start..end])?));
+            let spans = parse_spans(ast, &src[start..end])?;
+            emit_block!(BlockKind::Para(spans));
         } else {
             // Gaps between de-prefixed lines (blockquote / list bodies):
             // join `lines[para_start..i]` into an owned `String`
             // (kramdown's verbatim line-join with a single `\n`) — first
             // line indent-stripped, last line right-stripped — parse over
-            // it, then deep-own the spans so they don't borrow the temp.
+            // it, then push the spans into the arena with their text
+            // deep-owned so they don't borrow the temp.
             let para = &lines[para_start..i];
             let last = para.len() - 1; // >= 1: a 1-line para is contiguous
             let mut joined = String::new();
@@ -513,11 +699,48 @@ fn parse_blocks<'a>(
                     joined.push('\n');
                 }
             }
-            let spans = parse_spans(&joined)?;
-            out.push(Block::Para(spans_into_owned(spans)));
+            let spans = parse_spans_owned(ast, &joined)?;
+            emit_block!(BlockKind::Para(spans));
         }
     }
-    Ok(out)
+    Ok(chain.first())
+}
+
+/// Parse `joined` (a temporary `String` that does NOT outlive the AST)
+/// into the main arena, deep-owning every text `Cow` so no span borrows
+/// the temporary. Used for the rare owned-text paragraph fallback
+/// (blockquote / list bodies whose de-prefixed source lines don't abut
+/// contiguously). Parses into a scratch [`Ast`], then copies the chain
+/// in, remapping indices and `into_owned`-ing the Cows.
+fn parse_spans_owned<'a>(ast: &mut Ast<'a>, joined: &str) -> Result<Option<u32>, Error> {
+    let mut scratch = Ast::new();
+    let head = parse_spans(&mut scratch, joined)?;
+    Ok(copy_spans_owned(ast, &scratch, head))
+}
+
+/// Copy the span chain starting at `head` from `scratch` into `dst`,
+/// making every text `Cow` owned (`'static`) so it no longer borrows
+/// `scratch`'s backing text. Returns the head index in `dst`.
+fn copy_spans_owned<'a>(dst: &mut Ast<'a>, scratch: &Ast<'_>, head: Option<u32>) -> Option<u32> {
+    let mut chain = Chain::new();
+    let mut cur = head;
+    while let Some(idx) = cur {
+        let node = &scratch.spans[idx as usize];
+        let kind = match &node.kind {
+            SpanKind::Text(t) => SpanKind::Text(Cow::Owned(t.clone().into_owned())),
+            SpanKind::Code(t) => SpanKind::Code(Cow::Owned(t.clone().into_owned())),
+            SpanKind::Em(inner) => SpanKind::Em(copy_spans_owned(dst, scratch, *inner)),
+            SpanKind::Strong(inner) => SpanKind::Strong(copy_spans_owned(dst, scratch, *inner)),
+            SpanKind::Link { spans, href } => SpanKind::Link {
+                spans: copy_spans_owned(dst, scratch, *spans),
+                href: Cow::Owned(href.clone().into_owned()),
+            },
+        };
+        let new_idx = dst.push_span(kind);
+        chain.link(new_idx, |p, n| dst.spans[p as usize].next = Some(n));
+        cur = node.next;
+    }
+    chain.first()
 }
 
 /// Constructs we recognize well enough to refuse: kramdown features
@@ -647,11 +870,19 @@ fn is_hr(line: &str) -> bool {
 /// (kramdown's behaviour, probed: `- a` / `  - b` / `    cont`
 /// joins `cont` onto b).
 fn parse_list_items<'a>(
+    ast: &mut Ast<'a>,
     lines: &[&'a str],
     i: &mut usize,
     ordered: bool,
-) -> Result<Vec<ListItem<'a>>, Error> {
-    let mut items: Vec<ListItem<'a>> = Vec::new();
+) -> Result<Option<u32>, Error> {
+    // The items of THIS level, sibling-linked.
+    let mut items = Chain::new();
+    // The currently-open item: its index in the arena and a span Chain so
+    // lazy continuations can append to its span run after it was pushed.
+    // `None` until the first item opens.
+    let mut cur_item: Option<u32> = None;
+    let mut cur_spans = Chain::new();
+    let mut cur_has_child = false;
     while *i < lines.len() {
         let l = lines[*i];
         if is_blank(l) {
@@ -676,7 +907,24 @@ fn parse_list_items<'a>(
             if trim_end_ws(content) != content {
                 return Err(declined("list-trailing-ws"));
             }
-            items.push(ListItem { spans: parse_spans(content)?, child: None });
+            // Flush the previous item's span tail back into its node
+            // before opening the next item.
+            if let Some(prev) = cur_item {
+                ast.items[prev as usize].spans = cur_spans.first();
+            }
+            let mut spans = Chain::new();
+            let parsed = parse_spans(ast, content)?;
+            chain_extend_spans(ast, &mut spans, parsed);
+            let item_idx = ast.push_item(ItemNode {
+                spans: spans.first(),
+                child: None,
+                next: None,
+                _marker: std::marker::PhantomData,
+            });
+            items.link(item_idx, |p, n| ast.items[p as usize].next = Some(n));
+            cur_item = Some(item_idx);
+            cur_spans = spans;
+            cur_has_child = false;
             *i += 1;
             // Marker-indented tail block (>= 2 spaces): strip the
             // content column and attach to THIS item. Ordered
@@ -696,7 +944,6 @@ fn parse_list_items<'a>(
                 *i += 1;
             }
             if !tail.is_empty() {
-                let mut extra: Vec<Span<'a>> = Vec::new();
                 let mut j = 0usize;
                 // Leading non-marker lines: lazy continuations of
                 // this item (kramdown joins them verbatim with a
@@ -707,8 +954,10 @@ fn parse_list_items<'a>(
                     if trim_end_ws(cont) != cont || cont.starts_with(' ') || cont.starts_with('\t') {
                         return Err(declined("list-continuation-ws"));
                     }
-                    extra.push(Span::Text(Cow::Borrowed("\n")));
-                    extra.extend(parse_spans(cont)?);
+                    let nl = ast.push_span(SpanKind::Text(Cow::Borrowed("\n")));
+                    cur_spans.link(nl, |p, n| ast.spans[p as usize].next = Some(n));
+                    let parsed = parse_spans(ast, cont)?;
+                    chain_extend_spans(ast, &mut cur_spans, parsed);
                     j += 1;
                 }
                 let child = if j < tail.len() {
@@ -719,7 +968,7 @@ fn parse_list_items<'a>(
                     let child_ordered = list_marker(tail[j])
                         .expect("loop exit condition");
                     let mut k = j;
-                    let child_items = parse_list_items(&tail, &mut k, child_ordered)?;
+                    let child_items = parse_list_items(ast, &tail, &mut k, child_ordered)?;
                     if k < tail.len() {
                         // Content after the child list inside the
                         // same item (blank-separated etc.) — out of
@@ -730,9 +979,11 @@ fn parse_list_items<'a>(
                 } else {
                     None
                 };
-                let item = items.last_mut().expect("just pushed");
-                item.spans.extend(extra);
-                item.child = child;
+                // Persist the (possibly extended) span tail and child.
+                let item = cur_item.expect("just pushed");
+                ast.items[item as usize].spans = cur_spans.first();
+                ast.items[item as usize].child = child;
+                cur_has_child = child.is_some();
             }
         } else if l.starts_with(' ') {
             // Sub-2-space indent (1 space): kramdown treats a
@@ -747,23 +998,45 @@ fn parse_list_items<'a>(
             if trim_end_ws(l) != l {
                 return Err(declined("list-continuation-ws"));
             }
-            match items.last_mut() {
+            match cur_item {
                 Some(item) => {
-                    if item.child.is_some() {
+                    if cur_has_child {
                         // Column-0 text after a nested child would
                         // join the PARENT item in kramdown — out of
                         // our emit shape.
                         return Err(declined("list-after-child"));
                     }
-                    item.spans.push(Span::Text(Cow::Borrowed("\n")));
-                    item.spans.extend(parse_spans(l)?);
+                    let nl = ast.push_span(SpanKind::Text(Cow::Borrowed("\n")));
+                    cur_spans.link(nl, |p, n| ast.spans[p as usize].next = Some(n));
+                    let parsed = parse_spans(ast, l)?;
+                    chain_extend_spans(ast, &mut cur_spans, parsed);
+                    ast.items[item as usize].spans = cur_spans.first();
                     *i += 1;
                 }
                 None => break,
             }
         }
     }
-    Ok(items)
+    // Persist the final open item's span tail.
+    if let Some(prev) = cur_item {
+        ast.items[prev as usize].spans = cur_spans.first();
+    }
+    Ok(items.first())
+}
+
+/// Append an already-built span chain (head index `head`, or `None`) to
+/// `chain`, linking its head onto the current tail and advancing the
+/// chain's `last` to the appended chain's tail so subsequent links extend
+/// past it. Mirrors `Vec<Span>::extend` for the sibling-linked arena.
+fn chain_extend_spans(ast: &mut Ast<'_>, chain: &mut Chain, head: Option<u32>) {
+    let Some(head) = head else { return };
+    chain.link(head, |p, n| ast.spans[p as usize].next = Some(n));
+    // Walk to the appended chain's tail and make it the new chain tail.
+    let mut tail = head;
+    while let Some(n) = ast.spans[tail as usize].next {
+        tail = n;
+    }
+    chain.last = Some(tail);
 }
 
 fn list_marker(line: &str) -> Option<bool> {
@@ -804,11 +1077,25 @@ enum Elem {
 }
 
 /// The emphasis close being searched for by a `parse_spans_until`
-/// invocation (kramdown's `stop_re` + its acceptance conditions).
-struct Stop<'a> {
-    delim: &'a str,
+/// invocation (kramdown's `stop_re` + its acceptance conditions). The
+/// delimiter is always `delim_len` (1 or 2) copies of `type_char`, so we
+/// carry just those two bytes — no heap-allocated delimiter `String`
+/// (one per emphasis attempt; emphasis is common in prose).
+struct Stop {
     type_char: u8,
+    delim_len: usize,
     elem: Elem,
+}
+
+impl Stop {
+    /// Whether `s` opens with this stop's delimiter run (`delim_len`
+    /// copies of `type_char`). Equivalent to the old
+    /// `s.starts_with(stop.delim)`.
+    #[inline]
+    fn matches_at(&self, s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() >= self.delim_len && b[..self.delim_len].iter().all(|&x| x == self.type_char)
+    }
 }
 
 /// Ruby `/\s/` is ASCII-only — `char::is_whitespace` would also match
@@ -897,18 +1184,23 @@ impl<'a> TextRun<'a> {
         self.seg_end = b;
     }
 
-    /// Emit the accumulated `Text` span (if any) and reset to empty.
+    /// Emit the accumulated `Text` span (if any) into the arena, linking
+    /// it onto `chain`, then reset to empty.
     #[inline]
-    fn flush(&mut self, out: &mut Vec<Span<'a>>) {
+    fn flush(&mut self, ast: &mut Ast<'a>, chain: &mut Chain) {
         match self.owned.take() {
             Some(owned) => {
                 if !owned.is_empty() {
-                    out.push(Span::Text(Cow::Owned(owned)));
+                    let idx = ast.push_span(SpanKind::Text(Cow::Owned(owned)));
+                    chain.link(idx, |p, n| ast.spans[p as usize].next = Some(n));
                 }
             }
             None => {
                 if self.seg_start < self.seg_end {
-                    out.push(Span::Text(Cow::Borrowed(&self.text[self.seg_start..self.seg_end])));
+                    let idx = ast.push_span(SpanKind::Text(Cow::Borrowed(
+                        &self.text[self.seg_start..self.seg_end],
+                    )));
+                    chain.link(idx, |p, n| ast.spans[p as usize].next = Some(n));
                 }
             }
         }
@@ -917,9 +1209,9 @@ impl<'a> TextRun<'a> {
     }
 }
 
-pub(crate) fn parse_spans(text: &str) -> Result<Vec<Span<'_>>, Error> {
-    let (spans, _) = parse_spans_until(text, None, false, false, None)?;
-    Ok(spans)
+pub(crate) fn parse_spans<'a>(ast: &mut Ast<'a>, text: &'a str) -> Result<Option<u32>, Error> {
+    let (head, _) = parse_spans_until(ast, text, None, false, false, None)?;
+    Ok(head)
 }
 
 /// Recursive-descent span parser mirroring kramdown's `parse_spans` +
@@ -928,13 +1220,15 @@ pub(crate) fn parse_spans(text: &str) -> Result<Vec<Span<'_>>, Error> {
 /// accepted close begins, or `None` if the text ran out (the caller
 /// then reverts to literal delimiters, like kramdown's `revert_pos`).
 fn parse_spans_until<'a>(
+    ast: &mut Ast<'a>,
     text: &'a str,
-    stop: Option<&Stop<'_>>,
+    stop: Option<&Stop>,
     in_em: bool,
     in_strong: bool,
     parent: Option<Elem>,
-) -> Result<(Vec<Span<'a>>, Option<usize>), Error> {
-    let mut out: Vec<Span<'a>> = Vec::new();
+) -> Result<(Option<u32>, Option<usize>), Error> {
+    // The span run this call produces, sibling-linked in `ast.spans`.
+    let mut chain = Chain::new();
     // Borrowing text accumulator (replaces a `String` buf): a run of
     // verbatim bytes is emitted as `Cow::Borrowed`; only a rewrite forces
     // an owned `String`.
@@ -951,9 +1245,9 @@ fn parse_spans_until<'a>(
         // candidate falls through to normal parsing (where it may OPEN
         // a nested span of a different type).
         if let Some(stop) = stop
-            && text[i..].starts_with(stop.delim)
+            && stop.matches_at(&text[i..])
         {
-            let content_nonempty = !out.is_empty() || !acc.is_empty();
+            let content_nonempty = chain.first().is_some() || !acc.is_empty();
             let prev_ok = prev.is_some_and(|c| !ruby_space(c));
             // An em close can't sit on a clean strong delimiter
             // (`**` not followed by a third `*`) — that position
@@ -961,13 +1255,13 @@ fn parse_spans_until<'a>(
             let em_ok = stop.elem != Elem::Em || run_len(bytes, i, stop.type_char) != 2;
             // `_` closes don't bind into a following word.
             let underscore_ok = stop.type_char != b'_'
-                || !text[i + stop.delim.len()..]
+                || !text[i + stop.delim_len..]
                     .chars()
                     .next()
                     .is_some_and(char::is_alphanumeric);
             if content_nonempty && prev_ok && em_ok && underscore_ok {
-                acc.flush(&mut out);
-                return Ok((out, Some(i)));
+                acc.flush(ast, &mut chain);
+                return Ok((chain.first(), Some(i)));
             }
         }
         let c = bytes[i];
@@ -1013,7 +1307,7 @@ fn parse_spans_until<'a>(
                     i += open;
                     continue;
                 };
-                acc.flush(&mut out);
+                acc.flush(ast, &mut chain);
                 // kramdown trims one leading and one trailing space —
                 // independently — for multi-backtick delimiters only.
                 // `inner` stays a sub-slice of `text`, so it borrows.
@@ -1022,7 +1316,8 @@ fn parse_spans_until<'a>(
                     inner = inner.strip_prefix(' ').unwrap_or(inner);
                     inner = inner.strip_suffix(' ').unwrap_or(inner);
                 }
-                out.push(Span::Code(Cow::Borrowed(inner)));
+                let idx = ast.push_span(SpanKind::Code(Cow::Borrowed(inner)));
+                chain.link(idx, |p, n| ast.spans[p as usize].next = Some(n));
                 prev = Some('`');
                 i += open + close_rel + open;
             }
@@ -1047,13 +1342,16 @@ fn parse_spans_until<'a>(
                     i += take;
                     continue;
                 }
-                let delim_buf = (c as char).to_string().repeat(take);
                 let attempt = Stop {
-                    delim: &delim_buf,
                     type_char: c,
+                    delim_len: take,
                     elem,
                 };
+                // BACKTRACK: record the arena length before the speculative
+                // recursion so abandoned inner nodes can be reverted.
+                let saved = ast.spans.len();
                 let (inner, close) = parse_spans_until(
+                    ast,
                     &text[i + take..],
                     Some(&attempt),
                     in_em || elem == Elem::Em,
@@ -1061,26 +1359,31 @@ fn parse_spans_until<'a>(
                     Some(elem),
                 )?;
                 if let Some(close) = close {
-                    acc.flush(&mut out);
-                    out.push(if take == 2 {
-                        Span::Strong(inner)
+                    acc.flush(ast, &mut chain);
+                    let idx = ast.push_span(if take == 2 {
+                        SpanKind::Strong(inner)
                     } else {
-                        Span::Em(inner)
+                        SpanKind::Em(inner)
                     });
+                    chain.link(idx, |p, n| ast.spans[p as usize].next = Some(n));
                     prev = Some(c as char);
                     i += take + close + take;
                     continue;
                 }
+                // Reverted: drop the speculative inner nodes so they don't
+                // leak into the arena or the output.
+                ast.spans.truncate(saved);
                 // Unclosed strong retries from pos+1 as a single-char
                 // em, unless the immediate parent is an em.
                 if elem == Elem::Strong && parent != Some(Elem::Em) {
-                    let delim1 = (c as char).to_string();
                     let retry = Stop {
-                        delim: &delim1,
                         type_char: c,
+                        delim_len: 1,
                         elem: Elem::Em,
                     };
+                    let saved = ast.spans.len();
                     let (inner, close) = parse_spans_until(
+                        ast,
                         &text[i + 1..],
                         Some(&retry),
                         true,
@@ -1088,12 +1391,15 @@ fn parse_spans_until<'a>(
                         Some(Elem::Em),
                     )?;
                     if let Some(close) = close {
-                        acc.flush(&mut out);
-                        out.push(Span::Em(inner));
+                        acc.flush(ast, &mut chain);
+                        let idx = ast.push_span(SpanKind::Em(inner));
+                        chain.link(idx, |p, n| ast.spans[p as usize].next = Some(n));
                         prev = Some(c as char);
                         i += 1 + close + 1;
                         continue;
                     }
+                    // Reverted again: drop the retry's speculative nodes.
+                    ast.spans.truncate(saved);
                 }
                 // No close anywhere: kramdown reverts and emits the
                 // delimiter run as literal text (verbatim source).
@@ -1102,12 +1408,13 @@ fn parse_spans_until<'a>(
                 i += take;
             }
             b'[' => {
-                acc.flush(&mut out);
+                acc.flush(ast, &mut chain);
                 let rest = &text[i..];
-                let Some((spans, href, len)) = parse_link(rest, in_em, in_strong)? else {
+                let Some((spans, href, len)) = parse_link(ast, rest, in_em, in_strong)? else {
                     return Err(declined("bracket-not-link"));
                 };
-                out.push(Span::Link { spans, href });
+                let idx = ast.push_span(SpanKind::Link { spans, href });
+                chain.link(idx, |p, n| ast.spans[p as usize].next = Some(n));
                 prev = Some(')');
                 i += len;
             }
@@ -1237,8 +1544,8 @@ fn parse_spans_until<'a>(
             }
         }
     }
-    acc.flush(&mut out);
-    Ok((out, None))
+    acc.flush(ast, &mut chain);
+    Ok((chain.first(), None))
 }
 
 /// kramdown's intra-word underscore bail:
@@ -1368,36 +1675,19 @@ unsafe fn next_trigger_neon(hay: &[u8]) -> Option<usize> {
 /// Parsed-tree text the way kramdown-parser-gfm's `update_raw_text`
 /// collects it: text and codespan values verbatim (typography already
 /// applied in our Text spans), other elements contribute their
-/// children's text (so link TEXT counts, the href doesn't).
-/// Deep-convert a span subtree to an owned (`'static`) form: every
-/// `Cow::Borrowed` becomes `Cow::Owned`. Used only for the rare
-/// owned-text paragraph fallback (blockquote / list bodies whose
-/// de-prefixed source lines don't abut contiguously, so the joined text
-/// lives in a temporary `String` the spans must not outlive).
-fn spans_into_owned(spans: Vec<Span<'_>>) -> Vec<Span<'static>> {
-    spans
-        .into_iter()
-        .map(|s| match s {
-            Span::Text(t) => Span::Text(Cow::Owned(t.into_owned())),
-            Span::Code(t) => Span::Code(Cow::Owned(t.into_owned())),
-            Span::Em(inner) => Span::Em(spans_into_owned(inner)),
-            Span::Strong(inner) => Span::Strong(spans_into_owned(inner)),
-            Span::Link { spans, href } => Span::Link {
-                spans: spans_into_owned(spans),
-                href: Cow::Owned(href.into_owned()),
-            },
-        })
-        .collect()
-}
-
-pub(crate) fn spans_raw_text(spans: &[Span<'_>], out: &mut String) {
-    for span in spans {
-        match span {
-            Span::Text(t) | Span::Code(t) => out.push_str(t),
-            Span::Em(inner) | Span::Strong(inner) | Span::Link { spans: inner, .. } => {
-                spans_raw_text(inner, out);
+/// children's text (so link TEXT counts, the href doesn't). Walks the
+/// flat arena from the chain head `spans`.
+pub(crate) fn spans_raw_text(ast: &Ast<'_>, spans: Option<u32>, out: &mut String) {
+    let mut cur = spans;
+    while let Some(idx) = cur {
+        let node = &ast.spans[idx as usize];
+        match &node.kind {
+            SpanKind::Text(t) | SpanKind::Code(t) => out.push_str(t),
+            SpanKind::Em(inner) | SpanKind::Strong(inner) | SpanKind::Link { spans: inner, .. } => {
+                spans_raw_text(ast, *inner, out);
             }
         }
+        cur = node.next;
     }
 }
 
@@ -1411,10 +1701,11 @@ fn run_len(bytes: &[u8], i: usize, c: u8) -> usize {
 /// `@stack` check spans the link boundary).
 #[allow(clippy::type_complexity)]
 fn parse_link<'a>(
+    ast: &mut Ast<'a>,
     rest: &'a str,
     in_em: bool,
     in_strong: bool,
-) -> Result<Option<(Vec<Span<'a>>, Cow<'a, str>, usize)>, Error> {
+) -> Result<Option<(Option<u32>, Cow<'a, str>, usize)>, Error> {
     let bytes = rest.as_bytes();
     debug_assert_eq!(bytes[0], b'[');
     let mut depth = 1;
@@ -1446,7 +1737,8 @@ fn parse_link<'a>(
     if href.contains(' ') || href.contains('"') {
         return Err(declined("link-title-or-space"));
     }
-    let (spans, _) = parse_spans_until(&rest[1..close], None, in_em, in_strong, Some(Elem::Link))?;
+    let (spans, _) =
+        parse_spans_until(ast, &rest[1..close], None, in_em, in_strong, Some(Elem::Link))?;
     // `href` is a sub-slice of `rest` (the link source) — borrow it.
     Ok(Some((spans, Cow::Borrowed(href), close + 2 + paren_rel + 1)))
 }

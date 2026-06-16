@@ -118,8 +118,8 @@ pub fn to_html(
 ) -> Result<String, Error> {
     #[cfg(not(feature = "arena"))]
     {
-        let blocks = parse::parse(src, opts)?;
-        Ok(html::convert(&blocks, opts, highlighter, src.len()))
+        let (ast, root) = parse::parse(src, opts)?;
+        Ok(html::convert(&ast, root, opts, highlighter, src.len()))
     }
     // With the `arena` feature, run the parse+convert inside a bump
     // scope: the whole `Block`/`Span` tree is pointer-bumped and freed
@@ -131,8 +131,8 @@ pub fn to_html(
     {
         let guard = arena::Scope::enter();
         let built = (|| {
-            let blocks = parse::parse(src, opts)?;
-            Ok(html::convert(&blocks, opts, highlighter, src.len()))
+            let (ast, root) = parse::parse(src, opts)?;
+            Ok(html::convert(&ast, root, opts, highlighter, src.len()))
         })();
         match built {
             Ok(html) => {
@@ -164,26 +164,26 @@ pub fn profile_phases(src: &str, opts: &Options, iters: u32) -> (f64, f64) {
     use std::time::Instant;
     let warm = (iters / 5).max(3);
 
-    // Parse phase: full parse (builds + drops the owned tree each iter).
+    // Parse phase: full parse (builds + drops the arena each iter).
     for _ in 0..warm {
         std::hint::black_box(parse::parse(src, opts).ok());
     }
     let t = Instant::now();
     for _ in 0..iters {
-        let blocks = parse::parse(src, opts).expect("profile corpus parses");
-        std::hint::black_box(&blocks);
+        let parsed = parse::parse(src, opts).expect("profile corpus parses");
+        std::hint::black_box(&parsed);
     }
     let parse_ns = t.elapsed().as_nanos() as f64 / iters as f64;
 
     // Convert phase: HTML emission over a fixed pre-parsed tree.
-    let blocks = parse::parse(src, opts).expect("profile corpus parses");
+    let (ast, root) = parse::parse(src, opts).expect("profile corpus parses");
     let mut hl = NoHighlight;
     for _ in 0..warm {
-        std::hint::black_box(html::convert(&blocks, opts, &mut hl, src.len()));
+        std::hint::black_box(html::convert(&ast, root, opts, &mut hl, src.len()));
     }
     let t = Instant::now();
     for _ in 0..iters {
-        let h = html::convert(&blocks, opts, &mut hl, src.len());
+        let h = html::convert(&ast, root, opts, &mut hl, src.len());
         std::hint::black_box(&h);
     }
     let convert_ns = t.elapsed().as_nanos() as f64 / iters as f64;
