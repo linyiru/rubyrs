@@ -47,6 +47,96 @@ class MatchProbe
   def respond_to_missing?(*); true; end
 end
 
+# --- generic wordlist (keyword-classifier) upgrade ---
+# The most common rouge callback is `do |m| if SET.include?(m[0]) then
+# token A elsif SET2.include?(m[0]) then token B else token Name end end`.
+# carmine's engine has a native `wordlist` rule (classify the match by set
+# membership), so detecting this shape turns a decline into a MATCH.
+#
+# SOUNDNESS (the drop-in must never diverge): a block is only upgraded if
+# EVERY use of `m[0]` is as an `include?` ARGUMENT and it emits exactly one
+# `token T` (no value, no groups/push/pop). Enforced by:
+#  - WLWord (the value of m[0]) raises on every method → any non-include?
+#    use (==, =~, .start_with?, value-token) bails to callback;
+#  - the include? hook captures the receiver SETS (returning false so the
+#    word's methods are never touched), giving the COMPLETE candidate words
+#    via `set.to_a`;
+#  - tabulation re-runs the REAL block per candidate word (real sets) so the
+#    recorded token is exactly what rouge emits; a non-member probes default.
+require "set"
+
+class WLBail < StandardError; end
+class WLWord < BasicObject
+  def method_missing(*); ::Kernel.raise ::WLBail; end
+end
+WL_WORD = WLWord.new
+
+module WLIncludeHook
+  def include?(arg)
+    if $wl_capture && arg.equal?(WL_WORD)
+      $wl_sets << self
+      return false # take the else/next branch so every set is visited
+    end
+    super
+  end
+end
+[::Array, ::Set, ::Hash].each { |k| k.prepend(WLIncludeHook) }
+
+# m[0] → the word (WL_WORD in discovery, a real String in tabulation);
+# any other match access bails (capture groups, pre_match, …).
+class WLMatch
+  def initialize(w); @w = w; end
+  def [](i); i == 0 ? @w : raise(WLBail); end
+  def method_missing(*); raise WLBail; end
+  def respond_to_missing?(*); true; end
+end
+
+# Records the single emitted token; bails on anything else (value-token,
+# groups, push, pop, goto …) so only pure classifiers survive.
+class WLCtx
+  attr_reader :tok
+  def token(t, val = :__d__); raise WLBail if val != :__d__ || @tok; @tok = t.qualname; end
+  def method_missing(*); raise WLBail; end
+  def respond_to_missing?(*); true; end
+end
+
+def try_wordlist(blk)
+  $wl_sets = []
+  $wl_capture = true
+  dctx = WLCtx.new
+  begin
+    dctx.instance_exec(WLMatch.new(WL_WORD), &blk)
+  rescue Exception
+    return nil
+  ensure
+    $wl_capture = false
+  end
+  default = dctx.tok
+  return nil if default.nil? || $wl_sets.empty?
+  words = []
+  $wl_sets.each do |s|
+    return nil unless s.respond_to?(:each)
+    s.each { |w| words << w if w.is_a?(String) }
+  end
+  words.uniq!
+  return nil if words.empty?
+  order = []
+  by_tok = {}
+  words.each do |w|
+    c = WLCtx.new
+    begin
+      c.instance_exec(WLMatch.new(w), &blk)
+    rescue Exception
+      return nil
+    end
+    return nil if c.tok.nil?
+    next if c.tok == default
+    (by_tok[c.tok] ||= (order << c.tok; []))
+    by_tok[c.tok] << w
+  end
+  { sets: order.map { |t| [t, by_tok[t]] }, default: default }
+end
+
 class Recorder
   attr_reader :rules
   def initialize; @rules = []; end
@@ -57,8 +147,14 @@ class Recorder
       begin
         ctx.instance_exec(probe, &blk)
         if probe.touched?
-          # Match-dependent (read m / its captures) → emitted tokens vary.
-          @rules << { kind: "callback", re: re.source, opts: re.options }
+          # Match-dependent. Try the wordlist upgrade (pure include?-based
+          # keyword classifier → native `wordlist`); else it's a callback.
+          if (wl = try_wordlist(blk))
+            @rules << { kind: "wordlist", re: re.source, opts: re.options,
+                        sets: wl[:sets], default: wl[:default] }
+          else
+            @rules << { kind: "callback", re: re.source, opts: re.options }
+          end
         else
           @rules << { kind: "actions", re: re.source, opts: re.options, actions: ctx.actions }
         end
