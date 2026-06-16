@@ -31,19 +31,26 @@ syntect by default — explicitly disabled here.)
 ```
 engine         lang/runtime          ns/op       MB/s      out_B
 ------         ------------          -----       ----      -----
-rostdown       Rust                  85549      438.8      46112
-pulldown       Rust                 100109      375.0      43638
-blackfriday    Go                   392369       95.7      45413
-comrak         Rust                 436619       86.0      43878
-commonmarker   Ruby→Rust            471132       79.7      49596
-goldmark       Go                   720665       52.1      43878
-markdown-it    JS/V8                912797       41.1      43878
-marked         JS/V8               1196911       31.4      44646
-kramdown       Ruby               10025292        3.7      46112
+rostdown       Rust                  84362      445.0      46112
+pulldown       Rust                  99053      379.0      43638
+blackfriday    Go                   383028       98.0      45413
+comrak         Rust                 432436       86.8      43878
+commonmarker   Ruby→Rust            465422       80.7      49596
+goldmark       Go                   708701       53.0      43878
+markdown-it    JS/V8                915347       41.0      43878
+marked         JS/V8               1190826       31.5      44646
+kramdown       Ruby                9908742        3.8      46112
 ```
 
+> The `rostdown` row is the **default build — no `unsafe`, no dependency**,
+> exactly what ships in the `kramdown-rostdown` gem. It beats pulldown-cmark
+> by ~18% on the clean path. The opt-in `arena`+`simd` features (an unsafe
+> scoped bump allocator + an aarch64 NEON byteset) add ~+29% on top:
+> **~573 MB/s, ~52% faster than pulldown** — but they are headroom, not
+> required to win.
+>
 > Absolute MB/s drifts with machine load; rostdown/pulldown here are
-> isolated, interleaved 5× runs (±1%), the others from a full sweep.
+> isolated, interleaved 6× runs (±2%), the others from a full sweep.
 >
 > **rostdown was tuned in steps, output byte-for-byte unchanged
 > throughout** (golden corpus + the gem's 211-case differential gate
@@ -62,39 +69,39 @@ kramdown       Ruby               10025292        3.7      46112
 > | trigger lookup table | 371 | inline parser's "skip ordinary text" loop: a `[bool;256]` membership table, not 15 scattered compares |
 > | SWAR `memchr` pipe scan | 381 | `decline_block_scan`'s per-line table check (`\|`) finds the byte a word at a time |
 > | byte-level trim | 425 | blank checks, `is_hr`, `decline`, heading/list/setext `trim_end` — ASCII fast paths (was ~7% of self-time in Unicode `str::trim*`) |
-> | NEON byteset (`simd`) | 439 | inline trigger scan via an aarch64 NEON nibble-lookup, 16 bytes/iter (opt-in `simd` feature; scalar table otherwise) |
+> | NEON byteset (`simd`) | 439 | inline trigger scan via an aarch64 NEON nibble-lookup, 16 bytes/iter (opt-in `simd`; scalar table otherwise) |
+> | zero-copy AST | 508 | `Block`/`Span` borrow `src` via `Cow<&str>` — pristine prose/code/href runs never copied; only typography/escape allocates |
+> | flat-node arena | 573 | nodes live in flat sibling-linked index arenas, not nested `Vec`s — per-node allocations gone (2870 → 776/render) |
 >
-> That's **+326%** (4.3×) — from 3.6× *behind* pulldown to **~15% ahead**
-> (~439 vs ~375 MB/s, rostdown faster in 6/6 interleaved runs), while
-> rostdown does strictly *more*
-> (smart typography, heading `id` slugs, decline-checking, and
-> byte-identical kramdown output). The path was data-driven: an
-> allocation probe (2,879 `malloc`s/render vs pulldown's 49) plus a
-> ceiling experiment showed allocation was only ~30% of the gap — the
-> rest was per-byte/char *scanning* with high-level `str` methods
-> (`.chars()`, `trim`, `filter().count()`), re-run several times per
-> line. Each samply profile pinned the next hot scan; a byte loop, a
-> dependency-free SWAR `memchr`, or a lookup table cut it. What remains
-> toward *beating* pulldown is the same theme once more — a SIMD byteset
-> for the inline trigger scan — plus a zero-copy
-> borrowed AST so text isn't copied at all — pulldown's two remaining
-> structural edges.
+> The arena+simd column reaches **+456%** (5.7×), ~52% ahead of pulldown.
+> But the more important result: the **clean default build — no `unsafe`,
+> no dependency — now beats pulldown by ~18%** (~445 vs ~379 MB/s, 6/6
+> interleaved). Zero-copy + flat nodes cut per-render allocations from
+> 2,870 to 776, so the engine wins *without* the unsafe arena (which is
+> now optional headroom). All byte-identical to kramdown (golden 22/121,
+> the gem's 211-case differential), and rostdown does strictly *more*
+> than pulldown (smart typography, heading `id` slugs, decline-checking).
+> The path was data-driven throughout: each samply profile pinned the
+> next hot spot — a high-level `str` scan or an allocation — and a byte
+> loop, a dependency-free SWAR `memchr`, a lookup table, or a borrow
+> removed it.
 
 ## Reading the field
 
-- **pulldown-cmark (324 MB/s)** is in a class of its own — a streaming
-  *pull* parser with no AST and minimal allocation. It's what rustdoc,
-  mdBook and Zola use. ~3× faster than the AST builders.
-- **rostdown (381 MB/s after tuning + arena)** is now the **fastest in
-  the field** — past pulldown (8/8 interleaved runs), ~4.4× comrak,
-  ~7.3× goldmark — *while doing strictly more* (smart quotes/dashes, `id`
-  slugs, decline-checking, byte-identical kramdown output). It reached
-  this by pairing the `arena` (which makes its owned AST nearly
-  allocation-free) with byte-level/SWAR scanning that out-runs pulldown's
-  per-construct work on this prose-heavy corpus. The remaining
-  architectural lever (allocation: the arena path is still ~+55% over the
-  system allocator) is what a zero-copy borrowed AST would bank *without*
-  the arena — and would widen the lead further.
+- **pulldown-cmark (~379 MB/s)** — a streaming *pull* parser with no AST
+  and minimal allocation (rustdoc, mdBook, Zola). Long the throughput
+  leader among Markdown engines, ~3× faster than the AST builders.
+- **rostdown (445 MB/s clean → 573 with `arena`+`simd`)** is now the
+  **fastest in the field** — past pulldown by ~18% on the no-`unsafe`,
+  no-dependency default build *alone* (6/6 interleaved), ~52% with the
+  opt-in features, ~5× comrak, ~8× goldmark — *while doing strictly more*
+  (smart typography, `id` slugs, decline-checking) and emitting
+  byte-identical kramdown HTML. It got there by becoming a **zero-copy,
+  flat-node, byte-scanning** engine: text borrows `src` (`Cow`), AST
+  nodes live in flat index arenas (no per-node `Vec`), and the hot scans
+  use SWAR/NEON byte search — 2,870 → 776 allocations/render. The owned
+  AST + bump arena it started with are now optional headroom, not the
+  source of the win.
 - **comrak (86) → commonmarker (79)** shows the Rust-in-Ruby tax is only
   **~9%**. A well-built native gem keeps almost all of the Rust speed —
   exactly the shape `kramdown-rostdown` targets.
@@ -103,8 +110,8 @@ kramdown       Ruby               10025292        3.7      46112
   (98)** is faster but is legacy/unmaintained and spec-noncompliant.
 - **marked (32) / markdown-it (40)** — the JS staples; respectable for
   V8, an order of magnitude behind the Rust leaders.
-- **kramdown (3.7 MB/s)** — pure Ruby, **21× slower than commonmarker
-  and 28× slower than rostdown**. That gap is the entire motivation for
+- **kramdown (3.8 MB/s)** — pure Ruby, **~21× slower than commonmarker
+  and ~117× slower than rostdown**. That gap is the entire motivation for
   the accelerator: keep kramdown's exact output, get a compiled engine's
   speed, change zero lines of caller code.
 
