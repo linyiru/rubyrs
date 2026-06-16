@@ -1,0 +1,25 @@
+[workspace]
+
+[package]
+name = "md-bench-rust"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "md-bench-rust"
+path = "src/main.rs"
+
+[dependencies]
+pulldown-cmark = "0.12"
+comrak = "0.29"
+# `arena` feature on: rostdown's to_html bump-allocates its AST. We
+# install rostdown::ScopedAlloc as the global allocator below, so the
+# rostdown row measures the REALIZED arena number (incl. the copy-out).
+rostdown = { path = "../../../crates/rostdown", features = ["arena", "profiling"] }
+
+[profile.release]
+lto = "thin"
+# For a samply profile, temporarily add `debug = true` here (DWARF
+# line/inline info) and rebuild; remove it after so the headline MB/s
+# numbers reflect the shipping build.

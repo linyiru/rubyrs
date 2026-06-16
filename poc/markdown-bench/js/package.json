@@ -1,0 +1,6 @@
+{
+  "name": "md-bench-js",
+  "private": true,
+  "type": "module",
+  "dependencies": { "marked": "^15.0.0", "markdown-it": "^14.1.0" }
+}
