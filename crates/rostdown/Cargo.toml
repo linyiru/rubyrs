@@ -11,4 +11,15 @@ readme = "README.md"
 keywords = ["markdown", "kramdown", "html", "gfm"]
 categories = ["text-processing", "parser-implementations"]
 
+[features]
+# Opt-in scoped bump allocator (see src/arena.rs). Off by default keeps
+# the crate zero-dep, `unsafe`-free, and zero-overhead. An embedder that
+# enables it must also install `rostdown::ScopedAlloc` as its
+# `#[global_allocator]`; `to_html` then bump-allocates its AST and copies
+# the result out before resetting.
+arena = []
+# Exposes `profile_phases` (parse-vs-convert split timing) for the
+# benchmark harness. Diagnostic only; not part of the public API.
+profiling = []
+
 [dependencies]

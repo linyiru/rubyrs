@@ -3,18 +3,47 @@
 //! blocks indented by 2, `auto_ids` slugs with kramdown's exact rules,
 //! `<pre><code class="language-…">` for plain code blocks and the
 //! `<div class="language-… highlighter-…">` wrapper for highlighted ones.
+//!
+//! Perf: the converter writes everything through `push_str`/`push` into
+//! one pre-sized output buffer — no `format!` temporaries, no per-block
+//! `" ".repeat()` pad strings, and `escape_*` copies non-special runs in
+//! bulk. Output stays byte-identical (the golden corpus is the gate).
 
 use std::collections::HashMap;
 
+use crate::parse::ListItem;
 use crate::parse::{Block, Span};
 use crate::{CodeHighlighter, Options};
-use crate::parse::ListItem;
 
-pub(crate) fn convert(blocks: &[Block], opts: &Options, hl: &mut dyn CodeHighlighter) -> String {
-    let mut out = String::new();
+pub(crate) fn convert(
+    blocks: &[Block],
+    opts: &Options,
+    hl: &mut dyn CodeHighlighter,
+    src_len: usize,
+) -> String {
+    // HTML for the supported subset runs ~1.2–1.5× the source; pre-size
+    // to skip the geometric regrowth on a fresh String.
+    let mut out = String::with_capacity(src_len + src_len / 2 + 64);
     let mut used_ids: HashMap<String, u32> = HashMap::new();
     convert_blocks(&mut out, blocks, 0, opts, hl, &mut used_ids);
     out
+}
+
+/// Push `n` spaces without allocating (replaces `" ".repeat(n)`).
+fn push_pad(out: &mut String, n: usize) {
+    const SP: &str = "                                "; // 32 spaces
+    let mut left = n;
+    while left >= SP.len() {
+        out.push_str(SP);
+        left -= SP.len();
+    }
+    out.push_str(&SP[..left]);
+}
+
+/// `<h1>`..`<h6>`: heading levels are 1..=6, so the level digit is a
+/// single ASCII char — cheaper than formatting an integer.
+fn push_level_digit(out: &mut String, level: u8) {
+    out.push((b'0' + level) as char);
 }
 
 fn convert_blocks(
@@ -25,7 +54,6 @@ fn convert_blocks(
     hl: &mut dyn CodeHighlighter,
     used_ids: &mut HashMap<String, u32>,
 ) {
-    let pad = " ".repeat(indent);
     for block in blocks {
         match block {
             // kramdown emits a bare "\n" per blank-run, no indent.
@@ -36,7 +64,9 @@ fn convert_blocks(
                 span_text,
                 spans,
             } => {
-                out.push_str(&pad);
+                push_pad(out, indent);
+                out.push_str("<h");
+                push_level_digit(out, *level);
                 if opts.auto_ids {
                     // GFM sets ids at parse time with its own slug
                     // algorithm; core uses the converter's. Parse
@@ -47,15 +77,18 @@ fn convert_blocks(
                         basic_generate_id(raw)
                     };
                     let id = dedup_id(base, used_ids);
-                    out.push_str(&format!("<h{level} id=\"{id}\">"));
-                } else {
-                    out.push_str(&format!("<h{level}>"));
+                    out.push_str(" id=\"");
+                    out.push_str(&id);
+                    out.push('"');
                 }
+                out.push('>');
                 convert_spans(out, spans, hl.codespan_class());
-                out.push_str(&format!("</h{level}>\n"));
+                out.push_str("</h");
+                push_level_digit(out, *level);
+                out.push_str(">\n");
             }
             Block::Para(spans) => {
-                out.push_str(&pad);
+                push_pad(out, indent);
                 out.push_str("<p>");
                 convert_spans(out, spans, hl.codespan_class());
                 out.push_str("</p>\n");
@@ -64,9 +97,11 @@ fn convert_blocks(
                 emit_list(out, items, *ordered, indent, hl);
             }
             Block::Quote(inner) => {
-                out.push_str(&format!("{pad}<blockquote>\n"));
+                push_pad(out, indent);
+                out.push_str("<blockquote>\n");
                 convert_blocks(out, inner, indent + 2, opts, hl, used_ids);
-                out.push_str(&format!("{pad}</blockquote>\n"));
+                push_pad(out, indent);
+                out.push_str("</blockquote>\n");
             }
             Block::Code { lang, text } => {
                 // kramdown resolves a missing fence language to
@@ -79,15 +114,22 @@ fn convert_blocks(
                     && let Some(hl_html) = hl.highlight(hl_lang, text)
                 {
                     // kramdown convert_codeblock with a syntax highlighter.
-                    out.push_str(&format!(
-                        "{pad}<div class=\"language-{hl_lang} highlighter-{}\">{hl_html}{pad}</div>\n",
-                        hl.name()
-                    ));
+                    push_pad(out, indent);
+                    out.push_str("<div class=\"language-");
+                    out.push_str(hl_lang);
+                    out.push_str(" highlighter-");
+                    out.push_str(hl.name());
+                    out.push_str("\">");
+                    out.push_str(&hl_html);
+                    push_pad(out, indent);
+                    out.push_str("</div>\n");
                 } else {
-                    out.push_str(&pad);
+                    push_pad(out, indent);
                     out.push_str("<pre><code");
                     if let Some(lang) = lang {
-                        out.push_str(&format!(" class=\"language-{lang}\""));
+                        out.push_str(" class=\"language-");
+                        out.push_str(lang);
+                        out.push('"');
                     }
                     out.push('>');
                     let body_start = out.len();
@@ -99,7 +141,10 @@ fn convert_blocks(
                     out.push_str("</code></pre>\n");
                 }
             }
-            Block::Hr => out.push_str(&format!("{pad}<hr />\n")),
+            Block::Hr => {
+                push_pad(out, indent);
+                out.push_str("<hr />\n");
+            }
         }
     }
 }
@@ -120,25 +165,29 @@ fn emit_list(
     indent: usize,
     hl: &mut dyn CodeHighlighter,
 ) {
-    let pad = " ".repeat(indent);
     let tag = if ordered { "ol" } else { "ul" };
-    out.push_str(&format!("{pad}<{tag}>\n"));
-    let item_pad = " ".repeat(indent + 2);
+    push_pad(out, indent);
+    out.push('<');
+    out.push_str(tag);
+    out.push_str(">\n");
     for item in items {
-        out.push_str(&item_pad);
+        push_pad(out, indent + 2);
         out.push_str("<li>");
         convert_spans(out, &item.spans, hl.codespan_class());
         match &item.child {
             Some((c_ord, c_items)) => {
                 out.push('\n');
                 emit_list(out, c_items, *c_ord, indent + 4, hl);
-                out.push_str(&item_pad);
+                push_pad(out, indent + 2);
                 out.push_str("</li>\n");
             }
             None => out.push_str("</li>\n"),
         }
     }
-    out.push_str(&format!("{pad}</{tag}>\n"));
+    push_pad(out, indent);
+    out.push_str("</");
+    out.push_str(tag);
+    out.push_str(">\n");
 }
 
 fn convert_spans(out: &mut String, spans: &[Span], codespan_class: Option<&str>) {
@@ -178,27 +227,64 @@ fn convert_spans(out: &mut String, spans: &[Span], codespan_class: Option<&str>)
     }
 }
 
-/// kramdown `escape_html(…, :text)` — `&`, `<`, `>` only.
+/// kramdown `escape_html(…, :text)` — `&`, `<`, `>` only. Jump to the
+/// next special byte via `position` (a tight equality scan LLVM can
+/// vectorize) and bulk-copy the ordinary run before it. The matched
+/// bytes are ASCII, so the slice indices are always char boundaries.
 fn escape_text(out: &mut String, text: &str) {
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() {
+        match bytes[start..]
+            .iter()
+            .position(|&b| matches!(b, b'&' | b'<' | b'>'))
+        {
+            Some(off) => {
+                let i = start + off;
+                if off > 0 {
+                    out.push_str(&text[start..i]);
+                }
+                out.push_str(match bytes[i] {
+                    b'&' => "&amp;",
+                    b'<' => "&lt;",
+                    _ => "&gt;",
+                });
+                start = i + 1;
+            }
+            None => {
+                out.push_str(&text[start..]);
+                break;
+            }
         }
     }
 }
 
 /// kramdown `escape_html(…, :attribute)` — also escapes `"`.
 fn escape_attr(out: &mut String, text: &str) {
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            _ => out.push(ch),
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() {
+        match bytes[start..]
+            .iter()
+            .position(|&b| matches!(b, b'&' | b'<' | b'>' | b'"'))
+        {
+            Some(off) => {
+                let i = start + off;
+                if off > 0 {
+                    out.push_str(&text[start..i]);
+                }
+                out.push_str(match bytes[i] {
+                    b'&' => "&amp;",
+                    b'<' => "&lt;",
+                    b'>' => "&gt;",
+                    _ => "&quot;",
+                });
+                start = i + 1;
+            }
+            None => {
+                out.push_str(&text[start..]);
+                break;
+            }
         }
     }
 }

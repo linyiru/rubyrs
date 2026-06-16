@@ -62,8 +62,28 @@ fn declined(what: &'static str) -> Error {
     Error::Declined(what)
 }
 
+/// Split `src` on `\n` into line slices — byte-identical to
+/// `src.split('\n').collect()` (a trailing `\n` yields a final empty
+/// element) but with a tight byte scan instead of std's char-pattern
+/// searcher.
+fn split_lines(src: &str) -> Vec<&str> {
+    let bytes = src.as_bytes();
+    // Heuristic capacity (~32 B/line) so the Vec rarely regrows, without
+    // a second pass to count newlines exactly.
+    let mut out = Vec::with_capacity(src.len() / 32 + 8);
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' {
+            out.push(&src[start..i]);
+            start = i + 1;
+        }
+    }
+    out.push(&src[start..]);
+    out
+}
+
 pub(crate) fn parse(src: &str, opts: &Options) -> Result<Vec<Block>, Error> {
-    let lines: Vec<&str> = src.split('\n').collect();
+    let lines: Vec<&str> = split_lines(src);
     // A trailing "\n" yields one empty last element — drop it so it
     // doesn't read as a blank line.
     let lines = match lines.last() {
@@ -264,8 +284,8 @@ fn parse_blocks(lines: &[&str], opts: &Options) -> Result<Vec<Block>, Error> {
             // a heading — out of subset.
             if i + 1 < lines.len() {
                 let next = lines[i + 1];
-                let t = next.trim_end();
-                if !t.is_empty() && (t.chars().all(|c| c == '=') || t.chars().all(|c| c == '-')) {
+                let t = next.trim_end().as_bytes();
+                if !t.is_empty() && (t.iter().all(|&b| b == b'=') || t.iter().all(|&b| b == b'-')) {
                     return Err(declined("setext-heading"));
                 }
             }
@@ -290,17 +310,24 @@ fn parse_blocks(lines: &[&str], opts: &Options) -> Result<Vec<Block>, Error> {
 /// Constructs we recognize well enough to refuse: kramdown features
 /// outside the subset whose silent mis-parse would corrupt output.
 fn decline_block_scan(line: &str) -> Result<(), Error> {
-    let t = line.trim_start();
-    if line.starts_with("    ") || line.starts_with('\t') {
+    if line.as_bytes().starts_with(b"    ") || line.as_bytes().first() == Some(&b'\t') {
         return Err(declined("indented-code"));
     }
+    let t = line.trim_start();
     // kramdown starts a table on lines containing an unescaped `|`.
-    let mut esc = false;
-    for ch in t.chars() {
-        match ch {
-            '\\' => esc = !esc,
-            '|' if !esc => return Err(declined("table")),
-            _ => esc = false,
+    // Scan bytes (no UTF-8 decode): `\` and `|` are ASCII and a
+    // multibyte char's bytes are all >= 0x80, so each just resets `esc`
+    // — byte-identical to the per-char escape toggle. Most lines have no
+    // `|` at all, so a single tight `contains` skips the escape loop.
+    let tb = t.as_bytes();
+    if tb.contains(&b'|') {
+        let mut esc = false;
+        for &b in tb {
+            match b {
+                b'\\' => esc = !esc,
+                b'|' if !esc => return Err(declined("table")),
+                _ => esc = false,
+            }
         }
     }
     if t.starts_with("{:") || t.starts_with("{::") {
@@ -377,14 +404,24 @@ fn decline_eol(text_so_far: &str) -> Result<(), Error> {
 }
 
 fn is_hr(line: &str) -> bool {
-    let t = line.trim();
-    for marker in ['-', '*', '_'] {
-        let count = t.chars().filter(|c| *c == marker).count();
-        if count >= 3 && t.chars().all(|c| c == marker || c == ' ' || c == '\t') {
-            return true;
+    // An HR is one marker char (`-`/`*`/`_`) repeated >=3, plus spaces/
+    // tabs — so the first non-space char fixes the only possible marker.
+    // For prose (first char a letter) this bails on byte one, instead of
+    // the old three full `chars()` scans (one per candidate marker).
+    let t = line.trim().as_bytes();
+    let marker = match t.first() {
+        Some(&c @ (b'-' | b'*' | b'_')) => c,
+        _ => return false,
+    };
+    let mut count = 0usize;
+    for &b in t {
+        if b == marker {
+            count += 1;
+        } else if b != b' ' && b != b'\t' {
+            return false;
         }
     }
-    false
+    count >= 3
 }
 
 /// `Some(ordered?)` when the line opens a list item.
@@ -852,11 +889,28 @@ fn parse_spans_until(
                 }
                 i += run;
             }
+            _ if is_trigger(c) => {
+                // A trigger byte whose guarded arm didn't fire (e.g. `!`
+                // not before `[`, `>` not before `>`, a trailing `\`).
+                // All triggers are ASCII, so this is the whole char.
+                buf.push(c as char);
+                prev = Some(c as char);
+                i += 1;
+            }
             _ => {
-                let ch = text[i..].chars().next().expect("in-bounds char");
-                buf.push(ch);
-                prev = Some(ch);
-                i += ch.len_utf8();
+                // Bulk-copy a run of ordinary bytes in one push_str
+                // instead of decoding + pushing char by char. Triggers
+                // are ASCII so the run never splits a multibyte char,
+                // and stop delimiters start with `*`/`_` (triggers), so
+                // a run never skips a pending emphasis close.
+                let start = i;
+                i += 1;
+                while i < bytes.len() && !is_trigger(bytes[i]) {
+                    i += 1;
+                }
+                let run = &text[start..i];
+                buf.push_str(run);
+                prev = run.chars().next_back();
             }
         }
     }
@@ -891,6 +945,21 @@ fn flush(out: &mut Vec<Span>, buf: &mut String) {
     if !buf.is_empty() {
         out.push(Span::Text(std::mem::take(buf)));
     }
+}
+
+/// Bytes that begin a span-parser match arm (markup delimiters,
+/// typography triggers, escapes). Everything else is ordinary text and
+/// can be bulk-copied. The set MUST stay in sync with the `match c`
+/// arms in `parse_spans_until` — e.g. `~`/`{` are here so a run never
+/// swallows a `~~`/`{:` that should decline, and they're all ASCII so a
+/// run never splits a multibyte char.
+#[inline]
+fn is_trigger(c: u8) -> bool {
+    matches!(
+        c,
+        b'\\' | b'`' | b'*' | b'_' | b'[' | b'!' | b'<' | b'>'
+            | b'&' | b'~' | b'{' | b'\'' | b'"' | b'-' | b'.'
+    )
 }
 
 /// Parsed-tree text the way kramdown-parser-gfm's `update_raw_text`

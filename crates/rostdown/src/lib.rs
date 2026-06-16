@@ -13,8 +13,13 @@
 //! ```
 
 mod html;
+#[cfg(feature = "arena")]
+mod arena;
 mod parse;
 mod typography;
+
+#[cfg(feature = "arena")]
+pub use arena::ScopedAlloc;
 
 /// Rendering options. [`Options::jekyll`] mirrors Jekyll's kramdown
 /// defaults (`input: GFM`, `auto_ids`, `entity_output: as_char`,
@@ -110,6 +115,77 @@ pub fn to_html(
     opts: &Options,
     highlighter: &mut dyn CodeHighlighter,
 ) -> Result<String, Error> {
-    let blocks = parse::parse(src, opts)?;
-    Ok(html::convert(&blocks, opts, highlighter))
+    #[cfg(not(feature = "arena"))]
+    {
+        let blocks = parse::parse(src, opts)?;
+        Ok(html::convert(&blocks, opts, highlighter, src.len()))
+    }
+    // With the `arena` feature, run the parse+convert inside a bump
+    // scope: the whole `Block`/`Span` tree is pointer-bumped and freed
+    // wholesale. The result String is the one thing that must outlive
+    // the arena, so on the outermost scope we copy it to the system
+    // allocator (allocations at depth 0 forward to System) before
+    // resetting. Inert if `ScopedAlloc` isn't the global allocator.
+    #[cfg(feature = "arena")]
+    {
+        let guard = arena::Scope::enter();
+        let built = (|| {
+            let blocks = parse::parse(src, opts)?;
+            Ok(html::convert(&blocks, opts, highlighter, src.len()))
+        })();
+        match built {
+            Ok(html) => {
+                let outermost = arena::leave_no_reset();
+                core::mem::forget(guard); // we left manually
+                if outermost {
+                    let owned = String::from(html.as_str()); // depth 0 → System
+                    drop(html); // arena String → dealloc is a no-op
+                    arena::reset();
+                    Ok(owned)
+                } else {
+                    // Nested in an outer scope: it owns the arena lifetime.
+                    Ok(html)
+                }
+            }
+            Err(e) => {
+                drop(guard); // leave + (if outermost) reset
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Diagnostic: time the parse phase and the convert phase separately,
+/// returning `(parse_ns_per_op, convert_ns_per_op)`. Runs on the system
+/// allocator (no arena scope), so it isolates compute. Not public API.
+#[cfg(feature = "profiling")]
+pub fn profile_phases(src: &str, opts: &Options, iters: u32) -> (f64, f64) {
+    use std::time::Instant;
+    let warm = (iters / 5).max(3);
+
+    // Parse phase: full parse (builds + drops the owned tree each iter).
+    for _ in 0..warm {
+        std::hint::black_box(parse::parse(src, opts).ok());
+    }
+    let t = Instant::now();
+    for _ in 0..iters {
+        let blocks = parse::parse(src, opts).expect("profile corpus parses");
+        std::hint::black_box(&blocks);
+    }
+    let parse_ns = t.elapsed().as_nanos() as f64 / iters as f64;
+
+    // Convert phase: HTML emission over a fixed pre-parsed tree.
+    let blocks = parse::parse(src, opts).expect("profile corpus parses");
+    let mut hl = NoHighlight;
+    for _ in 0..warm {
+        std::hint::black_box(html::convert(&blocks, opts, &mut hl, src.len()));
+    }
+    let t = Instant::now();
+    for _ in 0..iters {
+        let h = html::convert(&blocks, opts, &mut hl, src.len());
+        std::hint::black_box(&h);
+    }
+    let convert_ns = t.elapsed().as_nanos() as f64 / iters as f64;
+
+    (parse_ns, convert_ns)
 }
