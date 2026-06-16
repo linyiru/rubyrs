@@ -212,6 +212,14 @@ module IrCompiler
     when :IASGN
       v = expr(n.children[1], mvar); return nil if v.nil?
       ["iset", n.children[0].to_s.sub(/\A@/, ""), v]
+    when :CASE
+      # `case m[i] (.downcase) when "a","b" then … else … end` over string
+      # literals → desugar to nested `if gin` ops (CASE2 / non-string whens
+      # decline).
+      gr = group_ref(n.children[0], mvar); return nil if gr.nil?
+      g, fold = gr
+      chain = case_chain(n.children[1], g, fold, mvar)
+      (chain && chain.size == 1) ? chain[0] : nil
     end
   end
 
@@ -219,6 +227,22 @@ module IrCompiler
   # propagates as nil (distinct from the empty `[]`).
   def self.branch(n, mvar)
     n.nil? ? [] : stmt_list(n, mvar)
+  end
+
+  # Desugar a WHEN chain into nested `if gin` ops. `node` is a WHEN node, the
+  # else-body, or nil. A WHEN yields a single `["if", gin, then, else]` op.
+  def self.case_chain(node, g, fold, mvar)
+    return [] if node.nil?
+    return stmt_list(node, mvar) unless node?(node) && node.type == :WHEN
+    list, body, nxt = node.children
+    return nil unless node?(list) && list.type == :LIST
+    items = list.children.compact
+    return nil unless !items.empty? && items.all? { |e| node?(e) && e.type == :STR }
+    lits = items.map { |e| e.children[0] }
+    cnd = fold ? ["ginf", g, fold, lits] : ["gin", g, lits]
+    then_ops = stmt_list(body, mvar); return nil if then_ops.nil?
+    else_ops = case_chain(nxt, g, fold, mvar); return nil if else_ops.nil?
+    [["if", cnd, then_ops, else_ops]]
   end
 
   def self.call_stmt(n, mvar)
@@ -260,7 +284,8 @@ module IrCompiler
   def self.cond(n, mvar)
     return nil unless node?(n)
     return ["ivar", n.children[0].to_s.sub(/\A@/, "")] if n.type == :IVAR
-    if %i[FCALL VCALL].include?(n.type) && n.children[0] == :state?
+    # `state?(:s)` / `in_state?(:s)` — rouge synonyms for "current top state".
+    if %i[FCALL VCALL].include?(n.type) && %i[state? in_state?].include?(n.children[0])
       args = n.type == :FCALL ? arglist(n.children[1]) : []
       return (args.size == 1 && sym?(args[0])) ? ["instate", args[0].children[0].to_s] : nil
     end
@@ -272,13 +297,14 @@ module IrCompiler
       g, fold = gr
       return fold ? ["ginf", g, fold, lits] : ["gin", g, lits]
     end
-    if n.type == :OPCALL && n.children[1] == :==
+    if n.type == :OPCALL && %i[== !=].include?(n.children[1])
       recv, _op, args = n.children
       gr = group_ref(recv, mvar); return nil if gr.nil?
       g, fold = gr
       a = arglist(args)
       return nil unless a.size == 1 && node?(a[0]) && a[0].type == :STR
-      return fold ? ["geqf", g, fold, a[0].children[0]] : ["geq", g, a[0].children[0]]
+      eq = fold ? ["geqf", g, fold, a[0].children[0]] : ["geq", g, a[0].children[0]]
+      return n.children[1] == :!= ? ["not", eq] : eq
     end
     if n.type == :OPCALL && n.children[1] == :!
       inner = cond(n.children[0], mvar)
