@@ -14,6 +14,27 @@ use std::collections::HashMap;
 use crate::parse::{Ast, BlockKind, SpanKind};
 use crate::{CodeHighlighter, Options};
 
+/// Run a highlighter callback with the bump arena paused (only when the
+/// `arena` feature is active). A custom highlighter may stash data that
+/// must outlive this render — e.g. a recording highlighter that captures
+/// `(lang, code)` for a second pass (the shape the kramdown-rostdown gem
+/// uses). Pausing routes the callback's allocations to the system
+/// allocator so they survive `to_html`'s end-of-scope arena reset instead
+/// of dangling. Zero-cost no-op without the feature.
+#[cfg(feature = "arena")]
+#[inline]
+fn with_hl_paused<R>(f: impl FnOnce() -> R) -> R {
+    let saved = crate::arena::pause();
+    let r = f();
+    crate::arena::resume(saved);
+    r
+}
+#[cfg(not(feature = "arena"))]
+#[inline]
+fn with_hl_paused<R>(f: impl FnOnce() -> R) -> R {
+    f()
+}
+
 pub(crate) fn convert(
     ast: &Ast<'_>,
     root: Option<u32>,
@@ -119,7 +140,7 @@ fn convert_blocks(
                     None => hl.default_lang().map(|d| std::borrow::Cow::Owned(d.to_string())),
                 };
                 if let Some(hl_lang) = effective.as_deref()
-                    && let Some(hl_html) = hl.highlight(hl_lang, text)
+                    && let Some(hl_html) = with_hl_paused(|| hl.highlight(hl_lang, text))
                 {
                     // kramdown convert_codeblock with a syntax highlighter.
                     push_pad(out, indent);
