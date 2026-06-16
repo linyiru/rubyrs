@@ -232,6 +232,14 @@ class Set
   end
   alias_method :collect_concat, :flat_map
 
+  # Enumerable#filter_map (map + compact in one pass). Surfaced by
+  # bridgetown-core's `configure_component_paths`
+  # (`@components_load_paths.filter_map { … }`).
+  def filter_map(&block)
+    return to_a.filter_map unless block_given?
+    to_a.filter_map(&block)
+  end
+
   def select(&block)
     to_a.select(&block)
   end

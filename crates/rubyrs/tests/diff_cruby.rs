@@ -1344,3 +1344,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // accessor in the single-thread model). Surfaced by
 // bridgetown-core/current.rb's thread-state store.
 #[test] fn thread_attr_accessor() { run_diff("thread_attr_accessor"); }
+
+// `Set#filter_map`. Surfaced by bridgetown-core's
+// `configure_component_paths`.
+#[test] fn set_filter_map() { run_diff("set_filter_map"); }
