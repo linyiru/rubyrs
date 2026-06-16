@@ -34,6 +34,14 @@ pub(crate) struct TranslationCtx<'src> {
     /// TranslationCtx` doesn't need to thread a write borrow
     /// through callers that just bump the counter.
     pub(crate) safe_nav_count: std::cell::Cell<usize>,
+    /// Stack of "the enclosing method uses `(...)` argument
+    /// forwarding". Pushed per `def` body (true only for
+    /// `def m(...)`), read by bare `super`: inside a `(...)` method,
+    /// bare `super` must forward the anonymous rest/kwrest/block the
+    /// SAME way `super(...)` does (splat `*`, kwsplat `__kw_rest_anon`,
+    /// `&block`) — not slot-dump the `*` rest array as one positional.
+    /// Blocks don't push, so `super` in a block sees the method's flag.
+    pub(crate) method_forward_stack: Vec<bool>,
 }
 
 impl<'src> TranslationCtx<'src> {
@@ -42,6 +50,7 @@ impl<'src> TranslationCtx<'src> {
             errors: Vec::new(),
             source,
             safe_nav_count: std::cell::Cell::new(0),
+            method_forward_stack: Vec::new(),
         }
     }
 
@@ -4282,6 +4291,32 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             let (block_params, block_body) = tr_block_node(ctx, &bn);
             return sp(node, Expr::SuperWithBlock { args: None, block_params, block_body });
         }
+        // Inside a `def m(...)` method, bare `super` forwards the
+        // anonymous rest/kwrest/block EXACTLY like `super(...)` —
+        // splat the `*` rest, kwsplat `__kw_rest_anon`, pass `&`. The
+        // plain `Super(None)` slot-dump otherwise passed the `*` rest
+        // ARRAY as a single positional arg (signalize's
+        // `def signal_accessor(...); super; end` then saw `names ==
+        // [[...]]`). Mirror the `super(...)` desugar below.
+        if matches!(ctx.method_forward_stack.last(), Some(true)) {
+            let star = sp(node, Expr::Call {
+                receiver: None,
+                name: "Array".into(),
+                args: vec![sp(node, Expr::LVarRead("*".to_string()))],
+                kwargs_trailing: false,
+            });
+            let kw = kwsplat_chunk(node, sp(node, Expr::LVarRead("__kw_rest_anon".to_string())));
+            let acc = sp(node, Expr::Call {
+                receiver: Some(Box::new(star)),
+                name: "+".into(),
+                args: vec![kw],
+                kwargs_trailing: false,
+            });
+            return sp(node, Expr::SuperApply {
+                args: Box::new(acc),
+                block_arg: Some(Box::new(sp(node, Expr::LVarRead("&".to_string())))),
+            });
+        }
         return sp(node, Expr::Super(None));
     }
     if let Some(n) = node.as_super_node() {
@@ -4637,6 +4672,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let mut kw_params: Vec<(String, Option<SExpr>)> = Vec::new();
         let mut kw_rest: Option<String> = None;
         let mut block_param: Option<String> = None;
+        let mut is_dotdotdot_forward = false;
         if let Some(p) = n.parameters() {
             if let Some(b) = p.block() {
                 // `def foo(&blk)`: capture the caller's block into
@@ -4690,6 +4726,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 rest = Some("*".to_string());
                 kw_rest = Some(String::new());
                 block_param = Some("&".to_string());
+                is_dotdotdot_forward = true;
             }
             for kw in p.keywords().iter() {
                 if let Some(rk) = kw.as_required_keyword_parameter_node() {
@@ -4741,6 +4778,10 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 }
             }
         }
+        // Track `(...)` forwarding across the body so bare `super`
+        // forwards the anonymous args like `super(...)` (see
+        // `method_forward_stack`).
+        ctx.method_forward_stack.push(is_dotdotdot_forward);
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
@@ -4749,6 +4790,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             }
             None => vec![],
         };
+        ctx.method_forward_stack.pop();
         // `def receiver.name; ...; end` — Prism reports the
         // receiver expression on DefNode when there is one.
         // Box the full expression rather than collapsing to a
