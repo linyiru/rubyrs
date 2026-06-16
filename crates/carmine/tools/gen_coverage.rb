@@ -6,7 +6,13 @@
 # drop-in-replacement work. Output is self-contained (no rouge path needed
 # by the Rust side).
 #
-#   ruby crates/carmine/tools/gen_coverage.rb [ROUGE_LIB_DIR]
+# Run under `--parser=parse.y`: the wordlist upgrade VALIDATES each
+# classifier block via `RubyVM::AbstractSyntaxTree.of(block)`, which Ruby
+# 3.4's default Prism backend can't provide for compiled iseqs. Without it
+# the AST gate returns nil → blocks stay callbacks (still SOUND, just less
+# coverage).
+#
+#   ruby --parser=parse.y crates/carmine/tools/gen_coverage.rb [ROUGE_LIB_DIR]
 #   CARMINE_COV_DIR=/tmp/carmine_cov cargo run -p carmine --example coverage
 #
 # Env: CARMINE_COV_DIR (output dir, default /tmp/carmine_cov). Optional
@@ -100,7 +106,116 @@ class WLCtx
   def respond_to_missing?(*); true; end
 end
 
+# --- AST classifier validator (run the tool under `--parser=parse.y`) ---
+# Runtime tracing alone is UNSOUND for `m[0] == "lit"` / `case m[0] when
+# "lit"` branches: the literal owns the comparison (`"lit" == word` /
+# `"lit" === word`), so the word probe never sees it → those words would be
+# silently misclassified as default. The AST sees every branch explicitly,
+# so we VALIDATE that a block is purely an if/case tree over `m[0]` whose
+# conditions are only `==` / `include?` / `when`-literals with single-`token`
+# leaves, and COLLECT the `==`/`when` literals (the `include?` sets are still
+# captured at runtime). If anything is unrecognized → nil (→ callback). With
+# the literals + sets forming a COMPLETE candidate set, the real-block
+# tabulation below is sound.
+module ClassifierAST
+  N = RubyVM::AbstractSyntaxTree::Node
+  def self.node?(x); x.is_a?(N); end
+  def self.str?(x); node?(x) && x.type == :STR; end
+
+  # The matched word: `m[0]` (CALL :[] on a `params` var, index 0) OR a bare
+  # alias var `w` where `w = m[0]` was seen (in `aliases`).
+  def self.m0?(n, params, aliases)
+    return false unless node?(n)
+    return true if %i[DVAR LVAR].include?(n.type) && aliases.include?(n.children[0])
+    return false unless n.type == :CALL && n.children[1] == :[]
+    recv, _mid, args = n.children
+    return false unless node?(recv) && %i[DVAR LVAR].include?(recv.type) && params.include?(recv.children[0])
+    a = node?(args) && args.type == :LIST ? args.children.compact : []
+    a.size == 1 && node?(a[0]) && a[0].type == :INTEGER && a[0].children[0] == 0
+  end
+
+  # A recognized condition over the matched word; collects == literals.
+  # `SET.include?(word)` is accepted (set captured at runtime) — SET is any
+  # expression. `word == "lit"` / `"lit" == word` collects the literal.
+  def self.cond?(c, params, aliases, lits)
+    return false unless node?(c)
+    if c.type == :CALL && c.children[1] == :include?
+      _set, _mid, args = c.children
+      a = node?(args) && args.type == :LIST ? args.children.compact : []
+      return a.size == 1 && m0?(a[0], params, aliases)
+    end
+    if c.type == :OPCALL && c.children[1] == :==
+      a, _op, args = c.children
+      b = (node?(args) && args.type == :LIST) ? args.children.compact[0] : nil
+      if m0?(a, params, aliases) && str?(b) then lits << b.children[0]; return true end
+      if m0?(b, params, aliases) && str?(a) then lits << a.children[0]; return true end
+    end
+    false
+  end
+
+  # A leaf must be a single `token X` call (FCALL/VCALL :token).
+  def self.leaf?(n)
+    return true if n.nil?
+    return false unless node?(n)
+    %i[FCALL VCALL].include?(n.type) && n.children[0] == :token
+  end
+
+  def self.branch(n, params, aliases, lits)
+    return true if leaf?(n)
+    return false unless node?(n)
+    case n.type
+    when :IF, :UNLESS
+      cond, a, b = n.children
+      cond?(cond, params, aliases, lits) && branch(a, params, aliases, lits) && branch(b, params, aliases, lits)
+    when :CASE, :CASE2
+      subj = n.children[0]
+      return false unless subj.nil? || m0?(subj, params, aliases)
+      n.children[1..].all? { |w| branch(w, params, aliases, lits) }
+    when :WHEN
+      list, body, nxt = n.children
+      return false unless node?(list) && list.type == :LIST
+      items = list.children.compact # LIST has a trailing nil terminator
+      return false unless items.all? { |e| str?(e) && (lits << e.children[0]) }
+      branch(body, params, aliases, lits) && branch(nxt, params, aliases, lits)
+    else
+      false
+    end
+  end
+
+  # Returns the ==/when literals if `blk` is a validated pure classifier,
+  # else nil. nil also when the AST is unavailable (Prism build w/o parse.y).
+  def self.literals(blk)
+    scope = begin
+      RubyVM::AbstractSyntaxTree.of(blk)
+    rescue StandardError
+      return nil
+    end
+    return nil unless node?(scope) && scope.type == :SCOPE
+    param = (scope.children[0] || []).first
+    return nil if param.nil?
+    params = [param]
+    aliases = []
+    body = scope.children[2]
+    # Unwrap a BLOCK body's leading `w = m[0]` alias assignments.
+    if node?(body) && body.type == :BLOCK
+      stmts = body.children
+      stmts[0..-2].each do |s|
+        return nil unless node?(s) && %i[LASGN DASGN].include?(s.type) && m0?(s.children[1], params, aliases)
+        aliases << s.children[0]
+      end
+      body = stmts.last
+    end
+    lits = []
+    branch(body, params, aliases, lits) ? lits.uniq : nil
+  end
+end
+
 def try_wordlist(blk)
+  # SOUNDNESS gate: only a structurally-validated pure classifier (AST)
+  # may be upgraded — this captures the ==/when literals runtime tracing
+  # can't see, so the candidate set is COMPLETE.
+  ast_lits = ClassifierAST.literals(blk)
+  return nil if ast_lits.nil?
   $wl_sets = []
   $wl_capture = true
   dctx = WLCtx.new
@@ -112,8 +227,8 @@ def try_wordlist(blk)
     $wl_capture = false
   end
   default = dctx.tok
-  return nil if default.nil? || $wl_sets.empty?
-  words = []
+  return nil if default.nil?
+  words = ast_lits.dup
   $wl_sets.each do |s|
     return nil unless s.respond_to?(:each)
     s.each { |w| words << w if w.is_a?(String) }

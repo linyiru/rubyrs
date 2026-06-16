@@ -1,7 +1,9 @@
 # Extract a rouge lexer's state machine into carmine's JSON rule-table
 # format. Run against a rouge checkout/gem:
 #
-#   ruby tools/extract.rb [ROUGE_LIB_DIR] LexerName > python.json
+#   ruby --parser=parse.y tools/extract.rb [ROUGE_LIB_DIR] LexerName > python.json
+# (parse.y: the wordlist upgrade reads each block's AST via .of, which
+#  Ruby 3.4's Prism backend can't provide; without it blocks stay callbacks.)
 #
 # rouge stores each state's definition BLOCK lazily in
 # `state_definitions`; we instance_eval those blocks against a recording
@@ -115,7 +117,100 @@ class WLCtx
   def method_missing(*); raise WLBail; end
   def respond_to_missing?(*); true; end
 end
+# AST classifier validator — closes the runtime hole for `m[0] == "lit"` /
+# `case m[0] when "lit"` branches (the literal owns the comparison, so the
+# word probe never sees it). Validates a block is purely an if/case tree
+# over m[0] (incl. a `w = m[0]` alias) with ==/include?/when conditions and
+# single-`token` leaves, collecting the ==/when literals. Needs the tool run
+# under `--parser=parse.y` (Prism iseqs have no `.of` AST); without it the
+# gate returns nil → blocks stay callbacks (still sound).
+module ClassifierAST
+  N = RubyVM::AbstractSyntaxTree::Node
+  def self.node?(x); x.is_a?(N); end
+  def self.str?(x); node?(x) && x.type == :STR; end
+
+  def self.m0?(n, params, aliases)
+    return false unless node?(n)
+    return true if %i[DVAR LVAR].include?(n.type) && aliases.include?(n.children[0])
+    return false unless n.type == :CALL && n.children[1] == :[]
+    recv, _mid, args = n.children
+    return false unless node?(recv) && %i[DVAR LVAR].include?(recv.type) && params.include?(recv.children[0])
+    a = node?(args) && args.type == :LIST ? args.children.compact : []
+    a.size == 1 && node?(a[0]) && a[0].type == :INTEGER && a[0].children[0] == 0
+  end
+
+  def self.cond?(c, params, aliases, lits)
+    return false unless node?(c)
+    if c.type == :CALL && c.children[1] == :include?
+      _set, _mid, args = c.children
+      a = node?(args) && args.type == :LIST ? args.children.compact : []
+      return a.size == 1 && m0?(a[0], params, aliases)
+    end
+    if c.type == :OPCALL && c.children[1] == :==
+      a, _op, args = c.children
+      b = (node?(args) && args.type == :LIST) ? args.children.compact[0] : nil
+      if m0?(a, params, aliases) && str?(b) then lits << b.children[0]; return true end
+      if m0?(b, params, aliases) && str?(a) then lits << a.children[0]; return true end
+    end
+    false
+  end
+
+  def self.leaf?(n)
+    return true if n.nil?
+    return false unless node?(n)
+    %i[FCALL VCALL].include?(n.type) && n.children[0] == :token
+  end
+
+  def self.branch(n, params, aliases, lits)
+    return true if leaf?(n)
+    return false unless node?(n)
+    case n.type
+    when :IF, :UNLESS
+      cond, a, b = n.children
+      cond?(cond, params, aliases, lits) && branch(a, params, aliases, lits) && branch(b, params, aliases, lits)
+    when :CASE, :CASE2
+      subj = n.children[0]
+      return false unless subj.nil? || m0?(subj, params, aliases)
+      n.children[1..].all? { |w| branch(w, params, aliases, lits) }
+    when :WHEN
+      list, body, nxt = n.children
+      return false unless node?(list) && list.type == :LIST
+      items = list.children.compact
+      return false unless items.all? { |e| str?(e) && (lits << e.children[0]) }
+      branch(body, params, aliases, lits) && branch(nxt, params, aliases, lits)
+    else
+      false
+    end
+  end
+
+  def self.literals(blk)
+    scope = begin
+      RubyVM::AbstractSyntaxTree.of(blk)
+    rescue StandardError
+      return nil
+    end
+    return nil unless node?(scope) && scope.type == :SCOPE
+    param = (scope.children[0] || []).first
+    return nil if param.nil?
+    params = [param]
+    aliases = []
+    body = scope.children[2]
+    if node?(body) && body.type == :BLOCK
+      stmts = body.children
+      stmts[0..-2].each do |s|
+        return nil unless node?(s) && %i[LASGN DASGN].include?(s.type) && m0?(s.children[1], params, aliases)
+        aliases << s.children[0]
+      end
+      body = stmts.last
+    end
+    lits = []
+    branch(body, params, aliases, lits) ? lits.uniq : nil
+  end
+end
+
 def try_wordlist(blk)
+  ast_lits = ClassifierAST.literals(blk)
+  return nil if ast_lits.nil?
   $wl_sets = []
   $wl_capture = true
   dctx = WLCtx.new
@@ -127,8 +222,8 @@ def try_wordlist(blk)
     $wl_capture = false
   end
   default = dctx.tok
-  return nil if default.nil? || $wl_sets.empty?
-  words = []
+  return nil if default.nil?
+  words = ast_lits.dup
   $wl_sets.each do |s|
     return nil unless s.respond_to?(:each)
     s.each { |w| words << w if w.is_a?(String) }
