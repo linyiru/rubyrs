@@ -466,6 +466,49 @@ impl Vm {
     /// extname / open-with-block). Returns `Ok(Some(v))` on a
     /// handled call, `Ok(None)` if the method name isn't in
     /// our subset so dispatch can keep walking.
+    /// Coerce a `File.utime` time argument to `(seconds, microseconds)`.
+    /// Accepts Integer / Float epoch values, a `Time` (read from its
+    /// pure-Ruby `@sec`/`@nsec` ivars), or `nil` (= now). Other types
+    /// raise TypeError, matching CRuby's `no implicit conversion`.
+    fn utime_secs(&self, v: &Value) -> Result<(i64, i64), Trap> {
+        match v {
+            Value::Int(n) => Ok((*n, 0)),
+            Value::Float(f) => Ok((f.trunc() as i64, (f.fract() * 1_000_000.0) as i64)),
+            Value::Nil => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                Ok((now.as_secs() as i64, now.subsec_micros() as i64))
+            }
+            Value::Object(oid) => {
+                // `Time` is pure-Ruby (preamble/time.rb) with `@sec` /
+                // `@nsec` Integer ivars. Resolve them by NAME via the
+                // interner's read-only `resolve` (keeps this `&self` so
+                // it composes with the `path_arg` closure's borrow).
+                if let HeapObj::Instance(inst) = self.heap.get(*oid) {
+                    let mut sec: Option<i64> = None;
+                    let mut nsec: i64 = 0;
+                    for (k, val) in inst.ivars.iter() {
+                        match self.interner.resolve(*k).as_ref() {
+                            "@sec" => if let Value::Int(n) = val { sec = Some(*n); },
+                            "@nsec" => if let Value::Int(n) = val { nsec = *n; },
+                            _ => {}
+                        }
+                    }
+                    if let Some(s) = sec {
+                        return Ok((s, nsec / 1000));
+                    }
+                }
+                Err(self.trap(RubyError::TypeError {
+                    msg: "no implicit conversion to Time".to_string(),
+                }))
+            }
+            other => Err(self.trap(RubyError::TypeError {
+                msg: format!("no implicit conversion of {} into Time", other.type_name()),
+            })),
+        }
+    }
+
     pub(crate) fn file_class_dispatch(&mut self, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
         // Pre-coerce path-like Object arguments (Pathname / Tempfile /
         // anything with `to_path` or `to_str`) to Strings up-front, so
@@ -748,6 +791,42 @@ impl Vm {
             // shared io_error mapping, partial work included (files
             // before the failing one stay deleted — same as CRuby's
             // left-to-right processing).
+            // `File.utime(atime, mtime, *paths)` — set each path's
+            // access + modification times, returning the file count.
+            // Times may be Time / Integer (epoch s) / Float; `nil` means
+            // "now". Surfaced by bridgetown's `StaticFile#write`
+            // (`File.utime(mtimes[path], mtimes[path], dest)`).
+            ("utime", rest) if rest.len() >= 2 => {
+                self.check_filesystem_io_allowed("File.utime", None)?;
+                let atime = self.utime_secs(&rest[0])?;
+                let mtime = self.utime_secs(&rest[1])?;
+                let mut count = 0i64;
+                for p in &rest[2..] {
+                    let path = path_arg(p)?;
+                    self.check_filesystem_io_allowed("File.utime", Some(Path::new(&path)))?;
+                    #[cfg(unix)]
+                    {
+                        let times = [
+                            libc::timeval { tv_sec: atime.0 as libc::time_t, tv_usec: atime.1 as libc::suseconds_t },
+                            libc::timeval { tv_sec: mtime.0 as libc::time_t, tv_usec: mtime.1 as libc::suseconds_t },
+                        ];
+                        let cpath = match std::ffi::CString::new(path.as_bytes()) {
+                            Ok(c) => c,
+                            Err(_) => return Err(self.trap(RubyError::ArgumentError {
+                                msg: "string contains null byte".to_string(),
+                            })),
+                        };
+                        let r = unsafe { libc::utimes(cpath.as_ptr(), times.as_ptr()) };
+                        if r != 0 {
+                            return Err(self.trap(io_error(&std::io::Error::last_os_error(), Some(Path::new(&path)))));
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    { let _ = (atime, mtime); }
+                    count += 1;
+                }
+                Value::Int(count)
+            }
             ("delete" | "unlink", paths) if !paths.is_empty() => {
                 self.check_filesystem_io_allowed("File.delete", None)?;
                 let mut count: i64 = 0;

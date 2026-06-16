@@ -1393,6 +1393,18 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // by serbea's `String#html_safe` on the Bridgetown render path.
 #[test] fn string_instance_variables() { run_diff("string_instance_variables"); }
 
+// Ruby 3.2+ Struct keyword init (`S.new(a: 1, b: 2)` on a default
+// Struct). Surfaced by bridgetown's front-matter `Result.new(content:,
+// front_matter:, line_count:)`.
+#[test] fn struct_keyword_init() { run_diff("struct_keyword_init"); }
+
+// `Pathname#each_filename`. Surfaced by bridgetown's resource write path.
+#[test] fn pathname_each_filename() { run_diff("pathname_each_filename"); }
+
+// `File.utime(atime, mtime, *paths)` (Integer/Time args). Surfaced by
+// bridgetown's `StaticFile#write`.
+#[test] fn file_utime() { run_diff("file_utime"); }
+
 // A lexically-scoped autoloaded constant wins over a same-named toplevel
 // constant. Surfaced by bridgetown's `register YAML` inside
 // `module …FrontMatter::Loaders` (binds `Loaders::YAML`, not `::YAML`).

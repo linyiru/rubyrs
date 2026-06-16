@@ -88,14 +88,26 @@ class Struct
       while k && (kw = k.instance_variable_get(:@__struct_kw)).nil?
         k = k.superclass
       end
+      mem = members
       if kw
         # `keyword_init: true` — `S.new(a: 1, b: 2)` passes the kwargs
         # as a trailing Hash (rubyrs routes them positionally to a
         # `*args` callee). Read each member out of it; absent → nil.
         h = args.first.is_a?(Hash) ? args.first : {}
-        members.each { |attr| instance_variable_set("@#{attr}".to_sym, h[attr]) }
+        mem.each { |attr| instance_variable_set("@#{attr}".to_sym, h[attr]) }
+      elsif args.size == 1 && args.first.is_a?(Hash) && !args.first.empty? &&
+            args.first.keys.all? { |k| mem.include?(k) }
+        # Ruby 3.2+: a DEFAULT (non-keyword_init) Struct ALSO accepts
+        # keyword init — `S.new(a: 1, b: 2)`. The kwargs arrive as a
+        # trailing Hash whose keys are all members; an explicit hash
+        # value for member 0 (`S.new({x: 1})` where x isn't a member)
+        # stays positional. Same detection as `Data` below. Surfaced by
+        # bridgetown's front-matter `Result.new(content:, front_matter:,
+        # line_count:)` (was binding the whole kwargs hash to member 0).
+        h = args.first
+        mem.each { |attr| instance_variable_set("@#{attr}".to_sym, h[attr]) }
       else
-        members.each_with_index do |attr, i|
+        mem.each_with_index do |attr, i|
           instance_variable_set("@#{attr}".to_sym, args[i])
         end
       end

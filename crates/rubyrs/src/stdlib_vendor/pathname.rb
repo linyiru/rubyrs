@@ -102,6 +102,17 @@ class Pathname
     Pathname.new(File.dirname(@path))
   end
 
+  # `Pathname#each_filename` — yield each path COMPONENT as a String
+  # (drops the leading `/` and collapses `//`; `"/usr/bin"` → "usr",
+  # "bin"). Returns an Enumerator without a block. Surfaced by
+  # bridgetown-core on the resource write path.
+  def each_filename(&block)
+    comps = @path.split("/").reject(&:empty?)
+    return comps.each unless block_given?
+    comps.each(&block)
+    self
+  end
+
   # `Pathname#expand_path(base = nil)` — absolute-path expansion
   # (delegates to `File.expand_path`, optional base dir). Surfaced by
   # bridgetown-core/model/repo_origin.rb#original_path.
