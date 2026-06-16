@@ -94,14 +94,89 @@ pub(crate) fn parse(src: &str, opts: &Options) -> Result<Vec<Block>, Error> {
     parse_blocks(lines, opts)
 }
 
+/// ASCII whitespace per `char::is_whitespace` (note: includes VT `0x0B`,
+/// which `u8::is_ascii_whitespace` omits).
+#[inline]
+fn ascii_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | 0x0B | 0x0C | b'\r')
+}
+
+/// `line.trim().is_empty()` with an ASCII fast path — most lines decide on
+/// the first byte (a prose letter ⇒ not blank). Falls back to the precise
+/// Unicode-aware check only when a non-ASCII byte is reached.
+#[inline]
+fn is_blank(line: &str) -> bool {
+    for (i, &b) in line.as_bytes().iter().enumerate() {
+        if b >= 0x80 {
+            return line[i..].trim_start().is_empty();
+        }
+        if !ascii_ws(b) {
+            return false;
+        }
+    }
+    true
+}
+
+/// `str::trim_start` with an ASCII fast path (non-ASCII boundary ⇒ defer
+/// to the Unicode-aware trim, which may strip more, e.g. NBSP).
+#[inline]
+fn trim_start_ws(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] >= 0x80 {
+            return s[i..].trim_start();
+        }
+        if !ascii_ws(b[i]) {
+            break;
+        }
+        i += 1;
+    }
+    &s[i..]
+}
+
+/// `str::trim` (both ends) with an ASCII fast path; defers to the precise
+/// Unicode trim when a trim boundary lands on a non-ASCII byte.
+#[inline]
+fn trim_ws(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut start = 0;
+    while start < b.len() && b[start] < 0x80 && ascii_ws(b[start]) {
+        start += 1;
+    }
+    let mut end = b.len();
+    while end > start && b[end - 1] < 0x80 && ascii_ws(b[end - 1]) {
+        end -= 1;
+    }
+    if (start < b.len() && b[start] >= 0x80) || (end > start && b[end - 1] >= 0x80) {
+        return s.trim(); // non-ASCII at a boundary: be precise
+    }
+    &s[start..end]
+}
+
+/// `str::trim_end` with an ASCII fast path (non-ASCII boundary ⇒ defer to
+/// the Unicode-aware trim, which may strip more).
+#[inline]
+fn trim_end_ws(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut end = b.len();
+    while end > 0 && b[end - 1] < 0x80 && ascii_ws(b[end - 1]) {
+        end -= 1;
+    }
+    if end > 0 && b[end - 1] >= 0x80 {
+        return s.trim_end();
+    }
+    &s[..end]
+}
+
 fn parse_blocks(lines: &[&str], opts: &Options) -> Result<Vec<Block>, Error> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
-        if line.trim().is_empty() {
+        if is_blank(line) {
             // Collapse a blank run into one Blank between blocks.
-            while i < lines.len() && lines[i].trim().is_empty() {
+            while i < lines.len() && is_blank(lines[i]) {
                 i += 1;
             }
             out.push(Block::Blank);
@@ -122,8 +197,8 @@ fn parse_blocks(lines: &[&str], opts: &Options) -> Result<Vec<Block>, Error> {
                 && let Some(text) = rest.strip_prefix(' ')
             {
                 // kramdown strips optional trailing hashes.
-                let text = text.trim_end();
-                let text = text.trim_end_matches('#').trim_end();
+                let text = trim_end_ws(text);
+                let text = trim_end_ws(text.trim_end_matches('#'));
                 let spans = parse_spans(text)?;
                 let mut span_text = String::new();
                 spans_raw_text(&spans, &mut span_text);
@@ -176,7 +251,7 @@ fn parse_blocks(lines: &[&str], opts: &Options) -> Result<Vec<Block>, Error> {
             let mut closed = false;
             while i < lines.len() {
                 let l = lines[i];
-                if l.trim_end() == fence {
+                if trim_end_ws(l) == fence {
                     closed = true;
                     i += 1;
                     break;
@@ -201,7 +276,7 @@ fn parse_blocks(lines: &[&str], opts: &Options) -> Result<Vec<Block>, Error> {
                 if let Some(rest) = l.strip_prefix('>') {
                     inner.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
                     i += 1;
-                } else if !l.trim().is_empty() && !inner.is_empty() {
+                } else if !is_blank(l) && !inner.is_empty() {
                     // Lazy continuation of the quoted paragraph.
                     inner.push(l.to_string());
                     i += 1;
@@ -257,7 +332,7 @@ fn parse_blocks(lines: &[&str], opts: &Options) -> Result<Vec<Block>, Error> {
         let mut first = true;
         while i < lines.len() {
             let l = lines[i];
-            if l.trim().is_empty() {
+            if is_blank(l) {
                 break;
             }
             if opts.gfm
@@ -285,7 +360,7 @@ fn parse_blocks(lines: &[&str], opts: &Options) -> Result<Vec<Block>, Error> {
             // a heading — out of subset.
             if i + 1 < lines.len() {
                 let next = lines[i + 1];
-                let t = next.trim_end().as_bytes();
+                let t = trim_end_ws(next).as_bytes();
                 if !t.is_empty() && (t.iter().all(|&b| b == b'=') || t.iter().all(|&b| b == b'-')) {
                     return Err(declined("setext-heading"));
                 }
@@ -314,7 +389,7 @@ fn decline_block_scan(line: &str) -> Result<(), Error> {
     if line.as_bytes().starts_with(b"    ") || line.as_bytes().first() == Some(&b'\t') {
         return Err(declined("indented-code"));
     }
-    let t = line.trim_start();
+    let t = trim_start_ws(line);
     // kramdown starts a table on lines containing an unescaped `|`.
     // Scan bytes (no UTF-8 decode): `\` and `|` are ASCII and a
     // multibyte char's bytes are all >= 0x80, so each just resets `esc`
@@ -409,7 +484,7 @@ fn is_hr(line: &str) -> bool {
     // tabs — so the first non-space char fixes the only possible marker.
     // For prose (first char a letter) this bails on byte one, instead of
     // the old three full `chars()` scans (one per candidate marker).
-    let t = line.trim().as_bytes();
+    let t = trim_ws(line).as_bytes();
     let marker = match t.first() {
         Some(&c @ (b'-' | b'*' | b'_')) => c,
         _ => return false,
@@ -443,11 +518,11 @@ fn parse_list_items(
     let mut items: Vec<ListItem> = Vec::new();
     while *i < lines.len() {
         let l = lines[*i];
-        if l.trim().is_empty() {
+        if is_blank(l) {
             // Blank: list ends here if followed by a non-item; a
             // following same-level item would make the list LOOSE.
             let mut j = *i;
-            while j < lines.len() && lines[j].trim().is_empty() {
+            while j < lines.len() && is_blank(lines[j]) {
                 j += 1;
             }
             if j < lines.len() && list_marker(lines[j]) == Some(ordered) {
@@ -462,7 +537,7 @@ fn parse_list_items(
             // subset, same as at the top level.
             decline_block_scan(content)?;
             // Trailing whitespace carries hard-break semantics.
-            if content.trim_end() != content {
+            if trim_end_ws(content) != content {
                 return Err(declined("list-trailing-ws"));
             }
             items.push(ListItem { spans: parse_spans(content)?, child: None });
@@ -472,7 +547,7 @@ fn parse_list_items(
             // parents decline (content column != 2). Tabs decline.
             let mut tail: Vec<&str> = Vec::new();
             while *i < lines.len()
-                && !lines[*i].trim().is_empty()
+                && !is_blank(lines[*i])
                 && (lines[*i].starts_with("  ") || lines[*i].starts_with('\t'))
             {
                 if lines[*i].starts_with('\t') {
@@ -493,7 +568,7 @@ fn parse_list_items(
                 while j < tail.len() && list_marker(tail[j]).is_none() {
                     let cont = tail[j];
                     decline_block_scan(cont)?;
-                    if cont.trim_end() != cont || cont.starts_with(' ') || cont.starts_with('\t') {
+                    if trim_end_ws(cont) != cont || cont.starts_with(' ') || cont.starts_with('\t') {
                         return Err(declined("list-continuation-ws"));
                     }
                     extra.push(Span::Text("\n".to_string()));
@@ -533,7 +608,7 @@ fn parse_list_items(
         } else {
             // Lazy continuation line appended to the last item.
             decline_block_scan(l)?;
-            if l.trim_end() != l {
+            if trim_end_ws(l) != l {
                 return Err(declined("list-continuation-ws"));
             }
             match items.last_mut() {
