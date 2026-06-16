@@ -570,6 +570,31 @@ module IrCompiler
     end
     nil
   end
+
+  # `push :sym` states in a `start { … }` proc, collected via AST. Robust to
+  # other code in the block (e.g. `@html = HTML.new(options); push :expr_start`
+  # — jsx): a trace-based capture Bails on `HTML.new` and LOSES the later
+  # push, so carmine would start in the wrong state. AST sees the push
+  # regardless. (Only literal `push :sym`; conditional/dynamic pushes ignored.)
+  def self.start_pushes(pr)
+    scope = begin
+      RubyVM::AbstractSyntaxTree.of(pr)
+    rescue StandardError
+      return []
+    end
+    return [] unless node?(scope) && scope.type == :SCOPE
+    out = []
+    collect = lambda do |n|
+      return unless node?(n)
+      if n.type == :FCALL && n.children[0] == :push
+        a = arglist(n.children[1])
+        out << a[0].children[0].to_s if a.size == 1 && sym?(a[0])
+      end
+      n.children.each { |c| collect.call(c) }
+    end
+    collect.call(scope.children[2])
+    out
+  end
 end
 
 def try_ir(blk)
@@ -766,19 +791,10 @@ lexer.state_definitions.each do |name, dsl|
   states[name] = rec.rules
 end
 
-# `start { push :foo }` initial-stack states (above :root). Trace each
-# start proc (no args, run on the lexer at reset) for its pushes; ivar
-# inits are no-ops here. carmine applies these in `Lexer::begin`.
-start_push = []
-(lexer.start_procs || []).each do |pr|
-  ctx = TraceCtx.new
-  begin
-    ctx.instance_exec(&pr)
-    ctx.actions.each { |a| start_push << a[1] if a[0] == "push" }
-  rescue StandardError
-    # keep pushes captured before the Bail
-  end
-end
+# `start { push :foo }` initial-stack states (above :root), collected via AST
+# (robust to ivar inits / lexer construction before the push). carmine
+# applies these in `Lexer::begin`.
+start_push = (lexer.start_procs || []).flat_map { |pr| IrCompiler.start_pushes(pr) }
 
 shortnames = {}
 Rouge::Token.each_token { |t| shortnames[t.qualname] = t.shortname }
