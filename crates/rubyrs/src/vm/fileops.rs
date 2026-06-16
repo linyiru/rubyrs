@@ -1021,6 +1021,17 @@ impl Vm {
                 }
                 Value::Int(0)
             }
+            // `File.path(obj)` — the path-string representation of a
+            // path-like object. Path-like Objects (Pathname/Tempfile/
+            // `to_path`) are already coerced to a String by the
+            // pre-coercion above, so this just returns it (TypeError for
+            // a non-path arg, like CRuby — no filesystem touch).
+            // Surfaced by the vendored fileutils' `fu_list` (`rm_f`)
+            // during bridgetown's `LoadersManager#initialize`.
+            ("path", [p]) => {
+                let path = path_arg(p)?;
+                Value::new_str(path)
+            }
             ("basename", [p]) => {
                 let path = path_arg(p)?;
                 Value::new_str(ruby_basename(&path).to_string())

@@ -1348,3 +1348,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `Set#filter_map`. Surfaced by bridgetown-core's
 // `configure_component_paths`.
 #[test] fn set_filter_map() { run_diff("set_filter_map"); }
+
+// `File.path(obj)` — path-string of a path-like object. Surfaced by the
+// vendored fileutils' `rm_f` during Bridgetown's LoadersManager.
+#[test] fn file_path_classmethod() { run_diff("file_path_classmethod"); }
