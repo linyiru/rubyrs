@@ -828,6 +828,7 @@ fn compile_ruby_regex(src: &str, opts: u64) -> Result<CRegex, Error> {
     let fixed = strip_leading_carets(src, extended).replace("{,", "{0,");
     let fixed = rewrite_charclass_octal_escapes(&fixed);
     let fixed = rewrite_ascii_shorthand_classes(&fixed);
+    let fixed = rewrite_inline_flags(&fixed);
     let pat = format!("(?{flags}){fixed}");
     // Linear first; syntax the meta engine rejects (lookaround,
     // backrefs, atomic groups) falls to the fancy backtracker.
@@ -869,6 +870,7 @@ fn compile_cond_regex(src: &str, opts: u64) -> Result<CRegex, Error> {
     let fixed = src.replace("{,", "{0,");
     let fixed = rewrite_charclass_octal_escapes(&fixed);
     let fixed = rewrite_ascii_shorthand_classes(&fixed);
+    let fixed = rewrite_inline_flags(&fixed);
     let pat = format!("(?{flags}){fixed}");
     if let Ok(re) = regex_automata::meta::Regex::new(&pat) {
         return Ok(CRegex::Linear(re));
@@ -877,6 +879,72 @@ fn compile_cond_regex(src: &str, opts: u64) -> Result<CRegex, Error> {
         pattern: src.to_string(),
         message: e.to_string(),
     })
+}
+
+/// Translate Ruby inline regex flags to Rust semantics. Ruby `m` is DOTALL
+/// (`.` matches newline); in Rust DOTALL is `s` while `m` means multiline
+/// `^`/`$`. So in every inline flag group — `(?flags)`, `(?flags:…)`,
+/// `(?on-off:…)` — map `m` → `s`. (Ruby `^`/`$` are ALWAYS line-anchored,
+/// which `compile_*` already forces on via top-level Rust `m`; Ruby inline
+/// flags never touch that, so leaving Rust `m` alone is correct, and a Ruby
+/// `(?-m…)` correctly maps to `(?-s…)` — turning off DOTALL, NOT line
+/// anchoring.) Without this, `(?m-ix:/\*.*\*/)` block-comments compile with
+/// `.` NOT crossing newlines and silently mismatch (go/c/… divergences).
+fn rewrite_inline_flags(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    let mut in_class = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && i + 1 < bytes.len() {
+            let n = utf8_char_len(bytes[i + 1]);
+            out.push('\\');
+            out.push_str(&src[i + 1..i + 1 + n]);
+            i += 1 + n;
+            continue;
+        }
+        if b == b'[' && !in_class {
+            in_class = true;
+            out.push('[');
+            i += 1;
+            continue;
+        }
+        if b == b']' && in_class {
+            in_class = false;
+            out.push(']');
+            i += 1;
+            continue;
+        }
+        // A flag group: `(?` followed by flag letters / `-`, then `:` or `)`.
+        // Lookaround / named / comment groups start with `=!<:#'` and so fail
+        // the all-flag-chars test below, and are copied verbatim.
+        if !in_class && b == b'(' && i + 1 < bytes.len() && bytes[i + 1] == b'?' {
+            let start = i + 2;
+            let mut j = start;
+            while j < bytes.len() && (bytes[j].is_ascii_alphabetic() || bytes[j] == b'-') {
+                j += 1;
+            }
+            if j < bytes.len() && (bytes[j] == b':' || bytes[j] == b')') && j > start {
+                let flags: String = src[start..j]
+                    .chars()
+                    .map(|c| if c == 'm' { 's' } else { c })
+                    .collect();
+                out.push_str("(?");
+                out.push_str(&flags);
+                out.push(bytes[j] as char);
+                i = j + 1;
+                continue;
+            }
+            out.push_str("(?");
+            i += 2;
+            continue;
+        }
+        let n = utf8_char_len(b);
+        out.push_str(&src[i..i + n]);
+        i += n;
+    }
+    out
 }
 
 /// Byte length of the UTF-8 char whose lead byte is `b` (1–4).
