@@ -1085,6 +1085,18 @@ pub(crate) struct Vm {
     /// is the set-once dispatch gate, same as `any_hash_singletons`.
     pub(crate) str_singletons: crate::intern::FxHashMap<usize, (std::rc::Rc<crate::value::RStr>, Rc<Class>)>,
     pub(crate) any_str_singletons: bool,
+    /// Instance variables on String VALUES — CRuby lets you set ivars
+    /// on a String (`str.instance_variable_set(:@x, 1)`); `RStr` has no
+    /// ivar slot, so they live in this side-table keyed by the Rc's
+    /// pointer identity (same shape/leak-tradeoff as `str_singletons`:
+    /// the strong Rc keeps the string alive so a freed-and-reused
+    /// allocation can't alias a stale entry). The values are GC objects,
+    /// so the root gather walks them. `any_str_ivars` is the set-once
+    /// dispatch gate. Motivating case: serbea's `String#html_safe` does
+    /// `dup.tap { _1.instance_variable_set(:@html_safe, true) }`
+    /// (Bridgetown's ERB render path).
+    pub(crate) str_ivars: crate::intern::FxHashMap<usize, (std::rc::Rc<crate::value::RStr>, crate::intern::FxHashMap<crate::intern::SymId, Value>)>,
+    pub(crate) any_str_ivars: bool,
     /// Per-instance eigenclasses for HEAP objects keyed by their
     /// `ObjId.0` — currently `Array` and `Proc`/`Block`, the two
     /// `define_singleton_method` / `def obj.x` targets the String
@@ -1795,6 +1807,8 @@ impl Vm {
             any_hash_singletons: false,
             str_singletons: crate::intern::FxHashMap::default(),
             any_str_singletons: false,
+            str_ivars: crate::intern::FxHashMap::default(),
+            any_str_ivars: false,
             heap_singletons: crate::intern::FxHashMap::default(),
             any_heap_singletons: false,
             binding_locals: crate::intern::FxHashMap::default(),

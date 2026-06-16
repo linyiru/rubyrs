@@ -1389,6 +1389,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // an eager build. Locks in the lazy-fancy compilation path.
 #[test] fn regex_large_lookaround_lazy() { run_diff("regex_large_lookaround_lazy"); }
 
+// Instance variables on a String value (side-table storage). Surfaced
+// by serbea's `String#html_safe` on the Bridgetown render path.
+#[test] fn string_instance_variables() { run_diff("string_instance_variables"); }
+
 // A lexically-scoped autoloaded constant wins over a same-named toplevel
 // constant. Surfaced by bridgetown's `register YAML` inside
 // `module …FrontMatter::Loaders` (binds `Loaders::YAML`, not `::YAML`).

@@ -9989,6 +9989,10 @@ impl Vm {
                     }
                 }
                 Value::Class(cls) => cls.ivars.borrow().keys().copied().collect(),
+                Value::Str(s) => {
+                    let key = std::rc::Rc::as_ptr(s) as usize;
+                    self.str_ivars.get(&key).map_or_else(Vec::new, |(_, m)| m.keys().copied().collect())
+                }
                 _ => Vec::new(),
             };
             if !ivar_ids.is_empty() {
@@ -10103,6 +10107,16 @@ impl Vm {
                 Value::Class(cls) => {
                     cls.ivars.borrow().get(&ivar_id).cloned().unwrap_or(Value::Nil)
                 }
+                // Ivars on a String VALUE live in the `str_ivars`
+                // side-table (RStr has no ivar slot). Unset → nil.
+                Value::Str(s) => {
+                    let key = std::rc::Rc::as_ptr(s) as usize;
+                    self.str_ivars
+                        .get(&key)
+                        .and_then(|(_, m)| m.get(&ivar_id))
+                        .cloned()
+                        .unwrap_or(Value::Nil)
+                }
                 _ => Value::Nil,
             };
             self.stack.push(v);
@@ -10154,6 +10168,31 @@ impl Vm {
                     self.stack.push(value);
                     return Ok(());
                 }
+                // Ivars on a String VALUE → `str_ivars` side-table. A
+                // FROZEN string still raises FrozenError (CRuby); an
+                // unfrozen one stores in the side-table keyed by Rc
+                // identity (the strong Rc keeps it alive — same leak
+                // tradeoff as str_singletons). serbea's `String#html_safe`
+                // (`dup.tap { _1.instance_variable_set(:@html_safe, true) }`)
+                // drives this on the Bridgetown render path.
+                Value::Str(s) => {
+                    if s.frozen.get() {
+                        let inspected = recv.to_inspect(&self.heap, &self.interner);
+                        return Err(self.trap(RubyError::FrozenError {
+                            msg: format!("can't modify frozen String: {}", inspected),
+                        }));
+                    }
+                    let key = std::rc::Rc::as_ptr(s) as usize;
+                    let s_keepalive = s.clone();
+                    self.str_ivars
+                        .entry(key)
+                        .or_insert_with(|| (s_keepalive, crate::intern::FxHashMap::default()))
+                        .1
+                        .insert(ivar_id, value.clone());
+                    self.any_str_ivars = true;
+                    self.stack.push(value);
+                    return Ok(());
+                }
                 _ => {
                     let cls = crate::vm::numeric::class_name_for_error(&recv);
                     let inspected = recv.to_inspect(&self.heap, &self.interner);
@@ -10183,6 +10222,10 @@ impl Vm {
                     _ => None,
                 },
                 Value::Class(cls) => cls.ivars.borrow_mut().remove(&ivar_id),
+                Value::Str(s) => {
+                    let key = std::rc::Rc::as_ptr(s) as usize;
+                    self.str_ivars.get_mut(&key).and_then(|(_, m)| m.remove(&ivar_id))
+                }
                 _ => None,
             };
             match removed {
@@ -10208,6 +10251,10 @@ impl Vm {
                     _ => false,
                 },
                 Value::Class(cls) => cls.ivars.borrow().contains_key(&ivar_id),
+                Value::Str(s) => {
+                    let key = std::rc::Rc::as_ptr(s) as usize;
+                    self.str_ivars.get(&key).is_some_and(|(_, m)| m.contains_key(&ivar_id))
+                }
                 _ => false,
             };
             self.stack.push(Value::Bool(defined));

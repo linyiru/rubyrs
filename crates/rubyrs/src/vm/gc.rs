@@ -676,6 +676,13 @@ impl Vm {
         for (_, sc) in self.str_singletons.values() {
             roots.push(crate::value::Value::Class(sc.clone()));
         }
+        // Instance variables set on String values — the side-table is
+        // the only thing rooting these values.
+        for (_, ivars) in self.str_ivars.values() {
+            for v in ivars.values() {
+                roots.push(v.clone());
+            }
+        }
         // Array/Proc per-instance eigenclasses: root both the
         // eigenclass (its methods capture closures) AND the keyed
         // object itself — the side-table holds the Value precisely so
