@@ -44,12 +44,40 @@ pub(crate) enum IrExpr {
     GroupIn(usize, Vec<String>),
 }
 
+/// Case fold applied to a captured group before comparison, mirroring
+/// rouge's `m[i].downcase` / `m[i].upcase` in classifier conditions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Fold {
+    Lower,
+    Upper,
+}
+
+impl Fold {
+    fn apply(self, s: &str) -> String {
+        match self {
+            Fold::Lower => s.to_lowercase(),
+            Fold::Upper => s.to_uppercase(),
+        }
+    }
+
+    fn parse(s: &str) -> Option<Fold> {
+        match s {
+            "down" => Some(Fold::Lower),
+            "up" => Some(Fold::Upper),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum IrCond {
     IvarTruthy(String),
     InState(u32),
     GroupEq(usize, String),
     GroupIn(usize, Vec<String>),
+    /// `SET.include?(m[i].downcase)` — fold group i, then exact-compare.
+    GroupEqFold(usize, Fold, String),
+    GroupInFold(usize, Fold, Vec<String>),
     Not(Box<IrCond>),
 }
 
@@ -257,6 +285,25 @@ fn parse_cond(v: &J, it: &mut dyn IrInterner) -> Result<IrCond, Error> {
             t.get(1).and_then(J::as_u64).ok_or_else(|| bad("gin idx"))? as usize,
             parse_str_list(t.get(2))?,
         ),
+        "geqf" => IrCond::GroupEqFold(
+            t.get(1).and_then(J::as_u64).ok_or_else(|| bad("geqf idx"))? as usize,
+            t.get(2)
+                .and_then(J::as_str)
+                .and_then(Fold::parse)
+                .ok_or_else(|| bad("geqf fold"))?,
+            t.get(3)
+                .and_then(J::as_str)
+                .ok_or_else(|| bad("geqf lit"))?
+                .to_string(),
+        ),
+        "ginf" => IrCond::GroupInFold(
+            t.get(1).and_then(J::as_u64).ok_or_else(|| bad("ginf idx"))? as usize,
+            t.get(2)
+                .and_then(J::as_str)
+                .and_then(Fold::parse)
+                .ok_or_else(|| bad("ginf fold"))?,
+            parse_str_list(t.get(3))?,
+        ),
         "not" => IrCond::Not(Box::new(parse_cond(
             t.get(1).ok_or_else(|| bad("not arg"))?,
             it,
@@ -344,6 +391,12 @@ pub(crate) fn eval_cond(
         }
         IrCond::GroupIn(i, lits) => {
             matches!(groups.get(*i), Some(Some(g)) if lits.iter().any(|l| l == g))
+        }
+        IrCond::GroupEqFold(i, fold, lit) => {
+            matches!(groups.get(*i), Some(Some(g)) if &fold.apply(g) == lit)
+        }
+        IrCond::GroupInFold(i, fold, lits) => {
+            matches!(groups.get(*i), Some(Some(g)) if { let f = fold.apply(g); lits.iter().any(|l| *l == f) })
         }
         IrCond::Not(inner) => !eval_cond(inner, groups, ivars, current_state),
     }

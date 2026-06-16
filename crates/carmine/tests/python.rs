@@ -156,6 +156,42 @@ fn unmatchable_input_in_callback_state_declines() {
     }
 }
 
+/// Case-fold classifier condition — `SET.include?(m[0].upcase)` folds the
+/// captured group before membership, so a case-insensitive keyword set
+/// (SQL/COBOL-style) classifies regardless of the source's case.
+#[test]
+fn ir_case_fold_condition() {
+    let json = r##"{
+      "lexer": "cifold",
+      "states": {"root": [
+        {"kind": "ir", "re": "[a-zA-Z]+", "opts": 0, "ops": [
+          ["if", ["ginf", 0, "up", ["SELECT", "FROM"]],
+            [["token", "Keyword"]], [["token", "Name"]]]
+        ]},
+        {"kind": "tok", "re": "\\s+", "opts": 0, "tok": "Text", "next": null}
+      ]},
+      "shortnames": {"Keyword": "k", "Name": "n", "Text": ""}
+    }"##;
+    let table = LexerTable::from_json(json).expect("ci-fold table compiles");
+    let mut lexer = Lexer::new(&table);
+    let toks = lexer.lex("select Foo", &mut NoCallbacks).expect("lex");
+    let names: Vec<&str> = table.token_names().collect();
+    let rendered: Vec<(String, String)> = toks
+        .iter()
+        .map(|(t, v)| (names[t.0 as usize].to_string(), v.clone()))
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![
+            // "select".upcase == "SELECT" ∈ set → Keyword
+            ("Keyword".to_string(), "select".to_string()),
+            ("Text".to_string(), " ".to_string()),
+            // "Foo".upcase == "FOO" ∉ set → Name
+            ("Name".to_string(), "Foo".to_string()),
+        ]
+    );
+}
+
 /// Conditional Action IR — a hand-written table exercising the op/
 /// expr/cond vocabulary end to end (Track C-1 engine side).
 #[test]

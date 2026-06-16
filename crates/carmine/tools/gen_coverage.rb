@@ -268,15 +268,17 @@ module IrCompiler
       recv, _mid, args = n.children
       lits = string_set(recv); return nil if lits.nil?
       a = arglist(args); return nil unless a.size == 1
-      g = group_index(a[0], mvar); return nil if g.nil?
-      return ["gin", g, lits]
+      gr = group_ref(a[0], mvar); return nil if gr.nil?
+      g, fold = gr
+      return fold ? ["ginf", g, fold, lits] : ["gin", g, lits]
     end
     if n.type == :OPCALL && n.children[1] == :==
       recv, _op, args = n.children
-      g = group_index(recv, mvar); return nil if g.nil?
+      gr = group_ref(recv, mvar); return nil if gr.nil?
+      g, fold = gr
       a = arglist(args)
       return nil unless a.size == 1 && node?(a[0]) && a[0].type == :STR
-      return ["geq", g, a[0].children[0]]
+      return fold ? ["geqf", g, fold, a[0].children[0]] : ["geq", g, a[0].children[0]]
     end
     if n.type == :OPCALL && n.children[1] == :!
       inner = cond(n.children[0], mvar)
@@ -346,6 +348,19 @@ module IrCompiler
 
   def self.sym?(n); node?(n) && n.type == :SYM; end
   def self.int?(n); node?(n) && n.type == :INTEGER; end
+
+  # A group reference for a classifier condition: `[index, fold]` where fold
+  # is "down"/"up" for `m[i].downcase`/`.upcase` (rouge's case-insensitive
+  # classifiers), or nil for a plain `m[i]`/alias. nil if not a group ref.
+  def self.group_ref(n, mvar)
+    if node?(n) && n.type == :CALL && %i[downcase upcase].include?(n.children[1]) &&
+       arglist(n.children[2]).empty?
+      g = group_index(n.children[0], mvar)
+      return g.nil? ? nil : [g, n.children[1] == :downcase ? "down" : "up"]
+    end
+    g = group_index(n, mvar)
+    g.nil? ? nil : [g, nil]
+  end
 
   # `m[i]` (or a bare alias var bound to `m[i]`) → capture index i (≥ 0).
   def self.group_index(n, mvar)
