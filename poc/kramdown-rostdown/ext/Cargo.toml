@@ -21,4 +21,14 @@ crate-type = ["cdylib"]
 [dependencies]
 # rostdown is dependency-free; we keep it that way by living in a
 # separate crate that the main workspace excludes (see root Cargo.toml).
+#
+# Local (in-monorepo) development uses the path dep below so the gem
+# tracks local rostdown edits with no network round-trip. rostdown now
+# also lives as a standalone repo (https://github.com/momiji-rs/rostdown);
+# to build the gem OUTSIDE the monorepo, swap the path line for the git
+# line:
+#   rostdown = { git = "https://github.com/momiji-rs/rostdown", branch = "master" }
+# (A crates.io `rostdown = "0.1"` dep is NOT yet usable — the `rostdown`
+# name on crates.io is held by an unrelated crate; publishing ours needs
+# that name resolved or a rename first.)
 rostdown = { path = "../../../crates/rostdown" }
