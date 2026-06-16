@@ -254,6 +254,28 @@ class StringScanner
   # the MatchData (so `[]` / `matched` / `pre_match` work) and
   # returns it; otherwise clears the last match and returns nil.
   def match_at_pos(regex)
+    # Native anchored match (no tail copy) when char index == byte index.
+    # `@str[@pos..]` copies O(remaining) chars on EVERY scan/check/skip;
+    # kramdown calls these at nearly every position, so the slice path is
+    # O(n²) over a document. __strscan_match_at runs the regex anchored at
+    # the byte offset @pos in place, sets $~, and returns the matched
+    # length (or nil / false-to-fall-back). See do_strscan_match_at_binary.
+    # Only the Regexp form takes the native anchored path; a non-Regexp
+    # arg falls through to `slice =~ regex` below, which raises the same
+    # TypeError CRuby does (csv probes `scan("x")` and rescues TypeError
+    # to decide STRING_SCANNER_SCAN_ACCEPT_STRING).
+    if @byte_addressable && regex.is_a?(Regexp)
+      r = @str.__strscan_match_at(regex, @pos)
+      unless r == false
+        if r.nil?
+          @last_md = nil
+          return nil
+        end
+        @last_md = $~
+        @match_pos = @pos
+        return @last_md
+      end
+    end
     slice = @str[@pos..] || ""
     if (slice =~ regex) == 0
       @last_md = $~

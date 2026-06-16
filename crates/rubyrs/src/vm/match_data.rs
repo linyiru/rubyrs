@@ -345,4 +345,107 @@ impl Vm {
             }
         }
     }
+
+    /// Anchored sibling of `do_strscan_search_binary` backing
+    /// `StringScanner#scan`/`check`/`skip`/`match?` (the `match_at_pos`
+    /// path). The match must BEGIN exactly at `start` (the scanner's
+    /// `@pos`); a match found further ahead is rejected. The win over
+    /// the Ruby `slice = @str[@pos..]; slice =~ regex` shape is that the
+    /// tail is a zero-copy `&bytes[start..]` view, not a per-call
+    /// O(remaining) copy — that copy is what made kramdown's
+    /// scan-at-every-position loop O(n²). Returns: `false` ⇒ no byte
+    /// engine (scanner falls back to the slice path); `nil` ⇒ no
+    /// anchored match; `Int(len)` ⇒ matched byte/char length (with
+    /// `@byte_addressable` true, byte == char), with `$~` set so the
+    /// caller's `$~[0]` yields the matched substring.
+    pub(crate) fn do_strscan_match_at_binary(
+        &mut self,
+        re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
+        s: &std::rc::Rc<crate::value::RStr>,
+        start: usize,
+    ) -> Result<Value, Trap> {
+        let start = start.min(s.content.borrow().len());
+        // `Bytes`: a linear-engine hit (byte-faithful captures).
+        // `Str`: a fancy-engine hit (the pattern has no byte engine);
+        // valid because `@byte_addressable` ⇒ the view is ASCII, so
+        // byte offset == char offset and the captures are valid UTF-8.
+        enum Outcome {
+            NoEngine,
+            NoMatch,
+            Bytes(Vec<u8>, Vec<Option<(usize, usize)>>, crate::regex_engine::OwnedCaptures),
+            Str(crate::regex_engine::OwnedCaptures),
+        }
+        let outcome = {
+            let bytes = s.content.borrow();
+            // O(1) view, NOT a copy. The anchored engines (`\A(?:…)`)
+            // force the match to begin at the view start, so a miss
+            // fails fast instead of forward-scanning the tail.
+            let sub = &bytes[start..];
+            match re.captures_owned_bytes_anchored(sub) {
+                Some(None) => Outcome::NoMatch,
+                Some(Some(oc)) => {
+                    // m_start is 0 by construction (the `\A` anchor).
+                    let region = sub[oc.m_start..oc.m_end].to_vec();
+                    let base = oc.m_start;
+                    let spans = oc
+                        .group_spans
+                        .iter()
+                        .map(|sp| sp.map(|(a, b)| (a - base, b - base)))
+                        .collect();
+                    Outcome::Bytes(region, spans, oc)
+                }
+                // No linear byte engine (lookaround / backref): try the
+                // anchored FANCY engine over the ASCII view. This is the
+                // path kramdown's block-boundary `check`s take.
+                None => match std::str::from_utf8(sub) {
+                    Err(_) => Outcome::NoEngine,
+                    Ok(sub_str) => match re.captures_owned_str_anchored(sub_str) {
+                        None => Outcome::NoEngine,
+                        Some(None) => Outcome::NoMatch,
+                        Some(Some(oc)) => Outcome::Str(oc),
+                    },
+                },
+            }
+        };
+        self.save_match_scope_on_write();
+        match outcome {
+            Outcome::NoEngine => Ok(Value::Bool(false)),
+            Outcome::NoMatch => {
+                self.last_match = None;
+                Ok(Value::Nil)
+            }
+            Outcome::Bytes(region, group_spans, oc) => {
+                let match_len = region.len();
+                let input_lossy = String::from_utf8_lossy(&region).into_owned();
+                self.last_match = Some(crate::vm::LastMatch {
+                    whole: oc.whole,
+                    caps: oc.groups,
+                    input: input_lossy,
+                    m_start: 0,
+                    m_end: match_len,
+                    named: oc.named,
+                    binary: Some(crate::vm::BinaryCaps {
+                        input: region.into_boxed_slice(),
+                        group_spans,
+                    }),
+                });
+                Ok(Value::Int(match_len as i64))
+            }
+            Outcome::Str(oc) => {
+                // ASCII view ⇒ byte len == char len; the matched span
+                // begins at 0 (`\A`), so `$~`'s region is `oc.whole`.
+                let match_len = oc.whole.len();
+                self.last_match = Some(crate::vm::LastMatch {
+                    whole: oc.whole.clone(),
+                    caps: oc.groups,
+                    input: oc.whole,
+                    m_start: 0,
+                    m_end: match_len,
+                    named: oc.named,
+                    binary: None,
+                });
+                Ok(Value::Int(match_len as i64))
+            }
+        }
+    }
 }

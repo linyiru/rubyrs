@@ -541,6 +541,16 @@ pub(crate) fn string_call(
             ))
         }
         (Value::Str(a), "empty?", []) => Some(Value::Bool(a.borrow().is_empty())),
+        // `String#ascii_only?` — byte-level (Tier 1 strings are
+        // byte-oriented, so the byte scan equals CRuby's encoding-aware
+        // answer for the supported encodings). Uses the cached ASCII
+        // flag (`is_ascii_cached`): O(n) once, O(1) after, invalidated
+        // on any content write. The previous pure-Ruby
+        // `each_byte { ... }` was O(n) per CALL and uncached — kramdown's
+        // `current_line_number` rebuilds a full-string StringScanner per
+        // element (its `refresh_byte_addressable` calls `ascii_only?`),
+        // so an uncached scan turned a document parse O(n²).
+        (Value::Str(a), "ascii_only?", []) => Some(Value::Bool(a.content.is_ascii_cached())),
         (Value::Str(a), "upcase", []) => {
             case_validity_guard(a)?;
             // Registry-tagged strings get real per-encoding case
@@ -2373,6 +2383,19 @@ impl Vm {
                     let re = re.clone();
                     let start = (*pos).max(0) as usize;
                     return Ok(Some(self.do_strscan_search_binary(&re, &s, start)?));
+                }
+                // StringScanner's non-slicing ANCHORED match hook (the
+                // `match_at_pos` path: scan/check/skip/match?). Mirrors
+                // __strscan_search but requires the match to start AT
+                // `byte_pos`; avoids the O(remaining) `@str[@pos..]` copy
+                // that made kramdown's per-position scan loop O(n²).
+                #[cfg(feature = "regex")]
+                if name == "__strscan_match_at"
+                    && let [Value::Regex(re), Value::Int(pos)] = args
+                {
+                    let re = re.clone();
+                    let start = (*pos).max(0) as usize;
+                    return Ok(Some(self.do_strscan_match_at_binary(&re, &s, start)?));
                 }
                 #[cfg(feature = "regex")]
                 if name == "match" && args.len() == 1 {

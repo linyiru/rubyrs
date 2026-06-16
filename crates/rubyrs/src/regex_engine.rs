@@ -119,6 +119,23 @@ pub struct CompiledRegex {
     /// untouched. Motivation: rack Lint's `value.b !~ /[\x80-\xff]/n`
     /// over CGI env values.
     bytes_engine: std::cell::OnceCell<Option<regex::bytes::Regex>>,
+    /// Byte-oriented engine ANCHORED at the haystack start (`\A(?:…)`),
+    /// for `StringScanner#scan`/`check`/`skip`/`match?` — they match
+    /// only AT the current position, never ahead. Without the `\A`
+    /// wrapper a miss-at-pos would forward-scan the whole remaining
+    /// buffer (turning kramdown's per-position `check` loop O(n²));
+    /// the anchor makes a miss fail in O(1). `Some` is the built
+    /// engine; `None` means it couldn't be built (Unicode/fancy
+    /// pattern → caller falls back to the slice path).
+    anchored_bytes_engine: std::cell::OnceCell<Option<regex::bytes::Regex>>,
+    /// Fancy engine anchored at the haystack start (`\A(?:…)`), the
+    /// backtracking counterpart of `anchored_bytes_engine` for patterns
+    /// the linear byte engine can't build (lookaround / backref). Backs
+    /// StringScanner's anchored match for those patterns so a per-
+    /// position `check` neither copies the tail nor forward-scans with
+    /// the slow engine — both of which made kramdown O(n²). `None` ⇒
+    /// couldn't build (caller falls back to the Ruby slice path).
+    anchored_fancy_engine: std::cell::OnceCell<Option<fancy_regex::Regex>>,
     /// The fully-prepared engine pattern (charclass-octal
     /// rewrite + `(?m)` prefix + any inline `(?is)` Ruby-flag
     /// prefix already applied) fed to `regex::Regex::new` at
@@ -180,6 +197,8 @@ pub(crate) fn compile_with_flags(
         Ok(_) => Ok(CompiledRegex {
             engine: std::cell::OnceCell::new(),
             bytes_engine: std::cell::OnceCell::new(),
+            anchored_bytes_engine: std::cell::OnceCell::new(),
+            anchored_fancy_engine: std::cell::OnceCell::new(),
             engine_pattern: prepared.into(),
             ruby_flags,
             source: bare_source.into(),
@@ -208,6 +227,8 @@ pub(crate) fn compile_with_flags(
             Ok(CompiledRegex {
                 engine: std::cell::OnceCell::new(),
                 bytes_engine: std::cell::OnceCell::new(),
+                anchored_bytes_engine: std::cell::OnceCell::new(),
+                anchored_fancy_engine: std::cell::OnceCell::new(),
                 engine_pattern: prepared.into(),
                 ruby_flags,
                 source: bare_source.into(),
@@ -230,13 +251,22 @@ pub(crate) fn compile_with_flags(
                 // subjects fall back to the UTF-8 engine.
                 let bytes_cell = std::cell::OnceCell::new();
                 let _ = bytes_cell.set(None);
+                let anchored_bytes_cell = std::cell::OnceCell::new();
+                let _ = anchored_bytes_cell.set(None);
                 Ok(CompiledRegex {
                     engine: cell,
                     bytes_engine: bytes_cell,
-                    engine_pattern: "".into(),
+                    anchored_bytes_engine: anchored_bytes_cell,
+                    // Keep the prepared pattern (NOT "") so the anchored
+                    // fancy engine can be rebuilt for StringScanner's
+                    // anchored match. Safe: `engine()` is pre-filled here
+                    // so it never reads this; `bytes_engine()` still fails
+                    // to build a byte engine from a fancy pattern → None.
+                    engine_pattern: prepared.into(),
                     ruby_flags,
                     source: bare_source.into(),
                     dup_named: std::cell::OnceCell::new(),
+                    anchored_fancy_engine: std::cell::OnceCell::new(),
                 })
             }
             Err(fancy_err) => {
@@ -821,6 +851,62 @@ impl CompiledRegex {
         Some(self.bytes_engine()?.is_match(haystack))
     }
 
+    /// Byte engine anchored at the haystack start (`\A(?:…)`). Built
+    /// lazily from `engine_pattern`. The `(?:…)` keeps the pattern's
+    /// own group numbering; `\A` forces a match to begin at offset 0
+    /// so a miss returns immediately instead of forward-scanning.
+    fn anchored_bytes_engine(&self) -> Option<&regex::bytes::Regex> {
+        self.anchored_bytes_engine
+            .get_or_init(|| {
+                if self.engine_pattern.is_empty() {
+                    return None;
+                }
+                regex::bytes::RegexBuilder::new(&format!(r"\A(?:{})", self.engine_pattern))
+                    .unicode(false)
+                    .build()
+                    .ok()
+            })
+            .as_ref()
+    }
+
+    /// Anchored byte-level captures at the haystack start — backs
+    /// `StringScanner#scan`/`check`/`skip`/`match?` via
+    /// `do_strscan_match_at_binary`. Outer `Option`: `None` ⇒ no byte
+    /// engine (caller falls back). Inner: `None` ⇒ no match anchored at
+    /// offset 0. Spans are byte offsets (= char offsets for ASCII).
+    pub(crate) fn captures_owned_bytes_anchored(
+        &self,
+        haystack: &[u8],
+    ) -> Option<Option<OwnedCaptures>> {
+        let re = self.anchored_bytes_engine()?;
+        let caps = match re.captures(haystack) {
+            Some(c) => c,
+            None => return Some(None),
+        };
+        let m0 = match caps.get(0) {
+            Some(m) => m,
+            None => return Some(None),
+        };
+        let lossy = |m: regex::bytes::Match<'_>| String::from_utf8_lossy(m.as_bytes()).into_owned();
+        let groups = (1..caps.len()).map(|i| caps.get(i).map(lossy)).collect();
+        let group_spans = (1..caps.len())
+            .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
+            .collect();
+        let named = build_named_captures(
+            re.capture_names(),
+            self.duplicate_named_groups(caps.len()),
+            |i| caps.get(i).map(lossy),
+        );
+        Some(Some(OwnedCaptures {
+            whole: lossy(m0),
+            m_start: m0.start(),
+            m_end: m0.end(),
+            groups,
+            group_spans,
+            named,
+        }))
+    }
+
     /// `=~` / `match` over a BINARY subject — byte-level captures. The
     /// OUTER `Option` distinguishes "no byte engine, fall back"
     /// (`None`) from "byte engine ran" (`Some`); the inner `Option` is
@@ -853,6 +939,60 @@ impl CompiledRegex {
         );
         Some(Some(OwnedCaptures {
             whole: lossy(m0),
+            m_start: m0.start(),
+            m_end: m0.end(),
+            groups,
+            group_spans,
+            named,
+        }))
+    }
+
+    /// Fancy engine anchored at the haystack start (`\A(?:…)`), built
+    /// lazily from `engine_pattern`. Counterpart of
+    /// `anchored_bytes_engine` for lookaround / backref patterns.
+    fn anchored_fancy_engine(&self) -> Option<&fancy_regex::Regex> {
+        self.anchored_fancy_engine
+            .get_or_init(|| {
+                if self.engine_pattern.is_empty() {
+                    return None;
+                }
+                fancy_regex::Regex::new(&format!(r"\A(?:{})", self.engine_pattern)).ok()
+            })
+            .as_ref()
+    }
+
+    /// Anchored str-level captures at the haystack start, via the fancy
+    /// engine — backs `do_strscan_match_at_binary`'s fallback when the
+    /// pattern has no linear byte engine. Outer `Option`: `None` ⇒ no
+    /// fancy engine could be built (caller falls back to the Ruby slice
+    /// path). Inner: `None` ⇒ no anchored match. Spans are byte offsets.
+    pub(crate) fn captures_owned_str_anchored(
+        &self,
+        haystack: &str,
+    ) -> Option<Option<OwnedCaptures>> {
+        let re = self.anchored_fancy_engine()?;
+        let caps = match re.captures(haystack) {
+            Ok(Some(c)) => c,
+            Ok(None) => return Some(None),
+            Err(_) => return Some(None),
+        };
+        let m0 = match caps.get(0) {
+            Some(m) => m,
+            None => return Some(None),
+        };
+        let groups = (1..caps.len())
+            .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+            .collect();
+        let group_spans = (1..caps.len())
+            .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
+            .collect();
+        let named = build_named_captures(
+            re.capture_names(),
+            self.duplicate_named_groups(caps.len()),
+            |i| caps.get(i).map(|m| m.as_str().to_string()),
+        );
+        Some(Some(OwnedCaptures {
+            whole: m0.as_str().to_string(),
             m_start: m0.start(),
             m_end: m0.end(),
             groups,

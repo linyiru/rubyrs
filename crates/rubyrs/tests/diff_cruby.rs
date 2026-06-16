@@ -638,6 +638,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "stdlib")]
 #[test] fn strscan_linear_scaling() { run_diff("strscan_linear_scaling"); }
 #[cfg(feature = "stdlib")]
+#[test] fn strscan_anchored_match() { run_diff("strscan_anchored_match"); }
+#[test] fn string_ascii_only() { run_diff("string_ascii_only"); }
+#[cfg(feature = "stdlib")]
 #[test] fn query_parse_linear_scaling() { run_diff("query_parse_linear_scaling"); }
 #[test] fn multi_assign_constants() { run_diff("multi_assign_constants"); }
 #[test] fn rbconfig_interpreter() { run_diff("rbconfig_interpreter"); }

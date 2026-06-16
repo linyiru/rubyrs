@@ -4,12 +4,11 @@
 # (addressable's URI normalization calls `unicode_normalize` on URL
 # components, which are ASCII in the supported sites).
 class String
-  # Byte-level ASCII check (CRuby's is encoding-aware; Tier 1 strings
-  # are byte-oriented so the byte scan is the same answer for UTF-8).
-  def ascii_only?
-    each_byte { |b| return false if b > 127 }
-    true
-  end
+  # NB: `String#ascii_only?` is a NATIVE primitive (string.rs) backed by
+  # the cached ASCII flag — O(1) after first use. It used to live here as
+  # a pure-Ruby `each_byte` scan, but that was O(n) per call and uncached,
+  # making kramdown's per-element `current_line_number` (which rebuilds a
+  # full-string StringScanner) an O(n²) document parse.
 
   # Unicode normalization (NFC/NFD/NFKC/NFKD). ASCII strings are
   # fixed points of every normalization form, so returning a copy is
