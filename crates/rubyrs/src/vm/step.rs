@@ -1812,6 +1812,33 @@ impl Vm {
                         }
                     }
                 }
+                // Phase 2.5: fire a pending autoload registered at a
+                // NEARER LEXICAL scope (`chain[..lex_split]`) BEFORE the
+                // toplevel fallback. CRuby resolves a lexically-scoped
+                // autoloaded constant (e.g. `Loaders::YAML`) over a
+                // same-named TOPLEVEL one (stdlib `::YAML`). Without
+                // this, `register YAML` inside `module …FrontMatter::
+                // Loaders` bound the stdlib `::YAML` (a registered stub)
+                // instead of firing the `autoload :YAML` loader class —
+                // so the registry held the wrong class and `loader_class
+                // .header?` hit `YAML.header?` (NoMethodError). Wasi has
+                // no `require`, so this compiles out.
+                #[cfg(not(target_os = "wasi"))]
+                if found.is_none() {
+                    for sym in &chain[..lex_split] {
+                        let cand = self.interner.resolve(*sym).to_string();
+                        if self.fire_pending_autoload(&cand)? {
+                            if let Some(c) = self.classes.get(sym).cloned() {
+                                found = Some(Value::Class(c));
+                                break;
+                            }
+                            if let Some(v) = self.constants.get(sym).cloned() {
+                                found = Some(v);
+                                break;
+                            }
+                        }
+                    }
+                }
                 // Phase 3: toplevel / Object (the bare last entry).
                 if found.is_none()
                     && let Some(bare_sym) = chain.last()

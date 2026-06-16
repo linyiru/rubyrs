@@ -1364,3 +1364,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 
 // `Pathname#join`. Surfaced by bridgetown-core/collection.rb#relative_path.
 #[test] fn pathname_join() { run_diff("pathname_join"); }
+
+// A lexically-scoped autoloaded constant wins over a same-named toplevel
+// constant. Surfaced by bridgetown's `register YAML` inside
+// `module …FrontMatter::Loaders` (binds `Loaders::YAML`, not `::YAML`).
+#[test] fn lexical_autoload_over_toplevel() { run_diff("lexical_autoload_over_toplevel"); }
