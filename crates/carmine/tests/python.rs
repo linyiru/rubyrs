@@ -192,6 +192,31 @@ fn ir_case_fold_condition() {
     );
 }
 
+/// x-mode (`/x`) must keep literal whitespace inside a char class — Rust's
+/// verbose mode would strip the space in `[ \t]` (→ tab-only), but Ruby
+/// treats it as a literal member (the diff `^>+[ \t]+` block regression).
+#[test]
+fn x_mode_preserves_class_whitespace() {
+    let json = r##"{
+      "lexer": "xc",
+      "states": {"root": [
+        {"kind": "tok", "re": ">[ \\t]+x", "opts": 2, "tok": "Keyword", "next": null},
+        {"kind": "tok", "re": "[^\\n]", "opts": 0, "tok": "Text", "next": null}
+      ]},
+      "shortnames": {"Keyword": "k", "Text": ""}
+    }"##;
+    let table = LexerTable::from_json(json).expect("x-class table compiles");
+    let mut lexer = Lexer::new(&table);
+    // space-separated `> x` must match the /x rule (not fall to Text).
+    let toks = lexer.lex("> x", &mut NoCallbacks).expect("lex");
+    let names: Vec<&str> = table.token_names().collect();
+    let rendered: Vec<(String, String)> = toks
+        .iter()
+        .map(|(t, v)| (names[t.0 as usize].to_string(), v.clone()))
+        .collect();
+    assert_eq!(rendered, vec![("Keyword".to_string(), "> x".to_string())]);
+}
+
 /// `m[i] =~ /re/` regex-match condition — classifies by an UNANCHORED
 /// pattern search over the group (rouge's `=~` truthiness). The leading
 /// `^`/`\A` must stay meaningful (not stripped like rule anchors).

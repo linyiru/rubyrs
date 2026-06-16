@@ -829,6 +829,11 @@ fn compile_ruby_regex(src: &str, opts: u64) -> Result<CRegex, Error> {
     let fixed = rewrite_charclass_octal_escapes(&fixed);
     let fixed = rewrite_ascii_shorthand_classes(&fixed);
     let fixed = rewrite_inline_flags(&fixed);
+    let fixed = if extended {
+        escape_class_whitespace(&fixed)
+    } else {
+        fixed
+    };
     let pat = format!("(?{flags}){fixed}");
     // Linear first; syntax the meta engine rejects (lookaround,
     // backrefs, atomic groups) falls to the fancy backtracker.
@@ -871,6 +876,11 @@ fn compile_cond_regex(src: &str, opts: u64) -> Result<CRegex, Error> {
     let fixed = rewrite_charclass_octal_escapes(&fixed);
     let fixed = rewrite_ascii_shorthand_classes(&fixed);
     let fixed = rewrite_inline_flags(&fixed);
+    let fixed = if opts & 2 != 0 {
+        escape_class_whitespace(&fixed)
+    } else {
+        fixed
+    };
     let pat = format!("(?{flags}){fixed}");
     if let Ok(re) = regex_automata::meta::Regex::new(&pat) {
         return Ok(CRegex::Linear(re));
@@ -879,6 +889,59 @@ fn compile_cond_regex(src: &str, opts: u64) -> Result<CRegex, Error> {
         pattern: src.to_string(),
         message: e.to_string(),
     })
+}
+
+/// Escape literal whitespace INSIDE char classes for x-mode. Rust's `x`
+/// (verbose) flag ignores insignificant whitespace EVEN inside `[...]`, so
+/// `[ \t]` would collapse to `[\t]` (tab only) and miss spaces — but
+/// Ruby/Onigmo treats whitespace in a class as a literal member. Replacing
+/// each literal whitespace char in a class with an escape (`\x20`, `\t`, …)
+/// preserves it under `x`. (Only called when `x` is set; outside classes,
+/// x-mode whitespace-stripping is intended and untouched.)
+fn escape_class_whitespace(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    let mut in_class = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && i + 1 < bytes.len() {
+            let n = utf8_char_len(bytes[i + 1]);
+            out.push('\\');
+            out.push_str(&src[i + 1..i + 1 + n]);
+            i += 1 + n;
+            continue;
+        }
+        if !in_class && b == b'[' {
+            in_class = true;
+            out.push('[');
+            i += 1;
+            continue;
+        }
+        if in_class && b == b']' {
+            in_class = false;
+            out.push(']');
+            i += 1;
+            continue;
+        }
+        if in_class && b.is_ascii_whitespace() {
+            match b {
+                b' ' => out.push_str("\\x20"),
+                b'\t' => out.push_str("\\t"),
+                b'\n' => out.push_str("\\n"),
+                b'\r' => out.push_str("\\r"),
+                0x0c => out.push_str("\\x0c"),
+                0x0b => out.push_str("\\x0b"),
+                _ => out.push(b as char),
+            }
+            i += 1;
+            continue;
+        }
+        let n = utf8_char_len(b);
+        out.push_str(&src[i..i + n]);
+        i += n;
+    }
+    out
 }
 
 /// Translate Ruby inline regex flags to Rust semantics. Ruby `m` is DOTALL
