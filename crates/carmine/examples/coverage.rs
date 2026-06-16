@@ -33,6 +33,43 @@ fn golden_pairs(v: &J) -> Vec<(String, String)> {
 }
 
 fn main() {
+    // CARMINE_DEBUG_TAG=<tag>: dump carmine's token stream vs rouge's
+    // golden for one lexer, then exit. Triage aid for a DIVERGE entry.
+    if let Ok(tag) = std::env::var("CARMINE_DEBUG_TAG") {
+        let cov = cov_dir();
+        let table =
+            LexerTable::from_json(&fs::read_to_string(format!("{cov}/{tag}.table.json")).unwrap())
+                .expect("table");
+        let demo = fs::read_to_string(format!("{cov}/{tag}.demo")).unwrap();
+        let golden = golden_pairs(
+            &serde_json::from_str::<J>(&fs::read_to_string(format!("{cov}/{tag}.golden.json")).unwrap())
+                .unwrap(),
+        );
+        let mut lexer = Lexer::new(&table);
+        match lexer.lex(&demo, &mut NoCallbacks) {
+            Ok(toks) => {
+                for (i, ((t, v), g)) in toks
+                    .iter()
+                    .map(|(t, v)| (table.token_name(*t).to_string(), v.clone()))
+                    .zip(golden.iter().cloned())
+                    .enumerate()
+                {
+                    let mark = if (t.as_str(), v.as_str()) == (g.0.as_str(), g.1.as_str()) {
+                        " "
+                    } else {
+                        "≠"
+                    };
+                    println!("{mark} {i:3} carmine={t:?} {v:?}\n      rouge  ={:?} {:?}", g.0, g.1);
+                    if mark == "≠" {
+                        break;
+                    }
+                }
+            }
+            Err(e) => println!("carmine declined/errored: {e}"),
+        }
+        return;
+    }
+
     let manifest: J =
         serde_json::from_str(&fs::read_to_string(format!("{}/manifest.json", cov_dir())).unwrap()).unwrap();
 

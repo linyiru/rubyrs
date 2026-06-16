@@ -63,6 +63,22 @@ class TraceCtx
   def respond_to_missing?(*); true; end
 end
 
+# Stand-in for the MatchData `|m|` a rouge rule block receives. ANY access
+# flips `touched` — a block that reads the match is match-dependent (its
+# emitted tokens vary per match), so it MUST be a `callback`, never a
+# static `actions` list traced down one arbitrary branch. Returns benign
+# values so the block runs far enough to reveal the access.
+class MatchProbe
+  def initialize; @touched = false; end
+  def touched?; @touched; end
+  def [](*); @touched = true; ""; end
+  def to_s; @touched = true; ""; end
+  def to_str; @touched = true; ""; end
+  def to_ary; @touched = true; []; end
+  def method_missing(*); @touched = true; self; end
+  def respond_to_missing?(*); true; end
+end
+
 class Recorder
   attr_reader :rules
   def initialize(lexer_name, state_name)
@@ -78,9 +94,14 @@ class Recorder
         return
       end
       ctx = TraceCtx.new
+      probe = MatchProbe.new
       begin
-        ctx.instance_exec(:__stream_stub__, &blk)
-        @rules << { kind: "actions", re: re.source, opts: re.options, actions: ctx.actions }
+        ctx.instance_exec(probe, &blk)
+        if probe.touched?
+          @rules << { kind: "callback", re: re.source, opts: re.options }
+        else
+          @rules << { kind: "actions", re: re.source, opts: re.options, actions: ctx.actions }
+        end
       rescue StandardError
         @rules << { kind: "callback", re: re.source, opts: re.options }
       end
@@ -105,12 +126,27 @@ lexer.state_definitions.each do |name, dsl|
   states[name] = rec.rules
 end
 
+# `start { push :foo }` initial-stack states (above :root). Trace each
+# start proc (no args, run on the lexer at reset) for its pushes; ivar
+# inits are no-ops here. carmine applies these in `Lexer::begin`.
+start_push = []
+(lexer.start_procs || []).each do |pr|
+  ctx = TraceCtx.new
+  begin
+    ctx.instance_exec(&pr)
+    ctx.actions.each { |a| start_push << a[1] if a[0] == "push" }
+  rescue StandardError
+    # keep pushes captured before the Bail
+  end
+end
+
 shortnames = {}
 Rouge::Token.each_token { |t| shortnames[t.qualname] = t.shortname }
 
 puts JSON.pretty_generate(
   lexer: lexer_name,
   rouge_version: Rouge.version,
+  start_push: start_push,
   states: states,
   shortnames: shortnames,
 )

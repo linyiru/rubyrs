@@ -478,6 +478,10 @@ impl<'t> Lexer<'t> {
     pub fn begin(&mut self) {
         self.stack.clear();
         self.stack.push(self.table.root);
+        // rouge's `start { push :foo }` initial-stack states sit above root.
+        for &st in &self.table.start_push {
+            self.stack.push(st);
+        }
         self.pos = 0;
         self.null_steps = 0;
         self.pending = None;

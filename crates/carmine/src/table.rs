@@ -155,6 +155,10 @@ pub struct LexerTable {
     pub(crate) states: Vec<Vec<Rule>>,
     pub(crate) state_names: Vec<String>,
     pub(crate) root: u32,
+    /// States pushed above `:root` at lex start, from rouge's
+    /// `start { push :foo }` blocks (in order). Applied by
+    /// [`crate::Lexer::begin`]; empty for the common root-start lexer.
+    pub(crate) start_push: Vec<u32>,
     pub(crate) token_names: Vec<String>,
     pub(crate) token_shortnames: Vec<String>,
     pub(crate) token_ids: HashMap<String, TokenId>,
@@ -285,6 +289,23 @@ impl Builder {
             .get("root")
             .ok_or_else(|| Error::Table("no \"root\" state".into()))?;
 
+        // `start { push :foo }` initial-stack states (optional; absent on
+        // the common root-start lexer). Resolve names to ids; an unknown
+        // name is a malformed table.
+        let start_push: Vec<u32> = match v.get("start_push").and_then(J::as_array) {
+            Some(arr) => arr
+                .iter()
+                .filter_map(J::as_str)
+                .map(|name| {
+                    self.state_ids
+                        .get(name)
+                        .copied()
+                        .ok_or_else(|| Error::Table(format!("start_push: unknown state {name:?}")))
+                })
+                .collect::<Result<_, _>>()?,
+            None => Vec::new(),
+        };
+
         // Everything interned so far came from the rules (plus the
         // Text/Error pre-registrations) — snapshot it for `rule_emits`.
         let rule_token_ids: Vec<TokenId> =
@@ -306,7 +327,7 @@ impl Builder {
                 // `Text` legitimately has no shortname; anything else
                 // missing would panic in rouge's formatter too — fail
                 // at load instead of mid-render.
-                None if name == "Text" || name == "Error" => {}
+                None if name.is_empty() || name == "Text" || name == "Error" => {}
                 None => {
                     return Err(Error::Table(format!("no shortname for token {name:?}")));
                 }
@@ -317,6 +338,7 @@ impl Builder {
             states,
             state_names: self.state_names,
             root,
+            start_push,
             token_names: self.token_names,
             token_shortnames,
             token_ids: self.token_ids,

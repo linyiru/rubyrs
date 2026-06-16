@@ -30,15 +30,38 @@ class TraceCtx
   def method_missing(*); raise Bail; end
   def respond_to_missing?(*); true; end
 end
+
+# Stand-in for the MatchData `|m|` the rouge block receives. ANY access
+# flips `touched` — a block that reads the match is match-dependent and
+# must be a `callback` (its emitted tokens vary per match), never recorded
+# as static `actions`. Returns benign values so the block runs far enough
+# to reveal the access (the recorded actions are discarded once touched).
+class MatchProbe
+  def initialize; @touched = false; end
+  def touched?; @touched; end
+  def [](*); @touched = true; ""; end
+  def to_s; @touched = true; ""; end
+  def to_str; @touched = true; ""; end
+  def to_ary; @touched = true; []; end
+  def method_missing(*); @touched = true; self; end
+  def respond_to_missing?(*); true; end
+end
+
 class Recorder
   attr_reader :rules
   def initialize; @rules = []; end
   def rule(re, tok = nil, next_state = nil, &blk)
     if blk
       ctx = TraceCtx.new
+      probe = MatchProbe.new
       begin
-        ctx.instance_exec(:__stub__, &blk)
-        @rules << { kind: "actions", re: re.source, opts: re.options, actions: ctx.actions }
+        ctx.instance_exec(probe, &blk)
+        if probe.touched?
+          # Match-dependent (read m / its captures) → emitted tokens vary.
+          @rules << { kind: "callback", re: re.source, opts: re.options }
+        else
+          @rules << { kind: "actions", re: re.source, opts: re.options, actions: ctx.actions }
+        end
       rescue StandardError
         @rules << { kind: "callback", re: re.source, opts: re.options }
       end
@@ -57,9 +80,24 @@ def extract_table(lx)
     rec.instance_eval(&dsl.instance_variable_get(:@defn))
     states[name] = rec.rules
   end
+  # `start { push :foo }` blocks set the initial stack above :root. Trace
+  # each (no-arg, run on the lexer at reset) for its pushes; ivar inits
+  # like `@q = []` are no-ops here (carmine lazily treats ivars as empty).
+  # An uncapturable start (calls beyond push/ivar) Bails → empty (best
+  # effort; surfaces as a divergence in the harness rather than silently).
+  start_push = []
+  (lx.start_procs || []).each do |pr|
+    ctx = TraceCtx.new
+    begin
+      ctx.instance_exec(&pr)
+      ctx.actions.each { |a| start_push << a[1] if a[0] == "push" }
+    rescue StandardError
+      # leave whatever pushes were captured before the Bail
+    end
+  end
   shortnames = {}
   Rouge::Token.each_token { |t| shortnames[t.qualname] = t.shortname }
-  { lexer: lx.name, states: states, shortnames: shortnames }
+  { lexer: lx.name, start_push: start_push, states: states, shortnames: shortnames }
 end
 
 manifest = []
