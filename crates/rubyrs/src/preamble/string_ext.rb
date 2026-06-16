@@ -33,4 +33,14 @@ class String
     raise NotImplementedError,
           "String#unicode_normalized?: non-ASCII input is not supported in the rubyrs subset"
   end
+
+  # `String#encode!` — the in-place variant of `#encode`: transcode (or
+  # set the encoding) and mutate the receiver, returning self. Built on
+  # the native `#encode` + in-place `#replace` so it inherits encode's
+  # transcoding + `undef:`/`replace:` option handling. A frozen receiver
+  # raises FrozenError via `replace`. Surfaced by bridgetown-core's
+  # `ERBView#initialize` (`@buffer.encode!`).
+  def encode!(*args)
+    replace(encode(*args))
+  end
 end
