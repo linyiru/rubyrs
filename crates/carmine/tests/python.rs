@@ -192,6 +192,40 @@ fn ir_case_fold_condition() {
     );
 }
 
+/// `m[i] =~ /re/` regex-match condition — classifies by an UNANCHORED
+/// pattern search over the group (rouge's `=~` truthiness). The leading
+/// `^`/`\A` must stay meaningful (not stripped like rule anchors).
+#[test]
+fn ir_regex_match_condition() {
+    let json = r##"{
+      "lexer": "rxdemo",
+      "states": {"root": [
+        {"kind": "ir", "re": "[$A-Za-z][A-Za-z0-9]*", "opts": 0, "ops": [
+          ["if", ["gmatch", 0, "\\A\\$", 0],
+            [["token", "Name.Variable"]], [["token", "Name"]]]
+        ]},
+        {"kind": "tok", "re": "\\s+", "opts": 0, "tok": "Text", "next": null}
+      ]},
+      "shortnames": {"Name.Variable": "nv", "Name": "n", "Text": ""}
+    }"##;
+    let table = LexerTable::from_json(json).expect("gmatch table compiles");
+    let mut lexer = Lexer::new(&table);
+    let toks = lexer.lex("$x foo", &mut NoCallbacks).expect("gmatch lex");
+    let names: Vec<&str> = table.token_names().collect();
+    let rendered: Vec<(String, String)> = toks
+        .iter()
+        .map(|(t, v)| (names[t.0 as usize].to_string(), v.clone()))
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![
+            ("Name.Variable".to_string(), "$x".to_string()), // starts with $ → \A\$ matches
+            ("Text".to_string(), " ".to_string()),
+            ("Name".to_string(), "foo".to_string()), // no leading $ → Name
+        ]
+    );
+}
+
 /// `recurse` — re-lex a captured substring with the same table from a
 /// fresh :root and splice the tokens in (rouge's `recurse`/`delegate
 /// self.class`). The inner digits re-lex as Number; if they couldn't be

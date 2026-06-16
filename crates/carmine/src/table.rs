@@ -35,12 +35,23 @@ use fancy_regex::Regex;
 /// the meta engine is linear-time AND supports true anchored-at-pos
 /// search, while fancy can only scan-from-pos and post-filter
 /// (`m0.start == pos`), paying a full O(n) scan on every miss.
+#[derive(Debug)]
 pub(crate) enum CRegex {
     Linear(regex_automata::meta::Regex),
     Fancy(Regex),
 }
 
 impl CRegex {
+    /// Unanchored "does this pattern match anywhere in `text`" — rouge's
+    /// `str =~ /re/` truthiness (used by IR `gmatch` conditions). Unlike
+    /// `captures_at`, this is NOT pos-anchored.
+    pub(crate) fn is_match_anywhere(&self, text: &str) -> bool {
+        match self {
+            CRegex::Linear(re) => re.is_match(text),
+            CRegex::Fancy(re) => re.is_match(text).unwrap_or(false),
+        }
+    }
+
     /// Anchored-at-`pos` capture search with full-haystack context
     /// (`^`/`\b` see the real surroundings). Returns group spans;
     /// `out[0]` is the whole match and is guaranteed to start at
@@ -233,6 +244,9 @@ impl crate::ir::IrInterner for Builder {
     }
     fn ir_state(&mut self, name: &str) -> u32 {
         self.state(name)
+    }
+    fn ir_regex(&mut self, src: &str, opts: u64) -> Result<CRegex, Error> {
+        compile_cond_regex(src, opts)
     }
 }
 
@@ -833,6 +847,36 @@ fn compile_ruby_regex(src: &str, opts: u64) -> Result<CRegex, Error> {
             pattern: src.to_string(),
             message: e.to_string(),
         })
+}
+
+/// Compile a regex for an IR `gmatch` CONDITION (`m[i] =~ /re/`). Unlike
+/// `compile_ruby_regex`, this is for an UNANCHORED whole-string search, so
+/// it does NOT strip leading `^` anchors and does NOT `\G`-wrap — stripping
+/// the `^` in `=~ /^\$/` would wrongly match anywhere. The same flag map
+/// (`m` always on, like rouge's line-anchoring `^`/`$`) and compatibility
+/// rewrites apply.
+fn compile_cond_regex(src: &str, opts: u64) -> Result<CRegex, Error> {
+    let mut flags = String::from("m");
+    if opts & 1 != 0 {
+        flags.push('i');
+    }
+    if opts & 2 != 0 {
+        flags.push('x');
+    }
+    if opts & 4 != 0 {
+        flags.push('s');
+    }
+    let fixed = src.replace("{,", "{0,");
+    let fixed = rewrite_charclass_octal_escapes(&fixed);
+    let fixed = rewrite_ascii_shorthand_classes(&fixed);
+    let pat = format!("(?{flags}){fixed}");
+    if let Ok(re) = regex_automata::meta::Regex::new(&pat) {
+        return Ok(CRegex::Linear(re));
+    }
+    Regex::new(&pat).map(CRegex::Fancy).map_err(|e| Error::Regex {
+        pattern: src.to_string(),
+        message: e.to_string(),
+    })
 }
 
 /// Byte length of the UTF-8 char whose lead byte is `b` (1–4).

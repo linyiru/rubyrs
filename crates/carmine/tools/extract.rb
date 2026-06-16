@@ -335,6 +335,17 @@ module IrCompiler
       inner = cond(n.children[0], mvar)
       return inner.nil? ? nil : ["not", inner]
     end
+    # `m[i] =~ /re/` — regex-match condition (unanchored). The regex literal
+    # carries its source + flags; the engine compiles it (cond semantics).
+    if n.type == :CALL && n.children[1] == :=~
+      recv, _mid, args = n.children
+      g = group_index(recv, mvar); return nil if g.nil?
+      a = arglist(args)
+      return nil unless a.size == 1 && node?(a[0]) && a[0].type == :REGX
+      re = a[0].children[0]
+      return nil unless re.is_a?(Regexp)
+      return ["gmatch", g, re.source, re.options]
+    end
     nil
   end
 

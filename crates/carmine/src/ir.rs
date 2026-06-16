@@ -69,7 +69,9 @@ impl Fold {
     }
 }
 
-#[derive(Debug, Clone)]
+// Not `Clone`: `GroupMatch` holds a compiled `CRegex` (not Clone), and no
+// caller clones a cond.
+#[derive(Debug)]
 pub(crate) enum IrCond {
     IvarTruthy(String),
     InState(u32),
@@ -78,6 +80,8 @@ pub(crate) enum IrCond {
     /// `SET.include?(m[i].downcase)` — fold group i, then exact-compare.
     GroupEqFold(usize, Fold, String),
     GroupInFold(usize, Fold, Vec<String>),
+    /// `m[i] =~ /re/` — group i matches the (unanchored) pattern anywhere.
+    GroupMatch(usize, crate::table::CRegex),
     Not(Box<IrCond>),
 }
 
@@ -129,6 +133,8 @@ pub(crate) type Ivars = HashMap<String, IvarVal>;
 pub(crate) trait IrInterner {
     fn ir_tok(&mut self, name: &str) -> TokenId;
     fn ir_state(&mut self, name: &str) -> u32;
+    /// Compile a `gmatch` condition regex (unanchored search semantics).
+    fn ir_regex(&mut self, src: &str, opts: u64) -> Result<crate::table::CRegex, Error>;
 }
 
 pub(crate) fn parse_ops(arr: &[J], it: &mut dyn IrInterner) -> Result<Vec<IrOp>, Error> {
@@ -317,6 +323,12 @@ fn parse_cond(v: &J, it: &mut dyn IrInterner) -> Result<IrCond, Error> {
                 .ok_or_else(|| bad("ginf fold"))?,
             parse_str_list(t.get(3))?,
         ),
+        "gmatch" => {
+            let i = t.get(1).and_then(J::as_u64).ok_or_else(|| bad("gmatch idx"))? as usize;
+            let src = t.get(2).and_then(J::as_str).ok_or_else(|| bad("gmatch src"))?;
+            let opts = t.get(3).and_then(J::as_u64).unwrap_or(0);
+            IrCond::GroupMatch(i, it.ir_regex(src, opts)?)
+        }
         "not" => IrCond::Not(Box::new(parse_cond(
             t.get(1).ok_or_else(|| bad("not arg"))?,
             it,
@@ -410,6 +422,9 @@ pub(crate) fn eval_cond(
         }
         IrCond::GroupInFold(i, fold, lits) => {
             matches!(groups.get(*i), Some(Some(g)) if { let f = fold.apply(g); lits.iter().any(|l| *l == f) })
+        }
+        IrCond::GroupMatch(i, re) => {
+            matches!(groups.get(*i), Some(Some(g)) if re.is_match_anywhere(g))
         }
         IrCond::Not(inner) => !eval_cond(inner, groups, ivars, current_state),
     }
