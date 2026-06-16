@@ -7000,6 +7000,23 @@ impl Vm {
                 self.invoke_method(m, self_val.clone(), args.into_vec())?;
                 return Ok(());
             }
+            // Bare `freeze` on an Object self: `Object#freeze` is a
+            // universal arm in the receiver-form dispatch, not a method-
+            // table entry, so the Object user-method arm above missed
+            // it — a bare `freeze` (implicit self) inside a method body
+            // raised NoMethodError. Mirror the receiver-form arm: flip
+            // the instance's frozen flag and return self. Surfaced by
+            // erubi's `Engine#initialize` calling bare `freeze`.
+            // (Narrowly scoped to `freeze` — a broad bridge of every
+            // bare Object-self call to receiver form regressed many
+            // method_missing / arity / toplevel shapes.)
+            if &*name == "freeze" && args.is_empty()
+                && let Value::Object(id) = &self_val
+            {
+                self.heap.instance(*id).frozen.set(true);
+                self.stack.push(self_val.clone());
+                return Ok(());
+            }
             // Bare calls inside reopened-primitive method bodies —
             // `class Integer; def to_json; to_s; end; end` shape.
             // The Object arm above only fires for `Value::Object`

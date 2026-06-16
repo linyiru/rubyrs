@@ -1372,6 +1372,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `Numeric#nonzero?` (self / nil). Surfaced by signalize's `_dispose`.
 #[test] fn numeric_nonzero() { run_diff("numeric_nonzero"); }
 
+// Bare `freeze` (implicit self) inside a method freezes self. Surfaced
+// by erubi's `Engine#initialize`.
+#[test] fn bare_freeze_self() { run_diff("bare_freeze_self"); }
+
 // A lexically-scoped autoloaded constant wins over a same-named toplevel
 // constant. Surfaced by bridgetown's `register YAML` inside
 // `module …FrontMatter::Loaders` (binds `Loaders::YAML`, not `::YAML`).
