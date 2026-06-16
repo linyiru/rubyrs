@@ -7,9 +7,17 @@ $LP = $LOAD_PATH
 [
   "hanami-router-2.3.1", "mustermann-3.1.1", "mustermann-contrib-3.1.1",
   "rack-3.1.10", "csv-3.3.2",
+  # Real uri gem — mustermann's ast/translator.rb references
+  # `URI::RFC2396_Parser`. Without it on the load path rubyrs falls to
+  # its minimal vendored URI stub, which is incompatible with
+  # mustermann's metaprogrammed `parser`/`Parser` const dance and made
+  # `Mustermann::Rails.parser` resolve to the stub's `URI::RFC2396_Parser`
+  # (→ "undefined method `on'"). CRuby autoloads `uri` implicitly.
+  "uri-1.0.2", "net-protocol-0.2.2",
 ].each { |g| $LP.unshift("#{G}/#{g}/lib") }
 $LP.unshift(File.expand_path("shim", __dir__))
 require "shims" if File.exist?(File.expand_path("shim/shims.rb", __dir__))
+require "uri"  # load the real uri BEFORE mustermann (see note above)
 
 puts "== phase 1: require hanami/router"
 begin
@@ -31,6 +39,14 @@ begin
 rescue Exception => e
   puts "P2-ERR: #{e.class}: #{e.message}"
   (e.backtrace || []).first(15).each { |f| puts "  #{f}" }
+  # Frontier (2026-06-15): `require "hanami/router"` (phase 1) now passes
+  # after adding the real uri gem. Phase 2 (route compilation) hits
+  # `RuntimeError: no block given (yield)` in mustermann's AST parser:
+  # `Node.parse(&block)` → `new.tap { |n| n.parse(&block) }` → the
+  # instance `parse` yields, but the block is lost across the
+  # multi-hop `node → parser.read → Node.parse(&block) → n.parse(&block)`
+  # forwarding chain. Doesn't reproduce in isolation (an emergent
+  # block-forwarding interaction) — the next thing to dig.
   exit 1
 end
 
