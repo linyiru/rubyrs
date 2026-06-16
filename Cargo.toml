@@ -46,6 +46,7 @@ debug = false
 resolver = "3"
 members = [
     "crates/carmine",
+    "crates/carmine-ffi",
     "crates/liquidus",
     "crates/rostdown",
     "crates/rubyrs",

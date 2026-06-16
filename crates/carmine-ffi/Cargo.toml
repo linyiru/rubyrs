@@ -1,0 +1,19 @@
+[package]
+name = "carmine-ffi"
+description = "C ABI over the carmine rouge-compatible lexer engine — the foundation for a drop-in Ruby gem and other-language bindings."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "carmine_ffi"
+# cdylib for the gem/FFI consumers; rlib so `cargo test` can build the
+# crate as a test harness.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+carmine = { path = "../carmine" }
+serde_json.workspace = true
