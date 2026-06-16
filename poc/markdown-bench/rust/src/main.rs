@@ -4,10 +4,13 @@
 
 use std::time::Instant;
 
-// rostdown's scoped bump allocator (the `arena` feature). rostdown's
-// to_html self-scopes, so its row reflects the realized arena number;
-// pulldown/comrak never open a scope, so their allocations forward to
-// System (stock behavior).
+// TURBO build only (`--features turbo`): rostdown's scoped bump
+// allocator (the `arena` feature). rostdown's to_html self-scopes, so
+// its row reflects the realized arena number; pulldown/comrak never open
+// a scope, so their allocations forward to System (stock behavior).
+// The DEFAULT build installs no global allocator — every engine uses the
+// System allocator, so the rostdown row is the stock zero-dep path.
+#[cfg(feature = "turbo")]
 #[global_allocator]
 static A: rostdown::ScopedAlloc = rostdown::ScopedAlloc;
 
@@ -18,6 +21,11 @@ fn render_pulldown(src: &str) -> usize {
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_FOOTNOTES);
     opts.insert(Options::ENABLE_TASKLISTS);
+    // Fair fight: rostdown does kramdown smart typography by default, and
+    // pulldown can too — so turn it on here (verified equivalent output:
+    // ---→—, "x"→“x”, ...→…). pulldown still has NO heading auto-id
+    // feature, which rostdown does — that asymmetry is real and remains.
+    opts.insert(Options::ENABLE_SMART_PUNCTUATION);
     let mut out = String::new();
     html::push_html(&mut out, Parser::new_ext(src, opts));
     out.len()

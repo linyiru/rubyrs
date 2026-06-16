@@ -49,5 +49,7 @@ rm -f "$RAW"
 
 echo
 echo "Note: no syntax highlighting (all engines emit plain <pre><code>)."
-echo "rostdown additionally does smart typography + heading auto-ids."
+echo "pulldown runs with ENABLE_SMART_PUNCTUATION, so typography is matched;"
+echo "rostdown additionally does kramdown heading id auto-slugs (no pulldown equiv)."
+echo "This is rostdown's default (zero-dep) build; for arena+simd see bench_rust_clean.sh."
 echo "Ruby gem end-to-end (kramdown vs kramdown-rostdown) — see bin/bench.rb."

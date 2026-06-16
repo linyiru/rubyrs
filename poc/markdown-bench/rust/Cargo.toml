@@ -10,13 +10,26 @@ publish = false
 name = "md-bench-rust"
 path = "src/main.rs"
 
+# Two rostdown configurations, selected at build time:
+#   * default build  → `cargo build --release`
+#       rostdown with NO arena/simd, System allocator. This is the
+#       zero-dep, `unsafe`-free path the gem actually ships.
+#   * turbo build     → `cargo build --release --features turbo`
+#       enables rostdown/arena + rostdown/simd AND installs
+#       rostdown::ScopedAlloc as the #[global_allocator] (see main.rs),
+#       so the rostdown row reflects the REALIZED arena number (incl. the
+#       copy-out) plus the aarch64 NEON byteset.
+# pulldown/comrak never open an arena scope, so their numbers are
+# identical under either build — measure them from the default build.
+[features]
+turbo = ["rostdown/arena", "rostdown/simd"]
+
 [dependencies]
 pulldown-cmark = "0.12"
 comrak = "0.29"
-# `arena` feature on: rostdown's to_html bump-allocates its AST. We
-# install rostdown::ScopedAlloc as the global allocator below, so the
-# rostdown row measures the REALIZED arena number (incl. the copy-out).
-rostdown = { path = "../../../crates/rostdown", features = ["arena", "profiling", "simd"] }
+# `profiling` only exposes profile_phases() (no deps, no unsafe, zero
+# effect on the render path); arena/simd come in via the `turbo` feature.
+rostdown = { path = "../../../crates/rostdown", default-features = false, features = ["profiling"] }
 
 [profile.release]
 lto = "thin"
