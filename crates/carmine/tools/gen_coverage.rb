@@ -106,86 +106,304 @@ class WLCtx
   def respond_to_missing?(*); true; end
 end
 
-# --- value-token IR (straight-line blocks) ---
-# The other big callback family is the VALUE-token rule:
-#   do |m| token Name::Function, m[1]; push :params end
-# (emit a captured group as a token's text, optionally with state moves).
-# carmine's engine already executes a Conditional-Action IR (see src/ir.rs);
-# a STRAIGHT-LINE block (no control flow) compiles 1:1 to that IR and runs
-# natively — turning the decline into a MATCH.
+# --- AST→IR compiler (value-token + conditional/stateful blocks) ---
+# After the keyword classifier, the big callback families are VALUE-tokens
+# (`token Name::Function, m[1]`) and CONDITIONAL/STATEFUL blocks (heredoc
+# queues, `state?`-guards, `m[i]=="lit"` classifiers). carmine's engine runs
+# a Conditional-Action IR (src/ir.rs); this COMPILES a rule block's AST
+# directly to that IR — it does NOT run the block, because with conditionals
+# the branch taken depends on the match, so running once would be unsound.
+# Conditions compile to `if` ops the ENGINE evaluates per match.
 #
-# SOUNDNESS: a value match probe can't bail on truthiness branches
-# (`if m[1] …` calls no method on the value), so runtime tracing alone is
-# UNSOUND. The gate is therefore the AST (`ClassifierAST.straight_line?`):
-# only a block whose body is a flat sequence of token/groups/push/pop!/goto
-# calls — with NO IF/CASE/loop/&&/|| anywhere and values restricted to
-# `m[N]` / string-literal / `+`-concatenations — is accepted. With no
-# control flow, running the block ONCE captures its complete behaviour, so
-# the recorded ops are exactly what rouge emits for every input.
-class IRBail < StandardError; end
+# SOUNDNESS: the decline boundary IS the compiler — any AST shape it doesn't
+# recognize returns nil → the rule stays a `callback` (never wrong). The
+# translation faithfully mirrors rouge's semantics (and the Rust twin
+# crates/rubyrs/src/rouge_ir.rs, already trusted for fence highlighting):
+# m[i]→capture i (0 = whole match), engine `emit` merges adjacent same-type
+# tokens exactly like rouge's lex stream. Run under `--parser=parse.y`
+# (Prism iseqs have no `.of`).
+module IrCompiler
+  N = RubyVM::AbstractSyntaxTree::Node
+  def self.node?(x); x.is_a?(N); end
 
-# Wraps an IR value expression. `+` builds a `cat`; any other method bails
-# (the AST gate already forbids them, this is defence in depth).
-class IRCap
-  attr_reader :ir
-  def initialize(ir); @ir = ir; end
-  def +(other)
-    rhs = case other
-          when IRCap then other.ir
-          when String then ["lit", other]
-          else raise IRBail
-          end
-    base = (@ir.is_a?(Array) && @ir[0] == "cat") ? @ir[1..] : [@ir]
-    IRCap.new(["cat", *base, rhs])
+  # The lexer CLASS being extracted — lets `self.class.keywords`-style
+  # CLASS-LEVEL data (match-independent, memoized Sets) resolve to literal
+  # word lists at extract time, exactly the data the wordlist hook captures
+  # at runtime. Set by extract_table before each lexer.
+  class << self; attr_accessor :klass; end
+
+  # block → ops array (JSON-ready), or nil to decline.
+  def self.compile(blk)
+    scope = begin
+      RubyVM::AbstractSyntaxTree.of(blk)
+    rescue StandardError
+      return nil
+    end
+    return nil unless node?(scope) && scope.type == :SCOPE
+    mvar = (scope.children[0] || [])[0] # the `|m|` match param
+    ops = stmt_list(scope.children[2], mvar)
+    (ops && !ops.empty?) ? ops : nil
   end
-  def coerce(*); raise IRBail; end
-  def method_missing(*); raise IRBail; end
-  def respond_to_missing?(*); false; end
-end
 
-# The `|m|` stand-in while building IR: `m[i]` (Integer i ≥ 0) → an IRCap
-# for capture group i; anything else bails.
-class IRMatch
-  def [](i); (i.is_a?(Integer) && i >= 0) ? IRCap.new(["g", i]) : raise(IRBail); end
-  def method_missing(*); raise IRBail; end
-  def respond_to_missing?(*); true; end
-end
-
-# Records the ops a straight-line block performs.
-class IRCtx
-  attr_reader :ops
-  def initialize; @ops = []; end
-  def token(t, val = :__whole__)
-    @ops << (val == :__whole__ ? ["token", t.qualname] : ["token", t.qualname, to_expr(val)])
+  # A body (BLOCK of statements, or a single statement) → [ops] or nil.
+  def self.stmt_list(body, mvar)
+    stmts = (node?(body) && body.type == :BLOCK) ? body.children : [body]
+    out = []
+    stmts.each do |s|
+      next if s.nil? || debug_print?(s)
+      op = stmt(s, mvar)
+      return nil if op.nil?
+      out << op
+    end
+    out
   end
-  def groups(*toks); @ops << ["groups", toks.map(&:qualname)]; end
-  def push(st = :__self__); @ops << ["push", st == :__self__ ? nil : st.to_s]; end
-  def pop!(n = 1); @ops << ["pop", n]; end
-  def goto(st); @ops << ["goto", st.to_s]; end
-  def method_missing(*); raise IRBail; end
-  def respond_to_missing?(*); true; end
 
-  private
+  # `puts/p/print/pp …` (optionally `… if @debug`) — stdout diagnostics that
+  # never touch the token stream; elided like every native path.
+  def self.debug_print?(n)
+    return false unless node?(n)
+    if %i[IF UNLESS].include?(n.type)
+      cond, body, = n.children
+      return false unless node?(cond) && cond.type == :IVAR
+      ss = ((node?(body) && body.type == :BLOCK) ? body.children : [body]).compact
+      return !ss.empty? && ss.all? { |x| print_call?(x) }
+    end
+    print_call?(n)
+  end
 
-  def to_expr(v)
-    case v
-    when IRCap then v.ir
-    when String then ["lit", v]
-    else raise IRBail
+  def self.print_call?(n)
+    node?(n) && %i[FCALL VCALL].include?(n.type) && %i[puts p print pp].include?(n.children[0])
+  end
+
+  def self.stmt(n, mvar)
+    return nil unless node?(n)
+    case n.type
+    when :FCALL, :VCALL, :CALL, :OPCALL
+      call_stmt(n, mvar)
+    when :IF, :UNLESS
+      pred, a, b = n.children
+      c = cond(pred, mvar); return nil if c.nil?
+      t = branch(a, mvar); return nil if t.nil?
+      e = branch(b, mvar); return nil if e.nil?
+      ["if", n.type == :UNLESS ? ["not", c] : c, t, e]
+    when :IASGN
+      v = expr(n.children[1], mvar); return nil if v.nil?
+      ["iset", n.children[0].to_s.sub(/\A@/, ""), v]
+    end
+  end
+
+  # An if/unless branch → [ops]; a nil branch (no else) is empty; failure
+  # propagates as nil (distinct from the empty `[]`).
+  def self.branch(n, mvar)
+    n.nil? ? [] : stmt_list(n, mvar)
+  end
+
+  def self.call_stmt(n, mvar)
+    # `@ivar << [a, b, …]`
+    if n.type == :OPCALL && n.children[1] == :<<
+      recv, _op, args = n.children
+      return nil unless node?(recv) && recv.type == :IVAR
+      a = arglist(args)
+      return nil unless a.size == 1 && node?(a[0]) && a[0].type == :LIST
+      tuple = a[0].children.compact.map { |e| expr(e, mvar) }
+      return nil if tuple.any?(&:nil?)
+      return ["lpush", recv.children[0].to_s.sub(/\A@/, ""), tuple]
+    end
+    return nil unless %i[FCALL VCALL].include?(n.type) # bare-receiver DSL only
+    mid = n.children[0]
+    args = n.type == :FCALL ? arglist(n.children[1]) : []
+    case mid
+    when :token
+      return nil unless args.size.between?(1, 2)
+      tok = const_qualname(args[0]); return nil if tok.nil?
+      return ["token", tok] if args.size == 1
+      v = expr(args[1], mvar); return nil if v.nil?
+      ["token", tok, v]
+    when :groups
+      return nil if args.empty?
+      toks = args.map { |a| const_qualname(a) }
+      toks.any?(&:nil?) ? nil : ["groups", toks]
+    when :push
+      return ["push", nil] if args.empty?
+      (args.size == 1 && sym?(args[0])) ? ["push", args[0].children[0].to_s] : nil
+    when :pop!
+      return ["pop", 1] if args.empty?
+      (args.size == 1 && int?(args[0])) ? ["pop", args[0].children[0]] : nil
+    when :goto
+      (args.size == 1 && sym?(args[0])) ? ["goto", args[0].children[0].to_s] : nil
+    end
+  end
+
+  def self.cond(n, mvar)
+    return nil unless node?(n)
+    return ["ivar", n.children[0].to_s.sub(/\A@/, "")] if n.type == :IVAR
+    if %i[FCALL VCALL].include?(n.type) && n.children[0] == :state?
+      args = n.type == :FCALL ? arglist(n.children[1]) : []
+      return (args.size == 1 && sym?(args[0])) ? ["instate", args[0].children[0].to_s] : nil
+    end
+    if n.type == :CALL && n.children[1] == :include?
+      recv, _mid, args = n.children
+      lits = string_set(recv); return nil if lits.nil?
+      a = arglist(args); return nil unless a.size == 1
+      g = group_index(a[0], mvar); return nil if g.nil?
+      return ["gin", g, lits]
+    end
+    if n.type == :OPCALL && n.children[1] == :==
+      recv, _op, args = n.children
+      g = group_index(recv, mvar); return nil if g.nil?
+      a = arglist(args)
+      return nil unless a.size == 1 && node?(a[0]) && a[0].type == :STR
+      return ["geq", g, a[0].children[0]]
+    end
+    if n.type == :OPCALL && n.children[1] == :!
+      inner = cond(n.children[0], mvar)
+      return inner.nil? ? nil : ["not", inner]
+    end
+    nil
+  end
+
+  def self.expr(n, mvar)
+    return nil unless node?(n)
+    case n.type
+    when :STR then ["lit", n.children[0]]
+    when :TRUE then ["bool", true]
+    when :FALSE then ["bool", false]
+    when :DSTR then interp(n, mvar)
+    when :CALL
+      if n.children[1] == :[]
+        g = group_index(n, mvar); g.nil? ? nil : ["g", g]
+      elsif n.children[1] == :include?
+        recv, _mid, args = n.children
+        lits = string_set(recv); return nil if lits.nil?
+        a = arglist(args); return nil unless a.size == 1
+        g = group_index(a[0], mvar); g.nil? ? nil : ["gin", g, lits]
+      end
+    end
+  end
+
+  # String interpolation `"a#{m[i]}b…"` → `["cat", parts…]`. Only literal
+  # chunks and `#{m[i]}` group interpolations; anything else declines.
+  # RubyVM DSTR nests: [head_str, EVSTR | LIST | nested DSTR, …].
+  def self.interp(n, mvar)
+    parts = []
+    ok = flatten_dstr(n, mvar, parts)
+    return nil unless ok
+    parts.empty? ? nil : ["cat", *parts]
+  end
+
+  def self.flatten_dstr(n, mvar, parts)
+    return false unless node?(n)
+    n.children.each do |c|
+      case c
+      when nil then next
+      when String then parts << ["lit", c]
+      else
+        return false unless node?(c)
+        case c.type
+        when :STR then parts << ["lit", c.children[0]]
+        when :EVSTR
+          g = group_index(c.children[0], mvar); return false if g.nil?
+          parts << ["g", g]
+        when :LIST, :DSTR
+          return false unless flatten_dstr(c, mvar, parts)
+        else
+          return false
+        end
+      end
+    end
+    true
+  end
+
+  # ---- leaf helpers ----
+  def self.arglist(n)
+    return [] if n.nil?
+    return n.children.compact if node?(n) && n.type == :LIST
+    [n]
+  end
+
+  def self.sym?(n); node?(n) && n.type == :SYM; end
+  def self.int?(n); node?(n) && n.type == :INTEGER; end
+
+  # `m[i]` → capture index i (≥ 0), checking the receiver is the match var.
+  def self.group_index(n, mvar)
+    return nil unless node?(n) && n.type == :CALL && n.children[1] == :[]
+    recv, _mid, args = n.children
+    return nil unless node?(recv) && %i[DVAR LVAR].include?(recv.type) && recv.children[0] == mvar
+    a = arglist(args)
+    return nil unless a.size == 1 && node?(a[0]) && a[0].type == :INTEGER
+    v = a[0].children[0]
+    (v.is_a?(Integer) && v >= 0) ? v : nil
+  end
+
+  # An array/`%w` literal of string literals → [String], else nil.
+  def self.string_array(n)
+    return nil unless node?(n) && n.type == :LIST
+    els = n.children.compact
+    return nil if els.empty? || !els.all? { |e| node?(e) && e.type == :STR }
+    els.map { |e| e.children[0] }
+  end
+
+  # A string set in an `include?` receiver position: an inline literal array,
+  # OR a CLASS-LEVEL data expression (`self.class.keywords`, a `CONST`) which
+  # we evaluate against the lexer class. Sound because such data is
+  # match-independent and memoized — the same words the runtime wordlist hook
+  # would capture. Non-string / instance-dependent / unresolvable → nil.
+  def self.string_set(n)
+    return string_array(n) if node?(n) && n.type == :LIST
+    v = eval_class_data(n)
+    return nil unless v.respond_to?(:to_a)
+    a = v.to_a
+    (!a.empty? && a.all? { |x| x.is_a?(String) }) ? a : nil
+  rescue StandardError
+    nil
+  end
+
+  # Resolve a match-INDEPENDENT class-data node to its value: `self.class.M`
+  # (no-arg accessor) or a bare `CONST`, against the lexer class. Anything
+  # instance-dependent (`self.M`) or with arguments is refused (nil).
+  def self.eval_class_data(n)
+    return nil unless node?(n) && klass
+    case n.type
+    when :CONST
+      klass.const_get(n.children[0])
+    when :CALL
+      recv, mid, args = n.children
+      return nil unless arglist(args).empty?
+      return nil unless node?(recv) && recv.type == :CALL && recv.children[1] == :class &&
+                        node?(recv.children[0]) && recv.children[0].type == :SELF
+      klass.respond_to?(mid) ? klass.public_send(mid) : nil
+    end
+  rescue StandardError
+    nil
+  end
+
+  # Resolve a token constant node (`Keyword`, `Name::Builtin`, `Str`) to its
+  # rouge qualname via the live token tree (handles aliases like Str →
+  # Literal::String). nil if it isn't a resolvable constant path.
+  def self.const_qualname(n)
+    path = const_path(n)
+    return nil if path.nil?
+    tok = path.reduce(Rouge::Token::Tokens) { |mod, seg| mod.const_get(seg) }
+    tok.respond_to?(:qualname) ? tok.qualname : nil
+  rescue StandardError
+    nil
+  end
+
+  def self.const_path(n)
+    return nil unless node?(n)
+    case n.type
+    when :CONST then [n.children[0]]
+    when :COLON3 then [n.children[0]]
+    when :COLON2
+      parent, name = n.children
+      pp = parent.nil? ? [] : const_path(parent)
+      pp.nil? ? nil : pp + [name]
     end
   end
 end
 
 def try_ir(blk)
-  return nil unless ClassifierAST.straight_line?(blk)
-  ctx = IRCtx.new
-  begin
-    ctx.instance_exec(IRMatch.new, &blk)
-  rescue Exception
-    return nil
-  end
-  ops = ctx.ops
-  ops.empty? ? nil : ops
+  IrCompiler.compile(blk)
 end
 
 # --- AST classifier validator (run the tool under `--parser=parse.y`) ---
@@ -262,81 +480,6 @@ module ClassifierAST
     else
       false
     end
-  end
-
-  # --- straight-line value-token validator (for try_ir) ---
-  # The args of a DSL call: a LIST's non-nil children, a lone node, or none.
-  def self.arg_list(n)
-    return [] if n.nil?
-    return n.children.compact if node?(n) && n.type == :LIST
-    [n]
-  end
-
-  def self.const_like?(n); node?(n) && %i[CONST COLON2 COLON3].include?(n.type); end
-  def self.sym?(n); node?(n) && n.type == :SYM; end
-  def self.int?(n); node?(n) && n.type == :INTEGER; end
-
-  # A value expression for `token T, <value>`: `m[N]` (N ≥ 0), a string
-  # literal, or a `+`-concatenation of those. NOTHING else (no method calls
-  # on the match, no interpolation — those would need transforms the IR
-  # can't express, so they stay callbacks).
-  def self.value?(n, params)
-    return false unless node?(n)
-    case n.type
-    when :STR then true
-    when :CALL
-      return false unless n.children[1] == :[]
-      recv, _mid, args = n.children
-      return false unless node?(recv) && %i[DVAR LVAR].include?(recv.type) && params.include?(recv.children[0])
-      a = arg_list(args)
-      a.size == 1 && node?(a[0]) && a[0].type == :INTEGER && a[0].children[0] >= 0
-    when :OPCALL
-      recv, op, args = n.children
-      return false unless op == :+
-      b = arg_list(args)[0]
-      value?(recv, params) && !b.nil? && value?(b, params)
-    else
-      false
-    end
-  end
-
-  # A single straight-line statement: token / groups / push / pop! / goto
-  # with constant token names and value-only arguments.
-  def self.stmt?(n, params)
-    return false unless node?(n) && %i[FCALL VCALL].include?(n.type)
-    mid = n.children[0]
-    args = n.type == :FCALL ? arg_list(n.children[1]) : []
-    case mid
-    when :token
-      return false unless args.size.between?(1, 2) && const_like?(args[0])
-      args.size == 1 || value?(args[1], params)
-    when :groups
-      !args.empty? && args.all? { |a| const_like?(a) }
-    when :push
-      args.empty? || (args.size == 1 && sym?(args[0]))
-    when :goto
-      args.size == 1 && sym?(args[0])
-    when :pop!
-      args.empty? || (args.size == 1 && int?(args[0]))
-    else
-      false
-    end
-  end
-
-  # True iff `blk` is a flat sequence of safe DSL statements with NO control
-  # flow — so running it once is its complete, input-independent behaviour.
-  def self.straight_line?(blk)
-    scope = begin
-      RubyVM::AbstractSyntaxTree.of(blk)
-    rescue StandardError
-      return false
-    end
-    return false unless node?(scope) && scope.type == :SCOPE
-    params = Array(scope.children[0])[0, 1]
-    body = scope.children[2]
-    stmts = (node?(body) && body.type == :BLOCK) ? body.children : [body]
-    stmts = stmts.compact
-    !stmts.empty? && stmts.all? { |s| stmt?(s, params) }
   end
 
   # Returns the ==/when literals if `blk` is a validated pure classifier,
@@ -451,6 +594,7 @@ class Recorder
 end
 
 def extract_table(lx)
+  IrCompiler.klass = lx # enable self.class.<data> resolution for this lexer
   states = {}
   lx.state_definitions.each do |name, dsl|
     rec = Recorder.new
