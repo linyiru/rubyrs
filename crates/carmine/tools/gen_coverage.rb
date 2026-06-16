@@ -106,6 +106,88 @@ class WLCtx
   def respond_to_missing?(*); true; end
 end
 
+# --- value-token IR (straight-line blocks) ---
+# The other big callback family is the VALUE-token rule:
+#   do |m| token Name::Function, m[1]; push :params end
+# (emit a captured group as a token's text, optionally with state moves).
+# carmine's engine already executes a Conditional-Action IR (see src/ir.rs);
+# a STRAIGHT-LINE block (no control flow) compiles 1:1 to that IR and runs
+# natively — turning the decline into a MATCH.
+#
+# SOUNDNESS: a value match probe can't bail on truthiness branches
+# (`if m[1] …` calls no method on the value), so runtime tracing alone is
+# UNSOUND. The gate is therefore the AST (`ClassifierAST.straight_line?`):
+# only a block whose body is a flat sequence of token/groups/push/pop!/goto
+# calls — with NO IF/CASE/loop/&&/|| anywhere and values restricted to
+# `m[N]` / string-literal / `+`-concatenations — is accepted. With no
+# control flow, running the block ONCE captures its complete behaviour, so
+# the recorded ops are exactly what rouge emits for every input.
+class IRBail < StandardError; end
+
+# Wraps an IR value expression. `+` builds a `cat`; any other method bails
+# (the AST gate already forbids them, this is defence in depth).
+class IRCap
+  attr_reader :ir
+  def initialize(ir); @ir = ir; end
+  def +(other)
+    rhs = case other
+          when IRCap then other.ir
+          when String then ["lit", other]
+          else raise IRBail
+          end
+    base = (@ir.is_a?(Array) && @ir[0] == "cat") ? @ir[1..] : [@ir]
+    IRCap.new(["cat", *base, rhs])
+  end
+  def coerce(*); raise IRBail; end
+  def method_missing(*); raise IRBail; end
+  def respond_to_missing?(*); false; end
+end
+
+# The `|m|` stand-in while building IR: `m[i]` (Integer i ≥ 0) → an IRCap
+# for capture group i; anything else bails.
+class IRMatch
+  def [](i); (i.is_a?(Integer) && i >= 0) ? IRCap.new(["g", i]) : raise(IRBail); end
+  def method_missing(*); raise IRBail; end
+  def respond_to_missing?(*); true; end
+end
+
+# Records the ops a straight-line block performs.
+class IRCtx
+  attr_reader :ops
+  def initialize; @ops = []; end
+  def token(t, val = :__whole__)
+    @ops << (val == :__whole__ ? ["token", t.qualname] : ["token", t.qualname, to_expr(val)])
+  end
+  def groups(*toks); @ops << ["groups", toks.map(&:qualname)]; end
+  def push(st = :__self__); @ops << ["push", st == :__self__ ? nil : st.to_s]; end
+  def pop!(n = 1); @ops << ["pop", n]; end
+  def goto(st); @ops << ["goto", st.to_s]; end
+  def method_missing(*); raise IRBail; end
+  def respond_to_missing?(*); true; end
+
+  private
+
+  def to_expr(v)
+    case v
+    when IRCap then v.ir
+    when String then ["lit", v]
+    else raise IRBail
+    end
+  end
+end
+
+def try_ir(blk)
+  return nil unless ClassifierAST.straight_line?(blk)
+  ctx = IRCtx.new
+  begin
+    ctx.instance_exec(IRMatch.new, &blk)
+  rescue Exception
+    return nil
+  end
+  ops = ctx.ops
+  ops.empty? ? nil : ops
+end
+
 # --- AST classifier validator (run the tool under `--parser=parse.y`) ---
 # Runtime tracing alone is UNSOUND for `m[0] == "lit"` / `case m[0] when
 # "lit"` branches: the literal owns the comparison (`"lit" == word` /
@@ -180,6 +262,81 @@ module ClassifierAST
     else
       false
     end
+  end
+
+  # --- straight-line value-token validator (for try_ir) ---
+  # The args of a DSL call: a LIST's non-nil children, a lone node, or none.
+  def self.arg_list(n)
+    return [] if n.nil?
+    return n.children.compact if node?(n) && n.type == :LIST
+    [n]
+  end
+
+  def self.const_like?(n); node?(n) && %i[CONST COLON2 COLON3].include?(n.type); end
+  def self.sym?(n); node?(n) && n.type == :SYM; end
+  def self.int?(n); node?(n) && n.type == :INTEGER; end
+
+  # A value expression for `token T, <value>`: `m[N]` (N ≥ 0), a string
+  # literal, or a `+`-concatenation of those. NOTHING else (no method calls
+  # on the match, no interpolation — those would need transforms the IR
+  # can't express, so they stay callbacks).
+  def self.value?(n, params)
+    return false unless node?(n)
+    case n.type
+    when :STR then true
+    when :CALL
+      return false unless n.children[1] == :[]
+      recv, _mid, args = n.children
+      return false unless node?(recv) && %i[DVAR LVAR].include?(recv.type) && params.include?(recv.children[0])
+      a = arg_list(args)
+      a.size == 1 && node?(a[0]) && a[0].type == :INTEGER && a[0].children[0] >= 0
+    when :OPCALL
+      recv, op, args = n.children
+      return false unless op == :+
+      b = arg_list(args)[0]
+      value?(recv, params) && !b.nil? && value?(b, params)
+    else
+      false
+    end
+  end
+
+  # A single straight-line statement: token / groups / push / pop! / goto
+  # with constant token names and value-only arguments.
+  def self.stmt?(n, params)
+    return false unless node?(n) && %i[FCALL VCALL].include?(n.type)
+    mid = n.children[0]
+    args = n.type == :FCALL ? arg_list(n.children[1]) : []
+    case mid
+    when :token
+      return false unless args.size.between?(1, 2) && const_like?(args[0])
+      args.size == 1 || value?(args[1], params)
+    when :groups
+      !args.empty? && args.all? { |a| const_like?(a) }
+    when :push
+      args.empty? || (args.size == 1 && sym?(args[0]))
+    when :goto
+      args.size == 1 && sym?(args[0])
+    when :pop!
+      args.empty? || (args.size == 1 && int?(args[0]))
+    else
+      false
+    end
+  end
+
+  # True iff `blk` is a flat sequence of safe DSL statements with NO control
+  # flow — so running it once is its complete, input-independent behaviour.
+  def self.straight_line?(blk)
+    scope = begin
+      RubyVM::AbstractSyntaxTree.of(blk)
+    rescue StandardError
+      return false
+    end
+    return false unless node?(scope) && scope.type == :SCOPE
+    params = Array(scope.children[0])[0, 1]
+    body = scope.children[2]
+    stmts = (node?(body) && body.type == :BLOCK) ? body.children : [body]
+    stmts = stmts.compact
+    !stmts.empty? && stmts.all? { |s| stmt?(s, params) }
   end
 
   # Returns the ==/when literals if `blk` is a validated pure classifier,
@@ -257,28 +414,37 @@ class Recorder
   def initialize; @rules = []; end
   def rule(re, tok = nil, next_state = nil, &blk)
     if blk
-      ctx = TraceCtx.new
-      probe = MatchProbe.new
-      begin
-        ctx.instance_exec(probe, &blk)
-        if probe.touched?
-          # Match-dependent. Try the wordlist upgrade (pure include?-based
-          # keyword classifier → native `wordlist`); else it's a callback.
-          if (wl = try_wordlist(blk))
-            @rules << { kind: "wordlist", re: re.source, opts: re.options,
-                        sets: wl[:sets], default: wl[:default] }
-          else
-            @rules << { kind: "callback", re: re.source, opts: re.options }
-          end
-        else
-          @rules << { kind: "actions", re: re.source, opts: re.options, actions: ctx.actions }
-        end
-      rescue StandardError
-        @rules << { kind: "callback", re: re.source, opts: re.options }
-      end
+      @rules << classify_block(re, blk)
     else
       ns = case next_state when nil then nil when Array then next_state.map(&:to_s) else next_state.to_s end
       @rules << { kind: "tok", re: re.source, opts: re.options, tok: tok.qualname, next: ns }
+    end
+  end
+
+  # Classify a rule BLOCK. A block that performs only static DSL calls
+  # (no match access) records as `actions`. Otherwise it's match-dependent
+  # — TraceCtx#token even Bails on a value token (`token T, m[1]`), so the
+  # match-dependent path is reached BOTH on `probe.touched?` AND on a Bail.
+  # We then try a sound upgrade (wordlist classifier / straight-line IR);
+  # anything else stays a `callback`.
+  def classify_block(re, blk)
+    ctx = TraceCtx.new
+    probe = MatchProbe.new
+    begin
+      ctx.instance_exec(probe, &blk)
+      unless probe.touched?
+        return { kind: "actions", re: re.source, opts: re.options, actions: ctx.actions }
+      end
+    rescue StandardError
+      # match-dependent (value token, dynamic state, unmodeled call) → fall
+      # through to the sound-upgrade attempts below.
+    end
+    if (wl = try_wordlist(blk))
+      { kind: "wordlist", re: re.source, opts: re.options, sets: wl[:sets], default: wl[:default] }
+    elsif (ir = try_ir(blk))
+      { kind: "ir", re: re.source, opts: re.options, ops: ir }
+    else
+      { kind: "callback", re: re.source, opts: re.options }
     end
   end
   def mixin(name); @rules << { kind: "mixin", state: name.to_s }; end
