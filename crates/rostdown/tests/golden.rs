@@ -20,6 +20,16 @@ use std::path::{Path, PathBuf};
 
 use rostdown::{Error, NoHighlight, Options, to_html};
 
+// With `--features arena`, install the scoped bump allocator as THIS
+// test binary's global allocator so the corpus runs through the LIVE
+// arena path (bump → scope reset → result copy-out) — the path Miri
+// can't cover (it doesn't execute `#[global_allocator]`). The
+// right-or-declined assertions below then gate the live arena for
+// byte-identity, and `-Zsanitizer=address` in CI gates it for memory UB.
+#[cfg(feature = "arena")]
+#[global_allocator]
+static GLOBAL: rostdown::ScopedAlloc = rostdown::ScopedAlloc;
+
 #[derive(Default)]
 struct Tally {
     pass: usize,
