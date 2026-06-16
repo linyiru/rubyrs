@@ -227,35 +227,27 @@ fn convert_spans(out: &mut String, spans: &[Span], codespan_class: Option<&str>)
     }
 }
 
-/// kramdown `escape_html(…, :text)` — `&`, `<`, `>` only. Jump to the
-/// next special byte via `position` (a tight equality scan LLVM can
-/// vectorize) and bulk-copy the ordinary run before it. The matched
-/// bytes are ASCII, so the slice indices are always char boundaries.
+/// kramdown `escape_html(…, :text)` — `&`, `<`, `>` only. A SWAR
+/// `memchr3` jumps to the next special byte (8 bytes/iter) and the
+/// ordinary run before it is bulk-copied; the matched bytes are ASCII,
+/// so the slice indices are always char boundaries.
 fn escape_text(out: &mut String, text: &str) {
     let bytes = text.as_bytes();
     let mut start = 0;
-    while start < bytes.len() {
-        match bytes[start..]
-            .iter()
-            .position(|&b| matches!(b, b'&' | b'<' | b'>'))
-        {
-            Some(off) => {
-                let i = start + off;
-                if off > 0 {
-                    out.push_str(&text[start..i]);
-                }
-                out.push_str(match bytes[i] {
-                    b'&' => "&amp;",
-                    b'<' => "&lt;",
-                    _ => "&gt;",
-                });
-                start = i + 1;
-            }
-            None => {
-                out.push_str(&text[start..]);
-                break;
-            }
+    while let Some(off) = crate::scan::memchr3(&bytes[start..], b'&', b'<', b'>') {
+        let i = start + off;
+        if off > 0 {
+            out.push_str(&text[start..i]);
         }
+        out.push_str(match bytes[i] {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            _ => "&gt;",
+        });
+        start = i + 1;
+    }
+    if start < bytes.len() {
+        out.push_str(&text[start..]);
     }
 }
 
@@ -354,6 +346,56 @@ fn dedup_id(id: String, used_ids: &mut HashMap<String, u32>) -> String {
         None => {
             used_ids.insert(id.clone(), 0);
             id
+        }
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    //! Pin the SWAR-backed HTML escaping (kramdown escape_html text vs
+    //! attribute). A reference scalar escaper is the oracle; we check
+    //! leading/trailing/adjacent specials, none-present, and multibyte.
+    use super::*;
+
+    fn ref_escape(text: &str, attr: bool) -> String {
+        let mut s = String::new();
+        for ch in text.chars() {
+            match ch {
+                '&' => s.push_str("&amp;"),
+                '<' => s.push_str("&lt;"),
+                '>' => s.push_str("&gt;"),
+                '"' if attr => s.push_str("&quot;"),
+                c => s.push(c),
+            }
+        }
+        s
+    }
+
+    fn run(text: &str) {
+        let mut t = String::new();
+        escape_text(&mut t, text);
+        assert_eq!(t, ref_escape(text, false), "escape_text {text:?}");
+        let mut a = String::new();
+        escape_attr(&mut a, text);
+        assert_eq!(a, ref_escape(text, true), "escape_attr {text:?}");
+    }
+
+    #[test]
+    fn escaping_matches_reference() {
+        for t in [
+            "",
+            "no specials here",
+            "a & b < c > d",
+            "&<>",                 // all specials, adjacent
+            "<lead",               // leading special
+            "trail>",              // trailing special
+            "a&&b",                // consecutive same
+            "quote \" and & < >",  // quote only escaped in attr
+            "café & <naïve>",      // multibyte interspersed
+            "&amp; already",       // ampersand of an entity-looking run
+            &"x".repeat(100),      // long run, no specials (word-at-a-time path)
+        ] {
+            run(t);
         }
     }
 }

@@ -1,0 +1,75 @@
+name: rostdown
+
+# Dedicated CI for the rostdown crate, deliberately self-contained so it
+# travels cleanly when rostdown is extracted into its own repository:
+#   - uses the public dtolnay toolchain action (not the monorepo's
+#     composite ./.github/actions/setup-rust-toolchain),
+#   - selects the crate with `-p rostdown` (still valid as the root crate
+#     of a standalone repo),
+#   - path-filtered so it only runs on rostdown changes in the monorepo.
+# To extract: move this file, drop the `paths:` filters, and (optionally)
+# drop `-p rostdown`.
+
+on:
+  push:
+    paths:
+      - "crates/rostdown/**"
+      - ".github/workflows/rostdown.yml"
+  pull_request:
+    paths:
+      - "crates/rostdown/**"
+      - ".github/workflows/rostdown.yml"
+
+jobs:
+  test:
+    name: test + clippy (default + arena)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Test (default features — zero-dep, unsafe-free)
+        run: cargo test -p rostdown --release
+
+      - name: Test (arena + profiling features)
+        # `arena` is the crate's ONLY unsafe module (a scoped bump
+        # allocator); this runs its ScopedAlloc routing tests + the
+        # Drop-ing Arena twin + the pure bump_compute suite. `profiling`
+        # compiles profile_phases.
+        run: cargo test -p rostdown --release --features arena,profiling
+
+      - name: Clippy (both configurations, warnings = errors)
+        run: |
+          cargo clippy -p rostdown --all-targets -- -D warnings
+          cargo clippy -p rostdown --all-targets --features arena,profiling -- -D warnings
+
+  miri:
+    name: Miri — arena UB (Stacked + Tree Borrows)
+    runs-on: ubuntu-latest
+    # RUSTUP_TOOLCHAIN overrides the repo's stable rust-toolchain.toml pin
+    # (which ships no miri) so `cargo miri` resolves to this nightly.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+
+      - name: Miri setup
+        run: cargo miri setup
+
+      - name: Miri (Stacked Borrows)
+        # Verifies bump_compute + the Drop-ing Arena twin (pointer
+        # provenance via base.add). The ScopedAlloc routing tests are
+        # #[cfg_attr(miri, ignore)] — Miri does not execute a
+        # #[global_allocator].
+        run: cargo miri test -p rostdown --lib --features arena,profiling
+
+      - name: Miri (Tree Borrows)
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+          MIRIFLAGS: "-Zmiri-tree-borrows"
+        run: cargo miri test -p rostdown --lib --features arena,profiling

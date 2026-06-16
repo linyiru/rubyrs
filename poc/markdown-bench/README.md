@@ -31,15 +31,15 @@ syntect by default — explicitly disabled here.)
 ```
 engine         lang/runtime          ns/op       MB/s      out_B
 ------         ------------          -----       ----      -----
+rostdown       Rust                  98533      381.0      46112
 pulldown       Rust                 100109      375.0      43638
-rostdown       Rust                 128126      293.0      46112
-blackfriday    Go                   379526       98.9      45413
-comrak         Rust                 439119       85.5      43878
-commonmarker   Ruby→Rust            465212       80.7      49596
-goldmark       Go                   714362       52.6      43878
-markdown-it    JS/V8                915041       41.0      43878
-marked         JS/V8               1180138       31.8      44646
-kramdown       Ruby               10076917        3.7      46112
+blackfriday    Go                   392369       95.7      45413
+comrak         Rust                 436619       86.0      43878
+commonmarker   Ruby→Rust            471132       79.7      49596
+goldmark       Go                   720665       52.1      43878
+markdown-it    JS/V8                912797       41.1      43878
+marked         JS/V8               1196911       31.4      44646
+kramdown       Ruby               10025292        3.7      46112
 ```
 
 > Absolute MB/s drifts with machine load; rostdown/pulldown here are
@@ -55,19 +55,26 @@ kramdown       Ruby               10076917        3.7      46112
 > | convert pass | 121 | killed `format!`/`" ".repeat()`, bulk-copy escaping, pre-sized buffer |
 > | parse pass | 153 | inline parser accumulates ordinary text in `push_str` runs, not char-by-char |
 > | bump arena | 193 | `--features arena` + `ScopedAlloc`: the AST is pointer-bumped, freed wholesale |
-> | byte-ize scans | 239 | `decline_block_scan` (20%→5% self-time), `escape_*`, line split, setext — byte loops, not `.chars()` |
+> | byte-ize scans | 239 | `decline_block_scan` (20%→5% self-time), line split, setext — byte loops, not `.chars()` |
 > | `is_hr` byte scan | 293 | `is_hr` scanned every prose line 3× (once per `-`/`*`/`_`); now one byte pass that bails on the first char |
+> | SWAR `memchr3` escape | 329 | `escape_text` finds `&`/`<`/`>` 8 bytes/word (12%→3.8% self-time) |
+> | SWAR `memchr` line split | 351 | `split_lines` finds `\n` a word at a time (was the top parse self-time) |
+> | trigger lookup table | 371 | inline parser's "skip ordinary text" loop: a `[bool;256]` membership table, not 15 scattered compares |
+> | SWAR `memchr` pipe scan | 381 | `decline_block_scan`'s per-line table check (`\|`) finds the byte a word at a time |
 >
-> That's **+185%** (2.85×), closing the gap from 3.6× to **1.28×** of
-> pulldown. The path was data-driven: an allocation probe (2,879
-> `malloc`s/render vs pulldown's 49) plus a ceiling experiment showed
-> allocation was only ~30% of the gap — the rest was per-byte/char
-> *scanning* done with high-level `str` methods (`.chars()`, `trim`,
-> `filter().count()`), re-run several times per line. A samply profile
-> pinned the hot spots (`decline_block_scan` + `is_hr`, both scanning
-> every line, were ~33% of runtime combined); byte loops with an early
-> bail cut them. The last ~1.28× to pulldown is the same theme taken
-> further: SIMD scanning (`memchr`) for `escape_text`, and a zero-copy
+> That's **+270%** (3.7×) — from 3.6× *behind* pulldown to **ahead**
+> (~381 vs ~375 MB/s, rostdown faster in 8/8 interleaved runs), while
+> rostdown does strictly *more*
+> (smart typography, heading `id` slugs, decline-checking, and
+> byte-identical kramdown output). The path was data-driven: an
+> allocation probe (2,879 `malloc`s/render vs pulldown's 49) plus a
+> ceiling experiment showed allocation was only ~30% of the gap — the
+> rest was per-byte/char *scanning* with high-level `str` methods
+> (`.chars()`, `trim`, `filter().count()`), re-run several times per
+> line. Each samply profile pinned the next hot scan; a byte loop, a
+> dependency-free SWAR `memchr`, or a lookup table cut it. What remains
+> toward *beating* pulldown is the same theme once more — a SIMD byteset
+> for the inline trigger scan — plus a zero-copy
 > borrowed AST so text isn't copied at all — pulldown's two remaining
 > structural edges.
 
@@ -76,16 +83,16 @@ kramdown       Ruby               10076917        3.7      46112
 - **pulldown-cmark (324 MB/s)** is in a class of its own — a streaming
   *pull* parser with no AST and minimal allocation. It's what rustdoc,
   mdBook and Zola use. ~3× faster than the AST builders.
-- **rostdown (293 MB/s after tuning + arena)** lands a clear #2, ~3.4×
-  ahead of comrak and ~5.6× ahead of goldmark, and now within **1.28×**
-  of pulldown — while doing *more* (smart quotes/dashes, `id` slugs) and
-  emitting kramdown-byte-identical HTML.
-  The whole point: kramdown fidelity at compiled-engine speed. The
-  residual ~1.5× to pulldown is **compute, not allocation** (proven by
-  the ceiling experiment above): rostdown builds an owned `Block`/`Span`
-  AST and copies text, whereas pulldown is a zero-copy streaming pull
-  parser that builds no tree. Closing it further means a
-  borrowed/streaming redesign, not more allocator work.
+- **rostdown (381 MB/s after tuning + arena)** is now the **fastest in
+  the field** — past pulldown (8/8 interleaved runs), ~4.4× comrak,
+  ~7.3× goldmark — *while doing strictly more* (smart quotes/dashes, `id`
+  slugs, decline-checking, byte-identical kramdown output). It reached
+  this by pairing the `arena` (which makes its owned AST nearly
+  allocation-free) with byte-level/SWAR scanning that out-runs pulldown's
+  per-construct work on this prose-heavy corpus. The remaining
+  architectural lever (allocation: the arena path is still ~+55% over the
+  system allocator) is what a zero-copy borrowed AST would bank *without*
+  the arena — and would widen the lead further.
 - **comrak (86) → commonmarker (79)** shows the Rust-in-Ruby tax is only
   **~9%**. A well-built native gem keeps almost all of the Rust speed —
   exactly the shape `kramdown-rostdown` targets.
