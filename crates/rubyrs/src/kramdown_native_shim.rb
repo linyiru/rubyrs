@@ -25,9 +25,15 @@ if ENV["RUBYRS_NATIVE_STATS"] && !$__rubyrs_native_stats
   end
 end
 
-if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
-   !::Kramdown::JekyllDocument.method_defined?(:__rostdown_orig_initialize)
+# Runs whenever the `_kramdown_native` host fns are present (the shim is
+# injected after `require "kramdown-parser-gfm"`). It patches whichever
+# Kramdown::Document subclass the active framework defines — Jekyll's
+# JekyllDocument and/or Bridgetown's BridgetownDocument — installing each
+# only once (idempotent), so re-injection at a later require point picks
+# up a class that wasn't defined yet on an earlier pass.
+if defined?(__rubyrs_kd_scan) && defined?(::Kramdown)
   module Kramdown
+    unless defined?(RostdownNative)
     module RostdownNative
       # The exact options hash Jekyll 4.4 passes to JekyllDocument.new
       # (probed from a real build; KramdownParser#setup adds the
@@ -48,7 +54,23 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
       # The same options after kramdown's highlighter setup
       # normalises them (symbol keys) — see eligible?.
       HL_OPTS_SYM = { default_lang: "plaintext", guess_lang: true }.freeze
-      IGNORED = ["toc_levels", "footnote_nr", "show_warnings", "coderay"].freeze
+      # Bridgetown's KramdownParser only sets `guess_lang` (no
+      # `default_lang`). For fenced code blocks `default_lang` changes the
+      # no-language path, so `try_render` declines a Bridgetown-shaped
+      # config when the source actually has a fence; prose (the common
+      # case) renders identically. Both key spellings, as with HL_OPTS.
+      BT_HL_OPTS = { "guess_lang" => true }.freeze
+      BT_HL_OPTS_SYM = { guess_lang: true }.freeze
+      # `include_extraction_tags` is a Bridgetown-only kramdown key (its
+      # serbea/markdown extraction pass); false is the render-neutral
+      # default. `mark_highlighting` is Bridgetown's `==mark==`/`::ins::`
+      # extension — rostdown has no such construct, but for a source
+      # WITHOUT those delimiters the output is byte-identical either way,
+      # so it's accepted here and guarded per-document in `try_render`.
+      IGNORED = [
+        "toc_levels", "footnote_nr", "show_warnings", "coderay",
+        "include_extraction_tags", "mark_highlighting"
+      ].freeze
 
       def self.eligible?(options)
         return false unless options.is_a?(Hash)
@@ -64,7 +86,10 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
             # declined every subsequent document forever (the
             # re-render "transition round" pathology: one decline
             # cascaded into 358 pure-kramdown conversions).
-            return false unless v == HL_OPTS || v == HL_OPTS_SYM
+            # Bridgetown's lighter `{guess_lang:}` shape is accepted too;
+            # the code-fence guard in `try_render` covers its missing
+            # `default_lang`.
+            return false unless [HL_OPTS, HL_OPTS_SYM, BT_HL_OPTS, BT_HL_OPTS_SYM].include?(v)
             next
           end
           return false unless REQUIRED.key?(k) && REQUIRED[k] == v
@@ -73,6 +98,87 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
           return false unless options.key?(k)
         end
         true
+      end
+
+      # Render `source` natively iff the options are eligible AND nothing
+      # in the source needs a construct rostdown can't reproduce. The one
+      # framework-specific guard: Bridgetown's `mark_highlighting` turns
+      # `==x==` / `::x::` into `<mark>` / `<ins>`; rostdown has no such
+      # rule, so a source containing those delimiters must fall back to
+      # the pure-Ruby parse (a plain substring scan — cheaper than a parse
+      # and almost always false for prose). Returns the HTML or nil
+      # (caller runs the original Ruby parse on nil).
+      def self.try_render(source, options)
+        return nil unless eligible?(options)
+        if (options["mark_highlighting"] || options[:mark_highlighting]) &&
+           (source.include?("==") || source.include?("::"))
+          return nil
+        end
+        # Bridgetown's highlighter opts omit `default_lang`, so kramdown
+        # renders code SPANS and BLOCKS with a different class than
+        # rostdown's Jekyll-shaped output (`highlighter-rouge` vs
+        # `language-plaintext highlighter-rouge`). Decline any Bridgetown
+        # source that contains code (a backtick — inline span or fence —
+        # or a tilde fence); it falls back to the same pure-Ruby path it
+        # used before this accelerator existed. Prose (the overwhelming
+        # common case) renders natively, byte-identical. Jekyll-exact opts
+        # carry `default_lang: plaintext` and keep the native code path.
+        sho = options["syntax_highlighter_opts"] || options[:syntax_highlighter_opts]
+        if (sho == BT_HL_OPTS || sho == BT_HL_OPTS_SYM) &&
+           (source.include?("`") || source =~ /~{3,}/)
+          return nil
+        end
+        render(source)
+      end
+
+      # Patch `klass#initialize`/`#to_html` (a Kramdown::Document subclass —
+      # Jekyll's JekyllDocument or Bridgetown's BridgetownDocument) to try
+      # the native renderer first. Idempotent; both subclasses share the
+      # wrapper since the only contract Jekyll/Bridgetown rely on after
+      # construction is `#to_html` (+ `#warnings`).
+      # Minimal stand-in for `document.root` on the native path (we skip
+      # building the kramdown AST). Jekyll only reads `#to_html`/`#warnings`,
+      # but Bridgetown's KramdownParser#convert reads
+      # `document.root.options[:extractions]` — so `root.options` must be a
+      # Hash (extractions ⇒ nil). Shared + frozen; read-only.
+      class StubRoot
+        def options
+          {}
+        end
+      end
+      STUB_ROOT = StubRoot.new
+
+      def self.install(klass)
+        return if klass.method_defined?(:__rostdown_orig_initialize)
+        klass.send(:alias_method, :__rostdown_orig_initialize, :initialize)
+        # `*rest` (not `options = {}`): a define_method block's optional
+        # positional doesn't relax the arity check the way a `def` default
+        # does, so `Doc.new(src, opts)` would raise "wrong number of
+        # arguments (given 2, expected 1)". Splat accepts both arities.
+        klass.send(:define_method, :initialize) do |source, *rest|
+          options = rest.first || {}
+          $__rubyrs_native_stats[:kd_total] += 1 if $__rubyrs_native_stats
+          @__rostdown_html = nil
+          html = ::Kramdown::RostdownNative.try_render(source, options)
+          if $__rubyrs_native_stats
+            if ::Kramdown::RostdownNative.eligible?(options)
+              $__rubyrs_native_stats[html ? :kd_native : :kd_decline] += 1
+            else
+              $__rubyrs_native_stats[:kd_ineligible] += 1
+            end
+          end
+          if html
+            # Skip the Ruby parse entirely; only #to_html / #warnings run after.
+            @__rostdown_html = html
+            @options = options
+            @warnings = []
+            @root = ::Kramdown::RostdownNative::STUB_ROOT
+          else
+            __rostdown_orig_initialize(source, *rest)
+          end
+        end
+        klass.send(:alias_method, :__rostdown_orig_to_html, :to_html)
+        klass.send(:define_method, :to_html) { @__rostdown_html || __rostdown_orig_to_html }
       end
 
       # The static tables embedded by `_rouge_native` were extracted
@@ -203,37 +309,14 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown::JekyllDocument) &&
         formatter.format(lexer.lex(code))
       end
     end
-  end
+    end # unless defined?(RostdownNative)
 
-  class ::Kramdown::JekyllDocument
-    alias_method :__rostdown_orig_initialize, :initialize
-    def initialize(source, options = {})
-      $__rubyrs_native_stats[:kd_total] += 1 if $__rubyrs_native_stats
-      @__rostdown_html = nil
-      if ::Kramdown::RostdownNative.eligible?(options)
-        html = ::Kramdown::RostdownNative.render(source)
-        if $__rubyrs_native_stats
-          $__rubyrs_native_stats[html ? :kd_native : :kd_decline] += 1
-        end
-        if html
-          # Skip the Ruby parse entirely; Jekyll only touches #to_html
-          # and #warnings afterwards.
-          @__rostdown_html = html
-          @options = options
-          @warnings = []
-          @root = nil
-          return
-        end
-      end
-      if $__rubyrs_native_stats && !::Kramdown::RostdownNative.eligible?(options)
-        $__rubyrs_native_stats[:kd_ineligible] += 1
-      end
-      __rostdown_orig_initialize(source, options)
-    end
-
-    alias_method :__rostdown_orig_to_html, :to_html
-    def to_html
-      @__rostdown_html || __rostdown_orig_to_html
-    end
+    # Patch whichever framework document class is defined now. Jekyll's
+    # JekyllDocument is defined by the time `require "kramdown-parser-gfm"`
+    # completes; Bridgetown's BridgetownDocument is defined when its
+    # KramdownParser first triggers the (re-injecting) gfm require. install
+    # is idempotent, so running both on every injection is safe.
+    RostdownNative.install(::Kramdown::JekyllDocument) if defined?(::Kramdown::JekyllDocument)
+    RostdownNative.install(::Kramdown::BridgetownDocument) if defined?(::Kramdown::BridgetownDocument)
   end
 end

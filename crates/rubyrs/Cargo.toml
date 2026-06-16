@@ -269,7 +269,7 @@ cli-defaults = ["stdlib", "_sqlite", "_http_server", "sass", "mimalloc"]
 # `everything` — kitchen sink for embedders who want every
 # available battery pre-wired. ADR 0019 v3 line 314's "Bun-
 # class CLI / Edge runtime" target. ≤ 150 MB stripped.
-everything = ["cli-defaults", "_json_native", "_fiber", "_encoding_full", "_socket", "_openssl"]
+everything = ["cli-defaults", "_json_native", "_fiber", "_encoding_full", "_socket", "_openssl", "_kramdown_native"]
 # `_http_server` enables the inbound HTTP server battery per
 # ADR 0022 v4. Pulls in hyper + tokio (current-thread runtime)
 # + http-body-util + bytes for the wire-protocol side; the

@@ -3767,13 +3767,18 @@ impl Vm {
                 false,
             )?;
         }
-        // `_kramdown_native` accelerator hook, same shape: Jekyll's
-        // KramdownParser#load_dependencies requires
-        // "kramdown-parser-gfm" AFTER Kramdown::JekyllDocument is
-        // defined, so this is the earliest safe patch point. The shim
-        // is `defined?(...)`-guarded and no-ops outside Jekyll.
+        // `_kramdown_native` accelerator hook. Jekyll requires
+        // "kramdown-parser-gfm" once Kramdown::JekyllDocument is defined;
+        // Bridgetown's own `kramdown/parser/gfm` requires it (line 3)
+        // once Kramdown::BridgetownDocument is defined. The shim patches
+        // whichever doc class is present and is idempotent, so we fire on
+        // EVERY successful require (not just the first load): if the gem
+        // was pre-required before the framework defined its document
+        // subclass, the framework's later re-require still triggers the
+        // patch. The shim is `defined?`-guarded — inert without the host
+        // fns or a kramdown document class.
         #[cfg(feature = "_kramdown_native")]
-        if path_str == "kramdown-parser-gfm" && matches!(result, Ok(Value::Bool(true))) {
+        if path_str == "kramdown-parser-gfm" && matches!(result, Ok(_)) {
             self.eval_string(
                 crate::kramdown_native::SHIM,
                 "<rubyrs:kramdown_native_shim>",
