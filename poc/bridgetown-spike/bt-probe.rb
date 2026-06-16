@@ -52,6 +52,7 @@ rescue Exception => e
   exit 1
 end
 
+cfg = nil
 puts "== phase 2: Bridgetown.configuration =="
 begin
   cfg = Bridgetown.configuration(
@@ -61,8 +62,13 @@ begin
 rescue Exception => e
   puts "P2-ERR: #{e.class}: #{e.message}"
   (e.backtrace || []).first(8).each { |f| puts "  #{f}" }
-  # Frontier (2026-06-15): zeitwerk `eager_load` loads only one of the
-  # five bridgetown/foundation/refine_ext/*.rb files, so
-  # `Bridgetown::Refinements` lacks `DeepDuplicatable` and
-  # `configuration.rb`'s `starting_defaults.deep_dup` → NoMethodError.
+end
+
+puts "== phase 3: Bridgetown::Site.new(config) =="
+begin
+  site = Bridgetown::Site.new(cfg)
+  puts "P3 OK: #{site.class}"
+rescue Exception => e
+  puts "P3-ERR: #{e.class}: #{e.message}"
+  (e.backtrace || []).first(8).each { |f| puts "  #{f}" }
 end

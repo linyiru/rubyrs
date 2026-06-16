@@ -37,6 +37,14 @@ module Gem
     def rubygems_deprecate_command(*); self; end
     def skip_during; yield if block_given?; end
   end
+
+  # WALL: `Gem.find_files_from_load_path(glob)` is RubyGems runtime
+  # surface (globs every $LOAD_PATH entry). bridgetown-core's
+  # `Localizable#locale` uses it to discover `*.yml` locale files. No
+  # gem locales on the spike load path, so `[]` is faithful for boot.
+  def self.find_files_from_load_path(glob)
+    $LOAD_PATH.flat_map { |dir| Dir.glob(File.join(dir, glob)) rescue [] }
+  end
 end
 
 # WALL: `pp` (pretty-print stdlib) isn't vendored. faraday's logging
