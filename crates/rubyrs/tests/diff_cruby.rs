@@ -1361,3 +1361,6 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Ruby 3.1+ `Class#subclasses` (immediate subclasses). Surfaced by
 // bridgetown-foundation's `Class#descendants` in Site.new.
 #[test] fn class_subclasses() { run_diff("class_subclasses"); }
+
+// `Pathname#join`. Surfaced by bridgetown-core/collection.rb#relative_path.
+#[test] fn pathname_join() { run_diff("pathname_join"); }

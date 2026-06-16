@@ -82,6 +82,15 @@ class Pathname
   end
   alias_method :/, :+
 
+  # `Pathname#join(*parts)` — append each part in turn via `#+` (which
+  # already handles `.`/`..` normalisation and an absolute part
+  # resetting the result). `join` with no args returns self. Surfaced
+  # by bridgetown-core/collection.rb#relative_path
+  # (`container.join(relative_directory)`).
+  def join(*parts)
+    parts.inject(self) { |acc, part| acc + part }
+  end
+
   def basename
     Pathname.new(File.basename(@path))
   end
