@@ -156,6 +156,38 @@ fn unmatchable_input_in_callback_state_declines() {
     }
 }
 
+/// `^` is LINE-anchored, matching rouge's `fixed_anchor: true` StringScanner
+/// (`^` at real line boundaries, NOT the scan position). No caret
+/// pre-stripping: a mid-line position must NOT satisfy `^`.
+#[test]
+fn caret_is_line_anchored() {
+    let json = r##"{
+      "lexer": "caret",
+      "states": {"root": [
+        {"kind": "tok", "re": "^x", "opts": 0, "tok": "Keyword", "next": null},
+        {"kind": "tok", "re": "[^\\n]", "opts": 0, "tok": "Text", "next": null},
+        {"kind": "tok", "re": "\\n", "opts": 0, "tok": "Text", "next": null}
+      ]},
+      "shortnames": {"Keyword": "k", "Text": ""}
+    }"##;
+    let table = LexerTable::from_json(json).expect("caret table compiles");
+    let mut lexer = Lexer::new(&table);
+    // "yx\nx": the first `x` is mid-line → Text; the `x` after `\n` → Keyword.
+    let toks = lexer.lex("yx\nx", &mut NoCallbacks).expect("lex");
+    let names: Vec<&str> = table.token_names().collect();
+    let rendered: Vec<(String, String)> = toks
+        .iter()
+        .map(|(t, v)| (names[t.0 as usize].to_string(), v.clone()))
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![
+            ("Text".to_string(), "yx\n".to_string()),
+            ("Keyword".to_string(), "x".to_string()),
+        ]
+    );
+}
+
 /// Case-fold classifier condition — `SET.include?(m[0].upcase)` folds the
 /// captured group before membership, so a case-insensitive keyword set
 /// (SQL/COBOL-style) classifies regardless of the source's case.

@@ -825,7 +825,13 @@ fn compile_ruby_regex(src: &str, opts: u64) -> Result<CRegex, Error> {
         flags.push('s');
     }
     let extended = opts & 2 != 0;
-    let fixed = strip_leading_carets(src, extended).replace("{,", "{0,");
+    // No caret pre-stripping: rouge scans with `fixed_anchor: true`, so its
+    // `^` is LINE-anchored (real line boundaries), exactly like carmine's
+    // anchored-at-pos search with full-haystack context. (The old strip
+    // assumed pos-anchored `^` — false — and corrupted `(?:^|…)` alternations
+    // into always-true.) The `bol` pre-filter (src starts with `^`) stays as
+    // a valid optimization.
+    let fixed = src.replace("{,", "{0,");
     let fixed = rewrite_charclass_octal_escapes(&fixed);
     let fixed = rewrite_ascii_shorthand_classes(&fixed);
     let fixed = rewrite_inline_flags(&fixed);
@@ -1021,149 +1027,4 @@ fn utf8_char_len(b: u8) -> usize {
     } else {
         4
     }
-}
-
-/// Remove `^` anchors that sit in LEADING position — i.e. every char
-/// before them is "transparent" at match start: group openers (`(`,
-/// `(?:`, `(?<name>`, `(?flags:` / `(?flags)`), alternation bars at the
-/// top of those groups, and (in x-mode) whitespace and `#` comments.
-/// Char classes (`[^…]`) and escapes are respected. This reproduces
-/// StringScanner's pos-matching `^` under carmine's anchored-at-pos
-/// search (see `compile_ruby_regex`).
-fn strip_leading_carets(src: &str, extended: bool) -> String {
-    let bytes = src.as_bytes();
-    let mut out = String::with_capacity(src.len());
-    let mut i = 0;
-    let mut leading = true;
-    while i < bytes.len() {
-        // A non-ASCII byte begins a multi-byte UTF-8 char that can never
-        // be a metacharacter (`^|([\`, whitespace, `#`). Copy the whole
-        // char verbatim — `bytes[i] as char` would mojibake it (é→"Ã©"),
-        // breaking every regex with a non-ASCII literal/class (Cyrillic,
-        // accented Latin, CJK …).
-        if bytes[i] >= 0x80 {
-            let n = utf8_char_len(bytes[i]);
-            out.push_str(&src[i..i + n]);
-            i += n;
-            leading = false;
-            continue;
-        }
-        let c = bytes[i] as char;
-        if leading {
-            match c {
-                '^' => {
-                    // The pos-anchor quirk: drop it.
-                    i += 1;
-                    continue;
-                }
-                '|' => {
-                    out.push(c);
-                    i += 1;
-                    continue; // a new alternation root is leading again
-                }
-                '(' => {
-                    // Copy the group opener; stay leading for `(`,
-                    // `(?:`, `(?<name>`, `(?flags:`, `(?flags)`.
-                    let rest = &src[i..];
-                    let opener_len = group_opener_len(rest);
-                    out.push_str(&rest[..opener_len]);
-                    i += opener_len;
-                    continue;
-                }
-                _ if extended && c.is_whitespace() => {
-                    out.push(c);
-                    i += 1;
-                    continue;
-                }
-                _ if extended && c == '#' => {
-                    // x-mode comment runs to end of line.
-                    while i < bytes.len() && bytes[i] != b'\n' {
-                        out.push(bytes[i] as char);
-                        i += 1;
-                    }
-                    continue;
-                }
-                _ => leading = false,
-            }
-        }
-        // Non-leading copy, tracking escapes and char classes so a later
-        // `|` at group top can't be confused with one inside `[...]`.
-        match c {
-            '\\' if i + 1 < bytes.len() => {
-                out.push(c);
-                out.push(bytes[i + 1] as char);
-                i += 2;
-                continue;
-            }
-            '[' => {
-                // Copy the whole char class verbatim.
-                out.push(c);
-                i += 1;
-                if i < bytes.len() && bytes[i] == b'^' {
-                    out.push('^');
-                    i += 1;
-                }
-                if i < bytes.len() && bytes[i] == b']' {
-                    out.push(']');
-                    i += 1;
-                }
-                while i < bytes.len() && bytes[i] != b']' {
-                    if bytes[i] >= 0x80 {
-                        // Multi-byte class member (e.g. `[а-яё]`) — verbatim.
-                        let n = utf8_char_len(bytes[i]);
-                        out.push_str(&src[i..i + n]);
-                        i += n;
-                    } else if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                        let n = 1 + utf8_char_len(bytes[i + 1]);
-                        out.push_str(&src[i..i + n]);
-                        i += n;
-                    } else {
-                        out.push(bytes[i] as char);
-                        i += 1;
-                    }
-                }
-                continue;
-            }
-            _ => {}
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
-}
-
-/// Length of a group opener at the start of `rest` (which begins with
-/// `(`): `(`, `(?:`, `(?<name>`, `(?'name'`, `(?flags)` or `(?flags:`.
-/// Lookarounds (`(?=`, `(?!`, `(?<=`, `(?<!`) are NOT leading-
-/// transparent — return 1 so the caret inside them is preserved.
-fn group_opener_len(rest: &str) -> usize {
-    let b = rest.as_bytes();
-    if b.len() < 2 || b[1] != b'?' {
-        return 1; // plain `(`
-    }
-    if b.len() >= 3 && (b[2] == b'=' || b[2] == b'!') {
-        return 1; // lookahead — treat `(` alone, inside is non-leading
-    }
-    if b.len() >= 3 && b[2] == b'<' {
-        if b.len() >= 4 && (b[3] == b'=' || b[3] == b'!') {
-            return 1; // lookbehind
-        }
-        // named group `(?<name>`
-        if let Some(end) = rest.find('>') {
-            return end + 1;
-        }
-        return 1;
-    }
-    if b.len() >= 3 && b[2] == b':' {
-        return 3; // `(?:`
-    }
-    // `(?flags:` or `(?flags)`
-    for (j, ch) in rest.char_indices().skip(2) {
-        match ch {
-            ':' | ')' => return j + 1,
-            'a'..='z' | 'A'..='Z' | '-' => continue,
-            _ => return 1,
-        }
-    }
-    1
 }
