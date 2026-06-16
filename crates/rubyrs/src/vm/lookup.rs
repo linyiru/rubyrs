@@ -655,8 +655,8 @@ impl Vm {
             "<" | "<=" | ">" | ">=" |
             "&" | "|" | "^" | "<<" | ">>" | "~" |
             "to_s" | "inspect" |
-            "to_i" | "to_f" | "abs" | "even?" | "odd?" |
-            "zero?" | "positive?" | "negative?" |
+            "to_i" | "to_int" | "to_f" | "abs" | "even?" | "odd?" |
+            "zero?" | "nonzero?" | "positive?" | "negative?" |
             "succ" | "next" | "pred" | "-@" | "+@" |
             "times" | "upto" | "downto" | "step" |
             "digits" | "bit_length" | "size" | "[]" |
@@ -675,7 +675,7 @@ impl Vm {
             "<" | "<=" | ">" | ">=" |
             "to_s" | "inspect" |
             "to_i" | "to_f" | "abs" |
-            "zero?" | "positive?" | "negative?" |
+            "zero?" | "nonzero?" | "positive?" | "negative?" |
             "nan?" | "infinite?" | "finite?" |
             "eql?" | "hash" |
             "floor" | "ceil" | "round" | "truncate" | "divmod" | "step" |

@@ -1372,6 +1372,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `Numeric#nonzero?` (self / nil). Surfaced by signalize's `_dispose`.
 #[test] fn numeric_nonzero() { run_diff("numeric_nonzero"); }
 
+// `Integer#to_int` (identity) + its respond_to? whitelist entry (and
+// nonzero?'s). Surfaced by tilt's `process_arg` (`arg.respond_to?(:to_int)`).
+#[test] fn integer_to_int_respond() { run_diff("integer_to_int_respond"); }
+
 // Bare `freeze` (implicit self) inside a method freezes self. Surfaced
 // by erubi's `Engine#initialize`.
 #[test] fn bare_freeze_self() { run_diff("bare_freeze_self"); }

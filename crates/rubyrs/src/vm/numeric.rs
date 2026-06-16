@@ -1064,6 +1064,11 @@ pub(crate) fn numeric_call(
             Some(integer_to_s_value(*a))
         }
         (Value::Int(a), "to_i", []) => Some(Value::Int(*a)),
+        // `Integer#to_int` — identity (the implicit-integer-conversion
+        // protocol). tilt's `process_arg` does `arg.respond_to?(:to_int)`
+        // to treat an Integer line-number arg as `@line`; without it the
+        // arg fell through to a TypeError. CRuby: `1.to_int == 1`.
+        (Value::Int(a), "to_int", []) => Some(Value::Int(*a)),
         // `abs` / `-@`: i64::MIN.abs() and -i64::MIN both overflow
         // i64 (CRuby promotes to Bignum). With `bignum` on, decline
         // here so bigint_primitive's unary arm produces the
