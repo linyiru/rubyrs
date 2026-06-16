@@ -4,11 +4,16 @@
 //! input with a given rule table and returns the token stream, or signals
 //! that a callback rule was hit (the caller then falls back to pure rouge).
 //!
-//! `carmine_lex(table_json, input)` returns a heap-allocated JSON C string:
+//! `carmine_lex(table_json, input_ptr, input_len)` returns a heap-allocated
+//! JSON C string:
 //!   {"status":"ok","tokens":[["Keyword","def"],["Text"," "], …]}
 //!   {"status":"decline"}                  // a callback rule blocks native lexing
 //!   {"status":"error","message":"…"}
 //! The caller MUST release the returned pointer with `carmine_free`.
+//!
+//! The TABLE is a NUL-terminated C string (JSON never contains NUL); the
+//! INPUT is length-delimited `(ptr, len)` so it may contain embedded NUL
+//! bytes (real source — e.g. syzkaller blobs — does).
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -25,6 +30,16 @@ fn cstr(p: *const c_char) -> Option<String> {
         .to_str()
         .ok()
         .map(str::to_string)
+}
+
+fn input_string(ptr: *const u8, len: usize) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: caller guarantees `ptr` points to `len` readable bytes for the
+    // call; we copy them out before returning.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    std::str::from_utf8(bytes).ok().map(str::to_string)
 }
 
 fn run(table_json: &str, input: &str) -> serde_json::Value {
@@ -48,14 +63,20 @@ fn run(table_json: &str, input: &str) -> serde_json::Value {
     }
 }
 
-/// Lex `input` with the rule table `table_json`. See the module docs for the
-/// returned JSON shape. Never panics across the boundary.
+/// Lex `input` (length-delimited, may contain NUL) with the rule table
+/// `table_json` (NUL-terminated). See the module docs for the returned JSON
+/// shape. Never panics across the boundary.
 ///
 /// # Safety
-/// `table_json` and `input` must be valid NUL-terminated C strings (or null).
+/// `table_json` is a valid NUL-terminated C string (or null); `input` points
+/// to `input_len` readable bytes (or is null).
 #[unsafe(no_mangle)]
-pub extern "C" fn carmine_lex(table_json: *const c_char, input: *const c_char) -> *mut c_char {
-    let out = match (cstr(table_json), cstr(input)) {
+pub extern "C" fn carmine_lex(
+    table_json: *const c_char,
+    input: *const u8,
+    input_len: usize,
+) -> *mut c_char {
+    let out = match (cstr(table_json), input_string(input, input_len)) {
         (Some(t), Some(i)) => std::panic::catch_unwind(|| run(&t, &i).to_string())
             .unwrap_or_else(|_| r#"{"status":"error","message":"panic"}"#.to_string()),
         _ => r#"{"status":"error","message":"null or non-utf8 argument"}"#.to_string(),
@@ -84,8 +105,7 @@ mod tests {
 
     fn call(table: &str, input: &str) -> serde_json::Value {
         let t = CString::new(table).unwrap();
-        let i = CString::new(input).unwrap();
-        let p = carmine_lex(t.as_ptr(), i.as_ptr());
+        let p = carmine_lex(t.as_ptr(), input.as_ptr(), input.len());
         let s = unsafe { CStr::from_ptr(p) }.to_str().unwrap().to_owned();
         carmine_free(p);
         serde_json::from_str(&s).unwrap()
@@ -95,12 +115,19 @@ mod tests {
     fn ok_decline_and_error() {
         let table = r##"{"lexer":"t","states":{"root":[
             {"kind":"tok","re":"a","opts":0,"tok":"Keyword","next":null},
+            {"kind":"tok","re":"'[^']*'","opts":0,"tok":"Literal.String.Single","next":null},
             {"kind":"callback","re":"b","opts":0}
-          ]},"shortnames":{"Keyword":"k"}}"##;
+          ]},"shortnames":{"Keyword":"k","Literal.String.Single":"s1"}}"##;
         let ok = call(table, "a");
         assert_eq!(ok["status"], "ok");
         assert_eq!(ok["tokens"][0][0], "Keyword");
         assert_eq!(ok["tokens"][0][1], "a");
+        // Embedded NUL must survive the boundary (length-delimited input):
+        // `'B\0B'` matches the single-quoted-string rule, not truncate at NUL.
+        let nul = call(table, "'B\u{0}B'");
+        assert_eq!(nul["status"], "ok");
+        assert_eq!(nul["tokens"][0][0], "Literal.String.Single");
+        assert_eq!(nul["tokens"][0][1], "'B\u{0}B'");
         // "b" hits the callback rule → decline (caller falls back to rouge).
         assert_eq!(call(table, "b")["status"], "decline");
         // Malformed table → error, not a crash.
