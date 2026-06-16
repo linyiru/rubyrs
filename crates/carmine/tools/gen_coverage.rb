@@ -141,8 +141,31 @@ module IrCompiler
     end
     return nil unless node?(scope) && scope.type == :SCOPE
     mvar = (scope.children[0] || [])[0] # the `|m|` match param
-    ops = stmt_list(scope.children[2], mvar)
-    (ops && !ops.empty?) ? ops : nil
+    @aliases = {} # leading `name = m[i]` binds (per block)
+    body = scope.children[2]
+    stmts = ((node?(body) && body.type == :BLOCK) ? body.children : [body]).compact
+    out = []
+    peeling = true
+    stmts.each do |s|
+      next if peeling && alias_bind?(s, mvar) # `name = m[i]` → record, drop
+      peeling = false
+      next if debug_print?(s)
+      op = stmt(s, mvar); return nil if op.nil?
+      out << op
+    end
+    out.empty? ? nil : out
+  end
+
+  # A leading `lvar = m[i]` pure alias: record `lvar → group i` (used bare
+  # later, it means that capture) and drop the binding from the op stream.
+  # A non-leading reassignment is NOT peeled → its LASGN reaches stmt → nil
+  # → decline, so the alias can never be stale.
+  def self.alias_bind?(s, mvar)
+    return false unless node?(s) && %i[LASGN DASGN].include?(s.type)
+    gi = group_index(s.children[1], mvar)
+    return false if gi.nil?
+    @aliases[s.children[0]] = gi
+    true
   end
 
   # A body (BLOCK of statements, or a single statement) → [ops] or nil.
@@ -264,19 +287,19 @@ module IrCompiler
 
   def self.expr(n, mvar)
     return nil unless node?(n)
+    # `m[i]` or a bare alias var → capture group value.
+    g = group_index(n, mvar); return ["g", g] unless g.nil?
     case n.type
     when :STR then ["lit", n.children[0]]
     when :TRUE then ["bool", true]
     when :FALSE then ["bool", false]
     when :DSTR then interp(n, mvar)
     when :CALL
-      if n.children[1] == :[]
-        g = group_index(n, mvar); g.nil? ? nil : ["g", g]
-      elsif n.children[1] == :include?
+      if n.children[1] == :include?
         recv, _mid, args = n.children
         lits = string_set(recv); return nil if lits.nil?
         a = arglist(args); return nil unless a.size == 1
-        g = group_index(a[0], mvar); g.nil? ? nil : ["gin", g, lits]
+        gi = group_index(a[0], mvar); gi.nil? ? nil : ["gin", gi, lits]
       end
     end
   end
@@ -324,15 +347,21 @@ module IrCompiler
   def self.sym?(n); node?(n) && n.type == :SYM; end
   def self.int?(n); node?(n) && n.type == :INTEGER; end
 
-  # `m[i]` → capture index i (≥ 0), checking the receiver is the match var.
+  # `m[i]` (or a bare alias var bound to `m[i]`) → capture index i (≥ 0).
   def self.group_index(n, mvar)
-    return nil unless node?(n) && n.type == :CALL && n.children[1] == :[]
-    recv, _mid, args = n.children
-    return nil unless node?(recv) && %i[DVAR LVAR].include?(recv.type) && recv.children[0] == mvar
-    a = arglist(args)
-    return nil unless a.size == 1 && node?(a[0]) && a[0].type == :INTEGER
-    v = a[0].children[0]
-    (v.is_a?(Integer) && v >= 0) ? v : nil
+    return nil unless node?(n)
+    if n.type == :CALL && n.children[1] == :[]
+      recv, _mid, args = n.children
+      return nil unless node?(recv) && %i[DVAR LVAR].include?(recv.type) && recv.children[0] == mvar
+      a = arglist(args)
+      return nil unless a.size == 1 && node?(a[0]) && a[0].type == :INTEGER
+      v = a[0].children[0]
+      return (v.is_a?(Integer) && v >= 0) ? v : nil
+    end
+    if %i[DVAR LVAR].include?(n.type) && @aliases&.key?(n.children[0])
+      return @aliases[n.children[0]]
+    end
+    nil
   end
 
   # An array/`%w` literal of string literals → [String], else nil.
