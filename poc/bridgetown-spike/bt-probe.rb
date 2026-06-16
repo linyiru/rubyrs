@@ -19,6 +19,9 @@ $LP = $LOAD_PATH
   # Real net/http stack — now backed by the _socket + _openssl batteries
   # (ADR 0028/0029), so faraday's net_http adapter loads unshimmed.
   "net-http-0.6.0", "net-protocol-0.2.2", "uri-1.0.2", "ruby2_keywords-0.0.5",
+  # rexml — kramdown's HTML parser dep, pulled in during render (CRuby
+  # finds it via rubygems; rubyrs only sees the explicit $LOAD_PATH).
+  "rexml-3.4.4",
 ].each { |g| $LP.unshift("#{G}/#{g}/lib") }
 # concurrent-ruby's require_path is lib/concurrent-ruby (not lib), so
 # `require "concurrent/map"` resolves under that subdir.
@@ -84,15 +87,12 @@ end
 puts "== phase 4: site.process (read -> render -> write) =="
 begin
   site.process
-  out = Dir.glob("#{SITE}/output/**/*").select { |f| File.file?(f) }
+  out = Dir.glob("#{SITE}/output/**/*").select { |f| File.file?(f) }.sort
   puts "P4 OK: wrote #{out.size} file(s)"
+  # Echo the rendered output so its content can be diffed against CRuby
+  # (rubyrs's matches byte-for-byte: `<h1 id="hi">Hi</h1>` etc.).
+  out.each { |f| puts "  -> #{f.sub("#{SITE}/", "")}: #{File.read(f).gsub("\n", "\\n")}" }
 rescue Exception => e
   puts "P4-ERR: #{e.class}: #{e.message}"
   (e.backtrace || []).first(6).each { |f| puts "  #{f}" }
-  # Frontier (2026-06-15): the ERB template now COMPILES, EVALUATES and
-  # executes; render reaches serbea's `html_safe`, which does
-  # `self.class.new(self).tap { _1.instance_variable_set(:@html_safe, true) }`
-  # — rubyrs has no instance-variable storage on String values, so
-  # `instance_variable_set` on a (non-frozen) String wrongly raises
-  # FrozenError. Adding an ivar table to RubyString is the next step.
 end
