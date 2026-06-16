@@ -1,0 +1,24 @@
+# Empty [workspace] makes this its own workspace root, so the parent
+# rubyrs workspace neither needs to list it in `members` nor `exclude`
+# it — the PoC stays fully self-contained. The rostdown path dep below
+# still resolves across the boundary.
+[workspace]
+
+[package]
+name = "kramdown_rostdown_cabi"
+description = "C-ABI cdylib over rostdown for the kramdown-rostdown PoC gem (FFI binding)"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+# cdylib so the Ruby `ffi` gem can dlopen it. The PoC gem loads this
+# .dylib/.so directly (no rb-sys/magnus); the scan/supply protocol below
+# is a 1:1 port of rubyrs' in-VM `__rubyrs_kd_*` host fns.
+name = "kramdown_rostdown_cabi"
+crate-type = ["cdylib"]
+
+[dependencies]
+# rostdown is dependency-free; we keep it that way by living in a
+# separate crate that the main workspace excludes (see root Cargo.toml).
+rostdown = { path = "../../../crates/rostdown" }
