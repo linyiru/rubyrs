@@ -768,6 +768,19 @@ fn compile_ruby_regex(src: &str, opts: u64) -> Result<CRegex, Error> {
         })
 }
 
+/// Byte length of the UTF-8 char whose lead byte is `b` (1–4).
+fn utf8_char_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b < 0xE0 {
+        2
+    } else if b < 0xF0 {
+        3
+    } else {
+        4
+    }
+}
+
 /// Remove `^` anchors that sit in LEADING position — i.e. every char
 /// before them is "transparent" at match start: group openers (`(`,
 /// `(?:`, `(?<name>`, `(?flags:` / `(?flags)`), alternation bars at the
@@ -781,6 +794,18 @@ fn strip_leading_carets(src: &str, extended: bool) -> String {
     let mut i = 0;
     let mut leading = true;
     while i < bytes.len() {
+        // A non-ASCII byte begins a multi-byte UTF-8 char that can never
+        // be a metacharacter (`^|([\`, whitespace, `#`). Copy the whole
+        // char verbatim — `bytes[i] as char` would mojibake it (é→"Ã©"),
+        // breaking every regex with a non-ASCII literal/class (Cyrillic,
+        // accented Latin, CJK …).
+        if bytes[i] >= 0x80 {
+            let n = utf8_char_len(bytes[i]);
+            out.push_str(&src[i..i + n]);
+            i += n;
+            leading = false;
+            continue;
+        }
         let c = bytes[i] as char;
         if leading {
             match c {
@@ -841,10 +866,15 @@ fn strip_leading_carets(src: &str, extended: bool) -> String {
                     i += 1;
                 }
                 while i < bytes.len() && bytes[i] != b']' {
-                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                        out.push(bytes[i] as char);
-                        out.push(bytes[i + 1] as char);
-                        i += 2;
+                    if bytes[i] >= 0x80 {
+                        // Multi-byte class member (e.g. `[а-яё]`) — verbatim.
+                        let n = utf8_char_len(bytes[i]);
+                        out.push_str(&src[i..i + n]);
+                        i += n;
+                    } else if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        let n = 1 + utf8_char_len(bytes[i + 1]);
+                        out.push_str(&src[i..i + n]);
+                        i += n;
                     } else {
                         out.push(bytes[i] as char);
                         i += 1;

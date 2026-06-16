@@ -517,10 +517,48 @@ impl<'t> Lexer<'t> {
                         groups,
                     });
                 }
-                None => self.error_getch(text),
+                None => {
+                    // No rule matched. If this state (or a mixin it pulls
+                    // in) has a CALLBACK rule, carmine can't be sure rouge
+                    // wouldn't have matched via that block (carmine's
+                    // handling of the callback's regex may be incomplete —
+                    // e.g. an embedded-lexer `delegate` whose lazy-lookahead
+                    // span carmine mis-evaluates). Emitting an Error token
+                    // would risk diverging from rouge, so DECLINE instead
+                    // (the drop-in contract: never wrong, only fall back).
+                    // States with no callback rule emit Error as rouge does.
+                    if let Some((cb_state, cb_rule)) = self.find_callback_rule(top, &mut Vec::new()) {
+                        return Err(Error::CallbackRequired {
+                            state: self.table.state_names[cb_state as usize].clone(),
+                            rule: cb_rule,
+                        });
+                    }
+                    self.error_getch(text);
+                }
             }
         }
         Ok(RunStep::Done)
+    }
+
+    /// First callback rule reachable from `state` (through mixins), as
+    /// `(state, rule_index)`. `seen` guards against mixin cycles.
+    fn find_callback_rule(&self, state: u32, seen: &mut Vec<u32>) -> Option<(u32, usize)> {
+        if seen.contains(&state) {
+            return None;
+        }
+        seen.push(state);
+        for (ri, rule) in self.table.states[state as usize].iter().enumerate() {
+            match &rule.kind {
+                Kind::Callback => return Some((state, ri)),
+                Kind::Mixin(other) => {
+                    if let Some(hit) = self.find_callback_rule(*other, seen) {
+                        return Some(hit);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     fn error_getch(&mut self, text: &str) {

@@ -124,17 +124,36 @@ fn registry_tokens_resolvable_for_callbacks() {
 }
 
 #[test]
-fn error_fallback_consumes_unmatchable_input() {
-    // U+0000 matches no python rule at the start of an expression
-    // context → rouge emits an Error token per char and continues.
-    let table = table();
+fn error_fallback_in_callback_free_state() {
+    // Unmatchable input in a state with NO callback rule → rouge emits an
+    // Error token per char; carmine reproduces it (the fallback is only
+    // suppressed when a callback rule is present — see the next test).
+    let json = r##"{
+      "lexer": "errdemo",
+      "states": {"root": [
+        {"kind": "tok", "re": "x", "opts": 0, "tok": "Name", "next": null}
+      ]},
+      "shortnames": {"Name": "n", "Error": "err"}
+    }"##;
+    let table = LexerTable::from_json(json).expect("table");
     let mut lexer = Lexer::new(&table);
     let toks = lexer.lex("\u{0}\u{0}x\n", &mut NoCallbacks).expect("lex");
     let names: Vec<&str> = toks.iter().map(|(t, _)| table.token_name(*t)).collect();
-    assert!(
-        names.contains(&"Error"),
-        "expected an Error token, got {names:?}"
-    );
+    assert!(names.contains(&"Error"), "expected Error, got {names:?}");
+}
+
+#[test]
+fn unmatchable_input_in_callback_state_declines() {
+    // python's root carries a callback rule (the string-start). When NO
+    // rule matches (U+0000), carmine can't be sure rouge wouldn't have
+    // matched via the callback, so it DECLINES rather than risk a wrong
+    // Error token — the drop-in "never wrong, only fall back" contract.
+    let table = table();
+    let mut lexer = Lexer::new(&table);
+    match lexer.lex("\u{0}\u{0}x\n", &mut NoCallbacks) {
+        Err(carmine::Error::CallbackRequired { .. }) => {}
+        other => panic!("expected CallbackRequired decline, got {other:?}"),
+    }
 }
 
 /// Conditional Action IR — a hand-written table exercising the op/
