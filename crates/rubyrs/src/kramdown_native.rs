@@ -45,9 +45,43 @@ use rostdown::{CodeHighlighter, Options};
 /// the hook in `vm/kernel.rs::require_ruby`).
 pub(crate) const SHIM: &str = include_str!("kramdown_native_shim.rb");
 
+/// Framework flavor — controls the code-span class and the default
+/// fence language, the two places Jekyll's and Bridgetown's kramdown
+/// configs render code differently (Bridgetown omits `default_lang`, so
+/// its code-span class is `highlighter-rouge`, not Jekyll's
+/// `language-plaintext highlighter-rouge`).
+#[derive(Clone, Copy, PartialEq)]
+enum Flavor {
+    Jekyll,
+    Bridgetown,
+}
+
+impl Flavor {
+    fn from_arg(s: &str) -> Self {
+        if s == "bridgetown" { Flavor::Bridgetown } else { Flavor::Jekyll }
+    }
+    fn codespan_class(self) -> &'static str {
+        match self {
+            Flavor::Jekyll => "language-plaintext highlighter-rouge",
+            Flavor::Bridgetown => "highlighter-rouge",
+        }
+    }
+    /// Default fence language for a no-info fence. Jekyll sets
+    /// `default_lang: plaintext`; Bridgetown sets none (its no-lang
+    /// fences are declined upstream in the shim, so `None` here just
+    /// keeps them off the native highlight path).
+    fn default_lang(self) -> Option<&'static str> {
+        match self {
+            Flavor::Jekyll => Some("plaintext"),
+            Flavor::Bridgetown => None,
+        }
+    }
+}
+
 /// A document between the scan and render passes.
 struct KdSession {
     src: String,
+    flavor: Flavor,
     /// `(lang, code)` per fenced block, in document order.
     blocks: Vec<(String, String)>,
     /// Highlighted HTML per block (inner `None` = plain path).
@@ -75,6 +109,7 @@ fn arg_err(msg: &str) -> Trap {
 /// conversion proceeds (the pass-1 HTML is discarded).
 struct Recorder {
     blocks: Vec<(String, String)>,
+    flavor: Flavor,
 }
 
 impl CodeHighlighter for Recorder {
@@ -83,10 +118,10 @@ impl CodeHighlighter for Recorder {
         Some(String::new())
     }
     fn codespan_class(&self) -> Option<&str> {
-        Some("language-plaintext highlighter-rouge")
+        Some(self.flavor.codespan_class())
     }
     fn default_lang(&self) -> Option<&str> {
-        Some("plaintext")
+        self.flavor.default_lang()
     }
 }
 
@@ -96,6 +131,7 @@ impl CodeHighlighter for Recorder {
 struct Supplied<'a> {
     htmls: &'a [Option<String>],
     cursor: usize,
+    flavor: Flavor,
     /// Set when pass-2 calls don't line up with pass-1 blocks — the
     /// render is then abandoned (shim falls back to Ruby).
     desynced: bool,
@@ -115,10 +151,10 @@ impl CodeHighlighter for Supplied<'_> {
         }
     }
     fn codespan_class(&self) -> Option<&str> {
-        Some("language-plaintext highlighter-rouge")
+        Some(self.flavor.codespan_class())
     }
     fn default_lang(&self) -> Option<&str> {
-        Some("plaintext")
+        self.flavor.default_lang()
     }
 }
 
@@ -145,19 +181,26 @@ fn free_session(sid: i64) -> Option<KdSession> {
 /// absent.
 pub fn register_host_fns(rt: &mut crate::Runtime) {
     rt.register_fn("__rubyrs_kd_scan", |args| {
-        let src = match args {
-            [Value::Str(s)] => s.to_string_lossy(),
-            _ => return Err(arg_err("__rubyrs_kd_scan(src)")),
+        let (src, flavor) = match args {
+            // `(src)` — legacy single-arg form defaults to Jekyll.
+            [Value::Str(s)] => (s.to_string_lossy(), Flavor::Jekyll),
+            // `(src, "jekyll" | "bridgetown")`.
+            [Value::Str(s), Value::Str(f)] => {
+                (s.to_string_lossy(), Flavor::from_arg(&f.to_string_lossy()))
+            }
+            _ => return Err(arg_err("__rubyrs_kd_scan(src[, flavor])")),
         };
-        let mut recorder = Recorder { blocks: Vec::new() };
-        // Jekyll's kramdown defaults; the shim has already verified the
-        // document options match them.
+        let mut recorder = Recorder { blocks: Vec::new(), flavor };
+        // GFM markdown parsing is flavor-independent (gfm + auto_ids); the
+        // flavor only changes code-span/fence emission via the highlighter
+        // trait. The shim has verified the document options match.
         if rostdown::to_html(&src, &Options::jekyll(), &mut recorder).is_err() {
             return Ok(Value::Nil);
         }
         let n = recorder.blocks.len();
         let session = KdSession {
             src: src.to_string(),
+            flavor,
             blocks: recorder.blocks,
             supplied: vec![None; n],
         };
@@ -242,6 +285,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         let mut supplied = Supplied {
             htmls: &session.supplied,
             cursor: 0,
+            flavor: session.flavor,
             desynced: false,
         };
         match rostdown::to_html(&session.src, &Options::jekyll(), &mut supplied) {

@@ -108,27 +108,47 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown)
       # the pure-Ruby parse (a plain substring scan — cheaper than a parse
       # and almost always false for prose). Returns the HTML or nil
       # (caller runs the original Ruby parse on nil).
-      def self.try_render(source, options)
+      def self.try_render(source, options, flavor)
         return nil unless eligible?(options)
-        if (options["mark_highlighting"] || options[:mark_highlighting]) &&
-           (source.include?("==") || source.include?("::"))
-          return nil
+        if flavor == "bridgetown"
+          # rostdown has no `==mark==`/`::ins::`; for a source without
+          # those delimiters the output is identical either way.
+          if (options["mark_highlighting"] || options[:mark_highlighting]) &&
+             (source.include?("==") || source.include?("::"))
+            return nil
+          end
+          # A NO-LANGUAGE fence (` ``` ` with no info string) is the one
+          # code construct that diverges: Bridgetown (no `default_lang`)
+          # wraps it in `<div class="highlighter-rouge">` and rouge GUESSES
+          # the language (`guess_lang: true`), which rostdown can't
+          # reproduce. Inline code spans and language-tagged fences (the
+          # common cases) DO render natively. `has_bare_opening_fence?`
+          # tracks open/close so a closing fence isn't mistaken for a
+          # bare opener.
+          return nil if has_bare_opening_fence?(source)
         end
-        # Bridgetown's highlighter opts omit `default_lang`, so kramdown
-        # renders code SPANS and BLOCKS with a different class than
-        # rostdown's Jekyll-shaped output (`highlighter-rouge` vs
-        # `language-plaintext highlighter-rouge`). Decline any Bridgetown
-        # source that contains code (a backtick — inline span or fence —
-        # or a tilde fence); it falls back to the same pure-Ruby path it
-        # used before this accelerator existed. Prose (the overwhelming
-        # common case) renders natively, byte-identical. Jekyll-exact opts
-        # carry `default_lang: plaintext` and keep the native code path.
-        sho = options["syntax_highlighter_opts"] || options[:syntax_highlighter_opts]
-        if (sho == BT_HL_OPTS || sho == BT_HL_OPTS_SYM) &&
-           (source.include?("`") || source =~ /~{3,}/)
-          return nil
+        render(source, flavor)
+      end
+
+      # True if `source` opens a fenced code block with no language/info
+      # string. Walks fences in order so the bare CLOSING fence of a
+      # language-tagged block (` ```ruby ` … ` ``` `) is not counted.
+      def self.has_bare_opening_fence?(source)
+        in_fence = false
+        source.each_line do |line|
+          # chomp: each_line keeps the trailing "\n", which would break the
+          # `\z` anchor — an opening `` ```ruby `` then wouldn't match while
+          # the bare closing `` ``` `` (last line, no newline) would, and a
+          # closing fence would be misread as a bare opener.
+          next unless (m = line.chomp.match(/\A[ ]{0,3}(?:`{3,}|~{3,})(.*)\z/))
+          if in_fence
+            in_fence = false
+          else
+            in_fence = true
+            return true if m[1].strip.empty?
+          end
         end
-        render(source)
+        false
       end
 
       # Patch `klass#initialize`/`#to_html` (a Kramdown::Document subclass —
@@ -148,7 +168,7 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown)
       end
       STUB_ROOT = StubRoot.new
 
-      def self.install(klass)
+      def self.install(klass, flavor)
         return if klass.method_defined?(:__rostdown_orig_initialize)
         klass.send(:alias_method, :__rostdown_orig_initialize, :initialize)
         # `*rest` (not `options = {}`): a define_method block's optional
@@ -159,7 +179,7 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown)
           options = rest.first || {}
           $__rubyrs_native_stats[:kd_total] += 1 if $__rubyrs_native_stats
           @__rostdown_html = nil
-          html = ::Kramdown::RostdownNative.try_render(source, options)
+          html = ::Kramdown::RostdownNative.try_render(source, options, flavor)
           if $__rubyrs_native_stats
             if ::Kramdown::RostdownNative.eligible?(options)
               $__rubyrs_native_stats[html ? :kd_native : :kd_decline] += 1
@@ -251,12 +271,12 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown)
       # without loading it, so the wholesale rouge_available? require
       # only happens when the static gate is closed — otherwise rouge
       # loads lazily on the first block the static path can't serve.
-      def self.render(source)
+      def self.render(source, flavor = "jekyll")
         unless static_hl_ok? || rouge_available?
           $stderr.puts "[kd-hl-unavailable]" if ENV["RUBYRS_NATIVE_STATS"] == "2"
           return nil
         end
-        sid = __rubyrs_kd_scan(source)
+        sid = __rubyrs_kd_scan(source, flavor)
         if sid.nil?
           $stderr.puts "[kd-scan-decline] #{source[0, 60].inspect}" if ENV["RUBYRS_NATIVE_STATS"] == "2"
           return nil
@@ -316,7 +336,7 @@ if defined?(__rubyrs_kd_scan) && defined?(::Kramdown)
     # completes; Bridgetown's BridgetownDocument is defined when its
     # KramdownParser first triggers the (re-injecting) gfm require. install
     # is idempotent, so running both on every injection is safe.
-    RostdownNative.install(::Kramdown::JekyllDocument) if defined?(::Kramdown::JekyllDocument)
-    RostdownNative.install(::Kramdown::BridgetownDocument) if defined?(::Kramdown::BridgetownDocument)
+    RostdownNative.install(::Kramdown::JekyllDocument, "jekyll") if defined?(::Kramdown::JekyllDocument)
+    RostdownNative.install(::Kramdown::BridgetownDocument, "bridgetown") if defined?(::Kramdown::BridgetownDocument)
   end
 end
