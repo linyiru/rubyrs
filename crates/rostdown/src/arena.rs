@@ -13,6 +13,9 @@
 //! one `unsafe` module and only compiles under `--features arena`.
 
 #![allow(unsafe_code)]
+// pause/resume are wired up for the gem's Recorder-escape boundary later;
+// keep them tested now even though to_html doesn't call them yet.
+#![allow(dead_code)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -235,4 +238,262 @@ pub fn reset() {
             tl.cursor.set(tl.base.get() as usize);
         }
     });
+}
+
+/// Suspend the scope (allocations route to System) around a callback
+/// whose allocations may outlive the arena — e.g. data that escapes
+/// `to_html` via a recording highlighter. Returns the saved depth.
+pub fn pause() -> u32 {
+    TL.with(|tl| {
+        let d = tl.depth.get();
+        tl.depth.set(0);
+        d
+    })
+}
+
+/// Restore the depth saved by [`pause`].
+pub fn resume(saved: u32) {
+    TL.with(|tl| tl.depth.set(saved));
+}
+
+// ===================================================================
+// Tests. The pure `bump_compute` and the Drop-ing `Arena` twin run
+// under `rustup run nightly cargo miri test` for UB detection; the
+// `ScopedAlloc` routing tests are #[cfg_attr(miri, ignore)] because
+// Miri does not execute a #[global_allocator] and the thread-local
+// backing intentionally leaks. Ported from rust-sass src/arena.rs.
+// ===================================================================
+#[cfg(test)]
+struct Arena {
+    base: *mut u8,
+    size: usize,
+    end: usize,
+    cursor: Cell<usize>,
+}
+
+#[cfg(test)]
+impl Arena {
+    fn with_system_backing(size: usize) -> Option<Arena> {
+        let layout = Layout::from_size_align(size, 4096).ok()?;
+        // SAFETY: non-zero size, valid align.
+        let base = unsafe { System.alloc(layout) };
+        if base.is_null() {
+            return None;
+        }
+        Some(Arena {
+            base,
+            size,
+            end: base as usize + size,
+            cursor: Cell::new(base as usize),
+        })
+    }
+
+    fn alloc(&self, layout: Layout) -> Option<*mut u8> {
+        let (aligned, next) =
+            bump_compute(self.cursor.get(), layout.align(), layout.size(), self.end)?;
+        self.cursor.set(next);
+        // SAFETY: in-bounds offset (see bump_compute).
+        Some(unsafe { self.base.add(aligned - self.base as usize) })
+    }
+
+    fn used(&self) -> usize {
+        self.cursor.get() - self.base as usize
+    }
+
+    fn contains(&self, ptr: *mut u8) -> bool {
+        let p = ptr as usize;
+        p >= self.base as usize && p < self.end
+    }
+
+    fn realloc(&self, ptr: *mut u8, old: Layout, new_size: usize) -> Option<*mut u8> {
+        let addr = ptr as usize;
+        if addr >= self.base as usize && addr + old.size() == self.cursor.get() {
+            let new_end = addr.checked_add(new_size)?;
+            if new_end <= self.end {
+                self.cursor.set(new_end);
+                return Some(ptr);
+            }
+        }
+        let np = self.alloc(Layout::from_size_align(new_size, old.align()).ok()?)?;
+        // SAFETY: np is a fresh, non-overlapping allocation of >= copy length.
+        unsafe { core::ptr::copy_nonoverlapping(ptr, np, old.size().min(new_size)) };
+        Some(np)
+    }
+
+    fn reset(&self) {
+        self.cursor.set(self.base as usize);
+    }
+}
+
+#[cfg(test)]
+impl Drop for Arena {
+    fn drop(&mut self) {
+        if let Ok(layout) = Layout::from_size_align(self.size, 4096) {
+            // SAFETY: base came from System.alloc with this layout.
+            unsafe { System.dealloc(self.base, layout) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layout(size: usize, align: usize) -> Layout {
+        Layout::from_size_align(size, align).unwrap()
+    }
+
+    // ---- pure bump_compute (also exercised by Miri) ----
+
+    #[test]
+    fn compute_aligns_up() {
+        assert_eq!(bump_compute(10, 8, 4, 1000), Some((16, 20)));
+        assert_eq!(bump_compute(16, 8, 8, 1000), Some((16, 24)));
+        assert_eq!(bump_compute(7, 1, 3, 1000), Some((7, 10)));
+    }
+
+    #[test]
+    fn compute_every_power_of_two_alignment() {
+        for align in [1usize, 2, 4, 8, 16, 32, 64, 128, 256, 4096] {
+            let (aligned, next) = bump_compute(1, align, 64, usize::MAX).unwrap();
+            assert_eq!(aligned % align, 0, "align {align}");
+            assert_eq!(next, aligned + 64);
+        }
+    }
+
+    #[test]
+    fn compute_boundary_and_overflow() {
+        assert_eq!(bump_compute(8, 8, 0, 100), Some((8, 8))); // zero-size
+        assert_eq!(bump_compute(0, 1, 100, 100), Some((0, 100))); // exact fit
+        assert_eq!(bump_compute(0, 1, 101, 100), None); // one past
+        assert_eq!(bump_compute(90, 8, 20, 100), None); // align+size overflow end
+        assert_eq!(bump_compute(usize::MAX, 8, 0, usize::MAX), None); // align overflow
+        assert_eq!(bump_compute(usize::MAX - 3, 1, 10, usize::MAX), None); // size overflow
+    }
+
+    // ---- standalone Arena (run under Miri for UB) ----
+
+    #[test]
+    fn arena_alloc_aligned_writable_in_bounds_nonoverlapping() {
+        let a = Arena::with_system_backing(64 * 1024).unwrap();
+        let mut prev_end = a.base as usize;
+        for align in [1usize, 2, 4, 8, 16, 64, 256] {
+            let p = a.alloc(layout(128, align)).unwrap();
+            assert_eq!(p as usize % align, 0, "align {align}");
+            assert!(a.contains(p));
+            assert!(p as usize >= prev_end, "no overlap");
+            prev_end = p as usize + 128;
+            // SAFETY: p is a live 128-byte allocation.
+            unsafe {
+                std::ptr::write_bytes(p, 0xAB, 128);
+                assert_eq!(*p, 0xAB);
+                assert_eq!(*p.add(127), 0xAB);
+            }
+        }
+    }
+
+    #[test]
+    fn arena_full_returns_none() {
+        let a = Arena::with_system_backing(4096).unwrap();
+        assert!(a.alloc(layout(8192, 8)).is_none());
+        assert!(a.alloc(layout(2048, 8)).is_some());
+        assert!(a.alloc(layout(2048, 8)).is_some());
+        assert!(a.alloc(layout(1, 1)).is_none());
+    }
+
+    #[test]
+    fn arena_reset_reuses_region() {
+        let a = Arena::with_system_backing(64 * 1024).unwrap();
+        let p1 = a.alloc(layout(1000, 8)).unwrap();
+        assert_eq!(a.used(), 1000);
+        a.reset();
+        assert_eq!(a.used(), 0);
+        let p2 = a.alloc(layout(1000, 8)).unwrap();
+        assert_eq!(p1, p2, "reset hands back the same region");
+        // SAFETY: p2 is a live 1000-byte allocation.
+        unsafe { std::ptr::write_bytes(p2, 0xCD, 1000) };
+    }
+
+    #[test]
+    fn arena_realloc_extends_tail_else_copies() {
+        let a = Arena::with_system_backing(64 * 1024).unwrap();
+        let p = a.alloc(layout(8, 8)).unwrap();
+        // SAFETY: p is a live 8-byte allocation.
+        unsafe { std::ptr::write_bytes(p, 0xCD, 8) };
+        let used = a.used();
+        let p2 = a.realloc(p, layout(8, 8), 16).unwrap();
+        assert_eq!(p, p2, "tail realloc grows in place");
+        assert_eq!(a.used(), used + 8, "only the +8 delta is consumed");
+        // SAFETY: p2 still points at the (now larger) live block.
+        unsafe { assert_eq!(*p2, 0xCD, "data preserved in place") };
+        let _q = a.alloc(layout(8, 8)).unwrap(); // p2 no longer the tail
+        let p3 = a.realloc(p2, layout(16, 8), 32).unwrap();
+        assert_ne!(p2, p3, "non-tail realloc copies to a fresh block");
+        // SAFETY: p3 is the fresh block holding the copied bytes.
+        unsafe { assert_eq!(*p3, 0xCD, "data copied to the new block") };
+    }
+
+    // ---- ScopedAlloc routing (NOT under Miri: no #[global_allocator]
+    // runs there and the thread-local backing intentionally leaks) ----
+
+    fn in_arena(p: *mut u8) -> bool {
+        TL.with(|tl| {
+            let b = tl.base.get() as usize;
+            b != 0 && (p as usize) >= b && (p as usize) < tl.end.get()
+        })
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn scoped_routes_to_system_when_inactive() {
+        let l = layout(64, 8);
+        // SAFETY: round-trips a System allocation; depth 0 → System.
+        let p = unsafe { ScopedAlloc.alloc(l) };
+        assert!(!p.is_null());
+        assert!(!in_arena(p));
+        unsafe { ScopedAlloc.dealloc(p, l) };
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn scoped_bumps_inside_scope_and_resets() {
+        let l = layout(128, 16);
+        let scope = Scope::enter();
+        // SAFETY: in-scope allocations come from the arena.
+        let p1 = unsafe { ScopedAlloc.alloc(l) };
+        let p2 = unsafe { ScopedAlloc.alloc(l) };
+        assert!(in_arena(p1) && in_arena(p2), "in-scope allocs are arena");
+        assert!(p2 as usize >= p1 as usize + 128, "no overlap");
+        assert_eq!(p1 as usize % 16, 0);
+        // dealloc of an in-arena pointer is a no-op (must not free/crash).
+        unsafe { ScopedAlloc.dealloc(p1, l) };
+        assert!(leave_no_reset(), "outermost");
+        reset();
+        // After reset the region is reused.
+        let scope2 = Scope::enter();
+        let p3 = unsafe { ScopedAlloc.alloc(l) };
+        assert_eq!(p3, p1, "reset hands back the same region");
+        let _ = leave_no_reset();
+        reset();
+        std::mem::forget(scope2);
+        std::mem::forget(scope);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn pause_routes_to_system_then_resumes() {
+        let l = layout(64, 8);
+        let scope = Scope::enter();
+        let saved = pause(); // depth → 0
+        // SAFETY: paused scope → System.
+        let p_sys = unsafe { ScopedAlloc.alloc(l) };
+        assert!(!in_arena(p_sys), "paused scope routes to System");
+        unsafe { ScopedAlloc.dealloc(p_sys, l) };
+        resume(saved);
+        let p_arena = unsafe { ScopedAlloc.alloc(l) };
+        assert!(in_arena(p_arena), "resumed scope bumps from the arena again");
+        let _ = leave_no_reset();
+        reset();
+        std::mem::forget(scope);
+    }
 }

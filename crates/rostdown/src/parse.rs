@@ -72,11 +72,12 @@ fn split_lines(src: &str) -> Vec<&str> {
     // a second pass to count newlines exactly.
     let mut out = Vec::with_capacity(src.len() / 32 + 8);
     let mut start = 0;
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'\n' {
-            out.push(&src[start..i]);
-            start = i + 1;
-        }
+    // SWAR memchr1 finds each `\n` a word at a time instead of scanning
+    // byte-by-byte (line splitting was the top parse self-time).
+    while let Some(off) = crate::scan::memchr1(&bytes[start..], b'\n') {
+        let nl = start + off;
+        out.push(&src[start..nl]);
+        start = nl + 1;
     }
     out.push(&src[start..]);
     out
@@ -320,7 +321,7 @@ fn decline_block_scan(line: &str) -> Result<(), Error> {
     // — byte-identical to the per-char escape toggle. Most lines have no
     // `|` at all, so a single tight `contains` skips the escape loop.
     let tb = t.as_bytes();
-    if tb.contains(&b'|') {
+    if crate::scan::memchr1(tb, b'|').is_some() {
         let mut esc = false;
         for &b in tb {
             match b {
@@ -953,13 +954,23 @@ fn flush(out: &mut Vec<Span>, buf: &mut String) {
 /// arms in `parse_spans_until` — e.g. `~`/`{` are here so a run never
 /// swallows a `~~`/`{:` that should decline, and they're all ASCII so a
 /// run never splits a multibyte char.
+/// 256-entry membership table for the trigger bytes. One indexed load
+/// per byte in the inline parser's hot "skip ordinary text" loop, vs a
+/// chain of compares for 15 scattered values.
+static TRIGGER: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut i = 0;
+    let set = b"\\`*_[!<>&~{'\"-.";
+    while i < set.len() {
+        t[set[i] as usize] = true;
+        i += 1;
+    }
+    t
+};
+
 #[inline]
 fn is_trigger(c: u8) -> bool {
-    matches!(
-        c,
-        b'\\' | b'`' | b'*' | b'_' | b'[' | b'!' | b'<' | b'>'
-            | b'&' | b'~' | b'{' | b'\'' | b'"' | b'-' | b'.'
-    )
+    TRIGGER[c as usize]
 }
 
 /// Parsed-tree text the way kramdown-parser-gfm's `update_raw_text`
@@ -1024,4 +1035,69 @@ fn parse_link(
     }
     let (spans, _) = parse_spans_until(&rest[1..close], None, in_em, in_strong, Some(Elem::Link))?;
     Ok(Some((spans, href.to_string(), close + 2 + paren_rel + 1)))
+}
+
+#[cfg(test)]
+mod byte_opt_tests {
+    //! Unit coverage for the byte-scan rewrites (perf work). The golden
+    //! corpus gates byte-identity at the document level; these pin the
+    //! individual functions on edge cases the corpus may not exercise —
+    //! especially the byte-vs-char hazards (escaped/After-multibyte `|`).
+    use super::*;
+
+    fn reason(line: &str) -> Option<&'static str> {
+        match decline_block_scan(line) {
+            Ok(()) => None,
+            Err(Error::Declined(r)) => Some(r),
+        }
+    }
+
+    #[test]
+    fn decline_table_pipe_escape_and_multibyte() {
+        assert_eq!(reason("plain prose, nothing special"), None);
+        assert_eq!(reason("a | b"), Some("table")); // unescaped pipe
+        assert_eq!(reason(r"a \| b"), None); // escaped pipe is NOT a table
+        assert_eq!(reason(r"a \\| b"), Some("table")); // \\ then | → unescaped
+        // byte scan must stay correct around multibyte chars:
+        assert_eq!(reason("café | x"), Some("table"));
+        assert_eq!(reason(r"café \| x"), None);
+        assert_eq!(reason("naïve prose"), None); // multibyte, no pipe
+    }
+
+    #[test]
+    fn decline_indented_code_and_prefixes() {
+        assert_eq!(reason("    four spaces"), Some("indented-code"));
+        assert_eq!(reason("\ttab"), Some("indented-code"));
+        assert_eq!(reason("   three spaces ok"), None);
+        assert_eq!(reason("{:.css}"), Some("ald-ial-extension"));
+        assert_eq!(reason("[^1]: footnote"), Some("footnote"));
+        assert_eq!(reason("$$ math $$"), Some("math"));
+        assert_eq!(reason("<div>"), Some("html-block"));
+        assert_eq!(reason("[id]: http://x"), Some("link-definition"));
+    }
+
+    #[test]
+    fn is_hr_true_cases() {
+        for s in ["---", "***", "___", "----", "- - -", "*  *  *", "  ---  ", "-\t-\t-"] {
+            assert!(is_hr(s), "{s:?} should be HR");
+        }
+    }
+
+    #[test]
+    fn is_hr_false_cases() {
+        for s in ["--", "**", "hello", "-*-", "- - x", "", "- -", "-x-", "a---", "---x"] {
+            assert!(!is_hr(s), "{s:?} should NOT be HR");
+        }
+    }
+
+    #[test]
+    fn split_lines_matches_std_split() {
+        for s in [
+            "", "a", "a\n", "a\nb", "a\nb\n", "\n", "\n\n", "a\n\nb", "café\nx\n",
+            "trailing\nnewline\n", "no newline at all",
+        ] {
+            let std: Vec<&str> = s.split('\n').collect();
+            assert_eq!(split_lines(s), std, "split mismatch for {s:?}");
+        }
+    }
 }
