@@ -69,6 +69,41 @@ impl Fold {
     }
 }
 
+/// Integer comparison for `stack.size`/`stack.length` conditions.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Cmp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl Cmp {
+    fn parse(s: &str) -> Option<Cmp> {
+        Some(match s {
+            "eq" => Cmp::Eq,
+            "ne" => Cmp::Ne,
+            "lt" => Cmp::Lt,
+            "le" => Cmp::Le,
+            "gt" => Cmp::Gt,
+            "ge" => Cmp::Ge,
+            _ => return None,
+        })
+    }
+    fn apply(self, a: usize, b: usize) -> bool {
+        match self {
+            Cmp::Eq => a == b,
+            Cmp::Ne => a != b,
+            Cmp::Lt => a < b,
+            Cmp::Le => a <= b,
+            Cmp::Gt => a > b,
+            Cmp::Ge => a >= b,
+        }
+    }
+}
+
 // Not `Clone`: `GroupMatch` holds a compiled `CRegex` (not Clone), and no
 // caller clones a cond.
 #[derive(Debug)]
@@ -84,6 +119,8 @@ pub(crate) enum IrCond {
     GroupMatch(usize, crate::table::CRegex),
     /// `if m[i]` — group i participated in the match (non-nil), even if "".
     GroupPresent(usize),
+    /// `stack.size <cmp> n` — the state-stack DEPTH compared to a constant.
+    StackDepth(Cmp, usize),
     Not(Box<IrCond>),
     And(Box<IrCond>, Box<IrCond>),
     Or(Box<IrCond>, Box<IrCond>),
@@ -336,6 +373,10 @@ fn parse_cond(v: &J, it: &mut dyn IrInterner) -> Result<IrCond, Error> {
         "gpresent" => IrCond::GroupPresent(
             t.get(1).and_then(J::as_u64).ok_or_else(|| bad("gpresent idx"))? as usize,
         ),
+        "sdepth" => IrCond::StackDepth(
+            t.get(1).and_then(J::as_str).and_then(Cmp::parse).ok_or_else(|| bad("sdepth cmp"))?,
+            t.get(2).and_then(J::as_u64).ok_or_else(|| bad("sdepth n"))? as usize,
+        ),
         "not" => IrCond::Not(Box::new(parse_cond(
             t.get(1).ok_or_else(|| bad("not arg"))?,
             it,
@@ -419,6 +460,7 @@ pub(crate) fn eval_cond(
     groups: &[Option<String>],
     ivars: &Ivars,
     current_state: u32,
+    stack_depth: usize,
 ) -> bool {
     match cond {
         IrCond::IvarTruthy(name) => !matches!(
@@ -442,14 +484,15 @@ pub(crate) fn eval_cond(
             matches!(groups.get(*i), Some(Some(g)) if re.is_match_anywhere(g))
         }
         IrCond::GroupPresent(i) => matches!(groups.get(*i), Some(Some(_))),
-        IrCond::Not(inner) => !eval_cond(inner, groups, ivars, current_state),
+        IrCond::StackDepth(cmp, n) => cmp.apply(stack_depth, *n),
+        IrCond::Not(inner) => !eval_cond(inner, groups, ivars, current_state, stack_depth),
         IrCond::And(a, b) => {
-            eval_cond(a, groups, ivars, current_state)
-                && eval_cond(b, groups, ivars, current_state)
+            eval_cond(a, groups, ivars, current_state, stack_depth)
+                && eval_cond(b, groups, ivars, current_state, stack_depth)
         }
         IrCond::Or(a, b) => {
-            eval_cond(a, groups, ivars, current_state)
-                || eval_cond(b, groups, ivars, current_state)
+            eval_cond(a, groups, ivars, current_state, stack_depth)
+                || eval_cond(b, groups, ivars, current_state, stack_depth)
         }
     }
 }

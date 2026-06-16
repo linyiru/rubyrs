@@ -304,6 +304,17 @@ module IrCompiler
       b = cond(n.children[1], mvar); return nil if b.nil?
       return [n.type == :AND ? "and" : "or", a, b]
     end
+    # `stack.size <cmp> n` / `stack.length <cmp> n` — state-stack depth cond.
+    if n.type == :OPCALL &&
+       (cmp = { :== => "eq", :"!=" => "ne", :< => "lt", :"<=" => "le", :> => "gt", :">=" => "ge" }[n.children[1]])
+      recv, _op, args = n.children
+      if node?(recv) && recv.type == :CALL && %i[size length].include?(recv.children[1]) &&
+         node?(recv.children[0]) && %i[VCALL FCALL].include?(recv.children[0].type) &&
+         recv.children[0].children[0] == :stack
+        a = arglist(args)
+        return ["sdepth", cmp, a[0].children[0]] if a.size == 1 && node?(a[0]) && a[0].type == :INTEGER
+      end
+    end
     return ["ivar", n.children[0].to_s.sub(/\A@/, "")] if n.type == :IVAR
     # `state?(:s)` / `in_state?(:s)` — rouge synonyms for "current top state".
     if %i[FCALL VCALL].include?(n.type) && %i[state? in_state?].include?(n.children[0])

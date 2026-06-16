@@ -280,7 +280,8 @@ impl<'t> Lexer<'t> {
                     else_ops,
                 } => {
                     let current = *self.stack.last().ok_or(Error::EmptyStack)?;
-                    let branch = if eval_cond(cond, groups, &self.ivars, current) {
+                    let depth = self.stack.len();
+                    let branch = if eval_cond(cond, groups, &self.ivars, current, depth) {
                         then_ops
                     } else {
                         else_ops

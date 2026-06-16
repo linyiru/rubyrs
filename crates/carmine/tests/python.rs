@@ -156,6 +156,46 @@ fn unmatchable_input_in_callback_state_declines() {
     }
 }
 
+/// `stack.size == n` — a condition on the state-stack DEPTH (common_lisp's
+/// unbalanced-`)` → Error at root, else pop).
+#[test]
+fn ir_stack_depth_condition() {
+    let close = r#"["if", ["sdepth", "eq", 1], [["token", "Error"]], [["token", "Punctuation"], ["pop", 1]]]"#;
+    let json = format!(
+        r##"{{
+      "lexer": "sd",
+      "states": {{
+        "root": [
+          {{"kind": "tok", "re": "\\(", "opts": 0, "tok": "Operator", "next": "grp"}},
+          {{"kind": "ir", "re": "\\)", "opts": 0, "ops": [{close}]}}
+        ],
+        "grp": [
+          {{"kind": "tok", "re": "\\(", "opts": 0, "tok": "Operator", "next": "grp"}},
+          {{"kind": "ir", "re": "\\)", "opts": 0, "ops": [{close}]}}
+        ]
+      }},
+      "shortnames": {{"Operator": "o", "Punctuation": "p", "Error": "err"}}
+    }}"##
+    );
+    let table = LexerTable::from_json(&json).expect("sdepth table compiles");
+    let names = |t: &LexerTable, toks: &[(carmine::TokenId, String)]| -> Vec<(String, String)> {
+        let n: Vec<&str> = t.token_names().collect();
+        toks.iter().map(|(t, v)| (n[t.0 as usize].to_string(), v.clone())).collect()
+    };
+    // "()" — depth 2 at the `)` → pop branch (Punctuation, distinct from `(`).
+    let mut lx = Lexer::new(&table);
+    assert_eq!(
+        names(&table, &lx.lex("()", &mut NoCallbacks).unwrap()),
+        vec![("Operator".into(), "(".into()), ("Punctuation".into(), ")".into())]
+    );
+    // ")" alone — depth 1 (root) → Error.
+    let mut lx2 = Lexer::new(&table);
+    assert_eq!(
+        names(&table, &lx2.lex(")", &mut NoCallbacks).unwrap()),
+        vec![("Error".into(), ")".into())]
+    );
+}
+
 /// `&&` / `||` compose conditions — `if A || B then … else …`.
 #[test]
 fn ir_and_or_conditions() {
