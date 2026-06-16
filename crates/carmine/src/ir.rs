@@ -83,6 +83,8 @@ pub(crate) enum IrCond {
     /// `m[i] =~ /re/` — group i matches the (unanchored) pattern anywhere.
     GroupMatch(usize, crate::table::CRegex),
     Not(Box<IrCond>),
+    And(Box<IrCond>, Box<IrCond>),
+    Or(Box<IrCond>, Box<IrCond>),
 }
 
 #[derive(Debug)]
@@ -333,6 +335,14 @@ fn parse_cond(v: &J, it: &mut dyn IrInterner) -> Result<IrCond, Error> {
             t.get(1).ok_or_else(|| bad("not arg"))?,
             it,
         )?)),
+        "and" => IrCond::And(
+            Box::new(parse_cond(t.get(1).ok_or_else(|| bad("and lhs"))?, it)?),
+            Box::new(parse_cond(t.get(2).ok_or_else(|| bad("and rhs"))?, it)?),
+        ),
+        "or" => IrCond::Or(
+            Box::new(parse_cond(t.get(1).ok_or_else(|| bad("or lhs"))?, it)?),
+            Box::new(parse_cond(t.get(2).ok_or_else(|| bad("or rhs"))?, it)?),
+        ),
         _ => return Err(bad("unknown cond")),
     })
 }
@@ -427,5 +437,13 @@ pub(crate) fn eval_cond(
             matches!(groups.get(*i), Some(Some(g)) if re.is_match_anywhere(g))
         }
         IrCond::Not(inner) => !eval_cond(inner, groups, ivars, current_state),
+        IrCond::And(a, b) => {
+            eval_cond(a, groups, ivars, current_state)
+                && eval_cond(b, groups, ivars, current_state)
+        }
+        IrCond::Or(a, b) => {
+            eval_cond(a, groups, ivars, current_state)
+                || eval_cond(b, groups, ivars, current_state)
+        }
     }
 }

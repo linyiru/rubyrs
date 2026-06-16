@@ -156,6 +156,40 @@ fn unmatchable_input_in_callback_state_declines() {
     }
 }
 
+/// `&&` / `||` compose conditions — `if A || B then … else …`.
+#[test]
+fn ir_and_or_conditions() {
+    let json = r##"{
+      "lexer": "andor",
+      "states": {"root": [
+        {"kind": "ir", "re": "[a-z]+", "opts": 0, "ops": [
+          ["if", ["or", ["geq", 0, "a"], ["geq", 0, "b"]],
+            [["token", "Keyword"]], [["token", "Name"]]]
+        ]},
+        {"kind": "tok", "re": "\\s+", "opts": 0, "tok": "Text", "next": null}
+      ]},
+      "shortnames": {"Keyword": "k", "Name": "n", "Text": ""}
+    }"##;
+    let table = LexerTable::from_json(json).expect("and/or table compiles");
+    let mut lexer = Lexer::new(&table);
+    let toks = lexer.lex("a b c", &mut NoCallbacks).expect("lex");
+    let names: Vec<&str> = table.token_names().collect();
+    let rendered: Vec<(String, String)> = toks
+        .iter()
+        .map(|(t, v)| (names[t.0 as usize].to_string(), v.clone()))
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![
+            ("Keyword".to_string(), "a".to_string()), // == "a"
+            ("Text".to_string(), " ".to_string()),
+            ("Keyword".to_string(), "b".to_string()), // == "b"
+            ("Text".to_string(), " ".to_string()),
+            ("Name".to_string(), "c".to_string()), // neither
+        ]
+    );
+}
+
 /// `^` is LINE-anchored, matching rouge's `fixed_anchor: true` StringScanner
 /// (`^` at real line boundaries, NOT the scan position). No caret
 /// pre-stripping: a mid-line position must NOT satisfy `^`.

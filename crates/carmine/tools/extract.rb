@@ -308,6 +308,12 @@ module IrCompiler
 
   def self.cond(n, mvar)
     return nil unless node?(n)
+    # `c1 && c2` / `c1 || c2` — recurse both sides (each must be a valid cond).
+    if %i[AND OR].include?(n.type)
+      a = cond(n.children[0], mvar); return nil if a.nil?
+      b = cond(n.children[1], mvar); return nil if b.nil?
+      return [n.type == :AND ? "and" : "or", a, b]
+    end
     return ["ivar", n.children[0].to_s.sub(/\A@/, "")] if n.type == :IVAR
     # `state?(:s)` / `in_state?(:s)` — rouge synonyms for "current top state".
     if %i[FCALL VCALL].include?(n.type) && %i[state? in_state?].include?(n.children[0])
