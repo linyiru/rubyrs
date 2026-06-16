@@ -1126,7 +1126,7 @@ impl Vm {
             Value::Block(_) => matches!(name, "call" | "[]" | "()" | "yield" | "arity" | "curry" | ">>" | "<<"),
             #[cfg(feature = "regex")]
             Value::Regex(_) => matches!(name,
-                "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect" | "options"
+                "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect" | "options" | "names"
                 // `freeze` / `frozen?` are compatibility shims:
                 // Regexp is immutable by construction so freezing
                 // is a no-op, but real Ruby code calls `.freeze`
@@ -2296,6 +2296,41 @@ impl Vm {
                                 return Ok(());
                             }
                             self.stack.push(Value::Bool(false));
+                            return Ok(());
+                        }
+                        // `super` from an `is_a?` / `kind_of?` /
+                        // `instance_of?` override → the builtin Kernel
+                        // type test (no table Method above the override;
+                        // it's a do_call recogniser in dispatch.rs).
+                        // mustermann's `Node#is_a?` is
+                        // `def is_a?(type); type = Node[type] if type.is_a?
+                        // Symbol; super(type); end` — the `super(type)`
+                        // must reach the real type check. The arg is a
+                        // Class/Module; the simple `class_of(recv)` walk
+                        // covers an object receiver (the mustermann case);
+                        // a non-Class arg is a TypeError like CRuby.
+                        ("is_a?" | "kind_of?" | "instance_of?", Some(recv)) => {
+                            let target = match args.first() {
+                                Some(Value::Class(c)) => c.clone(),
+                                _ => {
+                                    return Err(self.trap(crate::error::RubyError::TypeError {
+                                        msg: "class or module required".to_string(),
+                                    }));
+                                }
+                            };
+                            let recv_class = match self.class_of(&recv) {
+                                Value::Class(c) => c,
+                                _ => {
+                                    self.stack.push(Value::Bool(false));
+                                    return Ok(());
+                                }
+                            };
+                            let result = if nm == "instance_of?" {
+                                std::rc::Rc::ptr_eq(&recv_class, &target)
+                            } else {
+                                super::class_is_a(&recv_class, &target)
+                            };
+                            self.stack.push(Value::Bool(result));
                             return Ok(());
                         }
                         // `super` from a method defined on a Hash

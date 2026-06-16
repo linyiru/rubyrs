@@ -1,7 +1,16 @@
 # Hanami::Router 2.3.1 spike probe — mustermann + rack stack (no
 # zeitwerk/dry), the most rubyrs-tractable slice of Hanami. Mirrors the
 # sinatra spike: define routes, drive a Rack request end-to-end.
-# Run: target/release/rubyrs poc/hanami-spike/hr-probe.rb
+# Run (needs the stdlib battery for strscan): target/release/rubyrs
+#   --features stdlib  (probe binary built with `cargo build --release
+#   -p rubyrs --features stdlib`)  poc/hanami-spike/hr-probe.rb
+#
+# STATUS (2026-06-16): ALL THREE PHASES PASS — Hanami::Router boots,
+# compiles routes, and serves Rack requests end-to-end. The phase-2
+# walls fell in order: bare-super implicit block forwarding (mustermann
+# Capture#parse → Node#parse yield), Regexp#names (parser.scan branch),
+# and `super` from an is_a? override (Node#is_a?). strscan needs the
+# stdlib feature (the vendored StringScanner lives there).
 G = "/Users/linyiru/.rbenv/versions/3.4.1/lib/ruby/gems/3.4.0/gems"
 $LP = $LOAD_PATH
 [
@@ -39,14 +48,6 @@ begin
 rescue Exception => e
   puts "P2-ERR: #{e.class}: #{e.message}"
   (e.backtrace || []).first(15).each { |f| puts "  #{f}" }
-  # Frontier (2026-06-15): `require "hanami/router"` (phase 1) now passes
-  # after adding the real uri gem. Phase 2 (route compilation) hits
-  # `RuntimeError: no block given (yield)` in mustermann's AST parser:
-  # `Node.parse(&block)` → `new.tap { |n| n.parse(&block) }` → the
-  # instance `parse` yields, but the block is lost across the
-  # multi-hop `node → parser.read → Node.parse(&block) → n.parse(&block)`
-  # forwarding chain. Doesn't reproduce in isolation (an emergent
-  # block-forwarding interaction) — the next thing to dig.
   exit 1
 end
 

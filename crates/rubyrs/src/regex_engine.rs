@@ -667,6 +667,27 @@ impl CompiledRegex {
         }
     }
 
+    /// Named capture-group names in group-index order, deduplicated
+    /// keeping the first occurrence — `Regexp#names` semantics
+    /// (`/(?<a>.)(?<b>.)(?<a>.)/.names == ["a", "b"]`). `capture_names()`
+    /// yields one `Option<&str>` per group (group 0 + unnamed groups are
+    /// `None`); we drop the `None`s and collapse duplicates.
+    pub(crate) fn names(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut push = |names: &mut dyn Iterator<Item = Option<&str>>| {
+            for n in names.flatten() {
+                if !out.iter().any(|seen| seen == n) {
+                    out.push(n.to_string());
+                }
+            }
+        };
+        match self.engine() {
+            Engine::Native(r) => push(&mut r.capture_names()),
+            Engine::Fancy(r) => push(&mut r.capture_names()),
+        }
+        out
+    }
+
     /// Names written on 2+ capture groups (`(?<a>X)|(?<a>Y)`), each
     /// paired with ALL its 1-based group indices. Memoized. The
     /// source parse is TRUSTED only when its total group count equals

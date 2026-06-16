@@ -11359,6 +11359,21 @@ impl Vm {
             self.stack.push(Value::Bool(result));
             return Ok(());
         }
+        // `Regexp#names` — named capture-group names in group-index
+        // order, deduped (CRuby: `/(?<a>.)(?<a>.)/.names == ["a"]`).
+        // Built here rather than in the free `string_call` because the
+        // result Array needs heap allocation. mustermann's AST parser
+        // branches on `regexp.names.any?` to decide whether `scan`
+        // returns the raw matched string or a MatchData.
+        #[cfg(feature = "regex")]
+        if &*name == "names" && args.is_empty()
+            && let Value::Regex(re) = &recv
+        {
+            let names: Vec<Value> = re.names().into_iter().map(Value::new_str).collect();
+            let id = self.heap.alloc(HeapObj::Array(names.into()));
+            self.stack.push(Value::Array(id));
+            return Ok(());
+        }
         // `Regexp#match(str)` — symmetric with `String#match(regex)`.
         // Returns a MatchData (setting `$~`) or nil. A nil arg is a
         // no-match (CRuby returns nil and clears `$~`). Discovery: P3
