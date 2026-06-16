@@ -555,6 +555,72 @@ impl Builder {
 /// tracker. (POSIX classes themselves have a separate
 /// Ruby-Unicode-vs-Rust-ASCII divergence — out of scope here,
 /// tracked separately.)
+/// Rewrite octal escapes (`\NNN`) INSIDE a character class to `\x{..}`,
+/// which both engines accept. Onigmo treats `\1` inside `[...]` as the
+/// octal char U+0001 (backreferences are only meaningful outside a class),
+/// but regex-syntax / fancy-regex reject bare-octal-in-class as an invalid
+/// class. Octal/backref escapes OUTSIDE a class are left verbatim (there
+/// `\1` is a backreference, handled by fancy-regex). No-op when there's no
+/// `[`. Discovery: rouge's perl lexer builds `…[^\1]…` for its `s///`/`tr`
+/// rules. (Ported from rubyrs's regex_engine.)
+fn rewrite_charclass_octal_escapes(pat: &str) -> std::borrow::Cow<'_, str> {
+    if !pat.contains('[') {
+        return std::borrow::Cow::Borrowed(pat);
+    }
+    let chars: Vec<char> = pat.chars().collect();
+    let mut out = String::with_capacity(pat.len());
+    let mut in_class = false;
+    let mut at_class_start = false;
+    let mut changed = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            let n = chars[i + 1];
+            if in_class && ('0'..='7').contains(&n) {
+                let mut j = i + 1;
+                let mut val: u32 = 0;
+                let mut cnt = 0;
+                while j < chars.len() && cnt < 3 && ('0'..='7').contains(&chars[j]) {
+                    val = val * 8 + (chars[j] as u32 - '0' as u32);
+                    j += 1;
+                    cnt += 1;
+                }
+                out.push_str(&format!("\\x{{{val:x}}}"));
+                i = j;
+                changed = true;
+                at_class_start = false;
+                continue;
+            }
+            out.push(c);
+            out.push(n);
+            i += 2;
+            at_class_start = false;
+            continue;
+        }
+        if !in_class {
+            if c == '[' {
+                in_class = true;
+                at_class_start = true;
+            }
+        } else if c == '^' && at_class_start {
+            // negation right after `[` — still at the start
+        } else if c == ']' && !at_class_start {
+            in_class = false;
+            at_class_start = false;
+        } else {
+            at_class_start = false;
+        }
+        out.push(c);
+        i += 1;
+    }
+    if changed {
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(pat)
+    }
+}
+
 fn rewrite_ascii_shorthand_classes(pat: &str) -> std::borrow::Cow<'_, str> {
     // Two rewrite triggers: backslash shorthands and POSIX bracket
     // expressions. `[[:alnum:]]` has no backslash at all — gating on
@@ -746,6 +812,7 @@ fn compile_ruby_regex(src: &str, opts: u64) -> Result<CRegex, Error> {
     }
     let extended = opts & 2 != 0;
     let fixed = strip_leading_carets(src, extended).replace("{,", "{0,");
+    let fixed = rewrite_charclass_octal_escapes(&fixed);
     let fixed = rewrite_ascii_shorthand_classes(&fixed);
     let pat = format!("(?{flags}){fixed}");
     // Linear first; syntax the meta engine rejects (lookaround,
