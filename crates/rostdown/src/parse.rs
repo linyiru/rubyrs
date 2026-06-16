@@ -980,10 +980,11 @@ fn parse_spans_until(
                 // and stop delimiters start with `*`/`_` (triggers), so
                 // a run never skips a pending emphasis close.
                 let start = i;
-                i += 1;
-                while i < bytes.len() && !is_trigger(bytes[i]) {
-                    i += 1;
-                }
+                // bytes[i] is non-trigger (this arm); find the next one.
+                i = match next_trigger(&bytes[i + 1..]) {
+                    Some(off) => i + 1 + off,
+                    None => bytes.len(),
+                };
                 let run = &text[start..i];
                 buf.push_str(run);
                 prev = run.chars().next_back();
@@ -1046,6 +1047,82 @@ static TRIGGER: [bool; 256] = {
 #[inline]
 fn is_trigger(c: u8) -> bool {
     TRIGGER[c as usize]
+}
+
+/// Index of the first trigger byte in `hay`, or `None`. Scalar (the
+/// `TRIGGER` table) by default; under `--features simd` on aarch64 a NEON
+/// byteset scans 16 bytes per iteration. The two paths MUST agree — the
+/// `next_trigger_matches_scalar` test pins it.
+#[inline]
+fn next_trigger(hay: &[u8]) -> Option<usize> {
+    #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+    {
+        // SAFETY: bounded 16-byte loads (guarded by `+ 16 <= len`); NEON
+        // is baseline on aarch64.
+        return unsafe { next_trigger_neon(hay) };
+    }
+    #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
+    {
+        hay.iter().position(|&b| TRIGGER[b as usize])
+    }
+}
+
+// NEON byteset (Langdale's nibble-lookup): a byte `b` is in the trigger
+// set iff bit `b>>4` is set in LO_NIB[b & 0xF]. HI_NIB[h] = 1<<h selects
+// that bit. High nibbles 8..15 (non-ASCII) map to 0 — never a trigger,
+// so multibyte UTF-8 is skipped as ordinary run text.
+#[cfg(all(target_arch = "aarch64", feature = "simd"))]
+const LO_NIB: [u8; 16] = {
+    let mut t = [0u8; 16];
+    let set = b"\\`*_[!<>&~{'\"-.";
+    let mut i = 0;
+    while i < set.len() {
+        let b = set[i];
+        t[(b & 0x0F) as usize] |= 1u8 << (b >> 4);
+        i += 1;
+    }
+    t
+};
+#[cfg(all(target_arch = "aarch64", feature = "simd"))]
+const HI_NIB: [u8; 16] = {
+    let mut t = [0u8; 16];
+    let mut h = 0;
+    while h < 8 {
+        t[h] = 1u8 << h;
+        h += 1;
+    }
+    t
+};
+
+#[cfg(all(target_arch = "aarch64", feature = "simd"))]
+#[target_feature(enable = "neon")]
+unsafe fn next_trigger_neon(hay: &[u8]) -> Option<usize> {
+    use core::arch::aarch64::*;
+    let lo_tbl = unsafe { vld1q_u8(LO_NIB.as_ptr()) };
+    let hi_tbl = unsafe { vld1q_u8(HI_NIB.as_ptr()) };
+    let mut i = 0;
+    while i + 16 <= hay.len() {
+        let v = unsafe { vld1q_u8(hay.as_ptr().add(i)) };
+        let lo = vqtbl1q_u8(lo_tbl, vandq_u8(v, vdupq_n_u8(0x0F)));
+        let hi = vqtbl1q_u8(hi_tbl, vshrq_n_u8(v, 4));
+        // 0xFF in lanes where (lo & hi) != 0, i.e. byte is a trigger.
+        let m = vtstq_u8(lo, hi);
+        // NEON movemask: shift-narrow to 4 bits per lane → one nibble per
+        // input byte in a u64; trailing_zeros/4 is the first match index.
+        let narrowed = vshrn_n_u16(vreinterpretq_u16_u8(m), 4);
+        let mask = vget_lane_u64(vreinterpret_u64_u8(narrowed), 0);
+        if mask != 0 {
+            return Some(i + (mask.trailing_zeros() as usize >> 2));
+        }
+        i += 16;
+    }
+    while i < hay.len() {
+        if TRIGGER[hay[i] as usize] {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Parsed-tree text the way kramdown-parser-gfm's `update_raw_text`
@@ -1173,6 +1250,24 @@ mod byte_opt_tests {
         ] {
             let std: Vec<&str> = s.split('\n').collect();
             assert_eq!(split_lines(s), std, "split mismatch for {s:?}");
+        }
+    }
+
+    #[test]
+    fn next_trigger_matches_scalar() {
+        // Every value 0..=255 (incl. non-ASCII, which must NOT match) at
+        // every length — exercises the NEON path under `--features simd`
+        // against the scalar `is_trigger` oracle.
+        let bytes: Vec<u8> = (0u8..=255).cycle().take(400).collect();
+        for len in 0..bytes.len() {
+            let hay = &bytes[..len];
+            let oracle = hay.iter().position(|&b| is_trigger(b));
+            assert_eq!(next_trigger(hay), oracle, "len={len}");
+        }
+        for pos in 0..40usize {
+            let mut h = vec![b'x'; 40];
+            h[pos] = b'*';
+            assert_eq!(next_trigger(&h), Some(pos), "pos={pos}");
         }
     }
 }

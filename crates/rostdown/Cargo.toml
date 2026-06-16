@@ -21,5 +21,8 @@ arena = []
 # Exposes `profile_phases` (parse-vs-convert split timing) for the
 # benchmark harness. Diagnostic only; not part of the public API.
 profiling = []
+# Opt-in SIMD byteset (NEON on aarch64) for the inline parser's trigger
+# scan. Adds `unsafe`; default stays unsafe-free with a scalar table.
+simd = []
 
 [dependencies]
