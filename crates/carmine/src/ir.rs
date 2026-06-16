@@ -82,6 +82,8 @@ pub(crate) enum IrCond {
     GroupInFold(usize, Fold, Vec<String>),
     /// `m[i] =~ /re/` — group i matches the (unanchored) pattern anywhere.
     GroupMatch(usize, crate::table::CRegex),
+    /// `if m[i]` — group i participated in the match (non-nil), even if "".
+    GroupPresent(usize),
     Not(Box<IrCond>),
     And(Box<IrCond>, Box<IrCond>),
     Or(Box<IrCond>, Box<IrCond>),
@@ -331,6 +333,9 @@ fn parse_cond(v: &J, it: &mut dyn IrInterner) -> Result<IrCond, Error> {
             let opts = t.get(3).and_then(J::as_u64).unwrap_or(0);
             IrCond::GroupMatch(i, it.ir_regex(src, opts)?)
         }
+        "gpresent" => IrCond::GroupPresent(
+            t.get(1).and_then(J::as_u64).ok_or_else(|| bad("gpresent idx"))? as usize,
+        ),
         "not" => IrCond::Not(Box::new(parse_cond(
             t.get(1).ok_or_else(|| bad("not arg"))?,
             it,
@@ -436,6 +441,7 @@ pub(crate) fn eval_cond(
         IrCond::GroupMatch(i, re) => {
             matches!(groups.get(*i), Some(Some(g)) if re.is_match_anywhere(g))
         }
+        IrCond::GroupPresent(i) => matches!(groups.get(*i), Some(Some(_))),
         IrCond::Not(inner) => !eval_cond(inner, groups, ivars, current_state),
         IrCond::And(a, b) => {
             eval_cond(a, groups, ivars, current_state)

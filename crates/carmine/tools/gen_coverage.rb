@@ -342,6 +342,9 @@ module IrCompiler
       return nil unless re.is_a?(Regexp)
       return ["gmatch", g, re.source, re.options]
     end
+    # `if m[i]` / `if name` (bare group-ref or alias) — group-presence truthiness.
+    r = resolve_group(n, mvar)
+    return ["gpresent", r[0]] unless r.nil?
     nil
   end
 
@@ -461,6 +464,14 @@ module IrCompiler
   # would capture. Non-string / instance-dependent / unresolvable → nil.
   def self.string_set(n)
     return string_array(n) if node?(n) && n.type == :LIST
+    # `A | B` / `A + B` — union/concat of two resolvable string sets (e.g.
+    # `(['x'] | self.class.keywords)`). Both halves are match-independent.
+    if node?(n) && n.type == :OPCALL && %i[| +].include?(n.children[1])
+      a = string_set(n.children[0]); return nil if a.nil?
+      barg = arglist(n.children[2])[0]
+      b = barg && string_set(barg); return nil if b.nil?
+      return a + b
+    end
     v = eval_class_data(n)
     return nil unless v.respond_to?(:to_a)
     a = v.to_a
