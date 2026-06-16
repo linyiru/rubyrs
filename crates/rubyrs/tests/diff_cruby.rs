@@ -611,6 +611,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn regex_binary_bytes() { run_diff("regex_binary_bytes"); }
 #[test] fn object_singleton_super() { run_diff("object_singleton_super"); }
 #[test] fn bare_super_forwarding() { run_diff("bare_super_forwarding"); }
+#[test] fn bare_super_implicit_block() { run_diff("bare_super_implicit_block"); }
 #[test] fn hash_subclass_default() { run_diff("hash_subclass_default"); }
 #[test] fn hash_subclass_transform_override() { run_diff("hash_subclass_transform_override"); }
 #[test] fn clone_preserves_singleton() { run_diff("clone_preserves_singleton"); }

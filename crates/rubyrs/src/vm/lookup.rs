@@ -2185,7 +2185,21 @@ impl Vm {
         // define_method bodies super under their RUNTIME name.
         let name_id = self.super_runtime_name(name_id);
         match self.super_lookup(name_id) {
-            Ok((m, self_val)) => self.invoke_method(m, self_val, args),
+            // Bare `super` / `super(args)` (Op::Super / Op::ApplySuper)
+            // forward the CURRENT method's block by default — CRuby
+            // passes the calling frame's block to the superclass
+            // method even when the overriding method never names it
+            // with a `&blk` param. Mustermann's `Capture#parse` is the
+            // canonical caller: `def parse; self.payload ||= ...; super;
+            // end` (no block param) supering into `Node#parse` whose
+            // body `while element = yield`s the block threaded through
+            // `Node.parse(&block) → n.parse(&block)`. The explicit
+            // `super(&block)` / `super(&nil)` shapes go through
+            // Op::ApplySuperBlock instead, so they never reach here.
+            Ok((m, self_val)) => {
+                let block = self.frames.last().and_then(|f| f.block_arg);
+                self.invoke_method_with_block(m, self_val, args, block)
+            }
             Err(trap) => {
                 // `super` to a builtin Class / BasicObject method
                 // that rubyrs handles inline (so the ancestor walk
