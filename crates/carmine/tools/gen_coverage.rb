@@ -284,6 +284,15 @@ module IrCompiler
       return ["recurse", ["g", 0]] if args.empty?
       return nil unless args.size == 1
       v = expr(args[0], mvar); v.nil? ? nil : ["recurse", v]
+    when :delegate
+      # `delegate <SelfClass>[, text]` is recurse (a fresh sub-lex of the SAME
+      # class). ONLY self-delegation is handled here — resolving the target to
+      # the very class being extracted is sound; delegating to ANOTHER lexer
+      # needs the cross-lexer registry (not yet) → decline.
+      return nil unless args.size.between?(1, 2)
+      return nil unless resolve_lexer_const(args[0]).equal?(klass) && !klass.nil?
+      text = args.size == 2 ? expr(args[1], mvar) : ["g", 0]
+      text.nil? ? nil : ["recurse", text]
     end
   end
 
@@ -475,6 +484,22 @@ module IrCompiler
       pp = parent.nil? ? [] : const_path(parent)
       pp.nil? ? nil : pp + [name]
     end
+  end
+
+  # Resolve a constant path (`Dart`, `Rouge::Lexers::Shell`) to the live
+  # class, trying the lexer namespace then top level. Used to detect
+  # self-delegation (`delegate <SelfClass>` == recurse).
+  def self.resolve_lexer_const(n)
+    path = const_path(n)
+    return nil if path.nil?
+    [defined?(Rouge::Lexers) ? Rouge::Lexers : Object, Object].each do |base|
+      begin
+        return path.reduce(base) { |m, s| m.const_get(s) }
+      rescue StandardError
+        next
+      end
+    end
+    nil
   end
 end
 
