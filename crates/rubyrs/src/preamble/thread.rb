@@ -196,6 +196,42 @@ class Thread
   def abort_on_exception=(v)
     v
   end
+
+  # `Thread.attr_accessor :x` — in the single-thread model
+  # `Thread.current` IS this class, so a class-level `attr_accessor`
+  # must expose `Thread.current.x` / `.x=`. Define CLASS-level accessors
+  # (backed by a class ivar — process-global, the correct semantics for
+  # exactly one thread) AND instance-level ones (for `Thread.new`
+  # instances). Avoids `super` to the builtin Module#attr_accessor.
+  # Consumer: bridgetown-core/current.rb does
+  # `Thread.attr_accessor :bridgetown_state` then
+  # `Thread.current.bridgetown_state ||= {}`.
+  def self.attr_accessor(*names)
+    names.each do |n|
+      ivar = :"@#{n}"
+      define_singleton_method(n) { instance_variable_get(ivar) }
+      define_singleton_method(:"#{n}=") { |v| instance_variable_set(ivar, v) }
+      define_method(n) { instance_variable_get(ivar) }
+      define_method(:"#{n}=") { |v| instance_variable_set(ivar, v) }
+    end
+  end
+
+  def self.attr_reader(*names)
+    names.each do |n|
+      ivar = :"@#{n}"
+      define_singleton_method(n) { instance_variable_get(ivar) }
+      define_method(n) { instance_variable_get(ivar) }
+    end
+  end
+
+  def self.attr_writer(*names)
+    names.each do |n|
+      ivar = :"@#{n}"
+      define_singleton_method(:"#{n}=") { |v| instance_variable_set(ivar, v) }
+      define_method(:"#{n}=") { |v| instance_variable_set(ivar, v) }
+    end
+  end
+
   def self.current
     self
   end

@@ -1339,3 +1339,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `method_missing`. Surfaced by `HashWithDotAccess::Hash` dot-access
 // (Bridgetown's `Configuration` keys-as-methods).
 #[test] fn hash_subclass_method_missing() { run_diff("hash_subclass_method_missing"); }
+
+// `Thread.attr_accessor :x` + `Thread.current.x` round-trips (class-level
+// accessor in the single-thread model). Surfaced by
+// bridgetown-core/current.rb's thread-state store.
+#[test] fn thread_attr_accessor() { run_diff("thread_attr_accessor"); }
