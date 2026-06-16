@@ -1607,18 +1607,36 @@ impl Vm {
             Value::Class(cls) => {
                 self.lookup_class_singleton_method(cls, mm_id)
             }
-            // Hash with a per-instance eigenclass: the
-            // openstruct-over-Hash pattern installs
-            // `def h.method_missing` there.
-            Value::Hash(hid) if self.any_hash_singletons => {
-                match self.heap.get(*hid) {
-                    crate::heap::HeapObj::Hash(h) => h
-                        .singleton_class
-                        .as_ref()
-                        .and_then(|sc| self.lookup_method_uncached(sc, mm_id)),
-                    _ => None,
+            // A Hash SUBCLASS instance (class-tagged) consults its
+            // class's `method_missing` — `HashWithDotAccess::Hash`
+            // provides dot-access to keys via `method_missing`
+            // (`config.autoload_paths` → `config["autoload_paths"]`),
+            // and Bridgetown's `Configuration < HashWithDotAccess::Hash`
+            // leans on it. A plain Hash with a per-instance eigenclass
+            // (the openstruct-over-Hash pattern installs `def
+            // h.method_missing` there) consults that.
+            Value::Hash(hid) => {
+                let via_tag = self
+                    .heap
+                    .hash_class_tag(*hid)
+                    .and_then(|tag| self.lookup_method_uncached(&tag, mm_id));
+                if via_tag.is_some() {
+                    via_tag
+                } else if self.any_hash_singletons {
+                    let sc = match self.heap.get(*hid) {
+                        crate::heap::HeapObj::Hash(h) => h.singleton_class.clone(),
+                        _ => None,
+                    };
+                    sc.and_then(|sc| self.lookup_method_uncached(&sc, mm_id))
+                } else {
+                    None
                 }
             }
+            // Array subclass twin of the Hash-tag case.
+            Value::Array(aid) => self
+                .heap
+                .array_class_tag(*aid)
+                .and_then(|tag| self.lookup_method_uncached(&tag, mm_id)),
             _ => None,
         };
         let m = match m {

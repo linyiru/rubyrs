@@ -1334,3 +1334,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // bridgetown-foundation's `refine ::Hash` deep_dup called on a
 // `HashWithDotAccess::Hash`.
 #[test] fn refinement_applies_to_subclass() { run_diff("refinement_applies_to_subclass"); }
+
+// A Hash/Array subclass dispatches unknown methods to its class's
+// `method_missing`. Surfaced by `HashWithDotAccess::Hash` dot-access
+// (Bridgetown's `Configuration` keys-as-methods).
+#[test] fn hash_subclass_method_missing() { run_diff("hash_subclass_method_missing"); }
