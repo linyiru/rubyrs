@@ -16,7 +16,7 @@ comrak = "0.29"
 # `arena` feature on: rostdown's to_html bump-allocates its AST. We
 # install rostdown::ScopedAlloc as the global allocator below, so the
 # rostdown row measures the REALIZED arena number (incl. the copy-out).
-rostdown = { path = "../../../crates/rostdown", features = ["arena", "profiling"] }
+rostdown = { path = "../../../crates/rostdown", features = ["arena", "profiling", "simd"] }
 
 [profile.release]
 lto = "thin"

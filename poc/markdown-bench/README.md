@@ -31,7 +31,7 @@ syntect by default — explicitly disabled here.)
 ```
 engine         lang/runtime          ns/op       MB/s      out_B
 ------         ------------          -----       ----      -----
-rostdown       Rust                  98533      381.0      46112
+rostdown       Rust                  85549      438.8      46112
 pulldown       Rust                 100109      375.0      43638
 blackfriday    Go                   392369       95.7      45413
 comrak         Rust                 436619       86.0      43878
@@ -61,9 +61,11 @@ kramdown       Ruby               10025292        3.7      46112
 > | SWAR `memchr` line split | 351 | `split_lines` finds `\n` a word at a time (was the top parse self-time) |
 > | trigger lookup table | 371 | inline parser's "skip ordinary text" loop: a `[bool;256]` membership table, not 15 scattered compares |
 > | SWAR `memchr` pipe scan | 381 | `decline_block_scan`'s per-line table check (`\|`) finds the byte a word at a time |
+> | byte-level trim | 425 | blank checks, `is_hr`, `decline`, heading/list/setext `trim_end` — ASCII fast paths (was ~7% of self-time in Unicode `str::trim*`) |
+> | NEON byteset (`simd`) | 439 | inline trigger scan via an aarch64 NEON nibble-lookup, 16 bytes/iter (opt-in `simd` feature; scalar table otherwise) |
 >
-> That's **+270%** (3.7×) — from 3.6× *behind* pulldown to **ahead**
-> (~381 vs ~375 MB/s, rostdown faster in 8/8 interleaved runs), while
+> That's **+326%** (4.3×) — from 3.6× *behind* pulldown to **~15% ahead**
+> (~439 vs ~375 MB/s, rostdown faster in 6/6 interleaved runs), while
 > rostdown does strictly *more*
 > (smart typography, heading `id` slugs, decline-checking, and
 > byte-identical kramdown output). The path was data-driven: an
