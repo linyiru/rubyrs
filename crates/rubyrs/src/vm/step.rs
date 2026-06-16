@@ -1645,7 +1645,7 @@ impl Vm {
                         {
                             let head_id = self.interner.intern(head);
                             if let Some(head_cls) = self.classes.get(&head_id).cloned() {
-                                match self.resolve_const_path(&head_cls, rest, true) {
+                                match self.resolve_const_path(&head_cls, rest, true, false) {
                                     crate::vm::dispatch::ConstPathOutcome::Found(v) => {
                                         self.stack.push(v);
                                         return Ok(true);
@@ -1802,7 +1802,7 @@ impl Vm {
                                 if let Some(Value::Class(head_cls)) =
                                     self.const_via_ancestors(&cref, head_id)
                                     && let crate::vm::dispatch::ConstPathOutcome::Found(v) =
-                                        self.resolve_const_path(&head_cls, rest, true)
+                                        self.resolve_const_path(&head_cls, rest, true, false)
                                 {
                                     found = Some(v);
                                 }

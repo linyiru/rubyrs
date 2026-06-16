@@ -6701,8 +6701,23 @@ impl Vm {
         {
             let cls = self.class_of(r);
             if let Value::Class(c) = &cls {
-                let tname = self.interner.intern(&c.name);
-                if let Some(m) = self.active_refinements.get(&(tname, name_id)).cloned() {
+                // A refinement on a class applies to that class AND its
+                // subclasses (CRuby semantics): `refine ::Hash` covers a
+                // `HashWithDotAccess::Hash` instance too. Walk the
+                // receiver's ancestry nearest-first so the most-specific
+                // active refinement wins. Surfaced by bridgetown's
+                // `Configuration < HashWithDotAccess::Hash < Hash`, whose
+                // `DEFAULTS.deep_dup` relies on the `refine ::Hash`
+                // refinement reaching the subclass instance.
+                let mut hit = None;
+                for anc in super::flatten_ancestors(c) {
+                    let tname = self.interner.intern(&anc.name);
+                    if let Some(m) = self.active_refinements.get(&(tname, name_id)).cloned() {
+                        hit = Some(m);
+                        break;
+                    }
+                }
+                if let Some(m) = hit {
                     let r = r.clone();
                     return self.invoke_method(m, r, args.into_vec());
                 }
@@ -7418,7 +7433,7 @@ impl Vm {
                     })),
                 };
                 let cls_clone = cls.clone();
-                let outcome = self.resolve_const_path(&cls_clone, &const_name, split);
+                let outcome = self.resolve_const_path(&cls_clone, &const_name, split, true);
                 match outcome {
                     ConstPathOutcome::Found(_) => self.stack.push(Value::Bool(true)),
                     ConstPathOutcome::Missing { .. } => self.stack.push(Value::Bool(false)),
@@ -7454,7 +7469,7 @@ impl Vm {
                     })),
                 };
                 let cls_clone = cls.clone();
-                let outcome = self.resolve_const_path(&cls_clone, &const_name, split);
+                let outcome = self.resolve_const_path(&cls_clone, &const_name, split, true);
                 match outcome {
                     ConstPathOutcome::Found(v) => { self.stack.push(v); return Ok(()); }
                     ConstPathOutcome::Missing { missing_qualified } => return Err(self.trap(RubyError::NameError {
@@ -8797,7 +8812,7 @@ impl Vm {
                 return Ok(());
             }
             let cls_clone = cls.clone();
-            let outcome = self.resolve_const_path(&cls_clone, &const_name, split);
+            let outcome = self.resolve_const_path(&cls_clone, &const_name, split, true);
             match outcome {
                 ConstPathOutcome::Found(_) => self.stack.push(Value::Bool(true)),
                 ConstPathOutcome::Missing { .. } => self.stack.push(Value::Bool(false)),
@@ -8828,7 +8843,7 @@ impl Vm {
                 })),
             };
             let cls_clone = cls.clone();
-            let outcome = self.resolve_const_path(&cls_clone, &const_name, split);
+            let outcome = self.resolve_const_path(&cls_clone, &const_name, split, true);
             match outcome {
                 ConstPathOutcome::Found(v) => { self.stack.push(v); return Ok(()); }
                 ConstPathOutcome::Missing { missing_qualified } => return Err(self.trap(RubyError::NameError {
@@ -11723,6 +11738,22 @@ impl Vm {
                         method: snap,
                     });
                     Value::UnboundMethod(new_id)
+                }
+                // `Module#dup` / `Class#dup` (+ `#clone`) — shallow-copy
+                // the method / singleton-method / constant / include
+                // tables into a FRESH module. CRuby's dup'd module is
+                // ANONYMOUS (its name follows a later constant
+                // assignment), so clear `name` / `assigned_name`.
+                // inclusive's `ModuleWithPackages.dup.tap { |m| def
+                // m.name = "…"; m.extend_with_package(…) }` (the
+                // `packages`/`public_packages` DSL bridgetown-foundation
+                // builds on) depends on the copy carrying the original's
+                // singleton methods.
+                Value::Class(c) => {
+                    let mut copy = c.shallow_copy();
+                    copy.name.clear();
+                    *copy.assigned_name.borrow_mut() = None;
+                    Value::Class(std::rc::Rc::new(copy))
                 }
                 // Range/Block/Regex/etc.: no shallow-copy support
                 // yet. Surface a clear NoMethodError rather than
@@ -17063,6 +17094,14 @@ impl Vm {
         start_cls: &std::rc::Rc<crate::value::Class>,
         path: &str,
         split_on_double_colon: bool,
+        // `true` for explicit-receiver `Mod.const_get`/`const_defined?`:
+        // a pending SCOPED autoload for the qualified `scope::segment`
+        // must take precedence over a same-named TOPLEVEL constant
+        // (e.g. `RefineExt.const_get(:Hash)` fires `RefineExt`'s own
+        // `:Hash` autoload, NOT `::Hash`). `false` for lexical
+        // (Op::LoadConst chain) resolution, where the toplevel-bare
+        // fallback is the legitimate last resort for an unqualified head.
+        prefer_own_autoload: bool,
     ) -> ConstPathOutcome {
         // When a path segment resolves to a constant whose VALUE is a
         // Class (a const alias like `Str = Literal::String`), the
@@ -17245,7 +17284,23 @@ impl Vm {
                 // Final fallback: toplevel (bare segment lookup
                 // via Object) — matches CRuby's "after walking
                 // the inheritance chain, try toplevel" rule.
-                if hit.is_none() && self.interner.contains(segment) {
+                //
+                // For explicit-receiver `const_get`/`const_defined?`
+                // (`prefer_own_autoload`), suppress this fallback when a
+                // pending SCOPED autoload exists for the qualified
+                // `lookup`: the receiver's OWN (autoloaded) constant must
+                // win over a same-named global, so the scoped-autoload
+                // trigger just below fires it instead of returning the
+                // toplevel `::Hash`/`::Module`/`::String`. Surfaced by
+                // zeitwerk `eager_load` doing `Mod.const_get(:Hash,
+                // false)` on a bridgetown-foundation `RefineExt`
+                // namespace whose files shadow core class names. Scoped
+                // to `const_get` so lexical bare-name resolution (where
+                // `String` SHOULD reach `::String`) is unaffected.
+                let suppress_toplevel = prefer_own_autoload
+                    && self.interner.contains(&lookup)
+                    && self.autoloads_scoped.contains_key(&self.interner.intern(&lookup));
+                if hit.is_none() && !suppress_toplevel && self.interner.contains(segment) {
                     let tl_qid = self.interner.intern(segment);
                     if let Some(c) = self.classes.get(&tl_qid).cloned() {
                         hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));

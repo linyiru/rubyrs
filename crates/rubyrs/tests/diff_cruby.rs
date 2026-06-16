@@ -1320,3 +1320,17 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // autoload first (CRuby semantics). Surfaced by bridgetown-foundation's
 // zeitwerk-autoloaded `RefineExt` namespace.
 #[test] fn reopen_fires_autoload() { run_diff("reopen_fires_autoload"); }
+
+// `Mod.const_get(:Hash, false)` fires Mod's own pending autoload rather
+// than returning the toplevel `::Hash`. Surfaced by zeitwerk eager_load
+// over namespaces whose files shadow core class names.
+#[test] fn const_get_prefers_local_autoload() { run_diff("const_get_prefers_local_autoload"); }
+
+// `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
+// the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
+#[test] fn module_dup() { run_diff("module_dup"); }
+
+// A refinement on a class applies to its subclasses too. Surfaced by
+// bridgetown-foundation's `refine ::Hash` deep_dup called on a
+// `HashWithDotAccess::Hash`.
+#[test] fn refinement_applies_to_subclass() { run_diff("refinement_applies_to_subclass"); }
