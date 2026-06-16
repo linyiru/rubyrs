@@ -156,15 +156,15 @@ module IrCompiler
     out.empty? ? nil : out
   end
 
-  # A leading `lvar = m[i]` pure alias: record `lvar → group i` (used bare
-  # later, it means that capture) and drop the binding from the op stream.
-  # A non-leading reassignment is NOT peeled → its LASGN reaches stmt → nil
-  # → decline, so the alias can never be stale.
+  # A leading `lvar = m[i]` / `lvar = m[i].downcase|upcase` alias: record
+  # `lvar → [group, fold]` (used bare later, it means that capture, folded)
+  # and drop the binding from the op stream. A non-leading reassignment is
+  # NOT peeled → its LASGN reaches stmt → nil → decline, never stale.
   def self.alias_bind?(s, mvar)
     return false unless node?(s) && %i[LASGN DASGN].include?(s.type)
-    gi = group_index(s.children[1], mvar)
-    return false if gi.nil?
-    @aliases[s.children[0]] = gi
+    r = resolve_group(s.children[1], mvar)
+    return false if r.nil?
+    @aliases[s.children[0]] = r
     true
   end
 
@@ -410,18 +410,10 @@ module IrCompiler
   # A group reference for a classifier condition: `[index, fold]` where fold
   # is "down"/"up" for `m[i].downcase`/`.upcase` (rouge's case-insensitive
   # classifiers), or nil for a plain `m[i]`/alias. nil if not a group ref.
-  def self.group_ref(n, mvar)
-    if node?(n) && n.type == :CALL && %i[downcase upcase].include?(n.children[1]) &&
-       arglist(n.children[2]).empty?
-      g = group_index(n.children[0], mvar)
-      return g.nil? ? nil : [g, n.children[1] == :downcase ? "down" : "up"]
-    end
-    g = group_index(n, mvar)
-    g.nil? ? nil : [g, nil]
-  end
-
-  # `m[i]` (or a bare alias var bound to `m[i]`) → capture index i (≥ 0).
-  def self.group_index(n, mvar)
+  # Fold-aware resolution of a group reference → `[index, fold]` (fold is
+  # nil / "down" / "up"), else nil. Handles `m[i]`, `m[i].downcase|upcase`,
+  # and a bare alias var bound to any of those.
+  def self.resolve_group(n, mvar)
     return nil unless node?(n)
     if n.type == :CALL && n.children[1] == :[]
       recv, _mid, args = n.children
@@ -429,12 +421,29 @@ module IrCompiler
       a = arglist(args)
       return nil unless a.size == 1 && node?(a[0]) && a[0].type == :INTEGER
       v = a[0].children[0]
-      return (v.is_a?(Integer) && v >= 0) ? v : nil
+      return (v.is_a?(Integer) && v >= 0) ? [v, nil] : nil
+    end
+    if n.type == :CALL && %i[downcase upcase].include?(n.children[1]) && arglist(n.children[2]).empty?
+      inner = resolve_group(n.children[0], mvar)
+      return nil if inner.nil? || !inner[1].nil? # no double-fold
+      return [inner[0], n.children[1] == :downcase ? "down" : "up"]
     end
     if %i[DVAR LVAR].include?(n.type) && @aliases&.key?(n.children[0])
-      return @aliases[n.children[0]]
+      return @aliases[n.children[0]].dup
     end
     nil
+  end
+
+  # A group reference in a CONDITION (fold-aware): `[index, fold]` or nil.
+  def self.group_ref(n, mvar)
+    resolve_group(n, mvar)
+  end
+
+  # `m[i]` / a bare UNFOLDED alias → capture index i (value position). A
+  # folded group can't be emitted verbatim, so it returns nil there.
+  def self.group_index(n, mvar)
+    r = resolve_group(n, mvar)
+    (r && r[1].nil?) ? r[0] : nil
   end
 
   # An array/`%w` literal of string literals → [String], else nil.
