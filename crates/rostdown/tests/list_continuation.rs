@@ -74,23 +74,23 @@ fn ordered_tight_single_line() {
 
 #[test]
 fn ordered_lazy_column0_continuation() {
-    // Ordered lists already accept a column-0 lazy continuation…
     ok(
         "1. first\nsecond\n",
         "<ol>\n  <li>first\nsecond</li>\n</ol>\n",
     );
 }
 
-// ---- Frontier: kramdown accepts, rostdown declines (never wrong) ----------
-
 #[test]
-fn declines_ordered_indented_continuation() {
-    // …but NOT an indented continuation under the marker — the common
-    // numbered-list-with-wrapped-text shape. kramdown target:
-    //   "<ol>\n  <li>first line\nsecond line</li>\n  <li>next</li>\n</ol>\n"
-    // Flip this to `ok(...)` when ordered indented continuation lands.
-    declined("1. first line\n   second line\n2. next\n");
+fn ordered_indented_continuation() {
+    // The common numbered-list-with-wrapped-text shape: the continuation
+    // is indented to the marker's content column (digits + ". ").
+    ok(
+        "1. first line\n   second line\n2. next\n",
+        "<ol>\n  <li>first line\nsecond line</li>\n  <li>next</li>\n</ol>\n",
+    );
 }
+
+// ---- Frontier: kramdown accepts, rostdown declines (never wrong) ----------
 
 #[test]
 fn declines_loose_lists() {

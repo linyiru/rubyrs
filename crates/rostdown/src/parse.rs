@@ -1196,21 +1196,29 @@ fn parse_list_items<'a>(
             cur_spans = spans;
             cur_has_child = false;
             *i += 1;
-            // Marker-indented tail block (>= 2 spaces): strip the
-            // content column and attach to THIS item. Ordered
-            // parents decline (content column != 2). Tabs decline.
+            // Marker-indented tail block: lines indented to at least the
+            // item's content column attach to THIS item, stripped by that
+            // column. The column is the marker width — 2 for `- `/`* `/
+            // `+ `, digits+2 for `1. ` — so ordered lists now carry an
+            // indented continuation / nested child, not just unordered.
+            // Tabs decline; an indent of 2..col (only reachable for ordered
+            // markers wider than 2) is kramdown's space-keeping lazy form,
+            // out of our clean subset.
+            let content_col = l.len() - content.len();
             let mut tail: Vec<&str> = Vec::new();
-            while *i < lines.len()
-                && !is_blank(lines[*i])
-                && (lines[*i].starts_with("  ") || lines[*i].starts_with('\t'))
-            {
-                if lines[*i].starts_with('\t') {
+            while *i < lines.len() && !is_blank(lines[*i]) {
+                let tl = lines[*i];
+                if tl.starts_with('\t') {
                     return Err(declined("list-tab-indent"));
                 }
-                if ordered {
+                let lead = tl.len() - tl.trim_start_matches(' ').len();
+                if lead < 2 {
+                    break;
+                }
+                if lead < content_col {
                     return Err(declined("list-continuation"));
                 }
-                tail.push(&lines[*i][2..]);
+                tail.push(&tl[content_col..]);
                 *i += 1;
             }
             if !tail.is_empty() {

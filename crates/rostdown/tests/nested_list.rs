@@ -104,9 +104,17 @@ fn corpus_post_shape() {
 }
 
 #[test]
+fn ordered_parent_nested_child() {
+    // An ordered parent carries an indented child at its digits+2 content
+    // column (kramdown nests it just like an unordered parent).
+    ok(
+        "1. a\n   1. b\n",
+        "<ol>\n  <li>a\n    <ol>\n      <li>b</li>\n    </ol>\n  </li>\n</ol>\n",
+    );
+}
+
+#[test]
 fn conservative_declines_hold() {
-    // Ordered parents have a digits+2 content column — declined.
-    declined("1. a\n   1. b\n");
     // Blank-separated nesting is LOOSE (`<li><p>` form) — declined.
     declined("- a\n\n  - b\n");
     // Tab indentation — declined.
