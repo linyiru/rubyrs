@@ -64,12 +64,12 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 | source | byte-identical acceptance |
 | --- | ---: |
 | bridgetown | 60.5 % (78/129) |
-| jekyll | 49.5 % (100/202) |
-| **combined** | **53.8 % (178/331)** |
+| jekyll | 52.5 % (106/202) |
+| **combined** | **55.6 % (184/331)** |
 
-Top decline reasons (combined, `run.sh`): `html-block` (44),
+Top decline reasons (combined, `run.sh`): `html-block` (48),
 `ald-ial-extension` (19), `table` (19), `inline-html-or-autolink` (16),
-`entity` (11), `link-definition` (8).
+`link-definition` (8), `opt-space-block` (7).
 
 **The accept-but-wrong correction.** Earlier snapshots (40.2 % → 50.5 % →
 a raw 57.4 %) counted accept-vs-decline only — they were never byte-checked
@@ -79,13 +79,15 @@ a safe fallback). All 12 were fixed — by declining the constructs we can't
 reproduce (Liquid-in-link-defs, chained/blockquote/header IALs, cross-line
 emphasis & links, opt-space lazy-continuation whitespace) and by correctly
 supporting one (length-aware fence close). That moved those 12 from
-accept→decline, so the honest figure is **53.8 %, with WRONG = 0** — lower
-than the inflated 57.4 %, but every accepted page is now provably
-byte-identical. `verify.sh` is the standing gate that keeps it that way.
+accept→decline, so the honest post-correction figure was **53.8 %, with
+WRONG = 0** — lower than the inflated 57.4 %, but every accepted page is now
+provably byte-identical. HTML entity support (kramdown `:as_char`) then
+lifted it to the current **55.6 %**, still WRONG = 0. `verify.sh` is the
+standing gate that keeps it that way.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
-content ~54 %. The dominant remaining blockers are *core kramdown features
+content ~56 %. The dominant remaining blockers are *core kramdown features
 the engine does not yet do* — raw HTML blocks and IAL/ALD (`{:.class}`,
 `{:toc}`). Every declined page still renders correctly via the
 Ruby-kramdown fallback; declining only forgoes the speed-up. So the
