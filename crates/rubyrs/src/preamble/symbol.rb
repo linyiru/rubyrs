@@ -2,16 +2,16 @@
 # captures the symbol and forwards every call to `recv.send(sym, *rest,
 # &blk)`, so it works for receivers of any arity (`:+.to_proc.call(2, 3)`,
 # `arr.reduce(&:+.to_proc)`) and explicit conversions
-# (`[1, 2].map(&:to_s.to_proc)`). CRuby returns a lambda; rubyrs has no
-# `Proc#lambda?` to distinguish, and the proc form behaves identically
-# for the symbol-dispatch use, so we use `proc`.
+# (`[1, 2].map(&:to_s.to_proc)`). CRuby returns a LAMBDA, so this uses
+# `lambda` to match `:sym.to_proc.lambda? == true` (rubyrs doesn't yet
+# enforce lambda strict-arity, so it behaves the same for dispatch).
 #
 # (The literal `&:sym` block-pass has its own native fast path; this
 # method covers the EXPLICIT `:sym.to_proc` calls that path doesn't.)
 class Symbol
   def to_proc
     sym = self
-    proc { |recv, *args, &blk| recv.send(sym, *args, &blk) }
+    lambda { |recv, *args, &blk| recv.send(sym, *args, &blk) }
   end
 
   # `Symbol#match` / `#match?` are `to_s.match(...)` in CRuby — the symbol

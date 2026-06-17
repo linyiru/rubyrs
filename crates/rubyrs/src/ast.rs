@@ -492,7 +492,7 @@ pub(crate) enum Expr {
     /// consumed by a method call. We don't distinguish Lambda
     /// from Proc at runtime; the strict-arity check that CRuby's
     /// Lambda enforces is missing — documented in SUBSET.md.
-    Lambda { params: Vec<BlockParam>, body: Vec<SExpr> },
+    Lambda { params: Vec<BlockParam>, body: Vec<SExpr>, is_lambda: bool },
     /// `return [val]` — exits the current method/block frame with `val`.
     Return(Option<Box<SExpr>>),
     /// `next [val]` — exits the current block iteration with `val`.
@@ -3836,7 +3836,10 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             // CallWithBlock arm, which handles the block itself.
             if let Some(bn) = bnode.as_block_node() {
                 let (params, body) = tr_block_node(ctx, &bn);
-                return Some(Box::new(sp(node, Expr::Lambda { params, body })));
+                // NOT a real lambda — this reuses Expr::Lambda purely to
+                // forward a brace/do block through the splat-call Apply
+                // path, so `is_lambda: false` (it's an ordinary block).
+                return Some(Box::new(sp(node, Expr::Lambda { params, body, is_lambda: false })));
             }
             bnode.as_block_argument_node().and_then(|ba| match ba.expression() {
                 // Skip the symbol-to-proc shape (`&:method`); the
@@ -4499,7 +4502,8 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             None => vec![],
         };
         prepend_kw_default_prologue(&mut body, kw_defaults);
-        return sp(node, Expr::Lambda { params, body });
+        // A real `->(){}` lambda literal — flagged so Proc#lambda? is true.
+        return sp(node, Expr::Lambda { params, body, is_lambda: true });
     }
     if let Some(n) = node.as_yield_node() {
         // `yield(*x)` / `yield(a, *b)` — a splat in the args needs the

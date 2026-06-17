@@ -2851,6 +2851,25 @@ impl Vm {
             self.stack.push(Value::Int(arity));
             return Ok(CallableOutcome::Handled);
         }
+        // `Proc#lambda?` — the introspection bit set at creation
+        // (`->`/`lambda`/Method|Symbol#to_proc → true, `proc`/blocks →
+        // false). A CurriedProc inherits its underlying proc's flag.
+        if name == "lambda?" && args.is_empty() {
+            match &recv {
+                Value::Block(bid) => {
+                    let v = self.heap.block(*bid).is_lambda;
+                    self.stack.push(Value::Bool(v));
+                    return Ok(CallableOutcome::Handled);
+                }
+                Value::CurriedProc(cid) => {
+                    let (underlying, _, _) = self.heap.curried_proc(*cid);
+                    let v = matches!(&underlying, Value::Block(bid) if self.heap.block(*bid).is_lambda);
+                    self.stack.push(Value::Bool(v));
+                    return Ok(CallableOutcome::Handled);
+                }
+                _ => {}
+            }
+        }
         // `Proc#source_location` — `[file, line]` of the block's
         // body (CRuby points at the `proc {` line; we report the
         // first op's line, which lands on or just after it — the
@@ -3538,7 +3557,17 @@ impl Vm {
                 } else {
                     (recv, other)
                 };
-                let id = self.coerce_compose_to_block(outer, inner)?;
+                // CRuby: the composed proc's lambda? follows the
+                // FIRST-EXECUTED (inner) function — `(f >> g)` runs f
+                // first, `(f << g)` runs g first. A BoundMethod composes
+                // as a lambda (Method#to_proc is one); a Block carries
+                // its own bit.
+                let inner_is_lambda = match &inner {
+                    Value::BoundMethod(_) => true,
+                    Value::Block(bid) => self.heap.block(*bid).is_lambda,
+                    _ => false,
+                };
+                let id = self.coerce_compose_to_block(outer, inner, inner_is_lambda)?;
                 self.stack.push(Value::Block(id));
                 return Ok(CallableOutcome::Handled);
             }
@@ -14728,6 +14757,10 @@ impl Vm {
             captured_is_method_scope: false,
             // No lexical method, so `yield` inside it is meaningless.
             captured_yield_block: None,
+            // `Method#to_proc` / `Symbol#to_proc` produce LAMBDAs in
+            // CRuby (`method(:x).to_proc.lambda?` / `:y.to_proc.lambda?`
+            // → true), and `&method`/`&:sym` flow through here.
+            is_lambda: true,
         }));
         Ok(id)
     }
@@ -14741,6 +14774,7 @@ impl Vm {
         &mut self,
         outer: Value,
         inner: Value,
+        is_lambda: bool,
     ) -> Result<crate::value::ObjId, Trap> {
         use crate::bytecode::{Op, Proto};
         use crate::error::Span;
@@ -14819,6 +14853,9 @@ impl Vm {
             captured_is_method_scope: false,
             // No lexical method, so `yield` inside it is meaningless.
             captured_yield_block: None,
+            // A composed proc's lambda? follows the FIRST-EXECUTED
+            // (inner) function — the caller passes inner's lambda-ness.
+            is_lambda,
         }));
         Ok(id)
     }
@@ -16567,6 +16604,14 @@ impl Vm {
             // way of user-defined `lambda(arg)` shapes if anyone
             // overrides the name.
             if args.is_empty() && (&*name == "lambda" || &*name == "proc") {
+                // `lambda { }` promotes its block to a lambda
+                // (`Proc#lambda?` → true); `proc { }` keeps it a proc.
+                // The strict-arity / `return`-scope behavioural
+                // differences are still NOT modelled (documented gap) —
+                // this only sets the introspection bit.
+                if &*name == "lambda" {
+                    self.heap.block_mut(block).is_lambda = true;
+                }
                 self.stack.push(Value::Block(block));
                 return Ok(());
             }

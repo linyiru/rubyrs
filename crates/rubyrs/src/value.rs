@@ -478,6 +478,13 @@ pub struct BlockHandle {
     /// method had a block. GC: rooted via the heap block walk alongside
     /// `captured` / `self_val`.
     pub(crate) captured_yield_block: Option<ObjId>,
+    /// `true` when this block is a LAMBDA (`-> { }`, `lambda { }`, or a
+    /// `Method`/`Symbol` coerced via `#to_proc`), `false` for an
+    /// ordinary proc/block. Backs `Proc#lambda?`. NOTE: this is purely
+    /// the introspection bit — rubyrs does NOT (yet) enforce the
+    /// lambda-vs-proc behavioural differences (strict arity, `return`
+    /// scope), a documented subset gap.
+    pub(crate) is_lambda: bool,
 }
 
 #[derive(Debug)]

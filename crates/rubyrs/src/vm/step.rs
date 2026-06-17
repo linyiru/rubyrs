@@ -2654,7 +2654,11 @@ impl Vm {
                 let args: Vec<Value> = self.stack.drain(split..).collect();
                 self.super_call_with_lifecycle_noop(name_id, args)?;
             }
-            Op::CreateBlock(p_idx, param_start, n_params, rest_slot_raw, kw_rest_slot_raw) => {
+            Op::CreateBlock(p_idx, param_start, n_params, rest_slot_raw, kw_rest_slot_raw)
+            | Op::CreateLambda(p_idx, param_start, n_params, rest_slot_raw, kw_rest_slot_raw) => {
+                // CreateLambda flags the resulting Proc as a lambda
+                // (`Proc#lambda?`); CreateBlock is an ordinary block.
+                let is_lambda = matches!(op, Op::CreateLambda(..));
                 // Snapshot the surrounding frame's captured locals
                 // (shared Rc with subsequent invocations of this
                 // block) and self before any mutable borrow of
@@ -2728,6 +2732,7 @@ impl Vm {
                     kw_rest_slot,
                     captured_is_method_scope,
                     captured_yield_block,
+                    is_lambda,
                 }));
                 self.stack.push(Value::Block(id));
             }

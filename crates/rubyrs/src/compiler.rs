@@ -1304,7 +1304,7 @@ impl ProtoBuilder {
         let creates_block = self
             .code
             .iter()
-            .any(|op| matches!(op, Op::CreateBlock(..)));
+            .any(|op| matches!(op, Op::CreateBlock(..) | Op::CreateLambda(..)));
         // Slot → name table (inverts the compile-time name→slot map) so
         // Kernel#binding can snapshot the frame's named locals.
         let mut local_names = vec![String::new(); self.n_locals as usize];
@@ -2302,15 +2302,22 @@ pub(crate) fn compile_expr(
                 (false, true)  => b.emit(Op::ApplyCallNoRecvBlock(name_id, cid)),
             };
         }
-        Expr::Lambda { params, body } => {
+        Expr::Lambda { params, body, is_lambda } => {
             // `->(p) { body }` — compile the body as a block proto
             // and emit CreateBlock. Result stays on the stack as a
             // Value::Block (which supports `.call(args)` already).
             // Lambda params are now `Vec<BlockParam>` (post K7), so
             // they go straight into compile_block without rewrapping.
+            // A real `->` literal emits CreateLambda (sets Proc#lambda?
+            // true); the splat-call-block-forwarding reuse of this
+            // variant (is_lambda=false) stays an ordinary block.
             let (block_proto_idx, param_start, n_params, rest_slot, kw_rest_slot) =
                 compile_block(b, params, body, protos, interner, cc);
-            b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot, kw_rest_slot));
+            if *is_lambda {
+                b.emit(Op::CreateLambda(block_proto_idx as u32, param_start, n_params, rest_slot, kw_rest_slot));
+            } else {
+                b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot, kw_rest_slot));
+            }
         }
         Expr::Begin { body, rescue, ensure } => {
             compile_begin_arm(b, body, rescue, ensure, protos, interner, cc);

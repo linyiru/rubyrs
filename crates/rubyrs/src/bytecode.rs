@@ -474,6 +474,11 @@ pub(crate) enum Op {
     /// otherwise the slot invoke_block binds the trailing kwargs
     /// Hash (default `{}`) into.
     CreateBlock(u32, u16, u16, u16, u16),
+    /// Identical operands to `CreateBlock`, but the resulting Proc is
+    /// flagged as a LAMBDA (`Proc#lambda?` → true). Emitted only for a
+    /// `->(){}` literal; `lambda { }` flips the bit on its received
+    /// block at dispatch time instead.
+    CreateLambda(u32, u16, u16, u16, u16),
     CallBlock(SymId, u8, u16),
     CallNoRecvBlock(SymId, u8, u16),
     Yield(u8),
