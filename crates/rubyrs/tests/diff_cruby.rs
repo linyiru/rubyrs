@@ -1396,6 +1396,12 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // model). Surfaced by connection_pool's TimedStack + #with.
 #[test] fn thread_nested_consts_handle_interrupt() { run_diff("thread_nested_consts_handle_interrupt"); }
 
+// Keyword args in eval'd code: the eval body runs synchronously inside
+// the native `eval` dispatch, which left the trailing-hash-positional
+// flag stale-TRUE, so kwarg calls bound positionally. Surfaced by
+// connection_pool's `new(size:1) { }.with` smoke run via eval.
+#[test] fn eval_kwargs() { run_diff("eval_kwargs"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

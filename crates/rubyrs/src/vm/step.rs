@@ -2232,10 +2232,26 @@ impl Vm {
             // method so primitive arms can consume `:foo` keys
             // instead of inspecting the positional Hash heuristically.
             Op::CallKw(name_id, argc, cache_id) => {
-                self.do_call_kw(name_id, argc as usize, false, cache_id)?;
+                // A CallKw trailing Hash is ALWAYS keyword args (`k: v` /
+                // `**h`), never a positional brace hash, so clear the
+                // positional-hash flag explicitly. The plain `Call` ops
+                // set it TRUE and reset it after; CallKw used to rely on
+                // the residual-false default, which broke when the call
+                // runs while an OUTER native call (e.g. `eval`, whose
+                // body dispatches synchronously inside `do_call`) still
+                // holds the flag TRUE — the callee then bound the kwargs
+                // positionally ("wrong number of arguments (given 1,
+                // expected 0)" against a kwarg-only method).
+                self.trailing_hash_positional = false;
+                let r = self.do_call_kw(name_id, argc as usize, false, cache_id);
+                self.trailing_hash_positional = false;
+                r?;
             }
             Op::CallKwNoRecv(name_id, argc, cache_id) => {
-                self.do_call_kw(name_id, argc as usize, true, cache_id)?;
+                self.trailing_hash_positional = false;
+                let r = self.do_call_kw(name_id, argc as usize, true, cache_id);
+                self.trailing_hash_positional = false;
+                r?;
             }
             Op::ApplyCall(name_id, cache_id)
             | Op::ApplyCallNoRecv(name_id, cache_id)
@@ -2314,10 +2330,26 @@ impl Vm {
                 }
             }
             Op::CallBlock(name_id, argc, cache_id) => {
-                self.do_call_block(name_id, argc as usize, false, cache_id)?;
+                // Block calls don't carry the kwargs-vs-positional bit in
+                // the bytecode (the block+kwargs combo reuses this op —
+                // see emit_method_call). The method binder peels a
+                // trailing Hash as kwargs only when the callee declares kw
+                // params AND `trailing_hash_positional` is false, so the
+                // de-facto behaviour relies on the flag being false here.
+                // Set it explicitly (rather than inheriting a stale TRUE
+                // from an enclosing native call like `eval`, whose body
+                // dispatches synchronously) so `obj.new(k: v) { … }` binds
+                // its kwargs the same inside eval as outside.
+                self.trailing_hash_positional = false;
+                let r = self.do_call_block(name_id, argc as usize, false, cache_id);
+                self.trailing_hash_positional = false;
+                r?;
             }
             Op::CallNoRecvBlock(name_id, argc, cache_id) => {
-                self.do_call_block(name_id, argc as usize, true, cache_id)?;
+                self.trailing_hash_positional = false;
+                let r = self.do_call_block(name_id, argc as usize, true, cache_id);
+                self.trailing_hash_positional = false;
+                r?;
             }
             Op::ApplyCallBlock(name_id, cache_id) | Op::ApplyCallNoRecvBlock(name_id, cache_id) => {
                 // Splat-call with explicit `&block`. Stack layout
