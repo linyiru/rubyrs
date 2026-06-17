@@ -416,6 +416,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // pack/unpack `U` (UTF-8 codepoints) + `x` (skip/pad) — builder's
 // `pack('U')`, tzinfo's `unpack('… x15 …')`.
 #[test] fn pack_unpack_u_x() { run_diff("pack_unpack_u_x"); }
+// `Set` is an autoloaded core class since Ruby 3.2 — usable without
+// `require "set"` (multi_json's `Set.new` at load). stdlib-gated.
+#[cfg(feature = "stdlib")]
+#[test] fn set_autoload() { run_diff("set_autoload"); }
 #[test] fn case_when() { run_diff("case_when"); }
 #[test] fn modules() { run_diff("modules"); }
 #[test] fn conversions() { run_diff("conversions"); }

@@ -2880,6 +2880,18 @@ RUBYRS = "rubyrs".freeze
 "#;
         self.eval_inner(PREAMBLE, "<rubyrs:preamble>")
             .expect("ICE: failed to load built-in exception preamble");
+        // `Set` is an autoloaded core class since Ruby 3.2 — available
+        // without an explicit `require "set"` (modern gems like multi_json
+        // reference `Set.new` at load time assuming this). Registered only
+        // under the `stdlib` feature, where the vendored `set` can actually
+        // load; the default build leaves Set genuinely absent (an honest
+        // "uninitialized constant Set" rather than a load error).
+        #[cfg(feature = "stdlib")]
+        self.eval_inner(
+            "autoload :Set, \"set\"",
+            "<rubyrs:preamble:set-autoload>",
+        )
+            .expect("ICE: failed to register Set autoload");
         // File IO veneer — pure-Ruby `File.open` / `File.new` /
         // read-side instance methods on top of the Tier-1
         // `File.read` host primitive (ADR 0019 `_io`-veneer
