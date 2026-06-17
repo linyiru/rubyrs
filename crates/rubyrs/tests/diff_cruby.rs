@@ -1359,6 +1359,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // over namespaces whose files shadow core class names.
 #[test] fn const_get_prefers_local_autoload() { run_diff("const_get_prefers_local_autoload"); }
 
+// `const_get(:Absent)` invokes the receiver's `const_missing(sym)` hook
+// before raising NameError. Surfaced by regexp_parser's version_lookup
+// (`const_get("V3_4_0")` falling back to the nearest defined version).
+#[test] fn const_get_const_missing() { run_diff("const_get_const_missing"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

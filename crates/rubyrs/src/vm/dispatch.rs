@@ -1650,6 +1650,37 @@ impl Vm {
         Ok(true)
     }
 
+    /// CRuby resolves an absent constant by invoking the owning
+    /// class/module's `const_missing(sym)` hook before raising
+    /// NameError — the constant-space analogue of `method_missing`.
+    /// DSLs lean on it: regexp_parser's `version_class` does
+    /// `const_get("V3_4_0")` and relies on its `const_missing` to fall
+    /// back to the nearest defined version constant. When `cls` (or an
+    /// ancestor) defines `const_missing`, invoke it with the missing
+    /// name as a Symbol — pushing a frame whose return becomes the
+    /// `const_get` result — and return `Ok(true)`; otherwise `Ok(false)`
+    /// so the caller raises `uninitialized constant …` as before.
+    ///
+    /// Scoped to single-segment names (no `::`): a qualified path's
+    /// per-namespace hook semantics are subtle, and the surfacing
+    /// callers all pass a bare name, so paths fall through to the raise.
+    pub(crate) fn try_const_missing(
+        &mut self,
+        cls: &Rc<Class>,
+        const_name: &str,
+    ) -> Result<bool, Trap> {
+        if const_name.contains("::") {
+            return Ok(false);
+        }
+        let cm_id = self.interner.intern("const_missing");
+        let Some(m) = self.lookup_class_singleton_method(cls, cm_id) else {
+            return Ok(false);
+        };
+        let sym = self.interner.intern(const_name);
+        self.invoke_method(m, Value::Class(cls.clone()), vec![Value::Sym(sym)])?;
+        Ok(true)
+    }
+
     /// `respond_to?`'s fallback: when normal resolution misses, CRuby
     /// consults a user-defined `respond_to_missing?(name, include_priv)`
     /// — the companion to `method_missing` for proxy / DSL objects. If
@@ -7600,9 +7631,14 @@ impl Vm {
                 let outcome = self.resolve_const_path(&cls_clone, &const_name, split, true);
                 match outcome {
                     ConstPathOutcome::Found(v) => { self.stack.push(v); return Ok(()); }
-                    ConstPathOutcome::Missing { missing_qualified } => return Err(self.trap(RubyError::NameError {
-                        msg: format!("uninitialized constant {}", missing_qualified),
-                    })),
+                    ConstPathOutcome::Missing { missing_qualified } => {
+                        if self.try_const_missing(&cls_clone, &const_name)? {
+                            return Ok(());
+                        }
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("uninitialized constant {}", missing_qualified),
+                        }));
+                    }
                     ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
                         msg: format!("wrong constant name {}", name),
                     })),
@@ -9009,9 +9045,14 @@ impl Vm {
             let outcome = self.resolve_const_path(&cls_clone, &const_name, split, true);
             match outcome {
                 ConstPathOutcome::Found(v) => { self.stack.push(v); return Ok(()); }
-                ConstPathOutcome::Missing { missing_qualified } => return Err(self.trap(RubyError::NameError {
-                    msg: format!("uninitialized constant {}", missing_qualified),
-                })),
+                ConstPathOutcome::Missing { missing_qualified } => {
+                    if self.try_const_missing(&cls_clone, &const_name)? {
+                        return Ok(());
+                    }
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("uninitialized constant {}", missing_qualified),
+                    }));
+                }
                 ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
                     msg: format!("wrong constant name {}", name),
                 })),
