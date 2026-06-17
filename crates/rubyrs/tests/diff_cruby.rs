@@ -454,6 +454,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "regex")]
 #[test] fn scan_block_last_match() { run_diff("scan_block_last_match"); }
 #[test] fn array_literal_over_65k() { run_diff("array_literal_over_65k"); }
+#[test] fn block_param_trailing_comma() { run_diff("block_param_trailing_comma"); }
 #[test] fn safe_navigation() { run_diff("safe_navigation"); }
 #[test] fn class_extend() { run_diff("class_extend"); }
 #[test] fn super_splat_block() { run_diff("super_splat_block"); }

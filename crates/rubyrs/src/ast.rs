@@ -845,11 +845,21 @@ fn tr_block_node(
                     .map(|p| {
                         let mut out: Vec<BlockParam> =
                             p.requireds().iter().filter_map(|r| parse_one(&r)).collect();
-                        if let Some(rest) = p.rest()
-                            && let Some(rp) = rest.as_rest_parameter_node()
-                        {
-                            let name = rp.name().map(cid_to_string).unwrap_or_default();
-                            out.push(BlockParam::Rest(name));
+                        if let Some(rest) = p.rest() {
+                            if let Some(rp) = rest.as_rest_parameter_node() {
+                                let name = rp.name().map(cid_to_string).unwrap_or_default();
+                                out.push(BlockParam::Rest(name));
+                            } else if rest.as_implicit_rest_node().is_some() {
+                                // `|name,|` — the trailing comma is an
+                                // ImplicitRestNode. Its presence makes the
+                                // block multi-arg, so a single yielded Array
+                                // auto-splats (`name` binds arr[0], the rest
+                                // is discarded). Without an explicit rest slot
+                                // the block stayed single-arg and `name` got
+                                // the whole Array — rss's iTunes parser does
+                                // `[["name"],["email"]].each { |name,| … }`.
+                                out.push(BlockParam::Rest(String::new()));
+                            }
                         }
                         if let Some(b) = p.block() {
                             let name = b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string());
