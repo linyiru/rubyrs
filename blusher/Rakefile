@@ -1,18 +1,34 @@
 # frozen_string_literal: true
 
-# Build/release tasks for the blusher gem. In the rubyrs monorepo these
-# reference the sibling `carmine`/`carmine-ffi` crates; in the standalone
-# momiji-rs/blusher repo they reference the published `carmine` crate.
+# Build/release tasks for the blusher gem. In the rubyrs monorepo the `compile`
+# tasks build the sibling crates from the cargo workspace and stage the loadable
+# object; in the standalone momiji-rs/blusher repo, `gem install` compiles
+# ext/blusher via rb-sys/extconf.rb and CI cross-compiles via cross-gem-action,
+# so the rake `compile` here is a dev convenience only.
+
+# `gem build` / `release` (the standalone publish path also goes through the
+# Trusted-Publishing workflow, not `rake release`).
+require "bundler/gem_tasks" if File.exist?(File.expand_path("Gemfile", __dir__))
 
 REPO       = File.expand_path("..", __dir__)              # rubyrs workspace root (dev)
 DLEXT      = (RbConfig::CONFIG["host_os"] =~ /darwin/ ? "dylib" : "so")
+RBDLEXT    = RbConfig::CONFIG["DLEXT"]                     # ruby loadable suffix (bundle/so)
 CDYLIB     = "libcarmine_ffi.#{DLEXT}"
 EXT_DIR    = File.expand_path("ext", __dir__)
+LIB_DIR    = File.expand_path("lib", __dir__)
 TABLES_DIR = File.expand_path("lib/blusher/tables", __dir__)
 EXTRACT    = File.join(REPO, "crates/carmine/tools/extract.rb")
 
-desc "Build the carmine-ffi cdylib and stage it under ext/"
+desc "Build the magnus native extension and stage it as lib/blusher.<dlext>"
 task :compile do
+  sh "cargo build --release -p blusher-ext", chdir: REPO
+  # cargo emits libblusher.dylib/.so; `require` needs the ruby ext suffix.
+  cp File.join(REPO, "target/release", "libblusher.#{DLEXT}"),
+     File.join(LIB_DIR, "blusher.#{RBDLEXT}")
+end
+
+desc "Build the carmine-ffi cdylib fallback and stage it under ext/"
+task :compile_ffi do
   sh "cargo build --release -p carmine-ffi", chdir: REPO
   mkdir_p EXT_DIR
   cp File.join(REPO, "target/release", CDYLIB), File.join(EXT_DIR, CDYLIB)

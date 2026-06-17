@@ -1,0 +1,18 @@
+# The gem-internal native extension, compiled at `gem install` time by
+# rb-sys/rake-compiler (and cross-compiled in CI for precompiled platform
+# gems — see .github/workflows/release.yml). Mirrors crates/blusher-ext in the
+# rubyrs monorepo, but depends on the PUBLISHED carmine from crates.io so the
+# standalone momiji-rs/blusher repo builds without the workspace.
+[package]
+name = "blusher"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+carmine = "0.3"
+magnus = "0.7"
