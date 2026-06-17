@@ -1,17 +1,56 @@
-# Exception#cause exists and returns nil for an exception raised without
-# an active cause chain (CRuby parity for the raised-directly case).
-# minitest's assert_raises calls #cause on the caught exception.
+# Exception#cause is set implicitly: raising while another exception is
+# being handled chains the new one's #cause to it.
 begin
-  raise ArgumentError, "boom"
+  begin
+    raise "inner"
+  rescue
+    raise "outer"
+  end
 rescue => e
-  p e.cause                 # nil
-  p e.respond_to?(:cause)   # true
+  p e.message
+  p e.cause&.message
 end
 
-class MyErr < StandardError; end
+# No cause when not raised inside a rescue.
 begin
-  raise MyErr, "x"
-rescue MyErr => e
-  p e.cause                 # nil
-  p e.message               # "x"
+  raise "top"
+rescue => e
+  p e.cause.inspect
+end
+
+# A bare re-raise keeps cause nil (same object, not its own cause).
+begin
+  begin
+    raise "x"
+  rescue
+    raise
+  end
+rescue => e
+  p [e.message, e.cause.inspect]
+end
+
+# A 3-level chain.
+begin
+  begin
+    begin
+      raise "one"
+    rescue
+      raise "two"
+    end
+  rescue
+    raise "three"
+  end
+rescue => e
+  p [e.message, e.cause.message, e.cause.cause.message]
+end
+
+# A class raise inside a rescue also chains.
+begin
+  begin
+    raise ArgumentError, "arg"
+  rescue
+    raise TypeError, "typ"
+  end
+rescue => e
+  p [e.class, e.cause.class, e.cause.message]
 end

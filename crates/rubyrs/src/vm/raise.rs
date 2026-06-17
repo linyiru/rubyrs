@@ -191,6 +191,24 @@ impl Vm {
         // over the unwind, and the break value is dropped.
         self.pending_method_break = None;
         self.sync_control_signals();
+        // Implicit cause chain (CRuby): raising while another
+        // exception is being handled (`$!` is a DIFFERENT live
+        // exception) sets the new exception's `#cause` to it. Skips a
+        // re-raise of the same object and never overwrites an already-
+        // set cause. `$!` is updated to the new exception only once a
+        // handler catches it (raise.rs:391), so at this point it still
+        // holds the exception of the enclosing rescue.
+        if let Value::Object(exc_id) = &exc
+            && let Some(Value::Object(bang_id)) = self.globals.get(&self.sym_bang).cloned()
+            && bang_id != *exc_id
+        {
+            let cause_sym = self.interner.intern("@cause");
+            let already = self.heap.instance(*exc_id).ivars.get(&cause_sym)
+                .is_some_and(|v| !matches!(v, Value::Nil));
+            if !already {
+                self.heap.instance_mut(*exc_id).ivars.insert(cause_sym, Value::Object(bang_id));
+            }
+        }
         // Populate `@backtrace` on the raised exception from the
         // current frame stack — covers both the `raise "msg"` /
         // `raise FooClass.new` Object route (where normalize_
