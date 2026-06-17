@@ -63,16 +63,21 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 
 | source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 82.2 % (106/129) |
-| jekyll | 74.8 % (151/202) |
-| **combined** | **77.6 % (257/331)** |
+| bridgetown | 88.4 % (114/129) |
+| jekyll | 85.6 % (173/202) |
+| **combined** | **86.7 % (287/331)** |
 
-Top decline reasons (combined, `run.sh`): `html-block` (~26) and `table`
-(~9) lead, then small tails (opt-space fences inside Liquid blocks,
-multi-block list items, tables/code inside list items, `{:toc}`). The
-reproducible inline/block tails — strikethrough, hard breaks, nested link
-text, `{#id}`, leading IALs, OPT_SPACE-list paragraph interruption, indented
-code — are all rendered now.
+Top decline reasons (combined, `run.sh`) are now a flat tail of kramdown
+quirks: multi-block / multi-line-table list items, cross-line emphasis
+pairing in lazy list continuations, list-trailing-whitespace hard breaks,
+indented code that is really a lazy paragraph continuation inside a Liquid
+block, `{:toc}`/ALD extensions, doctype/comment HTML, and multi-line span
+HTML blocks. The reproducible block/inline tails are all rendered now:
+strikethrough, hard breaks, nested link text, `{#id}`, leading IALs,
+OPT_SPACE-list paragraph interruption, indented code, OPT_SPACE fences, the
+`<table>` family + custom/unknown HTML elements, span-content `code`/`samp`
+elements, autolinks (`<https://…>`/`<user@host>`), pipe-tables inside a
+single-line list item, and a span element opening a paragraph.
 
 **On 100 %.** Correctness is already 100 % — every accepted page is
 byte-identical and every declined page renders correctly via the Ruby
@@ -109,14 +114,20 @@ inline HTML elements (void like `<br>` plus markdown-content ones like
 `<a>`/`<abbr>`/`<sub>`), the `{#id}` header-id shorthand, hard line breaks
 (`<br />`), nested brackets / linked images in link text, GFM
 strikethrough (`~~x~~`), OPT_SPACE list paragraph interruption, and indented
-code blocks. Current: **77.6 %**. `verify.sh` is the standing gate that
+code blocks — then OPT_SPACE fenced code, the `<table>` family + custom/
+unknown HTML elements re-serialized like a `<div>`, span-content
+`code`/`kbd`/`samp`/`var` (well-formed nested tags kept), autolinks, a
+pipe-table built inside a single-line list item, and a span element opening
+a paragraph. Current: **86.7 %**. `verify.sh` is the standing gate that
 keeps it WRONG = 0.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
-content ~78 %. The remaining blockers are the out-of-subset tails of
-features the engine partly does — raw HTML outside the re-serialized subset
-(raw-text elements like `<table>`/`<script>`, comments, custom elements),
-tables inside list items/blockquotes, OPT_SPACE-indented blocks, and a few
-IAL/ALD tails (`{:toc}`). Every declined page still renders correctly via
-the Ruby-kramdown fallback; declining only forgoes the speed-up.
+content ~87 %. The remaining blockers are the impractical tail — constructs
+whose byte-identity would mean reproducing kramdown quirks at real
+accept-but-wrong risk: multi-block / multi-line-table list items, cross-line
+emphasis pairing in lazy continuations, list-trailing-whitespace hard breaks,
+indented code that is really a lazy paragraph continuation, `{:toc}`/ALD
+generation, `<script>`/comment/doctype HTML, and multi-line span HTML blocks.
+Every declined page still renders correctly via the Ruby-kramdown fallback;
+declining only forgoes the speed-up.
