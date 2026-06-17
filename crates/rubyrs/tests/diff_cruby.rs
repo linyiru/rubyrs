@@ -1381,6 +1381,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // File#seek honoring them. Surfaced by mini_mime's PReadFile#pread.
 #[test] fn io_seek_constants() { run_diff("io_seek_constants"); }
 
+// Fiber storage API (Ruby 3.2+): `Fiber[]` / `Fiber[]=`, backed by one
+// process-global store in the single-fiber model. Surfaced by
+// multi_json caching its adapter override in `Fiber[:multi_json_adapter]`.
+#[test] fn fiber_storage() { run_diff("fiber_storage"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

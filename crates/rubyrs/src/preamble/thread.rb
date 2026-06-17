@@ -280,6 +280,36 @@ class Thread
   end
 end
 
+# Fiber — Tier 1 models ONLY the Ruby 3.2+ "fiber storage" API
+# (`Fiber[]` / `Fiber[]=`), NOT the control-flow primitive
+# (`Fiber.new` / `#resume` / `Fiber.yield`). In the single-fiber
+# model there is exactly one storage scope, so a process-global hash
+# is the correct backing (CRuby's fiber storage is inheritable to
+# child fibers, which never exist here). Kept SEPARATE from Thread's
+# fiber-local store (`Thread.current[:k]`) — CRuby keeps the two
+# distinct. multi_json caches its per-call adapter override in
+# `Fiber[:multi_json_adapter]`.
+#
+# CRuby contract: keys must be a Symbol or a String (else TypeError
+# "<key.inspect> is not a symbol nor a string"); a missing key reads
+# as nil; the setter returns the assigned value (assignment semantics).
+class Fiber
+  def self.[](key)
+    unless key.is_a?(Symbol) || key.is_a?(String)
+      raise TypeError, "#{key.inspect} is not a symbol nor a string"
+    end
+    @storage ||= {}
+    @storage[key]
+  end
+  def self.[]=(key, val)
+    unless key.is_a?(Symbol) || key.is_a?(String)
+      raise TypeError, "#{key.inspect} is not a symbol nor a string"
+    end
+    @storage ||= {}
+    @storage[key] = val
+  end
+end
+
 # ConditionVariable — single-threaded no-op companion to Mutex.
 # Real code pairs `@cond = ConditionVariable.new` with `@cond.wait(
 # mutex)` / `signal` / `broadcast` for cross-thread coordination;
