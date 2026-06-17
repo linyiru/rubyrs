@@ -13,6 +13,16 @@
 # Loaded by `require "bigdecimal"` (always-on extra); also installs the
 # Kernel#BigDecimal() conversion function CRuby exposes on require.
 class BigDecimal
+  # Rounding-mode constants (CRuby values). money's `setup_defaults`
+  # reads `BigDecimal::ROUND_HALF_EVEN` (banker's rounding) at load.
+  ROUND_UP = 1
+  ROUND_DOWN = 2
+  ROUND_HALF_UP = 3
+  ROUND_HALF_DOWN = 4
+  ROUND_CEILING = 5
+  ROUND_FLOOR = 6
+  ROUND_HALF_EVEN = 7
+
   def initialize(value)
     @r = BigDecimal.__to_rational(value)
   end
@@ -117,20 +127,69 @@ class BigDecimal
   def >=(o); (@r <=> __coerce_r(o)) >= 0; end
 
   def zero?; @r == 0; end
+  def nonzero?; @r == 0 ? nil : self; end
+  def positive?; @r > 0; end
+  def negative?; @r < 0; end
 
-  # Round half away from zero to `n` decimal places, returning a
-  # BigDecimal (CRuby parity; the caller decides whether to #to_i).
-  def round(n = 0)
+  # This Rational-backed BigDecimal never models NaN / ±Infinity, so
+  # every value is finite. money validates amounts with `#finite?`.
+  def finite?; true; end
+  def infinite?; nil; end
+  def nan?; false; end
+
+  # `sign` — CRuby's SIGN_* magnitude: +2 (POSITIVE_FINITE) / -2
+  # (NEGATIVE_FINITE) for non-zero, +1 (POSITIVE_ZERO) for zero (we
+  # don't model signed-zero / NaN / infinite variants).
+  def sign
+    if @r > 0 then 2 elsif @r < 0 then -2 else 1 end
+  end
+
+  # Round a Rational `q` to an Integer under a CRuby rounding-mode
+  # constant. Directional modes (FLOOR / CEILING) act on the signed
+  # value; magnitude modes (UP / DOWN / the three HALF_*) round the
+  # absolute value and reapply the sign, so e.g. ROUND_HALF_UP sends
+  # -0.5 to -1 (away from zero) like CRuby.
+  def self.__round_to_int(q, mode)
+    # Rational#floor isn't available in the subset; Integer#div is
+    # floored, so `num.div(den)` is the mathematical floor of num/den.
+    fl = q.numerator.div(q.denominator)
+    return fl if q == fl
+    return fl if mode == ROUND_FLOOR
+    return fl + 1 if mode == ROUND_CEILING
+    neg = q < 0
+    mag = neg ? q * -1 : q   # Rational#-@ isn't in the subset
+    imag = mag.numerator.div(mag.denominator)
+    fr = mag - imag
+    up = case mode
+         when ROUND_UP then true
+         when ROUND_DOWN then false
+         else
+           cmp = fr <=> Rational(1, 2)
+           if cmp > 0
+             true
+           elsif cmp < 0
+             false
+           elsif mode == ROUND_HALF_DOWN
+             false
+           elsif mode == ROUND_HALF_EVEN
+             imag.odd?
+           else # ROUND_HALF_UP
+             true
+           end
+         end
+    r = up ? imag + 1 : imag
+    neg ? -r : r
+  end
+
+  # Round to `n` decimal places under `mode` (default ROUND_HALF_UP —
+  # half away from zero, BigDecimal's historical default), returning a
+  # BigDecimal. money passes an explicit mode
+  # (`value.round(0, rounding_mode)`).
+  def round(n = 0, mode = ROUND_HALF_UP)
     ni = n.to_i
     factor = 10 ** ni.abs
     scaled = ni >= 0 ? @r * factor : @r / factor
-    num = scaled.numerator
-    den = scaled.denominator
-    rounded = if num >= 0
-      (2 * num + den) / (2 * den)
-    else
-      -((-2 * num + den) / (2 * den))
-    end
+    rounded = BigDecimal.__round_to_int(scaled, mode)
     BigDecimal.new(ni >= 0 ? Rational(rounded, factor) : Rational(rounded * factor, 1))
   end
 

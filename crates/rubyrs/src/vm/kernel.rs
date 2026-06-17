@@ -4974,7 +4974,7 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "english" | "English"
         // `optparse`: vendored real parser (stdlib_vendor/optparse.rb)
         | "optparse"
-        | "bigdecimal" | "monitor" | "erb"
+        | "bigdecimal" | "bigdecimal/util" | "monitor" | "erb"
         // `pp`: Kernel#pp is native; the vendored pp.rb adds
         // Object#pretty_inspect + the PP module. faraday's logging
         // formatter `require 'pp'` for `Hash#pretty_inspect`.

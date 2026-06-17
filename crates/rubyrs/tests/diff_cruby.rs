@@ -1012,6 +1012,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // gem `ruby --disable=gems` can't load), so use the gem-enabled oracle.
 #[cfg(feature = "stdlib")]
 #[test] fn bigdecimal_basic() { run_diff_gem("bigdecimal_basic", "bigdecimal"); }
+// BigDecimal ROUND_* constants + mode-aware #round, finite-state
+// predicates / #sign, and bigdecimal/util #to_d. Surfaced by money.
+#[cfg(feature = "stdlib")]
+#[test] fn bigdecimal_modes_util() { run_diff_gem("bigdecimal_modes_util", "bigdecimal"); }
 #[test] fn gsub_hash() { run_diff("gsub_hash"); }
 #[test] fn hash_delete_block() { run_diff("hash_delete_block"); }
 // Hash#flatten(level) / #fetch_values (KeyError on miss) /
