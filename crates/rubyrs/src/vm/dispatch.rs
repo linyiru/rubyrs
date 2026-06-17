@@ -15277,6 +15277,42 @@ impl Vm {
             Some(self.stack.pop().expect("ICE: stack underflow before block receiver"))
         };
 
+        // `Dir.glob(pat) { |f| … }` block form. The no-block dispatch returns
+        // the matched Array (dir_class_dispatch); the block form yields each
+        // path and returns nil. do_call_block otherwise never routes to
+        // dir_class_dispatch, so a block-form `glob` raised NoMethodError.
+        // Common idiom — net-smtp loads its adapters with
+        // `Dir.glob("#{__dir__}/auth_*.rb") { |r| require_relative r }` (mail).
+        // `Dir[pat]` does NOT take a block in CRuby — a block is ignored and
+        // the Array returned; mirror that so the same arm covers both without
+        // a spurious NoMethodError on the (nonsensical) `Dir[pat] { }`.
+        if let Some(Value::Class(c)) = &recv
+            && c.name.as_str() == "Dir"
+            && matches!(&*name, "glob" | "[]")
+            && let Some(arr) = self.dir_class_dispatch(&name, &args)?
+        {
+            if &*name == "[]" {
+                self.stack.push(arr);
+                return Ok(());
+            }
+            let arr_id = match arr { Value::Array(id) => id, _ => unreachable!("glob returns Array") };
+            let paths: Vec<Value> = self.heap.array(arr_id).clone();
+            let mut g = crate::vm::PinGuard::new(self);
+            g.pin(Value::Block(block));
+            let pre_frames = g.vm.frames.len();
+            let mut early = None;
+            for p in paths {
+                match g.vm.step_block1(block, p, pre_frames)? {
+                    super::iter::BlockStep::MethodReturn => break,
+                    super::iter::BlockStep::Break(r) => { early = Some(r); break; }
+                    super::iter::BlockStep::Value(_) => {}
+                }
+            }
+            drop(g);
+            self.stack.push(early.unwrap_or(Value::Nil));
+            return Ok(());
+        }
+
         // Reopen-precedence early gate — block-form twin of
         // do_call's (`5.times { }` with a user `def times` on
         // Integer must invoke the reopen WITH the block, not the

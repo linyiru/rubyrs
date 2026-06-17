@@ -414,6 +414,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn symbol_index() { run_diff("symbol_index"); }
 #[test] fn integer_div() { run_diff("integer_div"); }
 #[test] fn set_temporary_name() { run_diff("set_temporary_name"); }
+#[test] fn dir_glob_block() { run_diff("dir_glob_block"); }
 // `ERB::Util` h/html_escape + u/url_encode (rspec-core's HTML formatter
 // does `include ERB::Util`). Vendored erb is stdlib-gated.
 #[cfg(feature = "stdlib")]
