@@ -37,3 +37,18 @@ class Gadget
   end
 end
 p Gadget.a                               # 1
+
+# `class << self` INSIDE an instance method — self is an instance, so
+# the visibility applies to the instance's eigenclass (regexp_parser
+# scanner.rb:48 does `class << self; attr_accessor :x; private :x, :x=`).
+class Scanner
+  def setup
+    class << self
+      attr_accessor :tk
+      private :tk, :tk=
+    end
+    send(:tk=, 7)
+    send(:tk)
+  end
+end
+p Scanner.new.setup                       # 7

@@ -1822,24 +1822,58 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     !args.is_empty() && args.iter().all(|n| n.as_splat_node().is_none())
                 }).unwrap_or(false)
             {
-                let target = if cid_to_string(call.name()) == "private" {
-                    "private_class_method"
-                } else {
-                    "public_class_method"
-                };
+                // Set the visibility on the receiver's singleton methods.
+                // Two cases, distinguished at RUNTIME by the receiver's
+                // type:
+                //   - `recv` is a Module/Class (`class << self` in a class
+                //     body, `class << Const`): use `private_class_method`,
+                //     which flips the class's singleton-method visibility
+                //     (those methods live in the real class's table, not
+                //     the eigenclass shell's, so `singleton_class.private`
+                //     wouldn't see them).
+                //   - `recv` is an ordinary object (`class << self` inside
+                //     an INSTANCE method — regexp_parser's scanner.rb:48):
+                //     instances have no `private_class_method`, so flip via
+                //     `recv.singleton_class.send(:private, …)`.
+                let vis = cid_to_string(call.name()); // "private" / "public"
+                let cm_name = if vis == "private" { "private_class_method" } else { "public_class_method" };
                 let receiver_expr = if needs_local {
                     sp(bn, Expr::LVarRead(synth_local.clone()))
                 } else {
                     recv_expr.clone()
                 };
-                let args: Vec<SExpr> = call.arguments()
+                let arg_exprs: Vec<SExpr> = call.arguments()
                     .map(|a| a.arguments().iter().map(|n| tr(ctx, &n)).collect())
                     .unwrap_or_default();
-                out.push(sp(bn, Expr::Call {
-                    receiver: Some(Box::new(receiver_expr)),
-                    name: target.to_string(),
-                    args,
+                let cond = sp(bn, Expr::Call {
+                    receiver: Some(Box::new(receiver_expr.clone())),
+                    name: "is_a?".to_string(),
+                    args: vec![sp(bn, Expr::ConstRead("Module".to_string()))],
                     kwargs_trailing: false,
+                });
+                let then_call = sp(bn, Expr::Call {
+                    receiver: Some(Box::new(receiver_expr.clone())),
+                    name: cm_name.to_string(),
+                    args: arg_exprs.clone(),
+                    kwargs_trailing: false,
+                });
+                let sing = sp(bn, Expr::Call {
+                    receiver: Some(Box::new(receiver_expr)),
+                    name: "singleton_class".to_string(),
+                    args: vec![], kwargs_trailing: false,
+                });
+                let mut send_args: Vec<SExpr> = vec![sp(bn, Expr::SymbolLit(vis))];
+                send_args.extend(arg_exprs);
+                let else_call = sp(bn, Expr::Call {
+                    receiver: Some(Box::new(sing)),
+                    name: "send".to_string(),
+                    args: send_args,
+                    kwargs_trailing: false,
+                });
+                out.push(sp(bn, Expr::If {
+                    cond: Box::new(cond),
+                    then_body: vec![then_call],
+                    else_body: vec![else_call],
                 }));
                 continue;
             }
