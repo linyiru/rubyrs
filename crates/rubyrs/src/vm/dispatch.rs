@@ -3186,7 +3186,7 @@ impl Vm {
             // module (verified against 3.4). Class.instance_method
             // stays strict — `obj.is_a?(cls)` required. Same
             // fence as the `bind_call` arm below.
-            if cap_class.name.as_str() != "Kernel"
+            if !matches!(cap_class.name.as_str(), "Kernel" | "Object" | "BasicObject")
                 && !cap_class.is_module
                 && !super::class_is_a(&target_class, &cap_class) {
                 return Err(self.trap(RubyError::TypeError {
@@ -3273,7 +3273,7 @@ impl Vm {
                     })),
                 },
             };
-            if cap_class.name.as_str() != "Kernel"
+            if !matches!(cap_class.name.as_str(), "Kernel" | "Object" | "BasicObject")
                 && !cap_class.is_module
                 && !super::class_is_a(&target_class, &cap_class) {
                 return Err(self.trap(RubyError::TypeError {
@@ -3341,7 +3341,7 @@ impl Vm {
             //     defined on its class.
             //     `Class.instance_method(:foo).bind_call(obj)`
             //     stays strict — `obj.is_a?(cls)` required.
-            if cap_class.name.as_str() != "Kernel"
+            if !matches!(cap_class.name.as_str(), "Kernel" | "Object" | "BasicObject")
                 && !cap_class.is_module
                 && !super::class_is_a(&target_class, &cap_class) {
                 return Err(self.trap(RubyError::TypeError {
@@ -15653,7 +15653,7 @@ impl Vm {
             // Same is_a fence as the no-block path: Kernel sentinel
             // and any Module captured class are exempt; Class
             // capture is strict.
-            if cap_class.name.as_str() != "Kernel"
+            if !matches!(cap_class.name.as_str(), "Kernel" | "Object" | "BasicObject")
                 && !cap_class.is_module
                 && !super::class_is_a(&target_class, &cap_class) {
                 return Err(self.trap(RubyError::TypeError {

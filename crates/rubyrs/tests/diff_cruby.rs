@@ -1481,6 +1481,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // singleton methods. Surfaced by sorbet's run_sig reflection.
 #[test] fn eigenclass_introspection() { run_diff("eigenclass_introspection"); }
 
+// `Object.instance_method(:method)` resolves the Kernel builtin, and an
+// Object/BasicObject/Kernel-rooted UnboundMethod binds to ANY receiver.
+// Surfaced by sorbet's `Object.instance_method(:method).bind_call(...)`.
+#[test] fn object_method_bind() { run_diff("object_method_bind"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

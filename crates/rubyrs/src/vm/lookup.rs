@@ -1701,6 +1701,12 @@ impl Vm {
             // Variadic dispatchers (CRuby: arity -1, params [[:rest]])
             ("send", -1, &[("rest", None)], "<internal:kernel>"),
             ("respond_to?", -1, &[("rest", None)], "<internal:kernel>"),
+            // `method` / `public_method` — single required arg (the
+            // method name); return a (bound) Method. sorbet does
+            // `Object.instance_method(:method).bind_call(mod, :new)` to
+            // reach `mod.method(:new)` for an owner check.
+            ("method", 1, &[("req", None)], "<internal:kernel>"),
+            ("public_method", 1, &[("req", None)], "<internal:kernel>"),
         ];
         for (name, arity, params, src_label) in entries {
             let name_id = self.interner.intern(name);
