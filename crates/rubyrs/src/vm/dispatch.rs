@@ -4270,6 +4270,55 @@ impl Vm {
         let Value::Class(cls_ref) = recv else { return Ok(false); };
         let cls = cls_ref.clone();
         match (name, args) {
+            // Ruby 3.3+ `Module#set_temporary_name` — give an ANONYMOUS module
+            // a temporary name (sequel's `mod.set_temporary_name(yield)`). nil
+            // clears it; a String sets `assigned_name`, which `effective_name`
+            // returns when the real (constant-assigned) name is empty. Raises
+            // on a permanently-named module, like CRuby. Returns self.
+            ("set_temporary_name", [arg]) => {
+                // A permanently-named (constant-assigned) module can't be
+                // renamed — CRuby raises RuntimeError.
+                if !matches!(arg, Value::Nil) && !cls.name.is_empty() {
+                    return Err(self.trap(RubyError::RuntimeError {
+                        msg: "can't change permanent name".into(),
+                    }));
+                }
+                match arg {
+                    Value::Nil => { *cls.assigned_name.borrow_mut() = None; }
+                    Value::Str(s) => {
+                        let nm = s.to_string_lossy();
+                        if nm.is_empty() {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "empty class/module name".into(),
+                            }));
+                        }
+                        // CRuby forbids a name that is a VALID constant path
+                        // ("to avoid confusion") — optional leading "::" then
+                        // `::`-separated constant segments (`[A-Z][A-Za-z0-9_]*`).
+                        // If ANY segment isn't a constant ("a::b", "Foo::bar",
+                        // sequel's "Sequel::SQL::…::_BaseMethodMissing") it's not
+                        // a constant path and is allowed.
+                        let body = nm.strip_prefix("::").unwrap_or(&nm);
+                        let is_const_path = !body.is_empty()
+                            && body.split("::").all(|seg| {
+                                let mut cs = seg.chars();
+                                matches!(cs.next(), Some(c) if c.is_ascii_uppercase())
+                                    && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
+                            });
+                        if is_const_path {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "the temporary name must not be a constant path to avoid confusion".into(),
+                            }));
+                        }
+                        *cls.assigned_name.borrow_mut() = Some(nm);
+                    }
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("expected a String or nil (given an instance of {})", other.type_name()),
+                    })),
+                }
+                self.stack.push(recv.clone());
+                Ok(true)
+            }
             ("ancestors", []) => {
                 let chain: Vec<Value> = super::flatten_ancestors(&cls)
                     .into_iter()
