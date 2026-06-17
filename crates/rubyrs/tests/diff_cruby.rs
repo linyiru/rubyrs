@@ -418,6 +418,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn undef_object_private() { run_diff("undef_object_private"); }
 #[test] fn super_to_builtin() { run_diff("super_to_builtin"); }
 #[test] fn bare_extend() { run_diff("bare_extend"); }
+#[test] fn is_a_extend() { run_diff("is_a_extend"); }
 // `ERB::Util` h/html_escape + u/url_encode (rspec-core's HTML formatter
 // does `include ERB::Util`). Vendored erb is stdlib-gated.
 #[cfg(feature = "stdlib")]

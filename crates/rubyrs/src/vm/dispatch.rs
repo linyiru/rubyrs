@@ -9781,9 +9781,21 @@ impl Vm {
                     return Ok(());
                 };
                 let result = if &*name == "instance_of?" {
+                    // Strict: the REAL class only — `extend`ed modules and
+                    // subclasses don't count for instance_of?.
                     Rc::ptr_eq(&recv_class, target)
                 } else {
-                    super::class_is_a(&recv_class, target)
+                    // is_a?/kind_of?: walk the SINGLETON-aware class so a module
+                    // `extend`ed into the object's eigenclass is found. The
+                    // eigenclass's superclass is the real class, so the regular
+                    // ancestry stays covered. (`Vm::class_of` returns the REAL
+                    // class for `obj.class`, hiding the eigenclass — so
+                    // `obj.extend(M); obj.is_a?(M)` was false.)
+                    let walk_class = match &recv {
+                        Value::Object(id) => self.heap.class_of(*id),
+                        _ => recv_class.clone(),
+                    };
+                    super::class_is_a(&walk_class, target)
                 };
                 self.stack.push(Value::Bool(result));
                 return Ok(());
