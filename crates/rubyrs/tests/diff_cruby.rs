@@ -1371,6 +1371,12 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // example groups via `klass.module_exec(*args, &block)`.
 #[test] fn module_exec_class_exec() { run_diff("module_exec_class_exec"); }
 
+// Bare `super` from a method with keyword params forwards them AS
+// keywords (reconstructed trailing kwargs Hash), not as positional
+// args. Surfaced by public_suffix's `Wildcard#initialize(value:,
+// length:, private:); super; end`.
+#[test] fn super_forward_kwargs() { run_diff("super_forward_kwargs"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

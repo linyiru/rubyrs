@@ -55,9 +55,20 @@ pub(crate) struct ProtoBuilder {
     /// Needed so bare `super` forwards `[pre…, *rest, post…]` in order.
     pub(crate) method_n_post_rest: u16,
     /// True when the method declares keyword params or a `**kwrest`.
-    /// Bare `super` forwarding of kwargs is not modelled yet, so these
-    /// methods fall back to the legacy (approximate) slot-dump path.
+    /// Bare `super` forwards named kwargs by reconstructing a trailing
+    /// Hash from `method_kw_params` (see below). A `**kwrest` slot
+    /// (`method_kw_rest_slot`) still falls back to the legacy slot-dump
+    /// — merging the rest Hash isn't modelled yet.
     pub(crate) method_has_kw: bool,
+    /// `(name, slot)` for each declared keyword parameter, in order.
+    /// Bare `super` rebuilds `{ name: <slot value>, … }` so the callee
+    /// binds them as KEYWORDS rather than positionals — public_suffix's
+    /// `Wildcard#initialize(value:, length:, private:); super; end`.
+    pub(crate) method_kw_params: Vec<(String, u16)>,
+    /// Slot of the `**kwrest` parameter when the method declares one.
+    /// Bare-`super` kwarg forwarding bails to the legacy path when this
+    /// is `Some` (rest-Hash merge is a follow-up).
+    pub(crate) method_kw_rest_slot: Option<u16>,
     /// True iff this builder is compiling a real method body
     /// (the proto bound to an `Op::DefMethod` /
     /// `Op::DefSingletonMethod`). Distinct from `method_name`
@@ -509,6 +520,15 @@ fn compile_def_arm(
             last.0 + 1,
         );
     }
+    // Bare-`super` kwarg forwarding layout: each keyword param's slot
+    // is `kw_start + i`; the `**kwrest` slot (if any) follows them.
+    let method_kw_params: Vec<(String, u16)> = kw_params
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| (name.clone(), kw_start + i as u16))
+        .collect();
+    let method_kw_rest_slot: Option<u16> =
+        kw_rest.as_ref().map(|_| kw_start + kw_params.len() as u16);
     let proto_idx = compile_proto_kind(
         name.to_string(), effective_params, n_required_positional, defaults.to_vec(), body,
         b.filename.clone(), protos, interner, cc, /*is_method=*/true,
@@ -518,6 +538,8 @@ fn compile_def_arm(
         /*has_kw=*/ !kw_params.is_empty() || kw_rest.is_some(),
         /*has_block=*/ block_param.is_some(),
         kw_computed_prologue,
+        method_kw_params,
+        method_kw_rest_slot,
     );
     if let Some(rname) = rest {
         protos[proto_idx].rest_param = Some(rname.clone());
@@ -1186,6 +1208,8 @@ impl ProtoBuilder {
             method_n_positional: 0,
             method_n_post_rest: 0,
             method_has_kw: false,
+            method_kw_params: vec![],
+            method_kw_rest_slot: None,
             is_method_body: false,
             loop_break_jumps: vec![],
             loop_next_jumps: vec![],
@@ -1836,6 +1860,48 @@ pub(crate) fn compile_expr(
                         }
                         b.emit(Op::NewArray(b.method_n_positional));
                         b.emit(Op::ApplySuperBlock(name_id));
+                    } else if b.method_has_kw
+                        && b.method_kw_rest_slot.is_none()
+                        && b.method_rest_slot.is_none()
+                    {
+                        // Bare `super` from a method with named keyword
+                        // params. The legacy slot-dump (below) forwards
+                        // the kw slots as POSITIONAL args, so a kwarg-only
+                        // parent reports "wrong number of arguments (given
+                        // N, expected 0)". Instead forward positionals
+                        // 0..n_positional, then a reconstructed trailing
+                        // kwargs Hash `{ name => <slot value>, … }` from the
+                        // current kw-param slot values, so the callee binds
+                        // them as KEYWORDS. The Hash rides as the args
+                        // array's trailing element; a `super` call leaves
+                        // `trailing_hash_positional == false`, so the
+                        // method binder peels it as kwargs. Surfaced by
+                        // public_suffix's `Wildcard#initialize(value:,
+                        // length:, private:); super; end`. (`**kwrest` and
+                        // a mid-signature `*rest` still bail to the legacy
+                        // path — merging the rest Hash isn't modelled yet.)
+                        let block_present = b.method_block_slot.is_some();
+                        if let Some(bs) = b.method_block_slot {
+                            b.emit(Op::LoadLocal(bs));
+                        }
+                        let n_pos = b.method_n_positional;
+                        for i in 0..n_pos {
+                            b.emit(Op::LoadLocal(i));
+                        }
+                        let kw = b.method_kw_params.clone();
+                        let kw_count = kw.len() as u16;
+                        for (kname, slot) in &kw {
+                            let ksym = interner.intern(kname);
+                            b.emit(Op::LoadSymbol(ksym));
+                            b.emit(Op::LoadLocal(*slot));
+                        }
+                        b.emit(Op::NewHash(kw_count));
+                        b.emit(Op::NewArray(n_pos + 1));
+                        if block_present {
+                            b.emit(Op::ApplySuperBlock(name_id));
+                        } else {
+                            b.emit(Op::ApplySuper(name_id));
+                        }
                     } else {
                         // Positional slot-dump. Pure positional uses the
                         // positional count; the kw / post-rest fallback
@@ -2281,7 +2347,7 @@ pub(crate) fn compile_proto_at(
     class_path: Vec<String>,
 ) -> usize {
     let n_req = params.len() as u16;
-    compile_proto_kind(name, params, n_req, vec![], body, filename, protos, interner, cc, /*is_method=*/false, class_path, None, /*n_required_post=*/0, /*has_kw=*/false, /*has_block=*/false, vec![])
+    compile_proto_kind(name, params, n_req, vec![], body, filename, protos, interner, cc, /*is_method=*/false, class_path, None, /*n_required_post=*/0, /*has_kw=*/false, /*has_block=*/false, vec![], vec![], None)
 }
 
 /// Same as `compile_proto` but tags the resulting builder as a
@@ -2315,6 +2381,10 @@ pub(crate) fn compile_proto_kind(
     // body for each. Empty when the method has no kwargs or all
     // kwarg defaults are literals.
     kw_computed_prologue: Vec<(u16, u16, SExpr)>,
+    // Bare-`super` kwarg forwarding: `(name, slot)` per keyword param
+    // and the `**kwrest` slot (if any). See `ProtoBuilder::method_kw_params`.
+    method_kw_params: Vec<(String, u16)>,
+    method_kw_rest_slot: Option<u16>,
 ) -> usize {
     let mut b = ProtoBuilder::new(&params, filename);
     b.class_path = class_path;
@@ -2328,6 +2398,8 @@ pub(crate) fn compile_proto_kind(
         b.method_n_positional = n_required_positional + n_optional + n_required_post;
         b.method_n_post_rest = n_required_post;
         b.method_has_kw = has_kw;
+        b.method_kw_params = method_kw_params;
+        b.method_kw_rest_slot = method_kw_rest_slot;
         // `&block` is the LAST entry in `effective_params`.
         b.method_block_slot = if has_block {
             Some((params.len() as u16).saturating_sub(1))
@@ -2441,6 +2513,8 @@ pub(crate) fn compile_block(
         method_n_positional: parent.method_n_positional,
         method_n_post_rest: parent.method_n_post_rest,
         method_has_kw: parent.method_has_kw,
+        method_kw_params: parent.method_kw_params.clone(),
+        method_kw_rest_slot: parent.method_kw_rest_slot,
         // Blocks are NOT method bodies — `return` inside one
         // unwinds non-locally to the enclosing method
         // (Op::ReturnMethod), not just the block frame.
