@@ -63,9 +63,9 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 
 | source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 93.0 % (120/129) |
+| bridgetown | 93.8 % (121/129) |
 | jekyll | 94.1 % (190/202) |
-| **combined** | **93.7 % (310/331)** |
+| **combined** | **94.0 % (311/331)** |
 
 Top decline reasons (combined, `run.sh`) are now a flat tail of kramdown
 quirks: multi-block / multi-line-table list items, cross-line emphasis
@@ -125,8 +125,10 @@ multi-row-pipe-table items, with kramdown's tight/loose rules) — then block
 IALs on fenced code and tables (both sides), a `|` inside an inline HTML
 tag no longer mistaken for a table separator, depth-matched link
 destinations (`[t](…Fork_(x))`, `[t]((u))`, kramdown's `LINK_PAREN_STOP`),
-and smart quotes directly after a code span (`` `x`'s `` → ’s). Current:
-**93.7 %**. `verify.sh` is the standing gate that keeps it WRONG = 0.
+smart quotes directly after a code span (`` `x`'s `` → ’s), and an
+opposite-kind list marker indented shallow under an ordered item
+(`1. a:\n  * b` → nested `<ul>`). Current: **94.0 %**. `verify.sh` is the
+standing gate that keeps it WRONG = 0.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
