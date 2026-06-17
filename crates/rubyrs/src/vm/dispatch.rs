@@ -3299,16 +3299,18 @@ impl Vm {
                     ),
                 }));
             }
-            let m = match bm_method.or_else(|| self.lookup_method_uncached(&cap_class, bm_name_id)) {
-                Some(m) => m,
+            match bm_method.or_else(|| self.lookup_method_uncached(&cap_class, bm_name_id)) {
+                Some(m) => { self.invoke_method(m, target, args)?; }
                 None => {
-                    let mname = self.interner.resolve(bm_name_id).to_string();
-                    return Err(self.trap(RubyError::NameError {
-                        msg: format!("undefined method '{}' for class '{}'", mname, cap_class.name),
-                    }));
+                    // Native builtin with no table Method — dispatch by
+                    // name on the target (see the UnboundMethod arm).
+                    let argc = args.len();
+                    self.stack.push(target);
+                    for a in args { self.stack.push(a); }
+                    self.bypass_visibility_once = true;
+                    self.do_call(bm_name_id, argc, false, u16::MAX)?;
                 }
-            };
-            self.invoke_method(m, target, args)?;
+            }
             return Ok(CallableOutcome::Handled);
         }
         if let Value::BoundMethod(_) = &recv && name == "bind_call" {
@@ -3373,16 +3375,22 @@ impl Vm {
             // lookup when no snapshot exists (e.g. UnboundMethod
             // values created from `unbind` paths that pre-date
             // the snapshot field).
-            let m = match cap_method.or_else(|| self.lookup_method_uncached(&cap_class, cap_name_id)) {
-                Some(m) => m,
+            match cap_method.or_else(|| self.lookup_method_uncached(&cap_class, cap_name_id)) {
+                Some(m) => { self.invoke_method(m, target, args)?; }
                 None => {
-                    let mname = self.interner.resolve(cap_name_id).to_string();
-                    return Err(self.trap(RubyError::NameError {
-                        msg: format!("undefined method '{}' for class '{}'", mname, cap_class.name),
-                    }));
+                    // No table Method — the captured method is a NATIVE
+                    // builtin (e.g. `String.instance_method(:upcase)`).
+                    // Dispatch it by name on the target, like
+                    // `bind(target).call(args)` does, so the native arm
+                    // runs. Bypass visibility (bind_call may invoke
+                    // private/protected methods, matching CRuby).
+                    let argc = args.len();
+                    self.stack.push(target);
+                    for a in args { self.stack.push(a); }
+                    self.bypass_visibility_once = true;
+                    self.do_call(cap_name_id, argc, false, u16::MAX)?;
                 }
-            };
-            self.invoke_method(m, target, args)?;
+            }
             return Ok(CallableOutcome::Handled);
         }
         if let Value::UnboundMethod(_) = &recv && name == "bind_call" {
