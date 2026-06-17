@@ -63,14 +63,16 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 
 | source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 81.4 % (105/129) |
-| jekyll | 73.3 % (148/202) |
-| **combined** | **76.4 % (253/331)** |
+| bridgetown | 82.2 % (106/129) |
+| jekyll | 74.8 % (151/202) |
+| **combined** | **77.6 % (257/331)** |
 
-Top decline reasons (combined, `run.sh`): `html-block` (~26),
-`opt-space-block` (~9), `table` (~9), then small tails. `hard-break`,
-`link-text-nested`, `inline-html-or-autolink`, `header-ial` have left the
-top reasons — all now rendered.
+Top decline reasons (combined, `run.sh`): `html-block` (~26) and `table`
+(~9) lead, then small tails (opt-space fences inside Liquid blocks,
+multi-block list items, tables/code inside list items, `{:toc}`). The
+reproducible inline/block tails — strikethrough, hard breaks, nested link
+text, `{#id}`, leading IALs, OPT_SPACE-list paragraph interruption, indented
+code — are all rendered now.
 
 **On 100 %.** Correctness is already 100 % — every accepted page is
 byte-identical and every declined page renders correctly via the Ruby
@@ -105,12 +107,14 @@ pipe/table boundary (a block with a pipe-less line is a paragraph, not a
 decline), leading block IALs (`{:.note}\ntext` → `<p class="note">`), and
 inline HTML elements (void like `<br>` plus markdown-content ones like
 `<a>`/`<abbr>`/`<sub>`), the `{#id}` header-id shorthand, hard line breaks
-(`<br />`), and nested brackets / linked images in link text. Current:
-**76.4 %**. `verify.sh` is the standing gate that keeps it WRONG = 0.
+(`<br />`), nested brackets / linked images in link text, GFM
+strikethrough (`~~x~~`), OPT_SPACE list paragraph interruption, and indented
+code blocks. Current: **77.6 %**. `verify.sh` is the standing gate that
+keeps it WRONG = 0.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
-content ~73 %. The remaining blockers are the out-of-subset tails of
+content ~78 %. The remaining blockers are the out-of-subset tails of
 features the engine partly does — raw HTML outside the re-serialized subset
 (raw-text elements like `<table>`/`<script>`, comments, custom elements),
 tables inside list items/blockquotes, OPT_SPACE-indented blocks, and a few
