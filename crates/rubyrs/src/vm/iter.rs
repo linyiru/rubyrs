@@ -1036,6 +1036,33 @@ impl Vm {
             }
             return Ok(Some(early.unwrap_or_else(|| recv.clone())));
         }
+        // `s.each_codepoint { |cp| ... }` — yield each character's
+        // integer Unicode code point (raw bytes for a BINARY subject),
+        // return the receiver. Same snapshot + step_block discipline as
+        // `each_byte`. The no-block form returns an Enumerator from
+        // string_collection_call.
+        if let Value::Str(s) = recv
+            && name == "each_codepoint" && args.is_empty()
+        {
+            let cps: Vec<i64> = if matches!(s.encoding.get(), crate::value::EncodingTag::Binary) {
+                s.borrow().iter().map(|&b| b as i64).collect()
+            } else {
+                s.to_string_lossy().chars().map(|c| c as i64).collect()
+            };
+            let mut g = PinGuard::new(self);
+            g.pin(recv.clone());
+            g.pin(Value::Block(block));
+            let pre_frames = g.vm.frames.len();
+            let mut early: Option<Value> = None;
+            for cp in cps {
+                match g.vm.step_block1(block, Value::Int(cp), pre_frames)? {
+                    BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                    BlockStep::Break(r) => { early = Some(r); break; }
+                    BlockStep::Value(_) => {}
+                }
+            }
+            return Ok(Some(early.unwrap_or_else(|| recv.clone())));
+        }
         // `s.each_char { |c| ... }` — yield each character (as a 1-char
         // String) to the block, return the receiver. Same char snapshot
         // + step_block discipline as `each_byte` above. The no-block form

@@ -3259,6 +3259,26 @@ impl Vm {
                         let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
+                    // `String#codepoints` — the integer Unicode code
+                    // point of each character. An ASCII-8BIT (BINARY)
+                    // subject yields raw byte values (0..255), matching
+                    // CRuby. The block form (`each_codepoint`) is routed
+                    // in collection_call_block.
+                    ("codepoints", []) => {
+                        let elems: Vec<Value> = if matches!(s.encoding.get(), crate::value::EncodingTag::Binary) {
+                            s.content.borrow().iter().map(|&b| Value::Int(b as i64)).collect()
+                        } else {
+                            s.to_string_lossy().chars().map(|c| Value::Int(c as i64)).collect()
+                        };
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(elems.into()));
+                        Some(Value::Array(id))
+                    }
+                    // `String#each_codepoint` with NO block → Enumerator
+                    // (the block form is handled in collection_call_block).
+                    ("each_codepoint", []) => {
+                        return self.make_enum_for(Value::Str(s.clone()), "each_codepoint", vec![]).map(Some);
+                    }
                     ("partition", [Value::Str(sep)]) => {
                         // Split at the FIRST occurrence → [before, sep, after];
                         // no match → [self, "", ""].
