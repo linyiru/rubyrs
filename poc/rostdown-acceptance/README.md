@@ -63,13 +63,13 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 
 | source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 61.2 % (79/129) |
-| jekyll | 54.5 % (110/202) |
-| **combined** | **57.1 % (189/331)** |
+| bridgetown | 67.4 % (87/129) |
+| jekyll | 62.9 % (127/202) |
+| **combined** | **64.7 % (214/331)** |
 
-Top decline reasons (combined, `run.sh`): `html-block` (49), `table` (20),
-`ald-ial-extension` (18), `inline-html-or-autolink` (16),
-`opt-space-block` (7).
+Top decline reasons (combined, `run.sh`): `table` (22), `html-block` (19),
+`inline-html-or-autolink` (19), `ald-ial-extension` (18),
+`opt-space-block` (8).
 
 **The accept-but-wrong correction.** Earlier snapshots (40.2 % → 50.5 % →
 a raw 57.4 %) counted accept-vs-decline only — they were never byte-checked
@@ -81,17 +81,19 @@ emphasis & links, opt-space lazy-continuation whitespace) and by correctly
 supporting one (length-aware fence close). That moved those 12 from
 accept→decline, so the honest post-correction figure was **53.8 %, with
 WRONG = 0** — lower than the inflated 57.4 %, but every accepted page is now
-provably byte-identical. Follow-on features — HTML entity resolution
-(kramdown `:as_char`), spaced link-definition destinations (so Liquid
-`{{ … }}` URLs resolve), and the blockquote "note box" IAL (`> …\n{:.note}`
-→ `<blockquote class="note">`) — then lifted it to the current **57.1 %**,
-still WRONG = 0. `verify.sh` is the standing gate that keeps it that way.
+provably byte-identical. Follow-on features then lifted it, all still WRONG = 0: HTML entity
+resolution (kramdown `:as_char`), spaced link-definition destinations (so
+Liquid `{{ … }}` URLs resolve), the blockquote "note box" IAL
+(`> …\n{:.note}` → `<blockquote class="note">`), and — the biggest lever —
+a kramdown-faithful re-serialization of common raw HTML blocks
+(`<div class="note">…`, `<figure>`, nested block/void elements). Current:
+**64.7 %**. `verify.sh` is the standing gate that keeps it WRONG = 0.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
-content ~57 %. The dominant remaining blockers are *core kramdown features
-the engine does not yet do* — raw HTML blocks and IAL/ALD (`{:.class}`,
-`{:toc}`). Every declined page still renders correctly via the
-Ruby-kramdown fallback; declining only forgoes the speed-up. So the
-highest-leverage work for broader real-world acceleration is raw-HTML
-blocks and IAL/ALD.
+content ~65 %. The remaining blockers are narrower slices of features the
+engine partly does — pipe tables outside the clean shape, raw HTML outside
+the re-serialized subset (raw-text elements, comments), inline raw HTML,
+and the rest of IAL/ALD (`{:toc}`, ALD definitions). Every declined page
+still renders correctly via the Ruby-kramdown fallback; declining only
+forgoes the speed-up.
