@@ -19,6 +19,7 @@
 //! ["iset", "sigil", ["g", 1]]
 //! ["lpush", "heredoc_queue", [["gin", 1, ["<<-", "<<~"]], ["g", 3]]]
 //! ["if", ["not", ["instate", "heredoc_queue"]], [ …then-ops… ], [ …else-ops… ]]
+//! ["recurse", ["g", 1]]   // re-lex group 1 with the same table (rouge `recurse`)
 //! ```
 //!
 //! Expressions: `["lit", s]`, `["g", i]` (capture i; 0 = whole match —
@@ -26,7 +27,11 @@
 //! `["bool", b]`, `["gin", i, [lits]]` (membership test as a value).
 //! Conditions: `["ivar", name]` (truthy), `["instate", s]` (rouge
 //! `state?` — the CURRENT top of stack), `["geq", i, lit]`,
-//! `["gin", i, [lits]]`, `["not", c]`.
+//! `["gin", i, [lits]]`, `["not", c]`, `["and", c, c]`, `["or", c, c]`;
+//! `["geqf", i, fold, lit]` / `["ginf", i, fold, [lits]]` (fold = "down"/"up"
+//! — `m[i].downcase|upcase` before compare); `["gmatch", i, src, opts]`
+//! (`m[i] =~ /re/`, unanchored); `["gpresent", i]` (`if m[i]`); `["sdepth",
+//! cmp, n]` (cmp = eq/ne/lt/le/gt/ge — `stack.size <cmp> n`).
 
 use std::collections::HashMap;
 

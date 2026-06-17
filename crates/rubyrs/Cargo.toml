@@ -330,7 +330,7 @@ regex-syntax = { version = "0.8", optional = true }
 fancy-regex = { version = "0.18", optional = true }
 # `_rouge_native` battery: the carmine rouge-compatible highlighting
 # engine (workspace sibling, also published to crates.io).
-carmine = { path = "../carmine", version = "0.2.0", optional = true }
+carmine = { path = "../carmine", version = "0.3.0", optional = true }
 # `_kramdown_native` battery: the rostdown kramdown-compatible Markdown
 # renderer (workspace sibling).
 rostdown = { path = "../rostdown", version = "0.1.0", optional = true }
