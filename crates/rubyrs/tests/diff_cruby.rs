@@ -457,6 +457,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn match_data_inspect_named() { run_diff("match_data_inspect_named"); }
 #[cfg(feature = "regex")]
 #[test] fn string_match_block_pos() { run_diff("string_match_block_pos"); }
+#[test] fn bare_universal_primitive_self() { run_diff("bare_universal_primitive_self"); }
 #[test] fn array_literal_over_65k() { run_diff("array_literal_over_65k"); }
 #[test] fn block_param_trailing_comma() { run_diff("block_param_trailing_comma"); }
 #[test] fn require_relative_dotted() { run_diff("require_relative_dotted"); }

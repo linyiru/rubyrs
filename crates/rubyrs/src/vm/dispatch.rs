@@ -6840,14 +6840,25 @@ impl Vm {
                     // falls to the universal default.
                     | "inspect"
                     | "to_s"
+                    // Predicate universals: a bare `nil?` (and the
+                    // stringify/identity ones above) inside a method
+                    // defined on NilClass/TrueClass/FalseClass — or any
+                    // primitive — dispatches on self. Was missing, so a
+                    // `def probe; inspect; end` reopened on NilClass
+                    // raised "undefined method inspect for nil".
+                    | "nil?"
             )
         {
             let self_val = self.frames.last()
                 .expect("ICE: do_call(no_recv) with empty frames for ivar bare-call routing")
                 .self_val.clone();
-            // Class self too: `kind_of?(DSL)` bare inside a
-            // class-level method (minitest Spec.describe).
-            if matches!(&self_val, Value::Object(_) | Value::Class(_)) {
+            // Route for ANY self — bare implicit-self IS `self.<method>`,
+            // and these universals work on every receiver type via the
+            // explicit-recv path. Previously gated to Object/Class, so
+            // the same call with a primitive self (nil/true/false, an
+            // Integer, a String, …) fell through and raised NoMethodError
+            // even though `nil.inspect` etc. work explicitly.
+            {
                 // Insert receiver BELOW the args so the explicit-
                 // recv path's stack layout (`[..., recv, arg1,
                 // ..., argN]`) is satisfied — `do_call` drains
