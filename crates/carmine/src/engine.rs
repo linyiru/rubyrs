@@ -548,7 +548,8 @@ impl<'t> Lexer<'t> {
                     // would risk diverging from rouge, so DECLINE instead
                     // (the drop-in contract: never wrong, only fall back).
                     // States with no callback rule emit Error as rouge does.
-                    if let Some((cb_state, cb_rule)) = self.find_callback_rule(top, &mut Vec::new()) {
+                    if let Some((cb_state, cb_rule)) = self.find_callback_rule(top, &mut Vec::new())
+                    {
                         return Err(Error::CallbackRequired {
                             state: self.table.state_names[cb_state as usize].clone(),
                             rule: cb_rule,

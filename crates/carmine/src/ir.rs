@@ -351,7 +351,9 @@ fn parse_cond(v: &J, it: &mut dyn IrInterner) -> Result<IrCond, Error> {
             parse_str_list(t.get(2))?,
         ),
         "geqf" => IrCond::GroupEqFold(
-            t.get(1).and_then(J::as_u64).ok_or_else(|| bad("geqf idx"))? as usize,
+            t.get(1)
+                .and_then(J::as_u64)
+                .ok_or_else(|| bad("geqf idx"))? as usize,
             t.get(2)
                 .and_then(J::as_str)
                 .and_then(Fold::parse)
@@ -362,7 +364,9 @@ fn parse_cond(v: &J, it: &mut dyn IrInterner) -> Result<IrCond, Error> {
                 .to_string(),
         ),
         "ginf" => IrCond::GroupInFold(
-            t.get(1).and_then(J::as_u64).ok_or_else(|| bad("ginf idx"))? as usize,
+            t.get(1)
+                .and_then(J::as_u64)
+                .ok_or_else(|| bad("ginf idx"))? as usize,
             t.get(2)
                 .and_then(J::as_str)
                 .and_then(Fold::parse)
@@ -370,17 +374,30 @@ fn parse_cond(v: &J, it: &mut dyn IrInterner) -> Result<IrCond, Error> {
             parse_str_list(t.get(3))?,
         ),
         "gmatch" => {
-            let i = t.get(1).and_then(J::as_u64).ok_or_else(|| bad("gmatch idx"))? as usize;
-            let src = t.get(2).and_then(J::as_str).ok_or_else(|| bad("gmatch src"))?;
+            let i = t
+                .get(1)
+                .and_then(J::as_u64)
+                .ok_or_else(|| bad("gmatch idx"))? as usize;
+            let src = t
+                .get(2)
+                .and_then(J::as_str)
+                .ok_or_else(|| bad("gmatch src"))?;
             let opts = t.get(3).and_then(J::as_u64).unwrap_or(0);
             IrCond::GroupMatch(i, it.ir_regex(src, opts)?)
         }
         "gpresent" => IrCond::GroupPresent(
-            t.get(1).and_then(J::as_u64).ok_or_else(|| bad("gpresent idx"))? as usize,
+            t.get(1)
+                .and_then(J::as_u64)
+                .ok_or_else(|| bad("gpresent idx"))? as usize,
         ),
         "sdepth" => IrCond::StackDepth(
-            t.get(1).and_then(J::as_str).and_then(Cmp::parse).ok_or_else(|| bad("sdepth cmp"))?,
-            t.get(2).and_then(J::as_u64).ok_or_else(|| bad("sdepth n"))? as usize,
+            t.get(1)
+                .and_then(J::as_str)
+                .and_then(Cmp::parse)
+                .ok_or_else(|| bad("sdepth cmp"))?,
+            t.get(2)
+                .and_then(J::as_u64)
+                .ok_or_else(|| bad("sdepth n"))? as usize,
         ),
         "not" => IrCond::Not(Box::new(parse_cond(
             t.get(1).ok_or_else(|| bad("not arg"))?,
@@ -483,7 +500,7 @@ pub(crate) fn eval_cond(
             matches!(groups.get(*i), Some(Some(g)) if &fold.apply(g) == lit)
         }
         IrCond::GroupInFold(i, fold, lits) => {
-            matches!(groups.get(*i), Some(Some(g)) if { let f = fold.apply(g); lits.iter().any(|l| *l == f) })
+            matches!(groups.get(*i), Some(Some(g)) if { let f = fold.apply(g); lits.contains(&f) })
         }
         IrCond::GroupMatch(i, re) => {
             matches!(groups.get(*i), Some(Some(g)) if re.is_match_anywhere(g))

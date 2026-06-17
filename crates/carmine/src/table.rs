@@ -307,16 +307,16 @@ impl Builder {
         // the common root-start lexer). Resolve names to ids; an unknown
         // name is a malformed table.
         let start_push: Vec<u32> = match v.get("start_push").and_then(J::as_array) {
-            Some(arr) => arr
-                .iter()
-                .filter_map(J::as_str)
-                .map(|name| {
-                    self.state_ids
-                        .get(name)
-                        .copied()
-                        .ok_or_else(|| Error::Table(format!("start_push: unknown state {name:?}")))
-                })
-                .collect::<Result<_, _>>()?,
+            Some(arr) => {
+                arr.iter()
+                    .filter_map(J::as_str)
+                    .map(|name| {
+                        self.state_ids.get(name).copied().ok_or_else(|| {
+                            Error::Table(format!("start_push: unknown state {name:?}"))
+                        })
+                    })
+                    .collect::<Result<_, _>>()?
+            }
             None => Vec::new(),
         };
 
@@ -794,7 +794,6 @@ fn rewrite_ascii_shorthand_classes(pat: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-
 /// Compile a Ruby/Onigmo regex source + `Regexp#options` bits into a
 /// [`fancy_regex::Regex`].
 ///
@@ -891,10 +890,12 @@ fn compile_cond_regex(src: &str, opts: u64) -> Result<CRegex, Error> {
     if let Ok(re) = regex_automata::meta::Regex::new(&pat) {
         return Ok(CRegex::Linear(re));
     }
-    Regex::new(&pat).map(CRegex::Fancy).map_err(|e| Error::Regex {
-        pattern: src.to_string(),
-        message: e.to_string(),
-    })
+    Regex::new(&pat)
+        .map(CRegex::Fancy)
+        .map_err(|e| Error::Regex {
+            pattern: src.to_string(),
+            message: e.to_string(),
+        })
 }
 
 /// Escape literal whitespace INSIDE char classes for x-mode. Rust's `x`

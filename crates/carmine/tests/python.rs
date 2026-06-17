@@ -180,13 +180,18 @@ fn ir_stack_depth_condition() {
     let table = LexerTable::from_json(&json).expect("sdepth table compiles");
     let names = |t: &LexerTable, toks: &[(carmine::TokenId, String)]| -> Vec<(String, String)> {
         let n: Vec<&str> = t.token_names().collect();
-        toks.iter().map(|(t, v)| (n[t.0 as usize].to_string(), v.clone())).collect()
+        toks.iter()
+            .map(|(t, v)| (n[t.0 as usize].to_string(), v.clone()))
+            .collect()
     };
     // "()" — depth 2 at the `)` → pop branch (Punctuation, distinct from `(`).
     let mut lx = Lexer::new(&table);
     assert_eq!(
         names(&table, &lx.lex("()", &mut NoCallbacks).unwrap()),
-        vec![("Operator".into(), "(".into()), ("Punctuation".into(), ")".into())]
+        vec![
+            ("Operator".into(), "(".into()),
+            ("Punctuation".into(), ")".into())
+        ]
     );
     // ")" alone — depth 1 (root) → Error.
     let mut lx2 = Lexer::new(&table);

@@ -42,8 +42,10 @@ fn main() {
                 .expect("table");
         let demo = fs::read_to_string(format!("{cov}/{tag}.demo")).unwrap();
         let golden = golden_pairs(
-            &serde_json::from_str::<J>(&fs::read_to_string(format!("{cov}/{tag}.golden.json")).unwrap())
-                .unwrap(),
+            &serde_json::from_str::<J>(
+                &fs::read_to_string(format!("{cov}/{tag}.golden.json")).unwrap(),
+            )
+            .unwrap(),
         );
         let mut lexer = Lexer::new(&table);
         match lexer.lex(&demo, &mut NoCallbacks) {
@@ -59,7 +61,10 @@ fn main() {
                     } else {
                         "≠"
                     };
-                    println!("{mark} {i:3} carmine={t:?} {v:?}\n      rouge  ={:?} {:?}", g.0, g.1);
+                    println!(
+                        "{mark} {i:3} carmine={t:?} {v:?}\n      rouge  ={:?} {:?}",
+                        g.0, g.1
+                    );
                     if mark == "≠" {
                         break;
                     }
@@ -71,7 +76,8 @@ fn main() {
     }
 
     let manifest: J =
-        serde_json::from_str(&fs::read_to_string(format!("{}/manifest.json", cov_dir())).unwrap()).unwrap();
+        serde_json::from_str(&fs::read_to_string(format!("{}/manifest.json", cov_dir())).unwrap())
+            .unwrap();
 
     let (mut matched, mut diverge, mut callback, mut errored, mut no_table) = (0, 0, 0, 0, 0);
     let mut diverge_list: Vec<String> = vec![];
@@ -80,7 +86,8 @@ fn main() {
 
     for rec in manifest.as_array().unwrap() {
         let tag = rec["tag"].as_str().unwrap();
-        let cov = cov_dir(); let table_path = format!("{cov}/{tag}.table.json");
+        let cov = cov_dir();
+        let table_path = format!("{cov}/{tag}.table.json");
         if !std::path::Path::new(&table_path).exists() {
             no_table += 1;
             continue;
@@ -97,8 +104,10 @@ fn main() {
             continue;
         };
         let golden = golden_pairs(
-            &serde_json::from_str::<J>(&fs::read_to_string(format!("{cov}/{tag}.golden.json")).unwrap())
-                .unwrap(),
+            &serde_json::from_str::<J>(
+                &fs::read_to_string(format!("{cov}/{tag}.golden.json")).unwrap(),
+            )
+            .unwrap(),
         );
         let mut lexer = Lexer::new(&table);
         match lexer.lex(&demo, &mut NoCallbacks) {
@@ -138,7 +147,11 @@ fn main() {
     println!(
         "total={total}  MATCH={matched}  DIVERGE={diverge}  callback-decline={callback}  error={errored}  no-table={no_table}"
     );
-    println!("\n--- MATCH ({}) ---\n{}", match_list.len(), match_list.join(" "));
+    println!(
+        "\n--- MATCH ({}) ---\n{}",
+        match_list.len(),
+        match_list.join(" ")
+    );
     println!("\n--- DIVERGE ({}) ---", diverge_list.len());
     for d in &diverge_list {
         println!("  {d}");
