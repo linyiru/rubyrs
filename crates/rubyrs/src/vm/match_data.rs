@@ -170,7 +170,24 @@ impl Vm {
         re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
         bound: String,
     ) -> Result<Value, Trap> {
-        let owned = re.captures_owned(&bound).map_err(|e| {
+        self.do_regexp_match_pos(re, bound, 0)
+    }
+
+    /// `String#match(re, pos)` / `Regexp#match(str, pos)` — match
+    /// starting at byte offset `byte_start` within `bound`. The regex
+    /// engine matches the tail slice `bound[byte_start..]`, so the
+    /// returned spans are shifted back by `byte_start` and pre/post are
+    /// recomputed against the FULL string — `$~`, `#begin`, `#pre_match`
+    /// stay relative to the whole subject, matching CRuby. `byte_start
+    /// == 0` is the plain whole-string match (`do_regexp_match`).
+    pub(crate) fn do_regexp_match_pos(
+        &mut self,
+        re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
+        bound: String,
+        byte_start: usize,
+    ) -> Result<Value, Trap> {
+        let tail = &bound[byte_start..];
+        let owned = re.captures_owned(tail).map_err(|e| {
             self.trap(crate::error::RubyError::RuntimeError {
                 msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
             })
@@ -181,7 +198,12 @@ impl Vm {
                 self.last_match = None;
                 Ok(Value::Nil)
             }
-            Some(oc) => {
+            Some(mut oc) => {
+                // Shift the whole-match span from tail-relative to
+                // full-string-relative; group substrings/names are
+                // position-independent and need no adjustment.
+                oc.m_start += byte_start;
+                oc.m_end += byte_start;
                 let pre = bound[..oc.m_start].to_string();
                 let post = bound[oc.m_end..].to_string();
                 let full_str = bound.clone();
@@ -213,6 +235,88 @@ impl Vm {
                 self.materialize_match_data_with_context(oc.whole, group_vals, ctx)
             }
         }
+    }
+
+    /// Shared `String#match` runner: validate args (`pattern[, pos]`),
+    /// coerce a String pattern to a Regexp, resolve `pos` (char index,
+    /// negative counts from the end) to a byte offset, run the match
+    /// (binary or UTF-8), set `$~`, and return the MatchData Value (or
+    /// Nil). Used by BOTH the plain dispatch arm and the block form
+    /// (`str.match(re) { |m| … }`) so they share one source of truth.
+    #[cfg(feature = "regex")]
+    pub(crate) fn string_match_run(
+        &mut self,
+        s: &std::rc::Rc<crate::value::RStr>,
+        args: &[Value],
+    ) -> Result<Value, Trap> {
+        use crate::error::RubyError;
+        if args.is_empty() || args.len() > 2 {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1..2)",
+                    args.len(),
+                ),
+            }));
+        }
+        // Coerce a String pattern into a Regex via the same path the
+        // `/.../` literal takes (a bad pattern raises RegexpError).
+        let coerced: Option<Value> = if let Value::Str(needle) = &args[0] {
+            let pat = needle.to_string_lossy();
+            let translated = crate::vm::step::preprocess_regex_pattern(&pat);
+            let compiled = crate::regex_engine::compile(&translated).map_err(|e| {
+                self.trap(RubyError::SyntaxError {
+                    msg: format!("invalid regex /{}/: {}", pat, e),
+                })
+            })?;
+            Some(Value::Regex(std::rc::Rc::new(compiled)))
+        } else {
+            None
+        };
+        let regex_arg = coerced.as_ref().unwrap_or(&args[0]);
+        let Value::Regex(re) = regex_arg else {
+            return Err(self.trap(RubyError::TypeError {
+                msg: format!(
+                    "wrong argument type {} (expected Regexp)",
+                    args[0].type_name(),
+                ),
+            }));
+        };
+        let re = re.clone();
+        let bound = s.to_string_lossy();
+        let char_len = bound.chars().count();
+        // Resolve the optional char-index `pos`. Negative counts from
+        // the end; out-of-range → no match (nil), matching CRuby.
+        let byte_start = match args.get(1) {
+            None => 0,
+            Some(Value::Int(p)) => {
+                let idx = if *p < 0 { *p + char_len as i64 } else { *p };
+                if idx < 0 || idx > char_len as i64 {
+                    self.save_match_scope_on_write();
+                    self.last_match = None;
+                    return Ok(Value::Nil);
+                }
+                bound.char_indices().nth(idx as usize).map(|(b, _)| b).unwrap_or(bound.len())
+            }
+            Some(other) => {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into Integer",
+                        other.type_name(),
+                    ),
+                }));
+            }
+        };
+        // BINARY subject (only at pos 0): byte engine + byte-faithful
+        // captures. A non-zero pos falls through to the lossy UTF-8
+        // path (binary+pos is vanishingly rare; the existing @whole /
+        // pre / post are lossy there anyway).
+        if byte_start == 0
+            && matches!(s.encoding.get(), crate::value::EncodingTag::Binary)
+            && let Some(v) = self.do_regexp_match_binary(&re, s)?
+        {
+            return Ok(v);
+        }
+        self.do_regexp_match_pos(&re, bound, byte_start)
     }
 
     /// `String#match` / `Regexp#match` against an ASCII-8BIT (BINARY)

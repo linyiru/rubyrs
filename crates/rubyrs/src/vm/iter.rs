@@ -1070,6 +1070,30 @@ impl Vm {
             }
             return Ok(Some(early.unwrap_or_else(|| recv.clone())));
         }
+        // `s.match(/pat/[, pos]) { |m| ... }` — if the pattern matches,
+        // yield the MatchData to the block and return the block's value;
+        // no match → return nil (block NOT called). Mirrors CRuby's
+        // String#match block form. `string_match_run` sets `$~` either
+        // way and shares all arg handling with the non-block arm.
+        #[cfg(feature = "regex")]
+        if let Value::Str(s) = recv
+            && name == "match"
+            && (1..=2).contains(&args.len())
+        {
+            let s = s.clone();
+            let md = self.string_match_run(&s, args)?;
+            if matches!(md, Value::Nil) {
+                return Ok(Some(Value::Nil));
+            }
+            let mut g = PinGuard::new(self);
+            g.pin(md.clone());
+            g.pin(Value::Block(block));
+            let pre_frames = g.vm.frames.len();
+            return match g.vm.step_block1(block, md, pre_frames)? {
+                BlockStep::MethodReturn => Ok(Some(Value::Nil)),
+                BlockStep::Break(r) | BlockStep::Value(r) => Ok(Some(r)),
+            };
+        }
         // `s.scan(/pat/) { |m| ... }` / `s.scan(string) { |m| ... }`
         // — yield each match to the block (capture-group Array if
         // the regex has groups, the matched substring otherwise).

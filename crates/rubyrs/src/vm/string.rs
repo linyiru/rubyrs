@@ -2403,41 +2403,13 @@ impl Vm {
                     return Ok(Some(Value::Bool(false)));
                 }
                 #[cfg(feature = "regex")]
-                if name == "match" && args.len() == 1 {
-                    // Coerce a String arg into a Regex via the
-                    // same code path the regex literal `/.../`
-                    // takes. Errors surface as the regex-engine's
-                    // syntax error, matching CRuby's contract
-                    // that a bad pattern raises RegexpError.
-                    let coerced: Option<Value> = if let Value::Str(needle) = &args[0] {
-                        let pat = needle.to_string_lossy();
-                        let translated = crate::vm::step::preprocess_regex_pattern(&pat);
-                        let compiled = crate::regex_engine::compile(&translated).map_err(|e| {
-                            self.trap(RubyError::SyntaxError {
-                                msg: format!("invalid regex /{}/: {}", pat, e),
-                            })
-                        })?;
-                        Some(Value::Regex(std::rc::Rc::new(compiled)))
-                    } else {
-                        None
-                    };
-                    let regex_arg = coerced.as_ref().unwrap_or(&args[0]);
-                    if let Value::Regex(re) = regex_arg {
-                        // Shared with `Regexp#match` — runs the match,
-                        // sets `$~`, materialises MatchData (or Nil).
-                        let re = re.clone();
-                        // BINARY subject: byte engine + byte-faithful
-                        // captures (a lossy bound would break byte
-                        // patterns and U+FFFD-mangle captures).
-                        if matches!(s.encoding.get(), crate::value::EncodingTag::Binary)
-                            && let Some(v) = self.do_regexp_match_binary(&re, &s)?
-                        {
-                            return Ok(Some(v));
-                        }
-                        let bound = s.to_string_lossy();
-                        return Ok(Some(self.do_regexp_match(&re, bound)?));
-                    }
-                    return Ok(None);
+                if name == "match" && (1..=2).contains(&args.len()) {
+                    // `str.match(pattern[, pos])` — shared runner handles
+                    // String→Regex coercion, the optional char-index pos,
+                    // the BINARY byte path, and sets `$~`. (The block form
+                    // `str.match(re) { |m| … }` is routed in
+                    // collection_call_block, which calls the same runner.)
+                    return Ok(Some(self.string_match_run(&s, args)?));
                 }
                 // String#[regex] / String#[regex, n] — Regex
                 // overloads of `[]` / `slice`. Tilt uses
