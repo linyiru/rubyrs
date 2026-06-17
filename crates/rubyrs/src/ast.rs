@@ -573,6 +573,13 @@ pub(crate) enum Expr {
 #[derive(Debug, Clone)]
 pub(crate) enum BlockParam {
     Single(String),
+    /// An OPTIONAL positional param (`|a, b = 1|`). Takes a real slot
+    /// like `Single` (so it binds positionally and is counted in
+    /// `n_params`), but the compiler also tallies these into
+    /// `Proto::n_optional_params` so `Proc#arity` reports the
+    /// `-(required + 1)` variadic form. The default is desugared into
+    /// the body prologue (`b = default if b.nil?`) by the AST walker.
+    Optional(String),
     Destructure(Vec<BlockParam>),
     /// `|*args|` rest parameter — collects all positional args
     /// past the last `Single` / `Destructure` slot into a fresh
@@ -919,7 +926,7 @@ fn walk_block_optionals(
         if let Some(op) = opt.as_optional_parameter_node() {
             let name = cid_to_string(op.name());
             kw_defaults.push((name.clone(), tr(ctx, &op.value())));
-            out.push(BlockParam::Single(name));
+            out.push(BlockParam::Optional(name));
         }
     }
 }

@@ -858,6 +858,13 @@ pub(crate) struct Proto {
     /// sentinel — set for every non-block proto (methods, class
     /// bodies, toplevel `<main>`).
     pub(crate) block_body_local_start: u16,
+    /// How many of this block proto's positional params are OPTIONAL
+    /// (`|a, b = 1|`). Counted in `n_params`/`n_required_positional`
+    /// like requireds (they take real slots), but tracked separately so
+    /// `Proc#arity` can report `-(required + 1)` when optionals (or a
+    /// rest) are present. 0 for methods and option-less blocks. Stamped
+    /// post-`build()` by compile_block alongside `block_body_local_start`.
+    pub(crate) n_optional_params: u16,
     /// Per-proto pool of binary string literals — bytes from
     /// `\xNN` escapes that aren't valid UTF-8. Indexed by
     /// `Op::LoadConstStrBytes(u32)`. The global interner (which

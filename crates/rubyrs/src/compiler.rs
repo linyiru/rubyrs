@@ -1336,6 +1336,7 @@ impl ProtoBuilder {
             // never need slot resetting; only `compile_block` flips
             // this via the dedicated setter on the resulting Proto.
             block_body_local_start: u16::MAX,
+            n_optional_params: 0,
             byte_literals: self.byte_literals,
             const_chains: self.const_chains,
             lexical_scope,
@@ -2660,6 +2661,11 @@ pub(crate) fn compile_block(
                 BlockParam::Single(name) => {
                     child_slots.push(b.define_local_slot(name));
                 }
+                BlockParam::Optional(_) => {
+                    // `|(a, b = 1)|` — an optional inside a destructure
+                    // isn't part of the subset (Prism nests it
+                    // differently); defensive skip, like the others.
+                }
                 BlockParam::Destructure(deeper) => {
                     let anon = format!("{depth_tag}_{j}");
                     let anon_slot = b.define_local_slot(&anon);
@@ -2729,11 +2735,21 @@ pub(crate) fn compile_block(
     // by these slots. ast.rs pushes Keyword entries last, so the
     // slots land after every positional/rest/blockarg/kwrest slot.
     let mut block_kw_params: Vec<(String, u16, bool)> = Vec::new();
+    // Count of OPTIONAL positional params — stamped onto the proto so
+    // Proc#arity reports `-(required + 1)`. Optionals take real slots
+    // (bound positionally, default applied via the AST body prologue),
+    // so they ALSO count toward n_required/n_params for binding.
+    let mut n_optional: u16 = 0;
     for (i, p) in block_params.iter().enumerate() {
         match p {
             BlockParam::Single(name) => {
                 b.define_local_slot(name);
                 n_required += 1;
+            }
+            BlockParam::Optional(name) => {
+                b.define_local_slot(name);
+                n_required += 1;
+                n_optional += 1;
             }
             BlockParam::Destructure(inners) => {
                 let anon = format!("__destruct_{i}");
@@ -2843,7 +2859,7 @@ pub(crate) fn compile_block(
     // math work when the same proto is installed as a method via
     // `Module#define_method`.
     let proto_params: Vec<String> = block_params.iter().enumerate().filter_map(|(i, p)| match p {
-        BlockParam::Single(n) => Some(n.clone()),
+        BlockParam::Single(n) | BlockParam::Optional(n) => Some(n.clone()),
         BlockParam::Destructure(_) => Some(format!("__destruct_{i}")),
         BlockParam::Rest(name) => {
             Some(if name.is_empty() { format!("__rest_{i}") } else { name.clone() })
@@ -2897,6 +2913,7 @@ pub(crate) fn compile_block(
     // range is empty and the runtime loop is a noop, so we don't
     // need to special-case it.
     protos.last_mut().expect("ICE: just pushed").block_body_local_start = body_local_start;
+    protos.last_mut().expect("ICE: just pushed").n_optional_params = n_optional;
     // M27 A1: stamp the block proto with `rest_param` /
     // `block_param` so when it's installed AS A METHOD (via
     // Module#define_method), invoke_method_with_block's binder

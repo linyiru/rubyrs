@@ -2843,11 +2843,29 @@ impl Vm {
         }
         if let Value::Block(bid) = &recv
             && name == "arity" && args.is_empty() {
-            let (n_required, has_rest) = {
+            // `n_params` counts requireds + optionals (both take slots);
+            // the proto tracks how many are optional so we subtract them
+            // out. CRuby's arity differs for procs vs lambdas: a rest
+            // param always gives `-(required + 1)`; an OPTIONAL gives
+            // `-(required + 1)` for a LAMBDA but the positive `required`
+            // for a lenient proc (`proc{|a,b=5|}.arity == 1`, while
+            // `->(a,b=5){}.arity == -2`). (Required keyword params also
+            // bump CRuby's arity — not modelled here yet, a separate gap.)
+            let (n_params, has_rest, n_optional, is_lambda) = {
                 let bh = self.heap.block(*bid);
-                (bh.n_params as i64, bh.rest_slot.is_some())
+                (
+                    bh.n_params as i64,
+                    bh.rest_slot.is_some(),
+                    self.protos[bh.proto_idx].n_optional_params as i64,
+                    bh.is_lambda,
+                )
             };
-            let arity = if has_rest { -(n_required + 1) } else { n_required };
+            let required = n_params - n_optional;
+            let arity = if has_rest || (n_optional > 0 && is_lambda) {
+                -(required + 1)
+            } else {
+                required
+            };
             self.stack.push(Value::Int(arity));
             return Ok(CallableOutcome::Handled);
         }
@@ -14716,6 +14734,7 @@ impl Vm {
                 // rest) or written by the proto's own emitted
                 // ops. `u16::MAX` skips the per-invocation reset.
                 block_body_local_start: u16::MAX,
+                n_optional_params: 0,
                 byte_literals: Vec::new(),
                 const_chains: Vec::new(),
                 lexical_scope: Vec::new(),
@@ -14824,6 +14843,7 @@ impl Vm {
                 // rest) or written by the proto's own emitted
                 // ops. `u16::MAX` skips the per-invocation reset.
                 block_body_local_start: u16::MAX,
+                n_optional_params: 0,
                 byte_literals: Vec::new(),
                 const_chains: Vec::new(),
                 lexical_scope: Vec::new(),
@@ -18143,6 +18163,7 @@ impl Vm {
                 op_spans: vec![Span::ZERO; 2],
                 filename: "<attr_accessor>".into(),
                 block_body_local_start: u16::MAX,
+                n_optional_params: 0,
                 byte_literals: vec![],
                 const_chains: vec![],
                 lexical_scope: vec![],
@@ -18184,6 +18205,7 @@ impl Vm {
                 op_spans: vec![Span::ZERO; 4],
                 filename: "<attr_accessor>".into(),
                 block_body_local_start: u16::MAX,
+                n_optional_params: 0,
                 byte_literals: vec![],
                 const_chains: vec![],
                 lexical_scope: vec![],
@@ -18308,6 +18330,7 @@ impl Vm {
             op_spans: vec![Span::ZERO; 4],
             filename: "<primitive-alias>".into(),
             block_body_local_start: u16::MAX,
+                n_optional_params: 0,
             byte_literals: vec![],
             const_chains: vec![],
             lexical_scope: vec![],
@@ -18492,6 +18515,7 @@ impl Vm {
             op_spans: vec![Span::ZERO; 3],
             filename: "<kernel-alias>".into(),
             block_body_local_start: u16::MAX,
+                n_optional_params: 0,
             byte_literals: vec![],
             const_chains: vec![],
             lexical_scope: vec![],
@@ -18633,6 +18657,7 @@ impl Vm {
             op_spans: vec![Span::ZERO; 2],
             filename: "<lifecycle-noop>".into(),
             block_body_local_start: u16::MAX,
+                n_optional_params: 0,
             byte_literals: vec![],
             const_chains: vec![],
             lexical_scope: vec![],
