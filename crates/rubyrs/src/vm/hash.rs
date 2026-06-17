@@ -668,7 +668,7 @@ impl Vm {
                     ("map" | "collect" | "select" | "filter" | "reject"
                         | "flat_map" | "collect_concat" | "filter_map"
                         | "find" | "detect" | "partition" | "group_by"
-                        | "sort_by", []) => {
+                        | "sort_by" | "transform_values" | "transform_keys", []) => {
                         return self.make_enum_for(Value::Hash(id), name, vec![]).map(Some);
                     }
                     // `h.each_with_object(memo)` with no block — Enumerator
