@@ -459,6 +459,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_match_block_pos() { run_diff("string_match_block_pos"); }
 #[test] fn bare_universal_primitive_self() { run_diff("bare_universal_primitive_self"); }
 #[test] fn string_codepoints() { run_diff("string_codepoints"); }
+#[test] fn sprintf_positional() { run_diff("sprintf_positional"); }
 #[cfg(feature = "regex")]
 #[test] fn match_data_offsets() { run_diff("match_data_offsets"); }
 #[cfg(feature = "regex")]

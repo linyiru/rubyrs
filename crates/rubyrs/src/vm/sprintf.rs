@@ -38,6 +38,38 @@ pub(crate) fn ruby_sprintf(
             out.push(c);
             continue;
         }
+        // Positional argument reference: `%N$…` makes this spec use the
+        // N-th (1-based) argument instead of the next sequential one —
+        // `"%2$s %1$s" % ["a","b"]` → "b a". Distinguished from a width
+        // (`%5d`) by the trailing `$`; peek via a cloned iterator so a
+        // plain width isn't consumed when there's no `$`.
+        let mut explicit_idx: Option<usize> = None;
+        {
+            let mut look = chars.clone();
+            let mut digits = 0usize;
+            let mut val: usize = 0;
+            while let Some(&d) = look.peek() {
+                if d.is_ascii_digit() {
+                    val = val * 10 + (d as usize - '0' as usize);
+                    digits += 1;
+                    look.next();
+                } else {
+                    break;
+                }
+            }
+            if digits > 0 && look.peek() == Some(&'$') {
+                // Commit: advance the real iterator past the digits + `$`.
+                for _ in 0..=digits {
+                    chars.next();
+                }
+                if val == 0 {
+                    return Err(RubyError::ArgumentError {
+                        msg: "invalid absolute reference - 0$".into(),
+                    });
+                }
+                explicit_idx = Some(val - 1);
+            }
+        }
         let mut flag_minus = false;
         let mut flag_plus = false;
         let mut flag_zero = false;
@@ -129,11 +161,16 @@ pub(crate) fn ruby_sprintf(
             out.push('%');
             continue;
         }
-        let arg = args.get(idx).ok_or_else(|| RubyError::ArgumentError {
+        // An explicit `%N$` reference selects args[N-1] and does NOT
+        // advance the sequential cursor; otherwise consume the next
+        // sequential argument.
+        let arg_idx = explicit_idx.unwrap_or(idx);
+        let arg = args.get(arg_idx).ok_or_else(|| RubyError::ArgumentError {
             msg: "too few arguments".into(),
         })?;
-        let arg_idx = idx;
-        idx += 1;
+        if explicit_idx.is_none() {
+            idx += 1;
+        }
         let mut body = match spec {
             'd' | 'i' => {
                 // BigInt fast path: render the decimal directly via
