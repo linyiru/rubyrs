@@ -677,7 +677,7 @@ impl Vm {
             "times" | "upto" | "downto" | "step" |
             "digits" | "bit_length" | "size" | "[]" |
             "allbits?" | "anybits?" | "nobits?" |
-            "gcd" | "lcm" | "gcdlcm" | "fdiv" | "divmod" |
+            "gcd" | "lcm" | "gcdlcm" | "fdiv" | "div" | "divmod" |
             "ceil" | "floor" | "round" | "truncate" |
             "chr" | "coerce" |
             "to_r" | "rationalize" |

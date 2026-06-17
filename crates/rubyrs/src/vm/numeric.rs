@@ -742,6 +742,13 @@ pub(crate) fn numeric_call(
                 { Some(Value::Int(result_i128 as i64)) }
             }
         }
+        // `Integer#div(Float)` → floor of the real quotient, as an Integer
+        // (CRuby: `7.div(2.0) == 3`). div-by-zero on a Float divisor yields
+        // ±Infinity in CRuby, whose floor raises FloatDomainError — but the
+        // common case is a finite divisor; keep it simple and floor.
+        (Value::Int(a), "div", [Value::Float(b)]) => {
+            Some(Value::Int(((*a as f64) / *b).floor() as i64))
+        }
         (Value::Int(a), "fdiv", [Value::Int(b)]) => {
             Some(Value::Float((*a as f64) / (*b as f64)))
         }
@@ -810,6 +817,18 @@ pub(crate) fn numeric_call(
                 // `bigint_arith` for promotion. Under no-bignum
                 // wrap (matches the existing wrapping convention
                 // for `+`/`-`/`*` overflow).
+                #[cfg(feature = "bignum")]
+                if *a == i64::MIN && *b == -1 { return Ok(None); }
+                Some(Value::Int(floor_div_i64(*a, *b)))
+            }
+            // `Integer#div` — floored integer division, same as `/` for
+            // Int operands (mini_mime's binary search does `(to-from).div(2)`).
+            "div" => {
+                if *b == 0 {
+                    return Err(RubyError::ZeroDivisionError {
+                        msg: "divided by 0".to_string(),
+                    });
+                }
                 #[cfg(feature = "bignum")]
                 if *a == i64::MIN && *b == -1 { return Ok(None); }
                 Some(Value::Int(floor_div_i64(*a, *b)))
