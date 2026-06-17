@@ -1491,6 +1491,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // *args| }` over arrays-of-rows.
 #[test] fn block_autosplat_rest() { run_diff("block_autosplat_rest"); }
 
+// `require "English"` aliases $MATCH/$PREMATCH/$POSTMATCH/etc. to the
+// punctuation match globals. Surfaced by rss building method names
+// from `$POSTMATCH`.
+#[test] fn english_match_globals() { run_diff("english_match_globals"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

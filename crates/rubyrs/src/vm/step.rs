@@ -1983,7 +1983,32 @@ impl Vm {
                 // returns the script's filename (we use the top
                 // frame's proto filename, which Runtime::eval set
                 // to whatever the host passed).
-                let name = self.interner.resolve(name_id).clone();
+                let name = {
+                    let resolved = self.interner.resolve(name_id).clone();
+                    // `require "English"` aliases the verbose global
+                    // names to the punctuation globals (`$POSTMATCH` →
+                    // `$'`, `$MATCH` → `$&`, …). Remap up front so every
+                    // handler below serves them. Gated on English being
+                    // required — CRuby leaves `$POSTMATCH` nil until then.
+                    // rss `require "English"` then builds method names
+                    // from `$POSTMATCH` (`alias_method "#{$POSTMATCH}?",
+                    // name` in install_get_attribute).
+                    if self.loaded_stdlib_stubs.contains("English")
+                        || self.loaded_stdlib_stubs.contains("english")
+                    {
+                        match &*resolved {
+                            "$MATCH" => std::rc::Rc::from("$&"),
+                            "$PREMATCH" => std::rc::Rc::from("$`"),
+                            "$POSTMATCH" => std::rc::Rc::from("$'"),
+                            "$LAST_PAREN_MATCH" => std::rc::Rc::from("$+"),
+                            "$LAST_MATCH_INFO" => std::rc::Rc::from("$~"),
+                            "$PROGRAM_NAME" => std::rc::Rc::from("$0"),
+                            _ => resolved,
+                        }
+                    } else {
+                        resolved
+                    }
+                };
                 // `$1`, `$2`, ..., `$10`, `$11`, ... — numbered
                 // capture references, written by ast.rs as
                 // `GVarRead("$N")` (the AST arm for
