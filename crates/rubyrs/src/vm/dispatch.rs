@@ -6658,7 +6658,13 @@ impl Vm {
         // else (private/protected, method_missing, the send-forms,
         // primitives, non-fixed arity) falls through to the path below,
         // which resolves identically (same class_of + lookup_method_cached).
-        if !maybe_refined && !no_recv && self.try_invoke_explicit_recv_cached(name_id, argc, cache_id)? {
+        // `!force_primitive`: a force-primitive call (alias forwarder, or
+        // `super` to a builtin the user method overrides) must NOT re-invoke
+        // that same user method via the cache — otherwise `def freeze; …;
+        // super; end` recurses forever. The other user-dispatch paths below
+        // already gate on `!force_primitive`; this fast path was the gap.
+        if !maybe_refined && !no_recv && !force_primitive
+            && self.try_invoke_explicit_recv_cached(name_id, argc, cache_id)? {
             return Ok(());
         }
         // Class/Module-receiver sibling (`X.class_method`): resolves

@@ -2543,6 +2543,39 @@ impl Vm {
                 // (`define_method(:found) { super(...) }`) on a
                 // class whose only `found` lives in
                 // `def self.method_missing`.
+                //
+                // `super` to a universal/primitive BUILTIN that self answers —
+                // `def freeze; …; super; end` reaching the builtin freeze,
+                // `def ==(o); …; super; end` reaching the builtin ==, etc. The
+                // super chain finds no user method (the builtin lives in native
+                // dispatch), so force-primitive dispatch the name on self,
+                // bypassing the overriding user method (the `!force_primitive`
+                // gate on do_call's user-dispatch fast path makes this
+                // terminate instead of recursing). sequel's `Dataset#freeze`
+                // does exactly this.
+                if is_no_super && !is_lifecycle_hook
+                    && let Some(sv) = self.frames.last().map(|f| f.self_val.clone())
+                {
+                    let nm = self.interner.resolve(name_id).clone();
+                    let prim_class = matches!(self.class_of(&sv), Value::Class(ref c)
+                        if self.primitive_class_responds_to(&c.name, name_id));
+                    // Only the PUBLIC universal arms + primitive-class methods.
+                    // NOT `universal_object_private` — its missing hooks
+                    // (`method_missing`/`respond_to_missing?`) have special
+                    // super semantics handled below (method_missing super must
+                    // reach the raise, not force-dispatch into itself), and the
+                    // copy hooks have no native arm to dispatch to.
+                    if Self::universal_arm_name(&nm)
+                        || Self::UNIVERSAL_OBJECT_METHODS.contains(&&*nm)
+                        || prim_class
+                    {
+                        self.force_primitive_dispatch = true;
+                        let argc = args.len();
+                        self.stack.push(sv);
+                        for a in args { self.stack.push(a); }
+                        return self.do_call(name_id, argc, false, u16::MAX);
+                    }
+                }
                 if is_no_super && !is_lifecycle_hook {
                     let self_val = self.frames.last().map(|f| f.self_val.clone());
                     let mm_id = self.interner.intern("method_missing");
