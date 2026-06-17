@@ -1457,6 +1457,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // else nil. Surfaced by sequel's `if defined?(yield); return yield(db)`.
 #[test] fn defined_yield() { run_diff("defined_yield"); }
 
+// `redo` keyword — re-run the loop iteration / block body. Covers
+// while / until / loop-do / each-block / innermost-loop binding.
+// Surfaced by rss's `loop do … redo … end`.
+#[test] fn redo_keyword() { run_diff("redo_keyword"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

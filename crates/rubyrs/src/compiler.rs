@@ -99,6 +99,19 @@ pub(crate) struct ProtoBuilder {
     /// an empty stack so `next` in a block reaches the iteration
     /// driver, not an enclosing `while` in the parent proto.
     pub(crate) loop_next_jumps: Vec<Vec<usize>>,
+    /// Parallel `redo` placeholder stack for `while`/`until` loops.
+    /// `redo` re-runs the loop BODY without re-checking the condition,
+    /// so these are patched to the body-start label (vs `next`'s
+    /// iter-check). Reuses `Op::NextLoop` (a loop-transfer that just
+    /// jumps to a target with the same handler-unwind) patched to a
+    /// different target. Empty outside a `while`; a `redo` then targets
+    /// `block_redo_target` (block body) or raises.
+    pub(crate) loop_redo_jumps: Vec<Vec<usize>>,
+    /// Body-start offset for a BLOCK proto, so a bare `redo` inside a
+    /// block (`loop do … redo … end`, `each { … redo … }`) re-runs the
+    /// block body in the same frame (an intra-proto `Op::Jump`). `None`
+    /// in non-block protos and until the block's body begins compiling.
+    pub(crate) block_redo_target: Option<usize>,
     /// Stack of in-progress `begin / rescue` blocks' "begin top"
     /// positions, pushed while compiling a rescue clause's body
     /// so that `Expr::Retry` inside the body jumps backwards to
@@ -348,11 +361,16 @@ fn compile_while_arm(
     b.emit(Op::EnterLoop);
     b.loop_break_jumps.push(vec![]);
     b.loop_next_jumps.push(vec![]);
+    b.loop_redo_jumps.push(vec![]);
     let iter_check;
+    // Body-start label: `redo` re-runs the body without re-checking the
+    // condition, so it targets here (vs `next`'s iter_check).
+    let redo_target;
     if post {
         // `begin … end while cond` — body runs first, cond
         // is checked after.
         let body_start = b.pos();
+        redo_target = body_start;
         compile_body(b, body, protos, interner, cc);
         b.emit(Op::Pop);
         iter_check = b.pos();
@@ -369,6 +387,7 @@ fn compile_while_arm(
         iter_check = start;
         compile_expr(b, cond, protos, interner, cc);
         let jf = b.emit(Op::JumpIfFalse(0));
+        redo_target = b.pos();
         compile_body(b, body, protos, interner, cc);
         b.emit(Op::Pop);
         let j = b.emit(Op::Jump(0));
@@ -377,8 +396,11 @@ fn compile_while_arm(
         b.patch_jump(jf, exit_normal);
         b.emit(Op::LoadNil);
     }
-    // Patch `next` placeholders to iter_check (re-eval cond);
-    // patch `break` placeholders to the join.
+    // Patch `redo` placeholders to the body-start (re-run body without
+    // re-checking the condition); `next` to iter_check; `break` to join.
+    for j in b.loop_redo_jumps.pop().expect("ICE: while popped loop_redo_jumps without push") {
+        b.patch_jump(j, redo_target);
+    }
     for j in b.loop_next_jumps.pop().expect("ICE: while popped loop_next_jumps without push") {
         b.patch_jump(j, iter_check);
     }
@@ -1226,6 +1248,8 @@ impl ProtoBuilder {
             is_method_body: false,
             loop_break_jumps: vec![],
             loop_next_jumps: vec![],
+            loop_redo_jumps: vec![],
+            block_redo_target: None,
             retry_targets: vec![],
             class_path: vec![],
             byte_literals: vec![],
@@ -2232,6 +2256,31 @@ pub(crate) fn compile_expr(
                 }
             }
         }
+        Expr::Redo => {
+            // `redo` re-runs the current iteration. Inside a `while` /
+            // `until` it jumps to the body-start (reusing NextLoop's
+            // handler-aware transfer, patched to the body label by the
+            // while codegen). Inside a block it re-runs the block body
+            // in the same frame via an intra-proto Jump. The `while`
+            // target takes precedence over the block when both apply
+            // (CRuby: redo binds to the innermost loop). Out of any
+            // loop/block, CRuby raises LocalJumpError; rubyrs emits a
+            // runtime raise (Tier-1 error-class divergence).
+            if !b.loop_redo_jumps.is_empty() {
+                let placeholder = b.emit(Op::NextLoop(0));
+                b.loop_redo_jumps.last_mut().expect("ICE: just checked").push(placeholder);
+            } else if let Some(target) = b.block_redo_target {
+                let here = b.pos();
+                let off = target as i32 - here as i32 - 1;
+                b.emit(Op::Jump(off));
+            } else {
+                let msg_sym = interner.intern("redo called outside of loop");
+                b.emit(Op::LoadConstStr(msg_sym));
+                b.emit(Op::Raise);
+            }
+            // Sentinel for stack-balance of any unreachable trailing code.
+            b.emit(Op::LoadNil);
+        }
         Expr::Apply { receiver, name, splat, block_arg } => {
             // `foo(*arr)` — compile receiver (if any) then the
             // splat expression. The VM op `ApplyCall(NoRecv)`
@@ -2541,6 +2590,11 @@ pub(crate) fn compile_block(
         // driver (`Op::Return` from the block frame), not an
         // enclosing `while` in the parent.
         loop_next_jumps: vec![],
+        // Fresh redo state: a `redo` in this block re-runs its own
+        // body (target set just before the body compiles below), not
+        // a `while`/block in the parent.
+        loop_redo_jumps: vec![],
+        block_redo_target: None,
         // Fresh `retry` target stack — blocks don't inherit
         // begin/rescue context from the parent proto. (CRuby's
         // `retry` always rescues within the textually-enclosing
@@ -2761,6 +2815,10 @@ pub(crate) fn compile_block(
     // (allocated in the param-binding phase above) keep their
     // values across invocations.
     let body_local_start = b.n_locals;
+    // A bare `redo` inside this block re-runs the body from here (after
+    // param binding / destructure prologue, since the block args don't
+    // change on redo). `loop do … redo … end` (rss's rss.rb:1222).
+    b.block_redo_target = Some(b.pos());
     compile_body(&mut b, body, protos, interner, cc);
     b.emit(Op::Return);
     // Proto's `params` vec carries the source-visible names. For

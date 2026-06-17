@@ -513,6 +513,11 @@ pub(crate) enum Expr {
     /// layer #9 — rackup-2.2.1/lib/rackup/server.rb:439 uses
     /// the canonical retry-on-EADDRINUSE pattern.)
     Retry,
+    /// `redo` — re-run the current loop iteration / block body WITHOUT
+    /// re-checking the condition or advancing the iterator. Targets the
+    /// innermost enclosing `while`/`until` (via `loop_redo_jumps`) or,
+    /// in a block, the block body start (`block_redo_target`).
+    Redo,
     /// `super` (forwarding all of the enclosing method's args)
     /// or `super(arg1, arg2)` (explicit args). `super()` with
     /// empty parens passes no args and is `Some(vec![])`;
@@ -4099,6 +4104,12 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // ProtoBuilder's `retry_targets` stack. (TRY_RUNS pass-10
         // layer #9.)
         return sp(node, Expr::Retry);
+    }
+    if node.as_redo_node().is_some() {
+        // `redo` — re-run the current loop body. Target resolution
+        // (innermost `while` vs enclosing block) happens at compile
+        // time; an out-of-loop `redo` emits a runtime raise.
+        return sp(node, Expr::Redo);
     }
     // `defined?(expr)` — returns a string describing the kind
     // of `expr`, or nil if it's not defined. Resolved at AST
