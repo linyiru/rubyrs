@@ -460,6 +460,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn bare_universal_primitive_self() { run_diff("bare_universal_primitive_self"); }
 #[cfg(feature = "regex")]
 #[test] fn match_data_offsets() { run_diff("match_data_offsets"); }
+#[cfg(feature = "regex")]
+#[test] fn regex_named_disables_numbered() { run_diff("regex_named_disables_numbered"); }
 #[test] fn array_literal_over_65k() { run_diff("array_literal_over_65k"); }
 #[test] fn block_param_trailing_comma() { run_diff("block_param_trailing_comma"); }
 #[test] fn require_relative_dotted() { run_diff("require_relative_dotted"); }

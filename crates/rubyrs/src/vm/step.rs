@@ -50,11 +50,60 @@ use super::{primitive_call, vec_nil, Frame, LoopTransferKind, RescueFilter, Resc
 /// like `\k<name>`, etc.) still surface as the regex crate's
 /// SyntaxError. Adding translations is per-feature on demand.
 #[cfg(feature = "regex")]
+/// Does `src` contain a named capture group — `(?<name>…)` or
+/// `(?'name'…)` — outside a char class / escape? `(?<=…)` and
+/// `(?<!…)` (lookbehind) are NOT named groups. Used to decide whether
+/// unnamed groups must be demoted to non-capturing (CRuby's rule that
+/// a named group disables numbered captures). Tracks `\` escapes and
+/// `[…]` classes so a literal `(?<` inside either doesn't false-fire.
+fn pattern_has_named_group(src: &str) -> bool {
+    let b = src.as_bytes();
+    let mut i = 0;
+    let mut in_class = false;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\\' {
+            i += 2;
+            continue;
+        }
+        if c == b'[' && !in_class {
+            in_class = true;
+            i += 1;
+            continue;
+        }
+        if c == b']' && in_class {
+            in_class = false;
+            i += 1;
+            continue;
+        }
+        if !in_class && c == b'(' && i + 2 < b.len() && b[i + 1] == b'?' {
+            match b[i + 2] {
+                b'\'' => return true, // (?'name'…)
+                // (?<name>…) — but not lookbehind (?<= / (?<!
+                b'<' if i + 3 < b.len() && b[i + 3] != b'=' && b[i + 3] != b'!' => {
+                    return true
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 pub(crate) fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
-    // Fast path: most regexes don't use `\G`. Skip the whole
-    // scan + allocation when the source can't possibly contain
-    // the anchor.
-    if !src.contains("\\G") {
+    // When a pattern contains ANY named capture group, Ruby/Onigmo
+    // demotes every UNNAMED `(…)` group to non-capturing — only the
+    // named groups are numbered. So `/(a)(?<x>b)/` matched against
+    // "ab" has `size == 2` (whole + x), `captures == ["b"]`, and `$1`
+    // is the `x` group. The linear/fancy engines keep unnamed groups
+    // captured, so rewrite `(` → `(?:` here to match CRuby's group
+    // numbering. Computed up front so the scanner only fires the
+    // rewrite when there's actually a named group present.
+    let demote_unnamed = pattern_has_named_group(src);
+    // Fast path: most regexes don't use `\G` and have no named
+    // group. Skip the whole scan + allocation in that case.
+    if !src.contains("\\G") && !demote_unnamed {
         return std::borrow::Cow::Borrowed(src);
     }
     // Tracks whether we are inside an outer character class
@@ -138,6 +187,21 @@ pub(crate) fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
                 i = j + 2;
                 continue;
             }
+        }
+        // Demote an unnamed capturing group to non-capturing when the
+        // pattern has a named group (see the fast-path comment). Only
+        // a bare `(` outside a char class counts: `(?…)` (non-capturing
+        // / named / lookaround / flags) and a `(` inside `[…]` (literal)
+        // are left untouched.
+        if demote_unnamed && !in_class && c == b'(' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'?' {
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            out.extend_from_slice(b"(?:");
+            i += 1;
+            continue;
         }
         // Outer character-class bracket tracking. POSIX inner
         // classes are skipped above so their `]` doesn't reach
