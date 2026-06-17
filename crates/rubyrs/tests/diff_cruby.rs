@@ -1467,6 +1467,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Surfaced by rexml (`Entity::NAME` via `include XMLTokens`).
 #[test] fn const_via_ancestors_and_lexical() { run_diff("const_via_ancestors_and_lexical"); }
 
+// `private :m` / `public :m` (with name args) inside a `class << X`
+// body set X's singleton-method visibility. Surfaced by diff-lcs.
+#[test] fn class_lt_lt_private() { run_diff("class_lt_lt_private"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

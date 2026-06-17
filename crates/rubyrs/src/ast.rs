@@ -1776,6 +1776,41 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 }
                 continue;
             }
+            // `private :m` / `public :m` (with explicit method-name args)
+            // inside `class << X` — set the visibility of X's SINGLETON
+            // method `m`. Desugar to `X.private_class_method(:m)` /
+            // `X.public_class_method(:m)` (the dispatch arms that flip
+            // singleton-method visibility). diff/lcs's
+            // `class << Diff::LCS::Internals; … private :diff_traversal;`.
+            // Bare `private` (no args, the default-visibility toggle) and
+            // `protected` (no `protected_class_method` exists) aren't
+            // modelled — they fall through to the error below.
+            if let Some(call) = bn.as_call_node()
+                && call.receiver().is_none()
+                && matches!(cid_to_string(call.name()).as_str(), "private" | "public")
+                && call.arguments().map(|a| a.arguments().iter().count() > 0).unwrap_or(false)
+            {
+                let target = if cid_to_string(call.name()) == "private" {
+                    "private_class_method"
+                } else {
+                    "public_class_method"
+                };
+                let receiver_expr = if needs_local {
+                    sp(bn, Expr::LVarRead(synth_local.clone()))
+                } else {
+                    recv_expr.clone()
+                };
+                let args: Vec<SExpr> = call.arguments()
+                    .map(|a| a.arguments().iter().map(|n| tr(ctx, &n)).collect())
+                    .unwrap_or_default();
+                out.push(sp(bn, Expr::Call {
+                    receiver: Some(Box::new(receiver_expr)),
+                    name: target.to_string(),
+                    args,
+                    kwargs_trailing: false,
+                }));
+                continue;
+            }
             // `attr_reader :foo` / `attr_writer :foo` / `attr_accessor :foo`
             // inside `class << X` body. CRuby installs reader/writer
             // methods on X's singleton class. We desugar each symbol
