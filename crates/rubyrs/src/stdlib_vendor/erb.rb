@@ -525,3 +525,27 @@ class ERB::Compiler # :nodoc:
     warn "Invalid ERB trim mode: #{mode.inspect} (trim_mode: nil, 0, 1, 2, or String composed of '%' and/or '-', '>', '<>')", uplevel: uplevel + 1
   end
 end
+
+# `ERB::Util` — the `h`/`html_escape` + `u`/`url_encode` helpers. Both
+# instance methods (for `include ERB::Util`, e.g. rspec-core's HTML
+# formatter `#h`) and module functions (`ERB::Util.html_escape(...)`).
+# Escaping matches CRuby's ERB::Escape (CGI.escapeHTML rules).
+class ERB
+  module Util
+    HTML_ESCAPE = {
+      "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", '"' => "&quot;", "'" => "&#39;"
+    }.freeze
+
+    def html_escape(s)
+      s.to_s.gsub(/[&<>"']/, HTML_ESCAPE)
+    end
+    alias h html_escape
+    module_function :h, :html_escape
+
+    def url_encode(s)
+      s.to_s.b.gsub(/[^a-zA-Z0-9_\-.~]/n) { |m| format("%%%02X", m.ord) }
+    end
+    alias u url_encode
+    module_function :u, :url_encode
+  end
+end

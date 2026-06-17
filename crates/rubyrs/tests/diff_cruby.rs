@@ -409,6 +409,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `Symbol#match` / `#match?` delegate to `to_s` (ostruct/oj guard names
 // with `name.match(/.../)`).
 #[test] fn symbol_match() { run_diff("symbol_match"); }
+// `ERB::Util` h/html_escape + u/url_encode (rspec-core's HTML formatter
+// does `include ERB::Util`). Vendored erb is stdlib-gated.
+#[cfg(feature = "stdlib")]
+#[test] fn erb_util() { run_diff("erb_util"); }
 #[test] fn case_when() { run_diff("case_when"); }
 #[test] fn modules() { run_diff("modules"); }
 #[test] fn conversions() { run_diff("conversions"); }
