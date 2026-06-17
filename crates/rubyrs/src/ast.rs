@@ -4096,14 +4096,40 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 && let Some(expr) = ba.expression() {
                     if let Some(sn) = expr.as_symbol_node() {
                         let method_name: String = String::from_utf8_lossy(sn.unescaped()).into_owned();
-                        let param_name = "__sp_x".to_string();
-                        let body_call = sp(node, Expr::Call {
-                            receiver: Some(Box::new(sp(node, Expr::LVarRead(param_name.clone())))),
+                        // `&:sym` is `sym.to_proc` — it forwards ALL the
+                        // yielded args: `recv.sym(*rest)`, where `recv` is
+                        // the first arg and `rest` the others. So
+                        // `reduce(&:+)` → `acc.+(x)` works (a binary op
+                        // gets its operand). Desugar to a REST-ONLY block
+                        // `{ |*__sp_a| __sp_a[0].sym(*__sp_a.drop(1)) }`:
+                        // rest-only means it does NOT auto-splat (so
+                        // `[[1,2]].map(&:first)` keeps the pair as the
+                        // single arg → `[1,2].first` == 1), yet still
+                        // forwards extra args. The old 1-param desugar
+                        // `{ |x| x.sym }` dropped them (broke `&:+`).
+                        let arr = "__sp_a".to_string();
+                        let arr_read = || sp(node, Expr::LVarRead(arr.clone()));
+                        let recv0 = sp(node, Expr::Call {
+                            receiver: Some(Box::new(arr_read())),
+                            name: "[]".to_string(),
+                            args: vec![sp(node, Expr::IntLit(0))],
+                            kwargs_trailing: false,
+                        });
+                        let rest = sp(node, Expr::Call {
+                            receiver: Some(Box::new(arr_read())),
+                            name: "drop".to_string(),
+                            args: vec![sp(node, Expr::IntLit(1))],
+                            kwargs_trailing: false,
+                        });
+                        let body_call = sp(node, Expr::Apply {
+                            receiver: Some(Box::new(recv0)),
                             name: method_name,
-                            args: vec![], kwargs_trailing: false });
+                            splat: Box::new(rest),
+                            block_arg: None,
+                        });
                         return wrap_sn(sp(node, Expr::CallWithBlock {
                             receiver, name, args,
-                            block_params: vec![BlockParam::Single(param_name)],
+                            block_params: vec![BlockParam::Rest(arr)],
                             block_body: vec![body_call],
                         }));
                     }
