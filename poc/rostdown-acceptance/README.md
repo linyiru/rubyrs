@@ -51,20 +51,23 @@ share-alike would travel).
 
 | source | acceptance |
 | --- | ---: |
-| bridgetown | 45.7 % (59/129) |
-| jekyll | 36.6 % (74/202) |
-| **combined** | **40.2 % (133/331)** |
+| bridgetown | 52.7 % (68/129) |
+| jekyll | 49.0 % (99/202) |
+| **combined** | **50.5 % (167/331)** |
 
-Top decline reasons (combined): `html-block` (41), `ald-ial-extension`
-(31), `opt-space-block` (26), `link-definition` (22), `table` (20),
-`inline-html-or-autolink` (13), `entity` (10), `image` (6).
+Top decline reasons (combined): `html-block` (44), `ald-ial-extension`
+(33), `table` (20), `inline-html-or-autolink` (15), `entity` (10).
+
+(Earlier snapshot: 40.2 % combined. The intervening work — inline images,
+indented headings/lists, and reference links/images — lifted it to
+50.5 %; `opt-space-block`, `link-definition`, and `image` left the top
+reasons.)
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; this repo's own
-technical docs ~59 %; real Jekyll/Bridgetown content ~40 %. The dominant
-real-world blockers are *core kramdown features* — raw HTML blocks,
-IAL/ALD (`{:.class}`, `{:toc}`), reference-style links, entities — not the
-inline-link / table / list / smart-quote work that lifted this repo's own
-docs. Every declined page still renders correctly via the Ruby-kramdown
-fallback; declining only forgoes the speed-up. So the highest-leverage
-work for broad real-world acceleration is IAL/ALD and raw-HTML blocks.
+technical docs ~59 %; real Jekyll/Bridgetown content ~50 %. The two
+dominant remaining blockers are *core kramdown features the engine does
+not yet do* — raw HTML blocks and IAL/ALD (`{:.class}`, `{:toc}`). Every
+declined page still renders correctly via the Ruby-kramdown fallback;
+declining only forgoes the speed-up. So the highest-leverage work for
+broader real-world acceleration is raw-HTML blocks and IAL/ALD.
