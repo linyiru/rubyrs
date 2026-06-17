@@ -24,4 +24,11 @@ class Symbol
   def match?(*args)
     to_s.match?(*args)
   end
+
+  # `Symbol#[]` — `to_s[...]` in CRuby (index/range/regex/substring slicing of
+  # the symbol's string). Surfaced by ostruct's method_missing, which extracts
+  # a setter name with `mid[/.*(?==\z)/m]`.
+  def [](*args)
+    to_s[*args]
+  end
 end
