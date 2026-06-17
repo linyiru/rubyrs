@@ -17671,6 +17671,24 @@ impl Vm {
                         break;
                     }
                 }
+                // Per-class `consts` table probe: a constant defined
+                // inside a module (`module Toks; NAME = …; end`) lives in
+                // that module's OWN `consts` table, which the qualified-
+                // string lookups above don't consult. Walk the real
+                // ancestor Class objects and check each one's table
+                // directly — this is what makes `Ent::NAME` resolve
+                // through an included module when `Ent` ALSO has a
+                // superclass (rexml's `Entity < Child; include
+                // XMLTokens`, where `Entity::NAME` reads XMLTokens::NAME).
+                if hit.is_none() {
+                    let seg_id = self.interner.intern(segment);
+                    for anc in super::flatten_ancestors(start_cls) {
+                        if let Some(v) = anc.consts.borrow().get(&seg_id).cloned() {
+                            hit = Some((v.clone(), const_scope_name(&v)));
+                            break;
+                        }
+                    }
+                }
                 // Final fallback: toplevel (bare segment lookup
                 // via Object) — matches CRuby's "after walking
                 // the inheritance chain, try toplevel" rule.
@@ -17697,6 +17715,23 @@ impl Vm {
                     } else if let Some(v) = self.constants.get(&tl_qid).cloned() {
                         hit = Some((v.clone(), const_scope_name(&v)));
                     }
+                }
+            }
+            // Stepped-into-scope ancestor walk: a PRIOR segment resolved
+            // to a Class and this segment's direct `Scope::seg` lookup
+            // missed — resolve `seg` through that class's ancestors
+            // (included modules + superclasses), which `const_via_
+            // ancestors` searches. The first-segment walk above is gated
+            // on `current_value.is_none()`, so this is the only place a
+            // stepped-into final segment reaches the ancestry. Makes
+            // `M::Ent::NAME` resolve NAME from a module Ent includes
+            // (rexml's `Entity < Child; include XMLTokens` → Entity::NAME).
+            if hit.is_none()
+                && let Some(Value::Class(scope_cls)) = current_value.clone()
+            {
+                let seg_id = self.interner.intern(segment);
+                if let Some(v) = self.const_via_ancestors(&scope_cls, seg_id) {
+                    hit = Some((v.clone(), const_scope_name(&v)));
                 }
             }
             // Scoped autoload trigger — Phase 2 of issue #224.

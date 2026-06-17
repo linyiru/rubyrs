@@ -1573,12 +1573,20 @@ impl Vm {
         chain.extend(super::flatten_ancestors(start));
         let bare_name = self.interner.resolve(bare).to_string();
         for anc in &chain {
-            // Anonymous scope: const_set / nested defines land in the
-            // per-class `consts` map keyed by the bare SymId.
+            // Per-class `consts` table FIRST, for every ancestor (named
+            // or anonymous): a constant defined inside a module
+            // (`module M; NAME = …; end`) lives in that module's own
+            // table, which the qualified-global-key probe below doesn't
+            // consult. This is what makes a constant reach a class
+            // through an INCLUDED module — e.g. rexml's `Entity < Child;
+            // include XMLTokens` resolving `Entity::NAME` to
+            // XMLTokens::NAME (the include sits between Entity and its
+            // superclass in the ancestry).
+            if let Some(v) = anc.consts.borrow().get(&bare).cloned() {
+                return Some(v);
+            }
+            // Anonymous scope: only the per-class table applies.
             if anc.name.is_empty() {
-                if let Some(v) = anc.consts.borrow().get(&bare).cloned() {
-                    return Some(v);
-                }
                 continue;
             }
             // Named scope: probe the qualified global key. Only intern

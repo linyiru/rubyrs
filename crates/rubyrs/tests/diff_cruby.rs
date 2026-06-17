@@ -1462,6 +1462,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Surfaced by rss's `loop do … redo … end`.
 #[test] fn redo_keyword() { run_diff("redo_keyword"); }
 
+// Constant resolution through an included module's own table, and a
+// bare `Head::Rest` whose head lives in an outer lexical scope.
+// Surfaced by rexml (`Entity::NAME` via `include XMLTokens`).
+#[test] fn const_via_ancestors_and_lexical() { run_diff("const_via_ancestors_and_lexical"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

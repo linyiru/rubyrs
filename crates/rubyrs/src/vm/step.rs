@@ -1774,41 +1774,43 @@ impl Vm {
                 // `<ancestor>::Str::Double`, so an included
                 // `Token::Tokens` resolves `Token::Tokens::Str::Double`.
                 if found.is_none()
-                    && let (Some(&inner_qid), Some(&bare_sym)) =
-                        (chain.first(), chain.last())
-                    && inner_qid != bare_sym
+                    && let Some(&bare_sym) = chain.last()
                 {
-                    let inner_full = self.interner.resolve(inner_qid).to_string();
                     let bare_str = self.interner.resolve(bare_sym).to_string();
                     let suffix = format!("::{}", bare_str);
-                    if let Some(scope_name) = inner_full.strip_suffix(&suffix)
-                        && self.interner.contains(scope_name)
-                    {
+                    // Walk EVERY lexical scope (innermost first), not just
+                    // chain.first(): CRuby resolves the HEAD of a
+                    // `Head::Rest` reference against the full Module.nesting
+                    // chain. `Entity::NAME` inside `class Text` (nesting
+                    // [REXML::Text, REXML]) resolves `Entity` to
+                    // `REXML::Entity` via the OUTER scope, not
+                    // `REXML::Text::Entity` (rexml text.rb:23). Pre-fix only
+                    // the innermost cref was tried, so the outer-scope head
+                    // was missed.
+                    for &lex_qid in &chain[..lex_split] {
+                        if found.is_some() { break; }
+                        if lex_qid == bare_sym { continue; }
+                        let lex_full = self.interner.resolve(lex_qid).to_string();
+                        let Some(scope_name) = lex_full.strip_suffix(&suffix) else { continue; };
+                        if scope_name.is_empty() || !self.interner.contains(scope_name) { continue; }
                         let scope_id = self.interner.intern(scope_name);
-                        if let Some(cref) = self.classes.get(&scope_id).cloned() {
-                            if let Some((head, rest)) = bare_str.split_once("::") {
-                                // Multi-segment bare name (`Str::Double`):
-                                // the flat key `<ancestor>::Str::Double`
-                                // doesn't exist when `Str` is a const ALIAS
-                                // (`Str = Literal::String`). Resolve the
-                                // FIRST segment through the ancestor walk,
-                                // then the REST via `resolve_const_path` on
-                                // the resolved class — exactly what the
-                                // qualified `C::Str::Double` LoadConst path
-                                // does. (rouge's lexers do this: `include
-                                // Token::Tokens` then `Str::Double`, where
-                                // `Tokens::Str` aliases `Literal::String`.)
-                                let head_id = self.interner.intern(head);
-                                if let Some(Value::Class(head_cls)) =
-                                    self.const_via_ancestors(&cref, head_id)
-                                    && let crate::vm::dispatch::ConstPathOutcome::Found(v) =
-                                        self.resolve_const_path(&head_cls, rest, true, false)
-                                {
-                                    found = Some(v);
-                                }
-                            } else {
-                                found = self.const_via_ancestors(&cref, bare_sym);
+                        let Some(cref) = self.classes.get(&scope_id).cloned() else { continue; };
+                        if let Some((head, rest)) = bare_str.split_once("::") {
+                            // Multi-segment bare (`Str::Double`, `Entity::NAME`):
+                            // resolve the head through this scope's ancestry,
+                            // then the rest via `resolve_const_path` on the
+                            // resolved class (which walks ITS ancestry too —
+                            // `Entity::NAME` → XMLTokens::NAME via include).
+                            let head_id = self.interner.intern(head);
+                            if let Some(Value::Class(head_cls)) =
+                                self.const_via_ancestors(&cref, head_id)
+                                && let crate::vm::dispatch::ConstPathOutcome::Found(v) =
+                                    self.resolve_const_path(&head_cls, rest, true, false)
+                            {
+                                found = Some(v);
                             }
+                        } else {
+                            found = self.const_via_ancestors(&cref, bare_sym);
                         }
                     }
                 }
