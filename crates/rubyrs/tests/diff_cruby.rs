@@ -420,6 +420,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `require "set"` (multi_json's `Set.new` at load). stdlib-gated.
 #[cfg(feature = "stdlib")]
 #[test] fn set_autoload() { run_diff("set_autoload"); }
+// alias_method / alias of a universal builtin (dup/hash/class/…) —
+// literal + runtime forms (ostruct's `alias_method "#{m}!", m` loop).
+#[test] fn alias_method_builtin() { run_diff("alias_method_builtin"); }
 #[test] fn case_when() { run_diff("case_when"); }
 #[test] fn modules() { run_diff("modules"); }
 #[test] fn conversions() { run_diff("conversions"); }

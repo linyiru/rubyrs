@@ -7710,6 +7710,41 @@ impl Vm {
                             return Ok(());
                         }
                         None => {
+                            // Source not in the user-method table — it may be a
+                            // universal Object/Kernel intrinsic
+                            // (`dup`/`hash`/`freeze`/`inspect`/…) or a primitive
+                            // arm of a builtin ancestor, which live in native
+                            // dispatch, not any method table. Synthesise a
+                            // builtin-forwarding Method before raising, mirroring
+                            // the literal-`alias` path (`Op::AliasMethod`).
+                            // ostruct's `alias_method "#{m}!", m` loop over
+                            // `instance_methods` hits exactly this.
+                            let old_name_str = self.interner.resolve(old_id).to_string();
+                            let mut primitive_hit =
+                                crate::vm::Vm::universal_arm_name(&old_name_str)
+                                || crate::vm::Vm::universal_kernel_private(&old_name_str)
+                                || crate::vm::Vm::UNIVERSAL_OBJECT_METHODS
+                                    .contains(&old_name_str.as_str());
+                            if !primitive_hit {
+                                let mut visited: std::collections::HashSet<*const crate::value::Class> =
+                                    std::collections::HashSet::new();
+                                let mut walker: Option<Rc<Class>> = Some(target.clone());
+                                while let Some(c) = walker {
+                                    if !visited.insert(Rc::as_ptr(&c)) { break; }
+                                    if self.primitive_class_responds_to(&c.name, old_id) {
+                                        primitive_hit = true;
+                                        break;
+                                    }
+                                    walker = c.superclass.borrow().clone();
+                                }
+                            }
+                            if primitive_hit {
+                                let synth = self.synth_primitive_forwarder(target, old_id);
+                                target.methods.borrow_mut().insert(new_id, synth);
+                                self.method_gen = self.method_gen.wrapping_add(1);
+                                self.stack.push(Value::Class(target.clone()));
+                                return Ok(());
+                            }
                             let old_name = self.interner.resolve(old_id).to_string();
                             return Err(self.trap(RubyError::NameError {
                                 msg: format!(

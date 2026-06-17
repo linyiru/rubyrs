@@ -3374,8 +3374,12 @@ impl Vm {
                             // user class synthesises the same
                             // forwarder (mock.rb's
                             // `alias __respond_to? respond_to?`).
+                            let old_name_str = self.interner.resolve(old_id).to_string();
                             let mut primitive_hit =
-                                crate::vm::Vm::universal_arm_name(&self.interner.resolve(old_id).clone());
+                                crate::vm::Vm::universal_arm_name(&old_name_str)
+                                || crate::vm::Vm::universal_kernel_private(&old_name_str)
+                                || crate::vm::Vm::UNIVERSAL_OBJECT_METHODS
+                                    .contains(&old_name_str.as_str());
                             // Rc-pointer visited set defends the
                             // walker against an adversarial cyclic
                             // superclass graph (`A.superclass = B;

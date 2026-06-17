@@ -629,6 +629,22 @@ impl Vm {
         )
     }
 
+    /// Kernel's PRIVATE builtin surface — instance methods every object
+    /// answers with an implicit receiver (`raise`/`puts`/`require`/…). These
+    /// live in `builtin_call`, not any method table, so `respond_to?(name,
+    /// true)` AND `alias_method`'s source-resolution must both recognise them.
+    /// Single source of truth for the two consumers.
+    pub(crate) fn universal_kernel_private(name: &str) -> bool {
+        matches!(name,
+            "exit" | "exit!" | "abort" | "at_exit"
+            | "puts" | "print" | "p" | "pp" | "warn"
+            | "require" | "require_relative" | "load"
+            | "sprintf" | "format" | "caller"
+            | "rand" | "srand" | "raise" | "fail"
+            | "block_given?" | "iterator?"
+        )
+    }
+
     pub(crate) fn primitive_arm_name_for_class(class_name: &str, name: &str) -> bool {
         // Universal arms (`nil?` / `to_s` / `==` / `inspect` / ...)
         // answer on every receiver shape; a user reopen of one on a
@@ -817,13 +833,7 @@ impl Vm {
         // sync when builtins graduate. (Without include_all these
         // stay false — explicit-receiver calls reject them, same as
         // CRuby's NoMethodError-private.)
-        if include_private && matches!(name,
-            "exit" | "exit!" | "abort" | "at_exit"
-            | "puts" | "print" | "p" | "pp" | "warn"
-            | "require" | "require_relative" | "load"
-            | "sprintf" | "format" | "caller"
-            | "rand" | "srand" | "raise" | "fail"
-        ) {
+        if include_private && Self::universal_kernel_private(name) {
             return true;
         }
         // Universal — every receiver responds to these.
