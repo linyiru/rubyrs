@@ -63,9 +63,9 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 
 | source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 90.7 % (117/129) |
-| jekyll | 92.1 % (186/202) |
-| **combined** | **91.5 % (303/331)** |
+| bridgetown | 92.2 % (119/129) |
+| jekyll | 93.0 % (188/202) |
+| **combined** | **92.7 % (307/331)** |
 
 Top decline reasons (combined, `run.sh`) are now a flat tail of kramdown
 quirks: multi-block / multi-line-table list items, cross-line emphasis
@@ -119,10 +119,12 @@ unknown HTML elements re-serialized like a `<div>`, span-content
 `code`/`kbd`/`samp`/`var` (well-formed nested tags kept), autolinks, a
 pipe-table built inside a single-line list item, a span element opening a
 paragraph, single-line list-item trailing whitespace, kramdown's
-single-token fenced-code info rule, and — the biggest lever — a full
-recursive list-item parser (multi-block / loose / nested / lazy-continuation
-/ multi-row-pipe-table items, with kramdown's tight/loose rules). Current:
-**91.5 %**. `verify.sh` is the standing gate that keeps it WRONG = 0.
+single-token fenced-code info rule, the biggest lever — a full recursive
+list-item parser (multi-block / loose / nested / lazy-continuation /
+multi-row-pipe-table items, with kramdown's tight/loose rules) — then block
+IALs on fenced code and tables (both sides), and a `|` inside an inline HTML
+tag no longer mistaken for a table separator. Current: **92.7 %**.
+`verify.sh` is the standing gate that keeps it WRONG = 0.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
