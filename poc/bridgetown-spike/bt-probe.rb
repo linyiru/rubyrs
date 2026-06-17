@@ -74,25 +74,32 @@ rescue Exception => e
   (e.backtrace || []).first(8).each { |f| puts "  #{f}" }
 end
 
-site = nil
-puts "== phase 3: Bridgetown::Site.new(config) =="
-begin
-  site = Bridgetown::Site.new(cfg)
-  puts "P3 OK: #{site.class}"
-rescue Exception => e
-  puts "P3-ERR: #{e.class}: #{e.message}"
-  (e.backtrace || []).first(8).each { |f| puts "  #{f}" }
-end
+# Boot+configure benchmark scope: phases 1-2 are the slice both CRuby and
+# rubyrs complete identically (rubyrs hits a Marshal-cache wall at phase 3).
+# `BT_BOOT_ONLY=1` skips phases 3-4 so the benchmark times the same work on
+# both (guard rather than `exit` — rubyrs surfaces `exit 0` as a nonzero
+# SystemExit, which would falsely flag the run as failed).
+unless ENV["BT_BOOT_ONLY"]
+  site = nil
+  puts "== phase 3: Bridgetown::Site.new(config) =="
+  begin
+    site = Bridgetown::Site.new(cfg)
+    puts "P3 OK: #{site.class}"
+  rescue Exception => e
+    puts "P3-ERR: #{e.class}: #{e.message}"
+    (e.backtrace || []).first(8).each { |f| puts "  #{f}" }
+  end
 
-puts "== phase 4: site.process (read -> render -> write) =="
-begin
-  site.process
-  out = Dir.glob("#{SITE}/output/**/*").select { |f| File.file?(f) }.sort
-  puts "P4 OK: wrote #{out.size} file(s)"
-  # Echo the rendered output so its content can be diffed against CRuby
-  # (rubyrs's matches byte-for-byte: `<h1 id="hi">Hi</h1>` etc.).
-  out.each { |f| puts "  -> #{f.sub("#{SITE}/", "")}: #{File.read(f).gsub("\n", "\\n")}" }
-rescue Exception => e
-  puts "P4-ERR: #{e.class}: #{e.message}"
-  (e.backtrace || []).first(6).each { |f| puts "  #{f}" }
+  puts "== phase 4: site.process (read -> render -> write) =="
+  begin
+    site.process
+    out = Dir.glob("#{SITE}/output/**/*").select { |f| File.file?(f) }.sort
+    puts "P4 OK: wrote #{out.size} file(s)"
+    # Echo the rendered output so its content can be diffed against CRuby
+    # (rubyrs's matches byte-for-byte: `<h1 id="hi">Hi</h1>` etc.).
+    out.each { |f| puts "  -> #{f.sub("#{SITE}/", "")}: #{File.read(f).gsub("\n", "\\n")}" }
+  rescue Exception => e
+    puts "P4-ERR: #{e.class}: #{e.message}"
+    (e.backtrace || []).first(6).each { |f| puts "  #{f}" }
+  end
 end
