@@ -4150,6 +4150,16 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 name: "__defined_super?".into(),
                 args: vec![], kwargs_trailing: false });
         }
+        // `defined?(yield)` — "yield" when the enclosing method has a
+        // block, else nil. Same catch-all-"expression" pre-fix bug as
+        // super: sequel's `if defined?(yield); return yield(db); end`
+        // ran the yield with no block ("no block given").
+        if inner.as_yield_node().is_some() {
+            return Spanned::new(span, Expr::Call {
+                receiver: None,
+                name: "__defined_yield?".into(),
+                args: vec![], kwargs_trailing: false });
+        }
         if let Some(iv) = inner.as_instance_variable_read_node() {
             let name = cid_to_string(iv.name());
             return Spanned::new(span, Expr::Call {

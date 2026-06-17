@@ -1453,6 +1453,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `a, (b, *c) = …`, deep nesting. Surfaced by parser/current's lexer.
 #[test] fn nested_destructure() { run_diff("nested_destructure"); }
 
+// `defined?(yield)` — "yield" when the enclosing method has a block,
+// else nil. Surfaced by sequel's `if defined?(yield); return yield(db)`.
+#[test] fn defined_yield() { run_diff("defined_yield"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

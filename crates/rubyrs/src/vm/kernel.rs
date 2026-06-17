@@ -75,6 +75,7 @@ impl Vm {
                 | "__defined_const?"
                 | "__defined_recv_method?"
                 | "__defined_super?"
+                | "__defined_yield?"
                 | "undef_method"
                 | "eval"
                 // `autoload(:Foo, "path")` / `autoload?(:Foo)`
@@ -919,6 +920,19 @@ impl Vm {
             // routes here for IVarRead / Call / ConstRead inner
             // expressions. The label-only-on-hit pattern matches
             // CRuby: hit returns a String, miss returns nil.
+            "__defined_yield?" => {
+                // `defined?(yield)` — "yield" iff the enclosing method
+                // was called with a block, else nil (same lexical-owner
+                // resolution as `block_given?`). sequel's Database.connect
+                // gates `return yield(db)` on `if defined?(yield)`; with
+                // the old catch-all "expression" label it always ran the
+                // yield and raised "no block given".
+                let has_block = self
+                    .lexical_owner_of_top()
+                    .map(|idx| self.frames[idx].block_arg.is_some())
+                    .unwrap_or(false);
+                return Some(Ok(if has_block { Value::new_str("yield") } else { Value::Nil }));
+            }
             "__defined_super?" => {
                 // `defined?(super)` — "super" iff the enclosing method
                 // has a same-named method further up the chain. Host fns
