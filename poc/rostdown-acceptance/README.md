@@ -63,9 +63,9 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 
 | source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 88.4 % (114/129) |
-| jekyll | 85.6 % (173/202) |
-| **combined** | **86.7 % (287/331)** |
+| bridgetown | 89.9 % (116/129) |
+| jekyll | 86.6 % (175/202) |
+| **combined** | **87.9 % (291/331)** |
 
 Top decline reasons (combined, `run.sh`) are now a flat tail of kramdown
 quirks: multi-block / multi-line-table list items, cross-line emphasis
@@ -117,17 +117,23 @@ strikethrough (`~~x~~`), OPT_SPACE list paragraph interruption, and indented
 code blocks — then OPT_SPACE fenced code, the `<table>` family + custom/
 unknown HTML elements re-serialized like a `<div>`, span-content
 `code`/`kbd`/`samp`/`var` (well-formed nested tags kept), autolinks, a
-pipe-table built inside a single-line list item, and a span element opening
-a paragraph. Current: **86.7 %**. `verify.sh` is the standing gate that
-keeps it WRONG = 0.
+pipe-table built inside a single-line list item, a span element opening a
+paragraph, single-line list-item trailing whitespace, and kramdown's
+single-token fenced-code info rule. Current: **87.9 %**. `verify.sh` is the
+standing gate that keeps it WRONG = 0.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
-content ~87 %. The remaining blockers are the impractical tail — constructs
+content ~88 %. The remaining blockers are the impractical tail — constructs
 whose byte-identity would mean reproducing kramdown quirks at real
-accept-but-wrong risk: multi-block / multi-line-table list items, cross-line
-emphasis pairing in lazy continuations, list-trailing-whitespace hard breaks,
-indented code that is really a lazy paragraph continuation, `{:toc}`/ALD
-generation, `<script>`/comment/doctype HTML, and multi-line span HTML blocks.
-Every declined page still renders correctly via the Ruby-kramdown fallback;
-declining only forgoes the speed-up.
+accept-but-wrong risk, confirmed by probing each against the oracle:
+multi-block list items (the whole list goes loose, each `<li>` re-wraps in
+`<p>`), emphasis/code that pairs ACROSS a lazy-continuation newline (kramdown
+joins lines THEN parses spans; rost parses per line), a blank-separated
+"lonely" IAL whose attachment target is context-dependent, `{:toc}`/ALD
+generation, a tilde run that is really `~~`-strikethrough with a literal
+remainder (`~~~x~~~` → `~<del>x</del>~`, possibly spanning lines), balanced /
+doubled link-destination parens (`[t]((u))` → `href="(u)"`), and
+`<script>`/comment/doctype/multi-line-span HTML. Every declined page still
+renders correctly via the Ruby-kramdown fallback; declining only forgoes the
+speed-up.
