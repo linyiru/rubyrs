@@ -15283,7 +15283,36 @@ impl Vm {
         // `a` to the whole array — rss's `|name, occurs, type, *args|`
         // over `[name, occurs, type, *rest]` rows then sent
         // `install__element` (empty `type`).
-        let args: Vec<Value> = if args.len() == 1
+        //
+        // Lambdas enforce STRICT positional arity and do NOT auto-splat
+        // a single Array (`->(a,b){}.call([1,2])` raises; a proc would
+        // bind a=1,b=2). The positional count (kwargs already peeled)
+        // must fall in the declared range, else ArgumentError — matching
+        // CRuby. Procs/blocks stay lenient. (Required-keyword strictness
+        // is already enforced for every block above.)
+        if bh_is_lambda {
+            let n_optional = self.protos[proto_idx].n_optional_params as usize;
+            let required = (n_params as usize).saturating_sub(n_optional);
+            let given = args.len();
+            let in_range = if rest_slot.is_some() {
+                given >= required
+            } else {
+                given >= required && given <= n_params as usize
+            };
+            if !in_range {
+                let expected = if rest_slot.is_some() {
+                    format!("{required}+")
+                } else if n_optional > 0 {
+                    format!("{required}..{n_params}")
+                } else {
+                    format!("{required}")
+                };
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {given}, expected {expected})"),
+                }));
+            }
+        }
+        let args: Vec<Value> = if !bh_is_lambda && args.len() == 1
             && (n_params > 1 || (n_params >= 1 && rest_slot.is_some())) {
             match &args[0] {
                 Value::Array(aid) => self.heap.array(*aid).clone(),

@@ -475,6 +475,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn block_arity_optional() { run_diff("block_arity_optional"); }
 #[test] fn block_arity_keywords() { run_diff("block_arity_keywords"); }
 #[test] fn lambda_local_return() { run_diff("lambda_local_return"); }
+#[test] fn lambda_strict_arity() { run_diff("lambda_strict_arity"); }
 #[cfg(feature = "regex")]
 #[test] fn match_data_offsets() { run_diff("match_data_offsets"); }
 #[cfg(feature = "regex")]
