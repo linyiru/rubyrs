@@ -3842,10 +3842,20 @@ impl Vm {
     pub(crate) fn ruby_source_candidates(&self, path_str: &str) -> Vec<std::path::PathBuf> {
         use std::path::{Path, PathBuf};
         let p = Path::new(path_str);
-        let rb_form: PathBuf = if p.extension().is_none() {
-            p.with_extension("rb")
-        } else {
+        // CRuby's `require` APPENDS `.rb` to the feature name unless it
+        // already ends in `.rb` — it does NOT treat an arbitrary trailing
+        // dotted segment as a pre-existing extension to keep or replace.
+        // `require "rss/1.0"` must look for `rss/1.0.rb`. The old
+        // `p.extension().is_none()` check saw `.0` as an extension and
+        // left the name unsuffixed (so `rss/1.0.rb` was never tried);
+        // worse, `with_extension("rb")` would have REPLACED `.0` →
+        // `rss/1.rb`. Append by string, gated only on a literal `.rb`
+        // suffix. (Native `.so`/`.bundle` requests are routed through the
+        // separate cext-candidate path, not here.)
+        let rb_form: PathBuf = if path_str.ends_with(".rb") {
             p.to_path_buf()
+        } else {
+            PathBuf::from(format!("{}.rb", path_str))
         };
         let mut candidates: Vec<PathBuf> = Vec::with_capacity(4);
         candidates.push(rb_form.clone());
@@ -3890,12 +3900,17 @@ impl Vm {
     /// the cext path when both could in principle apply.
     #[cfg(not(target_os = "wasi"))]
     pub(crate) fn find_ruby_source_candidate(&self, path_str: &str) -> bool {
-        // Has-non-rb extension (.so/.dylib/…) — go straight to
-        // cext, don't even consider .rb candidates. Matches the
-        // pre-refactor behaviour.
+        // A KNOWN native-library extension (.so/.dylib/…) routes
+        // straight to cext, skipping .rb candidates. But an arbitrary
+        // dotted trailing segment is NOT an extension: `require
+        // "rss/1.0"` must look for `rss/1.0.rb` (CRuby appends `.rb`
+        // unless the name already names a loadable file). The old `ext
+        // != "rb"` check mis-treated the `.0` as an extension and
+        // routed it to cext → LoadError. Bail only for real native
+        // suffixes.
         let p = std::path::Path::new(path_str);
         if let Some(ext) = p.extension().and_then(|e| e.to_str())
-            && ext != "rb" {
+            && matches!(ext, "so" | "bundle" | "dylib" | "dll" | "o") {
             return false;
         }
         // When `allowed_paths` is configured, skip the `.exists()`

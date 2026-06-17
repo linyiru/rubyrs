@@ -1406,6 +1406,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // sorbet-runtime's method-hook installer (`mod.singleton_class?`).
 #[test] fn singleton_class_predicate() { run_diff("singleton_class_predicate"); }
 
+// `require "foo/1.0"` appends `.rb` (→ foo/1.0.rb) rather than treating
+// the trailing `.0` as an extension. Surfaced by the rss gem's
+// `require "rss/1.0"` / "rss/2.0".
+#[test] fn require_dotted_path() { run_diff("require_dotted_path"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }
