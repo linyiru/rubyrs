@@ -1441,6 +1441,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // mail's multibyte/unicode.rb.
 #[test] fn class_self_attr_splat() { run_diff("class_self_attr_splat"); }
 
+// Bare `tap` / `yield_self` (implicit self) inside an instance method
+// dispatches on self. Surfaced by mail's CommonField#parse (`tap(&:element)`).
+#[test] fn bare_tap_then() { run_diff("bare_tap_then"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

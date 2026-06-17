@@ -16438,6 +16438,23 @@ impl Vm {
             }
 
         if no_recv {
+            // Bare `tap { … }` / `then { … }` / `yield_self { … }`
+            // (implicit self) inside an instance method — dispatch on
+            // self via the same `collection_call_block` path the
+            // explicit-recv form uses. mail's CommonField#parse does
+            // `tap(&:element)`; without this the bare call fell through
+            // to NoMethodError ("undefined method `tap'"). Mirrors the
+            // no-block bare-universal routing in `do_call` (which can't
+            // carry the block).
+            if matches!(&*name, "tap" | "then" | "yield_self") {
+                let self_val = self.frames.last()
+                    .expect("ICE: do_call_block(no_recv) empty frames for tap routing")
+                    .self_val.clone();
+                if let Some(v) = self.collection_call_block(&self_val, &name, &args, block)? {
+                    self.stack.push(v);
+                    return Ok(());
+                }
+            }
             // `lambda { ... }` / `proc { ... }` / `Proc.new { ... }`-
             // style block-to-Value capture. rubyrs doesn't
             // distinguish Lambda from Proc at runtime (the strict-
