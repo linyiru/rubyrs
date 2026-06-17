@@ -1812,7 +1812,15 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             if let Some(call) = bn.as_call_node()
                 && call.receiver().is_none()
                 && matches!(cid_to_string(call.name()).as_str(), "private" | "public")
-                && call.arguments().map(|a| a.arguments().iter().count() > 0).unwrap_or(false)
+                && call.arguments().map(|a| {
+                    let args: Vec<_> = a.arguments().iter().collect();
+                    // Only the explicit-name form (`private :a, :b`). A
+                    // SPLAT arg (`public(*FileUtils::METHODS)`, rake/
+                    // fileutils) must fall through to the regular call
+                    // handling — translating the splat here would trip
+                    // the unsupported-SplatNode path.
+                    !args.is_empty() && args.iter().all(|n| n.as_splat_node().is_none())
+                }).unwrap_or(false)
             {
                 let target = if cid_to_string(call.name()) == "private" {
                     "private_class_method"
