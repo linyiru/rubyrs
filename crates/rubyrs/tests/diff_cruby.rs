@@ -1364,6 +1364,13 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // (`const_get("V3_4_0")` falling back to the nearest defined version).
 #[test] fn const_get_const_missing() { run_diff("const_get_const_missing"); }
 
+// `Module#module_exec` / `#class_exec` — block-with-args twin of
+// class_eval's block form (runs in the class body context, block gets
+// the explicit args). Also exercises `|*a|` splat capture and the
+// block form returning the block's value. Surfaced by rspec building
+// example groups via `klass.module_exec(*args, &block)`.
+#[test] fn module_exec_class_exec() { run_diff("module_exec_class_exec"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

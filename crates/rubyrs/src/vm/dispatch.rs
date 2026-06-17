@@ -14382,23 +14382,44 @@ impl Vm {
         args: Vec<Value>,
     ) -> Result<(), Trap> {
         self.check_frames()?;
-        let (proto_idx, captured, param_start, n_params, bh_lexical_cvar_class) = {
+        let (proto_idx, captured, param_start, n_params, rest_slot, bh_lexical_cvar_class) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.lexical_cvar_class.clone())
+            (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.rest_slot, bh.lexical_cvar_class.clone())
         };
         // Bind args into the block's param slots, same auto-splat
         // shape as `invoke_block`. For instance_eval/class_eval
         // the conventional arg is a single value (self), so the
         // single-Array auto-splat case is unlikely to trigger,
         // but we keep the rule identical to avoid surprising
-        // future callers.
-        let args: Vec<Value> = if n_params > 1 && args.len() == 1 {
+        // future callers. Auto-splat does NOT apply to a rest-param
+        // block (`|*a|` captures the whole arg list, a lone Array
+        // included) — matching `invoke_block`.
+        let args: Vec<Value> = if n_params > 1 && args.len() == 1 && rest_slot.is_none() {
             match &args[0] {
                 Value::Array(aid) => self.heap.array(*aid).clone(),
                 _ => args,
             }
         } else {
             args
+        };
+        // `|*a|` / `|x, *rest|`: collect the args past the fixed
+        // positional params into the rest slot as an Array. Built
+        // before the locals borrow (heap.alloc needs &mut heap) and
+        // GC-pinned (the Block + each rest element must survive the
+        // alloc). instance_exec/class_exec pass the caller's explicit
+        // args here, so a splat block (`module_exec(1,2,3) { |*a| }`)
+        // now binds `a = [1, 2, 3]` instead of leaving it nil.
+        let rest_binding: Option<(usize, Value)> = if let Some(slot) = rest_slot {
+            let mut g = crate::vm::PinGuard::new(self);
+            g.pin(Value::Block(block_id));
+            let rest_args: Vec<Value> = args.iter().skip(n_params as usize).cloned().collect();
+            for a in &rest_args { g.pin(a.clone()); }
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let id = g.vm.heap.alloc(HeapObj::Array(rest_args.into()));
+            Some((slot as usize, Value::Array(id)))
+        } else {
+            None
         };
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
@@ -14410,6 +14431,11 @@ impl Vm {
             for (i, a) in args.into_iter().enumerate() {
                 if i < n_params as usize {
                     locals[param_start as usize + i] = a;
+                }
+            }
+            if let Some((slot, val)) = rest_binding {
+                if slot < locals.len() {
+                    locals[slot] = val;
                 }
             }
         }
@@ -16319,6 +16345,25 @@ impl Vm {
                     self.invoke_block_with_self(block, r.clone(), /*as_class_body=*/false, args)?;
                     return Ok(());
                 }
+            }
+            // `cls.class_exec(*args) { |*a| ... }` / `module_exec` —
+            // the block-with-args twin of the `class_eval` block form:
+            // runs the block in the RECEIVER class's body context (so
+            // `define_method` / `def` land on the class) but the block
+            // receives the EXPLICIT args you pass rather than the class
+            // itself (the eval forms pass `self`). rspec builds example
+            // groups via `klass.module_exec(*args, &block)` on an
+            // anonymous subclass; ActiveSupport's Concern uses it too.
+            // Only a Class/Module receiver is intercepted — `class_exec`
+            // is a Module instance method, so a non-module receiver
+            // falls through to NoMethodError (CRuby parity). A user
+            // override is deferred to via the singleton-method probe.
+            if matches!(&*name, "class_exec" | "module_exec")
+                && let Value::Class(c) = r
+                && self.lookup_class_singleton_method(c, name_id).is_none()
+            {
+                self.invoke_block_with_self(block, r.clone(), /*as_class_body=*/true, args)?;
+                return Ok(());
             }
             let is_instance_eval = &*name == "instance_eval";
             let is_class_eval = &*name == "class_eval" || &*name == "module_eval";
