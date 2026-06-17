@@ -4773,6 +4773,32 @@ pub(crate) fn base64_decode(input: &[u8]) -> Vec<u8> {
 /// Subset of CRuby's `String#unpack` — see the per-directive
 /// table in the call-site comment. Returns Err with a CRuby-
 /// ish message on unsupported directives or malformed input.
+/// Decode one UTF-8 scalar from the front of `bytes`, returning
+/// `(codepoint, byte_len)`. Used by `unpack("U")`. Returns `None` on a
+/// truncated or invalid lead/continuation byte (the caller raises, as CRuby
+/// does for malformed UTF-8). Faithful for valid UTF-8 (the real-world case);
+/// overlong/surrogate rejection is not modeled.
+fn decode_utf8_char(bytes: &[u8]) -> Option<(u32, usize)> {
+    let b0 = *bytes.first()?;
+    let (len, mut cp) = match b0 {
+        0x00..=0x7F => return Some((b0 as u32, 1)),
+        0xC0..=0xDF => (2, (b0 & 0x1F) as u32),
+        0xE0..=0xEF => (3, (b0 & 0x0F) as u32),
+        0xF0..=0xF7 => (4, (b0 & 0x07) as u32),
+        _ => return None,
+    };
+    if bytes.len() < len {
+        return None;
+    }
+    for &b in &bytes[1..len] {
+        if b & 0xC0 != 0x80 {
+            return None;
+        }
+        cp = (cp << 6) | (b & 0x3F) as u32;
+    }
+    Some((cp, len))
+}
+
 pub(crate) fn unpack_bytes(input: &[u8], fmt: &str) -> Result<Vec<Value>, String> {
     let mut out: Vec<Value> = Vec::new();
     let mut i = 0usize;
@@ -4902,6 +4928,28 @@ pub(crate) fn unpack_bytes(input: &[u8], fmt: &str) -> Result<Vec<Value>, String
                 let decoded = base64_decode(&input[i..]);
                 i = input.len();
                 out.push(Value::new_str_bytes(decoded));
+            }
+            'U' => {
+                // UTF-8 → Unicode codepoints. Count = number of chars
+                // (`*` = all remaining). tzinfo/builder-style readers.
+                let limit = if n == usize::MAX { usize::MAX } else { n };
+                let mut produced = 0usize;
+                while produced < limit && i < input.len() {
+                    let (cp, len) = decode_utf8_char(&input[i..])
+                        .ok_or_else(|| "malformed UTF-8 character in unpack".to_string())?;
+                    out.push(Value::Int(cp as i64));
+                    i += len;
+                    produced += 1;
+                }
+            }
+            'x' => {
+                // Skip forward n bytes (no output). `*` skips to the end.
+                // CRuby raises "x outside of string" past the end.
+                let skip = if n == usize::MAX { input.len().saturating_sub(i) } else { n };
+                if i + skip > input.len() {
+                    return Err("x outside of string".to_string());
+                }
+                i += skip;
             }
             // Whitespace inside the format is ignored, per CRuby.
             ' ' | '\t' | '\n' => {}
@@ -5045,6 +5093,30 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
                     _ => return Err("pack: expected String for m".into()),
                 };
                 out.extend_from_slice(base64_encode(&bytes, n != 0).as_bytes());
+            }
+            'U' => {
+                // Unicode codepoints → UTF-8 bytes. builder's XChar does
+                // `[item].pack('U')` / `seq.pack('U*')`.
+                let take = if n == usize::MAX { values.len() - vi } else { n };
+                for _ in 0..take {
+                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    vi += 1;
+                    let cp = match v {
+                        Value::Int(n) => n,
+                        _ => return Err("pack: expected Integer for U".into()),
+                    };
+                    let ch = u32::try_from(cp)
+                        .ok()
+                        .and_then(char::from_u32)
+                        .ok_or_else(|| "pack: invalid codepoint for U".to_string())?;
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                }
+            }
+            'x' => {
+                // Null padding (consumes no value). `*` emits nothing.
+                let take = if n == usize::MAX { 0 } else { n };
+                out.extend(std::iter::repeat_n(0u8, take));
             }
             ' ' | '\t' | '\n' => {}
             _ => return Err(format!("unsupported pack/unpack directive '{}'", dir)),
