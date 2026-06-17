@@ -4821,6 +4821,11 @@ impl Vm {
                         // (Mock's blank slate undefs each listed
                         // name; see UNIVERSAL_OBJECT_METHODS doc).
                         || Self::UNIVERSAL_OBJECT_METHODS.contains(&&*nm_owned)
+                        // Object PRIVATE instance methods (copy + missing
+                        // hooks) — sequel `undef_method :initialize_copy,
+                        // :initialize_clone, :initialize_dup` to disallow
+                        // copying a Database.
+                        || Self::universal_object_private(&nm_owned)
                         || matches!(&*nm_owned, "instance_eval")
                         || {
                             let mut hit = false;

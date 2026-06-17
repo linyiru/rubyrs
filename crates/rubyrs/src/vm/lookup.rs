@@ -645,6 +645,19 @@ impl Vm {
         )
     }
 
+    /// Object's PRIVATE instance methods that live in native dispatch (the
+    /// copy hooks + the missing-method hooks) rather than the method table.
+    /// Every object "has" them, so `undef_method`/`alias_method`/`private`
+    /// must treat them as resolvable. Surfaced by sequel
+    /// (`undef_method :dup, :clone, :initialize_copy, :initialize_clone,
+    /// :initialize_dup` to disallow copying a Database).
+    pub(crate) fn universal_object_private(name: &str) -> bool {
+        matches!(name,
+            "initialize" | "initialize_copy" | "initialize_clone" | "initialize_dup"
+            | "respond_to_missing?" | "method_missing"
+        )
+    }
+
     pub(crate) fn primitive_arm_name_for_class(class_name: &str, name: &str) -> bool {
         // Universal arms (`nil?` / `to_s` / `==` / `inspect` / ...)
         // answer on every receiver shape; a user reopen of one on a
