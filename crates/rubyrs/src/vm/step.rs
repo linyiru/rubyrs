@@ -4951,6 +4951,28 @@ impl Vm {
                 }
             }
             Op::Return => {
+                // A method/begin `ensure` must run when the frame exits
+                // via `return` (CRuby) — the direct pop below would skip
+                // it. When the returning frame still has a pending
+                // `is_ensure` handler, route through `begin_method_break`:
+                // the same ensure-walking machinery used for non-local
+                // (block) returns runs every pending ensure body
+                // (suspending into each, resumed by Op::EndEnsure) and
+                // then pops the frame, pushing the return value. Plain
+                // returns (no ensure — the overwhelming majority) keep
+                // the fast direct-pop path below.
+                let has_ensure = self.frames.last()
+                    .and_then(|fr| fr.aux.as_ref())
+                    .is_some_and(|a| a.rescues.iter().any(|h| h.is_ensure));
+                if has_ensure {
+                    let ret = self.stack.pop().unwrap_or(Value::Nil);
+                    let target = self.frames.len() - 1;
+                    self.begin_method_break(ret, target)?;
+                    // Either suspended into an ensure body (frame still
+                    // present, ip at the handler) or landed (frame
+                    // popped). Continue unless the stack is now empty.
+                    return Ok(!self.frames.is_empty());
+                }
                 let f = self.frames.pop().expect("ICE: Return no frame");
                 // Frame-local `$~`: a method frame saved its caller's
                 // last-match on entry (block frames carry `None` and
