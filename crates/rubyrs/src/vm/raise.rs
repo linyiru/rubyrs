@@ -51,30 +51,46 @@ impl Vm {
                 }
             }
             Value::Class(cls) => {
-                // `raise SomeClass` with no message: instantiate
-                // an empty Exception of that class. We skip the
-                // `initialize` dispatch — there's no argument to
-                // pass — and stamp `@message` with the class name,
-                // matching what the preamble's
-                // `Exception#initialize(nil)` fallback would have
-                // produced (CRuby: `raise ArgumentError` then
-                // `e.message` is "ArgumentError", and minitest's
-                // `e.message.include?` chains rely on it being a
-                // String). Divergence: a user subclass whose custom
-                // no-arg `initialize` sets a different @message
-                // still sees the class name here, since we don't
-                // dispatch.
-                self.maybe_gc();
-                let msg = Value::new_str(cls.name.clone());
-                let id = self.heap.alloc(HeapObj::Instance(Instance {
-                    class: cls.clone(),
-                    ivars: crate::intern::FxHashMap::default(),
-                    singleton_class: None,
-            frozen: std::cell::Cell::new(false),
-                }));
-                let msg_id = self.interner.intern("@message");
-                self.heap.instance_mut(id).ivars.insert(msg_id, msg);
-                Value::Object(id)
+                // `raise SomeClass` (no message) == `SomeClass.exception`
+                // == `SomeClass.new` — so a user-defined `initialize`
+                // (which may set a custom @message, e.g. StopIteration or
+                // `def initialize(m="default"); super; end`) MUST run.
+                // Dispatch `new` and use the resulting instance. Falls
+                // back to a bare class-name-stamped instance if `new`
+                // doesn't yield an Object (defensive — every exception
+                // class's `new` returns one). The sub-dispatch is
+                // self-contained (runs to completion before the caller's
+                // unwind starts).
+                self.stack.push(Value::Class(cls.clone()));
+                let new_id = self.interner.intern("new");
+                let pre = self.frames.len();
+                let built = match self.do_call(new_id, 0, false, u16::MAX)
+                    .and_then(|()| self.dispatch_until(pre))
+                {
+                    Ok(()) => self.stack.pop(),
+                    Err(_) => None,
+                };
+                match built {
+                    Some(obj @ Value::Object(_)) => obj,
+                    other => {
+                        // Fallback: bare instance with @message = class
+                        // name (the old behaviour).
+                        if other.is_some() {
+                            // `new` returned a non-Object; discard it.
+                        }
+                        self.maybe_gc();
+                        let msg = Value::new_str(cls.name.clone());
+                        let id = self.heap.alloc(HeapObj::Instance(Instance {
+                            class: cls.clone(),
+                            ivars: crate::intern::FxHashMap::default(),
+                            singleton_class: None,
+                            frozen: std::cell::Cell::new(false),
+                        }));
+                        let msg_id = self.interner.intern("@message");
+                        self.heap.instance_mut(id).ivars.insert(msg_id, msg);
+                        Value::Object(id)
+                    }
+                }
             }
             _ => v,
         }
