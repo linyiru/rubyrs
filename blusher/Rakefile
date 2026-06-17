@@ -1,0 +1,44 @@
+# frozen_string_literal: true
+
+# Build/release tasks for the blusher gem. In the rubyrs monorepo these
+# reference the sibling `carmine`/`carmine-ffi` crates; in the standalone
+# momiji-rs/blusher repo they reference the published `carmine` crate.
+
+REPO       = File.expand_path("..", __dir__)              # rubyrs workspace root (dev)
+DLEXT      = (RbConfig::CONFIG["host_os"] =~ /darwin/ ? "dylib" : "so")
+CDYLIB     = "libcarmine_ffi.#{DLEXT}"
+EXT_DIR    = File.expand_path("ext", __dir__)
+TABLES_DIR = File.expand_path("lib/blusher/tables", __dir__)
+EXTRACT    = File.join(REPO, "crates/carmine/tools/extract.rb")
+
+desc "Build the carmine-ffi cdylib and stage it under ext/"
+task :compile do
+  sh "cargo build --release -p carmine-ffi", chdir: REPO
+  mkdir_p EXT_DIR
+  cp File.join(REPO, "target/release", CDYLIB), File.join(EXT_DIR, CDYLIB)
+end
+
+desc "Generate the per-lexer carmine tables (lib/blusher/tables/<tag>.json)"
+task :tables do
+  require "rouge"
+  mkdir_p TABLES_DIR
+  Rouge::Lexer.all.each do |lx|
+    next unless lx.respond_to?(:state_definitions)
+    tag = lx.tag rescue next
+    cls = lx.name.split("::").last
+    json = `ruby --parser=parse.y #{EXTRACT} #{cls} 2>/dev/null`
+    File.write(File.join(TABLES_DIR, "#{tag}.json"), json) unless json.strip.empty?
+  end
+  puts "wrote #{Dir[File.join(TABLES_DIR, '*.json')].size} tables"
+end
+
+desc "Run rouge's lexer spec suite through blusher (the correctness gate)"
+task :spec do
+  rouge_src = ENV["ROUGE_SRC"] or abort "set ROUGE_SRC=<rouge checkout>"
+  sh({ "RUBYLIB" => "#{__dir__}/lib" },
+     "cd #{rouge_src} && bundle exec ruby -Ilib -Ispec " \
+     "-e 'require \"spec_helper\"; require \"blusher\"; " \
+     "Dir[\"./spec/lexers/*_spec.rb\"].sort.each { |f| require f }'")
+end
+
+task default: %i[compile tables]
