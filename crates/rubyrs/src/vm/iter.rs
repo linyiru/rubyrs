@@ -2003,8 +2003,16 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Array(result_id)))
             }
-            (Value::Hash(id), "transform_keys", []) => {
+            // `transform_keys { |k| … }` and `transform_keys(mapping) { |k| … }`.
+            // When a mapping Hash is given, a key found in it is replaced
+            // by the mapped value WITHOUT calling the block; only keys
+            // absent from the mapping go through the block (CRuby 2.5+).
+            (Value::Hash(id), "transform_keys", [] | [Value::Hash(_)]) => {
                 let id = *id;
+                let mapping: Vec<(Value, Value)> = match args.first() {
+                    Some(Value::Hash(mid)) => self.heap.hash(*mid).clone(),
+                    _ => Vec::new(),
+                };
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
@@ -2016,10 +2024,17 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
-                    let new_key = match g.vm.step_block1(block, k, pre_frames)? {
-                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(r) => r,
+                    // Mapping wins over the block; unmapped keys are yielded.
+                    let mapped = mapping.iter()
+                        .find(|(mk, _)| mk.ruby_eql(&k, &g.vm.heap))
+                        .map(|(_, mv)| mv.clone());
+                    let new_key = match mapped {
+                        Some(mv) => mv,
+                        None => match g.vm.step_block1(block, k, pre_frames)? {
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                            BlockStep::Break(r) => { early = Some(r); break; }
+                            BlockStep::Value(r) => r,
+                        },
                     };
                     // Last-wins collision: overwrite existing slot
                     // if the new_key equals one already present;

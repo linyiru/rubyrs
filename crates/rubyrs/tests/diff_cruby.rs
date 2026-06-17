@@ -463,6 +463,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "regex")]
 #[test] fn string_gsub_enumerator() { run_diff("string_gsub_enumerator"); }
 #[test] fn hash_transform_enumerator() { run_diff("hash_transform_enumerator"); }
+#[test] fn hash_transform_keys_mapping() { run_diff("hash_transform_keys_mapping"); }
 #[cfg(feature = "regex")]
 #[test] fn match_data_offsets() { run_diff("match_data_offsets"); }
 #[cfg(feature = "regex")]

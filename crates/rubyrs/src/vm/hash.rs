@@ -659,6 +659,39 @@ impl Vm {
                     ("each" | "each_pair" | "each_with_index", []) => {
                         return self.make_enum_for(Value::Hash(id), name, vec![]).map(Some);
                     }
+                    // `h.transform_keys(mapping_hash)` (Ruby 2.5+, no
+                    // block) — each key present in `mapping_hash` is
+                    // replaced by its mapped value; keys absent from the
+                    // mapping are kept unchanged. Last-wins on collision,
+                    // preserving iteration order (CRuby).
+                    ("transform_keys", [Value::Hash(mid)]) => {
+                        let mid = *mid;
+                        let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        let mapping: Vec<(Value, Value)> = self.heap.hash(mid).clone();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        g.pin(Value::Hash(mid));
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let result_id = g.vm.heap.alloc(HeapObj::Hash(
+                            crate::heap::HashObj::with_pairs(Vec::with_capacity(snapshot.len())),
+                        ));
+                        g.pin(Value::Hash(result_id));
+                        for (k, v) in snapshot {
+                            let new_key = mapping.iter()
+                                .find(|(mk, _)| mk.ruby_eql(&k, &g.vm.heap))
+                                .map(|(_, mv)| mv.clone())
+                                .unwrap_or_else(|| k.clone());
+                            let existing = g.vm.heap.hash(result_id).iter()
+                                .position(|(k2, _)| k2.ruby_eql(&new_key, &g.vm.heap));
+                            if let Some(p) = existing {
+                                g.vm.heap.hash_mut(result_id)[p] = (new_key, v);
+                            } else {
+                                g.vm.heap.hash_mut(result_id).push((new_key, v));
+                            }
+                        }
+                        Some(Value::Hash(result_id))
+                    }
                     // Transform / filter Enumerable family with no block —
                     // returns an Enumerator (CRuby `enum.c`), re-invoking
                     // the block form (collection_call_block) once driven.
