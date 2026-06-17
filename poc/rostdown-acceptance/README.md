@@ -63,12 +63,14 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 
 | source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 69.0 % (89/129) |
-| jekyll | 69.3 % (140/202) |
-| **combined** | **69.2 % (229/331)** |
+| bridgetown | 72.9 % (94/129) |
+| jekyll | 72.8 % (147/202) |
+| **combined** | **72.8 % (241/331)** |
 
-Top decline reasons (combined, `run.sh`): `inline-html-or-autolink` (23),
-`html-block` (22), `table` (9), `opt-space-block` (8), `hard-break` (4).
+Top decline reasons (combined, `run.sh`): `html-block` (26),
+`opt-space-block` (9), `table` (9), `link-text-nested` (5),
+`hard-break` (4). `inline-html-or-autolink` has left the top reasons —
+inline HTML elements (void + markdown-content) are now re-serialized.
 
 **The accept-but-wrong correction.** Earlier snapshots (40.2 % → 50.5 % →
 a raw 57.4 %) counted accept-vs-decline only — they were never byte-checked
@@ -87,15 +89,16 @@ Liquid `{{ … }}` URLs resolve), the blockquote "note box" IAL
 a kramdown-faithful re-serialization of common raw HTML blocks
 (`<div class="note">…`, `<figure>`, nested block/void elements), the
 pipe/table boundary (a block with a pipe-less line is a paragraph, not a
-decline), and leading block IALs (`{:.note}\ntext` → `<p class="note">`).
-Current: **69.2 %**. `verify.sh` is the standing gate that keeps it
-WRONG = 0.
+decline), leading block IALs (`{:.note}\ntext` → `<p class="note">`), and
+inline HTML elements (void like `<br>` plus markdown-content ones like
+`<a>`/`<abbr>`/`<sub>`). Current: **72.8 %**. `verify.sh` is the standing
+gate that keeps it WRONG = 0.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
-content ~69 %. The remaining blockers are narrower slices of features the
-engine partly does — inline raw HTML, raw HTML outside the re-serialized
-subset (raw-text elements, comments), pipe tables outside the clean shape,
-and a few IAL/ALD tails (`{:toc}`, code-block IALs). Every declined page
-still renders correctly via the Ruby-kramdown fallback; declining only
-forgoes the speed-up.
+content ~73 %. The remaining blockers are the out-of-subset tails of
+features the engine partly does — raw HTML outside the re-serialized subset
+(raw-text elements like `<table>`/`<script>`, comments, custom elements),
+tables inside list items/blockquotes, OPT_SPACE-indented blocks, and a few
+IAL/ALD tails (`{:toc}`). Every declined page still renders correctly via
+the Ruby-kramdown fallback; declining only forgoes the speed-up.
