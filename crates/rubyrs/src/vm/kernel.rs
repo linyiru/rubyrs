@@ -4587,9 +4587,23 @@ impl Vm {
         let source_rc: std::rc::Rc<str> = std::rc::Rc::from(source);
         self.sources.insert(filename_rc.clone(), source_rc);
         let fsl_start = self.protos.len();
-        let entry = crate::compiler::compile_proto(
+        // For `class_eval`/`module_eval` (class_ctx set), the eval'd code
+        // runs with the receiver as its lexical cref, so bare constants
+        // resolve through the receiver's namespace — `DC.module_eval("def
+        // f; Element; end")` finds `RSS::Element` when DC is RSS::DC.
+        // Seed the proto's class_path with the receiver's nesting (its
+        // `::`-split effective name) so the const-chain walk includes the
+        // outer scopes. Bare `eval` (no class_ctx) stays toplevel.
+        // Surfaced by rss's dublincore.rb module_eval'd accessors.
+        let eval_class_path: Vec<String> = class_ctx
+            .as_ref()
+            .and_then(|c| c.effective_name())
+            .map(|n| n.split("::").map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        let entry = crate::compiler::compile_proto_at(
             "<eval>".into(), compile_params, &[prog], filename_rc.clone(),
             &mut self.protos, &mut self.interner, &mut self.cache_counter,
+            eval_class_path,
         );
         if fsl {
             crate::compiler::mark_frozen_string_literal(&mut self.protos, fsl_start);
@@ -5033,6 +5047,13 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         // readiness methods directly and does its own host-side DNS — so
         // these are lenient no-op shells just to satisfy the require.
         | "io/wait" | "resolv"
+        // `open-uri`: extends Kernel#open / URI.open with HTTP(S) fetch
+        // (built on net/http). Gems require it at load but only call it
+        // from request-time methods — rss's parser.rb requires it for
+        // `URI.open(feed_url)`, never reached by parsing an in-memory
+        // String. Lenient shell satisfies the require; an actual
+        // `URI.open(url)` raises NoMethodError (feature-absent contract).
+        | "open-uri"
         // `io/console`: required at load time by the `console` gem's
         // terminal output (samovar → bridgetown CLI). Its only real
         // method use (`IO#winsize`) is on the TTY-only xterm path, never

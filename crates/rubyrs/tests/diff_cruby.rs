@@ -1496,6 +1496,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // from `$POSTMATCH`.
 #[test] fn english_match_globals() { run_diff("english_match_globals"); }
 
+// `Mod.module_eval(string)` runs with the receiver as cref, so bare
+// constants resolve through the receiver's namespace. Surfaced by rss.
+#[test] fn module_eval_const_scope() { run_diff("module_eval_const_scope"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }
