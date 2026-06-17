@@ -696,6 +696,18 @@ pub(crate) struct LastMatch {
     /// from `$~`, e.g. a `StringScanner`'s `@src[:name]`) can resolve
     /// named groups. Empty for patterns without named captures.
     pub(crate) named: Vec<(String, Option<String>)>,
+    /// Byte spans of capture groups 1..N within `input` (parallel to
+    /// `caps`; `None` for a group that didn't participate). Backs
+    /// `MatchData#begin`/`#end`/`#offset` (and the `byte*` variants) for
+    /// group indices — the whole match's span is `(m_start, m_end)`.
+    /// Empty when the producing path didn't carry span info (group
+    /// offsets then read as nil there).
+    pub(crate) group_spans: Vec<Option<(usize, usize)>>,
+    /// Names of capture groups 1..N in index order (parallel to `caps`):
+    /// `Some(name)` for `(?<name>…)`, `None` for an unnamed group. Lets
+    /// a re-materialised `MatchData` resolve `#begin(:name)` to the
+    /// group's position. Empty for patterns without named captures.
+    pub(crate) cap_names: Vec<Option<String>>,
     /// `Some` only when the match ran against an ASCII-8BIT (BINARY)
     /// subject. Carries the raw subject bytes + per-group byte spans so
     /// positional captures can be rebuilt byte-faithfully (and tagged

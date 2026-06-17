@@ -115,4 +115,58 @@ class MatchData
     end
     parts + ">"
   end
+
+  # --- match-position accessors: begin/end/offset (+ byte* variants) ---
+  # `n` is a group index (0 = the whole match) or a capture-group name
+  # (Symbol/String). begin/end/offset return CHARACTER offsets (derived
+  # via @string.byteslice so a multibyte subject reports char positions);
+  # bytebegin/byteend/byteoffset return raw byte offsets. A group that
+  # didn't participate yields nil (offset → [nil, nil]); a negative /
+  # out-of-range index or an unknown name raises IndexError — matching
+  # CRuby. `begin` and `end` are keywords, so they go through
+  # define_method rather than `def`.
+  define_method(:begin) do |n|
+    bb, _be = __match_byte_span(n)
+    bb && __byte_to_char(bb)
+  end
+  define_method(:end) do |n|
+    _bb, be = __match_byte_span(n)
+    be && __byte_to_char(be)
+  end
+  def offset(n)
+    bb, be = __match_byte_span(n)
+    [bb && __byte_to_char(bb), be && __byte_to_char(be)]
+  end
+  def bytebegin(n);  __match_byte_span(n)[0]; end
+  def byteend(n);    __match_byte_span(n)[1]; end
+  def byteoffset(n); __match_byte_span(n); end
+
+  private
+
+  def __byte_to_char(b)
+    @string ? @string.byteslice(0, b).length : b
+  end
+
+  # Resolve `n` to a [byte_begin, byte_end] pair, or [nil, nil] for a
+  # group that didn't match. @group_byte_offsets / @cap_names are
+  # parallel arrays over groups 1..N (index 0 = group 1); the whole
+  # match (index 0) derives its span from @pre_match + @whole.
+  def __match_byte_span(n)
+    if n.is_a?(Integer)
+      raise IndexError, "index #{n} out of matches" if n < 0 || n >= size
+      if n == 0
+        bb = @pre_match ? @pre_match.bytesize : 0
+        [bb, bb + @whole.bytesize]
+      else
+        sp = @group_byte_offsets && @group_byte_offsets[n - 1]
+        sp ? [sp[0], sp[1]] : [nil, nil]
+      end
+    else
+      name = n.to_s
+      i = @cap_names ? @cap_names.index(name) : nil
+      raise IndexError, "undefined group name reference: #{name}" if i.nil?
+      sp = @group_byte_offsets && @group_byte_offsets[i]
+      sp ? [sp[0], sp[1]] : [nil, nil]
+    end
+  end
 end

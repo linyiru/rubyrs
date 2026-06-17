@@ -697,6 +697,22 @@ impl CompiledRegex {
         }
     }
 
+    /// Per-group capture names for groups 1..N, in index order (the
+    /// whole-match group 0 is dropped). Entry `i` is `Some(name)` for a
+    /// `(?<name>…)` group or `None` for an unnamed `(…)` group. Backs
+    /// `MatchData#begin(:name)` / `#offset(:name)` — the materialiser
+    /// stores this alongside the positional byte spans so a named index
+    /// resolves to its group position.
+    pub(crate) fn capture_group_names(&self) -> Vec<Option<String>> {
+        let collect = |it: &mut dyn Iterator<Item = Option<&str>>| -> Vec<Option<String>> {
+            it.skip(1).map(|n| n.map(|s| s.to_string())).collect()
+        };
+        match self.engine() {
+            Engine::Native(r) => collect(&mut r.capture_names()),
+            Engine::Fancy(r) => collect(&mut r.capture_names()),
+        }
+    }
+
     /// Named capture-group names in group-index order, deduplicated
     /// keeping the first occurrence — `Regexp#names` semantics
     /// (`/(?<a>.)(?<b>.)(?<a>.)/.names == ["a", "b"]`). `capture_names()`

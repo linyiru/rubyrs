@@ -2267,6 +2267,7 @@ impl Vm {
         match owned {
             Some(oc) => {
                 self.save_match_scope_on_write();
+                let cap_names = re.capture_group_names();
                 self.last_match = Some(crate::vm::LastMatch {
                     whole: oc.whole,
                     caps: oc.groups,
@@ -2274,6 +2275,8 @@ impl Vm {
                     m_start: oc.m_start,
                     m_end: oc.m_end,
                     named: oc.named,
+                    group_spans: oc.group_spans,
+                    cap_names,
                     binary: None,
                 });
                 Ok(true)
@@ -11760,6 +11763,7 @@ impl Vm {
                                 None
                             };
                             self.save_match_scope_on_write();
+                            let cap_names = re.capture_group_names();
                             self.last_match = Some(crate::vm::LastMatch {
                                 whole: oc.whole,
                                 caps: oc.groups,
@@ -11767,6 +11771,8 @@ impl Vm {
                                 m_start,
                                 m_end: oc.m_end,
                                 named: oc.named,
+                                group_spans: oc.group_spans,
+                                cap_names,
                                 binary,
                             });
                             Value::Int(char_idx)

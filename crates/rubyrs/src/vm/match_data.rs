@@ -31,6 +31,15 @@ pub(crate) struct MatchDataContext {
     /// `None`, matching CRuby's contract that
     /// `named_captures["x"]` returns nil rather than `""`.
     pub(crate) named_captures: Vec<(String, Option<String>)>,
+    /// Byte spans of capture groups 1..N (full-`string` coordinates;
+    /// `None` for a non-participating group). Installed as
+    /// `@group_byte_offsets` so `MatchData#begin`/`#end`/`#offset` (+
+    /// `byte*`) can resolve group indices. Empty when unavailable.
+    pub(crate) group_offsets: Vec<Option<(usize, usize)>>,
+    /// Names of groups 1..N in index order (parallel to `group_offsets`)
+    /// — installed as `@cap_names` so `#begin(:name)` resolves a named
+    /// index to its group position.
+    pub(crate) cap_names: Vec<Option<String>>,
 }
 
 impl Vm {
@@ -108,6 +117,44 @@ impl Vm {
             let nc_ivar = self.interner.intern("@named_caps");
             self.heap.instance_mut(obj_id).ivars.insert(nc_ivar, Value::Hash(h_id));
         }
+        // Group byte spans (@group_byte_offsets) + group names
+        // (@cap_names) back MatchData#begin/#end/#offset (+ byte*).
+        // Each entry is a 2-element [begin, end] Array or nil. The
+        // whole-match span (index 0) is derived in the preamble from
+        // @pre_match / @whole, so only groups 1..N are stored here
+        // (index 0 of these arrays = group 1). Skip installing when
+        // empty so unmatched/legacy paths stay nil-on-group-access.
+        if !ctx.group_offsets.is_empty() {
+            let span_vals: Vec<Value> = ctx.group_offsets
+                .iter()
+                .map(|sp| match sp {
+                    Some((b, e)) => {
+                        let id = self.heap.alloc(HeapObj::Array(
+                            vec![Value::Int(*b as i64), Value::Int(*e as i64)].into(),
+                        ));
+                        Value::Array(id)
+                    }
+                    None => Value::Nil,
+                })
+                .collect();
+            self.check_alloc()?;
+            let off_id = self.heap.alloc(HeapObj::Array(span_vals.into()));
+            let off_ivar = self.interner.intern("@group_byte_offsets");
+            self.heap.instance_mut(obj_id).ivars.insert(off_ivar, Value::Array(off_id));
+        }
+        if !ctx.cap_names.is_empty() {
+            let name_vals: Vec<Value> = ctx.cap_names
+                .iter()
+                .map(|n| match n {
+                    Some(s) => Value::new_str(s.clone()),
+                    None => Value::Nil,
+                })
+                .collect();
+            self.check_alloc()?;
+            let names_id = self.heap.alloc(HeapObj::Array(name_vals.into()));
+            let names_ivar = self.interner.intern("@cap_names");
+            self.heap.instance_mut(obj_id).ivars.insert(names_ivar, Value::Array(names_id));
+        }
         Ok(Value::Object(obj_id))
     }
 
@@ -142,12 +189,21 @@ impl Vm {
                     })
                     .collect()
             };
+            // Prefer the BINARY per-group spans (byte coords == char
+            // indices for ASCII-8BIT) when present; otherwise the
+            // UTF-8 `group_spans`. Both are full-`input` coordinates.
+            let group_offsets: Vec<Option<(usize, usize)>> = match &lm.binary {
+                Some(bc) => bc.group_spans.clone(),
+                None => lm.group_spans.clone(),
+            };
             let ctx = MatchDataContext {
                 pre_match: lm.input.get(..lm.m_start).map(|s| s.to_string()),
                 post_match: lm.input.get(lm.m_end..).map(|s| s.to_string()),
                 string: Some(lm.input.clone()),
                 regexp: None,
                 named_captures: lm.named.clone(),
+                group_offsets,
+                cap_names: lm.cap_names.clone(),
             };
             (lm.whole.clone(), caps, ctx)
         });
@@ -204,6 +260,13 @@ impl Vm {
                 // position-independent and need no adjustment.
                 oc.m_start += byte_start;
                 oc.m_end += byte_start;
+                // Shift group spans from tail-relative to full-string
+                // coordinates too (parallel to the whole-match shift).
+                let group_spans: Vec<Option<(usize, usize)>> = oc.group_spans
+                    .iter()
+                    .map(|sp| sp.map(|(b, e)| (b + byte_start, e + byte_start)))
+                    .collect();
+                let cap_names = re.capture_group_names();
                 let pre = bound[..oc.m_start].to_string();
                 let post = bound[oc.m_end..].to_string();
                 let full_str = bound.clone();
@@ -223,6 +286,8 @@ impl Vm {
                     m_start: oc.m_start,
                     m_end: oc.m_end,
                     named: oc.named.clone(),
+                    group_spans: group_spans.clone(),
+                    cap_names: cap_names.clone(),
                     binary: None,
                 });
                 let ctx = MatchDataContext {
@@ -231,6 +296,8 @@ impl Vm {
                     string: Some(full_str),
                     regexp: Some(Value::Regex(re.clone())),
                     named_captures: oc.named,
+                    group_offsets: group_spans,
+                    cap_names,
                 };
                 self.materialize_match_data_with_context(oc.whole, group_vals, ctx)
             }
@@ -348,6 +415,10 @@ impl Vm {
             }
             Some(oc) => {
                 let input_lossy = String::from_utf8_lossy(&input).into_owned();
+                // `binary.group_spans` (full-input byte coords) backs the
+                // offset accessors for a BINARY subject — materialize
+                // prefers it — so the UTF-8 `group_spans` slot stays empty.
+                let cap_names = re.capture_group_names();
                 self.last_match = Some(crate::vm::LastMatch {
                     whole: oc.whole,
                     caps: oc.groups,
@@ -355,6 +426,8 @@ impl Vm {
                     m_start: oc.m_start,
                     m_end: oc.m_end,
                     named: oc.named,
+                    group_spans: Vec::new(),
+                    cap_names,
                     binary: Some(crate::vm::BinaryCaps {
                         input: input.into_boxed_slice(),
                         group_spans: oc.group_spans,
@@ -433,6 +506,7 @@ impl Vm {
                 // return value (the scanner's `@match_pos`).
                 let match_len = region.len();
                 let input_lossy = String::from_utf8_lossy(&region).into_owned();
+                let cap_names = re.capture_group_names();
                 self.last_match = Some(crate::vm::LastMatch {
                     whole: oc.whole,
                     caps: oc.groups,
@@ -440,6 +514,8 @@ impl Vm {
                     m_start: 0,
                     m_end: match_len,
                     named: oc.named,
+                    group_spans: Vec::new(),
+                    cap_names,
                     binary: Some(crate::vm::BinaryCaps {
                         input: region.into_boxed_slice(),
                         group_spans,
@@ -522,6 +598,7 @@ impl Vm {
             Outcome::Bytes(region, group_spans, oc) => {
                 let match_len = region.len();
                 let matched = String::from_utf8_lossy(&region).into_owned();
+                let cap_names = re.capture_group_names();
                 self.last_match = Some(crate::vm::LastMatch {
                     whole: oc.whole,
                     caps: oc.groups,
@@ -529,6 +606,8 @@ impl Vm {
                     m_start: 0,
                     m_end: match_len,
                     named: oc.named,
+                    group_spans: Vec::new(),
+                    cap_names,
                     binary: Some(crate::vm::BinaryCaps {
                         input: region.into_boxed_slice(),
                         group_spans,
@@ -543,6 +622,7 @@ impl Vm {
                 // ASCII view ⇒ byte len == char len; the matched span
                 // begins at 0 (`\A`), so `$~`'s region is `oc.whole`.
                 let match_len = oc.whole.len();
+                let cap_names = re.capture_group_names();
                 self.last_match = Some(crate::vm::LastMatch {
                     whole: oc.whole.clone(),
                     caps: oc.groups,
@@ -550,6 +630,8 @@ impl Vm {
                     m_start: 0,
                     m_end: match_len,
                     named: oc.named,
+                    group_spans: oc.group_spans,
+                    cap_names,
                     binary: None,
                 });
                 Ok(Value::new_str(oc.whole))

@@ -36,6 +36,16 @@ fn scan_last_match(re: &regex::Regex, caps: &regex::Captures, input: &str) -> cr
         .flatten()
         .map(|n| (n.to_string(), caps.name(n).map(|m| m.as_str().to_string())))
         .collect();
+    // Byte spans (full-`input` coords) + names for groups 1..N, so a
+    // `$~` materialised inside a scan block backs #begin/#end/#offset.
+    let group_spans: Vec<Option<(usize, usize)>> = (1..caps.len())
+        .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
+        .collect();
+    let cap_names: Vec<Option<String>> = re
+        .capture_names()
+        .skip(1)
+        .map(|n| n.map(|s| s.to_string()))
+        .collect();
     crate::vm::LastMatch {
         whole: whole_m.as_str().to_string(),
         caps: caps_vec,
@@ -43,6 +53,8 @@ fn scan_last_match(re: &regex::Regex, caps: &regex::Captures, input: &str) -> cr
         m_start: whole_m.start(),
         m_end: whole_m.end(),
         named,
+        group_spans,
+        cap_names,
         binary: None,
     }
 }
@@ -916,6 +928,7 @@ impl Vm {
                     let m_start = oc.m_start;
                     let m_end = oc.m_end;
                     let whole = oc.whole.clone();
+                    let cap_names = re.capture_group_names();
                     g.vm.save_match_scope_on_write();
                     g.vm.last_match = Some(crate::vm::LastMatch {
                         whole: whole.clone(),
@@ -924,6 +937,8 @@ impl Vm {
                         m_start,
                         m_end,
                         named: oc.named,
+                        group_spans: oc.group_spans,
+                        cap_names,
                         binary: None,
                     });
                     let r = match g.vm.step_block1(block, Value::new_str(whole), pre_frames)? {

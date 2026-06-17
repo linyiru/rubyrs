@@ -2847,6 +2847,13 @@ impl Vm {
                             let abs_start = start_byte + oc.m_start;
                             let abs_end = start_byte + oc.m_end;
                             let result = Value::Int(sa[..abs_start].chars().count() as i64);
+                            // Group spans shift by `start_byte` too (the
+                            // search ran on the tail from `start_byte`).
+                            let group_spans: Vec<Option<(usize, usize)>> = oc.group_spans
+                                .iter()
+                                .map(|sp| sp.map(|(b, e)| (b + start_byte, e + start_byte)))
+                                .collect();
+                            let cap_names = re.capture_group_names();
                             self.save_match_scope_on_write();
                             self.last_match = Some(crate::vm::LastMatch {
                                 whole: oc.whole,
@@ -2855,6 +2862,8 @@ impl Vm {
                                 m_start: abs_start,
                                 m_end: abs_end,
                                 named: oc.named,
+                                group_spans,
+                                cap_names,
                                 binary: None,
                             });
                             result
@@ -2954,6 +2963,7 @@ impl Vm {
                         } else {
                             None
                         };
+                        let cap_names = re.capture_group_names();
                         self.save_match_scope_on_write();
                         self.last_match = Some(crate::vm::LastMatch {
                             whole: oc.whole,
@@ -2962,6 +2972,8 @@ impl Vm {
                             m_start: oc.m_start,
                             m_end: oc.m_end,
                             named: oc.named,
+                            group_spans: oc.group_spans,
+                            cap_names,
                             binary: None,
                         });
                         return Ok(Some(match span {
@@ -4020,6 +4032,7 @@ impl Vm {
         } else {
             None
         };
+        let cap_names = re.capture_group_names();
         self.save_match_scope_on_write();
         self.last_match = Some(crate::vm::LastMatch {
             whole: oc.whole,
@@ -4028,6 +4041,8 @@ impl Vm {
             m_start: oc.m_start,
             m_end: oc.m_end,
             named: oc.named,
+            group_spans: oc.group_spans,
+            cap_names,
             binary: None,
         });
         Ok(match picked {
