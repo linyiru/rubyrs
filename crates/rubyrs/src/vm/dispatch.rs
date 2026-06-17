@@ -2843,29 +2843,40 @@ impl Vm {
         }
         if let Value::Block(bid) = &recv
             && name == "arity" && args.is_empty() {
-            // `n_params` counts requireds + optionals (both take slots);
-            // the proto tracks how many are optional so we subtract them
-            // out. CRuby's arity differs for procs vs lambdas: a rest
-            // param always gives `-(required + 1)`; an OPTIONAL gives
-            // `-(required + 1)` for a LAMBDA but the positive `required`
-            // for a lenient proc (`proc{|a,b=5|}.arity == 1`, while
-            // `->(a,b=5){}.arity == -2`). (Required keyword params also
-            // bump CRuby's arity — not modelled here yet, a separate gap.)
-            let (n_params, has_rest, n_optional, is_lambda) = {
+            // CRuby's Proc/lambda arity, accounting for optional
+            // positionals, rest, and keyword params. Reads positional
+            // shape from the handle (n_params = requireds + optionals,
+            // rest_slot) and keyword shape from the proto
+            // (block_kw_params with a required flag, kw_rest_param).
+            //
+            //   rp = required positional, op = optional positional
+            //   rk = required keyword count, ok = optional keyword count
+            //   base = rp + (rk > 0 ? 1 : 0)   # a mandatory kw adds ONE
+            //
+            // The sign differs proc vs lambda:
+            //   proc:   negative only when a positional REST is present
+            //           (lenient — optionals/keywords stay positive).
+            //   lambda: negative when rest OR an optional positional OR
+            //           a kwrest OR an optional keyword without any
+            //           required keyword to anchor it.
+            // Value is `base` (positive) or `-(base + 1)` (negative).
+            let (n_params, has_rest, is_lambda, proto_idx) = {
                 let bh = self.heap.block(*bid);
-                (
-                    bh.n_params as i64,
-                    bh.rest_slot.is_some(),
-                    self.protos[bh.proto_idx].n_optional_params as i64,
-                    bh.is_lambda,
-                )
+                (bh.n_params as i64, bh.rest_slot.is_some(), bh.is_lambda, bh.proto_idx)
             };
-            let required = n_params - n_optional;
-            let arity = if has_rest || (n_optional > 0 && is_lambda) {
-                -(required + 1)
+            let proto = &self.protos[proto_idx];
+            let n_optional = proto.n_optional_params as i64;
+            let rk = proto.block_kw_params.iter().filter(|(_, _, req)| *req).count() as i64;
+            let ok = proto.block_kw_params.iter().filter(|(_, _, req)| !*req).count() as i64;
+            let has_kwrest = proto.kw_rest_param.is_some();
+            let rp = n_params - n_optional;
+            let base = rp + if rk > 0 { 1 } else { 0 };
+            let negative = if is_lambda {
+                has_rest || n_optional > 0 || has_kwrest || (ok > 0 && rk == 0)
             } else {
-                required
+                has_rest
             };
+            let arity = if negative { -(base + 1) } else { base };
             self.stack.push(Value::Int(arity));
             return Ok(CallableOutcome::Handled);
         }
