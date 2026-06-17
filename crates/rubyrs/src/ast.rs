@@ -1843,6 +1843,51 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 // case naturally — empty sym_names → no iterations
                 // → nothing emitted. Don't add a guard rejecting
                 // zero-arg; that would diverge from CRuby.
+                if let Some((_do_reader, _do_writer)) = attr_reader_writer_flags(&name) {
+                    // `class << self; attr_reader(*ATTRIBUTES); end` — the
+                    // attr names come from a runtime splat (an Array
+                    // constant), so the compile-time per-name def
+                    // expansion below can't see them. Desugar a
+                    // single-splat call to a RUNTIME
+                    // `self.singleton_class.send(:attr_reader, *ATTRIBUTES)`
+                    // — `send` reaches the private Module method and the
+                    // singleton class is the right target (class-level
+                    // readers, matching CRuby). mail's
+                    // multibyte/unicode.rb does `attr_reader(*ATTRIBUTES)`
+                    // / `attr_writer(*ATTRIBUTES)` inside `class << self`.
+                    let recv_is_self_attr = matches!(&recv_expr.node, Expr::SelfExpr);
+                    let single_splat = call.arguments().and_then(|a| {
+                        let v: Vec<_> = a.arguments().iter().collect();
+                        if v.len() == 1 { v[0].as_splat_node() } else { None }
+                    });
+                    if recv_is_self_attr
+                        && let Some(sn) = single_splat
+                        && let Some(inner) = sn.expression()
+                    {
+                        let inner_expr = tr(ctx, &inner);
+                        let name_sym = sp(bn, Expr::ArrayLit(vec![
+                            sp(bn, Expr::SymbolLit(name.clone())),
+                        ]));
+                        let args_array = sp(bn, Expr::Call {
+                            receiver: Some(Box::new(name_sym)),
+                            name: "+".into(),
+                            args: vec![inner_expr],
+                            kwargs_trailing: false,
+                        });
+                        let sing = sp(bn, Expr::Call {
+                            receiver: Some(Box::new(sp(bn, Expr::SelfExpr))),
+                            name: "singleton_class".into(),
+                            args: vec![], kwargs_trailing: false,
+                        });
+                        out.push(sp(bn, Expr::Apply {
+                            receiver: Some(Box::new(sing)),
+                            name: "send".into(),
+                            splat: Box::new(args_array),
+                            block_arg: None,
+                        }));
+                        continue;
+                    }
+                }
                 if let Some((do_reader, do_writer)) = attr_reader_writer_flags(&name) {
                     let mut all_sym_args = true;
                     let sym_names: Vec<String> = call.arguments()

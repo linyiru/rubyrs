@@ -1436,6 +1436,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // by faraday's Options#[] memoization.
 #[test] fn struct_subclass_index_override() { run_diff("struct_subclass_index_override"); }
 
+// `class << self; attr_reader(*NAMES); end` — attr_* with a runtime
+// splat of names, desugared to a singleton-class send. Surfaced by
+// mail's multibyte/unicode.rb.
+#[test] fn class_self_attr_splat() { run_diff("class_self_attr_splat"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }
