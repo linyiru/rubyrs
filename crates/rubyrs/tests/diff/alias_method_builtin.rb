@@ -34,6 +34,19 @@ p c.send(:class!)              # C
 p c.send(:hash!).is_a?(Integer)# true
 p c.send(:object_id!).is_a?(Integer) # true
 
+# a block-body builtin aliased then invoked WITH a block — the alias must
+# forward the caller's block to the primitive (ostruct's accessor install does
+# `alias_method :define_singleton_method!, :define_singleton_method` then
+# `define_singleton_method!(name, &proc)`).
+class D2
+  alias_method :dsm!, :define_singleton_method
+end
+d = D2.new
+d.dsm!(:greet) { "hi" }
+p d.greet                      # "hi"
+d.dsm!(:add) { |x, y| x + y }
+p d.add(2, 3)                  # 5
+
 # a genuinely-undefined source still raises NameError
 begin
   Class.new { alias_method :x, :totally_not_a_method }

@@ -17825,6 +17825,41 @@ impl Vm {
         if is_kernel_global {
             return self.synth_kernel_forwarder(cls, orig_id);
         }
+        // Block-BODY universal methods — the block is the method's essence
+        // (`define_singleton_method`/`instance_eval`/`instance_exec`). The
+        // Proto/`ApplyCallPrimitive` forwarder below can't carry a block, so
+        // an alias of one invoked with a block silently dropped it (ostruct's
+        // `alias_method :define_singleton_method!, :define_singleton_method`
+        // then `define_singleton_method!(name, &proc)`). Re-dispatch these via
+        // a BuiltinMeta forwarder — the same mechanism `new`/`allocate`
+        // aliases use — which forwards args AND the caller's block (see the
+        // `m.builtin` arm in `invoke`). Scoped narrowly: the other universal
+        // methods (`dup`/`hash`/`class`/…) keep the Proto forwarder so their
+        // force-primitive snapshot semantics are unchanged.
+        {
+            let name = self.interner.resolve(orig_id).to_string();
+            if matches!(name.as_str(),
+                "define_singleton_method" | "instance_eval" | "instance_exec"
+            ) {
+                let meta = Rc::new(crate::value::BuiltinMeta {
+                    name_id: orig_id,
+                    arity: -1,
+                    parameters: vec![("rest", None)],
+                    source_label: None,
+                    source_line: 0,
+                });
+                return Rc::new(crate::value::Method {
+                    params: vec!["args".to_string()],
+                    proto_idx: 0,
+                    fixed_arity: None,
+                    defining_class: Some(Rc::downgrade(cls)),
+                    visibility: std::cell::Cell::new(crate::value::Visibility::Public),
+                    closure: None,
+                    builtin: Some(meta),
+                    original_name: Some(orig_id),
+                });
+            }
+        }
         let proto = Proto {
             name: format!("<primitive-alias-forwarder:{}>", self.interner.resolve(orig_id)),
             // `args` is the rest-arg name; proto.params lists it so
