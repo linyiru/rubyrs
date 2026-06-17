@@ -3782,6 +3782,29 @@ impl Vm {
                     // rather than the stateless `string_call`. `sub`
                     // replaces the first match, `gsub` all.
                     #[cfg(feature = "regex")]
+                    // `gsub` with ONLY a regex pattern (no replacement,
+                    // no block) → an Enumerator (Ruby 2.6+). Driving it
+                    // with a block re-invokes gsub with that block, so the
+                    // result is the substituted String —
+                    // `"aaa".gsub(/a/).with_index { |m,i| i.to_s }` →
+                    // "012", and `"hello".gsub(/l/).count` → 2. Restricted
+                    // to Regex: the block form for a STRING pattern isn't
+                    // wired yet (the enumerator would re-invoke an
+                    // unsupported `gsub("str") { … }`). `sub` has no
+                    // enumerator form — it requires a replacement arg.
+                    ("gsub", [Value::Regex(_)]) => {
+                        return self
+                            .make_enum_for(Value::Str(s.clone()), name, vec![args[0].clone()])
+                            .map(Some);
+                    }
+                    // `sub` with a lone pattern (no replacement, no block)
+                    // is an arity error in CRuby — sub has no Enumerator
+                    // form (only the first match is replaced).
+                    ("sub", [Value::Regex(_) | Value::Str(_)]) => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "wrong number of arguments (given 1, expected 2)".into(),
+                        }));
+                    }
                     ("sub" | "gsub", [Value::Regex(re), Value::Hash(hid)]) => {
                         let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
                             msg: format!(
