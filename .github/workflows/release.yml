@@ -58,6 +58,8 @@ jobs:
     environment: release
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain

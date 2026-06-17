@@ -92,6 +92,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain (wasm32-wasip1 target)
         # Composite reads workspace `rust-toolchain.toml` so the

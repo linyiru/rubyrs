@@ -21,6 +21,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
@@ -132,6 +134,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain (wasm32-wasip1 target)
         # Composite reads `rust-toolchain.toml` so the wasm32-wasip1
@@ -300,6 +304,8 @@ jobs:
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
@@ -329,6 +335,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Count panics
         # Counts `panic!`, `.unwrap()`, `.expect(` in each rubyrs
         # source file (doc-comment lines starting with `///` or `//!`
@@ -799,6 +807,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
@@ -839,6 +849,8 @@ jobs:
     # the middle, which negates the per-job cache key.
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
@@ -888,6 +900,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Rust nightly + Miri
         # `channel-override: nightly` because miri requires nightly
@@ -958,6 +972,8 @@ jobs:
       CARGO_LLVM_COV_VERSION: 0.8.7
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain + llvm-tools-preview
         # Composite reads rust-toolchain.toml so `llvm-tools-preview`
@@ -1135,6 +1151,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain

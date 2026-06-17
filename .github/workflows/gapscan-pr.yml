@@ -65,6 +65,7 @@ jobs:
       - name: Checkout (PR head + master)
         uses: actions/checkout@v6
         with:
+          submodules: recursive
           # Need the full history so the script can build the base
           # commit in a separate worktree.
           fetch-depth: 0
