@@ -6715,6 +6715,12 @@ impl Vm {
                     | "hash"
                     | "itself"
                     | "object_id"
+                    // `extend` mixes a module into self's singleton class —
+                    // a bare `extend Mod` inside an instance method (sequel's
+                    // `Database#adapter_initialize` does `extend
+                    // UnmodifiedIdentifiers::DatabaseMethods`) dispatches on
+                    // self, like the explicit `obj.extend(Mod)` arm.
+                    | "extend"
                     // Shallow-copy universals: `dup`/`clone` are
                     // handled in the explicit-recv arm only, so a bare
                     // `dup` inside an instance method (rack's
