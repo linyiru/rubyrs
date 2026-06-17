@@ -428,6 +428,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // the stdlib feature). Surfaced by faraday's logging formatter.
 #[cfg(feature = "stdlib")]
 #[test] fn pp_pretty_inspect() { run_diff("pp_pretty_inspect"); }
+
+// StringScanner#rest? — inverse of eos?. Surfaced by tzinfo's POSIX TZ
+// parser (`while scanner.rest?`).
+#[cfg(feature = "stdlib")]
+#[test] fn strscan_rest_predicate() { run_diff("strscan_rest_predicate"); }
 // pack/unpack `U` (UTF-8 codepoints) + `x` (skip/pad) — builder's
 // `pack('U')`, tzinfo's `unpack('… x15 …')`.
 #[test] fn pack_unpack_u_x() { run_diff("pack_unpack_u_x"); }

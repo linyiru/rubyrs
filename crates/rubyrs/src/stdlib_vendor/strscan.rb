@@ -110,6 +110,12 @@ class StringScanner
     @pos >= @str.length
   end
 
+  # `rest?` — true when there's still unscanned input (the inverse of
+  # `eos?`). tzinfo's POSIX TZ parser loops `while scanner.rest?`.
+  def rest?
+    @pos < @str.length
+  end
+
   def rest
     @str[@pos..] || ""
   end
