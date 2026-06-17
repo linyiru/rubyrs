@@ -4032,7 +4032,51 @@ impl Vm {
                 // within the same scope still hits the same slot
                 // (the qualified SymId is identical) so methods
                 // added in a reopen land on the same class.
-                let table_key = if qual_id.0 == u32::MAX { name_id } else { qual_id };
+                // Compact path-name define (`class A::B` inside a
+                // scope): the compiler leaves qual_id at the MAX
+                // sentinel for `::`-containing names because it can't
+                // know at compile time whether the HEAD resolves
+                // relative to the current scope or to top level. CRuby
+                // resolves the head via a normal (lexical-first)
+                // constant lookup, then defines the LAST segment in
+                // that namespace. Mirror that: if the head matches a
+                // class nested under any enclosing lexical scope, key
+                // the new class under `<resolved-head>::<rest>`.
+                // Otherwise keep the bare joined name (top-level head,
+                // e.g. top-level `class ERB::Compiler`). Without this,
+                // `module Parser; class Builders::Default` registered a
+                // fresh top-level `Builders::Default`, so
+                // `Parser::Builders::Default` stayed undefined (parser
+                // gem's AST builder).
+                let resolved_path_key: Option<crate::intern::SymId> = {
+                    let bare = self.interner.resolve(name_id).to_string();
+                    if qual_id.0 == u32::MAX
+                        && let Some((head, rest)) = bare.split_once("::")
+                    {
+                        let lex = self.frames.last()
+                            .map(|f| self.protos[f.proto_idx].lexical_scope.clone())
+                            .unwrap_or_default();
+                        let mut resolved = None;
+                        for scope_sym in &lex {
+                            let scope_full = self.interner.resolve(*scope_sym).to_string();
+                            let cand = format!("{scope_full}::{head}");
+                            if self.interner.contains(&cand) {
+                                let cand_id = self.interner.intern(&cand);
+                                if self.classes.contains_key(&cand_id) {
+                                    resolved = Some(self.interner.intern(&format!("{cand}::{rest}")));
+                                    break;
+                                }
+                            }
+                        }
+                        resolved
+                    } else {
+                        None
+                    }
+                };
+                let table_key = match resolved_path_key {
+                    Some(k) => k,
+                    None => if qual_id.0 == u32::MAX { name_id } else { qual_id },
+                };
                 let name_str = self.interner.resolve(table_key).to_string();
                 // Reopening a constant that has a PENDING AUTOLOAD must
                 // fire the autoload first (CRuby semantics): `module X`
