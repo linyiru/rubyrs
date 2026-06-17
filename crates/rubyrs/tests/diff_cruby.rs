@@ -1402,6 +1402,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // connection_pool's `new(size:1) { }.with` smoke run via eval.
 #[test] fn eval_kwargs() { run_diff("eval_kwargs"); }
 
+// Module#singleton_class? — true only for eigenclasses. Surfaced by
+// sorbet-runtime's method-hook installer (`mod.singleton_class?`).
+#[test] fn singleton_class_predicate() { run_diff("singleton_class_predicate"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

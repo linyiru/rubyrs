@@ -4542,6 +4542,20 @@ impl Vm {
                 self.stack.push(Value::Class(view));
                 Ok(true)
             }
+            ("singleton_class?", []) => {
+                // True iff the receiver IS an eigenclass (the metaclass
+                // of some object/class), false for an ordinary class or
+                // module. Both eigenclass forms — the class-level shell
+                // from `ensure_singleton_view` and the per-object one
+                // from `heap.ensure_singleton_class` — name themselves
+                // `#<Class:…>`, which no ordinary class/module does
+                // (real classes carry their constant name; anonymous
+                // ones are empty). sorbet-runtime's method-hook installer
+                // skips singleton classes via `mod.singleton_class?`.
+                let is_eigen = cls.name.starts_with("#<Class:");
+                self.stack.push(Value::Bool(is_eigen));
+                Ok(true)
+            }
             ("instance_methods", args_)
             | ("public_instance_methods", args_)
             | ("private_instance_methods", args_)
