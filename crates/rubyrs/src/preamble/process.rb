@@ -59,6 +59,14 @@ end
 # explicitly (minitest's `Minitest.io`), which is the supported
 # shape. STDIN stays absent-loud: rubyrs has no input capability.
 class IO
+  # `seek`/`sysseek` whence constants (CRuby values). `File#seek`
+  # already interprets 0/1/2 (preamble/file.rb); these named
+  # constants let gems pass `IO::SEEK_SET` explicitly — mini_mime's
+  # `pread` does `@file.seek(offset, IO::SEEK_SET)`.
+  SEEK_SET = 0
+  SEEK_CUR = 1
+  SEEK_END = 2
+
   def initialize(which)
     @which = which
   end

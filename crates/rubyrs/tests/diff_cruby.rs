@@ -1377,6 +1377,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // length:, private:); super; end`.
 #[test] fn super_forward_kwargs() { run_diff("super_forward_kwargs"); }
 
+// `IO::SEEK_SET` / `SEEK_CUR` / `SEEK_END` whence constants, and
+// File#seek honoring them. Surfaced by mini_mime's PReadFile#pread.
+#[test] fn io_seek_constants() { run_diff("io_seek_constants"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }
