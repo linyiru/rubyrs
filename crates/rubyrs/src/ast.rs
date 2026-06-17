@@ -1582,6 +1582,30 @@ fn singleton_body_needs_real_eval(body_nodes: &[Node<'_>], recv_is_self: bool) -
                 return true;
             }
         }
+        // Constant assignment in the body (`PATCH_MAP = {…}`): the
+        // constant belongs to the eigenclass, and the body's methods
+        // reference it BARE — which only resolves when those methods
+        // carry the eigenclass cref. The compile-time desugar rewrites
+        // them to `def Recv.m` with the SURROUNDING cref (wrong), so a
+        // bare reference can't find the const. The real eigenclass-body
+        // path runs the whole body with self = the metaclass, giving
+        // both the const and the methods the right scope. Surfaced by
+        // diff-lcs (`class << Diff::LCS; PATCH_MAP = {…}; def …
+        // PATCH_MAP[dir] … end; end`).
+        //
+        // NON-self only: a `class << self` body's const write is handled
+        // by the desugar's dedicated arm (which keeps it coexisting with
+        // class-variable writes in the SAME body — the real-eigenclass
+        // path re-roots `@@cvar` on the metaclass and breaks that
+        // interplay, as `class_self_cvar`'s MixedBody pins). A non-self
+        // `class << Const` body has no such desugar arm and needs the
+        // real path for the bare-const-reference cref anyway.
+        if !recv_is_self
+            && (bn.as_constant_write_node().is_some()
+                || bn.as_constant_path_write_node().is_some())
+        {
+            return true;
+        }
         false
     })
 }

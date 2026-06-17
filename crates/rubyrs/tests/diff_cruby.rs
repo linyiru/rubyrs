@@ -1471,6 +1471,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // body set X's singleton-method visibility. Surfaced by diff-lcs.
 #[test] fn class_lt_lt_private() { run_diff("class_lt_lt_private"); }
 
+// Constant assignment in a `class << <const>` body (referenced bare by
+// the body's singleton methods) routes to the real eigenclass-body
+// path. Surfaced by diff-lcs's `class << Diff::LCS; PATCH_MAP = {…}`.
+#[test] fn class_lt_lt_const_body() { run_diff("class_lt_lt_const_body"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }
