@@ -2,11 +2,13 @@
 name = "carmine"
 description = "A rouge-compatible syntax-highlighting engine: runs rule tables extracted from Ruby's rouge lexers and emits byte-identical HTML"
 version = "0.3.0"
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
-authors.workspace = true
-rust-version.workspace = true
+# Self-contained (no workspace inheritance) so this crate publishes from its
+# own repo, github.com/momiji-rs/carmine, unchanged from the rubyrs monorepo.
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/momiji-rs/carmine"
+authors = ["momiji-rs"]
+rust-version = "1.95"
 readme = "README.md"
 keywords = ["syntax-highlighting", "lexer", "rouge", "highlighting"]
 categories = ["text-processing", "parser-implementations"]
@@ -20,4 +22,5 @@ fancy-regex = "0.18"
 # the fancy backtracker (which also can't anchor, so it pays an
 # O(n) scan per miss).
 regex-automata = "0.4"
-serde_json.workspace = true
+# Value-based API only — no derive macros, no proc-macro compile cost.
+serde_json = { version = "1", default-features = false, features = ["std"] }
