@@ -453,6 +453,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn splat_call_block() { run_diff("splat_call_block"); }
 #[cfg(feature = "regex")]
 #[test] fn scan_block_last_match() { run_diff("scan_block_last_match"); }
+#[test] fn array_literal_over_65k() { run_diff("array_literal_over_65k"); }
 #[test] fn safe_navigation() { run_diff("safe_navigation"); }
 #[test] fn class_extend() { run_diff("class_extend"); }
 #[test] fn super_splat_block() { run_diff("super_splat_block"); }

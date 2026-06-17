@@ -458,8 +458,12 @@ pub(crate) enum Op {
     /// NOT re-enter the override (which would recurse, since the
     /// override calls the alias).
     CallBuiltinDirect(SymId),
-    NewArray(u16),
-    NewHash(u16),
+    // u32 operands: a literal array/hash can legitimately exceed 65535
+    // elements — mail's Ragel-generated address parser builds a ~230k
+    // element `_indicies` table as one array literal. A u16 count
+    // wrapped at 2^16, corrupting the stack.
+    NewArray(u32),
+    NewHash(u32),
     /// Pops two values (begin, end). u8 nonzero = exclusive (`...`).
     NewRange(u8),
     /// proto_idx, param_start, n_params, rest_slot, kw_rest_slot.

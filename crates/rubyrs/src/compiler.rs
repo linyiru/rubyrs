@@ -1895,7 +1895,7 @@ pub(crate) fn compile_expr(
                         for i in 0..b.method_n_positional {
                             b.emit(Op::LoadLocal(i));
                         }
-                        b.emit(Op::NewArray(b.method_n_positional));
+                        b.emit(Op::NewArray(b.method_n_positional as u32));
                         b.emit(Op::ApplySuperBlock(name_id));
                     } else if b.method_has_kw
                         && b.method_kw_rest_slot.is_none()
@@ -1932,8 +1932,8 @@ pub(crate) fn compile_expr(
                             b.emit(Op::LoadSymbol(ksym));
                             b.emit(Op::LoadLocal(*slot));
                         }
-                        b.emit(Op::NewHash(kw_count));
-                        b.emit(Op::NewArray(n_pos + 1));
+                        b.emit(Op::NewHash(kw_count as u32));
+                        b.emit(Op::NewArray((n_pos + 1) as u32));
                         if block_present {
                             b.emit(Op::ApplySuperBlock(name_id));
                         } else {
@@ -1991,7 +1991,7 @@ pub(crate) fn compile_expr(
             match args {
                 Some(arg_exprs) => {
                     for a in arg_exprs { compile_expr(b, a, protos, interner, cc); }
-                    b.emit(Op::NewArray(arg_exprs.len() as u16));
+                    b.emit(Op::NewArray(arg_exprs.len() as u32));
                 }
                 None => {
                     // Forwarding form: assemble the POSITIONAL args
@@ -2009,7 +2009,7 @@ pub(crate) fn compile_expr(
                         for i in 0..n {
                             b.emit(Op::LoadLocal(i));
                         }
-                        b.emit(Op::NewArray(n));
+                        b.emit(Op::NewArray(n as u32));
                     }
                 }
             }
@@ -2067,7 +2067,7 @@ pub(crate) fn compile_expr(
         }
         Expr::ArrayLit(elems) => {
             for e in elems { compile_expr(b, e, protos, interner, cc); }
-            b.emit(Op::NewArray(elems.len() as u16));
+            b.emit(Op::NewArray(elems.len() as u32));
         }
         Expr::RangeLit { begin, end, exclusive } => {
             compile_expr(b, begin, protos, interner, cc);
@@ -2079,7 +2079,7 @@ pub(crate) fn compile_expr(
                 compile_expr(b, k, protos, interner, cc);
                 compile_expr(b, v, protos, interner, cc);
             }
-            b.emit(Op::NewHash(pairs.len() as u16));
+            b.emit(Op::NewHash(pairs.len() as u32));
         }
         Expr::CallWithBlock { receiver, name, args, block_params, block_body } => {
             // Compile-time intercepts for literal-symbol arms whose
@@ -2390,7 +2390,7 @@ fn emit_super_forward_array(b: &mut ProtoBuilder, interner: &mut Interner, rs: u
     for i in 0..rs {
         b.emit(Op::LoadLocal(i));
     }
-    b.emit(Op::NewArray(rs));
+    b.emit(Op::NewArray(rs as u32));
     // `+ rest` (already an Array)
     b.emit(Op::LoadLocal(rs));
     b.emit(Op::Call(plus_id, 1, u16::MAX));
