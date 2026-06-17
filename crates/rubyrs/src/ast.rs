@@ -3815,6 +3815,19 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // any gem we've vendored, and giving them their own arm
         // would duplicate the synthesis code without benefit.
         let early_block_arg: Option<Box<SExpr>> = n.block().and_then(|bnode| {
+            // A brace/do block on a SPLAT call (`foo(*a) { … }`):
+            // the splat forces the Apply path, which the non-splat
+            // CallWithBlock arm never reaches, so the block was dropped
+            // ("no block given" / silently ignored). Convert it to a
+            // Lambda so the Apply path forwards it as the call's block —
+            // `Struct.new(*KEYS) { attr_accessor :previous, :next }`
+            // (regexp_parser's Token). Consumed ONLY by the splat
+            // returns below; non-splat calls fall through to the
+            // CallWithBlock arm, which handles the block itself.
+            if let Some(bn) = bnode.as_block_node() {
+                let (params, body) = tr_block_node(ctx, &bn);
+                return Some(Box::new(sp(node, Expr::Lambda { params, body })));
+            }
             bnode.as_block_argument_node().and_then(|ba| match ba.expression() {
                 // Skip the symbol-to-proc shape (`&:method`); the
                 // existing CallWithBlock arm has a richer
