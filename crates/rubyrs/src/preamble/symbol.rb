@@ -13,4 +13,15 @@ class Symbol
     sym = self
     proc { |recv, *args, &blk| recv.send(sym, *args, &blk) }
   end
+
+  # `Symbol#match` / `#match?` are `to_s.match(...)` in CRuby — the symbol
+  # matches as its string. Surfaced by ostruct/oj, which guard attribute
+  # names with `name.match(/.../)`.
+  def match(*args, &block)
+    to_s.match(*args, &block)
+  end
+
+  def match?(*args)
+    to_s.match?(*args)
+  end
 end

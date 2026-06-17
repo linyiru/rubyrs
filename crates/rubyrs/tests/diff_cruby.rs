@@ -406,6 +406,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn method_name() { run_diff("method_name"); }
 #[test] fn inspect_orphans() { run_diff("inspect_orphans"); }
 #[test] fn symbol_to_proc() { run_diff("symbol_to_proc"); }
+// `Symbol#match` / `#match?` delegate to `to_s` (ostruct/oj guard names
+// with `name.match(/.../)`).
+#[test] fn symbol_match() { run_diff("symbol_match"); }
 #[test] fn case_when() { run_diff("case_when"); }
 #[test] fn modules() { run_diff("modules"); }
 #[test] fn conversions() { run_diff("conversions"); }
