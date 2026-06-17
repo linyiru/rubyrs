@@ -1,0 +1,4 @@
+# Fetched sources and the prepared bodies are NOT vendored — they are
+# cloned on demand by fetch.sh (see README for sources + licenses).
+/corpus
+/prepared
