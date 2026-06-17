@@ -95,3 +95,24 @@ module Math
     __rubyrs_math(:hypot, x.to_f, y.to_f)
   end
 end
+
+class Integer
+  # Integer square root (`Integer.sqrt(n)`): the largest non-negative
+  # Integer r such that r*r <= n. Exact even for Bignums — the float
+  # seed from Math.sqrt is refined with integer arithmetic so
+  # `Integer.sqrt(10**20)` returns 10**10 exactly, not a rounded float.
+  def self.sqrt(n)
+    if n.is_a?(Float)
+      n = n.to_i
+    elsif !n.is_a?(Integer) && n.respond_to?(:to_int)
+      n = n.to_int
+    end
+    raise TypeError, "not an integer" unless n.is_a?(Integer)
+    raise Math::DomainError, 'Numerical argument is out of domain - "isqrt"' if n < 0
+    return n if n < 2
+    x = Math.sqrt(n).to_i
+    x += 1 while (x + 1) * (x + 1) <= n
+    x -= 1 while x * x > n
+    x
+  end
+end
