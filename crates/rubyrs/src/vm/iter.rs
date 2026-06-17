@@ -18,6 +18,35 @@ use crate::value::{ObjId, Value};
 
 use super::{value_cmp_v, PinGuard, Vm};
 
+/// Build a `LastMatch` from one native-regex hit so a `String#scan`
+/// block iteration can publish `$~` (and the English aliases
+/// `$LAST_MATCH_INFO` / `$&` / `` $` `` / `$'` / `$1`..). CRuby sets
+/// `$~` to each successive MatchData while a `scan` block runs;
+/// dotenv's parser reads `$LAST_MATCH_INFO[:key]` inside exactly such
+/// a block, so without this the global stays nil and indexing it
+/// raises NoMethodError.
+#[cfg(feature = "regex")]
+fn scan_last_match(re: &regex::Regex, caps: &regex::Captures, input: &str) -> crate::vm::LastMatch {
+    let whole_m = caps.get(0).expect("capture group 0 always present on a hit");
+    let caps_vec: Vec<Option<String>> = (1..caps.len())
+        .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+        .collect();
+    let named: Vec<(String, Option<String>)> = re
+        .capture_names()
+        .flatten()
+        .map(|n| (n.to_string(), caps.name(n).map(|m| m.as_str().to_string())))
+        .collect();
+    crate::vm::LastMatch {
+        whole: whole_m.as_str().to_string(),
+        caps: caps_vec,
+        input: input.to_string(),
+        m_start: whole_m.start(),
+        m_end: whole_m.end(),
+        named,
+        binary: None,
+    }
+}
+
 /// Outcome of a single `block.call(args)` step inside an
 /// iterator driver. Returned by `Vm::step_block`.
 ///
@@ -1072,6 +1101,11 @@ impl Vm {
                         ),
                     }))?;
                     let has_groups = native.captures_len() > 1;
+                    // CRuby publishes `$~` (and its English aliases) for
+                    // each successive match while the scan block runs.
+                    // Save the caller's match into the enclosing method
+                    // frame once, then overwrite `last_match` per iteration.
+                    g.vm.save_match_scope_on_write();
                     // The pre-migration code did `pop(); if break_signaled
                     // { early = pop(); }` — TWO pops, with the second one
                     // happening AFTER the first had already discarded the
@@ -1083,6 +1117,7 @@ impl Vm {
                     // double-pop bug as a side effect.
                     if has_groups {
                         for caps in native.captures_iter(&source_str) {
+                            g.vm.last_match = Some(scan_last_match(native, &caps, &source_str));
                             let mut group_vec: Vec<Value> = Vec::with_capacity(caps.len() - 1);
                             for i in 1..caps.len() {
                                 let v = caps.get(i)
@@ -1132,8 +1167,10 @@ impl Vm {
                             }
                         }
                     } else {
-                        for m in native.find_iter(&source_str) {
-                            match g.vm.step_block1(block, Value::new_str(m.as_str()), pre_frames)? {
+                        for caps in native.captures_iter(&source_str) {
+                            let whole = caps.get(0).expect("group 0 present on a hit").as_str().to_string();
+                            g.vm.last_match = Some(scan_last_match(native, &caps, &source_str));
+                            match g.vm.step_block1(block, Value::new_str(&whole), pre_frames)? {
                                 BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                                 BlockStep::Break(r) => { early = Some(r); break; }
                                 BlockStep::Value(_) => {}
