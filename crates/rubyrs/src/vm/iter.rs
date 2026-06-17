@@ -852,8 +852,27 @@ impl Vm {
         // ActiveSupport-lite canon couldn't write
         // `String#camelize` the idiomatic way.
         #[cfg(feature = "regex")]
-        if let (Value::Str(s), Value::Regex(re), 1) = (recv, args.first().unwrap_or(&Value::Nil), args.len())
+        if let Value::Str(s) = recv
+            && args.len() == 1
+            && matches!(&args[0], Value::Regex(_) | Value::Str(_))
             && (name == "gsub" || name == "sub" || name == "gsub!" || name == "sub!") {
+                // A String pattern is matched as a literal: escape its
+                // metacharacters and compile, so `"hi".gsub("h") { … }`
+                // (and the no-block enumerator `gsub("h").to_a`, which
+                // drives this path) work like the Regex form.
+                let re: std::rc::Rc<crate::regex_engine::CompiledRegex> = match &args[0] {
+                    Value::Regex(re) => re.clone(),
+                    Value::Str(pat) => {
+                        let escaped = regex::escape(&pat.to_string_lossy());
+                        std::rc::Rc::new(crate::regex_engine::compile(&escaped).map_err(|e| {
+                            self.trap(crate::error::RubyError::RuntimeError {
+                                msg: format!("regex compile failed: {}", e),
+                            })
+                        })?)
+                    }
+                    _ => unreachable!(),
+                };
+                let re = &re;
                 let is_bang = name == "sub!" || name == "gsub!";
                 // Bang siblings must reject a frozen receiver
                 // before iterating — even when the pattern would

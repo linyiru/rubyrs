@@ -462,6 +462,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn sprintf_positional() { run_diff("sprintf_positional"); }
 #[cfg(feature = "regex")]
 #[test] fn string_gsub_enumerator() { run_diff("string_gsub_enumerator"); }
+#[cfg(feature = "regex")]
+#[test] fn string_gsub_string_pattern() { run_diff("string_gsub_string_pattern"); }
 #[test] fn hash_transform_enumerator() { run_diff("hash_transform_enumerator"); }
 #[test] fn hash_transform_keys_mapping() { run_diff("hash_transform_keys_mapping"); }
 #[cfg(feature = "regex")]

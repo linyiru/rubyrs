@@ -3782,17 +3782,17 @@ impl Vm {
                     // rather than the stateless `string_call`. `sub`
                     // replaces the first match, `gsub` all.
                     #[cfg(feature = "regex")]
-                    // `gsub` with ONLY a regex pattern (no replacement,
-                    // no block) → an Enumerator (Ruby 2.6+). Driving it
-                    // with a block re-invokes gsub with that block, so the
+                    // `gsub` with ONLY a pattern (no replacement, no
+                    // block) → an Enumerator (Ruby 2.6+). Driving it with
+                    // a block re-invokes gsub with that block, so the
                     // result is the substituted String —
                     // `"aaa".gsub(/a/).with_index { |m,i| i.to_s }` →
-                    // "012", and `"hello".gsub(/l/).count` → 2. Restricted
-                    // to Regex: the block form for a STRING pattern isn't
-                    // wired yet (the enumerator would re-invoke an
-                    // unsupported `gsub("str") { … }`). `sub` has no
-                    // enumerator form — it requires a replacement arg.
-                    ("gsub", [Value::Regex(_)]) => {
+                    // "012", and `"hello".gsub(/l/).count` → 2. Works for
+                    // Regex AND String patterns (the block form for a
+                    // string literal is handled in collection_call_block).
+                    // `sub` has no enumerator form — it needs a
+                    // replacement arg.
+                    ("gsub", [Value::Regex(_) | Value::Str(_)]) => {
                         return self
                             .make_enum_for(Value::Str(s.clone()), name, vec![args[0].clone()])
                             .map(Some);
