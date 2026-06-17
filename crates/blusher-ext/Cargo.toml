@@ -1,0 +1,20 @@
+[package]
+name = "blusher-ext"
+description = "magnus/rb-sys native extension for the blusher gem — carmine engine bound to CRuby, building the token array directly (no JSON round-trip)."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+# The Ruby loadable object. rb-sys/rake-compiler renames it to the gem's
+# expected `blusher.{bundle,so}` at install; the symbol is `Init_blusher`.
+name = "blusher"
+crate-type = ["cdylib"]
+
+[dependencies]
+carmine = { path = "../carmine" }
+magnus = "0.7"

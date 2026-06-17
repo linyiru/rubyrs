@@ -47,6 +47,7 @@ resolver = "3"
 members = [
     "crates/carmine",
     "crates/carmine-ffi",
+    "crates/blusher-ext",
     "crates/liquidus",
     "crates/rostdown",
     "crates/rubyrs",
