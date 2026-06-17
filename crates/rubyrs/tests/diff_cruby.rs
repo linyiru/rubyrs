@@ -1016,6 +1016,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // predicates / #sign, and bigdecimal/util #to_d. Surfaced by money.
 #[cfg(feature = "stdlib")]
 #[test] fn bigdecimal_modes_util() { run_diff_gem("bigdecimal_modes_util", "bigdecimal"); }
+// `Monitor` autoloaded (available without explicit require, as in a
+// full Ruby env). Oracle is gem-enabled CRuby (`--disable=gems` lacks
+// the ambient Monitor). Surfaced by dotenv's bare `Monitor.new`.
+#[cfg(feature = "stdlib")]
+#[test] fn monitor_autoload() { run_diff_gem("monitor_autoload", "monitor"); }
 #[test] fn gsub_hash() { run_diff("gsub_hash"); }
 #[test] fn hash_delete_block() { run_diff("hash_delete_block"); }
 // Hash#flatten(level) / #fetch_values (KeyError on miss) /

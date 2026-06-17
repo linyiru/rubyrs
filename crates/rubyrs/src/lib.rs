@@ -2892,6 +2892,18 @@ RUBYRS = "rubyrs".freeze
             "<rubyrs:preamble:set-autoload>",
         )
             .expect("ICE: failed to register Set autoload");
+        // `Monitor` is available without an explicit `require "monitor"`
+        // in a full Ruby environment (rubygems pre-loads it), and gems
+        // lean on that — dotenv references `Monitor.new` at module load
+        // without requiring it. Autoload it (stdlib-gated, where the
+        // vendored `monitor` can load); the default build leaves Monitor
+        // absent (honest "uninitialized constant Monitor").
+        #[cfg(feature = "stdlib")]
+        self.eval_inner(
+            "autoload :Monitor, \"monitor\"",
+            "<rubyrs:preamble:monitor-autoload>",
+        )
+            .expect("ICE: failed to register Monitor autoload");
         // File IO veneer — pure-Ruby `File.open` / `File.new` /
         // read-side instance methods on top of the Tier-1
         // `File.read` host primitive (ADR 0019 `_io`-veneer
