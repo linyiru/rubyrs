@@ -4702,13 +4702,28 @@ impl Vm {
                 let inherit = !matches!(args_, [Value::Bool(false)]);
                 let mut names: Vec<String> = Vec::new();
                 let collect = |prefix: &str, names: &mut Vec<String>| {
-                    for k in self.constants.keys() {
+                    // Scan BOTH the constant-VALUE table and the CLASS
+                    // table: a nested class/module defined via the
+                    // compact `class M::Foo` form registers only in
+                    // `self.classes` (the in-module `module M; class Foo`
+                    // form also lands there), so reading `self.constants`
+                    // alone missed them — `Regexp::Syntax.constants`
+                    // returned none of the `class Regexp::Syntax::V1_8_6`
+                    // version classes, breaking regexp_parser's
+                    // `specified_versions` fallback.
+                    let push_short = |k: &crate::intern::SymId, names: &mut Vec<String>| {
                         let s = self.interner.resolve(*k).to_string();
                         if let Some(short) = s.strip_prefix(prefix)
                             && !short.contains("::")
                             && !names.contains(&short.to_string()) {
                             names.push(short.to_string());
                         }
+                    };
+                    for k in self.constants.keys() {
+                        push_short(k, names);
+                    }
+                    for k in self.classes.keys() {
+                        push_short(k, names);
                     }
                 };
                 let own_prefix = format!("{}::", cls.name);

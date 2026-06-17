@@ -1505,6 +1505,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // constants resolve through the receiver's namespace. Surfaced by rss.
 #[test] fn module_eval_const_scope() { run_diff("module_eval_const_scope"); }
 
+// `Module#constants` lists nested classes/modules defined via the
+// compact `class M::Foo` form (not just `module M; class Foo`).
+// Surfaced by regexp_parser's `class Regexp::Syntax::V1_8_6` versions.
+#[test] fn constants_compact_class() { run_diff("constants_compact_class"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }
