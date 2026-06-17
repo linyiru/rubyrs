@@ -1445,6 +1445,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // dispatches on self. Surfaced by mail's CommonField#parse (`tap(&:element)`).
 #[test] fn bare_tap_then() { run_diff("bare_tap_then"); }
 
+// `defined?(super)` — "super" when the enclosing method has a super in
+// the chain, else nil. Surfaced by sorbet's `if defined?(super); super`.
+#[test] fn defined_super() { run_diff("defined_super"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

@@ -4089,6 +4089,20 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         if inner.as_local_variable_read_node().is_some() {
             return s("local-variable");
         }
+        // `defined?(super)` — "super" when the enclosing method has a
+        // super-chain method of the same name, else nil. The runtime
+        // probe reads the current frame's method + ancestry (host fns
+        // run inline, so the frame is still the method containing the
+        // `defined?`). Pre-fix this fell through to the catch-all
+        // `"expression"`, so `if defined?(super); super; end` (sorbet's
+        // T::Helpers#abstract!) always ran the `super` and tripped
+        // "no superclass method".
+        if inner.as_super_node().is_some() || inner.as_forwarding_super_node().is_some() {
+            return Spanned::new(span, Expr::Call {
+                receiver: None,
+                name: "__defined_super?".into(),
+                args: vec![], kwargs_trailing: false });
+        }
         if let Some(iv) = inner.as_instance_variable_read_node() {
             let name = cid_to_string(iv.name());
             return Spanned::new(span, Expr::Call {

@@ -74,6 +74,7 @@ impl Vm {
                 | "__defined_method?"
                 | "__defined_const?"
                 | "__defined_recv_method?"
+                | "__defined_super?"
                 | "undef_method"
                 | "eval"
                 // `autoload(:Foo, "path")` / `autoload?(:Foo)`
@@ -918,6 +919,30 @@ impl Vm {
             // routes here for IVarRead / Call / ConstRead inner
             // expressions. The label-only-on-hit pattern matches
             // CRuby: hit returns a String, miss returns nil.
+            "__defined_super?" => {
+                // `defined?(super)` — "super" iff the enclosing method
+                // has a same-named method further up the chain. Host fns
+                // run inline (no frame push), so the top frame is still
+                // the method that textually contains the `defined?`. Get
+                // its method name from the proto and probe via
+                // `super_lookup` (which resolves WITHOUT invoking);
+                // Ok → a super exists, Err → none. Synthetic block / eval
+                // protos (name starts with `<`) aren't modeled — return
+                // nil there (a `defined?(super)` inside a block is rare).
+                let name_id = self.frames.last().and_then(|f| {
+                    let pn = self.protos[f.proto_idx].name.clone();
+                    if pn.is_empty() || pn.starts_with('<') {
+                        None
+                    } else {
+                        Some(self.interner.intern(&pn))
+                    }
+                });
+                let has = match name_id {
+                    Some(nid) => self.super_lookup(nid).is_ok(),
+                    None => false,
+                };
+                return Some(Ok(if has { Value::new_str("super") } else { Value::Nil }));
+            }
             "__defined_ivar?" => {
                 if let Some(Value::Sym(sid)) = args.first() {
                     let self_val = self.frames.last()
