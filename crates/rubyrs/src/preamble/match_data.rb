@@ -94,12 +94,24 @@ class MatchData
     # serialise as `N:nil` rather than `N:""`. String captures
     # go through `String#inspect` so quotes / escapes match CRuby
     # byte-for-byte.
+    #
+    # When the pattern has ANY named capture, CRuby lists ONLY the
+    # named groups (by name, in pattern order) and suppresses the
+    # numbered list entirely — `/(\w)(?<k>\w)/` inspects as
+    # `#<MatchData "ab" k:"b">`, NOT `1:"a" k:"b"`. Otherwise it
+    # falls back to the numbered list.
     parts = "#<MatchData " + @whole.inspect
-    i = 0
-    while i < @caps.length
-      cap = @caps[i]
-      parts += " " + (i + 1).to_s + ":" + (cap.nil? ? "nil" : cap.inspect)
-      i += 1
+    if @named_caps && !@named_caps.empty?
+      @named_caps.each do |name, val|
+        parts += " " + name + ":" + (val.nil? ? "nil" : val.inspect)
+      end
+    else
+      i = 0
+      while i < @caps.length
+        cap = @caps[i]
+        parts += " " + (i + 1).to_s + ":" + (cap.nil? ? "nil" : cap.inspect)
+        i += 1
+      end
     end
     parts + ">"
   end

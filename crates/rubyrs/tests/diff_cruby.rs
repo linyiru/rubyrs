@@ -453,6 +453,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn splat_call_block() { run_diff("splat_call_block"); }
 #[cfg(feature = "regex")]
 #[test] fn scan_block_last_match() { run_diff("scan_block_last_match"); }
+#[cfg(feature = "regex")]
+#[test] fn match_data_inspect_named() { run_diff("match_data_inspect_named"); }
 #[test] fn array_literal_over_65k() { run_diff("array_literal_over_65k"); }
 #[test] fn block_param_trailing_comma() { run_diff("block_param_trailing_comma"); }
 #[test] fn require_relative_dotted() { run_diff("require_relative_dotted"); }
