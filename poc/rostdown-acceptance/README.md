@@ -63,14 +63,14 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 
 | source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 75.2 % (97/129) |
+| bridgetown | 81.4 % (105/129) |
 | jekyll | 73.3 % (148/202) |
-| **combined** | **74.0 % (245/331)** |
+| **combined** | **76.4 % (253/331)** |
 
-Top decline reasons (combined, `run.sh`): `html-block` (26),
-`opt-space-block` (9), `table` (9), `link-text-nested` (5),
-`hard-break` (4), `indented-code` (3), `ald-ial-extension` (3).
-`inline-html-or-autolink` and `header-ial` have left the top reasons.
+Top decline reasons (combined, `run.sh`): `html-block` (~26),
+`opt-space-block` (~9), `table` (~9), then small tails. `hard-break`,
+`link-text-nested`, `inline-html-or-autolink`, `header-ial` have left the
+top reasons — all now rendered.
 
 **On 100 %.** Correctness is already 100 % — every accepted page is
 byte-identical and every declined page renders correctly via the Ruby
@@ -104,8 +104,9 @@ a kramdown-faithful re-serialization of common raw HTML blocks
 pipe/table boundary (a block with a pipe-less line is a paragraph, not a
 decline), leading block IALs (`{:.note}\ntext` → `<p class="note">`), and
 inline HTML elements (void like `<br>` plus markdown-content ones like
-`<a>`/`<abbr>`/`<sub>`). Current: **72.8 %**. `verify.sh` is the standing
-gate that keeps it WRONG = 0.
+`<a>`/`<abbr>`/`<sub>`), the `{#id}` header-id shorthand, hard line breaks
+(`<br />`), and nested brackets / linked images in link text. Current:
+**76.4 %**. `verify.sh` is the standing gate that keeps it WRONG = 0.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
