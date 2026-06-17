@@ -12,7 +12,7 @@ G = "/Users/linyiru/.rbenv/versions/3.4.1/lib/ruby/gems/3.4.0/gems"
 # rubyrs' built-in — a load-path artifact, not a real capability gap.
 VENDORED = %w[
   date bigdecimal openssl securerandom json csv strscan stringio set
-  digest psych yaml zlib fiddle etc fcntl io-console pathname
+  digest psych yaml zlib fiddle etc fcntl io-console pathname erb cgi
 ].freeze
 
 # Add the newest installed version of every gem's lib/ dir. No rubygems on
