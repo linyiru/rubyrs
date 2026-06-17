@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Measure rostdown's real-world acceptance over the prepared corpus: what
-# fraction of real pages render (byte-identically to kramdown, by the
-# right-or-declined contract) vs decline → Ruby-kramdown fallback. Run
-# ./fetch.sh first. Uses the rostdown `decline_scan` example.
+# Measure rostdown's real-world ACCEPT-vs-DECLINE rate over the prepared
+# corpus: what fraction of real pages rostdown renders rather than declines
+# (→ Ruby-kramdown fallback). Run ./fetch.sh first. Uses the rostdown
+# `decline_scan` example (Rust-only, fast).
+#
+# NOTE: this does NOT prove the accepted output is byte-identical to
+# kramdown — only that rostdown didn't decline. For the correctness gate
+# (accepted ⇒ bytes equal kramdown, WRONG must be 0) run ./verify.sh.
 set -euo pipefail
 cd "$(dirname "$0")"
 PREP=prepared

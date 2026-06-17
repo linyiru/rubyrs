@@ -31,8 +31,18 @@ share-alike would travel).
 
 ```sh
 ./fetch.sh   # clone + prepare (idempotent; rm -rf corpus/<name> to refresh)
-./run.sh     # per-source + combined acceptance and the decline histogram
+./run.sh     # per-source + combined accept-vs-decline + decline histogram (Rust-only)
+./verify.sh  # the byte-identity GATE: accepted ⇒ bytes equal kramdown (needs Ruby + kramdown)
 ```
+
+`run.sh` answers *"what fraction did rostdown render rather than decline?"*
+(fast, no Ruby). `verify.sh` answers the stricter, real question —
+*"…and was every rendered page byte-identical to kramdown?"* — by diffing
+each accepted page against `kramdown_oracle.rb` (the gem profile, syntax
+highlighting off to match rostdown's NoHighlight). **`WRONG` must be 0**:
+a nonzero count is an accept-but-wrong bug, which is worse than a decline
+(a decline still renders correctly via the Ruby fallback). Treat
+`verify.sh`'s acceptance number, not `run.sh`'s, as the headline.
 
 ## Caveats
 
@@ -43,31 +53,41 @@ share-alike would travel).
   outcome but isn't a perfect mirror of a real build.
 - `decline_scan` reports the **first** decline reason per file, so the
   histogram under-counts secondary reasons.
-- "Accepted" means rostdown rendered rather than declined. That the
-  accepted output is byte-identical to kramdown is gated separately (the
-  rostdown crate's golden corpus + differentials), not re-checked here.
+- In `run.sh`, "accepted" means only that rostdown rendered rather than
+  declined — it does **not** prove the output is correct. `verify.sh` adds
+  the byte-identity check that does; prefer its number.
 
-## Findings (2026-06-16)
+## Findings (2026-06-17, byte-identity verified)
 
-| source | acceptance |
+`verify.sh` — **0 accept-but-wrong**:
+
+| source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 52.7 % (68/129) |
-| jekyll | 49.0 % (99/202) |
-| **combined** | **50.5 % (167/331)** |
+| bridgetown | 60.5 % (78/129) |
+| jekyll | 49.5 % (100/202) |
+| **combined** | **53.8 % (178/331)** |
 
-Top decline reasons (combined): `html-block` (44), `ald-ial-extension`
-(33), `table` (20), `inline-html-or-autolink` (15), `entity` (10).
+Top decline reasons (combined, `run.sh`): `html-block` (44),
+`ald-ial-extension` (19), `table` (19), `inline-html-or-autolink` (16),
+`entity` (11), `link-definition` (8).
 
-(Earlier snapshot: 40.2 % combined. The intervening work — inline images,
-indented headings/lists, and reference links/images — lifted it to
-50.5 %; `opt-space-block`, `link-definition`, and `image` left the top
-reasons.)
+**The accept-but-wrong correction.** Earlier snapshots (40.2 % → 50.5 % →
+a raw 57.4 %) counted accept-vs-decline only — they were never byte-checked
+against kramdown. The first byte-identity sweep found **12 accepted pages
+whose HTML differed from kramdown** (the cardinal sin: silently wrong, not
+a safe fallback). All 12 were fixed — by declining the constructs we can't
+reproduce (Liquid-in-link-defs, chained/blockquote/header IALs, cross-line
+emphasis & links, opt-space lazy-continuation whitespace) and by correctly
+supporting one (length-aware fence close). That moved those 12 from
+accept→decline, so the honest figure is **53.8 %, with WRONG = 0** — lower
+than the inflated 57.4 %, but every accepted page is now provably
+byte-identical. `verify.sh` is the standing gate that keeps it that way.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
-prose (`../markdown-bench/corpus/bench.md`) is 100 %; this repo's own
-technical docs ~59 %; real Jekyll/Bridgetown content ~50 %. The two
-dominant remaining blockers are *core kramdown features the engine does
-not yet do* — raw HTML blocks and IAL/ALD (`{:.class}`, `{:toc}`). Every
-declined page still renders correctly via the Ruby-kramdown fallback;
-declining only forgoes the speed-up. So the highest-leverage work for
-broader real-world acceleration is raw-HTML blocks and IAL/ALD.
+prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
+content ~54 %. The dominant remaining blockers are *core kramdown features
+the engine does not yet do* — raw HTML blocks and IAL/ALD (`{:.class}`,
+`{:toc}`). Every declined page still renders correctly via the
+Ruby-kramdown fallback; declining only forgoes the speed-up. So the
+highest-leverage work for broader real-world acceleration is raw-HTML
+blocks and IAL/ALD.
