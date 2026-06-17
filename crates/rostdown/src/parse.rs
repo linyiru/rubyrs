@@ -163,6 +163,10 @@ pub(crate) enum SpanKind<'a> {
         /// Index of the first child span.
         spans: Option<u32>,
         href: Cow<'a, str>,
+        /// Optional `title="…"` from `[text](url "title")` / `'title'`.
+        /// HTML-attr-escaped at conversion; `None` for the common
+        /// no-title link.
+        title: Option<Cow<'a, str>>,
     },
 }
 
@@ -731,9 +735,12 @@ fn copy_spans_owned<'a>(dst: &mut Ast<'a>, scratch: &Ast<'_>, head: Option<u32>)
             SpanKind::Code(t) => SpanKind::Code(Cow::Owned(t.clone().into_owned())),
             SpanKind::Em(inner) => SpanKind::Em(copy_spans_owned(dst, scratch, *inner)),
             SpanKind::Strong(inner) => SpanKind::Strong(copy_spans_owned(dst, scratch, *inner)),
-            SpanKind::Link { spans, href } => SpanKind::Link {
+            SpanKind::Link { spans, href, title } => SpanKind::Link {
                 spans: copy_spans_owned(dst, scratch, *spans),
                 href: Cow::Owned(href.clone().into_owned()),
+                title: title
+                    .as_ref()
+                    .map(|t| Cow::Owned(t.clone().into_owned())),
             },
         };
         let new_idx = dst.push_span(kind);
@@ -1410,13 +1417,19 @@ fn parse_spans_until<'a>(
             b'[' => {
                 acc.flush(ast, &mut chain);
                 let rest = &text[i..];
-                let Some((spans, href, len)) = parse_link(ast, rest, in_em, in_strong)? else {
-                    return Err(declined("bracket-not-link"));
-                };
-                let idx = ast.push_span(SpanKind::Link { spans, href });
-                chain.link(idx, |p, n| ast.spans[p as usize].next = Some(n));
-                prev = Some(')');
-                i += len;
+                if let Some((spans, href, title, len)) =
+                    parse_link(ast, rest, in_em, in_strong)?
+                {
+                    let idx = ast.push_span(SpanKind::Link { spans, href, title });
+                    chain.link(idx, |p, n| ast.spans[p as usize].next = Some(n));
+                    prev = Some(')');
+                    i += len;
+                } else {
+                    // Not an inline link → `[` is literal; resume after it.
+                    acc.push_byte(i);
+                    prev = Some('[');
+                    i += 1;
+                }
             }
             b'!' if bytes.get(i + 1) == Some(&b'[') => {
                 return Err(declined("image"));
@@ -1705,7 +1718,7 @@ fn parse_link<'a>(
     rest: &'a str,
     in_em: bool,
     in_strong: bool,
-) -> Result<Option<(Option<u32>, Cow<'a, str>, usize)>, Error> {
+) -> Result<Option<(Option<u32>, Cow<'a, str>, Option<Cow<'a, str>>, usize)>, Error> {
     let bytes = rest.as_bytes();
     debug_assert_eq!(bytes[0], b'[');
     let mut depth = 1;
@@ -1723,24 +1736,71 @@ fn parse_link<'a>(
             _ => {}
         }
     }
+    // Unclosed bracket, or `]` not followed by `(`: not an inline link.
+    // kramdown then renders the `[` literally — reference-style links need
+    // a link definition, and a doc that has one already declines — so we
+    // signal "not a link" and let the caller emit `[` as text.
     let Some(close) = close else {
-        return Err(declined("unclosed-bracket"));
+        return Ok(None);
     };
     if bytes.get(close + 1) != Some(&b'(') {
         return Ok(None);
     }
     let after = &rest[close + 2..];
     let Some(paren_rel) = after.find(')') else {
-        return Err(declined("unclosed-link-paren"));
+        return Ok(None);
     };
-    let href = &after[..paren_rel];
-    if href.contains(' ') || href.contains('"') {
-        return Err(declined("link-title-or-space"));
-    }
+    let Some((href, title)) = split_href_title(&after[..paren_rel]) else {
+        // Quote present but the title is malformed (e.g. `url "t" extra`):
+        // kramdown treats the whole `[…](…)` as literal text.
+        return Ok(None);
+    };
     let (spans, _) =
         parse_spans_until(ast, &rest[1..close], None, in_em, in_strong, Some(Elem::Link))?;
-    // `href` is a sub-slice of `rest` (the link source) — borrow it.
-    Ok(Some((spans, Cow::Borrowed(href), close + 2 + paren_rel + 1)))
+    // `href`/`title` are sub-slices of `rest` (the link source) — borrow.
+    Ok(Some((
+        spans,
+        Cow::Borrowed(href),
+        title.map(Cow::Borrowed),
+        close + 2 + paren_rel + 1,
+    )))
+}
+
+/// Split a link destination `(…)` body into `(href, optional title)`,
+/// matching kramdown: `url`, `url "title"`, `url 'title'`. A bare space
+/// with no quote stays in the href (`url with space` ⇒ that whole href).
+/// Returns `None` when a quote is present but the title is malformed —
+/// kramdown then declines the link and the `[` is rendered literally.
+fn split_href_title(inner: &str) -> Option<(&str, Option<&str>)> {
+    let bytes = inner.as_bytes();
+    let Some(&last) = bytes.last() else {
+        return Some((inner, None)); // empty `()`
+    };
+    if last != b'"' && last != b'\'' {
+        // No trailing quote: a stray quote elsewhere ⇒ malformed title.
+        if inner.contains('"') || inner.contains('\'') {
+            return None;
+        }
+        return Some((inner, None));
+    }
+    // Closing quote is the last byte; the opening quote is the leftmost
+    // matching quote preceded by ASCII whitespace (the `url "title"` form).
+    let q = last;
+    let mut open = None;
+    for j in 1..inner.len().saturating_sub(1) {
+        if bytes[j] == q && bytes[j - 1].is_ascii_whitespace() {
+            open = Some(j);
+            break;
+        }
+    }
+    let open = open?;
+    let href = inner[..open].trim_end();
+    let title = &inner[open + 1..inner.len() - 1];
+    // No nested same-quote in the title, and the href must be quote-free.
+    if title.as_bytes().contains(&q) || href.contains('"') || href.contains('\'') {
+        return None;
+    }
+    Some((href, Some(title)))
 }
 
 #[cfg(test)]
@@ -1823,5 +1883,28 @@ mod byte_opt_tests {
             h[pos] = b'*';
             assert_eq!(next_trigger(&h), Some(pos), "pos={pos}");
         }
+    }
+
+    #[test]
+    fn split_href_title_cases() {
+        // (verified byte-identical against kramdown 2.5.2)
+        assert_eq!(split_href_title("url"), Some(("url", None)));
+        assert_eq!(
+            split_href_title(r#"http://x.com "title""#),
+            Some(("http://x.com", Some("title")))
+        );
+        assert_eq!(
+            split_href_title("http://x.com 'sgl'"),
+            Some(("http://x.com", Some("sgl")))
+        );
+        // bare space with no quote stays in the href
+        assert_eq!(
+            split_href_title("url with space"),
+            Some(("url with space", None))
+        );
+        // empty href + title
+        assert_eq!(split_href_title(r#" "t""#), Some(("", Some("t"))));
+        // malformed: quote present, trailing junk after the close quote
+        assert_eq!(split_href_title(r#"url "t" extra"#), None);
     }
 }

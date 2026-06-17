@@ -45,7 +45,7 @@ fn main() {
 
     // sort by count desc
     let mut v: Vec<(&&str, &(usize, String))> = reasons.iter().collect();
-    v.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+    v.sort_by_key(|(_, (count, _))| std::cmp::Reverse(*count));
     for (reason, (count, example)) in v {
         println!("  {count:>4}  {reason:<28} e.g. {example}");
     }

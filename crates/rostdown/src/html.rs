@@ -252,10 +252,16 @@ fn convert_spans(out: &mut String, ast: &Ast<'_>, head: Option<u32>, codespan_cl
                 escape_text(out, code);
                 out.push_str("</code>");
             }
-            SpanKind::Link { spans, href } => {
+            SpanKind::Link { spans, href, title } => {
                 out.push_str("<a href=\"");
                 escape_attr(out, href);
-                out.push_str("\">");
+                out.push('"');
+                if let Some(title) = title {
+                    out.push_str(" title=\"");
+                    escape_attr(out, title);
+                    out.push('"');
+                }
+                out.push('>');
                 convert_spans(out, ast, *spans, codespan_class);
                 out.push_str("</a>");
             }
