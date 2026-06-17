@@ -1130,7 +1130,6 @@ impl Vm {
         name: &str,
         args: &[Value],
     ) -> bool {
-        let Value::Str(rs) = recv else { return false };
         if name != "encoding" || !args.is_empty() {
             return false;
         }
@@ -1139,21 +1138,35 @@ impl Vm {
         // exists; report UTF-8 rather than panicking so a future
         // partial wiring degrades visibly (wrong name) instead of
         // fatally.
-        let const_name: std::borrow::Cow<'static, str> = match rs.encoding.get() {
-            crate::value::EncodingTag::Utf8 => "Encoding::UTF_8".into(),
-            crate::value::EncodingTag::UsAscii => "Encoding::US_ASCII".into(),
-            crate::value::EncodingTag::Binary => "Encoding::ASCII_8BIT".into(),
-            #[cfg(feature = "_encoding_full")]
-            crate::value::EncodingTag::Other(idx) => {
-                // Registry constant: "ISO-8859-1" → Encoding::ISO_8859_1
-                // (the preamble's encoding_full segment defines them).
-                match crate::encoding_full::name(idx) {
-                    Some(n) => format!("Encoding::{}", n.replace('-', "_")).into(),
-                    None => "Encoding::UTF_8".into(),
+        let const_name: std::borrow::Cow<'static, str> = match recv {
+            Value::Str(rs) => match rs.encoding.get() {
+                crate::value::EncodingTag::Utf8 => "Encoding::UTF_8".into(),
+                crate::value::EncodingTag::UsAscii => "Encoding::US_ASCII".into(),
+                crate::value::EncodingTag::Binary => "Encoding::ASCII_8BIT".into(),
+                #[cfg(feature = "_encoding_full")]
+                crate::value::EncodingTag::Other(idx) => {
+                    // Registry constant: "ISO-8859-1" → Encoding::ISO_8859_1
+                    // (the preamble's encoding_full segment defines them).
+                    match crate::encoding_full::name(idx) {
+                        Some(n) => format!("Encoding::{}", n.replace('-', "_")).into(),
+                        None => "Encoding::UTF_8".into(),
+                    }
+                }
+                #[cfg(not(feature = "_encoding_full"))]
+                crate::value::EncodingTag::Other(_) => "Encoding::UTF_8".into(),
+            },
+            // `Regexp#encoding` — CRuby reports US-ASCII for an all-ASCII
+            // source, UTF-8 when the pattern contains multibyte chars.
+            // regexp_parser's scanner reads `regexp.encoding`.
+            #[cfg(feature = "regex")]
+            Value::Regex(re) => {
+                if re.as_str().is_ascii() {
+                    "Encoding::US_ASCII".into()
+                } else {
+                    "Encoding::UTF_8".into()
                 }
             }
-            #[cfg(not(feature = "_encoding_full"))]
-            crate::value::EncodingTag::Other(_) => "Encoding::UTF_8".into(),
+            _ => return false,
         };
         let key = self.interner.intern(&const_name);
         let v = self.constants.get(&key).cloned()
