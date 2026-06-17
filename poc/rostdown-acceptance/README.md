@@ -63,12 +63,12 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 
 | source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 60.5 % (78/129) |
+| bridgetown | 61.2 % (79/129) |
 | jekyll | 54.5 % (110/202) |
-| **combined** | **56.8 % (188/331)** |
+| **combined** | **57.1 % (189/331)** |
 
 Top decline reasons (combined, `run.sh`): `html-block` (49), `table` (20),
-`ald-ial-extension` (19), `inline-html-or-autolink` (16),
+`ald-ial-extension` (18), `inline-html-or-autolink` (16),
 `opt-space-block` (7).
 
 **The accept-but-wrong correction.** Earlier snapshots (40.2 % → 50.5 % →
@@ -81,10 +81,11 @@ emphasis & links, opt-space lazy-continuation whitespace) and by correctly
 supporting one (length-aware fence close). That moved those 12 from
 accept→decline, so the honest post-correction figure was **53.8 %, with
 WRONG = 0** — lower than the inflated 57.4 %, but every accepted page is now
-provably byte-identical. Two follow-on features — HTML entity resolution
-(kramdown `:as_char`) and spaced link-definition destinations (so Liquid
-`{{ … }}` URLs resolve) — then lifted it to the current **56.8 %**, still
-WRONG = 0. `verify.sh` is the standing gate that keeps it that way.
+provably byte-identical. Follow-on features — HTML entity resolution
+(kramdown `:as_char`), spaced link-definition destinations (so Liquid
+`{{ … }}` URLs resolve), and the blockquote "note box" IAL (`> …\n{:.note}`
+→ `<blockquote class="note">`) — then lifted it to the current **57.1 %**,
+still WRONG = 0. `verify.sh` is the standing gate that keeps it that way.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
