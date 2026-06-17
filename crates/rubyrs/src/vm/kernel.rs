@@ -3537,10 +3537,23 @@ impl Vm {
                 .unwrap_or_else(|| PathBuf::from(".")),
             None => PathBuf::from("."),
         };
-        let mut target = base_dir.join(path_str);
-        if target.extension().is_none() {
-            target.set_extension("rb");
-        }
+        // Ruby appends `.rb` unless the path already names a `.rb`
+        // (or native) file. A dotted basename like `maker/1.0` has
+        // extension `"0"` — NOT a loadable extension — so CRuby still
+        // appends `.rb` → `maker/1.0.rb` (rss requires its versioned
+        // submodules this way). `set_extension("rb")` would REPLACE the
+        // `.0`, yielding `maker/1.rb`, so build the candidate by string
+        // append instead. A path that already ends in `.rb` is used
+        // verbatim.
+        let has_ruby_ext = Path::new(path_str)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e == "rb");
+        let target = if has_ruby_ext {
+            base_dir.join(path_str)
+        } else {
+            base_dir.join(format!("{path_str}.rb"))
+        };
         // Canonicalise so the duplicate-load check works regardless
         // of `./` / `..` or relative-cwd shape.
         let canon = match std::fs::canonicalize(&target) {
