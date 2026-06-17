@@ -63,14 +63,27 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 
 | source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 72.9 % (94/129) |
-| jekyll | 72.8 % (147/202) |
-| **combined** | **72.8 % (241/331)** |
+| bridgetown | 75.2 % (97/129) |
+| jekyll | 73.3 % (148/202) |
+| **combined** | **74.0 % (245/331)** |
 
 Top decline reasons (combined, `run.sh`): `html-block` (26),
 `opt-space-block` (9), `table` (9), `link-text-nested` (5),
-`hard-break` (4). `inline-html-or-autolink` has left the top reasons —
-inline HTML elements (void + markdown-content) are now re-serialized.
+`hard-break` (4), `indented-code` (3), `ald-ial-extension` (3).
+`inline-html-or-autolink` and `header-ial` have left the top reasons.
+
+**On 100 %.** Correctness is already 100 % — every accepted page is
+byte-identical and every declined page renders correctly via the Ruby
+fallback (`WRONG = 0`). The acceleration ratio is what climbs. The
+remaining decliners split into *reproducible* tails (hard breaks,
+strikethrough, indented code, link-text edge cases, OPT_SPACE fences) and
+*impractical* ones whose byte-identity would mean reproducing kramdown
+quirks at real accept-but-wrong risk — raw-text/custom HTML elements
+(`<table>`, `<script>`, `<sl-button>`), tables kramdown builds inside list
+items/blockquotes from a stray pipe, `{:toc}` generation, multi-block list
+items. Literal 100 % acceleration is the asymptote the
+byte-identical-or-decline design deliberately trades away for safety; the
+practical ceiling is ~85-90 %.
 
 **The accept-but-wrong correction.** Earlier snapshots (40.2 % → 50.5 % →
 a raw 57.4 %) counted accept-vs-decline only — they were never byte-checked
