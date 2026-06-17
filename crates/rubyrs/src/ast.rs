@@ -668,6 +668,13 @@ pub(crate) enum MultiWriteTarget {
     /// variant keeps the arity-N argument list distinct from
     /// `Call`'s always-arity-1 setter dispatch.
     Index { receiver: Box<SExpr>, args: Vec<SExpr> },
+    /// Nested / parenthesized destructuring target — `(a, b)` in
+    /// `(a, b), c = ...` or `a, (b, *c) = ...`. The element the outer
+    /// massign assigns to this position is itself destructured into the
+    /// inner target list (recursively, including its own splat). Prism
+    /// models it as a `MultiTargetNode`. Surfaced by parser/current
+    /// (`(line, _), col = ...` shapes in its generated lexer).
+    Nested(Vec<MultiWriteTarget>),
 }
 
 #[derive(Debug, Clone)]
@@ -3501,11 +3508,51 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     .map(|a| a.arguments().iter().map(|n| tr(ctx, &n)).collect())
                     .unwrap_or_default();
                 targets.push(MultiWriteTarget::Index { receiver, args });
+            } else if let Some(mt) = tgt.as_multi_target_node() {
+                // Nested / parenthesized target `(a, b)` — recurse.
+                targets.push(MultiWriteTarget::Nested(gather_nested(ctx, &mt)));
             } else {
                 ctx.errors.push(
                     format!("unsupported multi-write target: {:?}", tgt)
                 );
             }
+        }
+        // Gather a nested `MultiTargetNode`'s own lefts / `*rest` /
+        // rights into a target list (mutually recursive with
+        // `push_positional` for deeper nesting). The splat slot supports
+        // the common into-local / into-ivar forms; rarer splat-into-
+        // const/call/global inside a NESTED target errors (the top-level
+        // arm below still handles those at depth 0).
+        fn gather_nested(
+            ctx: &mut TranslationCtx<'_>,
+            mt: &ruby_prism::MultiTargetNode<'_>,
+        ) -> Vec<MultiWriteTarget> {
+            let mut sub: Vec<MultiWriteTarget> = Vec::new();
+            for t in mt.lefts().iter() {
+                push_positional(ctx, &mut sub, &t);
+            }
+            if let Some(rest) = mt.rest() {
+                if let Some(splat) = rest.as_splat_node() {
+                    match splat.expression() {
+                        None => sub.push(MultiWriteTarget::SplatLocal(None)),
+                        Some(expr) => {
+                            if let Some(lvt) = expr.as_local_variable_target_node() {
+                                sub.push(MultiWriteTarget::SplatLocal(Some(cid_to_string(lvt.name()))));
+                            } else if let Some(ivt) = expr.as_instance_variable_target_node() {
+                                sub.push(MultiWriteTarget::SplatIvar(cid_to_string(ivt.name())));
+                            } else {
+                                ctx.errors.push(format!("unsupported nested splat target: {:?}", expr));
+                            }
+                        }
+                    }
+                } else if rest.as_implicit_rest_node().is_some() {
+                    sub.push(MultiWriteTarget::SplatLocal(None));
+                }
+            }
+            for t in mt.rights().iter() {
+                push_positional(ctx, &mut sub, &t);
+            }
+            sub
         }
         for tgt in n.lefts().iter() {
             push_positional(ctx, &mut targets, &tgt);

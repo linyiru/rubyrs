@@ -672,38 +672,16 @@ fn compile_multiwrite_arm(
     cc: &mut u32,
 ) {
     use crate::ast::MultiWriteTarget as MWT;
-    compile_expr(b, value, protos, interner, cc);
-    // The VALUE of a massign expression is the ORIGINAL RHS, NOT the
-    // coerced destructuring Array: `(a, b = nil)` evaluates to `nil`,
-    // `(a, b = 42)` to `42`, `(a, b = [1, 2])` to `[1, 2]`. Keep a copy
-    // of the RHS beneath the coerced Array and restore it at the end
-    // (the `Pop` after the stores). Without this, `while (x, y =
-    // queue.shift)` looped forever — `shift` returning nil coerced to
-    // `[]` (truthy) instead of staying nil (zeitwerk's eager-load
-    // directory queue, `actual_eager_load_dir`).
-    b.emit(Op::Dup);
-    // Coerce the RHS to an Array (CRuby massign semantics) so the
-    // per-target `[]` / `__mw_splat` / `__mw_post` calls below see an
-    // Array even when the RHS is nil / a scalar / a `to_ary`-shaped
-    // object. Without this `a, b = nil` raised `nil[0]` NoMethodError.
-    b.emit(Op::MassignSplat);
-    let bracket_id = interner.intern("[]");
-    let splat_id = interner.intern("__mw_splat");
-
-    let splat_pos = targets.iter().position(|t| matches!(
-        t,
-        MWT::SplatLocal(_)
-            | MWT::SplatIvar(_)
-            | MWT::SplatGlobal(_)
-            | MWT::SplatConst(_)
-            | MWT::SplatCall { .. }
-    ));
-
-    let emit_store = |b: &mut ProtoBuilder,
-                      protos: &mut Vec<Proto>,
-                      interner: &mut Interner,
-                      cc: &mut u32,
-                      t: &MWT| {
+    // Store one target, consuming the value on TOP of the stack. A
+    // nested target re-enters `destructure` on that value (mutual
+    // recursion; both are nested fns so deeper nesting just recurses).
+    fn store_one(
+        b: &mut ProtoBuilder,
+        t: &MWT,
+        protos: &mut Vec<Proto>,
+        interner: &mut Interner,
+        cc: &mut u32,
+    ) {
         match t {
             MWT::Local(name) => {
                 let slot = b.local_slot(name);
@@ -820,46 +798,81 @@ fn compile_multiwrite_arm(
                 emit_method_call(b, setter_id, argc, /*has_recv=*/true, false, false, cc);
                 b.emit(Op::Pop);
             }
-        }
-    };
-
-    match splat_pos {
-        None => {
-            for (i, target) in targets.iter().enumerate() {
-                b.emit(Op::Dup);
-                b.emit(Op::LoadConstInt(i as i64));
-                emit_method_call(b, bracket_id, 1, true, false, false, cc);
-                emit_store(b, protos, interner, cc, target);
-            }
-        }
-        Some(s) => {
-            let post = targets.len() - s - 1;
-            let post_id = interner.intern("__mw_post");
-            for (i, target) in targets.iter().enumerate().take(s) {
-                b.emit(Op::Dup);
-                b.emit(Op::LoadConstInt(i as i64));
-                emit_method_call(b, bracket_id, 1, true, false, false, cc);
-                emit_store(b, protos, interner, cc, target);
-            }
-            b.emit(Op::Dup);
-            b.emit(Op::LoadConstInt(s as i64));
-            b.emit(Op::LoadConstInt(post as i64));
-            emit_method_call(b, splat_id, 2, true, false, false, cc);
-            emit_store(b, protos, interner, cc, &targets[s]);
-            for j in 0..post {
-                b.emit(Op::Dup);
-                b.emit(Op::LoadConstInt(j as i64));
-                b.emit(Op::LoadConstInt(s as i64));
-                b.emit(Op::LoadConstInt(post as i64));
-                emit_method_call(b, post_id, 3, true, false, false, cc);
-                emit_store(b, protos, interner, cc, &targets[s + 1 + j]);
+            MWT::Nested(subs) => {
+                // The value on top is itself an aggregate — destructure
+                // it into the inner target list (recursively).
+                destructure(b, subs, protos, interner, cc);
             }
         }
     }
-    // Drop the coerced destructuring Array; the original RHS copy
-    // (Dup'd above) is now the expression's value — CRuby massign
-    // semantics.
-    b.emit(Op::Pop);
+
+    // Destructure the value on TOP of the stack into `targets`,
+    // consuming it. Coerces to an Array (massign semantics), then feeds
+    // each target its slice (`[]` / `__mw_splat` / `__mw_post`).
+    fn destructure(
+        b: &mut ProtoBuilder,
+        targets: &[MWT],
+        protos: &mut Vec<Proto>,
+        interner: &mut Interner,
+        cc: &mut u32,
+    ) {
+        b.emit(Op::MassignSplat);
+        let bracket_id = interner.intern("[]");
+        let splat_id = interner.intern("__mw_splat");
+        let splat_pos = targets.iter().position(|t| matches!(
+            t,
+            MWT::SplatLocal(_)
+                | MWT::SplatIvar(_)
+                | MWT::SplatGlobal(_)
+                | MWT::SplatConst(_)
+                | MWT::SplatCall { .. }
+        ));
+        match splat_pos {
+            None => {
+                for (i, target) in targets.iter().enumerate() {
+                    b.emit(Op::Dup);
+                    b.emit(Op::LoadConstInt(i as i64));
+                    emit_method_call(b, bracket_id, 1, true, false, false, cc);
+                    store_one(b, target, protos, interner, cc);
+                }
+            }
+            Some(s) => {
+                let post = targets.len() - s - 1;
+                let post_id = interner.intern("__mw_post");
+                for (i, target) in targets.iter().enumerate().take(s) {
+                    b.emit(Op::Dup);
+                    b.emit(Op::LoadConstInt(i as i64));
+                    emit_method_call(b, bracket_id, 1, true, false, false, cc);
+                    store_one(b, target, protos, interner, cc);
+                }
+                b.emit(Op::Dup);
+                b.emit(Op::LoadConstInt(s as i64));
+                b.emit(Op::LoadConstInt(post as i64));
+                emit_method_call(b, splat_id, 2, true, false, false, cc);
+                store_one(b, &targets[s], protos, interner, cc);
+                for j in 0..post {
+                    b.emit(Op::Dup);
+                    b.emit(Op::LoadConstInt(j as i64));
+                    b.emit(Op::LoadConstInt(s as i64));
+                    b.emit(Op::LoadConstInt(post as i64));
+                    emit_method_call(b, post_id, 3, true, false, false, cc);
+                    store_one(b, &targets[s + 1 + j], protos, interner, cc);
+                }
+            }
+        }
+        // Drop the coerced Array — the destructure target is consumed.
+        b.emit(Op::Pop);
+    }
+
+    compile_expr(b, value, protos, interner, cc);
+    // The massign expression's VALUE is the ORIGINAL RHS (not the
+    // coerced destructuring Array): `(a, b = nil)` is `nil`, `(a, b =
+    // [1,2])` is `[1,2]`. Keep a copy beneath; `destructure` pops the
+    // coerced Array, leaving the original RHS as the result. Without
+    // this `while (x, y = queue.shift)` looped forever (nil coerced to
+    // `[]`, truthy) — zeitwerk's eager-load directory queue.
+    b.emit(Op::Dup);
+    destructure(b, targets, protos, interner, cc);
 }
 
 /// Compile the body of `Expr::Begin` — the `begin / rescue /
