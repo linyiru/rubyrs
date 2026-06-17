@@ -1416,6 +1416,12 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `require "rss/1.0"` / "rss/2.0".
 #[test] fn require_dotted_path() { run_diff("require_dotted_path"); }
 
+// `yield(*v, **h)` — a yield mixing a positional splat with a keyword
+// double-splat. The trailing KeywordHashNode must route through
+// tr_kwhash in the splat-assembly path. Surfaced by the pp gem
+// (`yield(*v, **kwsplat)`, pp.rb:277).
+#[test] fn yield_splat_kwsplat() { run_diff("yield_splat_kwsplat"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

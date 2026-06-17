@@ -3928,7 +3928,13 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             _ => {
                 let has_splat = arg_nodes.iter().any(|c| c.as_splat_node().is_some());
                 if !has_splat {
-                    let elems: Vec<SExpr> = arg_nodes.iter().map(|n| tr(ctx, n)).collect();
+                    let elems: Vec<SExpr> = arg_nodes.iter().map(|n| {
+                        if let Some(kh) = n.as_keyword_hash_node() {
+                            tr_kwhash(ctx, span_node, n, &kh)
+                        } else {
+                            tr(ctx, n)
+                        }
+                    }).collect();
                     return Some(Box::new(sp(span_node, Expr::ArrayLit(elems))));
                 }
                 let mut chunks: Vec<SExpr> = Vec::new();
@@ -3955,6 +3961,17 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             receiver: None,
                             name: "Array".into(),
                             args: vec![inner_expr], kwargs_trailing: false }));
+                    } else if let Some(kh) = n.as_keyword_hash_node() {
+                        // Trailing `**h` / `k: v` in a splat arg list
+                        // (`yield(*v, **h)`, `return a, *b, **h`): route
+                        // through `tr_kwhash` like the call / super splat
+                        // paths so the AssocSplat merges into a Hash that
+                        // rides as the assembled array's trailing element
+                        // (ApplyYield expands it; the block peels it as
+                        // kwargs). Without this, `tr` on the
+                        // KeywordHashNode trips the unsupported-node trap
+                        // — pp's `yield(*v, **kwsplat)` (pp.rb:277).
+                        buf.push(tr_kwhash(ctx, span_node, n, &kh));
                     } else {
                         buf.push(tr(ctx, n));
                     }
