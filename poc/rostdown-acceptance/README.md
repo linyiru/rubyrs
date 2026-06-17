@@ -63,9 +63,9 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 
 | source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 89.9 % (116/129) |
-| jekyll | 86.6 % (175/202) |
-| **combined** | **87.9 % (291/331)** |
+| bridgetown | 90.7 % (117/129) |
+| jekyll | 92.1 % (186/202) |
+| **combined** | **91.5 % (303/331)** |
 
 Top decline reasons (combined, `run.sh`) are now a flat tail of kramdown
 quirks: multi-block / multi-line-table list items, cross-line emphasis
@@ -118,21 +118,23 @@ code blocks — then OPT_SPACE fenced code, the `<table>` family + custom/
 unknown HTML elements re-serialized like a `<div>`, span-content
 `code`/`kbd`/`samp`/`var` (well-formed nested tags kept), autolinks, a
 pipe-table built inside a single-line list item, a span element opening a
-paragraph, single-line list-item trailing whitespace, and kramdown's
-single-token fenced-code info rule. Current: **87.9 %**. `verify.sh` is the
-standing gate that keeps it WRONG = 0.
+paragraph, single-line list-item trailing whitespace, kramdown's
+single-token fenced-code info rule, and — the biggest lever — a full
+recursive list-item parser (multi-block / loose / nested / lazy-continuation
+/ multi-row-pipe-table items, with kramdown's tight/loose rules). Current:
+**91.5 %**. `verify.sh` is the standing gate that keeps it WRONG = 0.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
-content ~88 %. The remaining blockers are the impractical tail — constructs
+content ~92 %. The remaining blockers are the impractical tail — constructs
 whose byte-identity would mean reproducing kramdown quirks at real
 accept-but-wrong risk, confirmed by probing each against the oracle:
-multi-block list items (the whole list goes loose, each `<li>` re-wraps in
-`<p>`), emphasis/code that pairs ACROSS a lazy-continuation newline (kramdown
-joins lines THEN parses spans; rost parses per line), a blank-separated
-"lonely" IAL whose attachment target is context-dependent, `{:toc}`/ALD
-generation, a tilde run that is really `~~`-strikethrough with a literal
-remainder (`~~~x~~~` → `~<del>x</del>~`, possibly spanning lines), balanced /
+PER-ITEM tight/loose mixing in a loose list that also has a sub-list-ending
+item, a blank-separated "lonely" IAL whose attachment target is
+context-dependent, `{:toc}`/ALD generation, indented code that is really a
+lazy paragraph continuation inside a Liquid block, a tilde run that is really
+`~~`-strikethrough with a literal remainder (`~~~x~~~` → `~<del>x</del>~`,
+possibly spanning lines), balanced /
 doubled link-destination parens (`[t]((u))` → `href="(u)"`), and
 `<script>`/comment/doctype/multi-line-span HTML. Every declined page still
 renders correctly via the Ruby-kramdown fallback; declining only forgoes the
