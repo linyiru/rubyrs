@@ -23,11 +23,16 @@ module Blusher
     # The loadable object's name must match the `Init_blusher` symbol and use
     # the platform's Ruby ext suffix (.bundle/.so) — `require` won't load a raw
     # cargo `.dylib`. `rake compile` stages it here from the cargo target dir.
+    DLEXT_RB = RbConfig::CONFIG["DLEXT"] # ruby loadable suffix (bundle/so)
+    RUBY_ABI = RUBY_VERSION[/\d+\.\d+/]  # "3.4" — fat gems stage per ABI
+
     EXT_CANDIDATES = [
-      # gem-installed by rake-compiler: lib/blusher/blusher.<dlext>
-      File.expand_path("blusher.#{RbConfig::CONFIG["DLEXT"]}", __dir__),
+      # precompiled fat gem (rake-compiler stages per Ruby ABI): lib/blusher/3.4/blusher.<dlext>
+      File.expand_path("#{RUBY_ABI}/blusher.#{DLEXT_RB}", __dir__),
+      # source gem (create_rust_makefile installs here): lib/blusher/blusher.<dlext>
+      File.expand_path("blusher.#{DLEXT_RB}", __dir__),
       # dev: `rake compile` stages the cargo build at lib/blusher.<dlext>
-      File.expand_path("../blusher.#{RbConfig::CONFIG["DLEXT"]}", __dir__),
+      File.expand_path("../blusher.#{DLEXT_RB}", __dir__),
       File.expand_path("../blusher.bundle", __dir__),
       File.expand_path("../blusher.so", __dir__),
     ].freeze
