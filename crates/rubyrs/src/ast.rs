@@ -845,6 +845,9 @@ fn tr_block_node(
                     .map(|p| {
                         let mut out: Vec<BlockParam> =
                             p.requireds().iter().filter_map(|r| parse_one(&r)).collect();
+                        // Optional positionals come AFTER requireds and
+                        // BEFORE rest (`|a, b = 1, *c|`).
+                        walk_block_optionals(ctx, &p, &mut out, &mut kw_defaults);
                         if let Some(rest) = p.rest() {
                             if let Some(rp) = rest.as_rest_parameter_node() {
                                 let name = rp.name().map(cid_to_string).unwrap_or_default();
@@ -894,6 +897,31 @@ fn tr_block_node(
     };
     prepend_kw_default_prologue(&mut block_body, kw_defaults);
     (block_params, block_body)
+}
+
+/// Shared optionals()-walk for block + lambda param lists: an
+/// optional POSITIONAL parameter (`|a, b = 10|` / `->(a, b = 10)`)
+/// takes a normal positional slot (so binding fills it from args
+/// left-to-right) and its default is desugared into the body prologue
+/// as `b = <default> if b.nil?` — reusing the keyword-default
+/// mechanism. Must be called RIGHT AFTER the requireds and BEFORE the
+/// rest param so slot order matches the source. Pre-fix these were
+/// dropped entirely (`->(a, b=10){}.call(1)` → `[1, nil]`).
+/// Documented divergence (shared with kw defaults): an explicit `nil`
+/// argument also triggers the default (CRuby keeps the nil).
+fn walk_block_optionals(
+    ctx: &mut TranslationCtx<'_>,
+    p: &ruby_prism::ParametersNode<'_>,
+    out: &mut Vec<BlockParam>,
+    kw_defaults: &mut Vec<(String, SExpr)>,
+) {
+    for opt in p.optionals().iter() {
+        if let Some(op) = opt.as_optional_parameter_node() {
+            let name = cid_to_string(op.name());
+            kw_defaults.push((name.clone(), tr(ctx, &op.value())));
+            out.push(BlockParam::Single(name));
+        }
+    }
 }
 
 /// Shared keywords()-walk for block + lambda param lists: pushes a
@@ -4467,6 +4495,9 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                                 .filter_map(|r| r.as_required_parameter_node()
                                     .map(|rp| BlockParam::Single(cid_to_string(rp.name()))))
                                 .collect();
+                            // Optional positionals (`->(a, b = 1, *c)`) —
+                            // after requireds, before rest.
+                            walk_block_optionals(ctx, &p, &mut out, &mut kw_defaults);
                             if let Some(rest) = p.rest()
                                 && let Some(rp) = rest.as_rest_parameter_node() {
                                     let name = rp.name().map(cid_to_string).unwrap_or_default();

@@ -471,6 +471,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn integer_sqrt() { run_diff("integer_sqrt"); }
 #[test] fn float_to_int() { run_diff("float_to_int"); }
 #[test] fn proc_lambda_predicate() { run_diff("proc_lambda_predicate"); }
+#[test] fn block_optional_params() { run_diff("block_optional_params"); }
 #[cfg(feature = "regex")]
 #[test] fn match_data_offsets() { run_diff("match_data_offsets"); }
 #[cfg(feature = "regex")]
