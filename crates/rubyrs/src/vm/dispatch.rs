@@ -4658,6 +4658,23 @@ impl Vm {
                         }
                     }
                 }
+                // Eigenclass-shell: the shell's OWN instance methods are
+                // the target class's singleton methods (`def self.foo`
+                // redirects into `target.singleton_methods`, not the
+                // shell's `methods`). Append them visibility-filtered for
+                // both the inherited and own-only listings — sorbet
+                // enumerates `singleton_class.instance_methods`. Mirrors
+                // the `instance_method` / `method_defined?` shell
+                // redirects.
+                if let Some(target) = cls.singleton_target.borrow().as_ref()
+                    .and_then(std::rc::Weak::upgrade)
+                {
+                    for (k, m) in target.singleton_methods.borrow().iter() {
+                        if allow(m.visibility.get()) && !sids.contains(k) {
+                            sids.push(*k);
+                        }
+                    }
+                }
                 sids.sort_by(|a, b| {
                     self.interner.resolve(*a).cmp(self.interner.resolve(*b))
                 });
@@ -5115,7 +5132,20 @@ impl Vm {
                 // → Kernel synth via Object→Kernel include chain)
                 // work the same as the direct case.
                 let snapshot = self.lookup_method_uncached(&cls, *sid)
-                    .or_else(|| self.builtin_method_via_ancestor_chain(&cls, *sid));
+                    .or_else(|| self.builtin_method_via_ancestor_chain(&cls, *sid))
+                    .or_else(|| {
+                        // Eigenclass-shell introspection: a class-level
+                        // singleton method (`def self.foo`) is installed
+                        // into the REAL class's `singleton_methods` table,
+                        // not the shell's `methods`. When `cls` is a
+                        // shell (`singleton_target` set), resolve through
+                        // the target's singleton-method chain — sorbet's
+                        // `singleton_class.instance_method(:included)`
+                        // (run_sig over a `def self.included`).
+                        cls.singleton_target.borrow().as_ref()
+                            .and_then(std::rc::Weak::upgrade)
+                            .and_then(|target| self.lookup_class_singleton_method(&target, *sid))
+                    });
                 if snapshot.is_none() && !is_primitive_class_name(&cls.name) {
                     let mname = self.interner.resolve(*sid).to_string();
                     return Err(self.trap(RubyError::NameError {

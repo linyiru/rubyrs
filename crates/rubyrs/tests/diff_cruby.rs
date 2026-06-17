@@ -1476,6 +1476,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // path. Surfaced by diff-lcs's `class << Diff::LCS; PATCH_MAP = {…}`.
 #[test] fn class_lt_lt_const_body() { run_diff("class_lt_lt_const_body"); }
 
+// Introspecting an eigenclass shell (`Klass.singleton_class
+// .instance_method(:m)` / `.instance_methods(false)`) sees class-level
+// singleton methods. Surfaced by sorbet's run_sig reflection.
+#[test] fn eigenclass_introspection() { run_diff("eigenclass_introspection"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }
