@@ -123,6 +123,25 @@ pub(crate) enum BlockKind<'a> {
         text: Cow<'a, str>,
     },
     Hr,
+    /// A kramdown/GFM pipe table in the common shape: an optional header
+    /// row (when a separator line underlines it), per-column alignment,
+    /// and body rows. Each cell is the span-head of its parsed content.
+    /// Tables outside this shape (multiple bodies, footers, raw-HTML
+    /// cells, ragged rows) decline so output stays byte-identical.
+    Table {
+        aligns: Vec<Align>,
+        header: Option<Vec<Option<u32>>>,
+        body: Vec<Vec<Option<u32>>>,
+    },
+}
+
+/// Per-column text alignment from a table's separator line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Align {
+    None,
+    Left,
+    Center,
+    Right,
 }
 
 /// One tight-list item in the flat arena. `spans` is the first child
@@ -355,6 +374,15 @@ fn parse_blocks<'a>(
                 i += 1;
             }
             emit_block!(BlockKind::Blank);
+            continue;
+        }
+
+        // A top-level pipe table. Heading/list/quote/fence take precedence
+        // (handled inside); a pipe-shaped run that isn't a clean table
+        // returns None and falls through to the pipe-decline below.
+        if let Some((kind, consumed)) = try_parse_table(ast, lines, i, opts)? {
+            emit_block!(kind);
+            i += consumed;
             continue;
         }
 
@@ -752,6 +780,241 @@ fn copy_spans_owned<'a>(dst: &mut Ast<'a>, scratch: &Ast<'_>, head: Option<u32>)
 
 /// Constructs we recognize well enough to refuse: kramdown features
 /// outside the subset whose silent mis-parse would corrupt output.
+/// Split a table row into trimmed cell slices, honouring `\|` escapes and
+/// backtick code spans (a `|` inside `` `…` `` is literal, not a cell
+/// boundary). Returns `None` when the line has no top-level pipe (not a
+/// table row) or has an unbalanced code span (out of the supported subset).
+fn split_table_cells(line: &str) -> Option<Vec<&str>> {
+    let s = line.trim_matches([' ', '\t']);
+    let b = s.as_bytes();
+    let mut cells = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut esc = false;
+    let mut had_pipe = false;
+    while i < b.len() {
+        if esc {
+            esc = false;
+            i += 1;
+            continue;
+        }
+        match b[i] {
+            b'\\' => {
+                esc = true;
+                i += 1;
+            }
+            b'`' => {
+                // Skip a balanced backtick code span (matching run lengths).
+                let run = run_len(b, i, b'`');
+                let mut j = i + run;
+                let mut closed = false;
+                while j < b.len() {
+                    if b[j] == b'`' {
+                        let r2 = run_len(b, j, b'`');
+                        if r2 == run {
+                            j += run;
+                            closed = true;
+                            break;
+                        }
+                        j += r2;
+                    } else {
+                        j += 1;
+                    }
+                }
+                if !closed {
+                    return None;
+                }
+                i = j;
+            }
+            b'|' => {
+                had_pipe = true;
+                cells.push(s[start..i].trim_matches([' ', '\t']));
+                start = i + 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    cells.push(s[start..].trim_matches([' ', '\t']));
+    if !had_pipe {
+        return None;
+    }
+    // Drop the empty cell created by an optional leading / trailing bar.
+    if cells.len() > 1 && cells[0].is_empty() {
+        cells.remove(0);
+    }
+    if cells.len() > 1 && cells.last().is_some_and(|c| c.is_empty()) {
+        cells.pop();
+    }
+    Some(cells)
+}
+
+/// Is `line` a table separator line (`---`, `:--`, `--:`, `:-:`, optional
+/// `|`)? Must hold at least one `-` and only `-:| \t`.
+fn is_table_sep_line(line: &str) -> bool {
+    let t = line.trim_matches([' ', '\t']);
+    if t.is_empty() {
+        return false;
+    }
+    let mut dash = false;
+    for &b in t.as_bytes() {
+        match b {
+            b'-' => dash = true,
+            b':' | b'|' | b' ' | b'\t' => {}
+            _ => return false,
+        }
+    }
+    dash
+}
+
+/// Per-column alignment from a separator line's cells.
+fn sep_align_cells(line: &str) -> Vec<Align> {
+    let s = line.trim_matches([' ', '\t']);
+    let s = s.strip_prefix('|').unwrap_or(s);
+    let s = s.strip_suffix('|').unwrap_or(s);
+    s.split('|')
+        .map(|c| {
+            let c = c.trim_matches([' ', '\t']);
+            match (c.starts_with(':'), c.ends_with(':')) {
+                (true, true) => Align::Center,
+                (true, false) => Align::Left,
+                (false, true) => Align::Right,
+                (false, false) => Align::None,
+            }
+        })
+        .collect()
+}
+
+/// Parse one table row into cell span-heads. `Ok(None)` ⇒ the cell count
+/// differs from `ncols` (ragged) or it isn't a row ⇒ the table declines.
+fn table_row_spans<'a>(
+    ast: &mut Ast<'a>,
+    line: &'a str,
+    ncols: usize,
+) -> Result<Option<Vec<Option<u32>>>, Error> {
+    let Some(cells) = split_table_cells(line) else {
+        return Ok(None);
+    };
+    if cells.len() != ncols {
+        return Ok(None);
+    }
+    let mut row = Vec::with_capacity(ncols);
+    for cell in cells {
+        row.push(parse_spans(ast, cell)?);
+    }
+    Ok(Some(row))
+}
+
+/// Try to parse a kramdown/GFM pipe table starting at `lines[start]`.
+/// `Ok(Some((table, consumed)))` for a table in the common shape;
+/// `Ok(None)` when it isn't one — heading/list/quote/fence take
+/// precedence, and any pipe-shaped run that isn't a clean table falls
+/// through to the normal pipe-decline (so output stays right-or-declined).
+fn try_parse_table<'a>(
+    ast: &mut Ast<'a>,
+    lines: &[&'a str],
+    start: usize,
+    opts: &Options,
+) -> Result<Option<(BlockKind<'a>, usize)>, Error> {
+    let first = lines[start];
+    if first.as_bytes().starts_with(b"    ") || first.as_bytes().first() == Some(&b'\t') {
+        return Ok(None);
+    }
+    let f = trim_start_ws(first);
+    if f.starts_with('#')
+        || f.starts_with('>')
+        || list_marker(first).is_some()
+        || f.starts_with("```")
+        || f.starts_with("~~~")
+        || is_hr(first)
+        || is_table_sep_line(first)
+    {
+        return Ok(None);
+    }
+    // The first line must itself be a table row.
+    if split_table_cells(first).is_none() {
+        return Ok(None);
+    }
+    // Collect the contiguous run; every line must be a row or separator,
+    // else the whole block is a paragraph (kramdown), not a table.
+    let mut end = start;
+    while end < lines.len() {
+        let l = lines[end];
+        if is_blank(l) {
+            break;
+        }
+        if end > start
+            && opts.gfm
+            && (l.starts_with('#')
+                || l.starts_with('>')
+                || list_marker(l).is_some()
+                || l.starts_with("```")
+                || l.starts_with("~~~"))
+        {
+            break;
+        }
+        if trim_start_ws(l).starts_with('+') {
+            return Ok(None); // multi-body separator — out of subset
+        }
+        let is_sep = is_table_sep_line(l);
+        if !is_sep && (split_table_cells(l).is_none() || l.contains('<')) {
+            return Ok(None);
+        }
+        end += 1;
+    }
+    let run = &lines[start..end];
+    // At most one separator, and only as the 2nd line (the header rule).
+    let mut sep_idx = None;
+    for (k, &l) in run.iter().enumerate() {
+        if is_table_sep_line(l) {
+            if sep_idx.is_some() {
+                return Ok(None);
+            }
+            sep_idx = Some(k);
+        }
+    }
+    let (header_line, align_line, body): (Option<&str>, Option<&str>, &[&str]) = match sep_idx {
+        None => (None, None, run),
+        Some(1) => (Some(run[0]), Some(run[1]), &run[2..]),
+        Some(_) => return Ok(None),
+    };
+    if body.is_empty() {
+        return Ok(None); // header + separator, no body row ⇒ not a table
+    }
+    let ncols = match split_table_cells(header_line.unwrap_or(body[0])) {
+        Some(c) if !c.is_empty() => c.len(),
+        _ => return Ok(None),
+    };
+    let mut aligns = vec![Align::None; ncols];
+    if let Some(al) = align_line {
+        for (c, a) in sep_align_cells(al).into_iter().take(ncols).enumerate() {
+            aligns[c] = a;
+        }
+    }
+    let header = match header_line {
+        Some(h) => match table_row_spans(ast, h, ncols)? {
+            Some(r) => Some(r),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    let mut rows = Vec::with_capacity(body.len());
+    for &l in body {
+        match table_row_spans(ast, l, ncols)? {
+            Some(r) => rows.push(r),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some((
+        BlockKind::Table {
+            aligns,
+            header,
+            body: rows,
+        },
+        end - start,
+    )))
+}
+
 fn decline_block_scan(line: &str) -> Result<(), Error> {
     if line.as_bytes().starts_with(b"    ") || line.as_bytes().first() == Some(&b'\t') {
         return Err(declined("indented-code"));
@@ -1721,20 +1984,24 @@ fn parse_link<'a>(
 ) -> Result<Option<(Option<u32>, Cow<'a, str>, Option<Cow<'a, str>>, usize)>, Error> {
     let bytes = rest.as_bytes();
     debug_assert_eq!(bytes[0], b'[');
-    let mut depth = 1;
+    // Find the closing `]`. Escaped brackets (`\]`/`\[`) and nested
+    // brackets in the link text are special in kramdown (escapes, nested
+    // links rendered literally); rather than risk wrong output we decline
+    // so the document falls back — the same right-or-declined result these
+    // produced before inline-link text was widened.
     let mut close = None;
-    for (idx, b) in bytes.iter().enumerate().skip(1) {
-        match b {
-            b'[' => depth += 1,
+    let mut k = 1;
+    while k < bytes.len() {
+        match bytes[k] {
+            b'\\' => return Err(declined("link-text-escape")),
+            b'[' => return Err(declined("link-text-nested")),
             b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(idx);
-                    break;
-                }
+                close = Some(k);
+                break;
             }
             _ => {}
         }
+        k += 1;
     }
     // Unclosed bracket, or `]` not followed by `(`: not an inline link.
     // kramdown then renders the `[` literally — reference-style links need
@@ -1755,6 +2022,13 @@ fn parse_link<'a>(
         // kramdown treats the whole `[…](…)` as literal text.
         return Ok(None);
     };
+    // Balanced parens in a URL (`…/Foo_(bar)`) and angle-bracket
+    // destinations (`<with spaces>`) are out of subset — the cheap
+    // first-`)` scan can't reproduce them, so decline rather than emit a
+    // truncated href.
+    if href.contains('(') || href.starts_with('<') {
+        return Err(declined("link-dest"));
+    }
     let (spans, _) =
         parse_spans_until(ast, &rest[1..close], None, in_em, in_strong, Some(Elem::Link))?;
     // `href`/`title` are sub-slices of `rest` (the link source) — borrow.
@@ -1781,7 +2055,8 @@ fn split_href_title(inner: &str) -> Option<(&str, Option<&str>)> {
         if inner.contains('"') || inner.contains('\'') {
             return None;
         }
-        return Some((inner, None));
+        // kramdown trims surrounding whitespace from the destination.
+        return Some((inner.trim_matches([' ', '\t']), None));
     }
     // Closing quote is the last byte; the opening quote is the leftmost
     // matching quote preceded by ASCII whitespace (the `url "title"` form).
@@ -1794,7 +2069,7 @@ fn split_href_title(inner: &str) -> Option<(&str, Option<&str>)> {
         }
     }
     let open = open?;
-    let href = inner[..open].trim_end();
+    let href = inner[..open].trim_matches([' ', '\t']);
     let title = &inner[open + 1..inner.len() - 1];
     // No nested same-quote in the title, and the href must be quote-free.
     if title.as_bytes().contains(&q) || href.contains('"') || href.contains('\'') {
@@ -1904,7 +2179,36 @@ mod byte_opt_tests {
         );
         // empty href + title
         assert_eq!(split_href_title(r#" "t""#), Some(("", Some("t"))));
+        // kramdown trims surrounding whitespace from the destination
+        assert_eq!(split_href_title("  spaces.html  "), Some(("spaces.html", None)));
         // malformed: quote present, trailing junk after the close quote
         assert_eq!(split_href_title(r#"url "t" extra"#), None);
+    }
+
+    #[test]
+    fn table_cell_split_cases() {
+        // (verified byte-identical against kramdown 2.5.2)
+        assert_eq!(split_table_cells("a | b"), Some(vec!["a", "b"]));
+        assert_eq!(split_table_cells("| a | b |"), Some(vec!["a", "b"]));
+        assert_eq!(split_table_cells("| a |  | c |"), Some(vec!["a", "", "c"]));
+        // escaped pipe is not a boundary (the cell keeps `\|`)
+        assert_eq!(split_table_cells(r"x | y \| z | w"), Some(vec!["x", r"y \| z", "w"]));
+        // a pipe inside a balanced code span is literal, not a boundary
+        assert_eq!(split_table_cells("`a|b` | c"), Some(vec!["`a|b`", "c"]));
+        // no top-level pipe ⇒ not a table row
+        assert_eq!(split_table_cells("just prose"), None);
+        // unbalanced code span ⇒ out of subset
+        assert_eq!(split_table_cells("`a | b"), None);
+    }
+
+    #[test]
+    fn table_sep_line_cases() {
+        assert!(is_table_sep_line("---|---"));
+        assert!(is_table_sep_line("|:--|--:|"));
+        assert!(is_table_sep_line(" :-: | -: "));
+        assert!(is_table_sep_line("|-----"));
+        assert!(!is_table_sep_line("a | b")); // a data row, not a separator
+        assert!(!is_table_sep_line("::|::")); // no dash
+        assert!(!is_table_sep_line("")); // empty
     }
 }

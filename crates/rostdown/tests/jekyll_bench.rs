@@ -90,7 +90,7 @@ fn heading_ids() {
 #[test]
 fn declines() {
     for src in [
-        "| a | b |\n",               // table
+        "| a | b |\n| c |\n",        // ragged table (column counts differ)
         "para\n====\n",              // setext heading
         "text with line  \nbreak\n", // hard break
         "{:toc}\n",                  // IAL / extension

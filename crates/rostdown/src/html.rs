@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use crate::parse::{Ast, BlockKind, SpanKind};
+use crate::parse::{Align, Ast, BlockKind, SpanKind};
 use crate::{CodeHighlighter, Options};
 
 /// Run a highlighter callback with the bump arena paused (only when the
@@ -174,8 +174,72 @@ fn convert_blocks(
                 push_pad(out, indent);
                 out.push_str("<hr />\n");
             }
+            BlockKind::Table {
+                aligns,
+                header,
+                body,
+            } => {
+                push_pad(out, indent);
+                out.push_str("<table>\n");
+                if let Some(header) = header {
+                    push_pad(out, indent + 2);
+                    out.push_str("<thead>\n");
+                    emit_table_row(out, ast, header, aligns, true, indent + 4, hl);
+                    push_pad(out, indent + 2);
+                    out.push_str("</thead>\n");
+                }
+                push_pad(out, indent + 2);
+                out.push_str("<tbody>\n");
+                for row in body {
+                    emit_table_row(out, ast, row, aligns, false, indent + 4, hl);
+                }
+                push_pad(out, indent + 2);
+                out.push_str("</tbody>\n");
+                push_pad(out, indent);
+                out.push_str("</table>\n");
+            }
         }
     }
+}
+
+/// kramdown's `<tr>` emission: one `<th>`/`<td>` per cell, indented two
+/// past the row. An empty cell is `<td> </td>` (a single space), and a
+/// column's alignment becomes `style="text-align: …"`.
+fn emit_table_row(
+    out: &mut String,
+    ast: &Ast<'_>,
+    cells: &[Option<u32>],
+    aligns: &[Align],
+    head: bool,
+    indent: usize,
+    hl: &mut dyn CodeHighlighter,
+) {
+    let tag = if head { "th" } else { "td" };
+    push_pad(out, indent);
+    out.push_str("<tr>\n");
+    for (col, &cell) in cells.iter().enumerate() {
+        push_pad(out, indent + 2);
+        out.push('<');
+        out.push_str(tag);
+        match aligns.get(col).copied().unwrap_or(Align::None) {
+            Align::None => {}
+            Align::Left => out.push_str(" style=\"text-align: left\""),
+            Align::Center => out.push_str(" style=\"text-align: center\""),
+            Align::Right => out.push_str(" style=\"text-align: right\""),
+        }
+        out.push('>');
+        let before = out.len();
+        convert_spans(out, ast, cell, hl.codespan_class());
+        if out.len() == before {
+            // kramdown fills an empty cell with a non-breaking space.
+            out.push('\u{a0}');
+        }
+        out.push_str("</");
+        out.push_str(tag);
+        out.push_str(">\n");
+    }
+    push_pad(out, indent);
+    out.push_str("</tr>\n");
 }
 
 /// kramdown's tight-list emission: leaf items are single-line
