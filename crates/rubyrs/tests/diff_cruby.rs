@@ -423,6 +423,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // does `include ERB::Util`). Vendored erb is stdlib-gated.
 #[cfg(feature = "stdlib")]
 #[test] fn erb_util() { run_diff("erb_util"); }
+
+// `require "pp"` installs Object#pretty_inspect + PP (vendored under
+// the stdlib feature). Surfaced by faraday's logging formatter.
+#[cfg(feature = "stdlib")]
+#[test] fn pp_pretty_inspect() { run_diff("pp_pretty_inspect"); }
 // pack/unpack `U` (UTF-8 codepoints) + `x` (skip/pad) — builder's
 // `pack('U')`, tzinfo's `unpack('… x15 …')`.
 #[test] fn pack_unpack_u_x() { run_diff("pack_unpack_u_x"); }

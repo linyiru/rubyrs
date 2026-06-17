@@ -164,6 +164,7 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         // (exception, path, frames, ...), which Kernel#binding now
         // captures. The Compiler is verbatim so output is byte-exact.
         "erb" => Some(include_str!("stdlib_vendor/erb.rb")),
+        "pp" => Some(include_str!("stdlib_vendor/pp.rb")),
         "set" => Some(include_str!("stdlib_vendor/set.rb")),
         "stringio" => Some(include_str!("stdlib_vendor/stringio.rb")),
         "strscan" => Some(include_str!("stdlib_vendor/strscan.rb")),
