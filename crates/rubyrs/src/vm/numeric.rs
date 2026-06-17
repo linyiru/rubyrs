@@ -1393,14 +1393,16 @@ pub(crate) fn numeric_call(
         // canonical "wrong answer" for this surface. Same guard
         // applies to floor/ceil/round/truncate's no-arg form
         // (each returns an Integer).
-        (Value::Float(a), "to_i" | "floor" | "ceil" | "round" | "truncate", [])
+        (Value::Float(a), "to_i" | "to_int" | "floor" | "ceil" | "round" | "truncate", [])
             if a.is_nan() || a.is_infinite() =>
         {
             return Err(RubyError::FloatDomainError {
                 msg: float_domain_label(*a).to_string(),
             });
         }
-        (Value::Float(a), "to_i", []) => Some(Value::Int(*a as i64)),
+        // `to_int` is CRuby's implicit-Integer-conversion alias of
+        // `to_i` (truncates toward zero); both share this arm.
+        (Value::Float(a), "to_i" | "to_int", []) => Some(Value::Int(*a as i64)),
         (Value::Float(a), "abs", []) => Some(Value::Float(a.abs())),
         (Value::Float(a), "-@", []) => Some(Value::Float(-*a)),
         (Value::Float(a), "+@", []) => Some(Value::Float(*a)),

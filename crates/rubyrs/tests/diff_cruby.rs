@@ -469,6 +469,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn method_bind_call_builtin() { run_diff("method_bind_call_builtin"); }
 #[test] fn kernel_hash_conversion() { run_diff("kernel_hash_conversion"); }
 #[test] fn integer_sqrt() { run_diff("integer_sqrt"); }
+#[test] fn float_to_int() { run_diff("float_to_int"); }
 #[cfg(feature = "regex")]
 #[test] fn match_data_offsets() { run_diff("match_data_offsets"); }
 #[cfg(feature = "regex")]

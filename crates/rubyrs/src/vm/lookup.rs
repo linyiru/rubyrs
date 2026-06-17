@@ -703,7 +703,7 @@ impl Vm {
             "+" | "-" | "*" | "/" | "%" | "**" |
             "<" | "<=" | ">" | ">=" |
             "to_s" | "inspect" |
-            "to_i" | "to_f" | "abs" |
+            "to_i" | "to_int" | "to_f" | "abs" |
             "zero?" | "nonzero?" | "positive?" | "negative?" |
             "nan?" | "infinite?" | "finite?" |
             "eql?" | "hash" |
