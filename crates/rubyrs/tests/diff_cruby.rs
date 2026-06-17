@@ -1513,6 +1513,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `Regexp#encoding` — US-ASCII for all-ASCII source, else UTF-8.
 // Surfaced by regexp_parser's scanner extract_encoding.
 #[test] fn regexp_encoding() { run_diff("regexp_encoding"); }
+#[test] fn integer_ord() { run_diff("integer_ord"); }
 
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).

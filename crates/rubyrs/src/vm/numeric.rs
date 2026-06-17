@@ -1139,6 +1139,10 @@ pub(crate) fn numeric_call(
         // `i64::MIN.pred` → BigInt(-(2^63 + 1))). Without
         // bignum, keep the historical wrapping behaviour. Same
         // promote-on-overflow pattern as `-@`/`abs`/`~` use.
+        // `Integer#ord` — an integer is its own codepoint, returns self.
+        // regexp_parser's scanner calls `byte.ord` on already-integer
+        // bytes (scanner.rb:1092).
+        (Value::Int(a), "ord", []) => Some(Value::Int(*a)),
         (Value::Int(a), "succ", []) | (Value::Int(a), "next", []) => {
             #[cfg(feature = "bignum")]
             { if *a == i64::MAX { None } else { Some(Value::Int(a + 1)) } }
