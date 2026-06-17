@@ -278,6 +278,22 @@ class Thread
     @thread_vars ||= {}
     @thread_vars.key?(key)
   end
+
+  # `Thread.handle_interrupt(ExceptionClass => :never|:immediate|:on_blocking)
+  # { ... }` masks asynchronous interrupts around the block. With one
+  # thread there are no async interrupts to defer, so it degenerates to
+  # running the block and returning its value. connection_pool's `with`
+  # wraps checkout/checkin in `Thread.handle_interrupt(Exception =>
+  # :never) { ... }`.
+  def self.handle_interrupt(_mask)
+    yield
+  end
+
+  # Companion predicate — no interrupts are ever pending in the
+  # single-threaded model.
+  def self.pending_interrupt?(*_args)
+    false
+  end
 end
 
 # Fiber — Tier 1 models ONLY the Ruby 3.2+ "fiber storage" API
@@ -392,6 +408,17 @@ end
 
 # CRuby exposes the same class as top-level ::Queue.
 Queue = Thread::Queue
+
+# CRuby defines Mutex and ConditionVariable both at the top level and
+# nested under Thread (`Thread::Mutex.equal?(Mutex)` is true), the
+# nested name being the canonical one. rubyrs defines them top-level
+# (mutex.rb / above); alias the nested constants so the
+# `Thread::Mutex.new` / `Thread::ConditionVariable.new` form resolves —
+# connection_pool's TimedStack uses it.
+class Thread
+  Mutex = ::Mutex
+  ConditionVariable = ::ConditionVariable
+end
 
 # Raised by push-after-close. CRuby defines it under ::ClosedQueueError
 # (subclass of StopIteration).

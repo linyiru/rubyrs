@@ -217,3 +217,87 @@ end
 # Outer local-variable capture is a follow-up.
 class Binding
 end
+
+# ObjectSpace::WeakMap — a map whose entries don't keep their keys/
+# values alive. Tier-1 models the MAP API only; the WEAK part is a
+# documented DIVERGENCE: entries are held with STRONG references and
+# never get collected (rubyrs's GC has no weak-ref table). Consumers
+# that use it as a leak-tolerant cache or registry still work —
+# connection_pool tracks live pools in `INSTANCES = WeakMap.new` for
+# its after-fork cleanup; ActiveSupport uses it for descendant
+# tracking. Code that DEPENDS on entries vanishing after GC will see
+# them linger (the cost of the single-process Tier-1 model).
+#
+# Keys compare by IDENTITY, not eql?/hash (CRuby: `w["x"]` misses an
+# entry stored under a different but equal `"x"`), so the backing Hash
+# is keyed on `object_id` and stores `[key, value]` pairs. The
+# `ObjectSpace` module itself is otherwise unmodelled (no each_object /
+# define_finalizer).
+module ObjectSpace
+  # NOTE: CRuby's WeakMap includes Enumerable, but object.rb loads
+  # before enumerable.rb in the preamble, so we don't mix it in here
+  # (the named `each_*` / `keys` / `values` cover the consumed surface;
+  # add Enumerable later if a gem needs `map`/`select`/etc. on a WeakMap).
+  class WeakMap
+    def initialize
+      @entries = {}   # object_id => [key, value]
+    end
+
+    def [](key)
+      e = @entries[key.object_id]
+      e && e[1]
+    end
+
+    def []=(key, value)
+      @entries[key.object_id] = [key, value]
+      value
+    end
+
+    def key?(key)
+      @entries.key?(key.object_id)
+    end
+    alias_method :include?, :key?
+    alias_method :member?, :key?
+
+    def delete(key)
+      e = @entries.delete(key.object_id)
+      e && e[1]
+    end
+
+    def each
+      return enum_for(:each) unless block_given?
+      @entries.each_value { |(k, v)| yield k, v }
+      self
+    end
+    alias_method :each_pair, :each
+
+    def each_key
+      return enum_for(:each_key) unless block_given?
+      @entries.each_value { |(k, _v)| yield k }
+      self
+    end
+
+    def each_value
+      return enum_for(:each_value) unless block_given?
+      @entries.each_value { |(_k, v)| yield v }
+      self
+    end
+
+    def keys
+      @entries.values.map { |(k, _v)| k }
+    end
+
+    def values
+      @entries.values.map { |(_k, v)| v }
+    end
+
+    def size
+      @entries.size
+    end
+    alias_method :length, :size
+
+    def inspect
+      "#<ObjectSpace::WeakMap:0x#{object_id.to_s(16)} size=#{@entries.size}>"
+    end
+  end
+end

@@ -1386,6 +1386,16 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // multi_json caching its adapter override in `Fiber[:multi_json_adapter]`.
 #[test] fn fiber_storage() { run_diff("fiber_storage"); }
 
+// ObjectSpace::WeakMap map API (identity keys; strong-ref Tier-1
+// divergence on the weak collection). Surfaced by connection_pool's
+// `INSTANCES = ObjectSpace::WeakMap.new`.
+#[test] fn objectspace_weakmap() { run_diff("objectspace_weakmap"); }
+
+// Thread::Mutex / Thread::ConditionVariable nested-constant aliases and
+// Thread.handle_interrupt (no-op block runner in the single-thread
+// model). Surfaced by connection_pool's TimedStack + #with.
+#[test] fn thread_nested_consts_handle_interrupt() { run_diff("thread_nested_consts_handle_interrupt"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }
