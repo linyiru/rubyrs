@@ -569,8 +569,11 @@ impl Vm {
                     // a separate future layer. (Copilot review #285
                     // round 1.)
                     let target_idx: Option<usize> = match &owner_rc {
+                        // A lambda frame is a valid return target too —
+                        // `find_return_target` may point here for a
+                        // `return` inside a lambda (local return).
                         Some(rc) => self.frames.iter().rposition(|f| {
-                            !f.is_block
+                            (!f.is_block || f.is_lambda)
                                 && f.locals
                                     .as_shared()
                                     .is_some_and(|l| std::rc::Rc::ptr_eq(l, rc))
@@ -771,8 +774,10 @@ impl Vm {
                 //    just below.
                 if self.method_return.is_some() {
                     let owner_idx: Option<usize> = match &self.method_return_locals {
+                        // A lambda frame is a valid return target (local
+                        // return from a lambda) — see the main loop.
                         Some(rc) => self.frames.iter().rposition(|f| {
-                            !f.is_block
+                            (!f.is_block || f.is_lambda)
                                 && f.locals
                                     .as_shared()
                                     .is_some_and(|l| std::rc::Rc::ptr_eq(l, rc))
@@ -4292,7 +4297,7 @@ impl Vm {
                     locals: crate::vm::Locals::Shared(Rc::new(RefCell::new(vec_nil(n_locals)))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
+                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, is_lambda: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
                     block_writeback: None,
                     captured_yield_block: None,
                 });
@@ -4332,7 +4337,7 @@ impl Vm {
                     locals: crate::vm::Locals::Shared(Rc::new(RefCell::new(vec_nil(n_locals)))),
                     self_val: Value::Class(eigen),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
+                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, is_lambda: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
                     block_writeback: None,
                     captured_yield_block: None,
                 });
@@ -5062,7 +5067,10 @@ impl Vm {
                     match top.locals.as_shared() {
                         Some(rc) => {
                             let seed = rc.clone();
-                            match self.find_lexical_owner_frame(&seed) {
+                            // Return-specific walk: stops at the nearest
+                            // enclosing LAMBDA frame (lambda `return` is
+                            // local) before falling through to the method.
+                            match self.find_return_target(&seed) {
                                 Some(idx) => self.frames[idx].locals.as_shared().cloned(),
                                 // Block escaped its scope (e.g. saved as
                                 // a Proc and called after its lexical

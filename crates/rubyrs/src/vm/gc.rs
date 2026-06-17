@@ -87,7 +87,7 @@ impl Vm {
             locals: crate::vm::Locals::Shared(Rc::new(RefCell::new(vec_nil(n_locals)))),
             self_val: main_self,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
+            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, is_lambda: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: None,
             captured_yield_block: None,
         });

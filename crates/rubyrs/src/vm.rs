@@ -182,6 +182,16 @@ pub(crate) struct Frame {
     /// enclosing method. Method frames, class bodies, and the
     /// toplevel `<main>` keep `false`.
     pub(crate) is_block: bool,
+    /// True for a block frame whose block is a LAMBDA. A `return`
+    /// inside a lambda is LOCAL — it returns from the lambda, not the
+    /// lexically-enclosing method (the proc behaviour). The return
+    /// unwind treats such a frame as a barrier: `find_return_target`
+    /// stops at the nearest enclosing lambda frame, and the unwind
+    /// target search accepts it like a method frame. Only set on the
+    /// block frames pushed by `invoke_block`/`invoke_block1` for a
+    /// lambda; every other frame (method, class body, toplevel,
+    /// ordinary block) keeps `false`.
+    pub(crate) is_lambda: bool,
     /// Count of positional args the caller supplied. Method
     /// dispatch (`invoke_method_with_block`) sets this to
     /// `positional_take`; `Op::JumpIfArgGiven(slot, off)` consults

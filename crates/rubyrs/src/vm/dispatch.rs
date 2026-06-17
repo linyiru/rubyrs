@@ -13430,7 +13430,7 @@ impl Vm {
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
             lexical_cvar_class: None,
             #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: false,
+            is_block: false, is_lambda: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
             aux: None,
@@ -13549,7 +13549,7 @@ impl Vm {
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
             lexical_cvar_class: None,
             #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: false,
+            is_block: false, is_lambda: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
             aux: None,
@@ -13647,7 +13647,7 @@ impl Vm {
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
             lexical_cvar_class: None,
             #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: false,
+            is_block: false, is_lambda: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
             aux: None,
@@ -13707,7 +13707,7 @@ impl Vm {
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
             lexical_cvar_class: None,
             #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: false,
+            is_block: false, is_lambda: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
             aux: None,
@@ -14016,7 +14016,7 @@ impl Vm {
                 // the explicit-capture idiom working without polluting
                 // the implicit-yield surface. Setting `block_arg:
                 // None` here is what enforces both.
-                is_class_body: false, swap_return: None, block_arg: None, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false,
+                is_class_body: false, swap_return: None, block_arg: None, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, is_lambda: false,
                 // `define_method` enforces exact arity (no
                 // defaults), so all params are "given".
                 n_given_positional: given as u16,
@@ -14074,7 +14074,7 @@ impl Vm {
                 defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
                 lexical_cvar_class: None,
                 #[cfg(feature = "regex")] saved_last_match: None,
-                is_block: false,
+                is_block: false, is_lambda: false,
                 n_given_positional: fixed.required,
                 kw_given_mask: 0,
                 aux: None,
@@ -14408,7 +14408,7 @@ impl Vm {
             locals,
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false,
+            is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, is_lambda: false,
             // Drives the body's default-arg prologue. Slots
             // `[0, positional_take)` came from the caller; slots
             // `[positional_take, positional_max)` are left Nil
@@ -14645,7 +14645,7 @@ impl Vm {
             // `vm/step.rs` (Op::ReturnMethod's branch), a
             // `return` inside the block walks back through
             // is_block frames to find the enclosing method.
-            // With `is_block: false` the class_eval frame would
+            // With `is_block: false, is_lambda: false` the class_eval frame would
             // be the target itself — `return` would return *from
             // class_eval* rather than the enclosing method,
             // diverging from CRuby. The matching unwind change
@@ -14653,6 +14653,8 @@ impl Vm {
             // past a `is_block && is_class_body` frame) lives
             // in `vm/step.rs`.
             is_block: true,
+            // instance_eval/class_eval frame, not a lambda.
+            is_lambda: false,
             n_given_positional: 0,
             kw_given_mask: 0,
             aux: None, pending_yield: false,
@@ -15001,6 +15003,42 @@ impl Vm {
         }
     }
 
+    /// Return-specific owner walk. Like `find_lexical_owner_frame`, but
+    /// STOPS at the nearest enclosing LAMBDA frame: a `return` inside a
+    /// lambda is LOCAL (returns from the lambda), whereas a `return` in
+    /// an ordinary proc/block returns from the lexically-enclosing
+    /// method. Returns the index of the nearest returnable scope — a
+    /// lambda block frame OR a method frame. Used ONLY by the return
+    /// unwind (NOT by `yield`, which must keep walking past lambdas).
+    pub(crate) fn find_return_target(
+        &self,
+        seed: &Rc<RefCell<Vec<Value>>>,
+    ) -> Option<usize> {
+        let mut target = seed.clone();
+        loop {
+            // A method frame (non-block) matching `target` is the owner.
+            if let Some(idx) = self.frames.iter().rposition(|f| {
+                !f.is_block && f.locals.as_shared().is_some_and(|l| Rc::ptr_eq(l, &target))
+            }) {
+                return Some(idx);
+            }
+            // A block frame matching `target`: a LAMBDA is the return
+            // barrier (stop here); an ordinary block follows its
+            // writeback one scope outward.
+            let blk_idx = self.frames.iter().rposition(|f| {
+                f.is_block && f.locals.as_shared().is_some_and(|l| Rc::ptr_eq(l, &target))
+            });
+            match blk_idx {
+                Some(idx) if self.frames[idx].is_lambda => return Some(idx),
+                Some(idx) => match &self.frames[idx].block_writeback {
+                    Some((parent, _)) => target = parent.clone(),
+                    None => return None,
+                },
+                None => return None,
+            }
+        }
+    }
+
     /// Single-positional-arg fast path for the hot Rust-level iter
     /// drivers (`times` / Array `each`/`map`/filter / Hash key-value
     /// walks): skips the per-iteration args-Vec allocation, the
@@ -15012,10 +15050,10 @@ impl Vm {
     /// the Frame it pushes are byte-identical to the general path.
     pub(crate) fn invoke_block1(&mut self, block_id: ObjId, arg: Value) -> Result<(), Trap> {
         self.check_frames()?;
-        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope, captured_yield_block) = {
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope, captured_yield_block, bh_is_lambda) = {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
-             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block)
+             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block, bh.is_lambda)
         };
         if rest_slot.is_some() || kw_rest_slot.is_some() || n_params > 1
             || !self.protos[proto_idx].block_kw_params.is_empty()
@@ -15047,7 +15085,7 @@ impl Vm {
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
             lexical_cvar_class: bh_lexical_cvar_class,
             #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: true, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
+            is_block: true, is_lambda: bh_is_lambda, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: writeback,
             captured_yield_block,
         });
@@ -15064,10 +15102,10 @@ impl Vm {
     /// path with the exact Vec the old call sites built.
     pub(crate) fn invoke_block2(&mut self, block_id: ObjId, a: Value, b: Value) -> Result<(), Trap> {
         self.check_frames()?;
-        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope, captured_yield_block) = {
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope, captured_yield_block, bh_is_lambda) = {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
-             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block)
+             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block, bh.is_lambda)
         };
         if rest_slot.is_some() || kw_rest_slot.is_some() || n_params != 2
             || !self.protos[proto_idx].block_kw_params.is_empty()
@@ -15098,7 +15136,7 @@ impl Vm {
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
             lexical_cvar_class: bh_lexical_cvar_class,
             #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: true, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
+            is_block: true, is_lambda: bh_is_lambda, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: writeback,
             captured_yield_block,
         });
@@ -15110,10 +15148,10 @@ impl Vm {
         // Snapshot what we need out of the block's heap slot before
         // taking any `&mut self` action. BlockHandle.captured is a
         // shared `Rc<RefCell<Vec<Value>>>` — cheap to clone.
-        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope, captured_yield_block) = {
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope, captured_yield_block, bh_is_lambda) = {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
-             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block)
+             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block, bh.is_lambda)
         };
         // `|**opts|` keyword-rest: peel the trailing kwargs Hash off
         // the args BEFORE positional binding (so it doesn't land in
@@ -15433,7 +15471,7 @@ impl Vm {
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
             lexical_cvar_class: bh_lexical_cvar_class,
             #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: true, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
+            is_block: true, is_lambda: bh_is_lambda, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: writeback,
             captured_yield_block,
         });
