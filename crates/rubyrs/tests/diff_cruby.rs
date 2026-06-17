@@ -1486,6 +1486,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Surfaced by sorbet's `Object.instance_method(:method).bind_call(...)`.
 #[test] fn object_method_bind() { run_diff("object_method_bind"); }
 
+// Block auto-splat of a single Array into a block with fixed params +
+// a rest (`|a, *b|`). Surfaced by rss's `.each { |name, occurs, type,
+// *args| }` over arrays-of-rows.
+#[test] fn block_autosplat_rest() { run_diff("block_autosplat_rest"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }

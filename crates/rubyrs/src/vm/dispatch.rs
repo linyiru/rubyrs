@@ -14438,7 +14438,17 @@ impl Vm {
         // future callers. Auto-splat does NOT apply to a rest-param
         // block (`|*a|` captures the whole arg list, a lone Array
         // included) — matching `invoke_block`.
-        let args: Vec<Value> = if n_params > 1 && args.len() == 1 && rest_slot.is_none() {
+        // CRuby auto-splats a single Array arg whenever the block expects
+        // MORE THAN ONE value — either >1 fixed params (`|a, b|`) OR ≥1
+        // fixed plus a rest (`|a, *b|`, `|x, y, z, *r|`). A rest-ONLY
+        // block (`|*a|`, n_params == 0) captures the array as-is (no
+        // splat). The old `rest_slot.is_none()` gate wrongly skipped the
+        // splat for any rest block, so `[[1,2,3]].each { |a, *b| }` bound
+        // `a` to the whole array — rss's `|name, occurs, type, *args|`
+        // over `[name, occurs, type, *rest]` rows then sent
+        // `install__element` (empty `type`).
+        let args: Vec<Value> = if args.len() == 1
+            && (n_params > 1 || (n_params >= 1 && rest_slot.is_some())) {
             match &args[0] {
                 Value::Array(aid) => self.heap.array(*aid).clone(),
                 _ => args,
@@ -15105,7 +15115,17 @@ impl Vm {
         // Auto-splat doesn't apply to rest-param blocks — `|*args|`
         // wants to capture the whole arg list, including a single
         // Array as-is.
-        let args: Vec<Value> = if n_params > 1 && args.len() == 1 && rest_slot.is_none() {
+        // CRuby auto-splats a single Array arg whenever the block expects
+        // MORE THAN ONE value — either >1 fixed params (`|a, b|`) OR ≥1
+        // fixed plus a rest (`|a, *b|`, `|x, y, z, *r|`). A rest-ONLY
+        // block (`|*a|`, n_params == 0) captures the array as-is (no
+        // splat). The old `rest_slot.is_none()` gate wrongly skipped the
+        // splat for any rest block, so `[[1,2,3]].each { |a, *b| }` bound
+        // `a` to the whole array — rss's `|name, occurs, type, *args|`
+        // over `[name, occurs, type, *rest]` rows then sent
+        // `install__element` (empty `type`).
+        let args: Vec<Value> = if args.len() == 1
+            && (n_params > 1 || (n_params >= 1 && rest_slot.is_some())) {
             match &args[0] {
                 Value::Array(aid) => self.heap.array(*aid).clone(),
                 _ => args,
