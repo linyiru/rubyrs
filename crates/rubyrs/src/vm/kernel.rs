@@ -1693,6 +1693,62 @@ impl Vm {
                     }
                 }
             }
+            // `Kernel#Hash(arg)` — nil or `[]` → `{}`; a Hash → itself;
+            // an object with `to_hash` → its result; anything else
+            // raises TypeError. (CRuby is deliberately narrow here:
+            // unlike Array(), it does NOT wrap arbitrary values.)
+            "Hash" => {
+                if args.len() != 1 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+                    })));
+                }
+                let empty_array = matches!(&args[0], Value::Array(aid) if self.heap.array(*aid).is_empty());
+                match &args[0] {
+                    Value::Hash(_) => Some(Ok(args[0].clone())),
+                    Value::Nil => {
+                        self.maybe_gc();
+                        if let Err(t) = self.check_alloc() { return Some(Err(t)); }
+                        let id = self.heap.alloc(crate::heap::HeapObj::Hash(
+                            crate::heap::HashObj::with_pairs(Vec::new()),
+                        ));
+                        Some(Ok(Value::Hash(id)))
+                    }
+                    _ if empty_array => {
+                        self.maybe_gc();
+                        if let Err(t) = self.check_alloc() { return Some(Err(t)); }
+                        let id = self.heap.alloc(crate::heap::HeapObj::Hash(
+                            crate::heap::HashObj::with_pairs(Vec::new()),
+                        ));
+                        Some(Ok(Value::Hash(id)))
+                    }
+                    other => {
+                        let tn = other.type_name().to_string();
+                        let recv = args[0].clone();
+                        let mid = self.interner.intern("to_hash");
+                        let m = match self.class_of(&recv) {
+                            Value::Class(cls) => self.lookup_method_uncached(&cls, mid),
+                            _ => None,
+                        };
+                        if let Some(m) = m {
+                            let pre = self.frames.len();
+                            let mut g = PinGuard::new(self);
+                            g.pin(recv.clone());
+                            if let Err(t) = g.vm.invoke_method(m, recv.clone(), vec![]) {
+                                return Some(Err(t));
+                            }
+                            if let Err(t) = g.vm.dispatch_until(pre) { return Some(Err(t)); }
+                            let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                            if matches!(r, Value::Hash(_)) {
+                                return Some(Ok(r));
+                            }
+                        }
+                        Some(Err(self.trap(RubyError::TypeError {
+                            msg: format!("can't convert {} into Hash", tn),
+                        })))
+                    }
+                }
+            }
             "print" => {
                 if let Some(target) = self.stdio_redirect("$stdout", true) {
                     return Some(self.forward_stdio_call(target, "print", args));

@@ -12750,7 +12750,7 @@ impl Vm {
         // no_recv `builtin_call` at the top of do_call.
         // (code-review #267 #3.)
         if matches!(name.as_ref(),
-            "Array" | "Integer" | "Float" | "String"
+            "Array" | "Hash" | "Integer" | "Float" | "String"
             | "sprintf" | "format"
             // Kernel#raise via an explicit receiver only reaches
             // here AFTER user lookup + method_missing missed —
