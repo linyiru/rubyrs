@@ -35,6 +35,25 @@
 #     shim unblocks doesn't trigger STRESS_GC sweep windows).
 
 class Struct
+  # Base-class `[]` / `[]=` so a subclass-factory's own override
+  # (`class Options < Struct; def [](k); …; super; end; end`) can reach
+  # the native index accessor via `super` — CRuby keeps these on Struct
+  # itself, ABOVE any user override. The per-instance `members` is
+  # resolved dynamically, so the same body serves every member layout.
+  # (Plain `Struct.new` classes don't inherit Struct — they get an
+  # equivalent copy generated onto the class in `self.new` below.)
+  def [](key)
+    if key.is_a?(Integer)
+      to_a[key]
+    else
+      instance_variable_get("@#{key}".to_sym)
+    end
+  end
+  def []=(key, val)
+    name = key.is_a?(Integer) ? members[key] : key
+    instance_variable_set("@#{name}".to_sym, val)
+  end
+
   def self.new(*attrs, &block)
     # `keyword_init: true/false` arrives as a trailing options Hash in
     # the splat (Struct.new has no kwparams). Peel it off the attr list.
@@ -112,23 +131,40 @@ class Struct
         end
       end
     end
+    # For a subclass factory (`Options.new(:x)` with `class Options <
+    # Struct`), the factory base may define its OWN versions of the
+    # generic struct methods — faraday's `Options#[]` memoizes via a
+    # custom `[]`. Generating those methods onto `cls` (which sits BELOW
+    # the base in the ancestry) would SHADOW the user override, so the
+    # base's method never runs. Collect the methods the base and its
+    # ancestors-above-but-below-Struct define, and skip regenerating any
+    # of them. (A plain `Struct.new(:x)` cls is `Class.new` rooted at
+    # Object, so nothing is collected and every generic method is
+    # generated as before.)
+    user_struct_methods = []
+    if is_subclass_factory
+      ancestors.each do |anc|
+        break if anc == Struct
+        user_struct_methods.concat(anc.instance_methods(false))
+      end
+    end
     attrs.each do |attr|
       ivar = "@#{attr}".to_sym
       writer = "#{attr}=".to_sym
-      cls.define_method(attr) { instance_variable_get(ivar) }
-      cls.define_method(writer) { |v| instance_variable_set(ivar, v) }
+      cls.define_method(attr) { instance_variable_get(ivar) } unless user_struct_methods.include?(attr)
+      cls.define_method(writer) { |v| instance_variable_set(ivar, v) } unless user_struct_methods.include?(writer)
     end
     cls.define_method(:to_a) do
       members.map { |a| instance_variable_get("@#{a}".to_sym) }
-    end
+    end unless user_struct_methods.include?(:to_a)
     cls.define_method(:to_h) do
       h = {}
       members.each { |a| h[a] = instance_variable_get("@#{a}".to_sym) }
       h
-    end
+    end unless user_struct_methods.include?(:to_h)
     cls.define_method(:each) do |&blk|
       to_a.each(&blk)
-    end
+    end unless user_struct_methods.include?(:each)
     cls.define_method(:[]) do |key|
       # `s[:attr]` / `s["attr"]` / `s[index]`.
       if key.is_a?(Integer)
@@ -136,11 +172,11 @@ class Struct
       else
         instance_variable_get("@#{key}".to_sym)
       end
-    end
+    end unless user_struct_methods.include?(:[])
     cls.define_method(:[]=) do |key, val|
       name = key.is_a?(Integer) ? members[key] : key
       instance_variable_set("@#{name}".to_sym, val)
-    end
+    end unless user_struct_methods.include?(:[]=)
     cls.define_method(:values_at) do |*idxs|
       # Int indices (negative from end) and Ranges, like Array#values_at.
       vals = to_a
@@ -154,11 +190,11 @@ class Struct
         end
       end
       out
-    end
+    end unless user_struct_methods.include?(:values_at)
     cls.define_method(:dig) do |key, *rest|
       v = self[key]
       rest.empty? || v.nil? ? v : v.dig(*rest)
-    end
+    end unless user_struct_methods.include?(:dig)
     cls.define_method(:==) do |other|
       # CRuby's `Struct#==` requires EXACT class match (`==`),
       # not `is_a?` — otherwise `parent_struct == child_struct`
@@ -167,13 +203,13 @@ class Struct
       # the exact-class semantics so `==` is reflexive AND
       # symmetric across Struct subclass inheritance.
       other.class == self.class && self.to_a == other.to_a
-    end
+    end unless user_struct_methods.include?(:==)
     cls.define_method(:inspect) do
       pairs = members.map { |a| "#{a}=#{instance_variable_get("@#{a}".to_sym).inspect}" }
       nm = self.class.name
       nm ? "#<struct #{nm} #{pairs.join(', ')}>" : "#<struct #{pairs.join(', ')}>"
-    end
-    cls.define_method(:to_s) { inspect }
+    end unless user_struct_methods.include?(:inspect)
+    cls.define_method(:to_s) { inspect } unless user_struct_methods.include?(:to_s)
     # Double-new: with `cls < Options < Struct`, an un-shadowed
     # `cls.new(values)` would re-resolve `new` up the chain to Struct's
     # FACTORY `self.new` and try to build YET ANOTHER subclass (treating

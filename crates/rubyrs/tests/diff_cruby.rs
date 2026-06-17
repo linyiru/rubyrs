@@ -1422,6 +1422,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // (`yield(*v, **kwsplat)`, pp.rb:277).
 #[test] fn yield_splat_kwsplat() { run_diff("yield_splat_kwsplat"); }
 
+// A `class Base < Struct` with its own `[]` override (calling super) is
+// honored + super-reachable by member-structs built from it. Surfaced
+// by faraday's Options#[] memoization.
+#[test] fn struct_subclass_index_override() { run_diff("struct_subclass_index_override"); }
+
 // `Module#dup` shallow-copies into a fresh anonymous module. Surfaced by
 // the `inclusive` gem's `ModuleWithPackages.dup` (bridgetown packages DSL).
 #[test] fn module_dup() { run_diff("module_dup"); }
