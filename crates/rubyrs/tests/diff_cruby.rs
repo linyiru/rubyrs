@@ -360,6 +360,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // define_singleton_method(name, callable) on a heap primitive (Array/
 // String/Hash) installs onto its per-instance eigenclass.
 #[test] fn define_singleton_method_heap() { run_diff("define_singleton_method_heap"); }
+// a singleton method on a heap primitive dispatches in block-call form.
+#[test] fn heap_singleton_block_call() { run_diff("heap_singleton_block_call"); }
 // Module#autoload? returns nil once the constant is actually defined
 // (Tilt's FinalizedMapping lazy lookups).
 #[test] fn autoload_defined_nil() { run_diff("autoload_defined_nil"); }

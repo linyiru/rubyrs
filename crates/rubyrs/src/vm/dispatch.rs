@@ -17416,6 +17416,58 @@ impl Vm {
         }
         let recv = recv.expect("ICE: receiver missing for block call");
 
+        // Per-instance eigenclass methods on a heap primitive (Array /
+        // Proc via heap_singletons, Hash, String) — the block-form twin
+        // of the do_call arm. A `def proc.each; yield call; end` then
+        // `proc.each { … }` must dispatch the singleton WITH the block;
+        // without this the block form fell through to the Block-call
+        // intrinsics and NoMethodError'd. Sinatra's result_test sets a
+        // lambda-with-`#each` as the Rack body. Checked before the
+        // Block-call / collection arms so a user override wins.
+        if self.any_heap_singletons {
+            let sc = match &recv {
+                Value::Array(id) | Value::Block(id) => self
+                    .heap_singletons
+                    .get(&(id.0 as usize))
+                    .map(|(_, sc)| sc.clone()),
+                _ => None,
+            };
+            if let Some(sc) = sc
+                && let Some(m) = self.lookup_method_uncached(&sc, name_id)
+            {
+                self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
+                return Ok(());
+            }
+        }
+        if self.any_hash_singletons
+            && let Value::Hash(hid) = &recv
+        {
+            let m = match self.heap.get(*hid) {
+                crate::heap::HeapObj::Hash(h) => h
+                    .singleton_class
+                    .as_ref()
+                    .and_then(|sc| self.lookup_method_uncached(sc, name_id)),
+                _ => None,
+            };
+            if let Some(m) = m {
+                self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
+                return Ok(());
+            }
+        }
+        if self.any_str_singletons
+            && let Value::Str(s) = &recv
+        {
+            let m = self
+                .str_singletons
+                .get(&(std::rc::Rc::as_ptr(s) as usize))
+                .map(|(_, sc)| sc.clone())
+                .and_then(|sc| self.lookup_method_uncached(&sc, name_id));
+            if let Some(m) = m {
+                self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
+                return Ok(());
+            }
+        }
+
         // `obj.send(:name, args...) { ... }` — same dynamic-name
         // re-aim as the block-less arm in `do_call`. `do_call_block`
         // pops args then block then recv (in that drain/pop order),
