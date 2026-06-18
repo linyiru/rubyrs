@@ -32,6 +32,8 @@ extern crate alloc;
 mod ast;
 #[cfg(feature = "_bcrypt")]
 mod bcrypt;
+#[cfg(feature = "_oj")]
+mod oj;
 mod bytecode;
 mod compiler;
 mod const_marker;
@@ -163,6 +165,11 @@ pub use openssl::register_host_fns as register_openssl_host_fns;
 /// bcrypt gem load + run. See [`bcrypt::register_host_fns`].
 #[cfg(feature = "_bcrypt")]
 pub use bcrypt::register_host_fns as register_bcrypt_host_fns;
+/// Register the `_oj` battery: the `Oj` module (dump/load over JSON),
+/// letting the oj gem load + run as a fast-JSON drop-in. See
+/// [`oj::register_host_fns`].
+#[cfg(feature = "_oj")]
+pub use oj::register_host_fns as register_oj_host_fns;
 
 use std::io::Write;
 use std::path::Path;

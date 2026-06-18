@@ -222,6 +222,13 @@ _encoding_full = ["dep:encoding_rs", "dep:unicode-normalization", "dep:unicode-s
 # No external crate (the algorithm is a self-contained port of
 # crypt_blowfish.c); makes `require "bcrypt"` load + run on rubyrs.
 _bcrypt = []
+# `_oj` — pure-Ruby shim for the oj gem's C extension (`oj/oj`),
+# routing `Oj.dump` / `Oj.load` to rubyrs's JSON (= oj's `:compat`
+# mode = standard JSON). Correct for plain-data dump/load — the common
+# "fast JSON drop-in" use; oj's default `:object`-mode quirks (symbols
+# as ":sym", custom-object marshalling) are NOT modelled (documented).
+# No Rust code — just an embedded preamble + the require stub.
+_oj = []
 # `dep:regex` (not the `regex` VM feature): the front-matter host fn
 # compiles Jekyll's YAML_FRONT_MATTER_REGEXP natively. Pulling the dep
 # alone keeps the `--no-default-features --features _yaml_native`

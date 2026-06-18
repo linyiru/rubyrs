@@ -435,6 +435,10 @@ fn main() {
     // `__bc_salt` / `__bc_crypt`. Without this the battery stays inert.
     #[cfg(feature = "_bcrypt")]
     rubyrs::register_bcrypt_host_fns(&mut rt);
+    // `_oj` battery: the `Oj` module (dump/load over JSON) so the oj gem
+    // loads + runs as a fast-JSON drop-in.
+    #[cfg(feature = "_oj")]
+    rubyrs::register_oj_host_fns(&mut rt);
     let result = rt.eval_file(path);
     trace.at("eval_done");
     match result {

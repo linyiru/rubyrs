@@ -5257,6 +5257,14 @@ fn is_stdlib_stub_name(name: &str) -> bool {
     if name == "bcrypt_ext" {
         return true;
     }
+    // `oj/oj`: the oj gem's C extension, provided by the `_oj` battery
+    // (the `Oj` module is defined at startup). Succeed the require so the
+    // gem's `require "oj/oj"` resolves instead of LoadError-ing on the
+    // .bundle.
+    #[cfg(feature = "_oj")]
+    if name == "oj/oj" {
+        return true;
+    }
     matches!(
         name,
         "uri" | "uri/generic" | "uri/common"
