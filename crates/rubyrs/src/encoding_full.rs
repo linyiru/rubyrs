@@ -47,6 +47,12 @@ const NAMES: &[&str] = &[
     // decode sniffs the leading BOM to pick endianness and a missing
     // BOM is an InvalidByteSequenceError (CRuby's "dummy" UTF-16).
     "UTF-16",
+    // indices 11/12/13 are the UTF-32 family: 4 bytes per codepoint,
+    // hand-rolled the same way. The BOM form's marker is the
+    // 4-byte 00 00 FE FF (BE) / FF FE 00 00 (LE).
+    "UTF-32LE",
+    "UTF-32BE",
+    "UTF-32",
 ];
 
 /// True for the hand-rolled UTF-16 registry indices; the bool is
@@ -60,11 +66,22 @@ fn utf16_endianness(idx: u8) -> Option<bool> {
     }
 }
 
-/// True for any UTF-16 registry index (the fixed-endianness LE/BE
-/// pair and the BOM form). Callers use it to route a failed decode
-/// to InvalidByteSequenceError instead of the generic decline path.
-pub(crate) fn is_utf16_family(idx: u8) -> bool {
-    matches!(idx, 8 | 9 | 10)
+/// Fixed-endianness UTF-32 indices; `true` = little-endian (11),
+/// `false` = big-endian (12).
+fn utf32_endianness(idx: u8) -> Option<bool> {
+    match idx {
+        11 => Some(true),
+        12 => Some(false),
+        _ => None,
+    }
+}
+
+/// True for any byte-order Unicode registry index (the UTF-16 and
+/// UTF-32 LE/BE pairs plus their BOM forms). Callers use it to route
+/// a failed decode to InvalidByteSequenceError instead of the
+/// generic UndefinedConversionError decline path.
+pub(crate) fn is_utf_endian_family(idx: u8) -> bool {
+    matches!(idx, 8..=13)
 }
 
 /// encoding_rs codec for a registry index (None = the hand-written
@@ -108,6 +125,9 @@ pub(crate) fn find(name: &str) -> Option<EncodingTag> {
         "UTF-16LE" | "UTF16LE" => 8,
         "UTF-16BE" | "UTF16BE" => 9,
         "UTF-16" | "UTF16" => 10,
+        "UTF-32LE" | "UTF32LE" => 11,
+        "UTF-32BE" | "UTF32BE" => 12,
+        "UTF-32" | "UTF32" => 13,
         _ => return None,
     };
     Some(EncodingTag::Other(idx))
@@ -158,6 +178,29 @@ pub(crate) fn encode_from_utf8(
         out.extend_from_slice(&[0xFE, 0xFF]);
         for unit in text.encode_utf16() {
             out.extend_from_slice(&unit.to_be_bytes());
+        }
+        return Ok(out);
+    }
+    // UTF-32LE/BE: 4 bytes per scalar value. No unmappable surface.
+    if let Some(le) = utf32_endianness(idx) {
+        let mut out = Vec::with_capacity(text.len() * 4);
+        for c in text.chars() {
+            let cp = c as u32;
+            let b = if le { cp.to_le_bytes() } else { cp.to_be_bytes() };
+            out.extend_from_slice(&b);
+        }
+        return Ok(out);
+    }
+    // BOM-form "UTF-32": a leading big-endian BOM (00 00 FE FF) then
+    // BE 4-byte units; empty input emits no bytes.
+    if idx == 13 {
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::with_capacity(text.len() * 4 + 4);
+        out.extend_from_slice(&[0x00, 0x00, 0xFE, 0xFF]);
+        for c in text.chars() {
+            out.extend_from_slice(&(c as u32).to_be_bytes());
         }
         return Ok(out);
     }
@@ -225,6 +268,33 @@ pub(crate) fn decode_to_utf8(idx: u8, bytes: &[u8]) -> Option<String> {
         };
         return decode_to_utf8(if le { 8 } else { 9 }, &bytes[2..]);
     }
+    // UTF-32LE/BE: a non-multiple-of-4 length, a surrogate, or a
+    // codepoint > U+10FFFF is invalid (None).
+    if let Some(le) = utf32_endianness(idx) {
+        if bytes.len() % 4 != 0 {
+            return None;
+        }
+        let mut out = String::with_capacity(bytes.len() / 4);
+        for c in bytes.chunks_exact(4) {
+            let raw = [c[0], c[1], c[2], c[3]];
+            let cp = if le { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) };
+            out.push(char::from_u32(cp)?);
+        }
+        return Some(out);
+    }
+    // BOM-form "UTF-32": empty → ""; the 4-byte leading BOM picks the
+    // endianness (00 00 FE FF = BE, FF FE 00 00 = LE) and is stripped.
+    if idx == 13 {
+        if bytes.is_empty() {
+            return Some(String::new());
+        }
+        let le = match bytes.get(0..4) {
+            Some([0x00, 0x00, 0xFE, 0xFF]) => false,
+            Some([0xFF, 0xFE, 0x00, 0x00]) => true,
+            _ => return None,
+        };
+        return decode_to_utf8(if le { 11 } else { 12 }, &bytes[4..]);
+    }
     let enc = codec(idx)?;
     enc.decode_without_bom_handling_and_without_replacement(bytes)
         .map(|cow| cow.into_owned())
@@ -236,7 +306,7 @@ pub(crate) fn valid(idx: u8, bytes: &[u8]) -> bool {
     if idx == 0 {
         return true;
     }
-    if utf16_endianness(idx).is_some() || idx == 10 {
+    if is_utf_endian_family(idx) {
         return decode_to_utf8(idx, bytes).is_some();
     }
     match codec(idx) {
@@ -335,7 +405,8 @@ mod tests {
     fn latin1_roundtrip_and_errors() {
         assert_eq!(name(0), Some("ISO-8859-1"));
         assert_eq!(name(9), Some("UTF-16BE"));
-        assert_eq!(name(11), None);
+        assert_eq!(name(11), Some("UTF-32LE"));
+        assert_eq!(name(14), None);
         assert_eq!(find("iso-8859-1"), Some(EncodingTag::Other(0)));
         assert_eq!(find("ISO8859-1"), Some(EncodingTag::Other(0)));
         assert_eq!(find("KLINGON"), None);
@@ -346,7 +417,7 @@ mod tests {
         assert_eq!(encode_from_utf8(0, "日", None), Err((0x65E5, "ISO-8859-1")));
         assert_eq!(encode_from_utf8(0, "日x", Some(b"?")), Ok(vec![b'?', b'x']));
         assert_eq!(encode_from_utf8(0, "日x", Some(b"_")), Ok(vec![b'_', b'x']));
-        // unregistered index (registry is 0..=10 with the UTF-16 trio)
+        // unregistered index (registry is 0..=13 with the UTF-16/32 trios)
         assert!(encode_from_utf8(99, "x", None).is_err());
         assert_eq!(decode_to_utf8(99, b"x"), None);
         // v2 spot checks: the WHATWG-backed codecs round-trip the
@@ -383,7 +454,33 @@ mod tests {
         assert_eq!(decode_to_utf8(10, &[0xFF, 0xFE, 0x68, 0x00]).as_deref(), Some("h"));
         assert_eq!(decode_to_utf8(10, &[]).as_deref(), Some(""));
         assert_eq!(decode_to_utf8(10, &[0x00, 0x68]), None); // no BOM
-        assert!(is_utf16_family(8) && is_utf16_family(9) && is_utf16_family(10));
-        assert!(!is_utf16_family(0) && !is_utf16_family(4));
+        assert!(is_utf_endian_family(8) && is_utf_endian_family(9) && is_utf_endian_family(10));
+        assert!(!is_utf_endian_family(0) && !is_utf_endian_family(4));
+    }
+
+    #[test]
+    fn utf32_transcode() {
+        assert_eq!(find("UTF-32LE"), Some(EncodingTag::Other(11)));
+        assert_eq!(find("utf32be"), Some(EncodingTag::Other(12)));
+        assert_eq!(find("UTF-32"), Some(EncodingTag::Other(13)));
+        // LE/BE round-trip a BMP char + an astral codepoint (one
+        // 4-byte unit, no surrogate).
+        assert_eq!(encode_from_utf8(11, "h", None), Ok(vec![0x68, 0, 0, 0]));
+        assert_eq!(encode_from_utf8(12, "h", None), Ok(vec![0, 0, 0, 0x68]));
+        let smiley = encode_from_utf8(11, "😀", None).unwrap();
+        assert_eq!(smiley, vec![0x00, 0xF6, 0x01, 0x00]); // U+1F600 LE
+        assert_eq!(decode_to_utf8(11, &smiley).as_deref(), Some("😀"));
+        // length not a multiple of 4 / out-of-range codepoint invalid.
+        assert_eq!(decode_to_utf8(11, &[0x00, 0x00]), None);
+        assert_eq!(decode_to_utf8(11, &[0x00, 0x00, 0x11, 0x00]), None); // > 0x10FFFF
+        assert!(!valid(11, &[0x00, 0x00]));
+        // BOM form: 4-byte BE BOM + BE units; empty stays empty.
+        assert_eq!(encode_from_utf8(13, "h", None), Ok(vec![0, 0, 0xFE, 0xFF, 0, 0, 0, 0x68]));
+        assert_eq!(encode_from_utf8(13, "", None), Ok(vec![]));
+        assert_eq!(decode_to_utf8(13, &[0, 0, 0xFE, 0xFF, 0, 0, 0, 0x68]).as_deref(), Some("h"));
+        assert_eq!(decode_to_utf8(13, &[0xFF, 0xFE, 0, 0, 0x68, 0, 0, 0]).as_deref(), Some("h"));
+        assert_eq!(decode_to_utf8(13, &[]).as_deref(), Some(""));
+        assert_eq!(decode_to_utf8(13, &[0x68, 0, 0, 0]), None); // no BOM
+        assert!(is_utf_endian_family(11) && is_utf_endian_family(12) && is_utf_endian_family(13));
     }
 }

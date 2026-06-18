@@ -22,6 +22,9 @@ class Encoding
   UTF_16LE = Encoding.new("UTF-16LE")
   UTF_16BE = Encoding.new("UTF-16BE")
   UTF_16 = Encoding.new("UTF-16")
+  UTF_32LE = Encoding.new("UTF-32LE")
+  UTF_32BE = Encoding.new("UTF-32BE")
+  UTF_32 = Encoding.new("UTF-32")
 
   class << self
     alias __rubyrs_find_core find
@@ -40,6 +43,9 @@ class Encoding
       when "UTF-16LE", "UTF16LE" then UTF_16LE
       when "UTF-16BE", "UTF16BE" then UTF_16BE
       when "UTF-16", "UTF16" then UTF_16
+      when "UTF-32LE", "UTF32LE" then UTF_32LE
+      when "UTF-32BE", "UTF32BE" then UTF_32BE
+      when "UTF-32", "UTF32" then UTF_32
       else __rubyrs_find_core(name)
       end
     end
@@ -49,6 +55,7 @@ class Encoding
       __rubyrs_list_core + [
         ISO_8859_1, Windows_1252, ISO_8859_15, KOI8_R,
         Windows_31J, EUC_JP, GBK, Big5, UTF_16LE, UTF_16BE, UTF_16,
+        UTF_32LE, UTF_32BE, UTF_32,
       ]
     end
 
