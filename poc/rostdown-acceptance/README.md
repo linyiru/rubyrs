@@ -64,8 +64,8 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 | source | byte-identical acceptance |
 | --- | ---: |
 | bridgetown | 93.8 % (121/129) |
-| jekyll | 94.1 % (190/202) |
-| **combined** | **94.0 % (311/331)** |
+| jekyll | 95.5 % (193/202) |
+| **combined** | **94.9 % (314/331)** |
 
 Top decline reasons (combined, `run.sh`) are now a flat tail of kramdown
 quirks: multi-block / multi-line-table list items, cross-line emphasis
@@ -127,21 +127,23 @@ tag no longer mistaken for a table separator, depth-matched link
 destinations (`[t](…Fork_(x))`, `[t]((u))`, kramdown's `LINK_PAREN_STOP`),
 smart quotes directly after a code span (`` `x`'s `` → ’s), and an
 opposite-kind list marker indented shallow under an ordered item
-(`1. a:\n  * b` → nested `<ul>`). Current: **94.0 %**. `verify.sh` is the
-standing gate that keeps it WRONG = 0.
+(`1. a:\n  * b` → nested `<ul>`), and a base-aware list parser that parses an
+OPT_SPACE list in place so a lazy continuation keeps its residual leading
+space verbatim. Current: **94.9 %**. `verify.sh` is the standing gate that
+keeps it WRONG = 0.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
-content ~94 %. The remaining blockers are the impractical tail — constructs
+content ~95 %. The remaining blockers are the impractical tail — constructs
 whose byte-identity would mean reproducing kramdown quirks at real
 accept-but-wrong risk, confirmed by probing each against the oracle:
-PER-ITEM tight/loose mixing in a loose list that also has a sub-list-ending
-item, a blank-separated "lonely" IAL whose attachment target is
-context-dependent, `{:toc}`/ALD generation, indented code that is really a
-lazy paragraph continuation inside a Liquid block, an OPT_SPACE list whose
-flat de-indent would drop a lazy line's residual leading space, a tilde run
-that is really `~~`-strikethrough with a literal remainder (`~~~x~~~` →
-`~<del>x</del>~`), an ordered-list shallow-indent nest, and
-`<script>`/comment/doctype/multi-line-span HTML. Every declined page still
+PER-ITEM tight/loose mixing in a loose list that also holds a non-paragraph
+item (a sub-list / fenced code / trailing paragraph stays inline while a bare
+paragraph item wraps in `<p>`), a blank-separated "lonely" IAL whose
+attachment target is context-dependent, `{:toc}`/ALD generation, indented
+code that is really a lazy paragraph continuation inside a Liquid block, a
+tilde run that is really `~~`-strikethrough with a literal remainder
+(`~~~x~~~` → `~<del>x</del>~`), and `<script>`/comment/doctype/multi-line-span
+HTML. Every declined page still
 renders correctly via the Ruby-kramdown fallback; declining only forgoes the
 speed-up.
