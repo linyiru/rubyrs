@@ -4303,6 +4303,64 @@ impl Vm {
             // pick the pair whose block-returned key is the
             // extremum. Result is the winning [k, v] as a fresh
             // 2-element Array, matching CRuby. Empty hash → nil.
+            // `Hash#min_by(n)` / `max_by(n)` — the n smallest/largest
+            // [k, v] pairs by the block's value, as an Array of pairs
+            // (mirrors Array#min_by(n) but over pairs).
+            (Value::Hash(id), op @ ("min_by" | "max_by"), [Value::Int(n)]) => {
+                let want_min = op == "min_by";
+                if *n < 0 {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: format!("negative size ({})", n),
+                    }));
+                }
+                let n_take = *n as usize;
+                let entries: Vec<(Value, Value)> = self.heap.hash(*id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(*id));
+                g.pin(Value::Block(block));
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
+                g.pin(Value::Array(result_id));
+                if n_take == 0 || entries.is_empty() {
+                    return Ok(Some(Value::Array(result_id)));
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut scored: Vec<(Value, Value)> = Vec::with_capacity(entries.len());
+                let mut early: Option<Value> = None;
+                for (k, v) in entries {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
+                    let pair = Value::Array(pair_id);
+                    // Root every pair for the rest of the op (sort + build).
+                    g.pin(pair.clone());
+                    let key = match g.vm.step_block1(block, pair.clone(), pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    scored.push((key, pair));
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                let interner = &g.vm.interner;
+                let mut incomparable = false;
+                scored.sort_by(|(ka, _), (kb, _)| {
+                    match value_cmp_v(ka, kb, interner) {
+                        Some(o) => o,
+                        None => { incomparable = true; std::cmp::Ordering::Equal }
+                    }
+                });
+                if incomparable { return Ok(None); }
+                let take = n_take.min(scored.len());
+                let result_vec: Vec<Value> = if want_min {
+                    scored.into_iter().take(take).map(|(_, p)| p).collect()
+                } else {
+                    scored.into_iter().rev().take(take).map(|(_, p)| p).collect()
+                };
+                *g.vm.heap.array_mut(result_id) = result_vec;
+                Some(Value::Array(result_id))
+            }
             (Value::Hash(id), op @ ("min_by" | "max_by"), []) => {
                 let want_max = op == "max_by";
                 let pairs: Vec<(Value, Value)> = self.heap.hash(*id).clone();
