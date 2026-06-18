@@ -1905,7 +1905,6 @@ pub(crate) fn compile_expr(
                         b.emit(Op::NewArray(b.method_n_positional as u32));
                         b.emit(Op::ApplySuperBlock(name_id));
                     } else if b.method_has_kw
-                        && b.method_kw_rest_slot.is_none()
                         && b.method_rest_slot.is_none()
                     {
                         // Bare `super` from a method with named keyword
@@ -1932,14 +1931,32 @@ pub(crate) fn compile_expr(
                         for i in 0..n_pos {
                             b.emit(Op::LoadLocal(i));
                         }
+                        // When the method also declares `**kwrest`, the
+                        // forwarded kwargs are the named params MERGED
+                        // OVER the kwrest hash (`def m(a, x: 1, **rest);
+                        // super; end` forwards `rest.merge({x: x})` —
+                        // mustermann's `Composite.supported?(option,
+                        // type: nil, **options)`). Build the kwrest hash
+                        // (dup'd via merge, never mutated) as the base,
+                        // then merge the reconstructed named-kw hash so
+                        // explicit keywords win.
                         let kw = b.method_kw_params.clone();
                         let kw_count = kw.len() as u16;
+                        let kwrest = b.method_kw_rest_slot;
+                        if let Some(krs) = kwrest {
+                            b.emit(Op::LoadLocal(krs));
+                        }
                         for (kname, slot) in &kw {
                             let ksym = interner.intern(kname);
                             b.emit(Op::LoadSymbol(ksym));
                             b.emit(Op::LoadLocal(*slot));
                         }
                         b.emit(Op::NewHash(kw_count as u32));
+                        if kwrest.is_some() {
+                            // `kwrest.merge(named)` → combined kwargs Hash.
+                            let merge_id = interner.intern("merge");
+                            b.emit(Op::Call(merge_id, 1, u16::MAX));
+                        }
                         b.emit(Op::NewArray((n_pos + 1) as u32));
                         if block_present {
                             b.emit(Op::ApplySuperBlock(name_id));
