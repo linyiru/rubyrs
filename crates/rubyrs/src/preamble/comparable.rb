@@ -24,24 +24,38 @@
 # the rule that Object equality must never raise.
 
 module Comparable
+  # CRuby's `rb_cmperr` message: `comparison of <self class> with
+  # <other> failed`, where `<other>` is the VALUE for a Numeric / nil /
+  # true / false operand (e.g. `5`) and the CLASS name otherwise (e.g.
+  # `String`). So `5 < "x"` → "...Integer with String failed" but
+  # `"a" < 5` → "...String with 5 failed".
+  def __cmp_fail(other)
+    rhs = case other
+          when Numeric, nil, true, false then other.inspect
+          else other.class
+          end
+    raise ArgumentError, "comparison of #{self.class} with #{rhs} failed"
+  end
+  private :__cmp_fail
+
   def <(other)
     c = self <=> other
-    raise ArgumentError, "comparison failed" if c.nil?
+    __cmp_fail(other) if c.nil?
     c < 0
   end
   def <=(other)
     c = self <=> other
-    raise ArgumentError, "comparison failed" if c.nil?
+    __cmp_fail(other) if c.nil?
     c <= 0
   end
   def >(other)
     c = self <=> other
-    raise ArgumentError, "comparison failed" if c.nil?
+    __cmp_fail(other) if c.nil?
     c > 0
   end
   def >=(other)
     c = self <=> other
-    raise ArgumentError, "comparison failed" if c.nil?
+    __cmp_fail(other) if c.nil?
     c >= 0
   end
   def ==(other)
