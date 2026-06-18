@@ -339,6 +339,30 @@ class Time
   def min;   decompose[:min];   end
   def sec;   decompose[:sec];   end
   def wday;  decompose[:wday];  end
+  # Day of the year, 1..366 (reuses the strftime %j helper).
+  def yday
+    d = decompose
+    __strftime_day_of_year(d[:year], d[:month], d[:day])
+  end
+  # Day-of-week predicates (wday: Sunday == 0 .. Saturday == 6).
+  def sunday?;    wday == 0; end
+  def monday?;    wday == 1; end
+  def tuesday?;   wday == 2; end
+  def wednesday?; wday == 3; end
+  def thursday?;  wday == 4; end
+  def friday?;    wday == 5; end
+  def saturday?;  wday == 6; end
+  # Fractional seconds: 0 (Integer) for a whole second, else a Rational
+  # of nanoseconds — matching CRuby.
+  def subsec
+    @nsec == 0 ? 0 : Rational(@nsec, 1_000_000_000)
+  end
+  # `[sec, min, hour, mday, mon, year, wday, yday, isdst, zone]`.
+  # Tier 1 is UTC-only with no DST, so isdst is false and zone "UTC".
+  def to_a
+    d = decompose
+    [d[:sec], d[:min], d[:hour], d[:day], d[:month], d[:year], d[:wday], yday, false, zone]
+  end
 
   def to_i; @sec; end
   alias_method :to_int, :to_i
