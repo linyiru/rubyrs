@@ -795,6 +795,12 @@ impl Heap {
     pub(crate) fn hash_class_tag(&self, id: ObjId) -> Option<Rc<Class>> {
         if let HeapObj::Hash(h) = self.get(id) { h.class_tag.clone() } else { None }
     }
+    /// Stamp a subclass tag onto a Hash — used by non-mutating builders
+    /// (`merge`, `select`, …) so the result keeps the receiver's class
+    /// (CRuby: `IndifferentHash.new.merge(x).class == IndifferentHash`).
+    pub(crate) fn hash_set_class_tag(&mut self, id: ObjId, tag: Option<Rc<Class>>) {
+        if let HeapObj::Hash(h) = self.get_mut(id) { h.class_tag = tag; }
+    }
     /// Read `@name` ivar off a (subclass) Hash; `None` if unset.
     /// Array twin of `hash_ivar_get` / `hash_ivar_set`.
     pub(crate) fn array_ivar_get(&self, id: ObjId, name: crate::intern::SymId) -> Option<Value> {

@@ -1167,6 +1167,12 @@ impl Vm {
                         if default_block.is_some() {
                             g.vm.heap.hash_set_default_block(nid, default_block);
                         }
+                        // Preserve the receiver's subclass (CRuby: merge
+                        // returns an instance of the receiver's class —
+                        // Sinatra's IndifferentHash#merge stays indifferent).
+                        if let Some(tag) = g.vm.heap.hash_class_tag(id) {
+                            g.vm.heap.hash_set_class_tag(nid, Some(tag));
+                        }
                         Some(Value::Hash(nid))
                     }
                     // `h.merge!(other)` / `h.update(other)` — in-place

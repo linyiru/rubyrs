@@ -189,6 +189,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn hash_default_proc_set() { run_diff("hash_default_proc_set"); }
 #[test] fn hash_subclass() { run_diff("hash_subclass"); }
 #[test] fn hash_subclass_override() { run_diff("hash_subclass_override"); }
+// merge (block + non-block) preserves the receiver's subclass tag.
+#[test] fn hash_subclass_merge() { run_diff("hash_subclass_merge"); }
 // A Hash/Array subclass that redefines `self.[]` reaches its own
 // class method (not the native Hash[]/Array[] constructor); a plain
 // subclass still gets the native tagged build. rack Rack::Headers[...].
