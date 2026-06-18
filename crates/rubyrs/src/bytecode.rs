@@ -849,6 +849,19 @@ pub(crate) struct Proto {
     /// `line - preamble_offset` so template content lands on the right
     /// template line). Apply via `Vm::reported_line`.
     pub(crate) line_base: i32,
+    /// Encoding of string literals produced by this proto, when it was
+    /// compiled from a source whose Ruby encoding wasn't the UTF-8
+    /// default — `eval(src, …)` / `class_eval(src, …)` where `src`
+    /// carries a US-ASCII / Shift_JIS / … tag. `None` = UTF-8 (the
+    /// common case; literals push UTF-8 untouched). When `Some(tag)`,
+    /// `Op::LoadConstStr*` re-tags the literal to `tag` (transcoding
+    /// the UTF-8 bytes for a non-ASCII-compatible encoding), so a
+    /// template engine eval'ing a non-UTF-8 template gets literals in
+    /// the template's own encoding (Tilt's encoding-detection specs).
+    /// Skipped by the preamble cache — only runtime eval'd protos ever
+    /// carry a non-None value, so cached protos restore as `None`.
+    #[cfg_attr(feature = "preamble-cache", serde(skip))]
+    pub(crate) source_encoding: Option<crate::value::EncodingTag>,
     /// `true` when `code` contains an `Op::CreateBlock` — i.e. running
     /// this proto can capture the frame's locals cell into a
     /// `BlockHandle` (block literal, `proc`/`lambda`/`->`,

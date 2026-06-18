@@ -1057,6 +1057,15 @@ impl Vm {
             Op::LoadConstStr(id) => {
                 let s = self.interner.resolve(id).clone();
                 let v = Value::new_str(s.to_string());
+                // Source-encoding re-tag: when the eval'd source wasn't
+                // UTF-8 (a template engine eval'ing a US-ASCII /
+                // Shift_JIS template), its string literals carry the
+                // source's encoding.
+                if let Some(enc) = self.protos[proto_idx].source_encoding
+                    && let Value::Str(rs) = &v
+                {
+                    self.retag_literal_to_source_encoding(rs, enc);
+                }
                 // `# frozen_string_literal: true`: plain literals push
                 // frozen. (Interpolated strings don't reach this op, so
                 // they stay mutable — CRuby semantics.)
@@ -1076,6 +1085,11 @@ impl Vm {
                 // future loads share.
                 let bytes: Vec<u8> = self.protos[proto_idx].byte_literals[idx as usize].to_vec();
                 let v = Value::new_str_bytes(bytes);
+                if let Some(enc) = self.protos[proto_idx].source_encoding
+                    && let Value::Str(rs) = &v
+                {
+                    self.retag_literal_to_source_encoding(rs, enc);
+                }
                 if self.protos[proto_idx].frozen_string_literal
                     && let Value::Str(rs) = &v
                 {

@@ -1124,6 +1124,34 @@ impl Vm {
     /// and silently returning Nil leaves downstream callers
     /// (`enc.dummy?` etc.) with a NoMethodError far from the root
     /// cause. Panic surfaces the actual bootstrap failure.
+    /// Re-tag (and, when needed, transcode) a freshly-loaded string
+    /// literal to the eval source's encoding. UTF-8 is the proto
+    /// default and never reaches here. US-ASCII / BINARY just flip the
+    /// tag — the literal bytes are already the right ones (the source
+    /// was ASCII-compatible). A registry encoding (`Other`) transcodes
+    /// the UTF-8 literal into that encoding's bytes; an unmappable char
+    /// leaves the literal UTF-8 (best-effort — a real non-UTF-8 template
+    /// wouldn't contain a char its own encoding can't represent).
+    pub(crate) fn retag_literal_to_source_encoding(&self, rs: &std::rc::Rc<crate::value::RStr>, enc: crate::value::EncodingTag) {
+        use crate::value::EncodingTag;
+        match enc {
+            EncodingTag::Utf8 => {}
+            EncodingTag::UsAscii | EncodingTag::Binary => {
+                rs.encoding.set(enc);
+            }
+            #[cfg(feature = "_encoding_full")]
+            EncodingTag::Other(idx) => {
+                let utf8 = rs.to_string_lossy();
+                if let Ok(bytes) = crate::encoding_full::encode_from_utf8(idx, &utf8, None) {
+                    *rs.borrow_mut() = bytes;
+                    rs.encoding.set(enc);
+                }
+            }
+            #[cfg(not(feature = "_encoding_full"))]
+            EncodingTag::Other(_) => {}
+        }
+    }
+
     pub(crate) fn try_push_string_encoding(
         &mut self,
         recv: &Value,
@@ -8677,7 +8705,33 @@ impl Vm {
                     ),
                 }));
             }
-            let src = if let Value::Str(s) = &args[0] { s.to_string_lossy() } else { unreachable!() };
+            // Source encoding: when the eval'd string isn't UTF-8 (a
+            // template engine class_eval'ing a US-ASCII / Shift_JIS
+            // template), decode the bytes to UTF-8 for parsing and
+            // remember the encoding so the compiled string literals are
+            // re-tagged (and, for a registry encoding, transcoded) back
+            // to it at load — Tilt's template-encoding-detection specs.
+            let (src, source_enc) = if let Value::Str(s) = &args[0] {
+                use crate::value::EncodingTag;
+                match s.encoding.get() {
+                    EncodingTag::Utf8 => (s.to_string_lossy(), None),
+                    // ASCII bytes are valid UTF-8 — parse as-is, just
+                    // carry the tag onto the literals.
+                    EncodingTag::UsAscii => (s.to_string_lossy(), Some(EncodingTag::UsAscii)),
+                    // Binary source: parse lossily, leave literals UTF-8
+                    // (a BINARY-tagged eval source is degenerate).
+                    EncodingTag::Binary => (s.to_string_lossy(), None),
+                    #[cfg(feature = "_encoding_full")]
+                    EncodingTag::Other(idx) => {
+                        match crate::encoding_full::decode_to_utf8(idx, &s.borrow()) {
+                            Some(u) => (u, Some(EncodingTag::Other(idx))),
+                            None => (s.to_string_lossy(), None),
+                        }
+                    }
+                    #[cfg(not(feature = "_encoding_full"))]
+                    EncodingTag::Other(_) => (s.to_string_lossy(), None),
+                }
+            } else { unreachable!() };
             // Track whether the filename is our synthetic default
             // or caller-supplied. Only the synthetic case opts
             // into the source-table collision-suffix dedupe; an
@@ -8711,7 +8765,7 @@ impl Vm {
                 Some(Value::Float(f)) => Some(*f as i32),
                 _ => None,
             };
-            let v = self.eval_string_full(&src, &filename, synthetic, Some(cls.clone()), None, seed, line_base)?;
+            let v = self.eval_string_full(&src, &filename, synthetic, Some(cls.clone()), None, seed, line_base, source_enc)?;
             if self.suppress_call_result_push {
                 self.suppress_call_result_push = false;
             } else {
@@ -15093,7 +15147,7 @@ impl Vm {
                 // shared captured cell — it must never be considered
                 // for the Locals::Stack representation.
                 creates_block: true,
-                frozen_string_literal: false, line_base: 1,
+                frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![
                     Op::LoadLocal(0),
                     Op::LoadLocal(1),
@@ -15200,7 +15254,7 @@ impl Vm {
                 // locals live in a shared captured cell — never
                 // Stack-eligible.
                 creates_block: true,
-                frozen_string_literal: false, line_base: 1,
+                frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![
                     Op::LoadLocal(0),                   // [outer]
                     Op::LoadLocal(1),                   // [outer, inner]
@@ -18616,7 +18670,7 @@ impl Vm {
                 block_param: None,
                 n_locals: 0,
                 creates_block: false,
-                frozen_string_literal: false, line_base: 1,
+                frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![Op::LoadIvar(ivar_id), Op::Return],
                 op_spans: vec![Span::ZERO; 2],
                 filename: "<attr_accessor>".into(),
@@ -18658,7 +18712,7 @@ impl Vm {
                 block_param: None,
                 n_locals: 1,
                 creates_block: false,
-                frozen_string_literal: false, line_base: 1,
+                frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![Op::LoadLocal(0), Op::Dup, Op::StoreIvar(ivar_id), Op::Return],
                 op_spans: vec![Span::ZERO; 4],
                 filename: "<attr_accessor>".into(),
@@ -18774,7 +18828,7 @@ impl Vm {
             block_param: None,
             n_locals: 1,
             creates_block: false,
-            frozen_string_literal: false, line_base: 1,
+            frozen_string_literal: false, line_base: 1, source_encoding: None,
             code: vec![
                 Op::LoadSelf,
                 Op::LoadLocal(0),
@@ -18960,7 +19014,7 @@ impl Vm {
             block_param: None,
             n_locals: 1,
             creates_block: false,
-            frozen_string_literal: false, line_base: 1,
+            frozen_string_literal: false, line_base: 1, source_encoding: None,
             code: vec![
                 Op::LoadLocal(0),
                 // Direct builtin call — bypasses `do_call` so the alias
@@ -19110,7 +19164,7 @@ impl Vm {
             block_param: None,
             n_locals: 1,
             creates_block: false,
-            frozen_string_literal: false, line_base: 1,
+            frozen_string_literal: false, line_base: 1, source_encoding: None,
             code: vec![Op::LoadNil, Op::Return],
             op_spans: vec![Span::ZERO; 2],
             filename: "<lifecycle-noop>".into(),

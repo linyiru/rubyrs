@@ -1322,6 +1322,9 @@ impl ProtoBuilder {
             // 1 = no line adjustment; eval-with-line stamps the whole
             // proto range via `mark_line_base`.
             line_base: 1,
+            // None = UTF-8 literals; eval-of-non-UTF-8-source stamps the
+            // range via `mark_source_encoding`.
+            source_encoding: None,
             n_required_post: 0,
             rest_param: None,
             kw_param_defaults: vec![],
@@ -2403,6 +2406,18 @@ pub(crate) fn mark_frozen_string_literal(protos: &mut [Proto], start: usize) {
 pub(crate) fn mark_line_base(protos: &mut [Proto], start: usize, base: i32) {
     for p in &mut protos[start..] {
         p.line_base = base;
+    }
+}
+
+/// Stamp `source_encoding` onto every proto in `protos[start..]` — the
+/// range an eval-of-non-UTF-8-source entry just compiled. Mirrors
+/// `mark_line_base` / `mark_frozen_string_literal`: a template engine
+/// eval'ing a US-ASCII / Shift_JIS template gets string literals tagged
+/// (and, for non-ASCII-compatible encodings, transcoded) to the
+/// template's own encoding.
+pub(crate) fn mark_source_encoding(protos: &mut [Proto], start: usize, enc: crate::value::EncodingTag) {
+    for p in &mut protos[start..] {
+        p.source_encoding = Some(enc);
     }
 }
 

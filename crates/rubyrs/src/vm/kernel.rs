@@ -3651,6 +3651,7 @@ impl Vm {
                     match self.extract_binding_ctx(binding) {
                         Some((self_o, cctx, locals)) => Some(self.eval_string_full(
                             &owned, "(eval)", true, cctx, Some(self_o), locals, None,
+                            None,
                         )),
                         None => Some(self.eval_string(&owned, "(eval)", true)),
                     }
@@ -3704,7 +3705,7 @@ impl Vm {
                     // builder_binding, path)`).
                     match self.extract_binding_ctx(binding) {
                         Some((self_o, cctx, locals)) => Some(self.eval_string_full(
-                            &owned, &fname, false, cctx, Some(self_o), locals, line_base,
+                            &owned, &fname, false, cctx, Some(self_o), locals, line_base, None,
                         )),
                         None => Some(self.eval_string_with_line(&owned, &fname, false, line_base)),
                     }
@@ -4646,7 +4647,7 @@ impl Vm {
         synthetic: bool,
         class_ctx: Option<std::rc::Rc<crate::value::Class>>,
     ) -> Result<Value, Trap> {
-        self.eval_string_full(source, filename, synthetic, class_ctx, None, vec![], None)
+        self.eval_string_full(source, filename, synthetic, class_ctx, None, vec![], None, None)
     }
 
     /// `eval_string` carrying an explicit backtrace line base (the
@@ -4659,7 +4660,7 @@ impl Vm {
         synthetic: bool,
         line_base: Option<i32>,
     ) -> Result<Value, Trap> {
-        self.eval_string_full(source, filename, synthetic, None, None, vec![], line_base)
+        self.eval_string_full(source, filename, synthetic, None, None, vec![], line_base, None)
     }
 
     /// `eval_string_with_class_ctx` plus a `self_override` — the eval'd
@@ -4764,6 +4765,11 @@ impl Vm {
         // line)` / 4th of `eval(src, b, file, line)`. `None` ⇒ leave
         // the default (`1`, no adjustment).
         line_base: Option<i32>,
+        // Encoding of the eval'd source string when it wasn't UTF-8
+        // (the source's Ruby encoding tag). `None` ⇒ UTF-8 default.
+        // Stamped onto the compiled proto range so string literals are
+        // re-tagged to the source's encoding at load.
+        source_encoding: Option<crate::value::EncodingTag>,
     ) -> Result<Value, Trap> {
         // Fast-fail BEFORE any parse / AST / compile work when
         // the frame cap is already exhausted. CPU-bound parse of
@@ -4878,6 +4884,9 @@ impl Vm {
         // relative to the default when `line_base` is None.)
         if let Some(base) = line_base {
             crate::compiler::mark_line_base(&mut self.protos, fsl_start, base);
+        }
+        if let Some(enc) = source_encoding {
+            crate::compiler::mark_source_encoding(&mut self.protos, fsl_start, enc);
         }
         if let Some(max) = cap_at_entry
             && self.interner.len() > max {

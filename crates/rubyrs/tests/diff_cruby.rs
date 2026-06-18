@@ -437,6 +437,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // WHATWG transcoder; common plane round-trips). Tilt template encoding.
 #[cfg(feature = "_encoding_full")]
 #[test] fn encoding_shift_jis() { run_diff("encoding_shift_jis"); }
+// eval/class_eval of non-UTF-8 source re-tags (+ transcodes) the
+// produced string literals to the source encoding (Tilt templates).
+#[cfg(feature = "_encoding_full")]
+#[test] fn eval_source_encoding() { run_diff("eval_source_encoding"); }
 // E3 core surface: File.read encoding: tags, default_external.
 #[test] fn file_read_encoding() { run_diff("file_read_encoding"); }
 #[test] fn lifecycle_hook_super() { run_diff("lifecycle_hook_super"); }
