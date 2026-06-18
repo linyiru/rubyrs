@@ -316,6 +316,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `alias new! new` snapshots the builtin Class#new (no recursion when
 // `new` is then redefined to call `new!`) — Sinatra's middleware wrap.
 #[test] fn alias_builtin_new() { run_diff("alias_builtin_new"); }
+// `begin … rescue … else E … ensure … end` — the else body runs only
+// on the no-exception path, its value is the begin's value, and an
+// exception in else escapes the rescue chain (Sinatra/Tilt lazy_load).
+#[test] fn begin_rescue_else() { run_diff("begin_rescue_else"); }
 #[test] fn class_self_visibility() { run_diff("class_self_visibility"); }
 #[test] fn env_nested_lookup() { run_diff("env_nested_lookup"); }
 #[test] fn time_local_flavour() { run_diff("time_local_flavour"); }

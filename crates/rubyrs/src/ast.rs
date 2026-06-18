@@ -5638,6 +5638,56 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect::<Vec<SExpr>>())
                 .unwrap_or_default()
         });
+        // `begin … rescue … else E … ensure … end`. The `else`
+        // body runs ONLY when the protected body completes WITHOUT
+        // an exception; its value becomes the begin's value; and —
+        // unlike the body — an exception raised inside `else` is
+        // NOT caught by the rescue clauses (it propagates, with
+        // ensure still running). Prism exposes it as an ElseNode.
+        if let Some(en) = n.else_clause() {
+            let else_body: Vec<SExpr> = en.statements()
+                .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
+                .unwrap_or_default();
+            if rescue.is_empty() {
+                // No rescue clause: `else` is just sequenced after
+                // the body (CRuby warns "else without rescue is
+                // useless" but still runs it). Appending preserves
+                // both the value and the ensure semantics.
+                let mut merged = body;
+                merged.extend(else_body);
+                return sp(node, Expr::Begin { body: merged, rescue, ensure });
+            }
+            // Desugar by nesting. An inner begin/rescue sets a
+            // hidden ok-flag true as its FIRST body statement (so
+            // `retry`, which re-runs the body, re-arms it) and
+            // false as the first statement of each rescue clause.
+            // An outer rescue-free layer — which carries the
+            // ensure — then runs `else` only when the flag
+            // survived, so an exception inside `else` escapes the
+            // rescue chain yet still triggers ensure.
+            let ok = ctx.fresh_pm();
+            let res = ctx.fresh_pm();
+            let mut inner_body = vec![
+                sp(node, Expr::LVarWrite(ok.clone(), Box::new(sp(node, Expr::BoolLit(true))))),
+            ];
+            inner_body.extend(body);
+            let rescue: Vec<RescueClause> = rescue.into_iter().map(|mut rc| {
+                let mut rb = vec![
+                    sp(node, Expr::LVarWrite(ok.clone(), Box::new(sp(node, Expr::BoolLit(false))))),
+                ];
+                rb.append(&mut rc.body);
+                rc.body = rb;
+                rc
+            }).collect();
+            let inner = sp(node, Expr::Begin { body: inner_body, rescue, ensure: None });
+            let assign = sp(node, Expr::LVarWrite(res.clone(), Box::new(inner)));
+            let branch = sp(node, Expr::If {
+                cond: Box::new(sp(node, Expr::LVarRead(ok))),
+                then_body: else_body,
+                else_body: vec![sp(node, Expr::LVarRead(res))],
+            });
+            return sp(node, Expr::Begin { body: vec![assign, branch], rescue: vec![], ensure });
+        }
         return sp(node, Expr::Begin { body, rescue, ensure });
     }
     if let Some(n) = node.as_post_execution_node() {
