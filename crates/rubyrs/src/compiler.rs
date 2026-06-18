@@ -1210,19 +1210,19 @@ fn emit_method_call(
 ) {
     let cid = *cc as u16;
     *cc += 1;
-    // Block + kwargs combination is not yet wired — `Op::CallBlock*`
-    // has no parallel CallKwBlock variant. For now `has_kwargs &&
-    // has_block` falls back to the non-kw block op; the trailing
-    // Hash travels as a positional arg, same shape as before this
-    // PR. Tracked as follow-up alongside the kwarg-consuming
-    // primitive surface.
+    // The block+kwargs combo (`foo(**kw, &blk)`) emits a dedicated
+    // `CallKwBlock*` op so the trailing keyword-splat Hash is treated
+    // as kwargs (an empty/nil one dropped), not smuggled in as a
+    // positional — see the op doc in bytecode.rs.
     let op = match (has_recv, has_block, has_kwargs) {
         (true, false, false)  => Op::Call(name, argc, cid),
         (false, false, false) => Op::CallNoRecv(name, argc, cid),
         (true, false, true)   => Op::CallKw(name, argc, cid),
         (false, false, true)  => Op::CallKwNoRecv(name, argc, cid),
-        (true, true, _)  => Op::CallBlock(name, argc, cid),
-        (false, true, _) => Op::CallNoRecvBlock(name, argc, cid),
+        (true, true, true)    => Op::CallKwBlock(name, argc, cid),
+        (false, true, true)   => Op::CallKwNoRecvBlock(name, argc, cid),
+        (true, true, false)   => Op::CallBlock(name, argc, cid),
+        (false, true, false)  => Op::CallNoRecvBlock(name, argc, cid),
     };
     b.emit(op);
 }
@@ -2082,7 +2082,7 @@ pub(crate) fn compile_expr(
             }
             b.emit(Op::NewHash(pairs.len() as u32));
         }
-        Expr::CallWithBlock { receiver, name, args, block_params, block_body } => {
+        Expr::CallWithBlock { receiver, name, args, block_params, block_body, kwargs_trailing } => {
             // Compile-time intercepts for literal-symbol arms whose
             // block body becomes the method body:
             // `define_method(:foo) { ... }` and
@@ -2104,9 +2104,9 @@ pub(crate) fn compile_expr(
             b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot, kw_rest_slot));
             for a in args { compile_expr(b, a, protos, interner, cc); }
             let argc = args.len() as u8;
-            emit_method_call(b, name_id, argc, has_recv, true, false, cc);
+            emit_method_call(b, name_id, argc, has_recv, true, *kwargs_trailing, cc);
         }
-        Expr::CallWithBlockArg { receiver, name, args, block_arg } => {
+        Expr::CallWithBlockArg { receiver, name, args, block_arg, kwargs_trailing } => {
             // `foo(&proc_value)`. Same stack shape as CallWithBlock
             // (recv, block, args...), but the block slot comes from
             // evaluating `block_arg` instead of constructing a
@@ -2122,7 +2122,7 @@ pub(crate) fn compile_expr(
             compile_expr(b, block_arg, protos, interner, cc);
             for a in args { compile_expr(b, a, protos, interner, cc); }
             let argc = args.len() as u8;
-            emit_method_call(b, name_id, argc, has_recv, true, false, cc);
+            emit_method_call(b, name_id, argc, has_recv, true, *kwargs_trailing, cc);
         }
         Expr::Return(val) => {
             // CRuby `return` has two scoping rules depending on the

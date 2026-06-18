@@ -334,6 +334,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_succ_bang() { run_diff("string_succ_bang"); }
 // File.rename(old, new) — atomic rename.
 #[test] fn file_rename() { run_diff("file_rename"); }
+// foo(**empty, &blk) drops the empty kwsplat even with a block-pass
+// (Tilt fixed-locals compiled_method.bind_call(scope, **locals, &block)).
+#[test] fn kwsplat_empty_block() { run_diff("kwsplat_empty_block"); }
+// NoMethodError < NameError < StandardError (CRuby exception hierarchy).
+#[test] fn nomethoderror_is_nameerror() { run_diff("nomethoderror_is_nameerror"); }
 // `begin … rescue … else E … ensure … end` — the else body runs only
 // on the no-exception path, its value is the begin's value, and an
 // exception in else escapes the rescue chain (Sinatra/Tilt lazy_load).

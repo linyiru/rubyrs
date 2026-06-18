@@ -481,6 +481,15 @@ pub(crate) enum Op {
     CreateLambda(u32, u16, u16, u16, u16),
     CallBlock(SymId, u8, u16),
     CallNoRecvBlock(SymId, u8, u16),
+    /// `foo(**kw, &blk)` — block-form call whose trailing arg is a
+    /// keyword-splat Hash (the block+kwargs combo). Twin of
+    /// `CallKw`/`CallBlock`: an EMPTY/`nil` trailing hash is dropped
+    /// (so `f(**{}, &b)` passes nothing, not a phantom positional),
+    /// then dispatch proceeds through the block path. Without these
+    /// the combo reused `CallBlock`, which passed `**{}` as a
+    /// positional → spurious arity errors (Tilt fixed-locals render).
+    CallKwBlock(SymId, u8, u16),
+    CallKwNoRecvBlock(SymId, u8, u16),
     Yield(u8),
     /// `yield(*arr)` — like `Yield` but the args come from a popped
     /// Array (dynamic argc), the yield analogue of `Op::ApplyCall`.

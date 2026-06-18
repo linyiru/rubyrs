@@ -447,6 +447,11 @@ pub(crate) enum Expr {
         args: Vec<SExpr>,
         block_params: Vec<BlockParam>,
         block_body: Vec<SExpr>,
+        /// `true` when the final arg came from a trailing
+        /// `KeywordHashNode` (`foo(k: v, &blk)` / `foo(**kw, &blk)`)
+        /// — drives the `CallKwBlock*` emit so an empty `**{}` is
+        /// dropped and a non-empty kwargs Hash binds as kwargs.
+        kwargs_trailing: bool,
     },
     /// `foo(&proc_value)` — block argument forwarding. The
     /// `block_arg` expression must evaluate to a `Value::Block`
@@ -461,6 +466,8 @@ pub(crate) enum Expr {
         name: String,
         args: Vec<SExpr>,
         block_arg: Box<SExpr>,
+        /// As `CallWithBlock::kwargs_trailing` — `foo(**kw, &proc)`.
+        kwargs_trailing: bool,
     },
     Yield(Vec<SExpr>),
     /// `yield(*arr)` / `yield(a, *b, c)` — yield with a splat. The
@@ -1038,6 +1045,7 @@ fn kwsplat_chunk(anchor: &Node<'_>, kwhash: SExpr) -> SExpr {
         name: "reject".into(),
         args: vec![],
         block_params: vec![BlockParam::Single("__kws".into())],
+        kwargs_trailing: false,
         block_body: vec![sp(anchor, Expr::Call {
             receiver: Some(Box::new(sp(anchor, Expr::LVarRead("__kws".into())))),
             name: "empty?".into(),
@@ -1470,6 +1478,7 @@ fn compile_hash_pattern(
                 args: vec![],
                 block_params: vec![BlockParam::Single("__pk".into()), BlockParam::Single("__pv".into())],
                 block_body: vec![pm_meth(anchor, key_list, "include?", vec![pm_lvar(anchor, "__pk")])],
+                kwargs_trailing: false,
             });
             checks.push(pm_bind(anchor, &name, rest_hash));
         }
@@ -1528,6 +1537,7 @@ fn compile_find_pattern(
         args: vec![],
         block_params: vec![BlockParam::Single(iparam.clone())],
         block_body: vec![pm_all(anchor, detect)],
+        kwargs_trailing: false,
     });
     checks.push(pm_bind(anchor, &fi, find_call));
     // `find` returns nil on no match (0 is truthy in Ruby, so a hit at
@@ -1822,13 +1832,14 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         kwargs_trailing,
                     })),
                     Expr::CallWithBlock {
-                        receiver: None, name, args, block_params, block_body,
+                        receiver: None, name, args, block_params, block_body, kwargs_trailing,
                     } => Some(sp(bn, Expr::CallWithBlock {
                         receiver: Some(Box::new(sc_expr)),
                         name,
                         args,
                         block_params,
                         block_body,
+                        kwargs_trailing,
                     })),
                     other => {
                         // e.g. `undef_method :x if cond` arrives as a
@@ -4057,7 +4068,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 // Block params + body via the shared translator
                 // (`|a, (b, c)|`, `|*rest|`, `|&blk|`, `|**opts|`).
                 let (block_params, block_body) = tr_block_node(ctx, &bn);
-                return wrap_sn(sp(node, Expr::CallWithBlock { receiver, name, args, block_params, block_body }));
+                return wrap_sn(sp(node, Expr::CallWithBlock { receiver, name, args, block_params, block_body, kwargs_trailing }));
             }
             // `&...` block argument. Two sub-cases:
             //   - `&:method` — symbol-to-proc. Synthesize a one-
@@ -4088,7 +4099,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 if ba.expression().is_none() {
                     let block_arg = sp(node, Expr::LVarRead("&".to_string()));
                     return wrap_sn(sp(node, Expr::CallWithBlockArg {
-                        receiver, name, args, block_arg: Box::new(block_arg),
+                        receiver, name, args, block_arg: Box::new(block_arg), kwargs_trailing,
                     }));
                 }
             }
@@ -4130,7 +4141,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         return wrap_sn(sp(node, Expr::CallWithBlock {
                             receiver, name, args,
                             block_params: vec![BlockParam::Rest(arr)],
-                            block_body: vec![body_call],
+                            block_body: vec![body_call], kwargs_trailing,
                         }));
                     }
                     // Fall-through: any other expression becomes
@@ -4140,7 +4151,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     // directly (no implicit coercion).
                     let block_arg = tr(ctx, &expr);
                     return wrap_sn(sp(node, Expr::CallWithBlockArg {
-                        receiver, name, args, block_arg: Box::new(block_arg),
+                        receiver, name, args, block_arg: Box::new(block_arg), kwargs_trailing,
                     }));
                 }
         }
@@ -4905,6 +4916,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                                 args: vec![],
                                 block_params: vec![BlockParam::Single(sp_name)],
                                 block_body: vec![body_expr],
+                                kwargs_trailing: false,
                             }), true);
                         }
                     (tr(ctx, cn), false)
@@ -5512,6 +5524,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 args: vec![],
                 block_params,
                 block_body,
+                kwargs_trailing: false,
             });
         }
     }
@@ -5704,6 +5717,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             args: vec![],
             block_params: vec![],
             block_body,
+            kwargs_trailing: false,
         });
     }
     if let Some(n) = node.as_pre_execution_node() {

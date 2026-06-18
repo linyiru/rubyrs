@@ -124,13 +124,18 @@ class StandardError < Exception
 end
 class RuntimeError < StandardError
 end
-class NoMethodError < StandardError
-end
 class ArgumentError < StandardError
 end
 class TypeError < StandardError
 end
+## NameError → StandardError, and NoMethodError → NameError (CRuby's
+## hierarchy). Defined in this order so NoMethodError can inherit from
+## NameError; this is load-bearing for `rescue NameError` catching a
+## NoMethodError (NoMethodError < NameError < StandardError) and for
+## `assert_raises(NameError)` accepting a NoMethodError (Tilt's specs).
 class NameError < StandardError
+end
+class NoMethodError < NameError
 end
 ## ScriptError — CRuby's ancestor for compile/load-time errors
 ## (NotImplementedError, LoadError, SyntaxError). Subclasses

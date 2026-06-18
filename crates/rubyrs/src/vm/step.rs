@@ -2499,6 +2499,36 @@ impl Vm {
                 self.trailing_hash_positional = false;
                 r?;
             }
+            // `foo(**kw, &blk)` — block-form call with a keyword-splat
+            // trailing Hash. An EMPTY/`nil` kwsplat contributes zero
+            // args (CRuby: `f(**{}, &b)` passes nothing), so drop the
+            // trailing arg before dispatch; the block stays below it on
+            // the stack. A non-empty kwargs Hash travels as the trailing
+            // arg with `trailing_hash_positional = false`, so a callee
+            // declaring kw params binds it (parity with `CallKw`).
+            Op::CallKwBlock(name_id, argc, cache_id)
+            | Op::CallKwNoRecvBlock(name_id, argc, cache_id) => {
+                let no_recv = matches!(op, Op::CallKwNoRecvBlock(_, _, _));
+                let mut argc = argc as usize;
+                if argc > 0 {
+                    let drop_trailing = match self.stack.last() {
+                        Some(crate::value::Value::Hash(hid)) => self.heap.hash(*hid).is_empty(),
+                        Some(crate::value::Value::Nil) => true,
+                        _ => false,
+                    };
+                    if drop_trailing {
+                        // The trailing kwsplat is the top of stack; the
+                        // block sits below the positional args, so a bare
+                        // pop removes exactly the kwsplat.
+                        self.stack.pop();
+                        argc -= 1;
+                    }
+                }
+                self.trailing_hash_positional = false;
+                let r = self.do_call_block(name_id, argc, no_recv, cache_id);
+                self.trailing_hash_positional = false;
+                r?;
+            }
             Op::ApplyCallBlock(name_id, cache_id) | Op::ApplyCallNoRecvBlock(name_id, cache_id) => {
                 // Splat-call with explicit `&block`. Stack layout
                 // (bottom→top): `[recv?, block, array]`. Pop the
