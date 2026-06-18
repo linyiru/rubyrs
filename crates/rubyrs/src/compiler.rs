@@ -2357,8 +2357,16 @@ pub(crate) fn detect_frozen_string_literal(src: &str) -> bool {
         let Some(comment) = t.strip_prefix('#') else {
             return false; // first non-comment line → magic-comment region ended
         };
-        if let Some(pos) = comment.find("frozen_string_literal:") {
-            let after = comment[pos + "frozen_string_literal:".len()..].trim_start();
+        // CRuby's magic-comment parser treats `-` and `_` as
+        // interchangeable in the directive name, so both
+        // `frozen_string_literal:` and `frozen-string-literal:` are
+        // honoured (Tilt emits the HYPHEN form into its compiled
+        // template source). Normalise hyphens to underscores in the
+        // directive region before matching. (Only the leading comment
+        // lines are scanned, so this can't corrupt a value.)
+        let normalized = comment.replace('-', "_");
+        if let Some(pos) = normalized.find("frozen_string_literal:") {
+            let after = normalized[pos + "frozen_string_literal:".len()..].trim_start();
             let val: String = after.chars().take_while(|c| c.is_alphanumeric()).collect();
             return val == "true";
         }

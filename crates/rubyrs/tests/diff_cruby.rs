@@ -339,6 +339,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn kwsplat_empty_block() { run_diff("kwsplat_empty_block"); }
 // NoMethodError < NameError < StandardError (CRuby exception hierarchy).
 #[test] fn nomethoderror_is_nameerror() { run_diff("nomethoderror_is_nameerror"); }
+// CRuby honours `# frozen-string-literal:` (hyphen form) too — Tilt
+// emits it into compiled template source.
+#[test] fn frozen_string_literal_hyphen() { run_diff("frozen_string_literal_hyphen"); }
 // `begin … rescue … else E … ensure … end` — the else body runs only
 // on the no-exception path, its value is the begin's value, and an
 // exception in else escapes the rescue chain (Sinatra/Tilt lazy_load).
