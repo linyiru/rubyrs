@@ -488,6 +488,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "stdlib")]
 #[test] fn set_subtract_divide() { run_diff("set_subtract_divide"); }
 #[test] fn hash_min_by_n() { run_diff("hash_min_by_n"); }
+#[test] fn array_values_at_setops() { run_diff("array_values_at_setops"); }
 #[cfg(feature = "regex")]
 #[test] fn match_data_offsets() { run_diff("match_data_offsets"); }
 #[cfg(feature = "regex")]

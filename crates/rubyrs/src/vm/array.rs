@@ -2045,6 +2045,108 @@ impl Vm {
                         let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
+                    // `Array#values_at(*indices)` — elements at each
+                    // index. An Integer index is negative-aware and
+                    // yields nil when out of range; a Range expands to
+                    // its (clamped) slice in place.
+                    ("values_at", idx_args)
+                        if idx_args.iter().all(|a| matches!(a, Value::Int(_) | Value::Range(_))) =>
+                    {
+                        let src = self.heap.array(id).clone();
+                        let len = src.len() as i64;
+                        let mut out: Vec<Value> = Vec::new();
+                        for a in idx_args {
+                            match a {
+                                Value::Int(i) => {
+                                    let idx = if *i < 0 { *i + len } else { *i };
+                                    out.push(if idx >= 0 && idx < len {
+                                        src[idx as usize].clone()
+                                    } else {
+                                        Value::Nil
+                                    });
+                                }
+                                Value::Range(rid) => {
+                                    let (mut bs, mut es) = {
+                                        let r = self.heap.range(*rid);
+                                        let b = match &r.begin { Value::Int(n) => *n, _ => 0 };
+                                        let e = match &r.end { Value::Int(n) => *n, _ => len - 1 };
+                                        let b = if b < 0 { b + len } else { b };
+                                        let mut e = if e < 0 { e + len } else { e };
+                                        if r.exclusive { e -= 1; }
+                                        (b, e)
+                                    };
+                                    if bs < 0 { bs = 0; }
+                                    if es >= len { es = len - 1; }
+                                    let mut j = bs;
+                                    while j <= es {
+                                        out.push(src[j as usize].clone());
+                                        j += 1;
+                                    }
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(out.into()));
+                        Some(Value::Array(nid))
+                    }
+                    // `Array#intersection` / `union` / `difference` — the
+                    // named, MULTI-arg forms of `&` / `|` / `-`.
+                    ("intersection" | "union" | "difference", others)
+                        if others.iter().all(|o| matches!(o, Value::Array(_))) =>
+                    {
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        for o in others { g.pin(o.clone()); }
+                        let src = g.vm.heap.array(id).clone();
+                        let other_arrs: Vec<Vec<Value>> = others.iter()
+                            .map(|o| match o {
+                                Value::Array(oid) => g.vm.heap.array(*oid).clone(),
+                                _ => unreachable!(),
+                            })
+                            .collect();
+                        let mut out: Vec<Value> = Vec::new();
+                        let already = |out: &[Value], v: &Value, h: &crate::heap::Heap|
+                            out.iter().any(|y| y.ruby_eq(v, h));
+                        match name {
+                            "intersection" => {
+                                for v in &src {
+                                    let in_all = other_arrs.iter()
+                                        .all(|oa| oa.iter().any(|x| x.ruby_eq(v, &g.vm.heap)));
+                                    if in_all && !already(&out, v, &g.vm.heap) {
+                                        out.push(v.clone());
+                                    }
+                                }
+                            }
+                            "difference" => {
+                                for v in &src {
+                                    let in_any = other_arrs.iter()
+                                        .any(|oa| oa.iter().any(|x| x.ruby_eq(v, &g.vm.heap)));
+                                    if !in_any && !already(&out, v, &g.vm.heap) {
+                                        out.push(v.clone());
+                                    }
+                                }
+                            }
+                            _ => {
+                                // union: self then each other, dedup'd.
+                                for v in src.iter().chain(other_arrs.iter().flatten()) {
+                                    if !already(&out, v, &g.vm.heap) {
+                                        out.push(v.clone());
+                                    }
+                                }
+                            }
+                        }
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
+                        Some(Value::Array(nid))
+                    }
+                    // `Array#intersect?` (Ruby 3.1+) — any common element.
+                    ("intersect?", [Value::Array(other)]) => {
+                        let src = self.heap.array(id).clone();
+                        let oth = self.heap.array(*other).clone();
+                        let hit = src.iter().any(|v| oth.iter().any(|x| x.ruby_eq(v, &self.heap)));
+                        Some(Value::Bool(hit))
+                    }
                     ("concat", [Value::Array(other)]) => {
                         // In-place: extend self with other's elements, return self.
                         let extra: Vec<Value> = self.heap.array(*other).clone();
