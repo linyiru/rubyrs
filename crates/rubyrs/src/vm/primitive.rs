@@ -47,13 +47,15 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
 
         (Value::Sym(a), "==", [Value::Sym(b)]) => Some(Value::Bool(a == b)),
         (Value::Sym(a), "!=", [Value::Sym(b)]) => Some(Value::Bool(a != b)),
-        (Value::Nil, "to_s", []) => Some(Value::new_str("")),
-        (Value::Nil, "inspect", []) => Some(Value::new_str("nil")),
+        // nil / true / false render to US-ASCII strings in CRuby (the
+        // content is fixed ASCII), not UTF-8.
+        (Value::Nil, "to_s", []) => Some(Value::new_str_us_ascii("")),
+        (Value::Nil, "inspect", []) => Some(Value::new_str_us_ascii("nil")),
         (Value::Nil, "to_i", []) => Some(Value::Int(0)),
         (Value::Nil, "to_f", []) => Some(Value::Float(0.0)),
         // Bool#inspect — to_s.
         (Value::Bool(b), "inspect", []) => {
-            Some(Value::new_str(if *b { "true" } else { "false" }))
+            Some(Value::new_str_us_ascii(if *b { "true" } else { "false" }))
         }
         (Value::Nil, "nil?", []) => Some(Value::Bool(true)),
         // Boolean / NilClass logical METHODS (`true & x`, `nil | x`,
@@ -78,7 +80,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         // covers every receiver. `!@` (the alternate spelling
         // used by `attr_*` / `define_method`) is the same op.
         (_, "!", []) | (_, "!@", []) => Some(Value::Bool(!recv.is_truthy())),
-        (Value::Bool(b), "to_s", []) => Some(Value::new_str(if *b { "true" } else { "false" })),
+        (Value::Bool(b), "to_s", []) => Some(Value::new_str_us_ascii(if *b { "true" } else { "false" })),
         // CRuby's TrueClass / FalseClass don't define `<=>`;
         // `Object#<=>` falls back to "0 if identical instance
         // else nil". Booleans are singletons (every `true` is

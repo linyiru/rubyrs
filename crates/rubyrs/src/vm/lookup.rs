@@ -2654,7 +2654,12 @@ impl Vm {
 impl Vm {
     pub(crate) fn sym_primitive(&mut self, recv: &Value, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
         Ok(match (recv, name, args) {
-            (Value::Sym(id), "to_s", []) => Some(Value::new_str(self.interner.resolve(*id).to_string())),
+            // Symbol#to_s — US-ASCII when the name is ASCII-only (CRuby
+            // tags an ascii symbol's string US-ASCII), else UTF-8.
+            (Value::Sym(id), "to_s", []) => {
+                let n = self.interner.resolve(*id).to_string();
+                Some(if n.is_ascii() { Value::new_str_us_ascii(n) } else { Value::new_str(n) })
+            }
             // Symbol#name (Ruby 3.0+) returns the same content as
             // #to_s. CRuby distinguishes by returning a frozen
             // String for #name vs. a mutable copy for #to_s;
@@ -2663,7 +2668,10 @@ impl Vm {
             // here. Lets msgpack-ruby `lib/msgpack/symbol.rb`'s
             // `if method_defined?(:name)` Ruby-version probe land
             // on the modern branch.
-            (Value::Sym(id), "name", []) => Some(Value::new_str(self.interner.resolve(*id).to_string())),
+            (Value::Sym(id), "name", []) => {
+                let n = self.interner.resolve(*id).to_string();
+                Some(if n.is_ascii() { Value::new_str_us_ascii(n) } else { Value::new_str(n) })
+            }
             // Symbol#inspect — `:name` for symbols whose name is a
             // bare identifier / operator, else the quoted `:"..."`
             // form with string-style escaping (CRuby:
@@ -2671,7 +2679,14 @@ impl Vm {
             // Jekyll spike surfaced `:"".inspect` / spaced symbols
             // diverging from `p`.
             (Value::Sym(id), "inspect", []) => {
-                Some(Value::new_str(crate::heap::symbol_inspect(self.interner.resolve(*id))))
+                // The unquoted `:name` form is US-ASCII (a simple symbol
+                // is ascii by construction); the quoted `:"..."` form is
+                // UTF-8 in CRuby even for ASCII content (it routes through
+                // String#inspect quoting).
+                let name = self.interner.resolve(*id);
+                let simple = crate::heap::symbol_name_is_simple(name);
+                let s = crate::heap::symbol_inspect(name);
+                Some(if simple { Value::new_str_us_ascii(s) } else { Value::new_str(s) })
             }
             (Value::Sym(id), "to_sym", []) => Some(Value::Sym(*id)),
             // Symbol#empty? / #length / #size operate on the
