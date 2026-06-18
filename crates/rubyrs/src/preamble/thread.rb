@@ -310,6 +310,18 @@ end
 # "<key.inspect> is not a symbol nor a string"); a missing key reads
 # as nil; the setter returns the assigned value (assignment semantics).
 class Fiber
+  # `Fiber.current` — the running fiber. Under the `_fiber` feature a
+  # real fiber body returns the actual fiber (via the host fn); at the
+  # top level (and in non-fiber builds) there's one implicit root fiber,
+  # so return a stable per-process sentinel. Consumers use it as a Hash
+  # key for per-fiber state (logger's `level_key` keys the log level on
+  # `Fiber.current`); a stable object is all that's required.
+  def self.current
+    cur = (__rubyrs_fiber_current rescue nil)
+    return cur unless cur.nil?
+    @root_fiber ||= Object.new
+  end
+
   def self.[](key)
     unless key.is_a?(Symbol) || key.is_a?(String)
       raise TypeError, "#{key.inspect} is not a symbol nor a string"
