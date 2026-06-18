@@ -6494,6 +6494,19 @@ impl Vm {
                 self.collection_call(&recv, "initialize", &args)?;
                 self.stack.push(recv);
                 return Ok(ClassOutcome::Handled);
+            } else if let Value::Str(rs) = &obj
+                && !args.is_empty()
+            {
+                // String subclass with NO user initialize (bcrypt's
+                // `Password < String`, when used directly): honour
+                // String#initialize — copy the source string's bytes into
+                // the tagged instance. Zero-arg new keeps the allocator's
+                // empty content.
+                let rs = rs.clone();
+                drop(g);
+                self.string_collection_call(rs, "initialize", &args)?;
+                self.stack.push(obj);
+                return Ok(ClassOutcome::Handled);
             } else {
                 // L3-F + L3-H: cext-defined initialize (registered
                 // via rb_define_method) lives in
@@ -8695,6 +8708,32 @@ impl Vm {
         }
         if self.try_push_string_encoding(&recv, &name, &args) {
             return Ok(());
+        }
+        // String-subclass user-method override (`class Password <
+        // String; def ==; …`). A `def` on the subclass — or a module it
+        // mixes in BELOW String — wins over the String primitive,
+        // mirroring the Array/Hash class_tag override gates. Bounded to
+        // ancestors strictly below `String`: String itself includes
+        // Comparable, whose Ruby `==`/`<`/… must NOT shadow the String
+        // primitives for a plain (non-overriding) subclass instance.
+        // Guarded by the class_tag check, so plain strings pay nothing.
+        if !force_primitive
+            && let Value::Str(s) = &recv
+            && let Some(tag) = s.class_tag.borrow().clone()
+        {
+            let mut found = None;
+            for anc in crate::vm::lookup::flatten_ancestors(&tag) {
+                if anc.name == "String" {
+                    break;
+                }
+                if let Some(m) = anc.methods.borrow().get(&name_id).cloned() {
+                    found = Some(m);
+                    break;
+                }
+            }
+            if let Some(m) = found {
+                return self.invoke_method(m, recv.clone(), args.into_vec());
+            }
         }
         // A user-defined singleton method overrides the built-in
         // Module/Class `name` / `to_s` / `inspect` primitives (CRuby
@@ -18298,7 +18337,6 @@ impl Vm {
             return Ok(Value::Hash(id));
         }
         // Array twin (rouge's python lexer: `StringRegister < Array`).
-        // String subclasses remain the documented follow-up.
         if class_inherits_named(cls, "Array") {
             let id = self.heap.alloc(HeapObj::Array(crate::heap::ArrayObj {
                 elems: Vec::new(),
@@ -18307,6 +18345,16 @@ impl Vm {
                 frozen: std::cell::Cell::new(false),
             }));
             return Ok(Value::Array(id));
+        }
+        // String twin (bcrypt's `Password < String`): a tagged, initially
+        // empty String. String primitives dispatch on it; `initialize`
+        // (e.g. `self.replace(...)`) fills the content.
+        if class_inherits_named(cls, "String") {
+            let v = Value::new_str(String::new());
+            if let Value::Str(s) = &v {
+                *s.class_tag.borrow_mut() = Some(cls.clone());
+            }
+            return Ok(v);
         }
         let id = self.heap.alloc(HeapObj::Instance(Instance {
             class: cls.clone(),

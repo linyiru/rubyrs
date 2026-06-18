@@ -2326,6 +2326,38 @@ impl Vm {
                     s.borrow_mut().clear();
                     return Ok(Some(Value::Str(s)));
                 }
+                // `String#initialize` — the default ctor body, reached by
+                // `String.new(str)` / a String-subclass `.new` with no
+                // custom `initialize` (and by `super(str)` from one).
+                // Copies the optional source string's bytes + encoding;
+                // no arg → empties self. (A trailing kwargs Hash —
+                // `String.new("x", encoding: …)` — is accepted and
+                // ignored; the transcoding form isn't modelled.)
+                if name == "initialize" {
+                    check_unfrozen(self)?;
+                    let positional = args
+                        .first()
+                        .filter(|a| !matches!(a, Value::Hash(_)));
+                    match positional {
+                        None => {
+                            s.borrow_mut().clear();
+                        }
+                        Some(Value::Str(o)) => {
+                            let nc = o.borrow().clone();
+                            *s.borrow_mut() = nc;
+                            s.encoding.set(o.encoding.get());
+                        }
+                        Some(other) => {
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: format!(
+                                    "no implicit conversion of {} into String",
+                                    other.type_name()
+                                ),
+                            }));
+                        }
+                    }
+                    return Ok(Some(Value::Str(s)));
+                }
                 if name == "replace" && args.len() == 1 {
                     check_unfrozen(self)?;
                     match &args[0] {

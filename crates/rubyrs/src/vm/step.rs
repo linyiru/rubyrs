@@ -1430,6 +1430,16 @@ impl Vm {
                     Value::Hash(id) => self.heap.hash_ivar_get(*id, name_id).unwrap_or(Value::Nil),
                     // Array-subclass instances likewise.
                     Value::Array(id) => self.heap.array_ivar_get(*id, name_id).unwrap_or(Value::Nil),
+                    // String-subclass instances keep ivars in the
+                    // `str_ivars` side table (keyed by Rc identity) — the
+                    // same table `instance_variable_get/set` use.
+                    Value::Str(s) => {
+                        let key = std::rc::Rc::as_ptr(s) as usize;
+                        self.str_ivars
+                            .get(&key)
+                            .and_then(|(_, m)| m.get(&name_id).cloned())
+                            .unwrap_or(Value::Nil)
+                    }
                     _ => Value::Nil,
                 };
                 self.stack.push(v);
@@ -1445,6 +1455,20 @@ impl Vm {
                     Value::Hash(id) => { self.heap.hash_ivar_set(*id, name_id, v); }
                     // Array-subclass instances likewise.
                     Value::Array(id) => { self.heap.array_ivar_set(*id, name_id, v); }
+                    // String-subclass instances → `str_ivars` side table
+                    // (the frozen guard above already handled a frozen
+                    // receiver). Keyed by Rc identity; the strong Rc keeps
+                    // the string alive (same leak tradeoff as str_singletons).
+                    Value::Str(s) => {
+                        let key = std::rc::Rc::as_ptr(s) as usize;
+                        let keep = s.clone();
+                        self.str_ivars
+                            .entry(key)
+                            .or_insert_with(|| (keep, crate::intern::FxHashMap::default()))
+                            .1
+                            .insert(name_id, v);
+                        self.any_str_ivars = true;
+                    }
                     _ => { /* drop — CRuby raises but the toplevel/primitive cases are rare */ }
                 }
             }
@@ -4864,6 +4888,19 @@ impl Vm {
                     self.do_call(name_id, 1, false, u16::MAX)?;
                     return Ok(true);
                 }
+                // A String-SUBCLASS instance (class_tag, e.g. bcrypt's
+                // Password) may override operators — operator SYNTAX
+                // otherwise skips user tables. Route to do_call so the
+                // subclass method-lookup gate runs (and falls back to the
+                // primitive when there's no override). Plain strings have
+                // no tag and stay on the fast path below.
+                if matches!(&a, Value::Str(s) if s.class_tag.borrow().is_some()) {
+                    self.stack.push(a);
+                    self.stack.push(b);
+                    let name_id = self.interner.intern(kind.name());
+                    self.do_call(name_id, 1, false, u16::MAX)?;
+                    return Ok(true);
+                }
                 if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
                     // Same guard as `Op::BinOpInt` — divide / mod
                     // by literal 0 in the Int×Int fast path. Without
@@ -4935,6 +4972,19 @@ impl Vm {
                     && matches!(&a, Value::Str(s)
                         if self.str_singletons.contains_key(&(std::rc::Rc::as_ptr(s) as usize)))
                 {
+                    self.stack.push(a);
+                    self.stack.push(b);
+                    let name_id = self.interner.intern(kind.name());
+                    self.do_call(name_id, 1, false, u16::MAX)?;
+                    return Ok(true);
+                }
+                // A String-SUBCLASS instance (class_tag, e.g. bcrypt's
+                // Password) may override operators — operator SYNTAX
+                // otherwise skips user tables. Route to do_call so the
+                // subclass method-lookup gate runs (and falls back to the
+                // primitive when there's no override). Plain strings have
+                // no tag and stay on the fast path below.
+                if matches!(&a, Value::Str(s) if s.class_tag.borrow().is_some()) {
                     self.stack.push(a);
                     self.stack.push(b);
                     let name_id = self.interner.intern(kind.name());

@@ -1199,6 +1199,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // unicode-* crates behind _encoding_full).
 #[cfg(feature = "_encoding_full")]
 #[test] fn unicode_grapheme_normalize() { run_diff("unicode_grapheme_normalize"); }
+// Subclassing String (class_tag): content + methods + ivars + override.
+#[test] fn string_subclass() { run_diff("string_subclass"); }
 // Range#map over String endpoints (str_succ materialize).
 #[test] fn range_string_map() { run_diff("range_string_map"); }
 // undef_method kills same-class methods (tombstone + table removal).

@@ -1233,6 +1233,11 @@ impl Vm {
             && let Some(c) = self.heap.array_class_tag(*id) {
             return Value::Class(c);
         }
+        // String twin (`class Password < String` — bcrypt).
+        if let Value::Str(s) = recv
+            && let Some(c) = s.class_tag.borrow().clone() {
+            return Value::Class(c);
+        }
         // Builtin receivers resolve through a per-type Rc<Class> cache
         // (`builtin_class_cache`) instead of interning the class-name
         // string on EVERY call — this sits on the dispatch hot path

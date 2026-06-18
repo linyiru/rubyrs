@@ -113,6 +113,15 @@ pub struct RStr {
     /// threads the field through every construction site so
     /// that change is a pure-semantics diff).
     pub(crate) encoding: Cell<EncodingTag>,
+    /// `Some(c)` when this String is an instance of a user subclass of
+    /// String (`class Password < String`). The string still IS a String
+    /// (so String primitives — `replace`, `split`, `[]`, `==`, … —
+    /// dispatch on it), but reports `c` as its class and consults `c`'s
+    /// method chain for user overrides before the primitives. `None` for
+    /// a plain `"..."` literal / `String.new`. The Array/Hash twin of
+    /// `ArrayObj::class_tag`; the `Rc<Class>` is also rooted in
+    /// `Vm.classes`, so it needs no extra GC marking.
+    pub(crate) class_tag: std::cell::RefCell<Option<std::rc::Rc<Class>>>,
 }
 
 /// ADR 0020's Tier 1 encoding tag. `Other(u8)` indexes the Tier 2
@@ -193,6 +202,7 @@ impl RStr {
             content: StrCell::new(s.into_bytes()),
             frozen: Cell::new(false),
             encoding: Cell::new(EncodingTag::Utf8),
+            class_tag: std::cell::RefCell::new(None),
         }
     }
 
@@ -205,6 +215,7 @@ impl RStr {
             content: StrCell::new(s.into_bytes()),
             frozen: Cell::new(false),
             encoding: Cell::new(EncodingTag::UsAscii),
+            class_tag: std::cell::RefCell::new(None),
         }
     }
 
@@ -217,6 +228,7 @@ impl RStr {
             content: StrCell::new(bytes),
             frozen: Cell::new(false),
             encoding: Cell::new(EncodingTag::Utf8),
+            class_tag: std::cell::RefCell::new(None),
         }
     }
 
@@ -228,6 +240,7 @@ impl RStr {
             content: StrCell::new(bytes),
             frozen: Cell::new(false),
             encoding: Cell::new(EncodingTag::Binary),
+            class_tag: std::cell::RefCell::new(None),
         }
     }
 
