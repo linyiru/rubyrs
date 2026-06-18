@@ -326,6 +326,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // String#slice! char-range on BINARY / non-UTF-8 bytes indexes by byte
 // (rack-session decrypt's data.slice!(-32..-1) on a decoded cookie).
 #[test] fn slice_bang_binary() { run_diff("slice_bang_binary"); }
+// Proc#binding — a Binding over the block's scope (self + closed-over
+// locals); unblocks erubi's `eval(engine.src, block.binding)` harness
+// (full erubi spec: 100 runs, 0 failures).
+#[test] fn proc_binding() { run_diff("proc_binding"); }
 // `begin … rescue … else E … ensure … end` — the else body runs only
 // on the no-exception path, its value is the begin's value, and an
 // exception in else escapes the rescue chain (Sinatra/Tilt lazy_load).

@@ -2972,6 +2972,61 @@ impl Vm {
                 _ => {}
             }
         }
+        // `Proc#binding` — a Binding capturing the block's scope: its
+        // `self`, lexical class, and the named locals it closed over.
+        // Built the same way as `Kernel#binding` (a `Binding` Instance
+        // + a `binding_locals` snapshot keyed on the ObjId) but reading
+        // from the BlockHandle's captured cell / proto local-names
+        // instead of the live frame. erubi's test harness drives
+        // `eval(engine.src, block.binding)` to run the generated
+        // template source against the block's locals + self.
+        if name == "binding" && args.is_empty()
+            && let Value::Block(bid) = &recv
+        {
+            let Some(bcls) = self.classes.get(&self.interner.intern("Binding")).cloned() else {
+                self.stack.push(Value::Nil);
+                return Ok(CallableOutcome::Handled);
+            };
+            let (proto_idx, captured, self_val, lex) = {
+                let bh = self.heap.block(*bid);
+                (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(), bh.lexical_cvar_class.clone())
+            };
+            // Snapshot the block's NAMED locals (slot → value) from the
+            // captured cell — the block shares this vector with its
+            // enclosing scope, so it carries the outer locals `eval`
+            // needs to resolve.
+            let mut snap: Vec<(String, Value)> = Vec::new();
+            {
+                let cap = captured.borrow();
+                let n = self.protos[proto_idx].n_locals as usize;
+                for slot in 0..n {
+                    let lname = self.protos[proto_idx].local_names.get(slot).cloned().unwrap_or_default();
+                    if lname.is_empty() {
+                        continue;
+                    }
+                    let val = cap.get(slot).cloned().unwrap_or(Value::Nil);
+                    snap.push((lname, val));
+                }
+            }
+            self.maybe_gc();
+            self.check_alloc()?;
+            let mut ivars = crate::intern::FxHashMap::default();
+            ivars.insert(self.interner.intern("@__self"), self_val);
+            if let Some(c) = lex {
+                ivars.insert(self.interner.intern("@__lexical_class"), Value::Class(c));
+            }
+            let id = self.heap.alloc(HeapObj::Instance(crate::value::Instance {
+                class: bcls,
+                ivars,
+                singleton_class: None,
+                frozen: std::cell::Cell::new(false),
+            }));
+            if !snap.is_empty() {
+                self.binding_locals.insert(id.0 as usize, snap);
+            }
+            self.stack.push(Value::Object(id));
+            return Ok(CallableOutcome::Handled);
+        }
         // `Proc#source_location` — `[file, line]` of the block's
         // body (CRuby points at the `proc {` line; we report the
         // first op's line, which lands on or just after it — the

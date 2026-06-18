@@ -1146,7 +1146,7 @@ impl Vm {
                     .is_some_and(|m| include_private
                         || m.visibility.get() == crate::value::Visibility::Public)
             }
-            Value::Block(_) => matches!(name, "call" | "[]" | "()" | "yield" | "arity" | "curry" | ">>" | "<<" | "lambda?" | "to_proc" | "===" | "source_location"),
+            Value::Block(_) => matches!(name, "call" | "[]" | "()" | "yield" | "arity" | "curry" | ">>" | "<<" | "lambda?" | "to_proc" | "===" | "source_location" | "binding"),
             #[cfg(feature = "regex")]
             Value::Regex(_) => matches!(name,
                 "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect" | "options" | "names" | "named_captures" | "casefold?"
