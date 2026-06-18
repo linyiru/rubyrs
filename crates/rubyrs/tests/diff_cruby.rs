@@ -1185,6 +1185,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Array/Hash/Range to_s/inspect encoding: seed from first element,
 // promote to UTF-8 on non-ASCII (CRuby's quirky rule).
 #[test] fn collection_inspect_encoding() { run_diff("collection_inspect_encoding"); }
+// `const_missing` hook fires on a missing constant before NameError.
+#[test] fn const_missing_hook() { run_diff("const_missing_hook"); }
 // Range#map over String endpoints (str_succ materialize).
 #[test] fn range_string_map() { run_diff("range_string_map"); }
 // undef_method kills same-class methods (tombstone + table removal).

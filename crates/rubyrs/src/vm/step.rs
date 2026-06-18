@@ -1734,6 +1734,34 @@ impl Vm {
                             }
                         }
                     }
+                    // `const_missing` hook (CRuby): before raising, give
+                    // the owning class/module a chance to materialise the
+                    // constant. For a qualified `Scope::CONST`, the
+                    // receiver is `Scope` and the name is the final
+                    // segment (`Scope.const_missing(:CONST)`); for a bare
+                    // toplevel name it's `Object.const_missing(:NAME)`.
+                    // try_const_missing pushes the hook's result and
+                    // returns true when it fired (result is dynamic, so we
+                    // must NOT cache it).
+                    {
+                        let name_str = self.interner.resolve(name_id).to_string();
+                        let (recv_cls, missing) = match name_str.rsplit_once("::") {
+                            Some((head, last)) if !head.is_empty() && self.interner.contains(head) => {
+                                let head_id = self.interner.intern(head);
+                                (self.classes.get(&head_id).cloned(), last.to_string())
+                            }
+                            Some(_) => (None, name_str.clone()),
+                            None => {
+                                let obj_id = self.interner.intern("Object");
+                                (self.classes.get(&obj_id).cloned(), name_str.clone())
+                            }
+                        };
+                        if let Some(cls) = recv_cls
+                            && self.try_const_missing(&cls, &missing)?
+                        {
+                            return Ok(true);
+                        }
+                    }
                     // CRuby raises `NameError: uninitialized constant
                     // <name>` for missing constants — silent-nil here
                     // masks real user errors AND lets downstream code
