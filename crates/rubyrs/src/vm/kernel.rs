@@ -5668,8 +5668,58 @@ impl MarshalReader<'_> {
                 }
                 Ok(Value::Hash(id))
             }
+            b'S' => {
+                // Struct: class symbol, then member count and
+                // [member_sym, value] pairs. CRuby allocates the struct
+                // and assigns members positionally (no `initialize`
+                // call); we mirror that by setting the `@<member>` ivars
+                // directly on a fresh instance of the named class. The
+                // class must already be defined (CRuby raises otherwise).
+                let class_val = self.read_value(vm)?;
+                let cname = match class_val {
+                    Value::Sym(s) => vm.interner.resolve(s).to_string(),
+                    _ => return Err("struct class must be a symbol".into()),
+                };
+                let cid = vm.interner.intern(&cname);
+                // A `Struct.new` class lives in the constants table under
+                // its assigned name (it's anonymous to `vm.classes`), so
+                // resolve the constant first, then fall back to the class
+                // table for genuinely-named classes.
+                let cls = match vm.constants.get(&cid) {
+                    Some(Value::Class(c)) => c.clone(),
+                    _ => vm
+                        .classes
+                        .get(&cid)
+                        .cloned()
+                        .ok_or_else(|| format!("undefined class/module {cname}"))?,
+                };
+                vm.maybe_gc();
+                vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
+                let id = vm.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
+                    class: cls,
+                    ivars: crate::intern::FxHashMap::default(),
+                    singleton_class: None,
+                    frozen: std::cell::Cell::new(false),
+                }));
+                self.objects.push(Value::Object(id));
+                vm.pinned.push(Value::Object(id));
+                let n = self.long()?;
+                for _ in 0..n.max(0) {
+                    let msym = self.read_value(vm)?;
+                    let mval = self.read_value(vm)?;
+                    let mname = match msym {
+                        Value::Sym(s) => vm.interner.resolve(s).to_string(),
+                        _ => return Err("struct member must be a symbol".into()),
+                    };
+                    let ivar = vm.interner.intern(&format!("@{mname}"));
+                    if let crate::heap::HeapObj::Instance(inst) = vm.heap.get_mut(id) {
+                        inst.ivars.insert(ivar, mval);
+                    }
+                }
+                Ok(Value::Object(id))
+            }
             other => Err(format!(
-                "unsupported marshal tag '{}' (rubyrs load-only subset: nil/bool/int/float/string/symbol/array/hash)",
+                "unsupported marshal tag '{}' (rubyrs load-only subset: nil/bool/int/float/string/symbol/array/hash/struct)",
                 other as char
             )),
         }
@@ -5856,12 +5906,83 @@ impl MarshalWriter {
                     self.write_value(vm, val)?;
                 }
             }
-            // Bignum, Object, Range, Block/Proc, Class, … — outside the
-            // byte subset; signal the caller to use the registry token.
+            // A Struct instance → CRuby's `S` tag: class symbol, member
+            // count, then [member_sym, value] in declaration order. Only
+            // a NAMED struct class can be dumped (CRuby raises on an
+            // anonymous one; we fall back to the token). Non-Struct
+            // objects stay out of subset for now (the `o`-tag arbitrary-
+            // object form, with its exception @mesg/@bt special-casing,
+            // is a separate follow-up).
+            Value::Object(id) => {
+                let inst_class = vm.heap.instance(*id).class.clone();
+                let members = match marshal_struct_members(vm, &inst_class) {
+                    Some(m) => m,
+                    None => return Err(()),
+                };
+                // The struct class must be NAMED — either a real
+                // constant name or one lazily stamped on first
+                // const-assignment (`S = Struct.new(...)`). Anonymous →
+                // CRuby raises; we fall back to the token.
+                let cname = match inst_class.effective_name() {
+                    Some(n) if !n.is_empty() => n,
+                    _ => return Err(()),
+                };
+                let csym = match vm.interner.get_id(&cname) {
+                    Some(s) => s,
+                    None => return Err(()),
+                };
+                if let Some(i) = self.objects.iter().position(|k| *k == ObjKey::Heap(*id)) {
+                    self.out.push(b'@');
+                    self.write_long(i as i64);
+                    return Ok(());
+                }
+                self.objects.push(ObjKey::Heap(*id));
+                self.out.push(b'S');
+                self.write_symbol(vm, csym);
+                self.write_long(members.len() as i64);
+                for m in &members {
+                    self.write_symbol(vm, *m);
+                    let mname = vm.interner.resolve(*m).to_string();
+                    let v = vm
+                        .interner
+                        .get_id(&format!("@{mname}"))
+                        .and_then(|isym| vm.heap.instance(*id).ivars.get(&isym).cloned())
+                        .unwrap_or(Value::Nil);
+                    self.write_value(vm, &v)?;
+                }
+            }
+            // Bignum, non-Struct Object, Range, Block/Proc, Class, … —
+            // outside the byte subset; signal the caller to use the
+            // registry token.
             _ => return Err(()),
         }
         Ok(())
     }
+}
+
+/// If `class` (or an ancestor) is a `Struct.new`-created class, return
+/// its member symbols in declaration order (read from the
+/// `@__struct_attrs` class ivar the Struct shim stores). `None` for a
+/// plain object whose class isn't a Struct. Mirrors the chain walk the
+/// preamble `Struct#members` does, so a Struct SUBCLASS instance still
+/// finds the members on whichever ancestor `Struct.new` built.
+fn marshal_struct_members(vm: &Vm, class: &std::rc::Rc<crate::value::Class>) -> Option<Vec<crate::intern::SymId>> {
+    let attrs_id = vm.interner.get_id("@__struct_attrs")?;
+    let mut cur = Some(class.clone());
+    while let Some(c) = cur {
+        if let Some(Value::Array(aid)) = c.ivars.borrow().get(&attrs_id).cloned() {
+            let mut out = Vec::new();
+            for e in vm.heap.array(aid) {
+                match e {
+                    Value::Sym(s) => out.push(*s),
+                    _ => return None,
+                }
+            }
+            return Some(out);
+        }
+        cur = c.superclass.borrow().clone();
+    }
+    None
 }
 
 /// CRuby marshal float text: `inf` / `-inf` / `nan` for the

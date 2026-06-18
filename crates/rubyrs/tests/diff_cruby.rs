@@ -1167,6 +1167,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Real binary Marshal.dump (common-tag subset): deep copy, CRuby-4.8
 // byte compatibility, shared-object links, cycles, encoding round-trip.
 #[test] fn marshal_binary_dump() { run_diff("marshal_binary_dump"); }
+// Struct (`S`-tag) marshalling: byte-compatible dump, deep copy,
+// nested/shared structs, anonymous-struct token fallback.
+#[test] fn marshal_struct() { run_diff("marshal_struct"); }
 // Range#map over String endpoints (str_succ materialize).
 #[test] fn range_string_map() { run_diff("range_string_map"); }
 // undef_method kills same-class methods (tombstone + table removal).
