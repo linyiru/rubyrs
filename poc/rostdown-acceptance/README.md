@@ -63,9 +63,9 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 
 | source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 96.1 % (124/129) |
-| jekyll | 98.5 % (199/202) |
-| **combined** | **97.6 % (323/331)** |
+| bridgetown | 96.9 % (125/129) |
+| jekyll | 99.5 % (201/202) |
+| **combined** | **98.5 % (326/331)** |
 
 Top decline reasons (combined, `run.sh`) are now a flat tail of kramdown
 quirks: multi-block / multi-line-table list items, cross-line emphasis
@@ -144,20 +144,20 @@ raw-text HTML blocks (content verbatim, no escaping, the trailing blank line
 kramdown always emits) — then the rest of the HTML-block tail: a multi-line
 span element opening a paragraph (`<em>\n…\n</em>`, the closing tag on its own
 line), the void span elements `<br>`/`<img>`/`<input>` opening a paragraph at
-column 0, and verbatim `<!-- … -->` comment blocks. Current: **97.6 %**.
-`verify.sh` is the standing gate that keeps it WRONG = 0.
+column 0, and verbatim `<!-- … -->` comment blocks — then a paragraph's
+indented continuation lines as lazy text rather than indented code (aligned
+wrapped prose, and indented content inside unexpanded `{% … %}` Liquid blocks).
+Current: **98.5 %**. `verify.sh` is the standing gate that keeps it WRONG = 0.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
-content ~97 %. The remaining blockers are the impractical tail — constructs
-whose byte-identity would mean reproducing kramdown quirks at real
+content ~98 %. The remaining five blockers are the impractical tail —
+constructs whose byte-identity would mean reproducing kramdown quirks at real
 accept-but-wrong risk, confirmed by probing each against the oracle:
 a standalone `{:…}` attribute list whose attachment target is
-context-dependent, indented
-code that is really a lazy paragraph continuation inside a Liquid block, a
-tilde run that is really `~~`-strikethrough with a literal remainder
-(`~~~x~~~` → `~<del>x</del>~`), a tab-indented list item, a chained span IAL,
-and a `markdown="1"` HTML element (its content is parsed as markdown, a
-content model the raw-HTML serializer doesn't share). Every declined page still
+context-dependent, a tilde run that is really `~~`-strikethrough with a literal
+remainder (`~~~x~~~` → `~<del>x</del>~`), a tab-indented list item, a chained
+span IAL, and a `markdown="1"` HTML element (its content is parsed as markdown,
+a content model the raw-HTML serializer doesn't share). Every declined page still
 renders correctly via the Ruby-kramdown fallback; declining only forgoes the
 speed-up.
