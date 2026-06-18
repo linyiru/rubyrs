@@ -2702,6 +2702,7 @@ impl Vm {
                     pos: 2,
                     symbols: Vec::new(),
                     objects: Vec::new(),
+                    trap: None,
                 };
                 // Every container the reader allocates stays pinned
                 // until the WHOLE graph is wired (children are only
@@ -2713,7 +2714,13 @@ impl Vm {
                 self.pinned.truncate(pin_base);
                 match r {
                     Ok(v) => Some(Ok(v)),
-                    Err(msg) => Some(Err(self.trap(RubyError::TypeError { msg }))),
+                    // A reentrant `_load` / `marshal_load` hook that raised
+                    // propagates its own exception; everything else is a
+                    // malformed-stream TypeError.
+                    Err(msg) => match rd.trap {
+                        Some(t) => Some(Err(t)),
+                        None => Some(Err(self.trap(RubyError::TypeError { msg }))),
+                    },
                 }
             }
             // `__rubyrs_marshal_dump_binary(obj)` → a real CRuby-4.8
@@ -2740,10 +2747,25 @@ impl Vm {
                     symbols: Vec::new(),
                     objects: Vec::new(),
                     e_sym,
+                    trap: None,
                 };
-                match w.write_value(self, &obj) {
+                // Pin the whole graph: reentrant `_dump` / `marshal_dump`
+                // hooks run Ruby (which may GC), and the Rust-local `obj`
+                // isn't itself a root — pinning it keeps the reachable
+                // subgraph alive across the hook.
+                let pin_base = self.pinned.len();
+                self.pinned.push(obj.clone());
+                let res = w.write_value(self, &obj);
+                self.pinned.truncate(pin_base);
+                match res {
                     Ok(()) => Some(Ok(Value::new_str_bytes_binary(w.out))),
-                    Err(()) => Some(Ok(Value::Nil)),
+                    // A hook raised → propagate the user exception instead
+                    // of falling back to the token (which would swallow
+                    // it). Out-of-subset (no trap) → token fallback.
+                    Err(()) => match w.trap {
+                        Some(t) => Some(Err(t)),
+                        None => Some(Ok(Value::Nil)),
+                    },
                 }
             }
             "__rubyrs_marshal_stash" => {
@@ -5497,6 +5519,11 @@ struct MarshalReader<'a> {
     pos: usize,
     symbols: Vec<crate::intern::SymId>,
     objects: Vec<Value>,
+    /// A trap raised by a reentrant `_load` / `marshal_load` hook —
+    /// stashed so the load entry point can PROPAGATE the user exception
+    /// rather than collapse it into the generic TypeError that a
+    /// `Result<_, String>` error would become.
+    trap: Option<Trap>,
 }
 
 impl MarshalReader<'_> {
@@ -5542,6 +5569,30 @@ impl MarshalReader<'_> {
             5..=127 => (c as i64) - 5,
             _ => (c as i64) + 5,
         })
+    }
+
+    /// Resolve a class-name symbol (from an `o`/`S`/`C`/`u`/`U` tag) to
+    /// its `Class`. A `Struct.new` / `Class.new` class is anonymous to
+    /// `vm.classes` but lives in the constants table under its assigned
+    /// name, so try constants first.
+    fn marshal_lookup_class(
+        &self,
+        vm: &mut Vm,
+        class_val: &Value,
+    ) -> Result<std::rc::Rc<crate::value::Class>, String> {
+        let cname = match class_val {
+            Value::Sym(s) => vm.interner.resolve(*s).to_string(),
+            _ => return Err("class name must be a symbol".into()),
+        };
+        let cid = vm.interner.intern(&cname);
+        match vm.constants.get(&cid) {
+            Some(Value::Class(c)) => Ok(c.clone()),
+            _ => vm
+                .classes
+                .get(&cid)
+                .cloned()
+                .ok_or_else(|| format!("undefined class/module {cname}")),
+        }
     }
 
     fn read_value(&mut self, vm: &mut Vm) -> Result<Value, String> {
@@ -5731,6 +5782,64 @@ impl MarshalReader<'_> {
                 }
                 Ok(inner)
             }
+            b'u' => {
+                // User-defined (`_dump`/`_load`): class symbol, then the
+                // dump string (length-prefixed bytes). Reconstruct via the
+                // class method `Class._load(str)`. A surrounding `I`
+                // (encoding ivar on the dump string) is consumed by the
+                // `I` arm; here we just read the raw bytes.
+                let class_val = self.read_value(vm)?;
+                let cls = self.marshal_lookup_class(vm, &class_val)?;
+                let n = self.long()?;
+                let data = self.take(n.max(0) as usize)?.to_vec();
+                let data_str = match String::from_utf8(data) {
+                    Ok(s) => Value::new_str(s),
+                    Err(e) => Value::new_str_bytes_binary(e.into_bytes()),
+                };
+                let load_id = vm.interner.intern("_load");
+                let pin_base = vm.pinned.len();
+                vm.pinned.push(data_str.clone());
+                let r = marshal_invoke(vm, Value::Class(cls), load_id, Some(data_str));
+                vm.pinned.truncate(pin_base);
+                let obj = match r {
+                    Ok(v) => v,
+                    Err(t) => {
+                        self.trap = Some(t);
+                        return Err("marshal _load raised".into());
+                    }
+                };
+                self.objects.push(obj.clone());
+                Ok(obj)
+            }
+            b'U' => {
+                // User-marshal (`marshal_dump`/`marshal_load`): class
+                // symbol, then the marshalled payload. Allocate an
+                // instance, register it (so the payload can link back),
+                // read the payload, then call `inst.marshal_load(payload)`.
+                let class_val = self.read_value(vm)?;
+                let cls = self.marshal_lookup_class(vm, &class_val)?;
+                vm.maybe_gc();
+                vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
+                let id = vm.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
+                    class: cls,
+                    ivars: crate::intern::FxHashMap::default(),
+                    singleton_class: None,
+                    frozen: std::cell::Cell::new(false),
+                }));
+                self.objects.push(Value::Object(id));
+                vm.pinned.push(Value::Object(id));
+                let payload = self.read_value(vm)?;
+                let load_id = vm.interner.intern("marshal_load");
+                let pin_base = vm.pinned.len();
+                vm.pinned.push(payload.clone());
+                let r = marshal_invoke(vm, Value::Object(id), load_id, Some(payload));
+                vm.pinned.truncate(pin_base);
+                if let Err(t) = r {
+                    self.trap = Some(t);
+                    return Err("marshal marshal_load raised".into());
+                }
+                Ok(Value::Object(id))
+            }
             b'o' => {
                 // Generic object: class symbol, then ivar count and
                 // [ivar_sym, value] pairs. Allocate an instance of the
@@ -5884,6 +5993,35 @@ struct MarshalWriter {
     /// The interned `:E` symbol (marshal's encoding flag), interned by
     /// the caller so `write_value` can stay `&Vm` (read-only).
     e_sym: crate::intern::SymId,
+    /// A trap raised by a reentrant `_dump` / `marshal_dump` hook.
+    /// `write_value` returns `Err(())` and stashes the trap here so the
+    /// caller can PROPAGATE the user exception (instead of silently
+    /// falling back to the registry token, which would swallow it).
+    trap: Option<Trap>,
+}
+
+/// Synchronously invoke a 0/1-arg Ruby method on `recv` from inside the
+/// marshal writer/reader, running nested frames to completion. The
+/// caller must keep `recv` and the in-flight graph GC-pinned. Returns
+/// the result, or the raised `Trap` to propagate.
+fn marshal_invoke(
+    vm: &mut Vm,
+    recv: Value,
+    name: crate::intern::SymId,
+    arg: Option<Value>,
+) -> Result<Value, Trap> {
+    let pre = vm.frames.len();
+    vm.stack.push(recv);
+    let argc = match arg {
+        Some(a) => {
+            vm.stack.push(a);
+            1
+        }
+        None => 0,
+    };
+    vm.do_call(name, argc, false, u16::MAX)?;
+    vm.dispatch_until(pre)?;
+    Ok(vm.stack.pop().unwrap_or(Value::Nil))
 }
 
 impl MarshalWriter {
@@ -6072,6 +6210,71 @@ impl MarshalWriter {
                 if let Some(i) = self.objects.iter().position(|k| *k == ObjKey::Heap(*id)) {
                     self.out.push(b'@');
                     self.write_long(i as i64);
+                    return Ok(());
+                }
+                // User-defined marshal hooks take precedence over the
+                // type-specific forms (CRuby's `w_object` checks
+                // marshal_dump → `U`, then _dump → `u`, before `o`/`S`).
+                let mdump_id = vm.interner.intern("marshal_dump");
+                if vm.lookup_method_uncached(&inst_class, mdump_id).is_some() {
+                    // `U` (user-marshal): class symbol, then the
+                    // marshal_dump result serialised inline (sharing the
+                    // link tables). marshal_load(that) rebuilds on read.
+                    self.objects.push(ObjKey::Heap(*id));
+                    self.out.push(b'U');
+                    self.write_symbol(vm, csym);
+                    let payload = match marshal_invoke(vm, Value::Object(*id), mdump_id, None) {
+                        Ok(v) => v,
+                        Err(t) => {
+                            self.trap = Some(t);
+                            return Err(());
+                        }
+                    };
+                    let pin_base = vm.pinned.len();
+                    vm.pinned.push(payload.clone());
+                    let r = self.write_value(vm, &payload);
+                    vm.pinned.truncate(pin_base);
+                    return r;
+                }
+                let dump_id = vm.interner.intern("_dump");
+                if vm.lookup_method_uncached(&inst_class, dump_id).is_some() {
+                    // `u` (user-defined): class symbol, then the `_dump`
+                    // result STRING (length-prefixed bytes). Wrapped in
+                    // `I` to carry the string's encoding flag (UTF-8/
+                    // US-ASCII), exactly like a plain String; a binary
+                    // dump string needs no wrapper. `_load(str)` rebuilds.
+                    self.objects.push(ObjKey::Heap(*id));
+                    let dumped = match marshal_invoke(vm, Value::Object(*id), dump_id, Some(Value::Int(-1))) {
+                        Ok(v) => v,
+                        Err(t) => {
+                            self.trap = Some(t);
+                            return Err(());
+                        }
+                    };
+                    let Value::Str(rs) = &dumped else { return Err(()) };
+                    let bytes = rs.content.borrow().clone();
+                    use crate::value::EncodingTag;
+                    match rs.encoding.get() {
+                        EncodingTag::Binary => {
+                            self.out.push(b'u');
+                            self.write_symbol(vm, csym);
+                            self.write_long(bytes.len() as i64);
+                            self.out.extend_from_slice(&bytes);
+                        }
+                        EncodingTag::Utf8 | EncodingTag::UsAscii => {
+                            let e_true = matches!(rs.encoding.get(), EncodingTag::Utf8);
+                            self.out.push(b'I');
+                            self.out.push(b'u');
+                            self.write_symbol(vm, csym);
+                            self.write_long(bytes.len() as i64);
+                            self.out.extend_from_slice(&bytes);
+                            self.write_long(1);
+                            let e_sym = self.e_sym;
+                            self.write_symbol(vm, e_sym);
+                            self.out.push(if e_true { b'T' } else { b'F' });
+                        }
+                        EncodingTag::Other(_) => return Err(()),
+                    }
                     return Ok(());
                 }
                 // A Struct instance → CRuby's `S` tag: class symbol,
