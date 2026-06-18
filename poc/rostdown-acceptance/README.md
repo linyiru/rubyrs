@@ -57,40 +57,34 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
   declined — it does **not** prove the output is correct. `verify.sh` adds
   the byte-identity check that does; prefer its number.
 
-## Findings (2026-06-17, byte-identity verified)
+## Findings (2026-06-18, byte-identity verified)
 
 `verify.sh` — **0 accept-but-wrong**:
 
 | source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 98.4 % (127/129) |
+| bridgetown | 100 % (129/129) |
 | jekyll | 100 % (202/202) |
-| **combined** | **99.4 % (329/331)** |
+| **combined** | **100 % (331/331)** |
 
-Top decline reasons (combined, `run.sh`) are now a flat tail of kramdown
-quirks: multi-block / multi-line-table list items, cross-line emphasis
-pairing in lazy list continuations, list-trailing-whitespace hard breaks,
-indented code that is really a lazy paragraph continuation inside a Liquid
-block, `{:toc}`/ALD extensions, doctype/comment HTML, and multi-line span
-HTML blocks. The reproducible block/inline tails are all rendered now:
-strikethrough, hard breaks, nested link text, `{#id}`, leading IALs,
-OPT_SPACE-list paragraph interruption, indented code, OPT_SPACE fences, the
-`<table>` family + custom/unknown HTML elements, span-content `code`/`samp`
-elements, autolinks (`<https://…>`/`<user@host>`), pipe-tables inside a
-single-line list item, and a span element opening a paragraph.
+There are **no declines** on this corpus — every Jekyll and Bridgetown page
+rostdown renders is byte-identical to kramdown. The reproducible block/inline
+tails all landed: strikethrough (incl. N-tilde runs), hard breaks, nested link
+text, `{#id}`, leading/chained IALs, OPT_SPACE-list paragraph interruption,
+indented code (and the lazy-continuation lookalike), OPT_SPACE fences, the
+`<table>` family + custom/unknown HTML elements, `<script>`/`<style>` raw text,
+HTML comments, span elements (incl. multi-line and `<br>`/`<img>`) opening a
+paragraph, `markdown="1"` element content, the full recursive list model
+(loose/tight per-item mixing, nested, lazy, TAB-indented, multi-row-pipe-table
+items), `{:toc}` generation, and an unclosed fence falling back to a paragraph.
 
-**On 100 %.** Correctness is already 100 % — every accepted page is
-byte-identical and every declined page renders correctly via the Ruby
-fallback (`WRONG = 0`). The acceleration ratio is what climbs. The
-remaining decliners split into *reproducible* tails (hard breaks,
-strikethrough, indented code, link-text edge cases, OPT_SPACE fences) and
-*impractical* ones whose byte-identity would mean reproducing kramdown
-quirks at real accept-but-wrong risk — raw-text/custom HTML elements
-(`<table>`, `<script>`, `<sl-button>`), tables kramdown builds inside list
-items/blockquotes from a stray pipe, `{:toc}` generation, multi-block list
-items. Literal 100 % acceleration is the asymptote the
-byte-identical-or-decline design deliberately trades away for safety; the
-practical ceiling is ~85-90 %.
+**On 100 %.** Correctness was always 100 % — every accepted page byte-identical,
+every declined page correct via the Ruby fallback (`WRONG = 0`). What climbed
+is the acceleration ratio, now **100 % on the full corpus**: the Rust fast path
+handles every page. This is not a relaxation of the contract — it still
+byte-checks every accepted page and would decline (never mis-render) any
+construct it can't reproduce. A different corpus may surface a new decliner;
+each is then a task to reproduce or to decline, never a correctness gamble.
 
 **The accept-but-wrong correction.** Earlier snapshots (40.2 % → 50.5 % →
 a raw 57.4 %) counted accept-vs-decline only — they were never byte-checked
@@ -148,19 +142,20 @@ column 0, and verbatim `<!-- … -->` comment blocks — then a paragraph's
 indented continuation lines as lazy text rather than indented code (aligned
 wrapped prose, and indented content inside unexpanded `{% … %}` Liquid blocks)
 — then chained span IALs (`{:.a}{:rel=b}` merged onto one element), a leading
-block IAL injected into the following HTML block's root tag, and the big one: a
-`markdown="1"` element whose content is parsed as markdown spans and spliced
-into the re-serialized raw HTML. jekyll is now **100 %**. Current: **99.4 %**.
+block IAL injected into the following HTML block's root tag, a `markdown="1"`
+element whose content is parsed as markdown spans and spliced into the
+re-serialized raw HTML, TAB-indented continuations / nested lists (the tab
+expanded to spaces, parsed through a deep-owning path so nothing borrows the
+temporary), and an unclosed `~~~`/``` fence falling back to a paragraph (whose
+tilde runs then parse as `~~`-strikethrough with a literal remainder,
+`~~~x~~~` → `~<del>x</del>~`). Current: **100 %** — every page in the corpus.
 `verify.sh` is the standing gate that keeps it WRONG = 0.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
-prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
-content ~99 %. Just two blockers remain, both single Bridgetown posts and both
-fighting the zero-copy borrow model: a TAB-indented nested list item (kramdown
-expands the tab to spaces by tab stop, producing a line the parser can't borrow
-from `src`), and an unclosed `~~~` tilde run that kramdown treats as a paragraph
-with `~~`-strikethrough plus a literal remainder (`~~~x~~~` → `~<del>x</del>~`)
-— and that one is a harness artifact (Bridgetown's `~~~{% … %}~~~` Ruby front
-matter, which a real build strips before Markdown ever runs). Every declined
-page still renders correctly via the Ruby-kramdown fallback; declining only
-forgoes the speed-up.
+prose (`../markdown-bench/corpus/bench.md`) and the full Jekyll + Bridgetown
+corpus are both **100 % byte-identical** to kramdown. There is no remaining
+tail on this corpus; the byte-identical-or-decline contract still holds (any
+future construct rostdown can't reproduce declines to the Ruby-kramdown
+fallback rather than render wrong), so a different corpus may surface new
+decliners — each is then a task to reproduce or to decline, never a
+correctness gamble.
