@@ -1182,6 +1182,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn numeric_to_s_encoding() { run_diff("numeric_to_s_encoding"); }
 // nil/true/false to_s/inspect + Symbol to_s/name/inspect encoding.
 #[test] fn nil_bool_symbol_encoding() { run_diff("nil_bool_symbol_encoding"); }
+// Array/Hash/Range to_s/inspect encoding: seed from first element,
+// promote to UTF-8 on non-ASCII (CRuby's quirky rule).
+#[test] fn collection_inspect_encoding() { run_diff("collection_inspect_encoding"); }
 // Range#map over String endpoints (str_succ materialize).
 #[test] fn range_string_map() { run_diff("range_string_map"); }
 // undef_method kills same-class methods (tombstone + table removal).

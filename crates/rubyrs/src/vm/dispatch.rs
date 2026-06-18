@@ -1816,6 +1816,57 @@ impl Vm {
     /// `{...}` when it re-enters a container already on `inspect_stack`
     /// — matching CRuby's recursive-inspect behaviour. Scalars (and
     /// plain Objects) delegate straight to `stringify_for_output`.
+    /// Encoding for a collection's `inspect`/`to_s` STRING, given the
+    /// already-rendered `s`. CRuby seeds the result encoding from the
+    /// FIRST element's inspect (an Integer/Symbol-simple/nil/true seeds
+    /// US-ASCII; a String — even ascii-only — seeds UTF-8 because its
+    /// inspect carries the string's UTF-8 tag), then promotes to UTF-8
+    /// if any byte is non-ASCII. So: US-ASCII only when the rendering is
+    /// all-ASCII AND the seed element is US-ASCII; otherwise UTF-8.
+    /// (`[1,"a"]` → US-ASCII, but `["a"]` and `("a".."z")` → UTF-8.)
+    pub(crate) fn tag_collection_inspect(&self, seed: &Value, s: String) -> Value {
+        if s.is_ascii() && self.inspect_seed_is_us_ascii(seed, 0) {
+            Value::new_str_us_ascii(s)
+        } else {
+            Value::new_str(s)
+        }
+    }
+
+    /// Does inspecting `v` yield a US-ASCII-tagged string? Walks the
+    /// FIRST element of a collection (CRuby's seed rule) with a depth
+    /// guard against cyclic/deep structures.
+    fn inspect_seed_is_us_ascii(&self, v: &Value, depth: u32) -> bool {
+        use crate::value::EncodingTag;
+        if depth > 64 {
+            return true;
+        }
+        match v {
+            Value::Int(_) | Value::Float(_) | Value::Nil | Value::Bool(_) => true,
+            #[cfg(feature = "bignum")]
+            Value::BigInt(_) => true,
+            // A simple symbol inspects bareword US-ASCII; a quoted one
+            // routes through String#inspect → UTF-8.
+            Value::Sym(id) => crate::heap::symbol_name_is_simple(self.interner.resolve(*id)),
+            // String#inspect keeps the string's own encoding.
+            Value::Str(rs) => matches!(rs.encoding.get(), EncodingTag::UsAscii),
+            Value::Array(id) => match self.heap.array(*id).first() {
+                Some(e) => self.inspect_seed_is_us_ascii(e, depth + 1),
+                None => true,
+            },
+            Value::Hash(id) => match self.heap.hash(*id).first() {
+                Some((k, _)) => self.inspect_seed_is_us_ascii(k, depth + 1),
+                None => true,
+            },
+            Value::Range(rid) => {
+                let begin = self.heap.range(*rid).begin.clone();
+                self.inspect_seed_is_us_ascii(&begin, depth + 1)
+            }
+            // Object#inspect etc. render `#<...>` (ASCII); a custom
+            // inspect returning non-ASCII promotes via the byte check.
+            _ => true,
+        }
+    }
+
     pub(crate) fn inspect_value(&mut self, v: &Value) -> Result<String, Trap> {
         match v {
             Value::Array(id) => {
@@ -12345,7 +12396,16 @@ impl Vm {
                 } else {
                     recv.to_display(&self.heap, &self.interner)
                 };
-                self.stack.push(Value::new_str(rendered));
+                // Range#inspect/to_s takes the encoding of its `begin`
+                // endpoint's inspect, promoted to UTF-8 on non-ASCII —
+                // `(1..3)` is US-ASCII, `("a".."z")` is UTF-8. Rational
+                // (always ASCII numerals) stays US-ASCII via the seed.
+                let seed = match &recv {
+                    Value::Range(rid) => self.heap.range(*rid).begin.clone(),
+                    _ => Value::Int(0),
+                };
+                let tagged = self.tag_collection_inspect(&seed, rendered);
+                self.stack.push(tagged);
                 return Ok(());
             }
             // BoundMethod / UnboundMethod: render

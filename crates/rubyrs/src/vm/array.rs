@@ -1645,7 +1645,8 @@ impl Vm {
                         // Cycle-safe + per-element `inspect` dispatch (see
                         // `Vm::inspect_value`); `to_s` aliases inspect.
                         let s = self.inspect_value(&Value::Array(id))?;
-                        Some(Value::new_str(s))
+                        let seed = self.heap.array(id).first().cloned().unwrap_or(Value::Nil);
+                        Some(self.tag_collection_inspect(&seed, s))
                     }
                     ("reverse", []) => {
                         let rev: Vec<Value> = self.heap.array(id).iter().rev().cloned().collect();

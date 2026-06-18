@@ -444,7 +444,10 @@ impl Vm {
                         // overflowing the stack and custom / Exception
                         // values keep their real inspect.
                         let s = self.inspect_value(&Value::Hash(id))?;
-                        Some(Value::new_str(s))
+                        // Seed encoding from the first KEY's inspect
+                        // (CRuby's rule), promoting on non-ASCII bytes.
+                        let seed = self.heap.hash(id).first().map(|(k, _)| k.clone()).unwrap_or(Value::Nil);
+                        Some(self.tag_collection_inspect(&seed, s))
                     }
                     ("to_a", []) | ("sort", []) => {
                         // Hash#to_a returns an Array of two-element Arrays.
