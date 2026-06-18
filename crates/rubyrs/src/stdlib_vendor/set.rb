@@ -110,6 +110,52 @@ class Set
     self
   end
 
+  # Remove every element of `enum` from self (in place); returns self.
+  def subtract(enum)
+    enum.each { |o| delete(o) }
+    self
+  end
+
+  # `keep_if` / `select!` / `reject!` — in-place filtering. keep_if
+  # always returns self; select!/reject! return self if the set
+  # changed, else nil (CRuby).
+  def keep_if
+    to_a.each { |o| delete(o) unless yield(o) }
+    self
+  end
+
+  def select!
+    n = size
+    to_a.each { |o| delete(o) unless yield(o) }
+    n == size ? nil : self
+  end
+  alias_method :filter!, :select!
+
+  def reject!
+    n = size
+    to_a.each { |o| delete(o) if yield(o) }
+    n == size ? nil : self
+  end
+
+  # `classify { |o| ... }` — group elements into a Hash keyed by the
+  # block's return value, each value a Set of the elements that mapped
+  # to it.
+  def classify
+    h = {}
+    each { |o| (h[yield(o)] ||= Set.new).add(o) }
+    h
+  end
+
+  # `divide { |o| ... }` — partition into a Set of Sets. The 1-arity
+  # block groups by the block's value (== classify().values). The
+  # 2-arity graph form (connected components) isn't modelled.
+  def divide(&block)
+    if block.arity == 2
+      raise NotImplementedError, "Set#divide with a 2-argument block is not supported"
+    end
+    Set.new(classify(&block).values)
+  end
+
   # Replace the contents with the elements of `enum` (CRuby
   # Set#replace). Returns self.
   def replace(enum)
