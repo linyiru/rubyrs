@@ -348,6 +348,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // define_singleton_method(name, callable) on a heap primitive (Array/
 // String/Hash) installs onto its per-instance eigenclass.
 #[test] fn define_singleton_method_heap() { run_diff("define_singleton_method_heap"); }
+// Module#autoload? returns nil once the constant is actually defined
+// (Tilt's FinalizedMapping lazy lookups).
+#[test] fn autoload_defined_nil() { run_diff("autoload_defined_nil"); }
 // `begin … rescue … else E … ensure … end` — the else body runs only
 // on the no-exception path, its value is the begin's value, and an
 // exception in else escapes the rescue chain (Sinatra/Tilt lazy_load).

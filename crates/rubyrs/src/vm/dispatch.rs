@@ -9280,12 +9280,25 @@ impl Vm {
                 };
                 if let Some(cn) = const_name {
                     let key = match owner.effective_name().as_deref() {
-                        None | Some("Object") => cn,
+                        None | Some("Object") => cn.clone(),
                         Some(on) => format!("{}::{}", on, cn),
                     };
                     if self.interner.contains(&key) {
                         let key_id = self.interner.intern(&key);
-                        if let Some(path) = self.autoloads_scoped.get(&key_id) {
+                        // CRuby: `autoload?` returns nil once the constant
+                        // is actually DEFINED (loaded), even if an
+                        // autoload entry still lingers — `autoload :X, f`
+                        // on an already-defined X doesn't re-arm. Tilt's
+                        // `constant_defined?` gates on `autoload?(n)` being
+                        // falsy before `const_get`, so a stale path here
+                        // made a loaded template class read as undefined
+                        // (FinalizedMapping lazy lookups returned nil).
+                        let short = self.interner.intern(&cn);
+                        let already_defined = self.classes.contains_key(&key_id)
+                            || self.constants.contains_key(&key_id)
+                            || owner.consts.borrow().contains_key(&short);
+                        if !already_defined
+                            && let Some(path) = self.autoloads_scoped.get(&key_id) {
                             let v = Value::new_str(path.clone());
                             self.stack.push(v);
                             return Ok(());
