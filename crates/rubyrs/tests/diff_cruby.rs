@@ -666,6 +666,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn regexp_options_carrier() { run_diff("regexp_options_carrier"); }
 #[cfg(feature = "regex")]
 #[test] fn regexp_casefold() { run_diff("regexp_casefold"); }
+#[cfg(feature = "regex")]
+#[test] fn regexp_match_write() { run_diff("regexp_match_write"); }
 #[test] fn regex_flags() { run_diff("regex_flags"); }
 #[cfg(feature = "regex")]
 #[test] fn regex_charclass_octal() { run_diff("regex_charclass_octal"); }

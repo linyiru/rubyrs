@@ -104,6 +104,7 @@ LocalVariableOrWriteNode
 LocalVariableReadNode
 LocalVariableTargetNode
 LocalVariableWriteNode
+MatchWriteNode
 MatchPredicateNode
 MatchRequiredNode
 ModuleNode

@@ -5681,6 +5681,51 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     if let Some(ff) = node.as_flip_flop_node() {
         return tr_flip_flop(ctx, node, &ff);
     }
+    // `MatchWriteNode` — a regexp-LITERAL `=~` whose pattern has named
+    // captures (`/(?<y>\d+)-(?<m>\d+)/ =~ str`). CRuby evaluates the
+    // `=~`, then binds a local variable PER named capture to that
+    // group's text (or nil when the match failed). Desugar into:
+    //   __mw_N = (re =~ str)         # the =~ call sets $~
+    //   y = $~ ? $~[:y] : nil
+    //   m = $~ ? $~[:m] : nil
+    //   __mw_N                        # whole expr value is the =~ result
+    // The synthetic temp carries the match index/nil so the sequence's
+    // value matches the bare `=~`. The `$~ ? …` guard mirrors CRuby
+    // setting the locals to nil (not erroring) on no-match.
+    if let Some(mw) = node.as_match_write_node() {
+        let call_node = mw.call();
+        let tmp = format!("__mw_{}", node_span(node).byte_offset);
+        let mut body: Vec<SExpr> = Vec::new();
+        body.push(sp(
+            node,
+            Expr::LVarWrite(tmp.clone(), Box::new(tr(ctx, &call_node.as_node()))),
+        ));
+        for t in mw.targets().iter() {
+            if let Some(lt) = t.as_local_variable_target_node() {
+                let name = cid_to_string(lt.name());
+                let index = sp(
+                    node,
+                    Expr::Call {
+                        receiver: Some(Box::new(sp(node, Expr::GVarRead("$~".to_string())))),
+                        name: "[]".to_string(),
+                        args: vec![sp(node, Expr::SymbolLit(name.clone()))],
+                        kwargs_trailing: false,
+                    },
+                );
+                let guarded = sp(
+                    node,
+                    Expr::If {
+                        cond: Box::new(sp(node, Expr::GVarRead("$~".to_string()))),
+                        then_body: vec![index],
+                        else_body: vec![sp(node, Expr::Nil)],
+                    },
+                );
+                body.push(sp(node, Expr::LVarWrite(name, Box::new(guarded))));
+            }
+        }
+        body.push(sp(node, Expr::LVarRead(tmp)));
+        return sp(node, Expr::Begin { body, rescue: vec![], ensure: None });
+    }
     // Unsupported Prism node — record the message and return a
     // placeholder. The eval entry point checks `ctx.errors` after
     // tr returns and surfaces a SyntaxError Trap, so the
