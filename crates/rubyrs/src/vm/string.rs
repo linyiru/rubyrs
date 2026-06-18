@@ -1897,6 +1897,14 @@ pub(crate) fn string_call(
         // flagless common case + `Regexp.new(str)`).
         #[cfg(feature = "regex")]
         (Value::Regex(re), "options", []) => Some(Value::Int(re.options() as i64)),
+        // `Regexp#casefold?` — true when the IGNORECASE flag is set
+        // (i.e. the regexp was built with `/i` or `Regexp::IGNORECASE`).
+        // Note this reflects only the literal's own flag, not inline
+        // `(?i:...)` groups (CRuby agrees: `/(?i:a)/.casefold?` is false).
+        #[cfg(feature = "regex")]
+        (Value::Regex(re), "casefold?", []) => {
+            Some(Value::Bool(re.options() & crate::regex_engine::RB_IGNORECASE != 0))
+        }
         #[cfg(feature = "regex")]
         (Value::Regex(re), "to_s", []) => Some(Value::new_str(re.to_s_string())),
         #[cfg(feature = "regex")]

@@ -664,6 +664,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn call_kwsplat_empty() { run_diff("call_kwsplat_empty"); }
 #[test] fn array_reduce_init_sym() { run_diff("array_reduce_init_sym"); }
 #[test] fn regexp_options_carrier() { run_diff("regexp_options_carrier"); }
+#[cfg(feature = "regex")]
+#[test] fn regexp_casefold() { run_diff("regexp_casefold"); }
 #[test] fn regex_flags() { run_diff("regex_flags"); }
 #[cfg(feature = "regex")]
 #[test] fn regex_charclass_octal() { run_diff("regex_charclass_octal"); }

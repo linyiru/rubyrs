@@ -1149,7 +1149,7 @@ impl Vm {
             Value::Block(_) => matches!(name, "call" | "[]" | "()" | "yield" | "arity" | "curry" | ">>" | "<<" | "lambda?" | "to_proc" | "===" | "source_location"),
             #[cfg(feature = "regex")]
             Value::Regex(_) => matches!(name,
-                "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect" | "options" | "names"
+                "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect" | "options" | "names" | "casefold?"
                 // `freeze` / `frozen?` are compatibility shims:
                 // Regexp is immutable by construction so freezing
                 // is a no-op, but real Ruby code calls `.freeze`
