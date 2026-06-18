@@ -11792,6 +11792,48 @@ impl Vm {
             self.stack.push(Value::Array(id));
             return Ok(());
         }
+        // `Regexp#named_captures` — Hash mapping each named group to the
+        // array of its 1-based capture indices (CRuby:
+        // `/(?<a>.)(?<b>.)/.named_captures == {"a"=>[1],"b"=>[2]}`; a name
+        // reused across alternatives collects multiple indices). Built
+        // from `capture_group_names()` (index 0 = whole match → skipped).
+        // mustermann's `Pattern#params` calls this on the route regexp.
+        #[cfg(feature = "regex")]
+        if &*name == "named_captures" && args.is_empty()
+            && let Value::Regex(re) = &recv
+        {
+            // `capture_group_names()` is 0-indexed per group (no
+            // whole-match slot); CRuby's capture indices are 1-based, so
+            // offset by 1. DIVERGENCE: for a pattern MIXING named and
+            // unnamed groups, CRuby/Oniguruma renumbers (unnamed groups
+            // don't count once a named one exists) — rubyrs's Rust engine
+            // numbers all groups PCRE-style, so a mixed pattern's indices
+            // can differ. All-named patterns (Sinatra routes) match.
+            let cap_names = re.capture_group_names();
+            let mut pairs: Vec<(Value, Value)> = Vec::new();
+            for (i, slot) in cap_names.iter().enumerate() {
+                let Some(nm) = slot else { continue };
+                let idx = (i + 1) as i64;
+                // Find an existing entry for this name (preserve order).
+                let pos = pairs.iter().position(|(k, _)| {
+                    matches!(k, Value::Str(s) if s.to_string_lossy() == *nm)
+                });
+                match pos {
+                    Some(p) => {
+                        if let Value::Array(aid) = &pairs[p].1 {
+                            self.heap.array_mut(*aid).push(Value::Int(idx));
+                        }
+                    }
+                    None => {
+                        let aid = self.heap.alloc(HeapObj::Array(vec![Value::Int(idx)].into()));
+                        pairs.push((Value::new_str(nm.clone()), Value::Array(aid)));
+                    }
+                }
+            }
+            let hid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+            self.stack.push(Value::Hash(hid));
+            return Ok(());
+        }
         // `Regexp#match(str)` — symmetric with `String#match(regex)`.
         // Returns a MatchData (setting `$~`) or nil. A nil arg is a
         // no-match (CRuby returns nil and clears `$~`). Discovery: P3

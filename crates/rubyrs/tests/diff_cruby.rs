@@ -713,6 +713,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn bare_super_implicit_block() { run_diff("bare_super_implicit_block"); }
 #[test] fn super_is_a() { run_diff("super_is_a"); }
 #[test] fn regexp_names() { run_diff("regexp_names"); }
+#[cfg(feature = "regex")]
+#[test] fn regexp_named_captures() { run_diff("regexp_named_captures"); }
+#[test] fn objectspace_finalizer() { run_diff("objectspace_finalizer"); }
 #[test] fn hash_subclass_default() { run_diff("hash_subclass_default"); }
 #[test] fn hash_subclass_transform_override() { run_diff("hash_subclass_transform_override"); }
 #[test] fn clone_preserves_singleton() { run_diff("clone_preserves_singleton"); }

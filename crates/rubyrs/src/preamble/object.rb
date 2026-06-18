@@ -241,9 +241,27 @@ end
 # Keys compare by IDENTITY, not eql?/hash (CRuby: `w["x"]` misses an
 # entry stored under a different but equal `"x"`), so the backing Hash
 # is keyed on `object_id` and stores `[key, value]` pairs. The
-# `ObjectSpace` module itself is otherwise unmodelled (no each_object /
-# define_finalizer).
+# `ObjectSpace` module itself is otherwise unmodelled (no each_object).
 module ObjectSpace
+  # `define_finalizer(obj, callable=nil)` / `undefine_finalizer(obj)` —
+  # CRuby registers a proc to run when `obj` is garbage-collected. rubyrs
+  # has no GC-finalizer hook (drop-based, single-process Tier-1), so these
+  # are no-ops: the registration is accepted but the finalizer never
+  # fires. Matches CRuby's "finalizers are best-effort / unordered /
+  # may-not-run" contract for the common cleanup-cache use (mustermann's
+  # EqualityMap registers one to evict cached patterns — here the cache
+  # simply never evicts). Return shape mirrors CRuby:
+  # `[0, callable]`-ish — we return the object for chaining tolerance.
+  def self.define_finalizer(obj, callable = nil, &block)
+    # CRuby returns `[0, callable]` (the "table slot" 0 + the finalizer);
+    # the block form uses the block as the callable.
+    [0, callable || block]
+  end
+
+  def self.undefine_finalizer(obj)
+    obj
+  end
+
   # NOTE: CRuby's WeakMap includes Enumerable, but object.rb loads
   # before enumerable.rb in the preamble, so we don't mix it in here
   # (the named `each_*` / `keys` / `values` cover the consumed surface;
