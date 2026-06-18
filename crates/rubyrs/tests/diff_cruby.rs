@@ -479,6 +479,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn symbol_proc_multiarg() { run_diff("symbol_proc_multiarg"); }
 #[test] fn ensure_on_return() { run_diff("ensure_on_return"); }
 #[test] fn raise_class_runs_initialize() { run_diff("raise_class_runs_initialize"); }
+#[test] fn time_components() { run_diff("time_components"); }
+#[cfg(feature = "stdlib")]
+#[test] fn stringio_line_methods() { run_diff("stringio_line_methods"); }
 #[cfg(feature = "regex")]
 #[test] fn match_data_offsets() { run_diff("match_data_offsets"); }
 #[cfg(feature = "regex")]

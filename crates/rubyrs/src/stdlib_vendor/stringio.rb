@@ -170,8 +170,11 @@ class StringIO
     nil
   end
 
-  def printf(_fmt, *_args)
-    raise NotImplementedError, "StringIO#printf not modelled in Tier 3 vendor"
+  # `printf(fmt, *args)` — formats via Kernel#format and writes the
+  # result; returns nil (IO#printf contract).
+  def printf(fmt, *args)
+    write(format(fmt, *args))
+    nil
   end
 
   # ----- read side -----
@@ -230,13 +233,70 @@ class StringIO
   end
 
   def each_line(&block)
-    return self unless block
+    return to_enum(:each_line) unless block
     while (line = gets)
       block.call(line)
     end
     self
   end
   alias_method :each, :each_line
+
+  # `readline` — like `gets` but raises EOFError at end of stream.
+  def readline
+    line = gets
+    raise EOFError, "end of file reached" if line.nil?
+    line
+  end
+
+  # `readlines` — the remaining lines as an Array (from the current
+  # position). NOTE: the old `#lines`/`#bytes`/`#chars` plural readers
+  # were REMOVED from IO/StringIO in Ruby 3.0 (they raise NoMethodError
+  # now), so we deliberately don't define them — only the `each_*`
+  # iterators below.
+  def readlines
+    out = []
+    while (line = gets)
+      out << line
+    end
+    out
+  end
+
+  # `getc` — the next single character (or nil at end).
+  def getc
+    return nil if @pos >= @str.length
+    ch = @str[@pos]
+    @pos += 1
+    ch
+  end
+
+  # `ungetc(str)` — push characters back so the next read returns them.
+  # CRuby inserts them at the current position (the position does not
+  # advance), so a later `read` starts with the pushed-back data.
+  def ungetc(obj)
+    return nil if obj.nil?
+    s = obj.is_a?(Integer) ? obj.chr : obj.to_s
+    @str = @str[0, @pos].to_s + s + @str[@pos..].to_s
+    nil
+  end
+  alias_method :ungetbyte, :ungetc
+
+  # `each_char` — yield each remaining character; no block → Enumerator.
+  def each_char(&block)
+    return to_enum(:each_char) unless block
+    while (ch = getc)
+      block.call(ch)
+    end
+    self
+  end
+
+  # `each_byte` — over the remaining bytes from `@pos`. (The plural
+  # `#bytes` reader was removed from IO/StringIO in Ruby 3.0.)
+  def each_byte(&block)
+    return to_enum(:each_byte) unless block
+    @str[@pos..].each_byte { |b| block.call(b) }
+    @pos = @str.length
+    self
+  end
 
   def inspect
     "#<StringIO>"
