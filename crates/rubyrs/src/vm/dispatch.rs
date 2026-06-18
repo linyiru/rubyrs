@@ -17104,16 +17104,26 @@ impl Vm {
                         && !cls.is_module
                         && cls.name != "Module";
                 if in_set || allocate_allowed {
-                    // `class_eval` / `module_eval` are the ONLY
+                    // `class_eval` / `module_eval` / `new` are the
                     // bridge-set members whose block is load-
                     // bearing. `class C; class_eval { def foo;
                     // end }; end` defines `foo` on `C` via the
                     // block-form intercept in do_call_block's
-                    // recv-form path. Re-route through
-                    // do_call_block (preserving block) instead
-                    // of the do_call discard path the other
-                    // bridge names use.
-                    if matches!(&*name, "class_eval" | "module_eval") {
+                    // recv-form path. Bare `new(...) { ... }` (self
+                    // is a Class, no user `def self.new`) must
+                    // forward its block to `initialize` — CRuby
+                    // does NOT discard it (unlike `ancestors`,
+                    // `name`, etc.). mustermann's `def self.new;
+                    // @map.fetch(...) { super(...) { options } };
+                    // end` lands here through Class#new's inherited
+                    // bare-`super` and dropped the inner `{ options
+                    // }` block, so the superclass `initialize`'s
+                    // `@options = yield.freeze if block_given?`
+                    // saw no block (Sinatra `provides:` routes).
+                    // Re-route through do_call_block (preserving
+                    // block) instead of the do_call discard path
+                    // the other bridge names use.
+                    if matches!(&*name, "class_eval" | "module_eval" | "new") {
                         let argc = args.len();
                         self.stack.push(self_val.clone());
                         self.stack.push(Value::Block(block));

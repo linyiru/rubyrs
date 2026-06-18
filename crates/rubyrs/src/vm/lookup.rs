@@ -2197,24 +2197,40 @@ impl Vm {
         args: Vec<Value>,
         block: Option<crate::value::ObjId>,
     ) -> Result<(), crate::error::Trap> {
-        let obj = self.alloc_default_instance(cls)?;
+        // Pin args + block BEFORE alloc_default_instance — its alloc
+        // can trigger maybe_gc, and `block` (plus any heap-shaped
+        // arg) is otherwise a bare Rust local unreachable from the
+        // roots until `invoke_method_with_block` pushes the new
+        // frame. Under STRESS_GC the block ObjId got swept (and its
+        // slot reused) before initialize bound it — ICE "heap slot
+        // is not a Block". Mirrors the rooting in do_call_block's
+        // user-class `new` arm (dispatch.rs ~17407). Repro:
+        // mustermann's `def self.new(s, **o); super(s, **o) { o };
+        // end` (Sinatra `provides:` / error routes).
+        let pin_start = self.pinned.len();
+        for a in &args { self.pinned.push(a.clone()); }
+        if let Some(bid) = block { self.pinned.push(Value::Block(bid)); }
+        let obj = match self.alloc_default_instance(cls) {
+            Ok(o) => o,
+            Err(t) => { self.pinned.truncate(pin_start); return Err(t); }
+        };
         self.pinned.push(obj.clone());
         let init_id = self.interner.intern("initialize");
         let ruby_init = self.lookup_method_uncached(cls, init_id);
         if let Some(m) = ruby_init {
             let pre_frames = self.frames.len();
             if let Err(t) = self.invoke_method_with_block(m, obj.clone(), args, block) {
-                self.pinned.pop();
+                self.pinned.truncate(pin_start);
                 return Err(t);
             }
             if let Err(t) = self.dispatch_until(pre_frames) {
-                self.pinned.pop();
+                self.pinned.truncate(pin_start);
                 return Err(t);
             }
             // initialize's return value is discarded by `new`.
             self.stack.pop();
         }
-        self.pinned.pop();
+        self.pinned.truncate(pin_start);
         self.stack.push(obj);
         Ok(())
     }

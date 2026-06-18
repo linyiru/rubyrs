@@ -316,6 +316,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `alias new! new` snapshots the builtin Class#new (no recursion when
 // `new` is then redefined to call `new!`) — Sinatra's middleware wrap.
 #[test] fn alias_builtin_new() { run_diff("alias_builtin_new"); }
+// Bare `new(...) { block }` (implicit self = class) forwards its block
+// to #initialize, including through bare `super(...) { block }` — the
+// path previously discarded the block (Sinatra `provides:`/mustermann).
+#[test] fn bare_new_block_forward() { run_diff("bare_new_block_forward"); }
 // `begin … rescue … else E … ensure … end` — the else body runs only
 // on the no-exception path, its value is the begin's value, and an
 // exception in else escapes the rescue chain (Sinatra/Tilt lazy_load).
