@@ -64,8 +64,8 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 | source | byte-identical acceptance |
 | --- | ---: |
 | bridgetown | 93.8 % (121/129) |
-| jekyll | 95.5 % (193/202) |
-| **combined** | **94.9 % (314/331)** |
+| jekyll | 96.5 % (195/202) |
+| **combined** | **95.5 % (316/331)** |
 
 Top decline reasons (combined, `run.sh`) are now a flat tail of kramdown
 quirks: multi-block / multi-line-table list items, cross-line emphasis
@@ -129,17 +129,22 @@ smart quotes directly after a code span (`` `x`'s `` → ’s), and an
 opposite-kind list marker indented shallow under an ordered item
 (`1. a:\n  * b` → nested `<ul>`), and a base-aware list parser that parses an
 OPT_SPACE list in place so a lazy continuation keeps its residual leading
-space verbatim. Current: **94.9 %**. `verify.sh` is the standing gate that
-keeps it WRONG = 0.
+space verbatim — then a uniformly-loose list whose multi-block items are
+blank-separated (`[Para, Blank, Code/List]`): kramdown only mixes per-item
+tight/loose when a block DIRECTLY ABUTS the leading paragraph, so a blank-
+separated one stays loose and renders natively (the abutting shape still
+declines). Current: **95.5 %**. `verify.sh` is the standing gate that keeps it
+WRONG = 0.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
 content ~95 %. The remaining blockers are the impractical tail — constructs
 whose byte-identity would mean reproducing kramdown quirks at real
 accept-but-wrong risk, confirmed by probing each against the oracle:
-PER-ITEM tight/loose mixing in a loose list that also holds a non-paragraph
-item (a sub-list / fenced code / trailing paragraph stays inline while a bare
-paragraph item wraps in `<p>`), a blank-separated "lonely" IAL whose
+PER-ITEM tight/loose mixing in a loose list where a block DIRECTLY ABUTS an
+item's leading paragraph (kramdown makes that paragraph transparent/inline
+while bare paragraph items wrap in `<p>`; the blank-separated case now renders
+natively), a blank-separated "lonely" IAL whose
 attachment target is context-dependent, `{:toc}`/ALD generation, indented
 code that is really a lazy paragraph continuation inside a Liquid block, a
 tilde run that is really `~~`-strikethrough with a literal remainder
