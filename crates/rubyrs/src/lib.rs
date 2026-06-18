@@ -30,6 +30,8 @@
 extern crate alloc;
 
 mod ast;
+#[cfg(feature = "_openssl")]
+mod aes;
 #[cfg(feature = "_bcrypt")]
 mod bcrypt;
 #[cfg(feature = "_oj")]

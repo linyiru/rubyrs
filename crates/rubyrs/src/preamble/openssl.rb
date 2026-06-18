@@ -36,6 +36,140 @@ module OpenSSL
     end
   end
 
+  # `OpenSSL::Digest` — the symmetric-crypto slice Rack 3's session
+  # `Encryptor` drives (`OpenSSL::Digest::SHA256.new`, handed to
+  # `OpenSSL::HMAC.digest`). A Digest instance here is a thin name +
+  # one-shot compute wrapper over the native `Digest` battery; HMAC and
+  # the message-digest API both key off `#name`. Only SHA-256 has a
+  # native HMAC path (all Rack needs); SHA1/SHA512/MD5 compute digests
+  # but raise from HMAC.
+  class Digest
+    attr_reader :name
+
+    def initialize(name)
+      @name = name.to_s.upcase
+    end
+
+    def self.digest(data); new(_algo).digest(data); end
+    def self.hexdigest(data); new(_algo).hexdigest(data); end
+
+    def digest(data)
+      ::Digest.const_get(@name).digest(data)
+    end
+
+    def hexdigest(data)
+      ::Digest.const_get(@name).hexdigest(data)
+    end
+
+    def digest_length
+      digest("").bytesize
+    end
+
+    class SHA256 < Digest
+      def initialize(*); super("SHA256"); end
+      def self._algo; "SHA256"; end
+    end
+    class SHA1 < Digest
+      def initialize(*); super("SHA1"); end
+      def self._algo; "SHA1"; end
+    end
+    class SHA512 < Digest
+      def initialize(*); super("SHA512"); end
+      def self._algo; "SHA512"; end
+    end
+    class MD5 < Digest
+      def initialize(*); super("MD5"); end
+      def self._algo; "MD5"; end
+    end
+  end
+
+  # `OpenSSL::HMAC.digest(digest, key, data)` — keyed-hash MAC. `digest`
+  # is either an `OpenSSL::Digest` instance (Rack passes
+  # `OpenSSL::Digest::SHA256.new`) or an algorithm-name String. Only
+  # SHA-256 is wired to the native HMAC; other algorithms raise (no
+  # consumer on the session path).
+  module HMAC
+    def self.digest(digest, key, data)
+      algo = digest.respond_to?(:name) ? digest.name : digest.to_s
+      unless algo.to_s.upcase.gsub("-", "") == "SHA256"
+        raise OpenSSL::OpenSSLError, "unsupported HMAC digest #{algo.inspect} (only SHA256)"
+      end
+      __rubyrs_hmac_sha256(key.to_s, data.to_s)
+    end
+
+    def self.hexdigest(digest, key, data)
+      digest(digest, key, data).unpack1("H*")
+    end
+  end
+
+  # `OpenSSL::Cipher` — AES-256-CTR only (Rack 3 `Encryptor`'s
+  # `new('aes-256-ctr')`). CTR is a stream cipher, so `encrypt` /
+  # `decrypt` select the same XOR transform and differ only in intent;
+  # `update` streams immediately (tracking the keystream byte offset so
+  # split updates resume correctly) and `final` is empty. Other ciphers
+  # raise — the native AES core is 256-bit-only.
+  class Cipher
+    class CipherError < OpenSSL::OpenSSLError; end
+
+    def initialize(name)
+      n = name.to_s.downcase
+      unless n == "aes-256-ctr"
+        raise CipherError, "unsupported cipher #{name.inspect} (only aes-256-ctr)"
+      end
+      @name = n
+      @key = nil
+      @iv = nil
+      @offset = 0
+    end
+
+    # Mode selectors — no-ops for CTR beyond resetting the stream
+    # position, matching OpenSSL's "call before key/iv" contract.
+    def encrypt; @offset = 0; self; end
+    def decrypt; @offset = 0; self; end
+
+    def key=(k)
+      k = k.to_s
+      raise CipherError, "key must be 32 bytes" unless k.bytesize == 32
+      @key = k.dup.force_encoding("BINARY")
+      @offset = 0
+      k
+    end
+
+    def iv=(v)
+      v = v.to_s
+      raise CipherError, "iv must be 16 bytes" unless v.bytesize == 16
+      @iv = v.dup.force_encoding("BINARY")
+      @offset = 0
+      v
+    end
+
+    def key_len; 32; end
+    def iv_len; 16; end
+
+    def random_iv
+      self.iv = SecureRandom.random_bytes(16)
+      @iv
+    end
+
+    def random_key
+      self.key = SecureRandom.random_bytes(32)
+      @key
+    end
+
+    def update(data)
+      raise CipherError, "cipher key not set" if @key.nil?
+      raise CipherError, "cipher iv not set" if @iv.nil?
+      data = data.to_s
+      out = __rubyrs_aes256_ctr(@key, @iv, @offset, data)
+      @offset += data.bytesize
+      out
+    end
+
+    def final
+      "".dup.force_encoding("BINARY")
+    end
+  end
+
   module SSL
     class SSLError < OpenSSL::OpenSSLError; end
 

@@ -3025,13 +3025,38 @@ impl Vm {
                             }
                         }));
                     }
-                    let lossy = s.to_string_lossy();
-                    let char_bytes: Vec<usize> = lossy.char_indices().map(|(b, _)| b).collect();
-                    let char_len = char_bytes.len() as i64;
-                    let total = lossy.len();
+                    // BINARY (ASCII-8BIT) — or any non-UTF-8 byte content —
+                    // indexes by BYTE: each byte is one "character" in
+                    // CRuby. Building the char→byte map from
+                    // `to_string_lossy()` (which expands invalid UTF-8 to
+                    // 3-byte U+FFFD) would compute offsets against the lossy
+                    // reconstruction and then apply them to the raw bytes —
+                    // diverging, and panicking OOB when the lossy form is
+                    // longer. rack-session's decrypt does
+                    // `data.slice!(-32..-1)` on `Base64.urlsafe_decode64`
+                    // output (random encrypted bytes — invalid UTF-8, not
+                    // always BINARY-tagged), so gate on actual byte
+                    // validity, not just the encoding tag.
+                    let binary = matches!(s.encoding.get(), crate::value::EncodingTag::Binary)
+                        || std::str::from_utf8(&s.borrow()).is_err();
+                    let lossy = if binary { String::new() } else { s.to_string_lossy() };
+                    let raw_len = s.borrow().len();
+                    let char_bytes: Vec<usize> = if binary {
+                        Vec::new()
+                    } else {
+                        lossy.char_indices().map(|(b, _)| b).collect()
+                    };
+                    let char_len = if binary { raw_len as i64 } else { char_bytes.len() as i64 };
+                    let total = if binary { raw_len } else { lossy.len() };
                     let byte_at = |ci: i64| -> usize {
                         let ci = ci as usize;
-                        if ci >= char_bytes.len() { total } else { char_bytes[ci] }
+                        if binary {
+                            ci.min(raw_len)
+                        } else if ci >= char_bytes.len() {
+                            total
+                        } else {
+                            char_bytes[ci]
+                        }
                     };
                     let span: Option<(usize, usize)> = match (&args[0], args.get(1)) {
                         (Value::Int(i), Some(Value::Int(n))) => {
@@ -3845,7 +3870,7 @@ impl Vm {
                             msg: "wrong number of arguments (given 1, expected 2)".into(),
                         }));
                     }
-                    ("sub" | "gsub", [Value::Regex(re), Value::Hash(hid)]) => {
+                    ("sub" | "gsub" | "sub!" | "gsub!", [Value::Regex(re), Value::Hash(hid)]) => {
                         let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
                             msg: format!(
                                 "regex op 'String#{name}' with a Hash replacement is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
@@ -3865,21 +3890,42 @@ impl Vm {
                             }
                         }
                         let s_owned = s.to_string_lossy();
-                        let out = if name == "sub" {
+                        let single = name == "sub" || name == "sub!";
+                        // Cow::Borrowed when no match — lets the bang
+                        // variants return nil on no-substitution (CRuby's
+                        // contract is "nil iff no match", not "iff
+                        // unchanged"). uri's `_encode_uri_component`
+                        // (rack set_cookie_header) drives `gsub!(re, table)`.
+                        let replaced = if single {
                             native.replace(&s_owned, |caps: &regex::Captures| {
                                 table.get(&caps[0]).cloned().unwrap_or_default()
-                            }).into_owned()
+                            })
                         } else {
                             native.replace_all(&s_owned, |caps: &regex::Captures| {
                                 table.get(&caps[0]).cloned().unwrap_or_default()
-                            }).into_owned()
+                            })
                         };
-                        Some(Value::new_str(out))
+                        if name.ends_with('!') {
+                            if s.frozen.get() {
+                                return Err(self.trap(RubyError::FrozenError {
+                                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(&s)),
+                                }));
+                            }
+                            match replaced {
+                                std::borrow::Cow::Borrowed(_) => Some(Value::Nil),
+                                std::borrow::Cow::Owned(new_str) => {
+                                    *s.borrow_mut() = new_str.into_bytes();
+                                    Some(Value::Str(s.clone()))
+                                }
+                            }
+                        } else {
+                            Some(Value::new_str(replaced.into_owned()))
+                        }
                     }
                     // String-pattern Hash form: the literal pattern is the
                     // only possible match key, so resolve its replacement
                     // once and do a plain substring replace.
-                    ("sub" | "gsub", [Value::Str(pat), Value::Hash(hid)]) => {
+                    ("sub" | "gsub" | "sub!" | "gsub!", [Value::Str(pat), Value::Hash(hid)]) => {
                         let pairs = self.heap.hash(*hid).clone();
                         let pat_s = pat.to_string_lossy();
                         let mut repl = String::new();
@@ -3895,12 +3941,28 @@ impl Vm {
                             }
                         }
                         let s_owned = s.to_string_lossy();
-                        let out = if name == "sub" {
+                        let single = name == "sub" || name == "sub!";
+                        let matched = !pat_s.is_empty() && s_owned.contains(pat_s.as_str());
+                        let out = if single {
                             s_owned.replacen(pat_s.as_str(), &repl, 1)
                         } else {
                             s_owned.replace(pat_s.as_str(), &repl)
                         };
-                        Some(Value::new_str(out))
+                        if name.ends_with('!') {
+                            if s.frozen.get() {
+                                return Err(self.trap(RubyError::FrozenError {
+                                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(&s)),
+                                }));
+                            }
+                            if !matched {
+                                Some(Value::Nil)
+                            } else {
+                                *s.borrow_mut() = out.into_bytes();
+                                Some(Value::Str(s.clone()))
+                            }
+                        } else {
+                            Some(Value::new_str(out))
+                        }
                     }
                     // `s.each_char` with no block → Enumerator (the block
                     // form is in collection_call_block). `s.each_char.to_a`

@@ -244,4 +244,44 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         });
         Ok(Value::Nil)
     });
+
+    // Symmetric-crypto slice for `Rack::Session::Encryptor` (ADR 0029
+    // addendum). The `OpenSSL::Cipher` / `OpenSSL::HMAC` veneers in
+    // preamble/openssl.rb call these; the AES / HMAC maths lives in
+    // `crate::aes` (FIPS-197 + RFC 2104), validated against NIST /
+    // RFC 4231 vectors there.
+
+    // `__rubyrs_hmac_sha256(key, data)` → 32-byte BINARY String.
+    rt.register_fn("__rubyrs_hmac_sha256", |args| {
+        let (key, data) = match args {
+            [Value::Str(k), Value::Str(d)] => (k.borrow().clone(), d.borrow().clone()),
+            _ => return Err(arg_err("__rubyrs_hmac_sha256(key: String, data: String)")),
+        };
+        let mac = crate::aes::hmac_sha256(&key, &data);
+        Ok(Value::new_str_bytes_binary(mac.to_vec()))
+    });
+
+    // `__rubyrs_aes256_ctr(key, iv, byte_offset, data)` → BINARY String.
+    // CTR is a stream cipher: encrypt and decrypt are the same call. The
+    // 32-byte key and 16-byte IV are validated for length here so a
+    // wrong-sized key surfaces as an OpenSSLError, not a panic.
+    rt.register_fn("__rubyrs_aes256_ctr", |args| {
+        let (key, iv, offset, data) = match args {
+            [Value::Str(k), Value::Str(v), Value::Int(off), Value::Str(d)] => (
+                k.borrow().clone(),
+                v.borrow().clone(),
+                *off,
+                d.borrow().clone(),
+            ),
+            _ => return Err(arg_err(
+                "__rubyrs_aes256_ctr(key: String, iv: String, offset: Integer, data: String)",
+            )),
+        };
+        let key: [u8; 32] = key.as_slice().try_into()
+            .map_err(|_| ssl_err(format!("aes-256-ctr key must be 32 bytes (got {})", key.len())))?;
+        let iv: [u8; 16] = iv.as_slice().try_into()
+            .map_err(|_| ssl_err(format!("aes-256-ctr iv must be 16 bytes (got {})", iv.len())))?;
+        let offset = u64::try_from(offset).unwrap_or(0);
+        Ok(Value::new_str_bytes_binary(crate::aes::aes256_ctr_xor(&key, &iv, offset, &data)))
+    });
 }

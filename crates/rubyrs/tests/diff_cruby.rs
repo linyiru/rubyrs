@@ -320,6 +320,12 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // to #initialize, including through bare `super(...) { block }` — the
 // path previously discarded the block (Sinatra `provides:`/mustermann).
 #[test] fn bare_new_block_forward() { run_diff("bare_new_block_forward"); }
+// String#gsub!/sub! with a Hash replacement table (uri's
+// _encode_uri_component → rack set_cookie_header).
+#[test] fn gsub_bang_hash() { run_diff("gsub_bang_hash"); }
+// String#slice! char-range on BINARY / non-UTF-8 bytes indexes by byte
+// (rack-session decrypt's data.slice!(-32..-1) on a decoded cookie).
+#[test] fn slice_bang_binary() { run_diff("slice_bang_binary"); }
 // `begin … rescue … else E … ensure … end` — the else body runs only
 // on the no-exception path, its value is the begin's value, and an
 // exception in else escapes the rescue chain (Sinatra/Tilt lazy_load).
