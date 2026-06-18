@@ -4561,10 +4561,31 @@ impl Vm {
                 Ok(true)
             }
             ("ancestors", []) => {
-                let chain: Vec<Value> = super::flatten_ancestors(&cls)
-                    .into_iter()
-                    .map(Value::Class)
-                    .collect();
+                let mut seen: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
+                let mut chain: Vec<Value> = Vec::new();
+                // A singleton-class shell (`obj.singleton_class`) keeps
+                // its prepended modules on the TARGET's
+                // `singleton_prepends` (that's where `class << self;
+                // prepend M` and the dispatch walk both live), not on
+                // the shell's own `prepends`. Surface them at the front
+                // so `singleton_class.ancestors.first` returns the SAME
+                // Rc the dispatch chain uses — `remove_method` on it
+                // then actually restores dispatch (Tilt's finalize!
+                // teardown does exactly this).
+                if let Some(target) = cls.singleton_target.borrow().as_ref().and_then(|w| w.upgrade()) {
+                    for pre in target.singleton_prepends.borrow().iter() {
+                        for a in super::flatten_ancestors(pre) {
+                            if seen.insert(Rc::as_ptr(&a)) {
+                                chain.push(Value::Class(a));
+                            }
+                        }
+                    }
+                }
+                for a in super::flatten_ancestors(&cls) {
+                    if seen.insert(Rc::as_ptr(&a)) {
+                        chain.push(Value::Class(a));
+                    }
+                }
                 self.maybe_gc();
                 self.check_alloc()?;
                 let id = self.heap.alloc(HeapObj::Array(chain.into()));

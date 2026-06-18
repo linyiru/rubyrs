@@ -351,6 +351,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Module#autoload? returns nil once the constant is actually defined
 // (Tilt's FinalizedMapping lazy lookups).
 #[test] fn autoload_defined_nil() { run_diff("autoload_defined_nil"); }
+// class<<self prepend surfaces in singleton_class.ancestors so
+// remove_method on it restores dispatch (Tilt finalize! teardown).
+#[test] fn singleton_class_prepend_ancestors() { run_diff("singleton_class_prepend_ancestors"); }
 // `begin … rescue … else E … ensure … end` — the else body runs only
 // on the no-exception path, its value is the begin's value, and an
 // exception in else escapes the rescue chain (Sinatra/Tilt lazy_load).
