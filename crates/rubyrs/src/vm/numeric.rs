@@ -833,13 +833,34 @@ pub(crate) fn numeric_call(
                 if *a == i64::MIN && *b == -1 { return Ok(None); }
                 Some(Value::Int(floor_div_i64(*a, *b)))
             }
-            "%" => {
+            "%" | "modulo" => {
                 if *b == 0 {
                     return Err(RubyError::ZeroDivisionError {
                         msg: "divided by 0".to_string(),
                     });
                 }
                 Some(Value::Int(floor_mod_i64(*a, *b)))
+            }
+            // `Integer#remainder` — truncated remainder (sign of the
+            // DIVIDEND), unlike `%`/`modulo` (sign of the divisor).
+            // Rust's `%` is already truncated, so it maps directly.
+            "remainder" => {
+                if *b == 0 {
+                    return Err(RubyError::ZeroDivisionError {
+                        msg: "divided by 0".to_string(),
+                    });
+                }
+                Some(Value::Int(a.wrapping_rem(*b)))
+            }
+            // `Integer#ceildiv` (Ruby 3.2+) — ceiling division,
+            // `-((-self) / other)` with floored `/`.
+            "ceildiv" => {
+                if *b == 0 {
+                    return Err(RubyError::ZeroDivisionError {
+                        msg: "divided by 0".to_string(),
+                    });
+                }
+                Some(Value::Int(floor_div_i64(a.wrapping_neg(), *b).wrapping_neg()))
             }
             "==" => Some(Value::Bool(a == b)),
             "!=" => Some(Value::Bool(a != b)),
@@ -1229,7 +1250,12 @@ pub(crate) fn numeric_call(
             // Float / 0.0 == ±Infinity (or NaN), not an exception —
             // matches IEEE 754 and CRuby.
             "/" => Some(Value::Float(a / b)),
-            "%" => Some(Value::Float(floor_mod_f64(*a, *b))),
+            "%" | "modulo" => Some(Value::Float(floor_mod_f64(*a, *b))),
+            // `Float#div` → floored quotient as an Integer; division by
+            // zero is a ZeroDivisionError (unlike `/` which gives ±Inf).
+            "div" => float_div_int(*a, *b)?,
+            // `Float#remainder` → truncated remainder (sign of dividend).
+            "remainder" => Some(Value::Float(a - b * (a / b).trunc())),
             "==" => Some(Value::Bool(a == b)),
             "!=" => Some(Value::Bool(a != b)),
             "<"  => Some(Value::Bool(a < b)),
@@ -1358,7 +1384,9 @@ pub(crate) fn numeric_call(
                 "-" => Some(Value::Float(a - b)),
                 "*" => Some(Value::Float(a * b)),
                 "/" => Some(Value::Float(a / b)),
-                "%" => Some(Value::Float(floor_mod_f64(*a, b))),
+                "%" | "modulo" => Some(Value::Float(floor_mod_f64(*a, b))),
+                "div" => float_div_int(*a, b)?,
+                "remainder" => Some(Value::Float(a - b * (a / b).trunc())),
                 "**" => Some(Value::Float(a.powf(b))),
                 _ => None,
             }
@@ -1377,7 +1405,10 @@ pub(crate) fn numeric_call(
                 "-" => Some(Value::Float(a - b)),
                 "*" => Some(Value::Float(a * b)),
                 "/" => Some(Value::Float(a / b)),
-                "%" => Some(Value::Float(floor_mod_f64(a, *b))),
+                "%" | "modulo" => Some(Value::Float(floor_mod_f64(a, *b))),
+                // `Integer#div(Float)` is handled by a dedicated arm
+                // above; `remainder` against a Float coerces here.
+                "remainder" => Some(Value::Float(a - b * (a / b).trunc())),
                 "**" => Some(Value::Float(a.powf(*b))),
                 _ => None,
             }
@@ -1491,6 +1522,18 @@ fn try_int_shl_lossless(a: i64, shift: i64) -> Option<i64> {
 /// no-bignum the wrapping result surfaces, matching the existing
 /// wrapping-on-overflow convention for `+`/`-`/`*`.
 ///
+/// `Float#div(b)` — floored quotient as an Integer. Division by zero
+/// (or a non-finite quotient) is a ZeroDivisionError, matching CRuby
+/// (which differs from `/`, that yields ±Infinity). Returns
+/// `Ok(Some(Int))` on success so callers can `?`-propagate.
+pub(crate) fn float_div_int(a: f64, b: f64) -> Result<Option<Value>, RubyError> {
+    let q = (a / b).floor();
+    if !q.is_finite() {
+        return Err(RubyError::ZeroDivisionError { msg: "divided by 0".to_string() });
+    }
+    Ok(Some(Value::Int(q as i64)))
+}
+
 /// Caller must ensure `b != 0` (ZeroDivisionError fires upstream).
 pub(crate) fn floor_div_i64(a: i64, b: i64) -> i64 {
     let q = a.wrapping_div(b);

@@ -483,6 +483,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "stdlib")]
 #[test] fn stringio_line_methods() { run_diff("stringio_line_methods"); }
 #[test] fn comparable_is_module() { run_diff("comparable_is_module"); }
+#[test] fn numeric_remainder_ceildiv() { run_diff("numeric_remainder_ceildiv"); }
 #[cfg(feature = "regex")]
 #[test] fn match_data_offsets() { run_diff("match_data_offsets"); }
 #[cfg(feature = "regex")]
