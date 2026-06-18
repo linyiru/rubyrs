@@ -1045,7 +1045,7 @@ impl Vm {
                 if matches!(name,
                     "new" | "name" | "to_s" | "inspect"
                     | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
-                    | "ancestors" | "include?"
+                    | "ancestors" | "included_modules" | "include?"
                     | "<" | "<=" | ">" | ">="
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"

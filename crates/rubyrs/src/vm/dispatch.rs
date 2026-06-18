@@ -4620,6 +4620,22 @@ impl Vm {
                 self.stack.push(Value::Array(id));
                 Ok(true)
             }
+            // `Module#included_modules` — the modules in the ancestor
+            // chain (every entry that IS a module, including inherited
+            // ones like Kernel; classes are excluded). Sinatra's
+            // base_test asserts `included_modules.include?(Rack::Utils)`.
+            ("included_modules", []) => {
+                let mods: Vec<Value> = super::flatten_ancestors(&cls)
+                    .into_iter()
+                    .filter(|c| c.is_module)
+                    .map(Value::Class)
+                    .collect();
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::Array(mods.into()));
+                self.stack.push(Value::Array(id));
+                Ok(true)
+            }
             // Ruby 3.1+ `Class#subclasses` — IMMEDIATE subclasses (not
             // transitive). rubyrs keeps no per-class subclass registry,
             // so scan the named-class table for classes whose immediate
