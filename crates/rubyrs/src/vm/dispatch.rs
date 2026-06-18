@@ -12157,6 +12157,72 @@ impl Vm {
         // accepts a `freeze:` kwarg in CRuby that we don't
         // route yet — extra args fall to the wrong-arity arm
         // below.
+        // `clone(freeze: true|false|nil)` — CRuby's freeze override
+        // (only `clone` accepts it; `dup` rejects any arg). Re-dispatch
+        // the plain no-arg clone (so each type's own copy logic runs),
+        // then force/clear the copy's frozen bit: `true` → frozen,
+        // `false` → not frozen, `nil`/absent → keep the source's state
+        // (which the base clone already did). A non-`freeze` keyword is
+        // an ArgumentError, matching CRuby.
+        if &*name == "clone"
+            && args.len() == 1
+            && let Value::Hash(hid) = &args[0]
+        {
+            let freeze_sym = self.interner.intern("freeze");
+            let mut want: Option<bool> = None;
+            let pairs: Vec<(Value, Value)> = self.heap.hash(*hid).clone();
+            for (k, v) in &pairs {
+                match k {
+                    Value::Sym(s) if *s == freeze_sym => {
+                        want = match v {
+                            Value::Nil => None,
+                            Value::Bool(false) => Some(false),
+                            _ => Some(true),
+                        };
+                    }
+                    Value::Sym(s) => {
+                        let kn = self.interner.resolve(*s).to_string();
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("unknown keyword: :{kn}"),
+                        }));
+                    }
+                    _ => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "wrong number of arguments (given 1, expected 0)".to_string(),
+                        }));
+                    }
+                }
+            }
+            let pre = self.frames.len();
+            let clone_id = self.interner.intern("clone");
+            self.stack.push(recv.clone());
+            self.do_call(clone_id, 0, false, u16::MAX)?;
+            self.dispatch_until(pre)?;
+            let copy = self.stack.pop().unwrap_or(Value::Nil);
+            if let Some(frozen) = want {
+                match &copy {
+                    Value::Array(id) => {
+                        if let crate::heap::HeapObj::Array(a) = self.heap.get(*id) {
+                            a.frozen.set(frozen);
+                        }
+                    }
+                    Value::Hash(id) => {
+                        if let crate::heap::HeapObj::Hash(h) = self.heap.get(*id) {
+                            h.frozen.set(frozen);
+                        }
+                    }
+                    Value::Object(id) => {
+                        if let crate::heap::HeapObj::Instance(i) = self.heap.get(*id) {
+                            i.frozen.set(frozen);
+                        }
+                    }
+                    Value::Str(rs) => rs.frozen.set(frozen),
+                    _ => {}
+                }
+            }
+            self.stack.push(copy);
+            return Ok(());
+        }
         if matches!(&*name, "dup" | "clone") && args.is_empty() {
             let copied = match &recv {
                 Value::Int(_)
