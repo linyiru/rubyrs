@@ -1193,6 +1193,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn clone_freeze_kwarg() { run_diff("clone_freeze_kwarg"); }
 // %a / %A C99 hexadecimal float sprintf.
 #[test] fn sprintf_hex_float() { run_diff("sprintf_hex_float"); }
+// UAX#29 grapheme clusters + UCD normalization (non-ASCII needs the
+// unicode-* crates behind _encoding_full).
+#[cfg(feature = "_encoding_full")]
+#[test] fn unicode_grapheme_normalize() { run_diff("unicode_grapheme_normalize"); }
 // Range#map over String endpoints (str_succ materialize).
 #[test] fn range_string_map() { run_diff("range_string_map"); }
 // undef_method kills same-class methods (tombstone + table removal).

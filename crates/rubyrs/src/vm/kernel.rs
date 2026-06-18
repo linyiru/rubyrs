@@ -2685,6 +2685,105 @@ impl Vm {
                     }))),
                 }
             }
+            // Unicode normalization / grapheme segmentation for
+            // non-ASCII input — backed by the `unicode-normalization` /
+            // `unicode-segmentation` crates behind `_encoding_full`. The
+            // preamble (`string_ext.rb`) handles the ASCII fast path and
+            // form validation, and only calls these for non-ASCII; absent
+            // the feature they raise NotImplementedError (the previous
+            // "non-ASCII not supported" surface, unchanged).
+            "__rubyrs_unicode_normalize" => {
+                let Some(Value::Str(s)) = args.first() else {
+                    return Some(Ok(Value::Nil));
+                };
+                let text = s.to_string_lossy();
+                let form = match args.get(1) {
+                    Some(Value::Sym(f)) => self.interner.resolve(*f).to_string(),
+                    _ => "nfc".to_string(),
+                };
+                #[cfg(feature = "_encoding_full")]
+                {
+                    use unicode_normalization::UnicodeNormalization;
+                    let out: String = match form.as_str() {
+                        "nfc" => text.nfc().collect(),
+                        "nfd" => text.nfd().collect(),
+                        "nfkc" => text.nfkc().collect(),
+                        "nfkd" => text.nfkd().collect(),
+                        _ => return Some(Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("invalid normalization form {form}"),
+                        }))),
+                    };
+                    return Some(Ok(Value::new_str(out)));
+                }
+                #[cfg(not(feature = "_encoding_full"))]
+                {
+                    let _ = (text, form);
+                    return Some(Err(self.trap(RubyError::HostException {
+                        class_name: "NotImplementedError".to_string(),
+                        message: "String#unicode_normalize: non-ASCII input is not supported in this build (enable _encoding_full)".to_string(),
+                    })));
+                }
+            }
+            "__rubyrs_unicode_normalized_p" => {
+                let Some(Value::Str(s)) = args.first() else {
+                    return Some(Ok(Value::Bool(true)));
+                };
+                let text = s.to_string_lossy();
+                let form = match args.get(1) {
+                    Some(Value::Sym(f)) => self.interner.resolve(*f).to_string(),
+                    _ => "nfc".to_string(),
+                };
+                #[cfg(feature = "_encoding_full")]
+                {
+                    use unicode_normalization::UnicodeNormalization;
+                    let norm: String = match form.as_str() {
+                        "nfc" => text.nfc().collect(),
+                        "nfd" => text.nfd().collect(),
+                        "nfkc" => text.nfkc().collect(),
+                        "nfkd" => text.nfkd().collect(),
+                        _ => return Some(Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("invalid normalization form {form}"),
+                        }))),
+                    };
+                    return Some(Ok(Value::Bool(norm == text)));
+                }
+                #[cfg(not(feature = "_encoding_full"))]
+                {
+                    let _ = (text, form);
+                    return Some(Err(self.trap(RubyError::HostException {
+                        class_name: "NotImplementedError".to_string(),
+                        message: "String#unicode_normalized?: non-ASCII input is not supported in this build (enable _encoding_full)".to_string(),
+                    })));
+                }
+            }
+            "__rubyrs_grapheme_split" => {
+                let Some(Value::Str(s)) = args.first() else {
+                    return Some(Ok(Value::Nil));
+                };
+                let text = s.to_string_lossy();
+                #[cfg(feature = "_encoding_full")]
+                {
+                    use unicode_segmentation::UnicodeSegmentation;
+                    let parts: Vec<Value> = text
+                        .graphemes(true)
+                        .map(|g| Value::new_str(g.to_string()))
+                        .collect();
+                    self.maybe_gc();
+                    if let Err(t) = self.check_alloc() {
+                        return Some(Err(t));
+                    }
+                    let id = self.heap.alloc(HeapObj::Array(parts.into()));
+                    return Some(Ok(Value::Array(id)));
+                }
+                #[cfg(not(feature = "_encoding_full"))]
+                {
+                    let _ = text;
+                    return Some(Err(self.trap(RubyError::HostException {
+                        class_name: "NotImplementedError".to_string(),
+                        message: "String#each_grapheme_cluster: non-ASCII input is not supported in this build (enable _encoding_full)".to_string(),
+                    })));
+                }
+            }
             "__rubyrs_marshal_load_binary" => {
                 let bytes: Vec<u8> = match args.first() {
                     Some(Value::Str(s)) => s.content.borrow().clone(),
