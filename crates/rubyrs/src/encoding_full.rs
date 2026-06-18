@@ -53,6 +53,16 @@ const NAMES: &[&str] = &[
     "UTF-32LE",
     "UTF-32BE",
     "UTF-32",
+    // index 14: strict Shift_JIS. CRuby ships it as a distinct
+    // Encoding object (name "Shift_JIS") separate from Windows-31J
+    // (index 4, where the SJIS/CP932 aliases point). encoding_rs only
+    // implements the WHATWG shift_jis table (= windows-31j), so this
+    // shares that transcoder; the two diverge only on a handful of
+    // vendor / wave-dash code points (documented in SUBSET.md). The
+    // common plane — kana, the JIS X 0208 kanji set — round-trips
+    // identically, which is what `String#encode('Shift_JIS')`
+    // consumers (Tilt's template-encoding detection) need.
+    "Shift_JIS",
 ];
 
 /// True for the hand-rolled UTF-16 registry indices; the bool is
@@ -95,6 +105,7 @@ fn codec(idx: u8) -> Option<&'static encoding_rs::Encoding> {
         5 => Some(encoding_rs::EUC_JP),
         6 => Some(encoding_rs::GBK),
         7 => Some(encoding_rs::BIG5),
+        14 => Some(encoding_rs::SHIFT_JIS), // strict Shift_JIS shares the table
         _ => None,
     }
 }
@@ -116,9 +127,11 @@ pub(crate) fn find(name: &str) -> Option<EncodingTag> {
         "WINDOWS-1252" | "CP1252" => 1,
         "ISO-8859-15" | "ISO8859-15" => 2,
         "KOI8-R" | "KOI8R" => 3,
-        // CRuby: alias SJIS/CP932 point at Windows-31J (NOT at the
-        // strict Shift_JIS encoding, which this registry declines).
+        // CRuby: SJIS/CP932 are aliases of Windows-31J; the strict
+        // Shift_JIS encoding (name "Shift_JIS") is a SEPARATE object
+        // (index 14), sharing the same transcoder.
         "WINDOWS-31J" | "CP932" | "SJIS" => 4,
+        "SHIFT_JIS" | "SHIFT-JIS" => 14,
         "EUC-JP" | "EUCJP" => 5,
         "GBK" | "CP936" => 6,
         "BIG5" => 7,

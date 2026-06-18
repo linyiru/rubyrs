@@ -25,6 +25,10 @@ class Encoding
   UTF_32LE = Encoding.new("UTF-32LE")
   UTF_32BE = Encoding.new("UTF-32BE")
   UTF_32 = Encoding.new("UTF-32")
+  ## Strict Shift_JIS — a distinct Encoding from Windows-31J (which
+  ## owns the SJIS/CP932 aliases); shares the WHATWG shift_jis
+  ## transcoder. Diverges only on a few vendor/wave-dash code points.
+  Shift_JIS = Encoding.new("Shift_JIS")
 
   class << self
     alias __rubyrs_find_core find
@@ -37,6 +41,7 @@ class Encoding
       when "ISO-8859-15", "ISO8859-15" then ISO_8859_15
       when "KOI8-R", "KOI8R" then KOI8_R
       when "WINDOWS-31J", "CP932", "SJIS" then Windows_31J
+      when "SHIFT_JIS", "SHIFT-JIS" then Shift_JIS
       when "EUC-JP", "EUCJP" then EUC_JP
       when "GBK", "CP936" then GBK
       when "BIG5" then Big5
@@ -55,7 +60,7 @@ class Encoding
       __rubyrs_list_core + [
         ISO_8859_1, Windows_1252, ISO_8859_15, KOI8_R,
         Windows_31J, EUC_JP, GBK, Big5, UTF_16LE, UTF_16BE, UTF_16,
-        UTF_32LE, UTF_32BE, UTF_32,
+        UTF_32LE, UTF_32BE, UTF_32, Shift_JIS,
       ]
     end
 

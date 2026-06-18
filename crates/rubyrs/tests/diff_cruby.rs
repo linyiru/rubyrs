@@ -433,6 +433,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // UTF-32LE/BE + BOM-form UTF-32: same hand-rolled transcoder family.
 #[cfg(feature = "_encoding_full")]
 #[test] fn encoding_full_utf32() { run_diff("encoding_full_utf32"); }
+// Strict Shift_JIS as a distinct Encoding from Windows-31J (shares the
+// WHATWG transcoder; common plane round-trips). Tilt template encoding.
+#[cfg(feature = "_encoding_full")]
+#[test] fn encoding_shift_jis() { run_diff("encoding_shift_jis"); }
 // E3 core surface: File.read encoding: tags, default_external.
 #[test] fn file_read_encoding() { run_diff("file_read_encoding"); }
 #[test] fn lifecycle_hook_super() { run_diff("lifecycle_hook_super"); }
