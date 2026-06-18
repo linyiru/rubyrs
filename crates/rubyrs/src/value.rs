@@ -196,6 +196,18 @@ impl RStr {
         }
     }
 
+    /// Construct a US-ASCII-tagged string. CRuby builds the output of
+    /// numeric `to_s`/`inspect` (`42.to_s`, `255.to_s(16)`,
+    /// `1.5.to_s`, Bignum) as US-ASCII, not UTF-8 — the bytes are
+    /// ASCII-only by construction. The caller must pass ASCII content.
+    pub fn new_us_ascii(s: String) -> Self {
+        Self {
+            content: StrCell::new(s.into_bytes()),
+            frozen: Cell::new(false),
+            encoding: Cell::new(EncodingTag::UsAscii),
+        }
+    }
+
     /// Construct from raw bytes. Tags UTF-8: the dominant
     /// callers cross TEXT that merely isn't validated (file
     /// reads, sliced strings); the byte-oriented producers that

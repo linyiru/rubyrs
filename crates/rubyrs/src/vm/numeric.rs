@@ -14,7 +14,9 @@ use crate::value::Value;
 /// fast-path so future changes (radix, locale, sign formatting)
 /// can't drift between the two entry points.
 pub(crate) fn integer_to_s_value(n: i64) -> Value {
-    Value::new_str(n.to_string())
+    // CRuby tags numeric to_s output US-ASCII (ASCII-only by
+    // construction), not UTF-8.
+    Value::new_str_us_ascii(n.to_string())
 }
 
 /// Tag byte mixed into `Integer#hash` so all Integer-flavoured
@@ -310,7 +312,7 @@ pub(crate) fn numeric_call(
             let mut n: u64 = a.unsigned_abs();
             let neg = *a < 0;
             if n == 0 {
-                return Ok(Some(Value::new_str("0")));
+                return Ok(Some(Value::new_str_us_ascii("0")));
             }
             let mut buf = Vec::<u8>::new();
             while n > 0 {
@@ -321,7 +323,7 @@ pub(crate) fn numeric_call(
             }
             if neg { buf.push(b'-'); }
             buf.reverse();
-            Some(Value::new_str(
+            Some(Value::new_str_us_ascii(
                 String::from_utf8(buf).expect("ASCII digits + sign"),
             ))
         }
@@ -1415,7 +1417,8 @@ pub(crate) fn numeric_call(
         }
         // Float predicates and conversions.
         (Value::Float(a), "to_s", []) | (Value::Float(a), "inspect", []) => {
-            Some(Value::new_str(crate::heap::format_float(*a)))
+            // US-ASCII like CRuby (ASCII-only float text).
+            Some(Value::new_str_us_ascii(crate::heap::format_float(*a)))
         }
         (Value::Float(a), "to_f", []) => Some(Value::Float(*a)),
         // Float → Integer conversions need to trap NaN / ±Infinity

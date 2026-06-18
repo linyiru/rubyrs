@@ -1956,7 +1956,7 @@ impl Vm {
             };
             self.check_bigint_to_s_cap(*id, radix)?;
             let s = self.heap.bigint(*id).to_str_radix(radix);
-            return Ok(Some(Value::new_str(s)));
+            return Ok(Some(Value::new_str_us_ascii(s)));
         }
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
         let arg_is_bigint = args.iter().any(|a| matches!(a, Value::BigInt(_)));
@@ -2024,7 +2024,7 @@ impl Vm {
                         // the call without an explicit drop dance.
                         self.check_bigint_to_s_cap(*id, 10)?;
                         let s = b.to_string();
-                        return Ok(Some(Value::new_str(s)));
+                        return Ok(Some(Value::new_str_us_ascii(s)));
                     }
                     // Pure read-only predicates — fit cleanly in
                     // Phase A because they don't need heap mutation.

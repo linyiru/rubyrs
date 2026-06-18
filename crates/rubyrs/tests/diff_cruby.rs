@@ -1178,6 +1178,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `u` (_dump/_load) + `U` (marshal_dump/marshal_load) user hooks —
 // reentrant Ruby calls from the serializer; exceptions propagate.
 #[test] fn marshal_user_hooks() { run_diff("marshal_user_hooks"); }
+// Numeric to_s/inspect output is US-ASCII (CRuby), not UTF-8.
+#[test] fn numeric_to_s_encoding() { run_diff("numeric_to_s_encoding"); }
 // Range#map over String endpoints (str_succ materialize).
 #[test] fn range_string_map() { run_diff("range_string_map"); }
 // undef_method kills same-class methods (tombstone + table removal).

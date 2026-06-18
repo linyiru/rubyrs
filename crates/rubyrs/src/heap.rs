@@ -1662,6 +1662,12 @@ impl Value {
     pub fn new_str_bytes(b: Vec<u8>) -> Self {
         Value::Str(std::rc::Rc::new(crate::value::RStr::from_bytes(b)))
     }
+    /// US-ASCII-tagged string — for numeric `to_s`/`inspect` output,
+    /// which CRuby builds as US-ASCII (the content is ASCII by
+    /// construction). Caller must pass ASCII-only content.
+    pub fn new_str_us_ascii(s: impl Into<String>) -> Self {
+        Value::Str(std::rc::Rc::new(crate::value::RStr::new_us_ascii(s.into())))
+    }
 
     pub(crate) fn is_truthy(&self) -> bool {
         !matches!(self, Value::Nil | Value::Bool(false))
