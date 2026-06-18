@@ -23,7 +23,7 @@
 # `false` instead of raising — CRuby's documented exception to
 # the rule that Object equality must never raise.
 
-class Comparable
+module Comparable
   def <(other)
     c = self <=> other
     raise ArgumentError, "comparison failed" if c.nil?

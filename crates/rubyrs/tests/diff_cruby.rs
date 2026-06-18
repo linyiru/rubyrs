@@ -482,6 +482,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn time_components() { run_diff("time_components"); }
 #[cfg(feature = "stdlib")]
 #[test] fn stringio_line_methods() { run_diff("stringio_line_methods"); }
+#[test] fn comparable_is_module() { run_diff("comparable_is_module"); }
 #[cfg(feature = "regex")]
 #[test] fn match_data_offsets() { run_diff("match_data_offsets"); }
 #[cfg(feature = "regex")]
