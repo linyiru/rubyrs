@@ -1164,6 +1164,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Marshal same-process round-trip contract + dumpability TypeErrors
 // + Exception ivar reflection (message/backtrace hidden).
 #[test] fn marshal_roundtrip_contract() { run_diff("marshal_roundtrip_contract"); }
+// Real binary Marshal.dump (common-tag subset): deep copy, CRuby-4.8
+// byte compatibility, shared-object links, cycles, encoding round-trip.
+#[test] fn marshal_binary_dump() { run_diff("marshal_binary_dump"); }
 // Range#map over String endpoints (str_succ materialize).
 #[test] fn range_string_map() { run_diff("range_string_map"); }
 // undef_method kills same-class methods (tombstone + table removal).

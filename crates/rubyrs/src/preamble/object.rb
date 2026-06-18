@@ -186,6 +186,16 @@ module Marshal
   # placeholder. minitest's Result over-the-wire tests only need
   # the same-process equality contract.
   def self.dump(obj, *_rest)
+    # Prefer a REAL CRuby-4.8 byte stream for the common-tag subset
+    # (nil/bool/Integer/Float/String/Symbol/Array/Hash + links). That
+    # makes load(dump(x)) a genuine DEEP COPY and the bytes portable to
+    # CRuby. Anything outside the subset (Bignum, arbitrary objects,
+    # Struct, Procs, Hash-with-default, …) returns nil here and falls
+    # back to the same-process registry token — which still satisfies
+    # load(dump(x)) == x and preserves object identity for the types
+    # that can't be byte-serialized (minitest's Result contract).
+    bin = __rubyrs_marshal_dump_binary(obj)
+    return bin unless bin.nil?
     __rubyrs_marshal_stash(obj)
   end
 

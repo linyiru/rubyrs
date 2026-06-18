@@ -2716,6 +2716,26 @@ impl Vm {
                     Err(msg) => Some(Err(self.trap(RubyError::TypeError { msg }))),
                 }
             }
+            // `__rubyrs_marshal_dump_binary(obj)` → a real CRuby-4.8
+            // byte stream for the common-tag subset, or nil when the
+            // graph contains anything outside it (the caller then uses
+            // the same-process registry token). A successful dump is
+            // byte-loadable by both MarshalReader and real CRuby, so
+            // `Marshal.load(Marshal.dump(x))` deep-copies these types.
+            "__rubyrs_marshal_dump_binary" => {
+                let obj = args.first().cloned().unwrap_or(Value::Nil);
+                let e_sym = self.interner.intern("E");
+                let mut w = MarshalWriter {
+                    out: vec![0x04, 0x08],
+                    symbols: Vec::new(),
+                    objects: Vec::new(),
+                    e_sym,
+                };
+                match w.write_value(self, &obj) {
+                    Ok(()) => Some(Ok(Value::new_str_bytes_binary(w.out))),
+                    Err(()) => Some(Ok(Value::Nil)),
+                }
+            }
             "__rubyrs_marshal_stash" => {
                 const MARSHAL_REGISTRY_CAP: usize = 1024;
                 let obj = args.first().cloned().unwrap_or(Value::Nil);
@@ -5564,12 +5584,16 @@ impl MarshalReader<'_> {
             }
             b'I' => {
                 // Ivar-wrapped object: the payload first, then the
-                // ivar list. Only the encoding shorthands (:E true/
-                // false, :encoding "name") are consumed — they're
-                // presentation-only for our tagged strings; any
-                // other ivar name is out of subset.
+                // ivar list. The encoding shorthand `:E` (true = UTF-8,
+                // false = US-ASCII) is HONOURED — re-tagging the inner
+                // string so a US-ASCII dump round-trips as US-ASCII
+                // rather than collapsing to UTF-8. `:encoding "name"`
+                // (registry encodings) is accepted but not applied
+                // here; any other ivar name is out of subset.
+                use crate::value::EncodingTag;
                 let inner = self.read_value(vm)?;
                 let n = self.long()?;
+                let mut enc: Option<EncodingTag> = None;
                 for _ in 0..n.max(0) {
                     let key = self.read_value(vm)?;
                     let val = self.read_value(vm)?;
@@ -5578,7 +5602,13 @@ impl MarshalReader<'_> {
                         _ => return Err("ivar key must be a symbol".into()),
                     };
                     match kname.as_str() {
-                        "E" | "encoding" => {
+                        "E" => {
+                            enc = Some(match val {
+                                Value::Bool(true) => EncodingTag::Utf8,
+                                _ => EncodingTag::UsAscii,
+                            });
+                        }
+                        "encoding" => {
                             let _ = val;
                         }
                         other => {
@@ -5587,6 +5617,9 @@ impl MarshalReader<'_> {
                             ));
                         }
                     }
+                }
+                if let (Some(tag), Value::Str(rs)) = (enc, &inner) {
+                    rs.encoding.set(tag);
                 }
                 Ok(inner)
             }
@@ -5640,6 +5673,210 @@ impl MarshalReader<'_> {
                 other as char
             )),
         }
+    }
+}
+
+/// Identity key for the marshal object-link table. The writer must
+/// register an entry for EVERY object the reader registers (float,
+/// string, array, hash) so `@`-link indices stay consistent with
+/// CRuby's; `Opaque` is the placeholder for an object we can serialise
+/// but never re-recognise (a Float has no Ruby-visible identity here).
+#[derive(PartialEq)]
+enum ObjKey {
+    Heap(crate::value::ObjId),
+    Str(usize),
+    Opaque,
+}
+
+/// Binary `Marshal.dump` writer for the common-tag subset that
+/// mirrors `MarshalReader` (nil/bool/Integer-in-i64/Float/String/
+/// Symbol/Array/Hash). Output is byte-loadable by both this reader
+/// and real CRuby, which makes `Marshal.load(Marshal.dump(x))` a
+/// genuine DEEP COPY for these types (closing the documented
+/// shallow-token divergence). Anything outside the subset — Bignum,
+/// arbitrary objects, Struct, Range, Hash-with-default, a tagged
+/// (non-UTF-8/ASCII/binary) string — makes `write_value` return
+/// `Err(())`, and the caller falls back to the same-process registry
+/// token (preserving the minitest identity contract for un-subset
+/// types). Symbol + object link tables match CRuby's registration
+/// order (parent before children), so shared substructure and cycles
+/// serialise without infinite recursion.
+struct MarshalWriter {
+    out: Vec<u8>,
+    symbols: Vec<crate::intern::SymId>,
+    objects: Vec<ObjKey>,
+    /// The interned `:E` symbol (marshal's encoding flag), interned by
+    /// the caller so `write_value` can stay `&Vm` (read-only).
+    e_sym: crate::intern::SymId,
+}
+
+impl MarshalWriter {
+    /// Marshal's variable-length long (the inverse of
+    /// `MarshalReader::long`). Small values fold into one byte;
+    /// larger ones emit a signed count followed by little-endian
+    /// payload bytes, stopping when the remaining value is 0
+    /// (positive) or -1 (negative) — CRuby's `w_long`.
+    fn write_long(&mut self, x: i64) {
+        if x == 0 {
+            self.out.push(0);
+            return;
+        }
+        if (1..123).contains(&x) {
+            self.out.push((x + 5) as u8);
+            return;
+        }
+        if (-123..=-1).contains(&x) {
+            self.out.push((x - 5) as i8 as u8);
+            return;
+        }
+        let neg = x < 0;
+        let mut v = x;
+        let mut payload = [0u8; 8];
+        let mut n = 0usize;
+        loop {
+            payload[n] = (v & 0xff) as u8;
+            v >>= 8; // arithmetic shift (i64) preserves sign
+            n += 1;
+            if (!neg && v == 0) || (neg && v == -1) || n == 8 {
+                break;
+            }
+        }
+        let count: i64 = if neg { -(n as i64) } else { n as i64 };
+        self.out.push(count as i8 as u8);
+        self.out.extend_from_slice(&payload[..n]);
+    }
+
+    /// Symbol with the link table: first sighting writes `:`+text and
+    /// registers; repeats write `;`+index.
+    fn write_symbol(&mut self, vm: &Vm, sid: crate::intern::SymId) {
+        if let Some(i) = self.symbols.iter().position(|&s| s == sid) {
+            self.out.push(b';');
+            self.write_long(i as i64);
+            return;
+        }
+        self.symbols.push(sid);
+        let name = vm.interner.resolve(sid).to_string();
+        self.out.push(b':');
+        self.write_long(name.len() as i64);
+        self.out.extend_from_slice(name.as_bytes());
+    }
+
+    fn write_value(&mut self, vm: &Vm, v: &Value) -> Result<(), ()> {
+        match v {
+            Value::Nil => self.out.push(b'0'),
+            Value::Bool(true) => self.out.push(b'T'),
+            Value::Bool(false) => self.out.push(b'F'),
+            Value::Int(n) => {
+                self.out.push(b'i');
+                self.write_long(*n);
+            }
+            Value::Float(f) => {
+                self.objects.push(ObjKey::Opaque);
+                self.out.push(b'f');
+                let text = marshal_float_text(*f);
+                self.write_long(text.len() as i64);
+                self.out.extend_from_slice(text.as_bytes());
+            }
+            Value::Sym(sid) => self.write_symbol(vm, *sid),
+            Value::Str(rs) => {
+                let ptr = std::rc::Rc::as_ptr(rs) as *const () as usize;
+                if let Some(i) = self.objects.iter().position(|k| *k == ObjKey::Str(ptr)) {
+                    self.out.push(b'@');
+                    self.write_long(i as i64);
+                    return Ok(());
+                }
+                self.objects.push(ObjKey::Str(ptr));
+                let bytes = rs.content.borrow().clone();
+                use crate::value::EncodingTag;
+                match rs.encoding.get() {
+                    // Binary strings carry no encoding ivar (CRuby's
+                    // ASCII-8BIT default) — a bare `"`.
+                    EncodingTag::Binary => {
+                        self.out.push(b'"');
+                        self.write_long(bytes.len() as i64);
+                        self.out.extend_from_slice(&bytes);
+                    }
+                    // UTF-8 / US-ASCII strings are ivar-wrapped with the
+                    // `:E` flag (true = UTF-8, false = US-ASCII), exactly
+                    // like CRuby. Registry-tagged strings (Other) fall
+                    // out of subset.
+                    EncodingTag::Utf8 | EncodingTag::UsAscii => {
+                        let e_true = matches!(rs.encoding.get(), EncodingTag::Utf8);
+                        self.out.push(b'I');
+                        self.out.push(b'"');
+                        self.write_long(bytes.len() as i64);
+                        self.out.extend_from_slice(&bytes);
+                        self.write_long(1); // one ivar
+                        let e_sym = self.e_sym;
+                        self.write_symbol(vm, e_sym);
+                        self.out.push(if e_true { b'T' } else { b'F' });
+                    }
+                    EncodingTag::Other(_) => return Err(()),
+                }
+            }
+            Value::Array(id) => {
+                if let Some(i) = self.objects.iter().position(|k| *k == ObjKey::Heap(*id)) {
+                    self.out.push(b'@');
+                    self.write_long(i as i64);
+                    return Ok(());
+                }
+                // Array subclasses dump through a different (`C`/`o`)
+                // form — out of subset.
+                if vm.heap.array_class_tag(*id).is_some() {
+                    return Err(());
+                }
+                self.objects.push(ObjKey::Heap(*id));
+                let elems = vm.heap.array(*id).clone();
+                self.out.push(b'[');
+                self.write_long(elems.len() as i64);
+                for e in &elems {
+                    self.write_value(vm, e)?;
+                }
+            }
+            Value::Hash(id) => {
+                if let Some(i) = self.objects.iter().position(|k| *k == ObjKey::Heap(*id)) {
+                    self.out.push(b'@');
+                    self.write_long(i as i64);
+                    return Ok(());
+                }
+                // Hash-with-default uses the `}` tag (default trails the
+                // pairs) and Hash subclasses a wrapper form — neither is
+                // in the reader's subset, so fall back.
+                if let crate::heap::HeapObj::Hash(h) = vm.heap.get(*id) {
+                    if h.default_block.is_some() || h.default_value.is_some() || h.class_tag.is_some() {
+                        return Err(());
+                    }
+                }
+                self.objects.push(ObjKey::Heap(*id));
+                let pairs = vm.heap.hash(*id).clone();
+                self.out.push(b'{');
+                self.write_long(pairs.len() as i64);
+                for (k, val) in &pairs {
+                    self.write_value(vm, k)?;
+                    self.write_value(vm, val)?;
+                }
+            }
+            // Bignum, Object, Range, Block/Proc, Class, … — outside the
+            // byte subset; signal the caller to use the registry token.
+            _ => return Err(()),
+        }
+        Ok(())
+    }
+}
+
+/// CRuby marshal float text: `inf` / `-inf` / `nan` for the
+/// non-finite cases, otherwise a shortest round-trippable decimal.
+/// CRuby emits its `ruby_dtoa` shortest form (`100.0` → `"1e2"`); we
+/// emit Rust's shortest `{}` form (`"100"`), which differs in spelling
+/// but parses back to the identical f64 — and CRuby's own reader uses
+/// `strtod`, so the bytes stay cross-loadable. `-0.0` → `"-0"`.
+fn marshal_float_text(f: f64) -> String {
+    if f.is_nan() {
+        "nan".to_string()
+    } else if f.is_infinite() {
+        if f < 0.0 { "-inf".to_string() } else { "inf".to_string() }
+    } else {
+        format!("{f}")
     }
 }
 
