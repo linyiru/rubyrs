@@ -301,3 +301,19 @@ module ObjectSpace
     end
   end
 end
+
+# GC — rubyrs has no user-triggerable collector (Tier-1 relies on the
+# host's allocator / drop semantics), so every entry point is an honest
+# no-op that returns CRuby's value: `start` → nil, `enable`/`disable` →
+# false (the previous "was disabled" state, which is always false here),
+# `count` → 0 (no collections have run). Real gems call `GC.start` in
+# benchmarks/teardown and `GC.disable` around hot loops; defining the
+# module lets that code run instead of tripping a NameError. `GC.stat`
+# is deliberately omitted — fabricating a stats Hash would mislead code
+# that reads its keys; an absent method is the truthful surface.
+module GC
+  def self.start(*); nil; end
+  def self.enable; false; end
+  def self.disable; false; end
+  def self.count; 0; end
+end

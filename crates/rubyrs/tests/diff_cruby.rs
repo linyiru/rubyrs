@@ -1461,6 +1461,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // divergence on the weak collection). Surfaced by connection_pool's
 // `INSTANCES = ObjectSpace::WeakMap.new`.
 #[test] fn objectspace_weakmap() { run_diff("objectspace_weakmap"); }
+// GC no-op module: start/enable/disable/count return CRuby's values
+// (rubyrs has no user-triggerable collector). Lets `GC.start` /
+// `GC.disable` in gem benchmarks/teardown run instead of NameError.
+#[test] fn gc_noop_module() { run_diff("gc_noop_module"); }
 
 // Thread::Mutex / Thread::ConditionVariable nested-constant aliases and
 // Thread.handle_interrupt (no-op block runner in the single-thread
