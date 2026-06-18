@@ -5664,7 +5664,10 @@ impl MarshalReader<'_> {
                 }
                 Ok(Value::Array(id))
             }
-            b'{' => {
+            b'{' | b'}' => {
+                // `{` = plain Hash; `}` = Hash with a scalar default
+                // (`Hash.new(0)`), whose default value trails the pairs.
+                let with_default = tag == b'}';
                 let n = self.long()?;
                 vm.maybe_gc();
                 vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
@@ -5679,10 +5682,54 @@ impl MarshalReader<'_> {
                     let v = self.read_value(vm)?;
                     pairs.push((k, v));
                 }
+                let default = if with_default {
+                    Some(self.read_value(vm)?)
+                } else {
+                    None
+                };
                 if let crate::heap::HeapObj::Hash(h) = vm.heap.get_mut(id) {
                     h.pairs = pairs;
+                    h.default_value = default;
                 }
                 Ok(Value::Hash(id))
+            }
+            b'C' => {
+                // Subclass-of-builtin wrapper: class symbol then the
+                // underlying builtin value (`[`/`{`/`}`). Reconstruct the
+                // builtin, then stamp the subclass onto its `class_tag` so
+                // `inst.class` reports the subclass. (String subclasses —
+                // CRuby's `I C :Sub "…"` — aren't modelled: rubyrs strings
+                // carry no subclass tag; an `inner` that isn't an Array or
+                // Hash is rejected.)
+                let class_val = self.read_value(vm)?;
+                let cname = match class_val {
+                    Value::Sym(s) => vm.interner.resolve(s).to_string(),
+                    _ => return Err("subclass tag must be a symbol".into()),
+                };
+                let cid = vm.interner.intern(&cname);
+                let cls = match vm.constants.get(&cid) {
+                    Some(Value::Class(c)) => c.clone(),
+                    _ => vm
+                        .classes
+                        .get(&cid)
+                        .cloned()
+                        .ok_or_else(|| format!("undefined class/module {cname}"))?,
+                };
+                let inner = self.read_value(vm)?;
+                match &inner {
+                    Value::Array(aid) => {
+                        if let crate::heap::HeapObj::Array(a) = vm.heap.get_mut(*aid) {
+                            a.class_tag = Some(cls);
+                        }
+                    }
+                    Value::Hash(hid) => {
+                        if let crate::heap::HeapObj::Hash(h) = vm.heap.get_mut(*hid) {
+                            h.class_tag = Some(cls);
+                        }
+                    }
+                    _ => return Err("unsupported `C` subclass payload (rubyrs: Array/Hash only)".into()),
+                }
+                Ok(inner)
             }
             b'o' => {
                 // Generic object: class symbol, then ivar count and
@@ -5949,12 +5996,18 @@ impl MarshalWriter {
                     self.write_long(i as i64);
                     return Ok(());
                 }
-                // Array subclasses dump through a different (`C`/`o`)
-                // form — out of subset.
-                if vm.heap.array_class_tag(*id).is_some() {
-                    return Err(());
-                }
                 self.objects.push(ObjKey::Heap(*id));
+                // An Array SUBCLASS (`class MyArr < Array`) is wrapped in
+                // CRuby's `C` (class-of-builtin) tag: `C :MyArr <[…]>`.
+                // The subclass must be named; anonymous → token fallback.
+                if let Some(sub) = vm.heap.array_class_tag(*id) {
+                    let csym = match marshal_class_sym(vm, &sub) {
+                        Some(s) => s,
+                        None => return Err(()),
+                    };
+                    self.out.push(b'C');
+                    self.write_symbol(vm, csym);
+                }
                 let elems = vm.heap.array(*id).clone();
                 self.out.push(b'[');
                 self.write_long(elems.len() as i64);
@@ -5968,21 +6021,38 @@ impl MarshalWriter {
                     self.write_long(i as i64);
                     return Ok(());
                 }
-                // Hash-with-default uses the `}` tag (default trails the
-                // pairs) and Hash subclasses a wrapper form — neither is
-                // in the reader's subset, so fall back.
-                if let crate::heap::HeapObj::Hash(h) = vm.heap.get(*id) {
-                    if h.default_block.is_some() || h.default_value.is_some() || h.class_tag.is_some() {
-                        return Err(());
+                let (has_block, default, sub) = match vm.heap.get(*id) {
+                    crate::heap::HeapObj::Hash(h) => {
+                        (h.default_block.is_some(), h.default_value.clone(), h.class_tag.clone())
                     }
+                    _ => (false, None, None),
+                };
+                // A block default (`Hash.new { ... }`) wraps a Proc — not
+                // serialisable; fall back to the token.
+                if has_block {
+                    return Err(());
                 }
                 self.objects.push(ObjKey::Heap(*id));
+                // Hash SUBCLASS → `C` wrapper, like Array.
+                if let Some(s) = &sub {
+                    let csym = match marshal_class_sym(vm, s) {
+                        Some(s) => s,
+                        None => return Err(()),
+                    };
+                    self.out.push(b'C');
+                    self.write_symbol(vm, csym);
+                }
                 let pairs = vm.heap.hash(*id).clone();
-                self.out.push(b'{');
+                // A scalar default (`Hash.new(0)`) uses the `}` tag, which
+                // trails the pairs with the default value; otherwise `{`.
+                self.out.push(if default.is_some() { b'}' } else { b'{' });
                 self.write_long(pairs.len() as i64);
                 for (k, val) in &pairs {
                     self.write_value(vm, k)?;
                     self.write_value(vm, val)?;
+                }
+                if let Some(d) = default {
+                    self.write_value(vm, &d)?;
                 }
             }
             Value::Object(id) => {
@@ -6134,6 +6204,17 @@ fn marshal_is_exception(class: &std::rc::Rc<crate::value::Class>) -> bool {
         cur = c.superclass.borrow().clone();
     }
     false
+}
+
+/// The interned symbol for a class's effective name, or `None` for an
+/// anonymous class (no constant name) — the marshal writer's signal to
+/// fall back to the registry token.
+fn marshal_class_sym(vm: &Vm, cls: &std::rc::Rc<crate::value::Class>) -> Option<crate::intern::SymId> {
+    let name = cls.effective_name()?;
+    if name.is_empty() {
+        return None;
+    }
+    vm.interner.get_id(&name)
 }
 
 /// CRuby marshal float text: `inf` / `-inf` / `nan` for the

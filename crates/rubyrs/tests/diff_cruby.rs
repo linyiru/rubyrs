@@ -1173,6 +1173,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Generic object (`o`-tag) + exception (`:mesg`/`:bt`) marshalling:
 // byte-compatible dump, deep copy, exception state + subclass round-trip.
 #[test] fn marshal_object() { run_diff("marshal_object"); }
+// `}` (Hash-with-default) + `C` (Array/Hash subclass wrapper) tags.
+#[test] fn marshal_hash_default_subclass() { run_diff("marshal_hash_default_subclass"); }
 // Range#map over String endpoints (str_succ materialize).
 #[test] fn range_string_map() { run_diff("range_string_map"); }
 // undef_method kills same-class methods (tombstone + table removal).
