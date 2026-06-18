@@ -92,7 +92,33 @@ impl Vm {
                     }
                 }
             }
-            _ => v,
+            // `raise <non-exception>` — an Integer / Float / Array /
+            // bare Object / non-Exception Class, etc. CRuby raises
+            // `TypeError: exception class/object expected` (a rescuable
+            // StandardError), NOT the value itself. Passing the value
+            // through let it escape to the top level and abort the
+            // process (Sinatra's mapped_error specs do `raise 500`).
+            _ => {
+                let te_id = self.interner.intern("TypeError");
+                match self.classes.get(&te_id).cloned() {
+                    Some(cls) => {
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Instance(Instance {
+                            class: cls,
+                            ivars: crate::intern::FxHashMap::default(),
+                            singleton_class: None,
+                            frozen: std::cell::Cell::new(false),
+                        }));
+                        let msg_id = self.interner.intern("@message");
+                        self.heap.instance_mut(id).ivars.insert(
+                            msg_id,
+                            Value::new_str("exception class/object expected".to_string()),
+                        );
+                        Value::Object(id)
+                    }
+                    None => v,
+                }
+            }
         }
     }
 

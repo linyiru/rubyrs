@@ -330,6 +330,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // locals); unblocks erubi's `eval(engine.src, block.binding)` harness
 // (full erubi spec: 100 runs, 0 failures).
 #[test] fn proc_binding() { run_diff("proc_binding"); }
+// raise <non-exception> → TypeError "exception class/object expected".
+#[test] fn raise_non_exception() { run_diff("raise_non_exception"); }
+// trailing `k: v` inside an array literal is a Hash element.
+#[test] fn array_trailing_kwhash() { run_diff("array_trailing_kwhash"); }
 // String#succ!/next! (Tilt compiled-method-name generation).
 #[test] fn string_succ_bang() { run_diff("string_succ_bang"); }
 // File.rename(old, new) — atomic rename.

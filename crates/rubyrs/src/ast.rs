@@ -5170,8 +5170,21 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // block for splat-in-call-args (K3 below).
         let raw_elems: Vec<_> = n.elements().iter().collect();
         let has_splat = raw_elems.iter().any(|e| e.as_splat_node().is_some());
+        // A trailing `k: v` inside an array literal (`[:public, max_age:
+        // 0]`) parses as a KeywordHashNode element — it's a plain Hash
+        // element (`[:public, {max_age: 0}]`), not call kwargs. Route it
+        // through `tr_kwhash`; bare `tr` would hit the unsupported-node
+        // trap. Sinatra's `set :static_cache_control, [:public, max_age:
+        // 0]`.
+        let tr_elem = |ctx: &mut TranslationCtx<'_>, e: &Node<'_>| -> SExpr {
+            if let Some(kh) = e.as_keyword_hash_node() {
+                tr_kwhash(ctx, node, e, &kh)
+            } else {
+                tr(ctx, e)
+            }
+        };
         if !has_splat {
-            let elems: Vec<SExpr> = raw_elems.iter().map(|e| tr(ctx, e)).collect();
+            let elems: Vec<SExpr> = raw_elems.iter().map(|e| tr_elem(ctx, e)).collect();
             return sp(node, Expr::ArrayLit(elems));
         }
         // Walk the elements building (group of consecutive non-splats
@@ -5206,7 +5219,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         kwargs_trailing: false,
                     }));
                 } else {
-                buf.push(tr(ctx, en));
+                buf.push(tr_elem(ctx, en));
             }
         }
         if !buf.is_empty() {
