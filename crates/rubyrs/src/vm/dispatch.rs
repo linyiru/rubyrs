@@ -5384,6 +5384,7 @@ impl Vm {
         _cache_id: u16,
         args: ArgsBuf,
         recv: Value,
+        force_primitive: bool,
     ) -> Result<ClassOutcome, Trap> {
         // Local SymId for "new" — used by the `cls.new`
         // override arm. Originally derived in the surrounding
@@ -5575,7 +5576,13 @@ impl Vm {
     // isn't today. Override-without-super covers the tilt
     // entry-point (and the common DSL builder pattern); the
     // super-into-allocator case is a separable follow-up.
+    // A user `def self.new` override wins — UNLESS this is a
+    // force-primitive call (a `<primitive-alias-forwarder>`: `alias new!
+    // new` snapshots the builtin `Class#new`, so `new!` must reach the
+    // allocator below, NOT re-enter the redefined `new` — Sinatra's
+    // `alias new! new; def new …; new!` would otherwise recurse forever).
     if name_id == new_id
+        && !force_primitive
         && let Value::Class(cls) = &recv
         && let Some(m) = self.lookup_class_singleton_method(cls, new_id) {
         self.invoke_method(m, recv.clone(), args.into_vec())?;
@@ -8803,7 +8810,7 @@ impl Vm {
         // include / prepend / extend / private / public / protected
         // / name / superclass / method_defined?. Extracted into
         // try_dispatch_class_intrinsics (#192 commit 4/5).
-        let (args, recv) = match self.try_dispatch_class_intrinsics(&name, name_id, cache_id, args, recv)? {
+        let (args, recv) = match self.try_dispatch_class_intrinsics(&name, name_id, cache_id, args, recv, force_primitive)? {
             ClassOutcome::Handled => return Ok(()),
             ClassOutcome::NotHandled { args, recv } => (args, recv),
         };

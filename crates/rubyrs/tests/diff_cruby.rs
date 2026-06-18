@@ -313,6 +313,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn class_self_cvar() { run_diff("class_self_cvar"); }
 #[test] fn class_self_if_modifier() { run_diff("class_self_if_modifier"); }
 #[test] fn class_self_alias_builtin() { run_diff("class_self_alias_builtin"); }
+// `alias new! new` snapshots the builtin Class#new (no recursion when
+// `new` is then redefined to call `new!`) — Sinatra's middleware wrap.
+#[test] fn alias_builtin_new() { run_diff("alias_builtin_new"); }
 #[test] fn class_self_visibility() { run_diff("class_self_visibility"); }
 #[test] fn env_nested_lookup() { run_diff("env_nested_lookup"); }
 #[test] fn time_local_flavour() { run_diff("time_local_flavour"); }
