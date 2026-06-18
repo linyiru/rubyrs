@@ -53,8 +53,8 @@ kramdown            Ruby             10263025        3.7      46112
 > (`src/bump.rs`, first chunk pre-sized from `src.len()` so a render's owned
 > strings land in one allocation) and, on aarch64, the baseline-NEON inline
 > scan (NEON is a guaranteed instruction set there, so the `unsafe` is a
-> formality). It now **stably beats pulldown** (~363 vs ~344, median +19 /
-> +5.5 % over 12 alternating-order interleaved pairs) and is
+> formality). It now **stably beats pulldown** (~365 vs ~340, median ~+25 /
+> +7 % over alternating-order interleaved pairs) and is
 > **~75× faster than kramdown** (the engine it drops in for), ~3× comrak. The
 > opt-in `arena` feature (a scoped GLOBAL bump allocator the embedder installs)
 > lifts it to ~396 MB/s — a **commanding** lead over pulldown (every
