@@ -50,3 +50,9 @@ p V.new({ a: 1 }).v
 
 # to_h round-trips through with
 p D.new(1, 2).with.to_h
+
+# Data-defined classes are real subclasses of Data (Ruby 3.2).
+p D.new(1, 2).is_a?(Data)
+p D.superclass.name
+p (D < Data)
+p E.new(5).is_a?(Data)

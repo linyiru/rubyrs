@@ -240,7 +240,9 @@ end
 # the native `#<...>` until Kernel#p routes to a user `inspect`.)
 class Data
   def self.define(*members, &block)
-    cls = Class.new
+    # Subclass `Data` (CRuby: `Data.define(...).superclass == Data`,
+    # so instances are `is_a?(Data)` and `< Data` holds).
+    cls = Class.new(self)
     cls.instance_variable_set(:@__data_members, members)
     cls.define_singleton_method(:members) do
       self.instance_variable_get(:@__data_members)
