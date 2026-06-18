@@ -711,6 +711,20 @@ pub(crate) fn string_call(
         (Value::Str(a), "succ", []) | (Value::Str(a), "next", []) => {
             Some(Value::new_str(a.with_str_lossy(str_succ)))
         }
+        // `succ!` / `next!` — in-place successor, returns self. Tilt
+        // generates unique compiled-method names by `succ!`-ing a
+        // counter String (template.rb's compiled_method_name).
+        (Value::Str(a), "succ!", []) | (Value::Str(a), "next!", []) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {}", crate::heap::rstr_inspect(a)),
+                });
+            }
+            let next = a.with_str_lossy(str_succ).into_bytes();
+            check(next.len())?;
+            *a.borrow_mut() = next;
+            Some(Value::Str(a.clone()))
+        }
         // `center` / `ljust` / `rjust` — pad to `width` with the
         // optional pad-string (default " "). The pad cycles when
         // multichar. If `width` is ≤ receiver length, the receiver

@@ -330,6 +330,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // locals); unblocks erubi's `eval(engine.src, block.binding)` harness
 // (full erubi spec: 100 runs, 0 failures).
 #[test] fn proc_binding() { run_diff("proc_binding"); }
+// String#succ!/next! (Tilt compiled-method-name generation).
+#[test] fn string_succ_bang() { run_diff("string_succ_bang"); }
+// File.rename(old, new) — atomic rename.
+#[test] fn file_rename() { run_diff("file_rename"); }
 // `begin … rescue … else E … ensure … end` — the else body runs only
 // on the no-exception path, its value is the begin's value, and an
 // exception in else escapes the rescue chain (Sinatra/Tilt lazy_load).

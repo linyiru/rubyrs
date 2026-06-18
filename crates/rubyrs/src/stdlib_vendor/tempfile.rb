@@ -57,6 +57,13 @@ class Tempfile
     # until `binmode` is called). rack's UploadedFile checks this to
     # report whether an upload was opened in binary mode.
     @binmode = false
+    # CRuby's Tempfile.new creates the (empty) file on disk
+    # immediately, so `File.read(tempfile.path)` works before any
+    # write/flush. Our handle is otherwise buffered (writes land in
+    # @buf, flushed on demand) — materialise an empty file here so
+    # external readers see it (Tilt initialises a Template straight
+    # from a fresh Tempfile and reads its path).
+    File.write(@path, "") rescue nil
   end
 
   attr_reader :path

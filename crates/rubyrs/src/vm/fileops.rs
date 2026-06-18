@@ -1101,6 +1101,18 @@ impl Vm {
                     .map_err(|e| self.trap(io_error(&e, Some(Path::new(&newp)))))?;
                 Value::Int(0)
             }
+            // `File.rename(old, new)` — atomic rename / move. Returns 0
+            // (CRuby). Tilt's Template caching test renames a temp file
+            // over the cached path to assert the recompile path.
+            ("rename", [old, new]) => {
+                self.check_filesystem_io_allowed("File.rename", None)?;
+                let oldp = path_arg(old)?;
+                let newp = path_arg(new)?;
+                self.check_filesystem_io_allowed("File.rename", Some(Path::new(&newp)))?;
+                std::fs::rename(&oldp, &newp)
+                    .map_err(|e| self.trap(io_error(&e, Some(Path::new(&oldp)))))?;
+                Value::Int(0)
+            }
             // `File.mkfifo(path[, mode])` — named pipe via libc::mkfifo
             // (libc is a plain unix dependency). Returns 0 (CRuby).
             // spec_directory creates one to assert Rack::Directory
