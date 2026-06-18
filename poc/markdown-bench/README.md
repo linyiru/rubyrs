@@ -36,8 +36,8 @@ syntect by default — explicitly disabled here.)
 ```
 engine             lang/runtime          ns/op       MB/s      out_B
 ------             ------------          -----       ----      -----
-rostdown arena+simd Rust (opt-in)        87700      428.0      46112
-rostdown default    Rust (NEON, arm64)   94800      396.0      46112
+rostdown arena+simd Rust (opt-in)        81800      459.0      46112
+rostdown default    Rust (NEON, arm64)   88700      423.0      46112
 pulldown            Rust (smart punct)  109000      344.0      44022
 blackfriday         Go                   386907       97.0      45413
 comrak              Rust                 431839       86.9      43878
@@ -53,10 +53,10 @@ kramdown            Ruby             10263025        3.7      46112
 > (`src/bump.rs`, first chunk pre-sized from `src.len()` so a render's owned
 > strings land in one allocation) and, on aarch64, the baseline-NEON inline
 > scan (NEON is a guaranteed instruction set there, so the `unsafe` is a
-> formality). It now **stably beats pulldown** (~396 vs ~341, median ~+55 / +16 % over alternating-order interleaved pairs) and is
+> formality). It now **stably beats pulldown** (~423 vs ~342, median ~+80 / +23 % over alternating-order interleaved pairs) and is
 > **~75× faster than kramdown** (the engine it drops in for), ~3× comrak. The
 > opt-in `arena` feature (a scoped GLOBAL bump allocator the embedder installs)
-> lifts it to ~428 MB/s — a **commanding** lead over pulldown (every
+> lifts it to ~459 MB/s — a **commanding** lead over pulldown (every
 > interleaved pair), because it bump-allocates *everything* (node Vecs, output,
 > the local arena's own chunks), not just the AST's owned strings.
 >
@@ -103,8 +103,8 @@ kramdown            Ruby             10263025        3.7      46112
 > since grown to **100 % byte-identical** kramdown coverage (golden 22/121
 > plus the full Jekyll + Bridgetown corpus, the gem's differential), and that
 > correctness work cost some of the lead back (see *History* above): it is now
-> ~396 default / ~428 turbo — both past pulldown, ~75× kramdown. Data-driven
-> wins took the default build 282 → ~396 (+40 %): a local bump arena
+> ~423 default / ~459 turbo — both past pulldown, ~75× kramdown. Data-driven
+> wins took the default build 282 → ~423 (+50 %): a local bump arena
 > (`src/bump.rs`) re-homing the AST's owned strings into wholesale-freed
 > chunks (first chunk pre-sized from `src.len()`); the inline hard-break scan,
 > which re-walked every prose run byte by byte after `next_trigger` had
@@ -113,8 +113,14 @@ kramdown            Ruby             10263025        3.7      46112
 > there, so its `unsafe` is a formality); the blockquote/list deep-own path,
 > which used to spin up a scratch AST per body and copy every node into the
 > real arena, now re-homing its buffer into the bump once and parsing straight
-> in (four functions deleted); and `SpanKind` holding `&'a str` instead of
-> `Cow`, making `SpanNode` a POD with no per-node `Drop`. The build
+> in (four functions deleted); `SpanKind` holding `&'a str` instead of
+> `Cow`, making `SpanNode` a POD with no per-node `Drop`; skipping the
+> link-definition pre-pass entirely when the doc has no `]:`; and
+> letter-first fast-paths through the block-opener and paragraph-continuation
+> loops — a line beginning with an ASCII letter can't be an HR, opener, IAL,
+> or indented code, so the trim-heavy `is_hr` / `decline_block_scan` probes
+> are skipped (a big win since `parse_blocks` recurses through every list item
+> and blockquote body). The build
 > path was data-driven throughout, and still is: each samply profile pins the
 > next hot spot — a high-level `str` scan or an allocation — and a byte loop, a
 > SWAR/memchr fast-bail, a lookup table, or a borrow removes it.
@@ -127,7 +133,7 @@ kramdown            Ruby             10263025        3.7      46112
   than the AST builders — now edged out here by rostdown even in its
   AST-building default build. (Without `ENABLE_SMART_PUNCTUATION` it does
   less work and measures ~393; we keep it on for typography parity.)
-- **rostdown (~396 MB/s default → ~428 with `arena`)** is the
+- **rostdown (~423 MB/s default → ~459 with `arena`)** is the
   **fastest** here — ahead of pulldown in both builds — and **~75× kramdown**
   (the engine it drops in for),
   ~3× comrak, ~5× goldmark — emitting **byte-identical kramdown HTML** with
