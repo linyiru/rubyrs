@@ -11984,26 +11984,17 @@ impl Vm {
             // don't count once a named one exists) — rubyrs's Rust engine
             // numbers all groups PCRE-style, so a mixed pattern's indices
             // can differ. All-named patterns (Sinatra routes) match.
-            let cap_names = re.capture_group_names();
-            let mut pairs: Vec<(Value, Value)> = Vec::new();
-            for (i, slot) in cap_names.iter().enumerate() {
-                let Some(nm) = slot else { continue };
-                let idx = (i + 1) as i64;
-                // Find an existing entry for this name (preserve order).
-                let pos = pairs.iter().position(|(k, _)| {
-                    matches!(k, Value::Str(s) if s.to_string_lossy() == *nm)
-                });
-                match pos {
-                    Some(p) => {
-                        if let Value::Array(aid) = &pairs[p].1 {
-                            self.heap.array_mut(*aid).push(Value::Int(idx));
-                        }
-                    }
-                    None => {
-                        let aid = self.heap.alloc(HeapObj::Array(vec![Value::Int(idx)].into()));
-                        pairs.push((Value::new_str(nm.clone()), Value::Array(aid)));
-                    }
-                }
+            // Each name → ALL its 1-based group indices. The engines
+            // collapse duplicate `(?<a>…)` names (keeping only the last),
+            // so this consults the source-parsed map to recover every
+            // index — mustermann's `params` reads this to collect each
+            // `*` splat capture into the "splat" array.
+            let index_map = re.named_capture_index_map();
+            let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(index_map.len());
+            for (nm, idxs) in index_map {
+                let arr: Vec<Value> = idxs.into_iter().map(|i| Value::Int(i as i64)).collect();
+                let aid = self.heap.alloc(HeapObj::Array(arr.into()));
+                pairs.push((Value::new_str(nm), Value::Array(aid)));
             }
             let hid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
             self.stack.push(Value::Hash(hid));

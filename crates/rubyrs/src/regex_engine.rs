@@ -761,6 +761,47 @@ impl CompiledRegex {
         })
     }
 
+    /// Full `Regexp#named_captures` map: each capture name paired with
+    /// ALL its 1-based group indices, in first-appearance order. The
+    /// engines collapse duplicate names (only the last `(?<a>…)` keeps
+    /// the name), so `capture_group_names()` alone loses the earlier
+    /// indices; when the source parse is trusted (group counts agree),
+    /// a duplicated name's FULL index list is substituted. mustermann's
+    /// `params` reads `regexp.named_captures` to gather every `*` splat
+    /// capture into the "splat" array.
+    pub(crate) fn named_capture_index_map(&self) -> Vec<(String, Vec<usize>)> {
+        // Prefer the SOURCE parse when its group count matches the
+        // engine's (the same trust gate `duplicate_named_groups` uses):
+        // it preserves both every duplicate index AND CRuby's
+        // first-source-appearance ordering, which the engine view loses
+        // (the engine keeps only the last `(?<a>…)`).
+        let base_extended = self.ruby_flags & RB_EXTENDED != 0;
+        let (count, names) = parse_capture_groups(&self.source, base_extended);
+        if count + 1 == self.captures_len() {
+            let mut out: Vec<(String, Vec<usize>)> = Vec::new();
+            for (name, idx) in names {
+                match out.iter_mut().find(|(n, _)| *n == name) {
+                    Some(slot) => slot.1.push(idx),
+                    None => out.push((name, vec![idx])),
+                }
+            }
+            return out;
+        }
+        // Untrusted parse (mixed named/unnamed renumbering, exotic
+        // syntax): fall back to the engine's per-group names.
+        let cap_names = self.capture_group_names();
+        let mut out: Vec<(String, Vec<usize>)> = Vec::new();
+        for (i, slot) in cap_names.iter().enumerate() {
+            let Some(nm) = slot else { continue };
+            let idx = i + 1;
+            match out.iter_mut().find(|(n, _)| n == nm) {
+                Some(slot) => slot.1.push(idx),
+                None => out.push((nm.clone(), vec![idx])),
+            }
+        }
+        out
+    }
+
     /// Engine-agnostic capture iteration for `String#scan` (no-block).
     /// Returns one entry per non-overlapping match; each entry holds the
     /// capture groups `0..captures_len` as owned Strings (`None` for an

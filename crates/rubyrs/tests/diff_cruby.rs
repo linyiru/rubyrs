@@ -336,6 +336,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn array_trailing_kwhash() { run_diff("array_trailing_kwhash"); }
 // Module#included_modules — modules in the ancestor chain.
 #[test] fn included_modules() { run_diff("included_modules"); }
+// Regexp#named_captures → name => ALL 1-based indices (duplicate
+// (?<a>…) names), source order (mustermann splat collection).
+#[cfg(feature = "regex")]
+#[test] fn regexp_named_captures_dup() { run_diff("regexp_named_captures_dup"); }
 // String#succ!/next! (Tilt compiled-method-name generation).
 #[test] fn string_succ_bang() { run_diff("string_succ_bang"); }
 // File.rename(old, new) — atomic rename.
