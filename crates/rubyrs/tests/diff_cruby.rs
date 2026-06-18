@@ -345,6 +345,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // eval/class_eval line-offset arg maps the source's first line into the
 // caller's coordinate system for backtraces (Tilt template line nums).
 #[test] fn eval_line_offset() { run_diff("eval_line_offset"); }
+// define_singleton_method(name, callable) on a heap primitive (Array/
+// String/Hash) installs onto its per-instance eigenclass.
+#[test] fn define_singleton_method_heap() { run_diff("define_singleton_method_heap"); }
 // `begin … rescue … else E … ensure … end` — the else body runs only
 // on the no-exception path, its value is the begin's value, and an
 // exception in else escapes the rescue chain (Sinatra/Tilt lazy_load).

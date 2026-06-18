@@ -12204,7 +12204,9 @@ impl Vm {
         // surface — close enough for primitives that don't
         // accept the install at all).
         if &*name == "define_singleton_method"
-            && matches!(&recv, Value::Object(_) | Value::Class(_))
+            && matches!(&recv,
+                Value::Object(_) | Value::Class(_)
+                | Value::Array(_) | Value::Hash(_) | Value::Block(_) | Value::Str(_))
         {
             match args.len() {
                 0 => return Err(self.trap(RubyError::ArgumentError {
@@ -12276,6 +12278,31 @@ impl Vm {
                             // singleton_target set.
                             self.install_singleton_method_on_class_from_value(
                                 c, name_sym, &src,
+                            )
+                        }
+                        // Heap primitives (Array / Proc / Hash / String)
+                        // install onto their per-instance eigenclass via
+                        // the same side-table the block form uses
+                        // (heap_singletons / hash / str). Tilt's
+                        // compiled_method test does
+                        // `ary.define_singleton_method(:z, unbound)`.
+                        Value::Array(_) | Value::Block(_) => {
+                            let sc = self.ensure_heap_singleton(&recv);
+                            self.install_method_from_value(
+                                &sc, name_sym, &src, crate::value::Visibility::Public,
+                            )
+                        }
+                        Value::Hash(hid) => {
+                            let sc = self.ensure_hash_singleton(*hid);
+                            self.install_method_from_value(
+                                &sc, name_sym, &src, crate::value::Visibility::Public,
+                            )
+                        }
+                        Value::Str(s) => {
+                            let s = s.clone();
+                            let sc = self.ensure_str_singleton(&s);
+                            self.install_method_from_value(
+                                &sc, name_sym, &src, crate::value::Visibility::Public,
                             )
                         }
                         _ => unreachable!(),
