@@ -50,9 +50,11 @@ kramdown            Ruby             10263025        3.7      46112
 
 > The `rostdown default` row is **dependency-free** with its `unsafe`
 > confined to two small, Miri-checked spots: the always-on local bump arena
-> (`src/bump.rs`) and, on aarch64, the baseline-NEON inline scan (NEON is a
-> guaranteed instruction set there, so the `unsafe` is a formality). It now
-> runs at **pulldown parity** (~343 vs ~340, trading wins interleaved) and is
+> (`src/bump.rs`, first chunk pre-sized from `src.len()` so a render's owned
+> strings land in one allocation) and, on aarch64, the baseline-NEON inline
+> scan (NEON is a guaranteed instruction set there, so the `unsafe` is a
+> formality). It now **edges pulldown** (~344 vs ~340, mean +1.6 interleaved)
+> and is
 > **~75× faster than kramdown** (the engine it drops in for), ~3× comrak. The
 > opt-in `arena` feature (a scoped GLOBAL bump allocator the embedder installs)
 > lifts it to ~359 MB/s — a **decisive, stable** lead over pulldown (every
