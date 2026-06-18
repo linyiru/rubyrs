@@ -489,6 +489,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn set_subtract_divide() { run_diff("set_subtract_divide"); }
 #[test] fn hash_min_by_n() { run_diff("hash_min_by_n"); }
 #[test] fn array_values_at_setops() { run_diff("array_values_at_setops"); }
+#[test] fn kernel_array_range() { run_diff("kernel_array_range"); }
 #[cfg(feature = "regex")]
 #[test] fn match_data_offsets() { run_diff("match_data_offsets"); }
 #[cfg(feature = "regex")]

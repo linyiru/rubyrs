@@ -1628,6 +1628,21 @@ impl Vm {
                         let id = g.vm.heap.alloc(crate::heap::HeapObj::Array(entries.into()));
                         Some(Ok(Value::Array(id)))
                     }
+                    // `Array(range)` expands the Range to its elements
+                    // (`Array(1..3) == [1, 2, 3]`). Range#to_a is a native
+                    // method (not in the method table), so the to_ary/to_a
+                    // table fallback below misses it — dispatch by name.
+                    Value::Range(_) => {
+                        let recv = args[0].clone();
+                        let pre = self.frames.len();
+                        self.stack.push(recv);
+                        let to_a_id = self.interner.intern("to_a");
+                        if let Err(t) = self.do_call(to_a_id, 0, false, u16::MAX) {
+                            return Some(Err(t));
+                        }
+                        if let Err(t) = self.dispatch_until(pre) { return Some(Err(t)); }
+                        Some(Ok(self.stack.pop().unwrap_or(Value::Nil)))
+                    }
                     _ => {
                         // CRuby's `Array(obj)` coerces via `to_ary`
                         // then `to_a` before wrapping in `[obj]`
