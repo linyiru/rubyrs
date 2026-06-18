@@ -1170,6 +1170,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Struct (`S`-tag) marshalling: byte-compatible dump, deep copy,
 // nested/shared structs, anonymous-struct token fallback.
 #[test] fn marshal_struct() { run_diff("marshal_struct"); }
+// Generic object (`o`-tag) + exception (`:mesg`/`:bt`) marshalling:
+// byte-compatible dump, deep copy, exception state + subclass round-trip.
+#[test] fn marshal_object() { run_diff("marshal_object"); }
 // Range#map over String endpoints (str_succ materialize).
 #[test] fn range_string_map() { run_diff("range_string_map"); }
 // undef_method kills same-class methods (tombstone + table removal).

@@ -2724,6 +2724,16 @@ impl Vm {
             // `Marshal.load(Marshal.dump(x))` deep-copies these types.
             "__rubyrs_marshal_dump_binary" => {
                 let obj = args.first().cloned().unwrap_or(Value::Nil);
+                // Gate on the dumpability probe FIRST: an un-dumpable
+                // graph (Proc/Method/Binding/IO, a singleton-augmented or
+                // genuinely-anonymous object) returns nil here so
+                // `Marshal.dump` falls through to the registry token,
+                // whose own probe raises CRuby's TypeError. This also
+                // guarantees the writer only ever sees Instance-backed
+                // objects (no panic on an opaque host shape).
+                if self.marshal_dumpable(&obj).is_err() {
+                    return Some(Ok(Value::Nil));
+                }
                 let e_sym = self.interner.intern("E");
                 let mut w = MarshalWriter {
                     out: vec![0x04, 0x08],
@@ -5028,9 +5038,15 @@ impl Vm {
                                     inst.class.name
                                 ));
                             }
-                            if inst.class.name.is_empty()
-                                || inst.class.name.starts_with("#<")
-                            {
+                            // Use the EFFECTIVE name so a const-assigned
+                            // class (`S = Struct.new(...)` / `Foo =
+                            // Class.new`) — whose raw `name` is empty but
+                            // whose lazily-stamped `assigned_name` is set —
+                            // is NOT treated as anonymous (it dumps fine
+                            // via the `S`/`o` tags). A truly anonymous
+                            // instance still raises.
+                            let ename = inst.class.effective_name().unwrap_or_default();
+                            if ename.is_empty() || ename.starts_with("#<") {
                                 return Err("can't dump anonymous class".into());
                             }
                             for iv in inst.ivars.values() {
@@ -5668,6 +5684,69 @@ impl MarshalReader<'_> {
                 }
                 Ok(Value::Hash(id))
             }
+            b'o' => {
+                // Generic object: class symbol, then ivar count and
+                // [ivar_sym, value] pairs. Allocate an instance of the
+                // named class (no `initialize` call, like CRuby) and set
+                // the ivars. For an Exception descendant the bare `:mesg`
+                // / `:bt` slots map back to rubyrs's `@message` /
+                // `@backtrace`; every other key is a real `@`-prefixed
+                // ivar name.
+                let class_val = self.read_value(vm)?;
+                let cname = match class_val {
+                    Value::Sym(s) => vm.interner.resolve(s).to_string(),
+                    _ => return Err("object class must be a symbol".into()),
+                };
+                let cid = vm.interner.intern(&cname);
+                let cls = match vm.constants.get(&cid) {
+                    Some(Value::Class(c)) => c.clone(),
+                    _ => vm
+                        .classes
+                        .get(&cid)
+                        .cloned()
+                        .ok_or_else(|| format!("undefined class/module {cname}"))?,
+                };
+                let is_exc = marshal_is_exception(&cls);
+                vm.maybe_gc();
+                vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
+                let id = vm.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
+                    class: cls,
+                    ivars: crate::intern::FxHashMap::default(),
+                    singleton_class: None,
+                    frozen: std::cell::Cell::new(false),
+                }));
+                self.objects.push(Value::Object(id));
+                vm.pinned.push(Value::Object(id));
+                let n = self.long()?;
+                for _ in 0..n.max(0) {
+                    let key = self.read_value(vm)?;
+                    let val = self.read_value(vm)?;
+                    let kname = match key {
+                        Value::Sym(s) => vm.interner.resolve(s).to_string(),
+                        _ => return Err("ivar key must be a symbol".into()),
+                    };
+                    let (ivar, val) = if is_exc && kname == "mesg" {
+                        // A nil :mesg means "default to the class name"
+                        // (CRuby's lazy message). rubyrs reads @message
+                        // raw, so materialise the class-name string now to
+                        // keep `.message` correct for cross-loaded dumps.
+                        let v = if matches!(val, Value::Nil) {
+                            Value::new_str(cname.clone())
+                        } else {
+                            val
+                        };
+                        (vm.interner.intern("@message"), v)
+                    } else if is_exc && kname == "bt" {
+                        (vm.interner.intern("@backtrace"), val)
+                    } else {
+                        (vm.interner.intern(&kname), val)
+                    };
+                    if let crate::heap::HeapObj::Instance(inst) = vm.heap.get_mut(id) {
+                        inst.ivars.insert(ivar, val);
+                    }
+                }
+                Ok(Value::Object(id))
+            }
             b'S' => {
                 // Struct: class symbol, then member count and
                 // [member_sym, value] pairs. CRuby allocates the struct
@@ -5811,7 +5890,7 @@ impl MarshalWriter {
         self.out.extend_from_slice(name.as_bytes());
     }
 
-    fn write_value(&mut self, vm: &Vm, v: &Value) -> Result<(), ()> {
+    fn write_value(&mut self, vm: &mut Vm, v: &Value) -> Result<(), ()> {
         match v {
             Value::Nil => self.out.push(b'0'),
             Value::Bool(true) => self.out.push(b'T'),
@@ -5906,22 +5985,11 @@ impl MarshalWriter {
                     self.write_value(vm, val)?;
                 }
             }
-            // A Struct instance → CRuby's `S` tag: class symbol, member
-            // count, then [member_sym, value] in declaration order. Only
-            // a NAMED struct class can be dumped (CRuby raises on an
-            // anonymous one; we fall back to the token). Non-Struct
-            // objects stay out of subset for now (the `o`-tag arbitrary-
-            // object form, with its exception @mesg/@bt special-casing,
-            // is a separate follow-up).
             Value::Object(id) => {
                 let inst_class = vm.heap.instance(*id).class.clone();
-                let members = match marshal_struct_members(vm, &inst_class) {
-                    Some(m) => m,
-                    None => return Err(()),
-                };
-                // The struct class must be NAMED — either a real
-                // constant name or one lazily stamped on first
-                // const-assignment (`S = Struct.new(...)`). Anonymous →
+                // The class must be NAMED — a real constant name or one
+                // lazily stamped on first const-assignment (`S =
+                // Struct.new(...)` / `Foo = Class.new`). Anonymous →
                 // CRuby raises; we fall back to the token.
                 let cname = match inst_class.effective_name() {
                     Some(n) if !n.is_empty() => n,
@@ -5936,24 +6004,93 @@ impl MarshalWriter {
                     self.write_long(i as i64);
                     return Ok(());
                 }
+                // A Struct instance → CRuby's `S` tag: class symbol,
+                // member count, then [member_sym, value] in declaration
+                // order.
+                if let Some(members) = marshal_struct_members(vm, &inst_class) {
+                    self.objects.push(ObjKey::Heap(*id));
+                    self.out.push(b'S');
+                    self.write_symbol(vm, csym);
+                    self.write_long(members.len() as i64);
+                    for m in &members {
+                        self.write_symbol(vm, *m);
+                        let mname = vm.interner.resolve(*m).to_string();
+                        let v = vm
+                            .interner
+                            .get_id(&format!("@{mname}"))
+                            .and_then(|isym| vm.heap.instance(*id).ivars.get(&isym).cloned())
+                            .unwrap_or(Value::Nil);
+                        self.write_value(vm, &v)?;
+                    }
+                    return Ok(());
+                }
+                // Otherwise a generic object → CRuby's `o` tag: class
+                // symbol, ivar count, then [ivar_sym, value]. Ivars are
+                // emitted name-sorted for run-to-run determinism (rubyrs
+                // ivar storage is unordered; CRuby uses definition order,
+                // so multi-ivar dumps may differ in byte ORDER but
+                // round-trip identically).
                 self.objects.push(ObjKey::Heap(*id));
-                self.out.push(b'S');
+                self.out.push(b'o');
                 self.write_symbol(vm, csym);
-                self.write_long(members.len() as i64);
-                for m in &members {
-                    self.write_symbol(vm, *m);
-                    let mname = vm.interner.resolve(*m).to_string();
-                    let v = vm
-                        .interner
-                        .get_id(&format!("@{mname}"))
-                        .and_then(|isym| vm.heap.instance(*id).ivars.get(&isym).cloned())
-                        .unwrap_or(Value::Nil);
-                    self.write_value(vm, &v)?;
+                let is_exc = marshal_is_exception(&inst_class);
+                // Snapshot ivars (clone out so later interning can take a
+                // &mut borrow of the interner).
+                let mut ivars: Vec<(crate::intern::SymId, Value)> = vm
+                    .heap
+                    .instance(*id)
+                    .ivars
+                    .iter()
+                    .map(|(k, v)| (*k, v.clone()))
+                    .collect();
+                if is_exc {
+                    // CRuby stores an Exception's message/backtrace in the
+                    // bare `:mesg` / `:bt` slots (no `@`), NOT as ivars.
+                    // rubyrs keeps them in `@message` / `@backtrace`
+                    // (`@cause` is internal too) — translate on the way
+                    // out and drop them from the user-ivar list.
+                    let msg_ivar = vm.interner.intern("@message");
+                    let bt_ivar = vm.interner.intern("@backtrace");
+                    let cause_ivar = vm.interner.intern("@cause");
+                    let mut msg = ivars.iter().find(|(k, _)| *k == msg_ivar)
+                        .map(|(_, v)| v.clone()).unwrap_or(Value::Nil);
+                    // CRuby lazily defaults a no-arg exception's message to
+                    // the class name and dumps `:mesg nil`; rubyrs stores
+                    // it eagerly in @message. Emit nil when @message just
+                    // mirrors the class name so the bytes match CRuby (the
+                    // reader maps a nil :mesg back to the class name, so
+                    // round-trips stay correct either way).
+                    if let Value::Str(s) = &msg {
+                        if *s.content.borrow() == *cname.as_bytes() {
+                            msg = Value::Nil;
+                        }
+                    }
+                    let bt = ivars.iter().find(|(k, _)| *k == bt_ivar)
+                        .map(|(_, v)| v.clone()).unwrap_or(Value::Nil);
+                    ivars.retain(|(k, _)| *k != msg_ivar && *k != bt_ivar && *k != cause_ivar);
+                    ivars.sort_by(|a, b| vm.interner.resolve(a.0).cmp(vm.interner.resolve(b.0)));
+                    let mesg_sym = vm.interner.intern("mesg");
+                    let bt_sym = vm.interner.intern("bt");
+                    self.write_long((2 + ivars.len()) as i64);
+                    self.write_symbol(vm, mesg_sym);
+                    self.write_value(vm, &msg)?;
+                    self.write_symbol(vm, bt_sym);
+                    self.write_value(vm, &bt)?;
+                    for (k, v) in ivars.clone() {
+                        self.write_symbol(vm, k);
+                        self.write_value(vm, &v)?;
+                    }
+                } else {
+                    ivars.sort_by(|a, b| vm.interner.resolve(a.0).cmp(vm.interner.resolve(b.0)));
+                    self.write_long(ivars.len() as i64);
+                    for (k, v) in ivars.clone() {
+                        self.write_symbol(vm, k);
+                        self.write_value(vm, &v)?;
+                    }
                 }
             }
-            // Bignum, non-Struct Object, Range, Block/Proc, Class, … —
-            // outside the byte subset; signal the caller to use the
-            // registry token.
+            // Bignum, Range, Block/Proc, Class, … — outside the byte
+            // subset; signal the caller to use the registry token.
             _ => return Err(()),
         }
         Ok(())
@@ -5983,6 +6120,20 @@ fn marshal_struct_members(vm: &Vm, class: &std::rc::Rc<crate::value::Class>) -> 
         cur = c.superclass.borrow().clone();
     }
     None
+}
+
+/// Is `class` an `Exception` descendant? Mirrors the chain walk
+/// `instance_variables` uses to hide `@message` / `@backtrace`. Drives
+/// marshal's exception special-case (`:mesg` / `:bt` slots).
+fn marshal_is_exception(class: &std::rc::Rc<crate::value::Class>) -> bool {
+    let mut cur = Some(class.clone());
+    while let Some(c) = cur {
+        if c.name == "Exception" {
+            return true;
+        }
+        cur = c.superclass.borrow().clone();
+    }
+    false
 }
 
 /// CRuby marshal float text: `inf` / `-inf` / `nan` for the
