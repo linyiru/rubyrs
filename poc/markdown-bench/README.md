@@ -31,29 +31,40 @@ syntect by default — explicitly disabled here.)
 > a few % larger. This measures throughput on the same input, not output
 > equivalence.
 
-## Results (macOS arm64, Ruby 3.4.1 / Go / rustc 1.95 / node 22)
+## Results (Apple M2 Max, arm64, Ruby 3.4.1 / Go / rustc 1.95 / node 22)
 
 ```
 engine             lang/runtime          ns/op       MB/s      out_B
 ------             ------------          -----       ----      -----
-rostdown arena+simd Rust (opt-in)        65000      578.0      46112
-rostdown default    Rust (zero-dep)      86000      435.0      46112
-pulldown            Rust (smart punct)  107000      351.0      44022
-blackfriday         Go                   370053      101.4      45413
-comrak              Rust                 429363       87.4      43878
-commonmarker        Ruby→Rust            466620       80.5      49596
-goldmark            Go                   703490       53.4      43878
-markdown-it         JS/V8                902588       41.6      43878
-marked              JS/V8               1152448       32.6      44646
-kramdown            Ruby               10012625        3.7      46112
+rostdown arena+simd Rust (opt-in)       108000      348.0      46112
+pulldown            Rust (smart punct)  110219      340.6      44022
+rostdown default    Rust (zero-dep)     134805      278.5      46112
+blackfriday         Go                   386907       97.0      45413
+comrak              Rust                 431839       86.9      43878
+commonmarker        Ruby→Rust            472072       79.5      49596
+goldmark            Go                   703315       53.4      43878
+markdown-it         JS/V8                913231       41.1      43878
+marked              JS/V8               1191501       31.5      44646
+kramdown            Ruby             10263025        3.7      46112
 ```
 
 > The `rostdown default` row is the **zero-dep, no-`unsafe`** build the
-> `kramdown-rostdown` gem ships. With smart typography matched on both
-> engines (see caveat above) it beats pulldown-cmark by **~24%** on the
-> clean path. The opt-in `arena`+`simd` features (an unsafe scoped bump
-> allocator + an aarch64 NEON byteset) add ~33% on top: **~578 MB/s,
-> ~65% faster than pulldown** — but they are headroom, not required to win.
+> `kramdown-rostdown` gem ships: **~75× faster than kramdown** (the engine it
+> drops in for), 2nd in the field, ~3× comrak. The opt-in `arena`+`simd`
+> features (an unsafe scoped bump allocator + an aarch64 NEON byteset) lift it
+> to ~348 MB/s — pulldown parity.
+>
+> **History.** An earlier, much smaller rostdown clocked ~435 default / ~578
+> turbo — ahead of pulldown. Reaching **100 % byte-identical** acceptance on
+> the full Jekyll + Bridgetown corpus added per-construct hot-path work
+> (kramdown-faithful HTML/list re-serialization, a recursive list model,
+> source-contiguity tracking, more inline-trigger types) that cost throughput
+> on this synthetic CommonMark corpus. A profiling pass clawed back the
+> clearest regression — the table-trigger scan ran on every block with no
+> memchr fast-bail (+20 % default, +23 % turbo) — and the rest is the
+> deliberate price of byte-identical-or-decline correctness. pulldown and
+> comrak, unchanged, still match their earlier numbers, so the delta is
+> rostdown's added work, not the machine.
 >
 > Absolute MB/s drifts with machine load; the rostdown/pulldown rows are
 > isolated, interleaved median-of-7 runs at N=1000 (±2%), the others from
@@ -81,19 +92,15 @@ kramdown            Ruby               10012625        3.7      46112
 > | zero-copy AST | 508 | `Block`/`Span` borrow `src` via `Cow<&str>` — pristine prose/code/href runs never copied; only typography/escape allocates |
 > | flat-node arena | 573 | nodes live in flat sibling-linked index arenas, not nested `Vec`s — per-node allocations gone (2870 → 776/render) |
 >
-> The arena+simd column reaches **+456%** (5.7× over the original
-> two-pass baseline), ~65% ahead of pulldown. But the more important
-> result: the **clean default build — no `unsafe`, no dependency — beats
-> pulldown by ~24%** (~435 vs ~351 MB/s, isolated median-of-7, both doing
-> smart typography). Zero-copy + flat nodes cut per-render allocations
-> from 2,870 to 776, so the engine wins *without* the unsafe arena (which
-> is now optional headroom). All byte-identical to kramdown (golden
-> 22/121, the gem's 211-case differential). With typography matched on
-> both engines, rostdown still does one thing pulldown has no feature for
-> — kramdown heading `id` auto-slugs — plus decline-checking. The path was
-> data-driven throughout: each samply profile pinned the next hot spot —
-> a high-level `str` scan or an allocation — and a byte loop, a
-> dependency-free SWAR `memchr`, a lookup table, or a borrow removed it.
+> Those zero-copy + flat-node + byte-scan optimizations took an early
+> rostdown to ~435 default / ~578 turbo — ahead of pulldown. The engine has
+> since grown to **100 % byte-identical** kramdown coverage (golden 22/121
+> plus the full Jekyll + Bridgetown corpus, the gem's differential), and that
+> correctness work cost some of the lead back (see *History* above): it is now
+> ~278 default / ~348 turbo — 2nd behind pulldown, ~75× kramdown. The build
+> path was data-driven throughout, and still is: each samply profile pins the
+> next hot spot — a high-level `str` scan or an allocation — and a byte loop, a
+> SWAR/memchr fast-bail, a lookup table, or a borrow removes it.
 
 ## Reading the field
 
@@ -102,18 +109,18 @@ kramdown            Ruby               10012625        3.7      46112
   Zola). Long the throughput leader among Markdown engines, ~3× faster
   than the AST builders. (Without `ENABLE_SMART_PUNCTUATION` it does less
   work and measures ~393; we keep it on for typography parity.)
-- **rostdown (435 MB/s clean → 578 with `arena`+`simd`)** is now the
-  **fastest in the field** — past pulldown by ~24% on the no-`unsafe`,
-  no-dependency default build *alone* (isolated median-of-7), ~65% with
-  the opt-in features, ~5× comrak, ~8× goldmark — with smart typography
-  matched on both engines, and rostdown additionally doing kramdown
-  heading `id` auto-slugs (pulldown has no equivalent) + decline-checking,
-  emitting byte-identical kramdown HTML. It got there by becoming a
-  **zero-copy, flat-node, byte-scanning** engine: text borrows `src`
-  (`Cow`), AST nodes live in flat index arenas (no per-node `Vec`), and
-  the hot scans use SWAR/NEON byte search — 2,870 → 776 allocations/render.
-  The owned AST + bump arena it started with are now optional headroom,
-  not the source of the win.
+- **rostdown (~278 MB/s clean → ~348 with `arena`+`simd`)** is the
+  **2nd-fastest** here and **~75× kramdown** (the engine it drops in for),
+  ~3× comrak, ~5× goldmark — emitting **byte-identical kramdown HTML** with
+  smart typography, kramdown heading `id` auto-slugs (pulldown has no
+  equivalent), and decline-checking, at **100 %** acceptance on the real
+  corpus. It is a **zero-copy, flat-node, byte-scanning** engine: text borrows
+  `src` (`Cow`), AST nodes live in flat index arenas (no per-node `Vec`), and
+  the hot scans use SWAR/NEON byte search. An earlier, much smaller rostdown
+  led the field at ~435/578; the climb to 100 % byte-identical correctness
+  traded part of that lead for faithfulness (the deliberate
+  byte-identical-or-decline bargain), with arena+simd keeping it at pulldown
+  parity.
 - **comrak (86) → commonmarker (79)** shows the Rust-in-Ruby tax is only
   **~9%**. A well-built native gem keeps almost all of the Rust speed —
   exactly the shape `kramdown-rostdown` targets.
