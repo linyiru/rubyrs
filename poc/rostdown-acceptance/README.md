@@ -63,9 +63,9 @@ a nonzero count is an accept-but-wrong bug, which is worse than a decline
 
 | source | byte-identical acceptance |
 | --- | ---: |
-| bridgetown | 96.9 % (125/129) |
-| jekyll | 99.5 % (201/202) |
-| **combined** | **98.5 % (326/331)** |
+| bridgetown | 98.4 % (127/129) |
+| jekyll | 100 % (202/202) |
+| **combined** | **99.4 % (329/331)** |
 
 Top decline reasons (combined, `run.sh`) are now a flat tail of kramdown
 quirks: multi-block / multi-line-table list items, cross-line emphasis
@@ -146,18 +146,21 @@ span element opening a paragraph (`<em>\n…\n</em>`, the closing tag on its own
 line), the void span elements `<br>`/`<img>`/`<input>` opening a paragraph at
 column 0, and verbatim `<!-- … -->` comment blocks — then a paragraph's
 indented continuation lines as lazy text rather than indented code (aligned
-wrapped prose, and indented content inside unexpanded `{% … %}` Liquid blocks).
-Current: **98.5 %**. `verify.sh` is the standing gate that keeps it WRONG = 0.
+wrapped prose, and indented content inside unexpanded `{% … %}` Liquid blocks)
+— then chained span IALs (`{:.a}{:rel=b}` merged onto one element), a leading
+block IAL injected into the following HTML block's root tag, and the big one: a
+`markdown="1"` element whose content is parsed as markdown spans and spliced
+into the re-serialized raw HTML. jekyll is now **100 %**. Current: **99.4 %**.
+`verify.sh` is the standing gate that keeps it WRONG = 0.
 
 **Reading it.** Acceptance is content-dependent: crafted CommonMark-safe
 prose (`../markdown-bench/corpus/bench.md`) is 100 %; real Jekyll/Bridgetown
-content ~98 %. The remaining five blockers are the impractical tail —
-constructs whose byte-identity would mean reproducing kramdown quirks at real
-accept-but-wrong risk, confirmed by probing each against the oracle:
-a standalone `{:…}` attribute list whose attachment target is
-context-dependent, a tilde run that is really `~~`-strikethrough with a literal
-remainder (`~~~x~~~` → `~<del>x</del>~`), a tab-indented list item, a chained
-span IAL, and a `markdown="1"` HTML element (its content is parsed as markdown,
-a content model the raw-HTML serializer doesn't share). Every declined page still
-renders correctly via the Ruby-kramdown fallback; declining only forgoes the
-speed-up.
+content ~99 %. Just two blockers remain, both single Bridgetown posts and both
+fighting the zero-copy borrow model: a TAB-indented nested list item (kramdown
+expands the tab to spaces by tab stop, producing a line the parser can't borrow
+from `src`), and an unclosed `~~~` tilde run that kramdown treats as a paragraph
+with `~~`-strikethrough plus a literal remainder (`~~~x~~~` → `~<del>x</del>~`)
+— and that one is a harness artifact (Bridgetown's `~~~{% … %}~~~` Ruby front
+matter, which a real build strips before Markdown ever runs). Every declined
+page still renders correctly via the Ruby-kramdown fallback; declining only
+forgoes the speed-up.
