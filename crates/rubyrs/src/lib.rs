@@ -30,6 +30,8 @@
 extern crate alloc;
 
 mod ast;
+#[cfg(feature = "_bcrypt")]
+mod bcrypt;
 mod bytecode;
 mod compiler;
 mod const_marker;
@@ -156,6 +158,11 @@ pub use socket::register_host_fns as register_socket_host_fns;
 /// layers TLS over a `_socket` connection.
 #[cfg(feature = "_openssl")]
 pub use openssl::register_host_fns as register_openssl_host_fns;
+/// Register the `_bcrypt` battery: `BCrypt::Engine.__bc_salt` /
+/// `__bc_crypt` backed by the pure-Rust EksBlowfish module, letting the
+/// bcrypt gem load + run. See [`bcrypt::register_host_fns`].
+#[cfg(feature = "_bcrypt")]
+pub use bcrypt::register_host_fns as register_bcrypt_host_fns;
 
 use std::io::Write;
 use std::path::Path;

@@ -431,6 +431,10 @@ fn main() {
     // backing Net::HTTP https, layered over a `_socket` connection. ADR 0029.
     #[cfg(feature = "_openssl")]
     rubyrs::register_openssl_host_fns(&mut rt);
+    // `_bcrypt` battery: pure-Rust EksBlowfish backing the bcrypt gem's
+    // `__bc_salt` / `__bc_crypt`. Without this the battery stays inert.
+    #[cfg(feature = "_bcrypt")]
+    rubyrs::register_bcrypt_host_fns(&mut rt);
     let result = rt.eval_file(path);
     trace.at("eval_done");
     match result {

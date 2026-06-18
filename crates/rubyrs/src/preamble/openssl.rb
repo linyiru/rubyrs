@@ -25,6 +25,17 @@ end
 module OpenSSL
   class OpenSSLError < StandardError; end
 
+  # `OpenSSL::Random.random_bytes(n)` — n cryptographically-random bytes
+  # as a binary (ASCII-8BIT) String. Backed by the same CSPRNG as
+  # `SecureRandom` (the host RNG); the two are interchangeable for
+  # callers that just want entropy. bcrypt's `generate_salt` uses this
+  # to seed a 16-byte salt.
+  module Random
+    def self.random_bytes(n)
+      SecureRandom.random_bytes(n)
+    end
+  end
+
   module SSL
     class SSLError < OpenSSL::OpenSSLError; end
 

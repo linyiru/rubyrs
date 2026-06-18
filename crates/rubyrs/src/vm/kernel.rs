@@ -5249,6 +5249,14 @@ impl Vm {
 /// reasoning, same cfg.
 #[cfg(not(target_os = "wasi"))]
 fn is_stdlib_stub_name(name: &str) -> bool {
+    // `bcrypt_ext`: the bcrypt gem's C extension, provided by the
+    // `_bcrypt` battery (BCrypt::Engine is defined at startup). The
+    // require just needs to succeed; routing it here bypasses the
+    // cext/.bundle path entirely.
+    #[cfg(feature = "_bcrypt")]
+    if name == "bcrypt_ext" {
+        return true;
+    }
     matches!(
         name,
         "uri" | "uri/generic" | "uri/common"

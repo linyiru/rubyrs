@@ -217,6 +217,11 @@ _kramdown_native = ["dep:rostdown"]
 # probes per the amended ADR. NOT in cli-defaults; `everything`
 # picks it up.
 _encoding_full = ["dep:encoding_rs", "dep:unicode-normalization", "dep:unicode-segmentation"]
+# `_bcrypt` — pure-Rust bcrypt (EksBlowfish) battery backing the bcrypt
+# gem's two C-ext entry points (`BCrypt::Engine.__bc_salt` / `__bc_crypt`).
+# No external crate (the algorithm is a self-contained port of
+# crypt_blowfish.c); makes `require "bcrypt"` load + run on rubyrs.
+_bcrypt = []
 # `dep:regex` (not the `regex` VM feature): the front-matter host fn
 # compiles Jekyll's YAML_FRONT_MATTER_REGEXP natively. Pulling the dep
 # alone keeps the `--no-default-features --features _yaml_native`
