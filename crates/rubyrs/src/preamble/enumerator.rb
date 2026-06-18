@@ -164,6 +164,11 @@ class Enumerator
     def take(n); __chain([:take, n]); end
     def drop(n); __chain([:drop, n]); end
     def with_index(offset = 0); __chain([:with_index, offset]); end
+    # `lazy.each_with_index` — like `with_index(0)`, yielding
+    # `[element, index]` pairs lazily (the inherited Enumerable
+    # each_with_index would eagerly drain, hanging/empty on an
+    # infinite source).
+    def each_with_index; __chain([:with_index, 0]); end
     # `lazy.zip(*others)` — pair each element with the same-index
     # element of the others (nil past their ends). Tier-1: the others
     # are materialised via to_a at CHAIN-BUILD time, so zipping an
