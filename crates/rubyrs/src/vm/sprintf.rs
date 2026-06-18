@@ -300,6 +300,15 @@ pub(crate) fn ruby_sprintf(
                 }
                 body
             }
+            'a' | 'A' => {
+                let f = coerce_float(arg)?;
+                let mut body = fmt_hex_float(f, precision, spec == 'A');
+                if !body.starts_with('-') {
+                    if flag_plus { body.insert(0, '+'); }
+                    else if flag_space { body.insert(0, ' '); }
+                }
+                body
+            }
             's' => {
                 let mut body = arg.to_display(heap, interner);
                 if let Some(p) = precision {
@@ -342,7 +351,7 @@ pub(crate) fn ruby_sprintf(
                 // The sign / alt-prefix placement below keeps the zeros
                 // inside the sign (`%+08.2f` → `+0003.14`).
                 let pad_char = if flag_zero && !flag_minus
-                    && (matches!(spec, 'f' | 'e' | 'E' | 'g' | 'G')
+                    && (matches!(spec, 'f' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A')
                         || (precision.is_none()
                             && matches!(spec, 'd' | 'i' | 'x' | 'X' | 'o' | 'b' | 'B'))) {
                     '0'
@@ -433,6 +442,85 @@ fn coerce_float(v: &Value) -> Result<f64, RubyError> {
 /// `1.23e4`; reformat the exponent to a sign + at least two digits
 /// (`1.23e+04`), and uppercase the `e` for `%E`. Non-finite values
 /// (`Inf`/`NaN`) pass through Rust's text.
+/// `%a` / `%A` — C99 hexadecimal floating-point. Renders the IEEE-754
+/// value as `[-]0x1.<hexfrac>p<±exp>` (normalised: a leading `1` and a
+/// binary exponent), or `0x0p+0` for zero. `prec` (the `%.Na` form)
+/// fixes the fraction to N hex digits with round-half-to-even; the
+/// default is the shortest exact fraction (trailing zeros stripped).
+/// `%A` upper-cases the whole rendering. Non-finite values render as
+/// `Inf` / `-Inf` / `NaN` (CRuby spelling), case-insensitive.
+fn fmt_hex_float(f: f64, prec: Option<usize>, upper: bool) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f < 0.0 { "-Inf".to_string() } else { "Inf".to_string() };
+    }
+    let bits = f.to_bits();
+    let sign = if bits >> 63 == 1 { "-" } else { "" };
+    let exp_field = ((bits >> 52) & 0x7ff) as i64;
+    let mantissa = bits & 0x000f_ffff_ffff_ffff; // low 52 bits
+
+    let body = if exp_field == 0 && mantissa == 0 {
+        // ±0.0
+        match prec {
+            Some(p) if p > 0 => format!("0x0.{}p+0", "0".repeat(p)),
+            _ => "0x0p+0".to_string(),
+        }
+    } else {
+        // (lead, frac52, exp): the leading hex digit is always 1 for a
+        // normalised value; a subnormal is normalised by shifting its
+        // mantissa up to a leading 1 and lowering the exponent.
+        let (mut frac52, mut exp): (u64, i64) = if exp_field == 0 {
+            // Subnormal: value = mantissa * 2^-1074. Shift the top set
+            // bit into the implicit-1 position (bit 52).
+            let shift = 52 - (63 - mantissa.leading_zeros()) as i64; // >0
+            (
+                (mantissa << shift) & 0x000f_ffff_ffff_ffff,
+                -1022 - shift,
+            )
+        } else {
+            (mantissa, exp_field - 1023)
+        };
+        // The 52-bit fraction renders as 13 hex nibbles (MSB first).
+        let frac_hex = match prec {
+            None => {
+                let full = format!("{frac52:013x}");
+                let trimmed = full.trim_end_matches('0');
+                trimmed.to_string()
+            }
+            Some(p) if p >= 13 => format!("{frac52:013x}{}", "0".repeat(p - 13)),
+            Some(p) => {
+                // Round the 52-bit fraction to 4*p bits, half-to-even.
+                let drop = 52 - 4 * p;
+                let keep = frac52 >> drop;
+                let rem = frac52 & ((1u64 << drop) - 1);
+                let half = 1u64 << (drop - 1);
+                let round_up = rem > half || (rem == half && keep & 1 == 1);
+                let mut k = keep + u64::from(round_up);
+                if k >> (4 * p) != 0 {
+                    // Carry past the leading 1 → 1.fff… rounds to 2.0,
+                    // i.e. 1.0 × 2^(exp+1) with a zero fraction.
+                    k = 0;
+                    exp += 1;
+                    frac52 = 0;
+                }
+                let _ = frac52;
+                format!("{k:0width$x}", width = p)
+            }
+        };
+        let exp_sign = if exp < 0 { '-' } else { '+' };
+        if frac_hex.is_empty() {
+            format!("0x1p{exp_sign}{}", exp.abs())
+        } else {
+            format!("0x1.{frac_hex}p{exp_sign}{}", exp.abs())
+        }
+    };
+
+    let out = format!("{sign}{body}");
+    if upper { out.to_uppercase() } else { out }
+}
+
 fn fmt_scientific(f: f64, prec: usize, upper: bool) -> String {
     if !f.is_finite() {
         let s = format!("{f}");

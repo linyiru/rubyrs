@@ -1191,6 +1191,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn comparison_failed_message() { run_diff("comparison_failed_message"); }
 // Object#clone(freeze: true|false|nil) override (dup rejects it).
 #[test] fn clone_freeze_kwarg() { run_diff("clone_freeze_kwarg"); }
+// %a / %A C99 hexadecimal float sprintf.
+#[test] fn sprintf_hex_float() { run_diff("sprintf_hex_float"); }
 // Range#map over String endpoints (str_succ materialize).
 #[test] fn range_string_map() { run_diff("range_string_map"); }
 // undef_method kills same-class methods (tombstone + table removal).
