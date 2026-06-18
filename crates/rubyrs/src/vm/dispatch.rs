@@ -1285,6 +1285,27 @@ impl Vm {
                             self.stack.push(Value::new_str(text));
                             return Ok(true);
                         }
+                        // A None decode from a UTF-16-family source is a
+                        // malformed byte sequence (odd length / lone
+                        // surrogate / missing BOM), which CRuby reports as
+                        // InvalidByteSequenceError — NOT the
+                        // UndefinedConversionError the generic decline path
+                        // below raises, and crucially NOT a silent
+                        // pass-through when the bad bytes happen to be
+                        // ASCII-only (a no-BOM "UTF-16" / odd single byte).
+                        // The message names the source encoding and the
+                        // offending bytes; the exact CRuby phrasing
+                        // ("incomplete …") is approximated.
+                        if crate::encoding_full::is_utf16_family(idx) {
+                            let from = crate::encoding_full::name(idx).unwrap_or("UTF-16");
+                            let shown: String = bytes.iter()
+                                .map(|&b| format!("\\x{b:02X}"))
+                                .collect();
+                            return Err(self.trap(RubyError::HostException {
+                                class_name: "Encoding::InvalidByteSequenceError".to_string(),
+                                message: format!("\"{shown}\" on {from}"),
+                            }));
+                        }
                     }
                 }
                 let _ = &replace;

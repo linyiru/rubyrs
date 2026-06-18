@@ -16,6 +16,12 @@ class Encoding
   EUC_JP = Encoding.new("EUC-JP")
   GBK = Encoding.new("GBK")
   Big5 = Encoding.new("Big5")
+  ## Fixed-endianness UTF-16 (hand-rolled transcoder; the BOM-form
+  ## "UTF-16" dummy encoding is not registered — it needs decode-time
+  ## BOM sniffing, a separate follow-up).
+  UTF_16LE = Encoding.new("UTF-16LE")
+  UTF_16BE = Encoding.new("UTF-16BE")
+  UTF_16 = Encoding.new("UTF-16")
 
   class << self
     alias __rubyrs_find_core find
@@ -31,6 +37,9 @@ class Encoding
       when "EUC-JP", "EUCJP" then EUC_JP
       when "GBK", "CP936" then GBK
       when "BIG5" then Big5
+      when "UTF-16LE", "UTF16LE" then UTF_16LE
+      when "UTF-16BE", "UTF16BE" then UTF_16BE
+      when "UTF-16", "UTF16" then UTF_16
       else __rubyrs_find_core(name)
       end
     end
@@ -39,7 +48,7 @@ class Encoding
     def list
       __rubyrs_list_core + [
         ISO_8859_1, Windows_1252, ISO_8859_15, KOI8_R,
-        Windows_31J, EUC_JP, GBK, Big5,
+        Windows_31J, EUC_JP, GBK, Big5, UTF_16LE, UTF_16BE, UTF_16,
       ]
     end
 
