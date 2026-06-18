@@ -8681,7 +8681,16 @@ impl Vm {
             // as locals, not method calls) and the class_stack push
             // still routes `def` onto cls.
             let seed = self.snapshot_caller_named_locals();
-            let v = self.eval_string_full(&src, &filename, synthetic, Some(cls.clone()), None, seed)?;
+            // 3rd arg is the line the source's first line maps to in
+            // backtraces (Tilt's `class_eval(method_source, eval_file,
+            // line - offset)`). Float coerces via truncation, matching
+            // the type guard above.
+            let line_base = match args.get(2) {
+                Some(Value::Int(n)) => Some(*n as i32),
+                Some(Value::Float(f)) => Some(*f as i32),
+                _ => None,
+            };
+            let v = self.eval_string_full(&src, &filename, synthetic, Some(cls.clone()), None, seed, line_base)?;
             if self.suppress_call_result_push {
                 self.suppress_call_result_push = false;
             } else {
@@ -15023,7 +15032,7 @@ impl Vm {
                 // shared captured cell — it must never be considered
                 // for the Locals::Stack representation.
                 creates_block: true,
-                frozen_string_literal: false,
+                frozen_string_literal: false, line_base: 1,
                 code: vec![
                     Op::LoadLocal(0),
                     Op::LoadLocal(1),
@@ -15130,7 +15139,7 @@ impl Vm {
                 // locals live in a shared captured cell — never
                 // Stack-eligible.
                 creates_block: true,
-                frozen_string_literal: false,
+                frozen_string_literal: false, line_base: 1,
                 code: vec![
                     Op::LoadLocal(0),                   // [outer]
                     Op::LoadLocal(1),                   // [outer, inner]
@@ -18546,7 +18555,7 @@ impl Vm {
                 block_param: None,
                 n_locals: 0,
                 creates_block: false,
-                frozen_string_literal: false,
+                frozen_string_literal: false, line_base: 1,
                 code: vec![Op::LoadIvar(ivar_id), Op::Return],
                 op_spans: vec![Span::ZERO; 2],
                 filename: "<attr_accessor>".into(),
@@ -18588,7 +18597,7 @@ impl Vm {
                 block_param: None,
                 n_locals: 1,
                 creates_block: false,
-                frozen_string_literal: false,
+                frozen_string_literal: false, line_base: 1,
                 code: vec![Op::LoadLocal(0), Op::Dup, Op::StoreIvar(ivar_id), Op::Return],
                 op_spans: vec![Span::ZERO; 4],
                 filename: "<attr_accessor>".into(),
@@ -18704,7 +18713,7 @@ impl Vm {
             block_param: None,
             n_locals: 1,
             creates_block: false,
-            frozen_string_literal: false,
+            frozen_string_literal: false, line_base: 1,
             code: vec![
                 Op::LoadSelf,
                 Op::LoadLocal(0),
@@ -18890,7 +18899,7 @@ impl Vm {
             block_param: None,
             n_locals: 1,
             creates_block: false,
-            frozen_string_literal: false,
+            frozen_string_literal: false, line_base: 1,
             code: vec![
                 Op::LoadLocal(0),
                 // Direct builtin call — bypasses `do_call` so the alias
@@ -19040,7 +19049,7 @@ impl Vm {
             block_param: None,
             n_locals: 1,
             creates_block: false,
-            frozen_string_literal: false,
+            frozen_string_literal: false, line_base: 1,
             code: vec![Op::LoadNil, Op::Return],
             op_spans: vec![Span::ZERO; 2],
             filename: "<lifecycle-noop>".into(),

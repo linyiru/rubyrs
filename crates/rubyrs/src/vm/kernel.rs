@@ -3650,7 +3650,7 @@ impl Vm {
                     let owned = src.to_string_lossy();
                     match self.extract_binding_ctx(binding) {
                         Some((self_o, cctx, locals)) => Some(self.eval_string_full(
-                            &owned, "(eval)", true, cctx, Some(self_o), locals,
+                            &owned, "(eval)", true, cctx, Some(self_o), locals, None,
                         )),
                         None => Some(self.eval_string(&owned, "(eval)", true)),
                     }
@@ -3689,6 +3689,13 @@ impl Vm {
                 | [Value::Str(src), binding, Value::Str(file), _] => {
                     let owned = src.to_string_lossy();
                     let fname = file.to_string_lossy();
+                    // 4th arg (when present) is the line the source's
+                    // first line maps to in backtraces.
+                    let line_base = match args.get(3) {
+                        Some(Value::Int(n)) => Some(*n as i32),
+                        Some(Value::Float(f)) => Some(*f as i32),
+                        _ => None,
+                    };
                     // `synthetic=false`: caller supplied the
                     // filename explicitly. Pass through to keep
                     // `__FILE__` stable across repeated evals. A
@@ -3697,9 +3704,9 @@ impl Vm {
                     // builder_binding, path)`).
                     match self.extract_binding_ctx(binding) {
                         Some((self_o, cctx, locals)) => Some(self.eval_string_full(
-                            &owned, &fname, false, cctx, Some(self_o), locals,
+                            &owned, &fname, false, cctx, Some(self_o), locals, line_base,
                         )),
-                        None => Some(self.eval_string(&owned, &fname, false)),
+                        None => Some(self.eval_string_with_line(&owned, &fname, false, line_base)),
                     }
                 }
                 _ => Some(Err(self.trap(RubyError::ArgumentError {
@@ -4639,7 +4646,20 @@ impl Vm {
         synthetic: bool,
         class_ctx: Option<std::rc::Rc<crate::value::Class>>,
     ) -> Result<Value, Trap> {
-        self.eval_string_full(source, filename, synthetic, class_ctx, None, vec![])
+        self.eval_string_full(source, filename, synthetic, class_ctx, None, vec![], None)
+    }
+
+    /// `eval_string` carrying an explicit backtrace line base (the
+    /// 4th arg of `eval(src, nil, file, line)` when no Binding is
+    /// supplied).
+    pub(crate) fn eval_string_with_line(
+        &mut self,
+        source: &str,
+        filename: &str,
+        synthetic: bool,
+        line_base: Option<i32>,
+    ) -> Result<Value, Trap> {
+        self.eval_string_full(source, filename, synthetic, None, None, vec![], line_base)
     }
 
     /// `eval_string_with_class_ctx` plus a `self_override` — the eval'd
@@ -4739,6 +4759,11 @@ impl Vm {
         // local reads, not method calls) and seed the eval frame's
         // locals. Empty for bare `eval` / `class_eval`.
         local_seed: Vec<(String, Value)>,
+        // The line number the eval'd source's FIRST line should report
+        // as in backtraces — the 3rd arg of `class_eval(src, file,
+        // line)` / 4th of `eval(src, b, file, line)`. `None` ⇒ leave
+        // the default (`1`, no adjustment).
+        line_base: Option<i32>,
     ) -> Result<Value, Trap> {
         // Fast-fail BEFORE any parse / AST / compile work when
         // the frame cap is already exhausted. CPU-bound parse of
@@ -4842,6 +4867,17 @@ impl Vm {
         );
         if fsl {
             crate::compiler::mark_frozen_string_literal(&mut self.protos, fsl_start);
+        }
+        // Stamp the caller-supplied line offset over the whole eval
+        // proto range so backtraces / source_location map onto the
+        // caller's coordinate system. `prepare_eval_body` may wrap the
+        // source in a single-line lambda prologue when `local_seed` is
+        // non-empty (to make Prism resolve seeded names as locals);
+        // that prologue shifts the body down one line, so compensate by
+        // subtracting it from the base. (`mark_line_base` is a no-op
+        // relative to the default when `line_base` is None.)
+        if let Some(base) = line_base {
+            crate::compiler::mark_line_base(&mut self.protos, fsl_start, base);
         }
         if let Some(max) = cap_at_entry
             && self.interner.len() > max {

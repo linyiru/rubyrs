@@ -342,6 +342,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // CRuby honours `# frozen-string-literal:` (hyphen form) too — Tilt
 // emits it into compiled template source.
 #[test] fn frozen_string_literal_hyphen() { run_diff("frozen_string_literal_hyphen"); }
+// eval/class_eval line-offset arg maps the source's first line into the
+// caller's coordinate system for backtraces (Tilt template line nums).
+#[test] fn eval_line_offset() { run_diff("eval_line_offset"); }
 // `begin … rescue … else E … ensure … end` — the else body runs only
 // on the no-exception path, its value is the begin's value, and an
 // exception in else escapes the rescue chain (Sinatra/Tilt lazy_load).

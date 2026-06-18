@@ -838,6 +838,17 @@ pub(crate) struct Proto {
     /// mutable (CRuby semantics). Discovery: rack's spec_builder
     /// frozen.ru rackup asserts `'frozen'.frozen?`.
     pub(crate) frozen_string_literal: bool,
+    /// Source line that this proto's FIRST source line maps to in
+    /// reported line numbers (backtraces, `Method#source_location`,
+    /// `caller`). `1` for normal top-level/file protos (no
+    /// adjustment). When a string is eval'd with an explicit line
+    /// argument — `class_eval(src, file, line)` / `eval(src, b, file,
+    /// line)` — every proto compiled from that string carries
+    /// `line_base = line`, so a span on the Nth source line reports as
+    /// `(N - 1) + line_base` (the offset can be ≤ 0; Tilt passes
+    /// `line - preamble_offset` so template content lands on the right
+    /// template line). Apply via `Vm::reported_line`.
+    pub(crate) line_base: i32,
     /// `true` when `code` contains an `Op::CreateBlock` — i.e. running
     /// this proto can capture the frame's locals cell into a
     /// `BlockHandle` (block literal, `proc`/`lambda`/`->`,

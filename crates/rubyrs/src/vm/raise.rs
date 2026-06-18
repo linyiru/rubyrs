@@ -240,7 +240,7 @@ impl Vm {
                         crate::error::Span::ZERO
                     };
                     let line = match self.sources.get(&filename) {
-                        Some(src) => crate::error::line_col(src, span.byte_offset).0,
+                        Some(src) => crate::error::line_with_base(src, span.byte_offset, proto.line_base),
                         None => 0,
                     };
                     Value::new_str(format!("{}:{}:in '{}'", filename, line, method))

@@ -32,6 +32,18 @@ pub(crate) fn line_col(source: &str, byte_offset: u32) -> (u32, u32) {
     (line, col)
 }
 
+/// 1-based source line at `byte_offset`, shifted into the caller's
+/// coordinate system by a proto's `line_base` (the line its first
+/// source line maps to). `line_base == 1` is the identity. Used for
+/// backtraces / `source_location` / `caller` so `eval(src, b, file,
+/// line)` and `class_eval(src, file, line)` report the line the caller
+/// asked for. Clamps to ≥ 1 (CRuby never reports a non-positive line in
+/// a backtrace even when the offset arithmetic would go ≤ 0).
+pub(crate) fn line_with_base(source: &str, byte_offset: u32, line_base: i32) -> u32 {
+    let raw = line_col(source, byte_offset).0 as i64;
+    (raw + line_base as i64 - 1).max(1) as u32
+}
+
 /// Format Prism parse diagnostics into a SyntaxError message body.
 /// Each diagnostic becomes `"L<line>:<col>: <message>"`, joined with
 /// `"; "` when there are multiple.

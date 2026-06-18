@@ -1319,6 +1319,9 @@ impl ProtoBuilder {
             // eval) stamp `true` across the whole proto range when the
             // source carried a `# frozen_string_literal: true` comment.
             frozen_string_literal: false,
+            // 1 = no line adjustment; eval-with-line stamps the whole
+            // proto range via `mark_line_base`.
+            line_base: 1,
             n_required_post: 0,
             rest_param: None,
             kw_param_defaults: vec![],
@@ -2388,6 +2391,18 @@ pub(crate) fn detect_frozen_string_literal(src: &str) -> bool {
 pub(crate) fn mark_frozen_string_literal(protos: &mut [Proto], start: usize) {
     for p in &mut protos[start..] {
         p.frozen_string_literal = true;
+    }
+}
+
+/// Stamp `line_base` onto every proto in `protos[start..]` — the range
+/// an eval-with-line entry just compiled. Mirrors
+/// `mark_frozen_string_literal`: lets `class_eval(src, file, line)` /
+/// `eval(src, b, file, line)` map reported line numbers onto the
+/// caller's coordinate system without threading the offset through
+/// every `compile_*` signature.
+pub(crate) fn mark_line_base(protos: &mut [Proto], start: usize, base: i32) {
+    for p in &mut protos[start..] {
+        p.line_base = base;
     }
 }
 
