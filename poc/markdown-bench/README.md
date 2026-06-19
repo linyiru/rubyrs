@@ -125,6 +125,28 @@ kramdown            Ruby             10263025        3.7      46112
 > next hot spot — a high-level `str` scan or an allocation — and a byte loop, a
 > SWAR/memchr fast-bail, a lookup table, or a borrow removes it.
 
+## Real-world content
+
+The corpus above is synthetic (prose-only). On the gem's actual workload —
+the 235 real Jekyll + Bridgetown pages in `../rostdown-acceptance`, **all
+rendered byte-identically** — rostdown beats pulldown on typical pages, and
+most pages run *faster* than the synthetic bench (they have fewer
+typography rewrites to slow the prose path). Interleaved median-of-3,
+default (no-arena) build:
+
+| real page | rostdown | pulldown | |
+|---|---:|---:|---|
+| `themes.md` (~20 KB, typical docs page) | ~440 | ~333 | **rostdown +32 %** |
+| `history.md` (303 KB, link/list-heavy — the slowest real page) | ~264 | ~235 | **rostdown +12 %** |
+| `navigation.md` (~21 KB, 42 code blocks + `{:toc}`) | ~373 | ~397 | pulldown +6 % |
+
+rostdown leads on the typical page and even on the slowest link-heavy
+outlier. The code/TOC-heavy page narrows (and slightly reverses) because
+rostdown does work pulldown skips entirely — kramdown's `{:toc}`
+table-of-contents generation and fenced-code escaping — to keep the output
+byte-identical. (Profiling these real pages is also what surfaced the
+`escape_attr` SWAR win above, invisible on the link-free synthetic corpus.)
+
 ## Reading the field
 
 - **pulldown-cmark (~344 MB/s, smart punctuation on)** — a streaming
