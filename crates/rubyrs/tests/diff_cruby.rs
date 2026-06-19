@@ -368,6 +368,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // (rack-protection HostAuthorization). Needs the vendored stdlib source.
 #[cfg(feature = "stdlib")]
 #[test] fn ipaddr_basic() { run_diff("ipaddr_basic"); }
+// Pure-Ruby Date/DateTime (Tier 3 vendored): JDN civil-date core,
+// strftime/parse/arithmetic; now/today via Time.now.
+#[cfg(feature = "stdlib")]
+#[test] fn date_basic() { run_diff("date_basic"); }
 // Module#autoload? returns nil once the constant is actually defined
 // (Tilt's FinalizedMapping lazy lookups).
 #[test] fn autoload_defined_nil() { run_diff("autoload_defined_nil"); }

@@ -167,6 +167,11 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         "pp" => Some(include_str!("stdlib_vendor/pp.rb")),
         "bigdecimal/util" => Some(include_str!("stdlib_vendor/bigdecimal_util.rb")),
         "set" => Some(include_str!("stdlib_vendor/set.rb")),
+        // Date / DateTime: pure-Ruby civil dates on a Julian-Day-Number
+        // core, `today`/`now` via Time.now (ADR 0019 Tier 3). The
+        // Date/DateTime constant shells are registered in kernel.rs for
+        // both `date` and `time`; this supplies the real implementation.
+        "date" => Some(include_str!("stdlib_vendor/date.rb")),
         // IPAddr: pure-Ruby IPv4/IPv6 + CIDR (ADR 0019 Tier 3). The
         // `ipaddr` constant shell is registered in kernel.rs; this
         // supplies the real implementation. rack-protection's
