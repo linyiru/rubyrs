@@ -70,6 +70,13 @@ class MatchData
   def named_captures
     @named_caps ? @named_caps.dup : {}
   end
+  # `names` — the array of named-capture group names (in pattern
+  # order), matching `Regexp#names`. Empty when the pattern had no
+  # named groups. Includes non-participating named groups (whose
+  # capture is nil), since `@named_caps` records all of them.
+  def names
+    @named_caps ? @named_caps.keys : []
+  end
   def to_a
     [@whole] + @caps
   end
