@@ -598,6 +598,123 @@ impl Vm {
         }
     }
 
+    /// Numeric `coerce` protocol fallback. When a built-in numeric
+    /// receiver (`Int` / `Float` / `Rational` / `BigInt`) is sent a
+    /// coercible arithmetic/comparison operator with a single
+    /// non-numeric `Object` argument that responds to `coerce`, run
+    /// CRuby's coercion dance: `a, b = other.coerce(self)` then
+    /// `a.send(op, b)`, leaving the result on the operand stack.
+    ///
+    /// This is what lets a pure-Ruby `Numeric` subclass (e.g. the
+    /// preamble `Complex`) interoperate with the built-in numerics on
+    /// the LHS — `1 + Complex(0, 1)` reaches `Complex#coerce`. Returns
+    /// `Ok(Some(()))` when it handled the call (result pushed), or
+    /// `Ok(None)` to let the caller fall through to its NoMethodError /
+    /// TypeError. For `==`, a non-coercible RHS yields `false` (CRuby
+    /// never raises from `Integer#==`).
+    pub(crate) fn try_numeric_coerce_fallback(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        name_id: SymId,
+        args: &[Value],
+    ) -> Result<Option<()>, Trap> {
+        let recv_is_numeric = match recv {
+            Value::Int(_) | Value::Float(_) | Value::Rational(_) => true,
+            #[cfg(feature = "bignum")]
+            Value::BigInt(_) => true,
+            _ => false,
+        };
+        if !recv_is_numeric || args.len() != 1 {
+            return Ok(None);
+        }
+        let arg_is_numeric = match &args[0] {
+            Value::Int(_) | Value::Float(_) | Value::Rational(_) => true,
+            #[cfg(feature = "bignum")]
+            Value::BigInt(_) => true,
+            _ => false,
+        };
+        // Numeric RHS is already handled by the primitive / rational /
+        // bigint arms before this fallback runs; only a non-numeric RHS
+        // reaches the coerce protocol.
+        if arg_is_numeric {
+            return Ok(None);
+        }
+        // Arithmetic ops produce a coerced result or a TypeError;
+        // comparison ops only run the coerce dance when the RHS
+        // actually coerces (else they fall through to the existing,
+        // already-correct `<=>`/`<` handling: nil / ArgumentError).
+        const ARITH: &[&str] = &[
+            "+", "-", "*", "/", "%", "**", "divmod", "fdiv", "quo", "remainder",
+        ];
+        const CMP: &[&str] = &["<=>", "<", "<=", ">", ">=", "=="];
+        let is_arith = ARITH.contains(&name);
+        let is_cmp = CMP.contains(&name);
+        if !is_arith && !is_cmp {
+            return Ok(None);
+        }
+        let other = args[0].clone();
+        let coerce_id = self.interner.intern("coerce");
+        if !self.responds_to(&other, coerce_id, false) {
+            if !is_arith {
+                // Comparison: defer to the caller's existing path
+                // (`==` → false, `<=>` → nil, `<`/`>` → ArgumentError).
+                return Ok(None);
+            }
+            // Arithmetic with a non-coercible RHS → CRuby's
+            // "X can't be coerced into <Numeric>" TypeError. Without
+            // this the call fell through to a misleading
+            // "undefined method `+' for an instance of Integer".
+            let target = match recv {
+                Value::Float(_) => "Float",
+                Value::Rational(_) => "Rational",
+                _ => "Integer",
+            };
+            let arg_desc = match &other {
+                Value::Sym(_) | Value::Nil | Value::Bool(_) => {
+                    other.to_inspect(&self.heap, &self.interner)
+                }
+                Value::Object(id) => self.heap.real_class_of(*id).name.to_string(),
+                v => crate::vm::numeric::type_name_for_coerce(v).to_string(),
+            };
+            return Err(self.trap(RubyError::TypeError {
+                msg: format!("{arg_desc} can't be coerced into {target}"),
+            }));
+        }
+        // `other.coerce(self)` → expect a 2-element Array `[a, b]`.
+        let pre = self.frames.len();
+        self.stack.push(other.clone());
+        self.stack.push(recv.clone());
+        self.do_call(coerce_id, 1, false, u16::MAX)?;
+        self.dispatch_until(pre)?;
+        let pair = self.stack.pop().unwrap_or(Value::Nil);
+        let (a, b) = match &pair {
+            Value::Array(aid) => {
+                let arr = self.heap.array(*aid);
+                if arr.len() == 2 {
+                    (arr[0].clone(), arr[1].clone())
+                } else {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: "coerce must return [x, y]".to_string(),
+                    }));
+                }
+            }
+            _ => {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: "coerce must return [x, y]".to_string(),
+                }));
+            }
+        };
+        // `a.send(op, b)` — the coerced pair re-dispatches the operator
+        // (typically reaching the RHS class's own operator method).
+        let pre2 = self.frames.len();
+        self.stack.push(a);
+        self.stack.push(b);
+        self.do_call(name_id, 1, false, u16::MAX)?;
+        self.dispatch_until(pre2)?;
+        Ok(Some(()))
+    }
+
     /// `Rational#**(exp)` — phase C.4.4 power dispatch.
     ///
     /// Integer exp (Int / BigInt) keeps the result exact:
@@ -8937,6 +9054,19 @@ impl Vm {
         #[cfg(feature = "bignum")]
         if let Some(v) = self.bigint_primitive(&recv, &name, &args)? {
             self.stack.push(v);
+            return Ok(());
+        }
+
+        // Numeric `coerce` protocol: a built-in numeric LHS sent a
+        // coercible operator with a non-numeric Object RHS that
+        // responds to `coerce` (`1 + Complex(0, 1)`). Runs
+        // `a, b = rhs.coerce(lhs); a.send(op, b)`. Sits after the
+        // primitive numeric arms so built-in numeric operands keep
+        // their fast paths, and before the user-table / NoMethodError
+        // fallthrough so it pre-empts the "undefined method" error.
+        if !force_primitive
+            && let Some(()) = self.try_numeric_coerce_fallback(&recv, &name, name_id, &args)?
+        {
             return Ok(());
         }
 
