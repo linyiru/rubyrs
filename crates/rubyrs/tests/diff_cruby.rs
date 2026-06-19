@@ -334,6 +334,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn raise_non_exception() { run_diff("raise_non_exception"); }
 // bare super with named kwargs + **kwrest forwards them as keywords.
 #[test] fn super_kwargs_kwrest() { run_diff("super_kwargs_kwrest"); }
+#[test] fn super_forward_rest_kwargs() { run_diff("super_forward_rest_kwargs"); }
 // trailing `k: v` inside an array literal is a Hash element.
 #[test] fn array_trailing_kwhash() { run_diff("array_trailing_kwhash"); }
 // Module#included_modules — modules in the ancestor chain.
@@ -552,6 +553,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn scan_block_last_match() { run_diff("scan_block_last_match"); }
 #[cfg(feature = "regex")]
 #[test] fn match_data_inspect_named() { run_diff("match_data_inspect_named"); }
+#[cfg(feature = "regex")]
+#[test] fn match_data_names() { run_diff("match_data_names"); }
 #[cfg(feature = "regex")]
 #[test] fn string_match_block_pos() { run_diff("string_match_block_pos"); }
 #[test] fn bare_universal_primitive_self() { run_diff("bare_universal_primitive_self"); }

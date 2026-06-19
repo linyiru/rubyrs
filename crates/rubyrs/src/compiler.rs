@@ -1913,6 +1913,75 @@ pub(crate) fn compile_expr(
                         b.emit(Op::NewArray(b.method_n_positional as u32));
                         b.emit(Op::ApplySuperBlock(name_id));
                     } else if b.method_has_kw
+                        && b.method_rest_slot.is_some()
+                        && b.method_n_post_rest == 0
+                    {
+                        // Bare `super` from a method with BOTH a `*rest`
+                        // and keyword params / `**kwrest`
+                        // (`def m(*a, **kw); super; end` — mustermann's
+                        // `Concat#initialize(*, **)`). The legacy
+                        // slot-dump loads the `*rest` slot as a SINGLE
+                        // positional (so `[*a]` rides nested one level
+                        // too deep — `[[…]]`); splat it into the
+                        // positional array instead, then append the
+                        // reconstructed trailing kwargs Hash so the
+                        // callee binds keywords. Combines the rest-only
+                        // and kw-only branches.
+                        let rs = b.method_rest_slot.expect("rest_slot is_some checked");
+                        let block_present = b.method_block_slot.is_some();
+                        if let Some(bs) = b.method_block_slot {
+                            b.emit(Op::LoadLocal(bs));
+                        }
+                        // positional array `[pre…] + rest`
+                        emit_super_forward_array(b, interner, rs);
+                        // reconstructed kwargs Hash (`**kwrest` merged
+                        // under named kw, explicit keywords winning).
+                        let kw = b.method_kw_params.clone();
+                        let kw_count = kw.len() as u16;
+                        let kwrest = b.method_kw_rest_slot;
+                        if let Some(krs) = kwrest {
+                            b.emit(Op::LoadLocal(krs));
+                        }
+                        for (kname, slot) in &kw {
+                            let ksym = interner.intern(kname);
+                            b.emit(Op::LoadSymbol(ksym));
+                            b.emit(Op::LoadLocal(*slot));
+                        }
+                        b.emit(Op::NewHash(kw_count as u32));
+                        if kwrest.is_some() {
+                            let merge_id = interner.intern("merge");
+                            b.emit(Op::Call(merge_id, 1, u16::MAX));
+                        }
+                        // Append the kwargs Hash to the positional array
+                        // (`arr + [hash]`) ONLY when it is non-empty —
+                        // CRuby's keyword separation forwards nothing for
+                        // an empty `**kwrest`, and a trailing empty Hash
+                        // would otherwise count as an extra positional to
+                        // a parent without kw params (`def m(*a, **kw);
+                        // super; end` calling `super` to `def base(a, b)`).
+                        // Stack here: `[posarr, hash]`.
+                        b.emit(Op::Dup);
+                        let empty_id = interner.intern("empty?");
+                        b.emit(Op::Call(empty_id, 0, u16::MAX));
+                        // JumpIfFalse → non-empty path (condition popped).
+                        let jf = b.emit(Op::JumpIfFalse(0));
+                        // empty: drop the Hash, leave the positional array.
+                        b.emit(Op::Pop);
+                        let j_done = b.emit(Op::Jump(0));
+                        // non-empty: `posarr + [hash]`. ApplySuper peels the
+                        // trailing Hash as kwargs (super leaves
+                        // `trailing_hash_positional == false`).
+                        b.patch_jump(jf, b.pos());
+                        b.emit(Op::NewArray(1));
+                        let plus_id = interner.intern("+");
+                        b.emit(Op::Call(plus_id, 1, u16::MAX));
+                        b.patch_jump(j_done, b.pos());
+                        if block_present {
+                            b.emit(Op::ApplySuperBlock(name_id));
+                        } else {
+                            b.emit(Op::ApplySuper(name_id));
+                        }
+                    } else if b.method_has_kw
                         && b.method_rest_slot.is_none()
                     {
                         // Bare `super` from a method with named keyword
