@@ -337,6 +337,21 @@ impl Vm {
             Value::Object(id) => Some(self.heap.real_class_of(*id)),
             _ => None,
         };
+        // `throw`/`catch` is modelled on the exception machinery
+        // (preamble/throw_catch.rb): a `throw` to a live tag raises an
+        // internal `RubyrsThrowSignal`. CRuby's throw is an unstoppable
+        // non-local jump that NO `rescue` — not even `rescue Exception`
+        // — may intercept; only the matching `catch` stops it. To make
+        // every ordinary rescue transparent to the carrier while still
+        // letting `catch`'s own `rescue RubyrsThrowSignal` catch it, we
+        // require, when the in-flight exception is the throw carrier,
+        // that the handler's filter be RubyrsThrowSignal-or-narrower
+        // (i.e. the filter class itself descends from RubyrsThrowSignal).
+        // `rescue Exception`'s filter is Exception, which is NOT a
+        // descendant, so it falls through — matching CRuby's jump.
+        let exc_is_throw_signal = exc_class
+            .as_ref()
+            .is_some_and(|c| class_chain_has_name(c, "RubyrsThrowSignal"));
         loop {
             // Pop rescue handlers off this frame one by one. A non-ensure
             // handler with a `filter_class` skips if the exception's class
@@ -358,9 +373,18 @@ impl Vm {
                         // `rescue` which compiles to StandardError).
                         // The splat form (`rescue *PASSTHROUGH`)
                         // matches if ANY listed class matches.
-                        exc_class.as_ref().is_some_and(|cls| match filter {
-                            RescueFilter::Class(f) => class_is_a(cls, f),
-                            RescueFilter::Any(list) => list.iter().any(|f| class_is_a(cls, f)),
+                        exc_class.as_ref().is_some_and(|cls| {
+                            // Throw carrier: only a filter that is itself
+                            // RubyrsThrowSignal-or-narrower may catch it.
+                            let filter_ok = |f: &Rc<Class>| {
+                                class_is_a(cls, f)
+                                    && (!exc_is_throw_signal
+                                        || class_chain_has_name(f, "RubyrsThrowSignal"))
+                            };
+                            match filter {
+                                RescueFilter::Class(f) => filter_ok(f),
+                                RescueFilter::Any(list) => list.iter().any(filter_ok),
+                            }
                         })
                     } else {
                         // Non-ensure handler with no resolved filter
@@ -726,6 +750,21 @@ impl Vm {
             self.release_frame_locals(popped.locals);
         }
     }
+}
+
+/// True if `cls` or any of its superclasses is named `name`.
+/// Used to recognise the `RubyrsThrowSignal` throw carrier (and
+/// any hypothetical subclass) so ordinary `rescue` clauses can
+/// stay transparent to a `throw` in flight — see the unwind loop.
+fn class_chain_has_name(cls: &Rc<Class>, name: &str) -> bool {
+    let mut cur = Some(cls.clone());
+    while let Some(c) = cur {
+        if c.name == name {
+            return true;
+        }
+        cur = c.superclass.borrow().clone();
+    }
+    false
 }
 
 /// ADR 0025 Phase 2: build an Interrupt instance for the

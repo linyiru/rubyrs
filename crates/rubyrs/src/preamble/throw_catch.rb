@@ -9,14 +9,16 @@
 #
 #   * tag IS on the live catch stack → `RubyrsThrowSignal`, rooted
 #     directly at Exception. CRuby's throw is an unstoppable
-#     non-local jump — an intervening `rescue ArgumentError` /
-#     `rescue StandardError` between throw and catch must NOT see
-#     it (minitest's assert_throws has exactly such a rescue, used
-#     to DETECT wrong-tag throws; a single-class carrier was caught
-#     there and broke every assert_throws). Rooting the signal
-#     outside StandardError makes ordinary rescues transparent.
-#     Divergence: a bare `rescue Exception` between throw and catch
-#     still intercepts it, which CRuby's jump would fly past.
+#     non-local jump — NO intervening `rescue` between throw and
+#     catch may see it (minitest's assert_throws has exactly such a
+#     rescue, used to DETECT wrong-tag throws; a carrier caught
+#     there broke every assert_throws). The VM unwind loop
+#     (vm/raise.rs) makes EVERY ordinary rescue transparent to the
+#     carrier: a `rescue` clause catches the signal only when its
+#     filter is itself `RubyrsThrowSignal`-or-narrower. So even a
+#     bare `rescue Exception` flies past, exactly like CRuby's jump,
+#     while `catch`'s own `rescue RubyrsThrowSignal` below still
+#     stops it.
 #   * tag is NOT live → `UncaughtThrowError` (< ArgumentError, the
 #     CRuby class) raised AT THE THROW SITE, exactly like CRuby —
 #     user code legitimately rescues this one.
