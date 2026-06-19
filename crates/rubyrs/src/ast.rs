@@ -2935,6 +2935,20 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             });
         }
     }
+    // Imaginary literal — `3i`, `2.5i`, `1ri`. Prism wraps the
+    // numeric in an ImaginaryNode; desugar to `Complex(0, <numeric>)`
+    // so it routes through the preamble's pure-Ruby Complex factory
+    // (and its component types follow the inner literal — `3i` has an
+    // Integer imaginary part, `2.5i` a Float).
+    if let Some(n) = node.as_imaginary_node() {
+        let inner = tr_impl(ctx, &n.numeric());
+        return sp(node, Expr::Call {
+            receiver: None,
+            name: "Complex".to_string(),
+            args: vec![sp(node, Expr::IntLit(0)), inner],
+            kwargs_trailing: false,
+        });
+    }
     if let Some(n) = node.as_float_node() {
         return sp(node, Expr::FloatLit(n.value()));
     }

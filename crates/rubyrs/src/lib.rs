@@ -2450,6 +2450,15 @@ impl Runtime {
             "<rubyrs:preamble:match_data>",
         )
             .expect("ICE: failed to load MatchData preamble");
+        // Complex — pure-Ruby complex-number type + `Kernel#Complex`
+        // + `to_c`/`#i` on the built-in numerics. Built on the VM's
+        // numeric coerce-protocol fallback so a built-in numeric LHS
+        // (`1 + Complex(0, 1)`) reaches `Complex#coerce`.
+        self.eval_inner(
+            include_str!("preamble/complex.rb"),
+            "<rubyrs:preamble:complex>",
+        )
+            .expect("ICE: failed to load Complex preamble");
         // Mutex — single-threaded no-op shim. Tier 1 has no OS
         // threads, so the entire lock surface degenerates to
         // "run the block / no-op".

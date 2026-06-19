@@ -89,6 +89,7 @@ InstanceVariableReadNode
 InstanceVariableTargetNode
 InstanceVariableWriteNode
 IntegerNode
+ImaginaryNode
 InterpolatedRegularExpressionNode
 InterpolatedStringNode
 InterpolatedSymbolNode
