@@ -992,6 +992,12 @@ impl Heap {
     ) -> Vec<(unsafe extern "C" fn(*mut std::ffi::c_void), *mut std::ffi::c_void)> {
         for m in self.marks.iter_mut() { *m = false; }
         let mut worklist: Vec<ObjId> = Vec::new();
+        // Classes whose ivar/method graph has already been walked via an
+        // instance's `class` field this cycle — visit each at most once
+        // regardless of instance count (named classes are also covered
+        // by the Vm root scan; this set bounds the redundant re-walk).
+        let mut seen_inst_classes: crate::intern::FxHashSet<*const Class> =
+            crate::intern::FxHashSet::default();
         for v in roots { Heap::visit_value(v, &mut self.marks, &mut worklist); }
         // Mark phase: iterate each greyed object's children in place.
         // The previous impl `let children: Vec<Value> = ...clone()` per
@@ -1004,6 +1010,22 @@ impl Heap {
                 Slot::Live(HeapObj::Instance(inst)) => {
                     for v in inst.ivars.values() {
                         Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
+                    // Mark the instance's CLASS graph. An ANONYMOUS class
+                    // (`Struct.new(:x).new(...)`, a `Class.new` instance)
+                    // is reachable ONLY through its instances — the Vm
+                    // root scan iterates `Vm.classes` (named only), so
+                    // such a class's heap-backed ivars (e.g. a Struct's
+                    // `@__struct_attrs` members Array) were swept while
+                    // the instance still consulted them on every method
+                    // call — a use-after-free at ObjId-reuse time
+                    // (`Struct.new(:x).new(v)` under GC pressure; the
+                    // `Value::Class` arm follows the superclass chain so
+                    // `class Foo < Struct.new(...)` is covered too). Dedup
+                    // per cycle so N instances of one class walk it once.
+                    let cls = inst.class.clone();
+                    if seen_inst_classes.insert(Rc::as_ptr(&cls)) {
+                        Heap::visit_value(&crate::value::Value::Class(cls), &mut self.marks, &mut worklist);
                     }
                     // Walk singleton-class closure methods too:
                     // singleton classes aren't in `Vm.classes`

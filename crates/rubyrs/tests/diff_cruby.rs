@@ -364,6 +364,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn heap_singleton_block_call() { run_diff("heap_singleton_block_call"); }
 // Fiber.current — stable non-nil per-fiber Hash key (logger level_key).
 #[test] fn fiber_current() { run_diff("fiber_current"); }
+// Anonymous Struct class kept alive via its instances across the GC
+// (its @__struct_attrs members Array must not be swept mid-construct).
+#[test] fn struct_anon_gc() { run_diff("struct_anon_gc"); }
 // Pure-Ruby IPAddr (Tier 3 vendored): IPv4/IPv6 + CIDR + include?/===
 // (rack-protection HostAuthorization). Needs the vendored stdlib source.
 #[cfg(feature = "stdlib")]

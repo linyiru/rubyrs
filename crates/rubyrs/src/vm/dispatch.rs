@@ -18611,8 +18611,20 @@ impl Vm {
     /// These exemptions are intentional; flagged by PR #181
     /// code-review #3.
     pub(crate) fn alloc_default_instance(&mut self, cls: &Rc<Class>) -> Result<Value, Trap> {
+        // Pin the class across the pre-alloc GC. An ANONYMOUS class
+        // (`Struct.new(:x).new(...)`, a `Class.new` instance) reachable
+        // ONLY as this `.new` receiver isn't in any root set yet (it's
+        // not in `Vm.classes`, and the receiver may already be a bare
+        // Rust local), so this maybe_gc would sweep its heap-backed
+        // ivars — a Struct's `@__struct_attrs` members Array — out from
+        // under the `initialize` about to run, ICE'ing on the next
+        // `members` read. Once the instance exists, the Instance mark
+        // arm (heap.rs) keeps the class graph alive via `inst.class`.
+        self.pinned.push(Value::Class(cls.clone()));
         self.maybe_gc();
-        self.check_alloc()?;
+        let alloc_ok = self.check_alloc();
+        self.pinned.pop();
+        alloc_ok?;
         // A user subclass of Hash allocates a real (tagged) Hash so
         // the Hash primitives (`[]=`, `merge!`, `size`, …) dispatch on
         // its instances; the tag carries the actual class for
