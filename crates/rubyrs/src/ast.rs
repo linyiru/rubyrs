@@ -387,6 +387,12 @@ pub(crate) enum Expr {
         /// identical — only the constructed Class struct's
         /// flag differs.
         is_module: bool,
+        /// `true` when the constant path was ABSOLUTE (`class ::Foo` /
+        /// `module ::Bar`) — the definition lands at TOP LEVEL, ignoring
+        /// the enclosing lexical scope (`class C; module ::M; end; end`
+        /// defines top-level `M`, not `C::M`). The compiler forces the
+        /// qualified-name slot to the no-prefix sentinel for these.
+        absolute: bool,
     },
     /// `alias new old` keyword form encountered INSIDE a
     /// `class << X` body. Compiles to `Op::AliasSingletonMethod`
@@ -5335,7 +5341,8 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             }
             None => vec![],
         };
-        return sp(node, Expr::Class { name, superclass, body, is_module: false });
+        let absolute = is_constant_path_absolute(&cp);
+        return sp(node, Expr::Class { name, superclass, body, is_module: false, absolute });
     }
     // `module Foo; ... end` — our subset doesn't distinguish
     // modules from classes (Comparable was already a stub class
@@ -5357,6 +5364,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         } else {
             "?".to_string()
         };
+        let absolute = is_constant_path_absolute(&cp);
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
@@ -5365,7 +5373,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             }
             None => vec![],
         };
-        return sp(node, Expr::Class { name, superclass: None, body, is_module: true });
+        return sp(node, Expr::Class { name, superclass: None, body, is_module: true, absolute });
     }
     // `class << X; body; end` — singleton class body. Supported
     // body entries in the spike subset:

@@ -367,6 +367,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Anonymous Struct class kept alive via its instances across the GC
 // (its @__struct_attrs members Array must not be swept mid-construct).
 #[test] fn struct_anon_gc() { run_diff("struct_anon_gc"); }
+// Time.parse scans for an embedded timestamp (CRuby leniency).
+#[test] fn time_parse_lenient() { run_diff("time_parse_lenient"); }
+// `module ::Foo` / `class ::Bar` inside a class defines at top level.
+#[test] fn absolute_module_def() { run_diff("absolute_module_def"); }
 // Pure-Ruby IPAddr (Tier 3 vendored): IPv4/IPv6 + CIDR + include?/===
 // (rack-protection HostAuthorization). Needs the vendored stdlib source.
 #[cfg(feature = "stdlib")]

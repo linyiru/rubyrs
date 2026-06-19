@@ -229,6 +229,17 @@ class Time
     if s.split(" ").any? { |tk| MONTH_ABBR.include?(tk) }
       return rfc2822(s)
     end
+    # Leniency (CRuby's Date._parse scans for a timestamp ANYWHERE in
+    # the string, ignoring surrounding text). When the string doesn't
+    # already start with an ISO date, extract the first embedded
+    # `YYYY-MM-DD[ HH:MM:SS [zone]]` run and parse that — e.g. a Struct's
+    # `"#<struct to_time=2026-06-18 22:45:32 +0000>"` (Sinatra's
+    # `time_for` does `Time.parse(value.to_s)` on arbitrary objects).
+    unless s =~ /\A\d{4}-\d{2}-\d{2}/
+      m = s.match(/\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2}(?:\s*[+-]\d{2}:?\d{2}|\s*Z)?)?/)
+      raise ArgumentError, "no time information in #{str.inspect}" unless m
+      s = m[0]
+    end
     # Split the date from the time/zone at the first space or 'T'.
     sep = nil
     i = 0

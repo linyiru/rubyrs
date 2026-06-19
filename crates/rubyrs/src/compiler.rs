@@ -613,11 +613,17 @@ fn compile_class_arm(
     superclass: &Option<Box<SExpr>>,
     body: &[SExpr],
     is_module: bool,
+    absolute: bool,
     protos: &mut Vec<Proto>,
     interner: &mut Interner,
     cc: &mut u32,
 ) {
-    let mut child_path = b.class_path.clone();
+    // An ABSOLUTE path (`class ::Foo` / `module ::Bar`) defines at top
+    // level, ignoring the enclosing lexical scope — so the body's
+    // class_path starts fresh at the name, NOT under `b.class_path`,
+    // and the qualified-name slot below is forced to the no-prefix
+    // sentinel.
+    let mut child_path = if absolute { Vec::new() } else { b.class_path.clone() };
     child_path.push(name.to_string());
     let proto_idx = compile_proto_at(
         format!("<class:{}>", name), vec![], body,
@@ -644,10 +650,12 @@ fn compile_class_arm(
     // AND the StoreConst alias below. Do NOT replace with
     // Option<SymId> — the bytecode op fields are SymId-typed
     // and the runtime reader compares `qual_id.0 != u32::MAX`.
-    let qual_id = if !b.class_path.is_empty() && !name.contains("::") {
+    let qual_id = if !absolute && !b.class_path.is_empty() && !name.contains("::") {
         let prefixed = format!("{}::{}", b.class_path.join("::"), name);
         interner.intern(&prefixed)
     } else {
+        // Top level, already-qualified, or an absolute `::Foo` path —
+        // no lexical-scope prefix.
         crate::intern::SymId(u32::MAX)
     };
     if is_module {
@@ -2039,8 +2047,8 @@ pub(crate) fn compile_expr(
             }
             b.emit(Op::ApplySuperBlock(name_id));
         }
-        Expr::Class { name, superclass, body, is_module } => {
-            compile_class_arm(b, name, superclass, body, *is_module, protos, interner, cc);
+        Expr::Class { name, superclass, body, is_module, absolute } => {
+            compile_class_arm(b, name, superclass, body, *is_module, *absolute, protos, interner, cc);
         }
         Expr::AliasSingletonMethod(new_name, old_name) => {
             // Counterpart to the existing alias_method compile-
