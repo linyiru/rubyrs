@@ -371,6 +371,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn time_parse_lenient() { run_diff("time_parse_lenient"); }
 // `module ::Foo` / `class ::Bar` inside a class defines at top level.
 #[test] fn absolute_module_def() { run_diff("absolute_module_def"); }
+// super(*a, &b) with no superclass method falls to method_missing;
+// super FROM method_missing raises (no recursion).
+#[test] fn super_to_method_missing() { run_diff("super_to_method_missing"); }
 // Pure-Ruby IPAddr (Tier 3 vendored): IPv4/IPv6 + CIDR + include?/===
 // (rack-protection HostAuthorization). Needs the vendored stdlib source.
 #[cfg(feature = "stdlib")]

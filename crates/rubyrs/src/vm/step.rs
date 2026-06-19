@@ -2745,7 +2745,45 @@ impl Vm {
                                     }
                                 }
                             }
-                            _ => return Err(trap),
+                            // `super` FROM `method_missing` itself (a
+                            // `def method_missing(m, *a, &b); …; super; end`
+                            // fallthrough — the bare `super` forwards the
+                            // block, so it lands here) reaches
+                            // BasicObject#method_missing, which raises
+                            // NoMethodError for the ORIGINAL missing method
+                            // (args[0]). Routing it back through
+                            // try_method_missing would re-invoke the SAME
+                            // user method_missing → infinite recursion.
+                            ("method_missing", _) => {
+                                let missing = match args.first() {
+                                    Some(Value::Sym(s)) => self.interner.resolve(*s).to_string(),
+                                    Some(Value::Str(s)) => s.to_string_lossy(),
+                                    _ => self.interner.resolve(name_id).to_string(),
+                                };
+                                let recv_desc = self.frames.last()
+                                    .map(|f| self.recv_desc_for_error(&f.self_val))
+                                    .unwrap_or_else(|| "Object".into());
+                                return Err(self.trap(RubyError::NoMethodError {
+                                    kind: crate::error::NoMethodErrorKind::Missing,
+                                    method: missing,
+                                    recv_type: std::borrow::Cow::Owned(recv_desc),
+                                }));
+                            }
+                            (_, cur) => {
+                                // CRuby: `super(*a, &b)` with no superclass
+                                // method invokes `method_missing(name, *a,
+                                // &b)` on self before raising. Sinatra's
+                                // Delegator proxies a delegated method
+                                // (`super if respond_to?`) to a mixin's
+                                // method_missing this way. The no-block
+                                // super path (super_call_with_lifecycle_noop)
+                                // already does this; this is its block-form
+                                // twin.
+                                let recv = cur.unwrap_or(Value::Nil);
+                                if !self.try_method_missing(&recv, name_id, args, block_id)? {
+                                    return Err(trap);
+                                }
+                            }
                         }
                     }
                 }
