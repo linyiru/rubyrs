@@ -167,6 +167,11 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         "pp" => Some(include_str!("stdlib_vendor/pp.rb")),
         "bigdecimal/util" => Some(include_str!("stdlib_vendor/bigdecimal_util.rb")),
         "set" => Some(include_str!("stdlib_vendor/set.rb")),
+        // IPAddr: pure-Ruby IPv4/IPv6 + CIDR (ADR 0019 Tier 3). The
+        // `ipaddr` constant shell is registered in kernel.rs; this
+        // supplies the real implementation. rack-protection's
+        // HostAuthorization does `IPAddr.new("0.0.0.0/0").include?(host)`.
+        "ipaddr" => Some(include_str!("stdlib_vendor/ipaddr.rb")),
         "stringio" => Some(include_str!("stdlib_vendor/stringio.rb")),
         "strscan" => Some(include_str!("stdlib_vendor/strscan.rb")),
         "json" => Some(include_str!("stdlib_vendor/json.rb")),
