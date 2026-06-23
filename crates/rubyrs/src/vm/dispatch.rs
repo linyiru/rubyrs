@@ -2641,6 +2641,34 @@ impl Vm {
     /// `instance_variable_{get,set}("@x#{i}", ...)` in a loop.
     /// Non-Symbol-non-String args raise TypeError matching the
     /// shape `parse_send_target` uses for `send` / `__send__`.
+    /// Resolve a `class_variable_*` name arg (Symbol or String) to the
+    /// `@@name` SymId used as the cvar key. CRuby requires the `@@`
+    /// prefix (else NameError) and that a name follows it.
+    fn resolve_cvar_name_arg(&mut self, arg: &Value) -> Result<SymId, Trap> {
+        let raw = match arg {
+            Value::Sym(id) => self.interner.resolve(*id).to_string(),
+            Value::Str(s) => s.to_string_lossy(),
+            other => {
+                let inspected = other.to_inspect(&self.heap, &self.interner);
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!("{} is not a symbol nor a string", inspected),
+                }));
+            }
+        };
+        if !raw.starts_with("@@") || raw.len() <= 2 {
+            return Err(self.trap(RubyError::NameError {
+                msg: format!("'{raw}' is not allowed as a class variable name"),
+            }));
+        }
+        if let Some(max) = self.max_symbols
+            && !self.interner.contains(&raw) && self.interner.len() >= max {
+                return Err(self.trap(RubyError::ResourceExhausted {
+                    msg: format!("interner exhausted: {} symbols", max),
+                }));
+            }
+        Ok(self.interner.intern(&raw))
+    }
+
     fn resolve_ivar_name_arg(&mut self, arg: &Value) -> Result<SymId, Trap> {
         match arg {
             Value::Sym(id) => {
@@ -11115,6 +11143,74 @@ impl Vm {
                 g2.vm.stack.pop(); // discard initialize_copy's return value
             }
             self.stack.push(copied);
+            return Ok(());
+        }
+        // `Module#class_variable_get / _set / _defined?` + `class_variables`
+        // — cvar reflection over `class.class_vars` (keyed by the `@@name`
+        // SymId, same as Load/StoreCvar). CRuby shares cvars across the
+        // ancestor chain (get/defined?/set resolve to the owning ancestor).
+        // ActiveSupport's mattr_accessor uses class_variable_set.
+        if matches!(&*name, "class_variable_get" | "class_variable_defined?")
+            && args.len() == 1
+            && let Value::Class(cls) = &recv
+        {
+            let cls = cls.clone();
+            let cv_id = self.resolve_cvar_name_arg(&args[0])?;
+            let owner = self.cvar_owner_class(&cls, cv_id);
+            if &*name == "class_variable_defined?" {
+                self.stack.push(Value::Bool(owner.is_some()));
+                return Ok(());
+            }
+            match owner {
+                Some(o) => {
+                    let v = o.class_vars.borrow().get(&cv_id).cloned().unwrap_or(Value::Nil);
+                    self.stack.push(v);
+                }
+                None => {
+                    let nm = self.interner.resolve(cv_id).to_string();
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("uninitialized class variable {nm} in {}", cls.name),
+                    }));
+                }
+            }
+            return Ok(());
+        }
+        if &*name == "class_variable_set" && args.len() == 2
+            && let Value::Class(cls) = &recv
+        {
+            let cls = cls.clone();
+            let cv_id = self.resolve_cvar_name_arg(&args[0])?;
+            let value = args[1].clone();
+            // Write to the owning ancestor (shared-hierarchy semantics),
+            // else create on the receiver — mirrors Op::StoreCvar.
+            let owner = self.cvar_owner_class(&cls, cv_id).unwrap_or(cls);
+            owner.class_vars.borrow_mut().insert(cv_id, value.clone());
+            self.stack.push(value);
+            return Ok(());
+        }
+        if &*name == "class_variables"
+            && args.len() <= 1
+            && let Value::Class(cls) = &recv
+        {
+            // `class_variables(inherit = true)` → the `@@name` Symbols.
+            let inherit = !matches!(args.first(), Some(Value::Bool(false)));
+            let chain = if inherit {
+                crate::vm::lookup::flatten_ancestors(cls)
+            } else {
+                vec![cls.clone()]
+            };
+            let mut out: Vec<Value> = Vec::new();
+            let mut seen = crate::intern::FxHashSet::default();
+            for c in &chain {
+                for k in c.class_vars.borrow().keys() {
+                    if seen.insert(*k) {
+                        out.push(Value::Sym(*k));
+                    }
+                }
+            }
+            self.maybe_gc();
+            let id = self.heap.alloc(HeapObj::Array(out.into()));
+            self.stack.push(Value::Array(id));
             return Ok(());
         }
         if &*name == "instance_variable_get" && args.len() == 1 {
