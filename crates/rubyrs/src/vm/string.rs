@@ -1600,6 +1600,18 @@ pub(crate) fn string_call(
         (Value::Str(a), "end_with?", [Value::Str(b)]) => {
             Some(Value::Bool(a.with_str_lossy(|sa| b.with_str_lossy(|sb| sa.ends_with(sb)))))
         }
+        // Variadic `end_with?` — true if the string ends with ANY of the
+        // suffix arguments (CRuby accepts only Strings here, no Regexp;
+        // non-String args are ignored, mirroring the start_with? arm's
+        // leniency). The single-String fast path above is the common case.
+        (Value::Str(a), "end_with?", suffixes) => {
+            let src = a.to_string_lossy();
+            let any = suffixes.iter().any(|p| match p {
+                Value::Str(b) => src.ends_with(&*b.to_string_lossy()),
+                _ => false,
+            });
+            Some(Value::Bool(any))
+        }
         // Variadic `start_with?` — true if ANY argument matches at the
         // start: a String is a literal prefix; a Regexp must match at
         // index 0 (`"Hello".start_with?(/[A-Z]/)`). Non-String/Regexp
