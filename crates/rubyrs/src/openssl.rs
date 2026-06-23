@@ -261,11 +261,11 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         Ok(Value::new_str_bytes_binary(mac.to_vec()))
     });
 
-    // `__rubyrs_aes256_ctr(key, iv, byte_offset, data)` → BINARY String.
-    // CTR is a stream cipher: encrypt and decrypt are the same call. The
-    // 32-byte key and 16-byte IV are validated for length here so a
-    // wrong-sized key surfaces as an OpenSSLError, not a panic.
-    rt.register_fn("__rubyrs_aes256_ctr", |args| {
+    // `__rubyrs_aes_ctr(key, iv, byte_offset, data)` → BINARY String.
+    // Key is 16 / 24 / 32 bytes (AES-128 / 192 / 256); CTR is a stream
+    // cipher (encrypt == decrypt). Lengths validated here so a wrong
+    // size surfaces as an OpenSSLError, not a panic.
+    rt.register_fn("__rubyrs_aes_ctr", |args| {
         let (key, iv, offset, data) = match args {
             [Value::Str(k), Value::Str(v), Value::Int(off), Value::Str(d)] => (
                 k.borrow().clone(),
@@ -274,88 +274,92 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 d.borrow().clone(),
             ),
             _ => return Err(arg_err(
-                "__rubyrs_aes256_ctr(key: String, iv: String, offset: Integer, data: String)",
+                "__rubyrs_aes_ctr(key: String, iv: String, offset: Integer, data: String)",
             )),
         };
-        let key: [u8; 32] = key.as_slice().try_into()
-            .map_err(|_| ssl_err(format!("aes-256-ctr key must be 32 bytes (got {})", key.len())))?;
+        validate_aes_key(&key)?;
         let iv: [u8; 16] = iv.as_slice().try_into()
-            .map_err(|_| ssl_err(format!("aes-256-ctr iv must be 16 bytes (got {})", iv.len())))?;
+            .map_err(|_| ssl_err(format!("aes-ctr iv must be 16 bytes (got {})", iv.len())))?;
         let offset = u64::try_from(offset).unwrap_or(0);
-        Ok(Value::new_str_bytes_binary(crate::aes::aes256_ctr_xor(&key, &iv, offset, &data)))
+        Ok(Value::new_str_bytes_binary(crate::aes::aes_ctr_xor(&key, &iv, offset, &data)))
     });
 
-    // `__rubyrs_aes256_gcm_encrypt(key, iv, aad, plaintext)` → a BINARY
+    // `__rubyrs_aes_gcm_encrypt(key, iv, aad, plaintext)` → a BINARY
     // String of `ciphertext || tag` (the 16-byte auth tag is appended;
     // the OpenSSL::Cipher veneer splits it back off).
-    rt.register_fn("__rubyrs_aes256_gcm_encrypt", |args| {
+    rt.register_fn("__rubyrs_aes_gcm_encrypt", |args| {
         let (key, iv, aad, data) = match args {
             [Value::Str(k), Value::Str(v), Value::Str(a), Value::Str(d)] => (
                 k.borrow().clone(), v.borrow().clone(), a.borrow().clone(), d.borrow().clone(),
             ),
             _ => return Err(arg_err(
-                "__rubyrs_aes256_gcm_encrypt(key: String, iv: String, aad: String, plaintext: String)",
+                "__rubyrs_aes_gcm_encrypt(key: String, iv: String, aad: String, plaintext: String)",
             )),
         };
-        let key: [u8; 32] = key.as_slice().try_into()
-            .map_err(|_| ssl_err(format!("aes-256-gcm key must be 32 bytes (got {})", key.len())))?;
-        let (mut ct, tag) = crate::aes::aes256_gcm_encrypt(&key, &iv, &aad, &data);
+        validate_aes_key(&key)?;
+        let (mut ct, tag) = crate::aes::aes_gcm_encrypt(&key, &iv, &aad, &data);
         ct.extend_from_slice(&tag);
         Ok(Value::new_str_bytes_binary(ct))
     });
 
-    // `__rubyrs_aes256_gcm_decrypt(key, iv, aad, ciphertext, tag)` → the
-    // plaintext BINARY String, or an OpenSSLError if the tag fails to
-    // authenticate (surfaced as CipherError from Cipher#final).
-    rt.register_fn("__rubyrs_aes256_gcm_decrypt", |args| {
+    // `__rubyrs_aes_gcm_decrypt(key, iv, aad, ciphertext, tag)` → the
+    // plaintext BINARY String, or nil if the tag fails to authenticate
+    // (surfaced as CipherError from Cipher#final).
+    rt.register_fn("__rubyrs_aes_gcm_decrypt", |args| {
         let (key, iv, aad, ct, tag) = match args {
             [Value::Str(k), Value::Str(v), Value::Str(a), Value::Str(c), Value::Str(t)] => (
                 k.borrow().clone(), v.borrow().clone(), a.borrow().clone(),
                 c.borrow().clone(), t.borrow().clone(),
             ),
             _ => return Err(arg_err(
-                "__rubyrs_aes256_gcm_decrypt(key: String, iv: String, aad: String, ct: String, tag: String)",
+                "__rubyrs_aes_gcm_decrypt(key: String, iv: String, aad: String, ct: String, tag: String)",
             )),
         };
-        let key: [u8; 32] = key.as_slice().try_into()
-            .map_err(|_| ssl_err(format!("aes-256-gcm key must be 32 bytes (got {})", key.len())))?;
+        validate_aes_key(&key)?;
         // `nil` on auth failure — the Cipher#final veneer turns it into
         // a Ruby OpenSSL::Cipher::CipherError (a rescuable StandardError),
         // not the host-level exception a host-fn `Err` would raise.
-        match crate::aes::aes256_gcm_decrypt(&key, &iv, &aad, &ct, &tag) {
+        match crate::aes::aes_gcm_decrypt(&key, &iv, &aad, &ct, &tag) {
             Some(pt) => Ok(Value::new_str_bytes_binary(pt)),
             None => Ok(Value::Nil),
         }
     });
 
-    // `__rubyrs_aes256_cbc_encrypt(key, iv, data)` / `_decrypt(...)` →
+    // `__rubyrs_aes_cbc_encrypt(key, iv, data)` / `_decrypt(...)` →
     // BINARY String. `data` must already be a 16-byte multiple (the
     // OpenSSL::Cipher veneer applies / strips PKCS#7 padding).
-    rt.register_fn("__rubyrs_aes256_cbc_encrypt", |args| {
+    rt.register_fn("__rubyrs_aes_cbc_encrypt", |args| {
         let (key, iv, data) = cbc_args(args, "encrypt")?;
-        Ok(Value::new_str_bytes_binary(crate::aes::aes256_cbc_encrypt(&key, &iv, &data)))
+        Ok(Value::new_str_bytes_binary(crate::aes::aes_cbc_encrypt(&key, &iv, &data)))
     });
-    rt.register_fn("__rubyrs_aes256_cbc_decrypt", |args| {
+    rt.register_fn("__rubyrs_aes_cbc_decrypt", |args| {
         let (key, iv, data) = cbc_args(args, "decrypt")?;
-        Ok(Value::new_str_bytes_binary(crate::aes::aes256_cbc_decrypt(&key, &iv, &data)))
+        Ok(Value::new_str_bytes_binary(crate::aes::aes_cbc_decrypt(&key, &iv, &data)))
     });
 }
 
-/// Shared arg validation for the CBC host fns: 32-byte key, 16-byte IV,
-/// and a block-aligned data buffer.
-fn cbc_args(args: &[Value], op: &str) -> Result<([u8; 32], [u8; 16], Vec<u8>), Trap> {
+/// AES key length must be 16 / 24 / 32 bytes (AES-128 / 192 / 256).
+fn validate_aes_key(key: &[u8]) -> Result<(), Trap> {
+    match key.len() {
+        16 | 24 | 32 => Ok(()),
+        n => Err(ssl_err(format!("aes key must be 16, 24, or 32 bytes (got {n})"))),
+    }
+}
+
+/// Shared arg validation for the CBC host fns: AES key (16/24/32),
+/// 16-byte IV, and a block-aligned data buffer.
+fn cbc_args(args: &[Value], op: &str) -> Result<(Vec<u8>, [u8; 16], Vec<u8>), Trap> {
     let (key, iv, data) = match args {
         [Value::Str(k), Value::Str(v), Value::Str(d)] => {
             (k.borrow().clone(), v.borrow().clone(), d.borrow().clone())
         }
         _ => return Err(arg_err(&format!(
-            "__rubyrs_aes256_cbc_{op}(key: String, iv: String, data: String)"
+            "__rubyrs_aes_cbc_{op}(key: String, iv: String, data: String)"
         ))),
     };
-    let key: [u8; 32] = key.as_slice().try_into()
-        .map_err(|_| ssl_err(format!("aes-256-cbc key must be 32 bytes (got {})", key.len())))?;
+    validate_aes_key(&key)?;
     let iv: [u8; 16] = iv.as_slice().try_into()
-        .map_err(|_| ssl_err(format!("aes-256-cbc iv must be 16 bytes (got {})", iv.len())))?;
+        .map_err(|_| ssl_err(format!("aes-cbc iv must be 16 bytes (got {})", iv.len())))?;
     if data.len() % 16 != 0 {
         return Err(ssl_err(format!("aes-256-cbc data must be a 16-byte multiple (got {})", data.len())));
     }

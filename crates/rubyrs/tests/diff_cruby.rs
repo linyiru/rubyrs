@@ -771,6 +771,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // AES-256-CBC with PKCS#7 padding — round-trip, padding=0, bad decrypt.
 #[cfg(feature = "_openssl")]
 #[test] fn openssl_aes_cbc() { run_diff("openssl_aes_cbc"); }
+// AES-128 (16-byte key, 10 rounds) across CBC/CTR/GCM.
+#[cfg(feature = "_openssl")]
+#[test] fn openssl_aes128() { run_diff("openssl_aes128"); }
 #[test] fn super_to_primitive() { run_diff("super_to_primitive"); }
 #[test] fn fancy_regex_captures() { run_diff("fancy_regex_captures"); }
 #[test] fn numeric_comparable() { run_diff("numeric_comparable"); }

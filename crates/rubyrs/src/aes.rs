@@ -55,38 +55,45 @@ const INV_SBOX: [u8; 256] = [
     0x17,0x2b,0x04,0x7e,0xba,0x77,0xd6,0x26,0xe1,0x69,0x14,0x63,0x55,0x21,0x0c,0x7d,
 ];
 
-// Round constants for the AES-256 key schedule (one per 8-word group; the
-// schedule uses Rcon[1..=7] for 60 words = 14 rounds).
-const RCON: [u8; 8] = [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40];
+// AES key-schedule round constants, Rcon[1..=10] (index 0 unused). Ten
+// entries cover AES-128's 10 groups; AES-192/256 use fewer.
+const RCON: [u8; 11] = [
+    0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36,
+];
 
-const NR: usize = 14; // AES-256: 14 rounds.
-
-/// Expand a 32-byte AES-256 key into `4 * (NR + 1)` round-key words.
-fn key_schedule(key: &[u8; 32]) -> [[u8; 4]; 4 * (NR + 1)] {
-    let mut w = [[0u8; 4]; 4 * (NR + 1)];
-    for i in 0..8 {
+/// Expand an AES key (16 / 24 / 32 bytes → AES-128 / 192 / 256) into its
+/// round-key words. Returns `(round_keys, nr)` where `nr` is the round
+/// count (10 / 12 / 14); `round_keys.len() == 4 * (nr + 1)`. The block
+/// transforms are identical across key sizes — only the schedule and
+/// round count differ.
+fn expand_key(key: &[u8]) -> (Vec<[u8; 4]>, usize) {
+    let nk = key.len() / 4; // key words: 4, 6, or 8
+    let nr = nk + 6; // rounds: 10, 12, or 14
+    let total = 4 * (nr + 1);
+    let mut w = vec![[0u8; 4]; total];
+    for i in 0..nk {
         w[i] = [key[4 * i], key[4 * i + 1], key[4 * i + 2], key[4 * i + 3]];
     }
-    for i in 8..4 * (NR + 1) {
+    for i in nk..total {
         let mut t = w[i - 1];
-        if i % 8 == 0 {
+        if i % nk == 0 {
             // RotWord + SubWord + Rcon.
             t = [t[1], t[2], t[3], t[0]];
             for b in &mut t {
                 *b = SBOX[*b as usize];
             }
-            t[0] ^= RCON[i / 8];
-        } else if i % 8 == 4 {
-            // AES-256 applies SubWord at the mid-group word too.
+            t[0] ^= RCON[i / nk];
+        } else if nk > 6 && i % nk == 4 {
+            // AES-256 only: SubWord at the mid-group word.
             for b in &mut t {
                 *b = SBOX[*b as usize];
             }
         }
         for j in 0..4 {
-            w[i][j] = w[i - 8][j] ^ t[j];
+            w[i][j] = w[i - nk][j] ^ t[j];
         }
     }
-    w
+    (w, nr)
 }
 
 #[inline]
@@ -100,10 +107,11 @@ fn gmul2(x: u8) -> u8 { xtime(x) }
 #[inline]
 fn gmul3(x: u8) -> u8 { xtime(x) ^ x }
 
-/// Encrypt one 16-byte block in place under the expanded key schedule.
-fn encrypt_block(w: &[[u8; 4]; 4 * (NR + 1)], block: &mut [u8; 16]) {
+/// Encrypt one 16-byte block in place under the expanded key schedule
+/// (`nr` rounds).
+fn encrypt_block(w: &[[u8; 4]], nr: usize, block: &mut [u8; 16]) {
     add_round_key(block, w, 0);
-    for round in 1..NR {
+    for round in 1..nr {
         sub_bytes(block);
         shift_rows(block);
         mix_columns(block);
@@ -111,11 +119,11 @@ fn encrypt_block(w: &[[u8; 4]; 4 * (NR + 1)], block: &mut [u8; 16]) {
     }
     sub_bytes(block);
     shift_rows(block);
-    add_round_key(block, w, NR);
+    add_round_key(block, w, nr);
 }
 
 #[inline]
-fn add_round_key(s: &mut [u8; 16], w: &[[u8; 4]; 4 * (NR + 1)], round: usize) {
+fn add_round_key(s: &mut [u8; 16], w: &[[u8; 4]], round: usize) {
     // State columns map to round-key words 4*round + col.
     for col in 0..4 {
         let k = w[4 * round + col];
@@ -163,8 +171,8 @@ fn mix_columns(s: &mut [u8; 16]) {
 /// been consumed by previous `update` calls on the same cipher, so the
 /// counter and intra-block position resume exactly where they left off.
 /// Encrypt and decrypt are identical (stream cipher).
-pub fn aes256_ctr_xor(key: &[u8; 32], iv: &[u8; 16], byte_offset: u64, data: &[u8]) -> Vec<u8> {
-    let w = key_schedule(key);
+pub fn aes_ctr_xor(key: &[u8], iv: &[u8; 16], byte_offset: u64, data: &[u8]) -> Vec<u8> {
+    let (w, nr) = expand_key(key);
     let mut out = Vec::with_capacity(data.len());
     let mut consumed = byte_offset;
     let mut keystream = [0u8; 16];
@@ -177,7 +185,7 @@ pub fn aes256_ctr_xor(key: &[u8; 32], iv: &[u8; 16], byte_offset: u64, data: &[u
             let mut ctr = *iv;
             add_counter(&mut ctr, block_index);
             keystream = ctr;
-            encrypt_block(&w, &mut keystream);
+            encrypt_block(&w, nr, &mut keystream);
             ks_valid_from = block_index;
         }
         out.push(byte ^ keystream[within]);
@@ -255,12 +263,12 @@ fn inc32(cb: &mut [u8; 16]) {
 
 /// GCTR: counter mode keyed by the expanded schedule, starting from the
 /// initial counter block `icb`, incrementing the low 32 bits per block.
-fn gctr(w: &[[u8; 4]; 4 * (NR + 1)], icb: &[u8; 16], data: &[u8]) -> Vec<u8> {
+fn gctr(w: &[[u8; 4]], nr: usize, icb: &[u8; 16], data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
     let mut cb = *icb;
     for chunk in data.chunks(16) {
         let mut ks = cb;
-        encrypt_block(w, &mut ks);
+        encrypt_block(w, nr, &mut ks);
         for (i, &b) in chunk.iter().enumerate() {
             out.push(b ^ ks[i]);
         }
@@ -270,9 +278,9 @@ fn gctr(w: &[[u8; 4]; 4 * (NR + 1)], icb: &[u8; 16], data: &[u8]) -> Vec<u8> {
 }
 
 /// Derive (H, J0) for a key schedule and IV.
-fn gcm_setup(w: &[[u8; 4]; 4 * (NR + 1)], iv: &[u8]) -> ([u8; 16], [u8; 16]) {
+fn gcm_setup(w: &[[u8; 4]], nr: usize, iv: &[u8]) -> ([u8; 16], [u8; 16]) {
     let mut h = [0u8; 16];
-    encrypt_block(w, &mut h);
+    encrypt_block(w, nr, &mut h);
     let j0 = if iv.len() == 12 {
         let mut j = [0u8; 16];
         j[..12].copy_from_slice(iv);
@@ -291,7 +299,7 @@ fn gcm_setup(w: &[[u8; 4]; 4 * (NR + 1)], iv: &[u8]) -> ([u8; 16], [u8; 16]) {
 }
 
 /// GHASH over AAD || pad || C || pad || [bitlen(A)]_64 || [bitlen(C)]_64.
-fn gcm_tag(w: &[[u8; 4]; 4 * (NR + 1)], h: &[u8; 16], j0: &[u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
+fn gcm_tag(w: &[[u8; 4]], nr: usize, h: &[u8; 16], j0: &[u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
     let mut g = Vec::with_capacity(aad.len() + ct.len() + 48);
     g.extend_from_slice(aad);
     while g.len() % 16 != 0 {
@@ -305,7 +313,7 @@ fn gcm_tag(w: &[[u8; 4]; 4 * (NR + 1)], h: &[u8; 16], j0: &[u8; 16], aad: &[u8],
     g.extend_from_slice(&((ct.len() as u64) * 8).to_be_bytes());
     let s = ghash(h, &g);
     let mut ej0 = *j0;
-    encrypt_block(w, &mut ej0);
+    encrypt_block(w, nr, &mut ej0);
     let mut tag = [0u8; 16];
     for i in 0..16 {
         tag[i] = ej0[i] ^ s[i];
@@ -314,28 +322,28 @@ fn gcm_tag(w: &[[u8; 4]; 4 * (NR + 1)], h: &[u8; 16], j0: &[u8; 16], aad: &[u8],
 }
 
 /// AES-256-GCM encrypt → (ciphertext, 16-byte tag).
-pub fn aes256_gcm_encrypt(key: &[u8; 32], iv: &[u8], aad: &[u8], plaintext: &[u8]) -> (Vec<u8>, [u8; 16]) {
-    let w = key_schedule(key);
-    let (h, j0) = gcm_setup(&w, iv);
+pub fn aes_gcm_encrypt(key: &[u8], iv: &[u8], aad: &[u8], plaintext: &[u8]) -> (Vec<u8>, [u8; 16]) {
+    let (w, nr) = expand_key(key);
+    let (h, j0) = gcm_setup(&w, nr, iv);
     let mut cb = j0;
     inc32(&mut cb);
-    let ct = gctr(&w, &cb, plaintext);
-    let tag = gcm_tag(&w, &h, &j0, aad, &ct);
+    let ct = gctr(&w, nr, &cb, plaintext);
+    let tag = gcm_tag(&w, nr, &h, &j0, aad, &ct);
     (ct, tag)
 }
 
 /// AES-256-GCM decrypt with tag verification → plaintext, or `None` if
 /// the tag doesn't authenticate (constant-time compare).
-pub fn aes256_gcm_decrypt(
-    key: &[u8; 32],
+pub fn aes_gcm_decrypt(
+    key: &[u8],
     iv: &[u8],
     aad: &[u8],
     ct: &[u8],
     tag: &[u8],
 ) -> Option<Vec<u8>> {
-    let w = key_schedule(key);
-    let (h, j0) = gcm_setup(&w, iv);
-    let expected = gcm_tag(&w, &h, &j0, aad, ct);
+    let (w, nr) = expand_key(key);
+    let (h, j0) = gcm_setup(&w, nr, iv);
+    let expected = gcm_tag(&w, nr, &h, &j0, aad, ct);
     let mut diff = 0u8;
     if tag.len() != 16 {
         return None;
@@ -348,7 +356,7 @@ pub fn aes256_gcm_decrypt(
     }
     let mut cb = j0;
     inc32(&mut cb);
-    Some(gctr(&w, &cb, ct))
+    Some(gctr(&w, nr, &cb, ct))
 }
 
 // ---- AES-256-CBC ----
@@ -408,9 +416,9 @@ fn inv_mix_columns(s: &mut [u8; 16]) {
 }
 
 /// Decrypt one 16-byte block in place (inverse cipher, FIPS-197 §5.3).
-fn decrypt_block(w: &[[u8; 4]; 4 * (NR + 1)], block: &mut [u8; 16]) {
-    add_round_key(block, w, NR);
-    for round in (1..NR).rev() {
+fn decrypt_block(w: &[[u8; 4]], nr: usize, block: &mut [u8; 16]) {
+    add_round_key(block, w, nr);
+    for round in (1..nr).rev() {
         inv_shift_rows(block);
         inv_sub_bytes(block);
         add_round_key(block, w, round);
@@ -422,8 +430,8 @@ fn decrypt_block(w: &[[u8; 4]; 4 * (NR + 1)], block: &mut [u8; 16]) {
 }
 
 /// AES-256-CBC encrypt of block-aligned `data` (len multiple of 16).
-pub fn aes256_cbc_encrypt(key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
-    let w = key_schedule(key);
+pub fn aes_cbc_encrypt(key: &[u8], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    let (w, nr) = expand_key(key);
     let mut out = Vec::with_capacity(data.len());
     let mut prev = *iv;
     for chunk in data.chunks_exact(16) {
@@ -431,7 +439,7 @@ pub fn aes256_cbc_encrypt(key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Vec<u8>
         for i in 0..16 {
             blk[i] = chunk[i] ^ prev[i];
         }
-        encrypt_block(&w, &mut blk);
+        encrypt_block(&w, nr, &mut blk);
         out.extend_from_slice(&blk);
         prev = blk;
     }
@@ -440,15 +448,15 @@ pub fn aes256_cbc_encrypt(key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Vec<u8>
 
 /// AES-256-CBC decrypt of block-aligned `data` (len multiple of 16).
 /// Returns the still-PKCS#7-padded plaintext (the veneer strips it).
-pub fn aes256_cbc_decrypt(key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
-    let w = key_schedule(key);
+pub fn aes_cbc_decrypt(key: &[u8], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    let (w, nr) = expand_key(key);
     let mut out = Vec::with_capacity(data.len());
     let mut prev = *iv;
     for chunk in data.chunks_exact(16) {
         let mut blk = [0u8; 16];
         blk.copy_from_slice(chunk);
         let ct = blk;
-        decrypt_block(&w, &mut blk);
+        decrypt_block(&w, nr, &mut blk);
         for i in 0..16 {
             out.push(blk[i] ^ prev[i]);
         }
@@ -504,9 +512,32 @@ mod tests {
             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         ).try_into().unwrap();
         let mut block: [u8; 16] = unhex("00112233445566778899aabbccddeeff").try_into().unwrap();
-        let w = key_schedule(&key);
-        encrypt_block(&w, &mut block);
+        let (w, nr) = expand_key(&key);
+        encrypt_block(&w, nr, &mut block);
         assert_eq!(hex(&block), "8ea2b7ca516745bfeafc49904b496089");
+    }
+
+    #[test]
+    fn aes128_block_and_modes() {
+        // FIPS-197 Appendix C.1 (AES-128) known-answer for the block.
+        let key: [u8; 16] = unhex("000102030405060708090a0b0c0d0e0f").try_into().unwrap();
+        let mut block: [u8; 16] = unhex("00112233445566778899aabbccddeeff").try_into().unwrap();
+        let (w, nr) = expand_key(&key);
+        assert_eq!(nr, 10);
+        encrypt_block(&w, nr, &mut block);
+        assert_eq!(hex(&block), "69c4e0d86a7b0430d8cdb78070b4c55a");
+
+        // CBC round-trip with a 128-bit key.
+        let iv = [0x11u8; 16];
+        let pt = b"sixteen byte msg".to_vec();
+        let ct = aes_cbc_encrypt(&key, &iv, &pt);
+        assert_eq!(aes_cbc_decrypt(&key, &iv, &ct), pt);
+
+        // GCM round-trip + tag verification with a 128-bit key.
+        let giv = [0x22u8; 12];
+        let (gct, tag) = aes_gcm_encrypt(&key, &giv, b"aad", b"hello aes-128-gcm");
+        assert_eq!(aes_gcm_decrypt(&key, &giv, b"aad", &gct, &tag).unwrap(), b"hello aes-128-gcm");
+        assert!(aes_gcm_decrypt(&key, &giv, b"wrong", &gct, &tag).is_none());
     }
 
     #[test]
@@ -522,7 +553,7 @@ mod tests {
             "30c81c46a35ce411e5fbc1191a0a52ef",
             "f69f2445df4f9b17ad2b417be66c3710",
         ));
-        let ct = aes256_ctr_xor(&key, &iv, 0, &plaintext);
+        let ct = aes_ctr_xor(&key, &iv, 0, &plaintext);
         assert_eq!(hex(&ct), concat!(
             "601ec313775789a5b7a7f504bbf3d228",
             "f443e3ca4d62b59aca84e990cacaf5c5",
@@ -530,7 +561,7 @@ mod tests {
             "dfc9c58db67aada613c2dd08457941a6",
         ));
         // Round-trip: CTR decrypt == same XOR.
-        let back = aes256_ctr_xor(&key, &iv, 0, &ct);
+        let back = aes_ctr_xor(&key, &iv, 0, &ct);
         assert_eq!(back, plaintext);
     }
 
@@ -541,9 +572,9 @@ mod tests {
         let key = [7u8; 32];
         let iv = [3u8; 16];
         let data: Vec<u8> = (0..70u8).collect();
-        let whole = aes256_ctr_xor(&key, &iv, 0, &data);
-        let a = aes256_ctr_xor(&key, &iv, 0, &data[..23]);
-        let b = aes256_ctr_xor(&key, &iv, 23, &data[23..]);
+        let whole = aes_ctr_xor(&key, &iv, 0, &data);
+        let a = aes_ctr_xor(&key, &iv, 0, &data[..23]);
+        let b = aes_ctr_xor(&key, &iv, 23, &data[23..]);
         assert_eq!([a, b].concat(), whole);
     }
 
@@ -560,14 +591,14 @@ mod tests {
             "30c81c46a35ce411e5fbc1191a0a52ef",
             "f69f2445df4f9b17ad2b417be66c3710",
         ));
-        let ct = aes256_cbc_encrypt(&key, &iv, &pt);
+        let ct = aes_cbc_encrypt(&key, &iv, &pt);
         assert_eq!(hex(&ct), concat!(
             "f58c4c04d6e5f1ba779eabfb5f7bfbd6",
             "9cfc4e967edb808d679f777bc6702c7d",
             "39f23369a9d9bacfa530e26304231461",
             "b2eb05e2c39be9fcda6c19078c6a9d1b",
         ));
-        assert_eq!(aes256_cbc_decrypt(&key, &iv, &ct), pt);
+        assert_eq!(aes_cbc_decrypt(&key, &iv, &ct), pt);
     }
 
     #[test]
@@ -576,7 +607,7 @@ mod tests {
         // empty AAD/plaintext → empty ct, known tag.
         let key = [0u8; 32];
         let iv = [0u8; 12];
-        let (ct, tag) = aes256_gcm_encrypt(&key, &iv, &[], &[]);
+        let (ct, tag) = aes_gcm_encrypt(&key, &iv, &[], &[]);
         assert!(ct.is_empty());
         assert_eq!(hex(&tag), "530f8afbc74536b9a963b4f1c4cb738b");
     }
@@ -593,19 +624,19 @@ mod tests {
             "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72",
             "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
         ));
-        let (ct, tag) = aes256_gcm_encrypt(&key, &iv, &aad, &pt);
+        let (ct, tag) = aes_gcm_encrypt(&key, &iv, &aad, &pt);
         assert_eq!(hex(&ct), concat!(
             "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa",
             "8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662",
         ));
         assert_eq!(hex(&tag), "76fc6ece0f4e1768cddf8853bb2d551b");
         // Round-trip with tag verification.
-        let back = aes256_gcm_decrypt(&key, &iv, &aad, &ct, &tag).unwrap();
+        let back = aes_gcm_decrypt(&key, &iv, &aad, &ct, &tag).unwrap();
         assert_eq!(back, pt);
         // A flipped tag byte must fail authentication.
         let mut bad = tag;
         bad[0] ^= 1;
-        assert!(aes256_gcm_decrypt(&key, &iv, &aad, &ct, &bad).is_none());
+        assert!(aes_gcm_decrypt(&key, &iv, &aad, &ct, &bad).is_none());
     }
 
     #[test]

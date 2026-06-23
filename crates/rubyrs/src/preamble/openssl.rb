@@ -216,12 +216,16 @@ module OpenSSL
 
     def initialize(name)
       n = name.to_s.downcase
-      unless ["aes-256-ctr", "aes-256-gcm", "aes-256-cbc"].include?(n)
-        raise CipherError, "unsupported cipher #{name.inspect} (only aes-256-ctr, aes-256-gcm, aes-256-cbc)"
+      m = n.match(/\Aaes-(128|192|256)-(ctr|gcm|cbc)\z/)
+      unless m
+        raise CipherError, "unsupported cipher #{name.inspect} " \
+                           "(only aes-{128,192,256}-{ctr,gcm,cbc})"
       end
       @name = n
-      @gcm = (n == "aes-256-gcm")
-      @cbc = (n == "aes-256-cbc")
+      @key_len = m[1].to_i / 8        # 16 / 24 / 32 bytes
+      mode = m[2]
+      @gcm = (mode == "gcm")
+      @cbc = (mode == "cbc")
       # GCM and CBC buffer the whole message (GCM for the tag, CBC for
       # the block-aligned PKCS#7 pad); CTR streams directly.
       @buffered = @gcm || @cbc
@@ -241,7 +245,10 @@ module OpenSSL
 
     def key=(k)
       k = k.to_s
-      raise CipherError, "key must be 32 bytes" unless k.bytesize == 32
+      # CRuby raises ArgumentError (not CipherError) on a wrong-size key.
+      unless k.bytesize == @key_len
+        raise ArgumentError, "key must be #{@key_len} bytes"
+      end
       @key = k.dup.force_encoding("BINARY")
       @offset = 0
       k
@@ -252,14 +259,14 @@ module OpenSSL
       # CTR needs a full 16-byte counter; GCM's IV is variable (12 is
       # standard and what Rails / MessageEncryptor use).
       unless @gcm || v.bytesize == 16
-        raise CipherError, "iv must be 16 bytes"
+        raise ArgumentError, "iv must be 16 bytes"
       end
       @iv = v.dup.force_encoding("BINARY")
       @offset = 0
       v
     end
 
-    def key_len; 32; end
+    def key_len; @key_len; end
     def iv_len; @gcm ? 12 : 16; end
 
     # PKCS#7 padding toggle (CBC). `padding = 0` requires block-aligned
@@ -280,7 +287,7 @@ module OpenSSL
     end
 
     def random_key
-      self.key = SecureRandom.random_bytes(32)
+      self.key = SecureRandom.random_bytes(@key_len)
       @key
     end
 
@@ -294,7 +301,7 @@ module OpenSSL
         @buffer += data.b
         "".b
       else
-        out = __rubyrs_aes256_ctr(@key, @iv, @offset, data)
+        out = __rubyrs_aes_ctr(@key, @iv, @offset, data)
         @offset += data.bytesize
         out
       end
@@ -311,11 +318,11 @@ module OpenSSL
     def gcm_final
       if @mode == :decrypt
         raise CipherError, "auth_tag not set" if @auth_tag.nil?
-        pt = __rubyrs_aes256_gcm_decrypt(@key, @iv, @aad, @buffer, @auth_tag)
+        pt = __rubyrs_aes_gcm_decrypt(@key, @iv, @aad, @buffer, @auth_tag)
         raise CipherError, "bad decrypt" if pt.nil?
         pt
       else
-        res = __rubyrs_aes256_gcm_encrypt(@key, @iv, @aad, @buffer)
+        res = __rubyrs_aes_gcm_encrypt(@key, @iv, @aad, @buffer)
         @auth_tag = res[-16..].b
         res[0...-16].b
       end
@@ -326,7 +333,7 @@ module OpenSSL
         if @padding
           raise CipherError, "bad decrypt" unless (@buffer.bytesize % 16).zero? && !@buffer.empty?
         end
-        pt = __rubyrs_aes256_cbc_decrypt(@key, @iv, @buffer)
+        pt = __rubyrs_aes_cbc_decrypt(@key, @iv, @buffer)
         return pt unless @padding
         pad = pt.getbyte(pt.bytesize - 1)
         # Valid PKCS#7: 1..16, and the last `pad` bytes all equal `pad`.
@@ -342,7 +349,7 @@ module OpenSSL
         elsif (data.bytesize % 16) != 0
           raise CipherError, "data not a multiple of the block length"
         end
-        __rubyrs_aes256_cbc_encrypt(@key, @iv, data)
+        __rubyrs_aes_cbc_encrypt(@key, @iv, data)
       end
     end
   end
