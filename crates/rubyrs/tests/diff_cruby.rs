@@ -1187,6 +1187,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // inspect tuple format, strptime. Oracle = CRuby's core `date`.
 #[cfg(feature = "stdlib")]
 #[test] fn date_methods() { run_diff_gem("date_methods", "date"); }
+// DateTime: time-preserving +/-, offset/zone/sec_fraction/new_offset,
+// iso8601/strptime parsers, UTC-instant inspect tuple.
+#[cfg(feature = "stdlib")]
+#[test] fn datetime_methods() { run_diff_gem("datetime_methods", "date"); }
 // `Monitor` autoloaded (available without explicit require, as in a
 // full Ruby env). Oracle is gem-enabled CRuby (`--disable=gems` lacks
 // the ambient Monitor). Surfaced by dotenv's bare `Monitor.new`.

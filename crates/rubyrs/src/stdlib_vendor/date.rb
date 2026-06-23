@@ -380,6 +380,21 @@ class DateTime < Date
     end
   end
 
+  # `iso8601` only accepts the ISO-8601 form — `parse` already handles
+  # it, so delegate.
+  def self.iso8601(str = '-4712-01-01T00:00:00+00:00', *)
+    parse(str)
+  end
+
+  def self.strptime(str, fmt = '%FT%T%z')
+    h = _strptime(str, fmt)
+    unless h && h[:year] && h[:mon] && h[:mday]
+      raise ArgumentError, "invalid strptime format - #{fmt.inspect}"
+    end
+    off = h[:offset] ? offset_to_string(h[:offset]) : '+00:00'
+    new(h[:year], h[:mon], h[:mday], h[:hour] || 0, h[:min] || 0, h[:sec] || 0, off)
+  end
+
   def initialize(year = -4712, month = 1, day = 1, hour = 0, min = 0, sec = 0, offset = '+00:00')
     init_civil(year, month, day)
     @hour = hour
@@ -406,6 +421,49 @@ class DateTime < Date
   alias second sec
   def offset_secs; @offset_secs; end
 
+  # offset as a day-fraction Rational (CRuby's `#offset`); `zone` is
+  # the "+HH:MM" string; sub-second precision isn't modelled, so
+  # `sec_fraction` is always 0.
+  def offset; Rational(@offset_secs, 86400); end
+  def zone; DateTime.offset_to_string(@offset_secs); end
+  def sec_fraction; Rational(0, 1); end
+
+  # Day arithmetic that preserves the time-of-day and offset (Date#+/-
+  # would drop them). `n` is a number of days (fractional allowed; the
+  # sub-second remainder is dropped, matching the rest of this file).
+  def +(n)
+    raise TypeError, 'expected numeric' unless n.is_a?(Numeric)
+    total = @jd * 86400 + @hour * 3600 + @min * 60 + @sec + (n * 86400)
+    total = total.floor
+    day = total / 86400
+    rem = total % 86400
+    y, m, d = Date.jd_to_civil(day)
+    DateTime.new(y, m, d, rem / 3600, (rem % 3600) / 60, rem % 60,
+                 DateTime.offset_to_string(@offset_secs))
+  end
+
+  def -(other)
+    if other.is_a?(Date)
+      Rational(cmp_key - other.send(:cmp_key), 86400)
+    elsif other.is_a?(Numeric)
+      self + (-other)
+    else
+      raise TypeError, 'expected numeric or date'
+    end
+  end
+
+  # Same instant, re-expressed in a different offset.
+  def new_offset(offset = 0)
+    target = DateTime.parse_offset(offset)
+    utc = @jd * 86400 + @hour * 3600 + @min * 60 + @sec - @offset_secs
+    local = utc + target
+    day = local / 86400
+    rem = local % 86400
+    y, m, d = Date.jd_to_civil(day)
+    DateTime.new(y, m, d, rem / 3600, (rem % 3600) / 60, rem % 60,
+                 DateTime.offset_to_string(target))
+  end
+
   def to_time
     # Build the UTC instant then keep it (rubyrs Time is UTC-based).
     Time.utc(@year, @month, @day, @hour, @min, @sec) - @offset_secs
@@ -421,7 +479,15 @@ class DateTime < Date
            @hour, @min, @sec, DateTime.offset_to_string(@offset_secs))
   end
   alias iso8601 to_s
-  def inspect; "#<DateTime: #{to_s} ((#{@jd}j))>"; end
+  # CRuby's internal tuple: (jd, day-fraction seconds, nanoseconds),
+  # offset seconds, gregorian-start jd. The jd / seconds are the UTC
+  # instant (local wall clock minus the offset), so they roll across
+  # midnight independently of the local `#jd`. Sub-second is 0n here.
+  def inspect
+    total = @jd * 86400 + @hour * 3600 + @min * 60 + @sec - @offset_secs
+    format('#<DateTime: %s ((%dj,%ds,0n),%+ds,2299161j)>',
+           to_s, total / 86400, total % 86400, @offset_secs)
+  end
 
   def strftime(fmt = '%FT%T%:z')
     f = fmt.gsub('%:z', DateTime.offset_to_string(@offset_secs))
