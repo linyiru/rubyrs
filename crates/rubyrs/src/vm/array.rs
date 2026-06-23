@@ -714,7 +714,7 @@ impl Vm {
                         *self.heap.array_mut(id) = elems;
                         Some(Value::Array(id))
                     }
-                    ("push", [v]) | ("<<", [v]) => {
+                    ("<<", [v]) => {
                         // P2-14c: refuse a push that would make this
                         // Array's storage exceed the per-value byte
                         // cap. We size in bytes-of-Value because that's
@@ -727,6 +727,24 @@ impl Vm {
                                 }));
                             }
                         self.heap.array_mut(id).push(v.clone());
+                        Some(Value::Array(id))
+                    }
+                    // `push` / `append` are VARIADIC (`<<` is the single-
+                    // element operator). `a.push(1, 2)` / `a.push(*xs)`
+                    // append all args and return self; no args is a no-op
+                    // returning self. (i18n's fallback `result.push(*defaults)`.)
+                    ("push" | "append", vs) => {
+                        let new_len = self.heap.array(id).len().saturating_add(vs.len());
+                        if let Some(max) = self.max_value_bytes
+                            && new_len.saturating_mul(std::mem::size_of::<Value>()) > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("Array.push would exceed {max} bytes"),
+                                }));
+                            }
+                        let arr = self.heap.array_mut(id);
+                        for v in vs {
+                            arr.push(v.clone());
+                        }
                         Some(Value::Array(id))
                     }
                     ("[]", [Value::Int(i)]) => {

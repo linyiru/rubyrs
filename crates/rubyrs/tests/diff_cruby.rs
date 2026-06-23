@@ -157,6 +157,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_basics() { run_diff("string_basics"); }
 #[test] fn array_basics() { run_diff("array_basics"); }
 #[test] fn array_join_binary() { run_diff("array_join_binary"); }
+#[test] fn array_push_variadic() { run_diff("array_push_variadic"); }
 #[test] fn hash_basics() { run_diff("hash_basics"); }
 #[test] fn hash_compare_by_identity() { run_diff("hash_compare_by_identity"); }
 #[test] fn index_fast_path() { run_diff("index_fast_path"); }
@@ -821,6 +822,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn super_lifecycle_hook_block() { run_diff("super_lifecycle_hook_block"); }
 #[cfg(feature = "regex")]
 #[test] fn regexp_symbol_arg() { run_diff("regexp_symbol_arg"); }
+#[test] fn module_class_variable_reflection() { run_diff("module_class_variable_reflection"); }
 #[test] fn super_is_a() { run_diff("super_is_a"); }
 #[test] fn regexp_names() { run_diff("regexp_names"); }
 #[cfg(feature = "regex")]
