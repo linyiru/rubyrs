@@ -1815,9 +1815,11 @@ impl Vm {
     /// `Ok(false)` to fall through.
     ///
     /// A beginless range raises CRuby's ArgumentError. A negative
-    /// `begin` (which CRuby treats as a left shift, overflowing the
-    /// i64 fast path into a Bignum) declines so the value type stays
-    /// honest — these bit ranges effectively never appear in practice.
+    /// `begin` is a left shift (`n << -begin`), which CRuby lets grow
+    /// into a Bignum — handled here via BigInt under `bignum`, declined
+    /// (so the no-Bignum profile falls through) otherwise. Pathological
+    /// shifts/widths beyond `BIT_RANGE_CAP` decline rather than allocate
+    /// gigabytes.
     pub(crate) fn try_push_int_bit_range(
         &mut self,
         recv: &Value,
@@ -1843,14 +1845,19 @@ impl Vm {
                         .to_string(),
                 }));
             }
-            Value::Int(b) if b >= 0 => b,
-            // Negative begin → left shift into Bignum territory; decline.
+            Value::Int(b) => b,
             // Non-Integer begin → not a bit range; decline.
             _ => return Ok(false),
         };
 
-        // Arithmetic right shift with two's-complement saturation past
-        // the i64 width (matches the existing `n[i]` / `n[off, len]` arms).
+        // Negative begin = left shift into (possibly) Bignum territory.
+        if beg < 0 {
+            return self.int_bit_range_negative_begin(n, beg, &end, exclusive);
+        }
+
+        // Fast path: non-negative begin is an arithmetic right shift that
+        // always fits i64, with two's-complement saturation past the i64
+        // width (matches the existing `n[i]` / `n[off, len]` arms).
         let shifted: i64 = if beg >= 64 {
             if n < 0 { -1 } else { 0 }
         } else {
@@ -1876,6 +1883,64 @@ impl Vm {
         };
         self.stack.push(Value::Int(result));
         Ok(true)
+    }
+
+    /// Negative-`begin` arm of `Integer#[](range)`: `n[i..j]` with
+    /// `i < 0` left-shifts `n` by `-i` (CRuby's infinite two's-complement
+    /// view), so the result can be a Bignum. `bigint_to_value` collapses
+    /// back to a Fixnum when it fits. Declines (returns `Ok(false)`)
+    /// under no-Bignum, for a non-Integer end, or when the shift / width
+    /// would exceed `BIT_RANGE_CAP` bits.
+    #[allow(unused_variables)]
+    fn int_bit_range_negative_begin(
+        &mut self,
+        n: i64,
+        beg: i64,
+        end: &Value,
+        exclusive: bool,
+    ) -> Result<bool, Trap> {
+        #[cfg(feature = "bignum")]
+        {
+            use num_bigint::BigInt;
+            // Bound on shift magnitude / mask width — well above any real
+            // bit range, small enough that the worst-case allocation stays
+            // sane.
+            const BIT_RANGE_CAP: u64 = 1 << 16;
+            let shift = beg.unsigned_abs();
+            if shift > BIT_RANGE_CAP {
+                return Ok(false);
+            }
+            let shifted: BigInt = BigInt::from(n) << (shift as usize);
+            let result_big = match end {
+                // Endless — the full left shift, unmasked.
+                Value::Nil => shifted,
+                Value::Int(e) => {
+                    // len = e - beg (+1 inclusive). `beg < 0`, so compute
+                    // in i128 to avoid the subtraction overflowing i64.
+                    let len: i128 =
+                        (*e as i128) - (beg as i128) + if exclusive { 0 } else { 1 };
+                    if len <= 0 {
+                        shifted
+                    } else if len as u64 > BIT_RANGE_CAP {
+                        return Ok(false);
+                    } else {
+                        // Low `len` bits — num_bigint's `&` is unbounded
+                        // two's-complement, so negative `shifted` masks to
+                        // the correct non-negative bitfield.
+                        let mask = (BigInt::from(1) << (len as usize)) - 1;
+                        &shifted & &mask
+                    }
+                }
+                _ => return Ok(false),
+            };
+            let v = self.bigint_to_value(result_big)?;
+            self.stack.push(v);
+            Ok(true)
+        }
+        #[cfg(not(feature = "bignum"))]
+        {
+            Ok(false)
+        }
     }
 
     /// Re-entrant dispatch entry for C extensions calling back into

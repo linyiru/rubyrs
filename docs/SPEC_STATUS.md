@@ -13,7 +13,7 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 171 |
-| Examples in corpus | 1137 |
+| Examples in corpus | 1138 |
 | Skipped `it` traces | 155 |
 
 ### Skipped traces by category
@@ -45,7 +45,7 @@ Find blocks unlocked by a future feature with e.g.
 | Complex | 1 | 5 | 0 |
 | Float | 3 | 15 | 0 |
 | Hash | 41 | 207 | 51 |
-| Integer | 39 | 339 | 30 |
+| Integer | 39 | 340 | 30 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
 | Numeric | 1 | 8 | 0 |
@@ -140,7 +140,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_bit_and_spec.rb` | Integer#& | `core/integer/bit_and_spec.rb` | 11 | 0 |
 | `integer_bit_length_spec.rb` | Integer#bit_length | `core/integer/bit_length_spec.rb` | 4 | 0 |
 | `integer_bit_or_spec.rb` | Integer#\| | `core/integer/bit_or_spec.rb` | 10 | 0 |
-| `integer_bit_range_spec.rb` | Integer#[] with a Range | `core/integer/element_reference_spec.rb` | 6 | 0 |
+| `integer_bit_range_spec.rb` | Integer#[] with a Range | `core/integer/element_reference_spec.rb` | 7 | 0 |
 | `integer_bit_xor_spec.rb` | Integer#^ | `core/integer/bit_xor_spec.rb` | 11 | 0 |
 | `integer_case_compare_spec.rb` | Integer#=== | `core/integer/case_compare_spec.rb + core/integer/shared/equal.rb` | 9 | 1 |
 | `integer_ceil_spec.rb` | Integer#ceil | `core/integer/ceil_spec.rb + shared/to_i.rb + shared/integer_rounding.rb + shared/integer_ceil_precision.rb` | 10 | 1 |

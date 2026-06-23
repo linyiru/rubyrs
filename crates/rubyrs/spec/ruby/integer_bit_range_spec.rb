@@ -31,6 +31,14 @@ describe "Integer#[] with a Range" do
     assert_eq(0b101101[1..-1], 22)
   end
 
+  it "left-shifts for a negative begin, growing into a Bignum" do
+    assert_eq(0b101101[-1..], 90)
+    assert_eq(0b101101[-3..], 360)
+    assert_eq(0b101101[-2..3], 52)
+    assert_eq((-45)[-1..], -90)
+    assert_eq(1[-64..], 18446744073709551616)
+  end
+
   it "raises ArgumentError for a beginless range" do
     assert_raises("ArgumentError") { 0b101101[..3] }
   end
