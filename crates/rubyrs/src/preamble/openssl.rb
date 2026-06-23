@@ -216,11 +216,15 @@ module OpenSSL
 
     def initialize(name)
       n = name.to_s.downcase
-      unless n == "aes-256-ctr" || n == "aes-256-gcm"
-        raise CipherError, "unsupported cipher #{name.inspect} (only aes-256-ctr, aes-256-gcm)"
+      unless ["aes-256-ctr", "aes-256-gcm", "aes-256-cbc"].include?(n)
+        raise CipherError, "unsupported cipher #{name.inspect} (only aes-256-ctr, aes-256-gcm, aes-256-cbc)"
       end
       @name = n
       @gcm = (n == "aes-256-gcm")
+      @cbc = (n == "aes-256-cbc")
+      # GCM and CBC buffer the whole message (GCM for the tag, CBC for
+      # the block-aligned PKCS#7 pad); CTR streams directly.
+      @buffered = @gcm || @cbc
       @key = nil
       @iv = nil
       @offset = 0
@@ -228,6 +232,7 @@ module OpenSSL
       @aad = "".b
       @buffer = "".b
       @auth_tag = nil
+      @padding = true
     end
 
     # Mode selectors — reset the stream position / GCM buffer.
@@ -257,6 +262,10 @@ module OpenSSL
     def key_len; 32; end
     def iv_len; @gcm ? 12 : 16; end
 
+    # PKCS#7 padding toggle (CBC). `padding = 0` requires block-aligned
+    # input. CRuby accepts an integer; non-zero / true means on.
+    def padding=(v); @padding = !(v == 0 || v == false); v; end
+
     # GCM authenticated-data + tag accessors (no-ops / errors for CTR).
     def auth_data=(a); @aad = a.to_s.b; a; end
     def auth_tag=(t); @auth_tag = t.to_s.b; t; end
@@ -279,9 +288,9 @@ module OpenSSL
       raise CipherError, "cipher key not set" if @key.nil?
       raise CipherError, "cipher iv not set" if @iv.nil?
       data = data.to_s
-      if @gcm
-        # GCM needs the whole message for the tag — buffer here, emit in
-        # final (so `update(x) + final` yields the full result).
+      if @buffered
+        # GCM / CBC need the whole message — buffer here, emit in final
+        # (so `update(x) + final` yields the full result).
         @buffer += data.b
         "".b
       else
@@ -292,7 +301,14 @@ module OpenSSL
     end
 
     def final
-      return "".dup.force_encoding("BINARY") unless @gcm
+      return "".dup.force_encoding("BINARY") unless @buffered
+      return gcm_final if @gcm
+      cbc_final
+    end
+
+    private
+
+    def gcm_final
       if @mode == :decrypt
         raise CipherError, "auth_tag not set" if @auth_tag.nil?
         pt = __rubyrs_aes256_gcm_decrypt(@key, @iv, @aad, @buffer, @auth_tag)
@@ -302,6 +318,31 @@ module OpenSSL
         res = __rubyrs_aes256_gcm_encrypt(@key, @iv, @aad, @buffer)
         @auth_tag = res[-16..].b
         res[0...-16].b
+      end
+    end
+
+    def cbc_final
+      if @mode == :decrypt
+        if @padding
+          raise CipherError, "bad decrypt" unless (@buffer.bytesize % 16).zero? && !@buffer.empty?
+        end
+        pt = __rubyrs_aes256_cbc_decrypt(@key, @iv, @buffer)
+        return pt unless @padding
+        pad = pt.getbyte(pt.bytesize - 1)
+        # Valid PKCS#7: 1..16, and the last `pad` bytes all equal `pad`.
+        ok = pad && pad >= 1 && pad <= 16 && pad <= pt.bytesize &&
+             pt[(pt.bytesize - pad)..].bytes.all? { |b| b == pad }
+        raise CipherError, "bad decrypt" unless ok
+        pt[0, pt.bytesize - pad]
+      else
+        data = @buffer
+        if @padding
+          pad = 16 - (data.bytesize % 16)
+          data += ([pad] * pad).pack("C*")
+        elsif (data.bytesize % 16) != 0
+          raise CipherError, "data not a multiple of the block length"
+        end
+        __rubyrs_aes256_cbc_encrypt(@key, @iv, data)
       end
     end
   end

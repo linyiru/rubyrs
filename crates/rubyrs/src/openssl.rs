@@ -327,4 +327,37 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             None => Ok(Value::Nil),
         }
     });
+
+    // `__rubyrs_aes256_cbc_encrypt(key, iv, data)` / `_decrypt(...)` →
+    // BINARY String. `data` must already be a 16-byte multiple (the
+    // OpenSSL::Cipher veneer applies / strips PKCS#7 padding).
+    rt.register_fn("__rubyrs_aes256_cbc_encrypt", |args| {
+        let (key, iv, data) = cbc_args(args, "encrypt")?;
+        Ok(Value::new_str_bytes_binary(crate::aes::aes256_cbc_encrypt(&key, &iv, &data)))
+    });
+    rt.register_fn("__rubyrs_aes256_cbc_decrypt", |args| {
+        let (key, iv, data) = cbc_args(args, "decrypt")?;
+        Ok(Value::new_str_bytes_binary(crate::aes::aes256_cbc_decrypt(&key, &iv, &data)))
+    });
+}
+
+/// Shared arg validation for the CBC host fns: 32-byte key, 16-byte IV,
+/// and a block-aligned data buffer.
+fn cbc_args(args: &[Value], op: &str) -> Result<([u8; 32], [u8; 16], Vec<u8>), Trap> {
+    let (key, iv, data) = match args {
+        [Value::Str(k), Value::Str(v), Value::Str(d)] => {
+            (k.borrow().clone(), v.borrow().clone(), d.borrow().clone())
+        }
+        _ => return Err(arg_err(&format!(
+            "__rubyrs_aes256_cbc_{op}(key: String, iv: String, data: String)"
+        ))),
+    };
+    let key: [u8; 32] = key.as_slice().try_into()
+        .map_err(|_| ssl_err(format!("aes-256-cbc key must be 32 bytes (got {})", key.len())))?;
+    let iv: [u8; 16] = iv.as_slice().try_into()
+        .map_err(|_| ssl_err(format!("aes-256-cbc iv must be 16 bytes (got {})", iv.len())))?;
+    if data.len() % 16 != 0 {
+        return Err(ssl_err(format!("aes-256-cbc data must be a 16-byte multiple (got {})", data.len())));
+    }
+    Ok((key, iv, data))
 }
