@@ -12,8 +12,8 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 162 |
-| Examples in corpus | 1076 |
+| Files | 166 |
+| Examples in corpus | 1103 |
 | Skipped `it` traces | 155 |
 
 ### Skipped traces by category
@@ -48,7 +48,7 @@ Find blocks unlocked by a future feature with e.g.
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
 | Range | 2 | 30 | 0 |
-| Rational | 6 | 33 | 0 |
+| Rational | 10 | 60 | 0 |
 | String | 24 | 165 | 24 |
 | UnboundMethod | 4 | 18 | 0 |
 
@@ -182,12 +182,16 @@ Find blocks unlocked by a future feature with e.g.
 | `method_unbind_spec.rb` | Method#unbind | `core/method/unbind_spec.rb` | 4 | 0 |
 | `range_chunk_while_spec.rb` | Range#chunk_while | `core/range/chunk_while_spec.rb (Enumerable-inherited behaviour)` | 10 | 0 |
 | `range_each_slice_spec.rb` | Range#each_slice | `core/range/each_slice_spec.rb / each_cons_spec.rb (Enumerable-inherited behaviour)` | 20 | 0 |
+| `rational_abs_spec.rb` | Rational#abs | `core/rational/{abs,uminus,abs2}_spec.rb` | 7 | 0 |
+| `rational_coerce_spec.rb` | Rational#coerce | `core/rational/coerce_spec.rb` | 4 | 0 |
 | `rational_denominator_spec.rb` | Rational#denominator | `core/rational/denominator_spec.rb` | 3 | 0 |
 | `rational_equal_value_spec.rb` | Rational#== when given a Rational | `core/rational/equal_value_spec.rb (Rational#==)` | 7 | 0 |
 | `rational_exponent_spec.rb` | Rational#** | `core/rational/exponent_spec.rb` | 7 | 0 |
 | `rational_literal_spec.rb` | Rational literal | `language/literal/numeric_spec.rb` | 6 | 0 |
 | `rational_numerator_spec.rb` | Rational#numerator | `core/rational/numerator_spec.rb` | 3 | 0 |
 | `rational_plus_spec.rb` | Rational#+ when given a Rational | `core/rational/plus_spec.rb` | 7 | 0 |
+| `rational_predicate_spec.rb` | Rational#zero? | `core/rational/{zero,positive,negative}_spec.rb` | 4 | 0 |
+| `rational_round_spec.rb` | Rational#floor | `core/rational/{floor,ceil,round,truncate}_spec.rb` | 12 | 0 |
 | `singleton_method_spec.rb` | def obj.name | `core/basicobject/singleton_method_spec.rb + core/kernel/define_singleton_method_spec.rb` | 7 | 0 |
 | `string_capitalize_spec.rb` | String#capitalize | `core/string/capitalize_spec.rb` | 9 | 1 |
 | `string_center_spec.rb` | String#center | `core/string/center_spec.rb` | 4 | 2 |

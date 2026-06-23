@@ -759,6 +759,9 @@ impl Vm {
             "to_i" | "to_f" |
             "+" | "-" | "*" | "/" | "**" |
             "<" | "<=" | ">" | ">=" | "<=>" |
+            "abs" | "magnitude" | "abs2" | "-@" | "+@" |
+            "zero?" | "nonzero?" | "positive?" | "negative?" |
+            "floor" | "ceil" | "round" | "truncate" |
             "coerce"
         )
     }

@@ -244,6 +244,17 @@ pub(crate) enum FloatToRationalMode {
     DefaultUlp,
 }
 
+/// Rounding tie-break mode for `Rational#round` (and the shared
+/// `rational_round_op` helper). Mirrors CRuby's `half:` keyword:
+/// `:up` rounds halves away from zero (the default), `:down`
+/// toward zero, `:even` to the nearest even (banker's rounding).
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum RHalf {
+    Up,
+    Down,
+    Even,
+}
+
 impl Vm {
     /// Allocate a canonical-form `Value::Rational` from raw i64
     /// (num, den). gcd-normalizes and sign-normalizes (`den > 0`)
@@ -288,6 +299,128 @@ impl Vm {
                 crate::heap::RationalRepr { num, den },
             ));
             Ok(Value::Rational(id))
+        }
+    }
+
+    /// `floor` / `ceil` / `truncate` / `round` for a Rational with
+    /// an optional decimal precision `ndigits`. Matches CRuby:
+    ///   - `ndigits <= 0` → an **Integer** rounded to a multiple of
+    ///     `10 ** -ndigits` (`0` → the nearest whole number).
+    ///   - `ndigits > 0`  → a **Rational** rounded to that many
+    ///     decimal places.
+    /// `half` only affects `round` (tie-breaking); the other ops
+    /// ignore it. The receiver's canonical form (`den > 0`, coprime)
+    /// is assumed.
+    pub(crate) fn rational_round_op(
+        &mut self,
+        r: &crate::heap::RationalRepr,
+        op: &str,
+        ndigits: i64,
+        half: RHalf,
+    ) -> Result<Value, Trap> {
+        #[cfg(feature = "bignum")]
+        {
+            use num_bigint::BigInt;
+            use num_integer::Integer;
+            use num_traits::Signed;
+            // Round `a / b` (with `b > 0`) to an integer per `op`.
+            fn rdiv(a: &BigInt, b: &BigInt, op: &str, half: RHalf) -> BigInt {
+                match op {
+                    "truncate" => a / b,
+                    "floor" => a.div_floor(b),
+                    "ceil" => a.div_ceil(b),
+                    // "round"
+                    _ => {
+                        let neg = a.is_negative();
+                        let n = a.abs();
+                        let q = &n / b;
+                        let rem = &n % b;
+                        let twice = &rem * 2;
+                        let bump = match half {
+                            RHalf::Up => twice >= *b,
+                            RHalf::Down => twice > *b,
+                            RHalf::Even => twice > *b || (twice == *b && !q.is_even()),
+                        };
+                        let mut res = if bump { q + 1 } else { q };
+                        if neg {
+                            res = -res;
+                        }
+                        res
+                    }
+                }
+            }
+            if ndigits > 0 {
+                let scale = BigInt::from(10).pow(ndigits as u32);
+                let q = rdiv(&(&r.num * &scale), &r.den, op, half);
+                self.make_rational_bigint(q, scale)
+            } else {
+                let scale = BigInt::from(10).pow((-ndigits) as u32);
+                let q = rdiv(&r.num, &(&r.den * &scale), op, half);
+                self.bigint_to_value(q * &scale)
+            }
+        }
+        #[cfg(not(feature = "bignum"))]
+        {
+            // i128-widened to keep the `* 10^ndigits` and round-mode
+            // arithmetic from overflowing for ordinary precisions;
+            // extreme `ndigits` can still overflow `pow`, mirroring
+            // the existing i64 Rational acceptance.
+            fn rdiv(a: i128, b: i128, op: &str, half: RHalf) -> i128 {
+                match op {
+                    "truncate" => a / b,
+                    "floor" => {
+                        let q = a / b;
+                        if a % b != 0 && (a < 0) != (b < 0) { q - 1 } else { q }
+                    }
+                    "ceil" => {
+                        let q = a / b;
+                        if a % b != 0 && (a < 0) == (b < 0) { q + 1 } else { q }
+                    }
+                    // "round"
+                    _ => {
+                        let neg = a < 0;
+                        let n = a.unsigned_abs() as i128;
+                        let q = n / b;
+                        let rem = n % b;
+                        let twice = rem * 2;
+                        let bump = match half {
+                            RHalf::Up => twice >= b,
+                            RHalf::Down => twice > b,
+                            RHalf::Even => twice > b || (twice == b && q % 2 != 0),
+                        };
+                        let res = if bump { q + 1 } else { q };
+                        if neg { -res } else { res }
+                    }
+                }
+            }
+            if ndigits > 0 {
+                let scale = 10i128.pow(ndigits as u32);
+                let q = rdiv(r.num as i128 * scale, r.den as i128, op, half);
+                self.make_rational(q as i64, scale as i64)
+            } else {
+                let scale = 10i128.pow((-ndigits) as u32);
+                let q = rdiv(r.num as i128, r.den as i128 * scale, op, half);
+                Ok(Value::Int((q * scale) as i64))
+            }
+        }
+    }
+
+    /// Read the `half:` keyword from a `Rational#round` kwargs Hash.
+    /// Recognizes `:up` / `:down` / `:even`; anything else (or a
+    /// missing key) yields the CRuby default `RHalf::Up`.
+    pub(crate) fn rhalf_from_kwargs(&mut self, hid: ObjId) -> RHalf {
+        let key = Value::Sym(self.interner.intern("half"));
+        match self
+            .heap
+            .hash_index_lookup(hid, &key)
+            .map(|pos| &self.heap.hash(hid)[pos].1)
+        {
+            Some(Value::Sym(s)) => match &**self.interner.resolve(*s) {
+                "down" => RHalf::Down,
+                "even" => RHalf::Even,
+                _ => RHalf::Up,
+            },
+            _ => RHalf::Up,
         }
     }
 
@@ -13112,6 +13245,200 @@ impl Vm {
                     return Err(self.trap(RubyError::ArgumentError {
                         msg: format!(
                             "wrong number of arguments (given {}, expected 0)",
+                            args.len(),
+                        ),
+                    }));
+                }
+                // `Rational#abs` / `#magnitude` — den is always > 0 in
+                // canonical form, so magnitude only needs |num|.
+                ("abs" | "magnitude", 0) => {
+                    #[cfg(feature = "bignum")]
+                    {
+                        use num_traits::Signed;
+                        let v = self.make_rational_bigint(r.num.abs(), r.den.clone())?;
+                        self.stack.push(v);
+                    }
+                    #[cfg(not(feature = "bignum"))]
+                    {
+                        let v = self.make_rational(r.num.abs(), r.den)?;
+                        self.stack.push(v);
+                    }
+                    return Ok(());
+                }
+                // `Rational#-@` (unary minus) — negate the numerator.
+                ("-@", 0) => {
+                    #[cfg(feature = "bignum")]
+                    {
+                        let v = self.make_rational_bigint(-r.num.clone(), r.den.clone())?;
+                        self.stack.push(v);
+                    }
+                    #[cfg(not(feature = "bignum"))]
+                    {
+                        let v = self.make_rational(-r.num, r.den)?;
+                        self.stack.push(v);
+                    }
+                    return Ok(());
+                }
+                // `Rational#+@` (unary plus) — returns self unchanged.
+                ("+@", 0) => {
+                    self.stack.push(recv.clone());
+                    return Ok(());
+                }
+                // `Rational#abs2` — |self|**2 == num**2 / den**2. Both
+                // squares are non-negative and stay coprime, so the
+                // result is already canonical (make_* re-normalizes).
+                ("abs2", 0) => {
+                    #[cfg(feature = "bignum")]
+                    {
+                        let v = self.make_rational_bigint(&r.num * &r.num, &r.den * &r.den)?;
+                        self.stack.push(v);
+                    }
+                    #[cfg(not(feature = "bignum"))]
+                    {
+                        let v = self.make_rational(r.num * r.num, r.den * r.den)?;
+                        self.stack.push(v);
+                    }
+                    return Ok(());
+                }
+                // Sign predicates — `den > 0` always, so the sign of
+                // the whole Rational lives entirely in the numerator.
+                ("zero?", 0) => {
+                    #[cfg(feature = "bignum")]
+                    let b = { use num_traits::Zero; r.num.is_zero() };
+                    #[cfg(not(feature = "bignum"))]
+                    let b = r.num == 0;
+                    self.stack.push(Value::Bool(b));
+                    return Ok(());
+                }
+                ("positive?", 0) => {
+                    #[cfg(feature = "bignum")]
+                    let b = { use num_traits::Signed; r.num.is_positive() };
+                    #[cfg(not(feature = "bignum"))]
+                    let b = r.num > 0;
+                    self.stack.push(Value::Bool(b));
+                    return Ok(());
+                }
+                ("negative?", 0) => {
+                    #[cfg(feature = "bignum")]
+                    let b = { use num_traits::Signed; r.num.is_negative() };
+                    #[cfg(not(feature = "bignum"))]
+                    let b = r.num < 0;
+                    self.stack.push(Value::Bool(b));
+                    return Ok(());
+                }
+                // `Numeric#nonzero?` — self if non-zero, else nil.
+                ("nonzero?", 0) => {
+                    #[cfg(feature = "bignum")]
+                    let z = { use num_traits::Zero; r.num.is_zero() };
+                    #[cfg(not(feature = "bignum"))]
+                    let z = r.num == 0;
+                    self.stack.push(if z { Value::Nil } else { recv.clone() });
+                    return Ok(());
+                }
+                // `Rational#coerce(other)` — returns `[other_compatible,
+                // self]`. Integer → Rational pair; Float → Float pair;
+                // Rational → as-is. Non-numeric → TypeError (CRuby).
+                ("coerce", 1) => {
+                    let other = &args[0];
+                    let pair = match other {
+                        Value::Int(n) => {
+                            let or = self.make_rational(*n, 1)?;
+                            vec![or, recv.clone()]
+                        }
+                        #[cfg(feature = "bignum")]
+                        Value::BigInt(_) => {
+                            use num_bigint::BigInt;
+                            let b = self
+                                .as_bigint_ref(other)
+                                .expect("BigInt value coerces")
+                                .into_owned();
+                            let or = self.make_rational_bigint(b, BigInt::from(1))?;
+                            vec![or, recv.clone()]
+                        }
+                        Value::Float(f) => {
+                            vec![
+                                Value::Float(*f),
+                                Value::Float(crate::heap::rational_to_f64(&r)),
+                            ]
+                        }
+                        Value::Rational(_) => vec![other.clone(), recv.clone()],
+                        _ => {
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: format!(
+                                    "{} can't be coerced into Rational",
+                                    crate::vm::numeric::type_name_for_coerce(other),
+                                ),
+                            }));
+                        }
+                    };
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let id = self.heap.alloc(HeapObj::Array(pair.into()));
+                    self.stack.push(Value::Array(id));
+                    return Ok(());
+                }
+                // `Rational#floor` / `#ceil` / `#truncate` / `#round`
+                // — optional Integer precision. See rational_round_op:
+                // ndigits<=0 → Integer, ndigits>0 → Rational.
+                ("floor" | "ceil" | "truncate" | "round", 0) => {
+                    let v = self.rational_round_op(&r, &name, 0, RHalf::Up)?;
+                    self.stack.push(v);
+                    return Ok(());
+                }
+                ("floor" | "ceil" | "truncate" | "round", 1)
+                    if matches!(&args[0], Value::Int(_)) =>
+                {
+                    let Value::Int(n) = &args[0] else { unreachable!() };
+                    let v = self.rational_round_op(&r, &name, *n, RHalf::Up)?;
+                    self.stack.push(v);
+                    return Ok(());
+                }
+                // `round(half:)` — kwargs arrive as a trailing Hash
+                // positional. Bare `round(half: :even)` and the
+                // `round(n, half: :even)` form.
+                ("round", 1) if matches!(&args[0], Value::Hash(_)) => {
+                    let Value::Hash(hid) = &args[0] else { unreachable!() };
+                    let half = self.rhalf_from_kwargs(*hid);
+                    let v = self.rational_round_op(&r, "round", 0, half)?;
+                    self.stack.push(v);
+                    return Ok(());
+                }
+                ("round", 2)
+                    if matches!(&args[0], Value::Int(_))
+                        && matches!(&args[1], Value::Hash(_)) =>
+                {
+                    let (Value::Int(n), Value::Hash(hid)) = (&args[0], &args[1]) else {
+                        unreachable!()
+                    };
+                    let (n, hid) = (*n, *hid);
+                    let half = self.rhalf_from_kwargs(hid);
+                    let v = self.rational_round_op(&r, "round", n, half)?;
+                    self.stack.push(v);
+                    return Ok(());
+                }
+                // Arity guards (CRuby raises ArgumentError, not the
+                // NoMethodError the `_` fall-through would produce).
+                ("abs" | "magnitude" | "-@" | "+@" | "abs2" | "zero?" | "positive?"
+                    | "negative?" | "nonzero?", _) => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0)",
+                            args.len(),
+                        ),
+                    }));
+                }
+                ("coerce", _) => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1)",
+                            args.len(),
+                        ),
+                    }));
+                }
+                ("floor" | "ceil" | "truncate" | "round", _) => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0..1)",
                             args.len(),
                         ),
                     }));
