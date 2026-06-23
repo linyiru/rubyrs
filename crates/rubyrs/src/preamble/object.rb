@@ -78,6 +78,20 @@ class Object < BasicObject
   private :respond_to_missing?
 end
 
+# The core metaclass hierarchy: `Module < Object`, `Class < Module`
+# (CRuby). Defining them here — the first reference to these constants
+# in the preamble — establishes the right `is_module: false` flag and
+# superclass chain, so `mod.is_a?(Object)` / `Object === mod` /
+# `Module.superclass` / `case x when Module` behave like CRuby. Without
+# it, a module/class VALUE's class (`Module`/`Class`) was a stray shell
+# whose ancestry never reached Object, so `Object === SomeModule` was
+# false — dry-core's `defines(:x, type: Object)` class-attribute check
+# (`type === value`) then rejected every module-valued attribute.
+class Module < Object
+end
+class Class < Module
+end
+
 # Re-parent the exception hierarchy onto Object. preamble/exceptions.rb
 # loads BEFORE this file (so RuntimeError/etc. resolve while the rest of
 # the preamble loads), which means `class Exception` could not default
