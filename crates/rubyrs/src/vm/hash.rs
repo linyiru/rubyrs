@@ -1141,22 +1141,30 @@ impl Vm {
                         }
                         Some(Value::Hash(nid))
                     }
-                    ("merge", [Value::Hash(other)]) => {
-                        // CRuby: keys in `other` overwrite keys in `self`,
-                        // and `other`'s key-order is appended after self's
-                        // (existing keys retain their position). The
-                        // result inherits the RECEIVER's default-block
-                        // (`h.default_proc`), so
+                    ("merge", others)
+                        if others.iter().all(|v| matches!(v, Value::Hash(_))) =>
+                    {
+                        // CRuby 3.0+: `merge` takes ZERO OR MORE hashes,
+                        // applied left-to-right — keys in a later hash
+                        // overwrite earlier ones, key-order appends after
+                        // self's (existing keys retain position). No args
+                        // returns a copy of self. The result inherits the
+                        // RECEIVER's default-block (`h.default_proc`), so
                         // `Hash.new { |h, k| h[k] = [] }.merge(x)[:y]`
-                        // still auto-vivifies on the merged hash.
+                        // still auto-vivifies. (Block-form merge lives in
+                        // iter.rs.) dry-types builds BOOLEAN_MAP with
+                        // `EMPTY_HASH.merge(trues, falses)`.
                         let mut out: Vec<(Value, Value)> = self.heap.hash(id).clone();
-                        let extra: Vec<(Value, Value)> = self.heap.hash(*other).clone();
-                        for (k, v) in extra {
-                            let pos = out.iter().position(|(ek, _)| ek.ruby_eql(&k, &self.heap));
-                            if let Some(p) = pos {
-                                out[p].1 = v;
-                            } else {
-                                out.push((k, v));
+                        for ov in others {
+                            let Value::Hash(other) = ov else { continue };
+                            let extra: Vec<(Value, Value)> = self.heap.hash(*other).clone();
+                            for (k, v) in extra {
+                                let pos = out.iter().position(|(ek, _)| ek.ruby_eql(&k, &self.heap));
+                                if let Some(p) = pos {
+                                    out[p].1 = v;
+                                } else {
+                                    out.push((k, v));
+                                }
                             }
                         }
                         // GC rooting: snapshot the receiver's default-
@@ -1172,17 +1180,15 @@ impl Vm {
                         let default_block = self.heap.hash_default_block(id);
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
-                        // Pin `*other` too — `extra` was a shallow clone
-                        // of its pairs (ObjIds, not deep copies), so any
-                        // nested heap children (Arrays / Strings /
-                        // Hashes / etc.) inside `extra` are reachable
-                        // ONLY through `*other`. Without this pin,
-                        // maybe_gc could sweep `*other` plus its
-                        // children, leaving the new merged Hash with
-                        // dangling ObjIds. Caught under STRESS_GC by
-                        // a probe like
-                        // `h.merge({a: [1,2,3,4,5]})` in a tight loop.
-                        g.pin(Value::Hash(*other));
+                        // Pin every source hash too — `out` holds shallow
+                        // clones of their pairs (ObjIds), so nested heap
+                        // children are reachable ONLY through the sources.
+                        // Without this, maybe_gc could sweep them, leaving
+                        // the merged Hash with dangling ObjIds (STRESS_GC
+                        // catches `h.merge({a: [1,2,3]})` in a loop).
+                        for ov in others {
+                            g.pin(ov.clone());
+                        }
                         if let Some(bid) = default_block {
                             g.pin(Value::Block(bid));
                         }
