@@ -1126,6 +1126,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn yaml_psych_error() { run_diff("yaml_psych_error"); }
 #[cfg(feature = "stdlib")]
 #[test] fn digest_hexdigest() { run_diff("digest_hexdigest"); }
+#[test] fn unpack_base64_strict() { run_diff("unpack_base64_strict"); }
 #[test] fn regex_line_anchors() { run_diff("regex_line_anchors"); }
 #[test] fn array_insert() { run_diff("array_insert"); }
 #[test] fn array_insert_too_big() { run_diff("array_insert_too_big"); }

@@ -4916,6 +4916,80 @@ pub(crate) fn base64_decode(input: &[u8]) -> Vec<u8> {
     out
 }
 
+/// `String#unpack("m0")` — STRICT Base64 (RFC 4648). Unlike the
+/// tolerant `m`/`base64_decode`, this rejects (returns `None`):
+///   - a total length that isn't a multiple of 4,
+///   - any non-alphabet byte (whitespace, newlines, `-`/`_`, ...),
+///   - `=` padding anywhere but the trailing 1-2 chars of the last group,
+///   - non-canonical encodings whose pre-padding leftover bits aren't 0
+///     (e.g. `"YW=="`, where 4 stray bits would be dropped).
+/// Matches CRuby's `m0` exactly — the base64 stdlib gem's
+/// `strict_decode64` / `urlsafe_decode64` rely on this strictness.
+pub(crate) fn base64_decode_strict(input: &[u8]) -> Option<Vec<u8>> {
+    if input.len() % 4 != 0 {
+        return None;
+    }
+    let mut rev = [255u8; 256];
+    for (i, &c) in BASE64_TBL.iter().enumerate() {
+        rev[c as usize] = i as u8;
+    }
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    let groups = input.len() / 4;
+    for g in 0..groups {
+        let chunk = &input[g * 4..g * 4 + 4];
+        let is_last = g == groups - 1;
+        let mut vals = [0u8; 4];
+        let mut pad = 0usize;
+        let mut j = 0;
+        while j < 4 {
+            let c = chunk[j];
+            if c == b'=' {
+                pad = 4 - j;
+                // The rest of the group must all be padding...
+                if chunk[j..].iter().any(|&x| x != b'=') {
+                    return None;
+                }
+                // ...and padding only appears in the final group.
+                if !is_last {
+                    return None;
+                }
+                break;
+            }
+            let v = rev[c as usize];
+            if v == 255 {
+                return None;
+            }
+            vals[j] = v;
+            j += 1;
+        }
+        match pad {
+            0 => {
+                out.push((vals[0] << 2) | (vals[1] >> 4));
+                out.push((vals[1] << 4) | (vals[2] >> 2));
+                out.push((vals[2] << 6) | vals[3]);
+            }
+            1 => {
+                // 3 data chars → 2 bytes; the low 2 bits of char 3 are dropped.
+                if vals[2] & 0x03 != 0 {
+                    return None;
+                }
+                out.push((vals[0] << 2) | (vals[1] >> 4));
+                out.push((vals[1] << 4) | (vals[2] >> 2));
+            }
+            2 => {
+                // 2 data chars → 1 byte; the low 4 bits of char 2 are dropped.
+                if vals[1] & 0x0f != 0 {
+                    return None;
+                }
+                out.push((vals[0] << 2) | (vals[1] >> 4));
+            }
+            // pad of 3 or 4 (e.g. "====") is never valid.
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
 /// Subset of CRuby's `String#unpack` — see the per-directive
 /// table in the call-site comment. Returns Err with a CRuby-
 /// ish message on unsupported directives or malformed input.
@@ -5066,12 +5140,20 @@ pub(crate) fn unpack_bytes(input: &[u8], fmt: &str) -> Result<Vec<Value>, String
                 out.push(Value::new_str_bytes(s_bytes));
             }
             'm' => {
-                // Base64 (RFC 2045/4648). Decodes the REST of the
-                // input (no per-element count), skipping whitespace
-                // and stopping at padding, and yields the single
-                // decoded String. rack's basic-auth reader does
-                // `credentials.unpack1('m')`.
-                let decoded = base64_decode(&input[i..]);
+                // Base64. `m0` (count 0) is STRICT RFC 4648 — rejects
+                // whitespace / bad padding / non-canonical input with
+                // ArgumentError "invalid base64" (what base64's
+                // strict_decode64 / urlsafe_decode64 rely on). Plain
+                // `m` (or nonzero count) is the tolerant RFC 2045 form
+                // (skips whitespace, stops at padding) — rack's
+                // basic-auth reader does `credentials.unpack1('m')`.
+                // Either way decodes the REST of the input.
+                let decoded = if n == 0 {
+                    base64_decode_strict(&input[i..])
+                        .ok_or_else(|| "invalid base64".to_string())?
+                } else {
+                    base64_decode(&input[i..])
+                };
                 i = input.len();
                 out.push(Value::new_str_bytes(decoded));
             }
