@@ -46,60 +46,159 @@ module OpenSSL
   class Digest
     attr_reader :name
 
+    # Algorithm name (CRuby's upcased form) → the lowercase tag the
+    # native `RubyrsDigest` primitive understands, and the digest byte
+    # length. Backed directly by the native digest so OpenSSL::Digest
+    # does NOT depend on the `digest` stdlib being required first.
+    TAGS = { "SHA256" => "sha256", "SHA2" => "sha256", "SHA1" => "sha1",
+             "MD5" => "md5", "SHA512" => "sha512" }.freeze
+    LENS = { "SHA256" => 32, "SHA2" => 32, "SHA1" => 20,
+             "MD5" => 16, "SHA512" => 64 }.freeze
+
     def initialize(name)
       @name = name.to_s.upcase
+      @buffer = "".b
     end
 
-    def self.digest(data); new(_algo).digest(data); end
-    def self.hexdigest(data); new(_algo).hexdigest(data); end
+    # Base class methods take (name, data); each concrete subclass
+    # overrides them to the (data) form below.
+    def self.digest(name, data); new(name).digest(data); end
+    def self.hexdigest(name, data); new(name).hexdigest(data); end
 
-    def digest(data)
-      ::Digest.const_get(@name).digest(data)
+    def _tag
+      TAGS[@name] or raise OpenSSL::OpenSSLError, "unsupported digest algorithm: #{@name}"
+    end
+    private :_tag
+
+    # Streaming API: accumulate via update/<<, finalize via digest.
+    def update(data); @buffer += data.to_s.b; self; end
+    alias << update
+    def reset; @buffer = "".b; self; end
+
+    # `digest(data)` / `hexdigest(data)` are one-shot (don't disturb the
+    # streamed buffer); the no-arg forms finalize the buffer.
+    def digest(data = nil)
+      RubyrsDigest.digest(_tag, data.nil? ? @buffer : data.to_s)
     end
 
-    def hexdigest(data)
-      ::Digest.const_get(@name).hexdigest(data)
+    def hexdigest(data = nil)
+      digest(data).unpack1("H*")
     end
 
     def digest_length
-      digest("").bytesize
+      LENS[@name] || digest.bytesize
     end
+    alias size digest_length
 
     class SHA256 < Digest
       def initialize(*); super("SHA256"); end
-      def self._algo; "SHA256"; end
+      def self.digest(data); new.digest(data); end
+      def self.hexdigest(data); new.hexdigest(data); end
     end
     class SHA1 < Digest
       def initialize(*); super("SHA1"); end
-      def self._algo; "SHA1"; end
+      def self.digest(data); new.digest(data); end
+      def self.hexdigest(data); new.hexdigest(data); end
     end
     class SHA512 < Digest
       def initialize(*); super("SHA512"); end
-      def self._algo; "SHA512"; end
+      def self.digest(data); new.digest(data); end
+      def self.hexdigest(data); new.hexdigest(data); end
     end
     class MD5 < Digest
       def initialize(*); super("MD5"); end
-      def self._algo; "MD5"; end
+      def self.digest(data); new.digest(data); end
+      def self.hexdigest(data); new.hexdigest(data); end
     end
   end
 
-  # `OpenSSL::HMAC.digest(digest, key, data)` — keyed-hash MAC. `digest`
-  # is either an `OpenSSL::Digest` instance (Rack passes
-  # `OpenSSL::Digest::SHA256.new`) or an algorithm-name String. Only
-  # SHA-256 is wired to the native HMAC; other algorithms raise (no
-  # consumer on the session path).
+  # `OpenSSL::HMAC.digest(digest, key, data)` — keyed-hash MAC (RFC 2104).
+  # `digest` is either an `OpenSSL::Digest` instance or an algorithm-name
+  # String. SHA-256 uses the verified native fast path; every other
+  # algorithm `OpenSSL::Digest` supports (SHA1 / SHA512 / MD5) runs the
+  # pure-Ruby HMAC construction over that digest.
   module HMAC
     def self.digest(digest, key, data)
-      algo = digest.respond_to?(:name) ? digest.name : digest.to_s
-      unless algo.to_s.upcase.gsub("-", "") == "SHA256"
-        raise OpenSSL::OpenSSLError, "unsupported HMAC digest #{algo.inspect} (only SHA256)"
+      algo = (digest.respond_to?(:name) ? digest.name : digest.to_s).upcase.gsub("-", "")
+      if algo == "SHA256"
+        __rubyrs_hmac_sha256(key.to_s, data.to_s)
+      else
+        __generic(algo, key.to_s, data.to_s)
       end
-      __rubyrs_hmac_sha256(key.to_s, data.to_s)
     end
 
     def self.hexdigest(digest, key, data)
       digest(digest, key, data).unpack1("H*")
     end
+
+    # RFC 2104 over any OpenSSL::Digest algorithm. The block size is
+    # 128 bytes for the SHA-512 family, 64 for the rest.
+    def self.__generic(algo, key, data)
+      block = (algo == "SHA512" || algo == "SHA384") ? 128 : 64
+      hash = ->(d) { OpenSSL::Digest.new(algo).digest(d) }
+      k = key.b
+      k = hash.call(k) if k.bytesize > block
+      k += ("\x00".b * (block - k.bytesize)) if k.bytesize < block
+      # `pack("C*")` (not map{.chr}.join) — Array#join re-encodes
+      # ASCII-8BIT bytes >127 to UTF-8, corrupting the keystream.
+      ipad = k.bytes.map { |b| b ^ 0x36 }.pack("C*")
+      opad = k.bytes.map { |b| b ^ 0x5c }.pack("C*")
+      hash.call(opad + hash.call(ipad + data.b))
+    end
+  end
+
+  # `OpenSSL::KDF.pbkdf2_hmac` (RFC 2898) — derive a key from a password
+  # via iterated HMAC. Built on OpenSSL::HMAC, so it works for any
+  # supported digest. `OpenSSL::PKCS5.pbkdf2_hmac` is the legacy alias.
+  module KDF
+    def self.pbkdf2_hmac(pass, salt:, iterations:, length:, hash:)
+      algo = hash.respond_to?(:name) ? hash.name : hash.to_s
+      pass = pass.to_s
+      salt = salt.to_s
+      dk = "".b
+      block_index = 1
+      while dk.bytesize < length
+        u = OpenSSL::HMAC.digest(algo, pass, salt + [block_index].pack("N"))
+        t = u
+        (iterations - 1).times do
+          u = OpenSSL::HMAC.digest(algo, pass, u)
+          t = t.bytes.zip(u.bytes).map { |a, b| a ^ b }.pack("C*")
+        end
+        dk += t
+        block_index += 1
+      end
+      dk[0, length]
+    end
+  end
+
+  module PKCS5
+    def self.pbkdf2_hmac(pass, salt, iterations, length, digest)
+      OpenSSL::KDF.pbkdf2_hmac(pass, salt: salt, iterations: iterations,
+                               length: length, hash: digest)
+    end
+
+    # CRuby's older SHA-1-fixed entry point.
+    def self.pbkdf2_hmac_sha1(pass, salt, iterations, length)
+      OpenSSL::KDF.pbkdf2_hmac(pass, salt: salt, iterations: iterations,
+                               length: length, hash: "SHA1")
+    end
+  end
+
+  # Constant-time comparison. `fixed_length_secure_compare` requires
+  # equal-length inputs (raises otherwise); `secure_compare` returns
+  # false on a length mismatch first (matching CRuby).
+  def self.fixed_length_secure_compare(a, b)
+    a = a.to_s.b
+    b = b.to_s.b
+    raise ArgumentError, "inputs must be of equal length" if a.bytesize != b.bytesize
+    res = 0
+    a.bytes.zip(b.bytes).each { |x, y| res |= x ^ y }
+    res.zero?
+  end
+
+  def self.secure_compare(a, b)
+    return false unless a.to_s.bytesize == b.to_s.bytesize
+    fixed_length_secure_compare(a, b)
   end
 
   # `OpenSSL::Cipher` — AES-256-CTR only (Rack 3 `Encryptor`'s

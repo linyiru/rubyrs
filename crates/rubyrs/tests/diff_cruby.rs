@@ -758,6 +758,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn const_autovivified_module() { run_diff("const_autovivified_module"); }
 #[test] fn require_override_autoload() { run_diff("require_override_autoload"); }
 #[test] fn require_openssl_zlib_stub() { run_diff("require_openssl_zlib_stub"); }
+// Real OpenSSL crypto (HMAC variants, PBKDF2, secure_compare, Digest
+// streaming) needs the `_openssl` build; CRuby's core openssl is the
+// oracle (loadable under --disable-gems).
+#[cfg(feature = "_openssl")]
+#[test] fn openssl_crypto() { run_diff("openssl_crypto"); }
 #[test] fn super_to_primitive() { run_diff("super_to_primitive"); }
 #[test] fn fancy_regex_captures() { run_diff("fancy_regex_captures"); }
 #[test] fn numeric_comparable() { run_diff("numeric_comparable"); }
