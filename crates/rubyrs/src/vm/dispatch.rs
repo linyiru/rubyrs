@@ -9626,7 +9626,10 @@ impl Vm {
                         let v = if &*name == "hexdigest" {
                             Value::new_str(crate::digest::to_hex(&raw))
                         } else {
-                            Value::new_str_bytes(raw)
+                            // Raw digest bytes are ASCII-8BIT in CRuby
+                            // (binary, not UTF-8) — match so concatenating
+                            // with other BINARY strings doesn't clash.
+                            Value::new_str_bytes_binary(raw)
                         };
                         self.stack.push(v);
                         return Ok(());

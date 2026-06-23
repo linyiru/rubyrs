@@ -16,3 +16,6 @@ p d.hexdigest
 p (d.hexdigest == Digest::SHA256.hexdigest("hello"))
 # digest of a longer multi-block input
 p Digest::SHA256.hexdigest("a" * 1000)
+# raw digest bytes are ASCII-8BIT (binary), not UTF-8
+p Digest::SHA256.digest("abc").encoding.to_s
+p Digest::SHA512.digest("abc").encoding.to_s
