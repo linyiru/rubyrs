@@ -1638,6 +1638,22 @@ impl Vm {
                     };
                     self.name_anon_class(cls, &qualified);
                 }
+                // Const assigned directly inside an eigenclass body
+                // (`class << self; FOO = …`): CRuby scopes it under the
+                // eigenclass. Mirror the nested module/class arm in
+                // Op::DefClass — also register on the eigenclass's own
+                // const table so `self::FOO` / `const_get(:FOO, false)` /
+                // `const_defined?(:FOO, false)` resolve, while the global
+                // `self.constants` write (below) keeps bare reads in the
+                // body working. Additive, gated on an eigenclass scope.
+                if let Some(scope) = self.class_stack.last()
+                    && scope.singleton_target.borrow().is_some()
+                {
+                    let short = self.interner.resolve(name_id);
+                    let short = short.rsplit("::").next().unwrap_or(&short).to_string();
+                    let short_id = self.interner.intern(&short);
+                    scope.consts.borrow_mut().insert(short_id, v.clone());
+                }
                 self.constants.insert(name_id, v);
                 // Stamp the assignment location (first write wins, so a
                 // `class Foo; end`'s DefClass location is preserved over
@@ -4460,6 +4476,27 @@ impl Vm {
                         // effects; CRuby ignores the return).
                         self.stack.pop();
                     }
+                }
+                // A nested `module`/`class` defined directly inside an
+                // eigenclass body (`class << self; module Sync; …`):
+                // CRuby scopes the constant under the eigenclass. The
+                // flat const model keys it under the surrounding class
+                // (compile-time qual_id) so bare reads in the body still
+                // resolve — ALSO register it on the eigenclass's own
+                // const table so explicit access (`self::Sync`,
+                // `const_get(:Sync, false)`, `const_defined?(:Sync,
+                // false)`, `singleton_class.const_get`) finds it where
+                // CRuby puts it. Additive: the global table + bare-read
+                // path are untouched (gated on the enclosing scope being
+                // an eigenclass — `singleton_target` set).
+                if let Some(scope) = self.class_stack.last()
+                    && scope.singleton_target.borrow().is_some()
+                {
+                    let short = self.interner.resolve(name_id);
+                    let short = short.rsplit("::").next().unwrap_or(&short).to_string();
+                    let short_id = self.interner.intern(&short);
+                    scope.consts.borrow_mut().insert(short_id, Value::Class(cls.clone()));
+                    self.bump_const_gen();
                 }
                 self.class_stack.push(cls.clone());
                 self.class_visibility_stack.push(Visibility::Public);

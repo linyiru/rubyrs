@@ -821,6 +821,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn bare_super_implicit_block() { run_diff("bare_super_implicit_block"); }
 #[test] fn super_lifecycle_hook_block() { run_diff("super_lifecycle_hook_block"); }
 #[test] fn super_to_native_class_method() { run_diff("super_to_native_class_method"); }
+#[test] fn class_self_nested_const() { run_diff("class_self_nested_const"); }
 #[cfg(feature = "regex")]
 #[test] fn regexp_symbol_arg() { run_diff("regexp_symbol_arg"); }
 #[test] fn module_class_variable_reflection() { run_diff("module_class_variable_reflection"); }
