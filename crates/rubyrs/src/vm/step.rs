@@ -2790,6 +2790,25 @@ impl Vm {
                                     recv_type: std::borrow::Cow::Owned(recv_desc),
                                 }));
                             }
+                            // Lifecycle / inclusion hooks: CRuby ships real
+                            // empty defaults on Module/Class
+                            // (Module#included/extended/prepended,
+                            // Class#inherited, method_added family), so a
+                            // user hook's bare `super` (forwarding its
+                            // block) reaches a no-op. ActiveSupport::Concern
+                            // defines `included(base = nil, &block)` whose
+                            // `super` (block-carrying → this path) must land
+                            // here. Twin of the plain-super lifecycle no-op
+                            // in super_call_with_lifecycle_noop.
+                            (hook, Some(Value::Class(_)))
+                                if matches!(hook,
+                                    "included" | "extended" | "prepended" | "inherited"
+                                    | "method_added" | "method_removed" | "method_undefined"
+                                    | "singleton_method_added" | "singleton_method_removed"
+                                    | "singleton_method_undefined") =>
+                            {
+                                self.stack.push(Value::Nil);
+                            }
                             (_, cur) => {
                                 // CRuby: `super(*a, &b)` with no superclass
                                 // method invokes `method_missing(name, *a,

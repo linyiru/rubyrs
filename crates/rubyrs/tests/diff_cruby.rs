@@ -818,6 +818,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn object_singleton_super() { run_diff("object_singleton_super"); }
 #[test] fn bare_super_forwarding() { run_diff("bare_super_forwarding"); }
 #[test] fn bare_super_implicit_block() { run_diff("bare_super_implicit_block"); }
+#[test] fn super_lifecycle_hook_block() { run_diff("super_lifecycle_hook_block"); }
 #[test] fn super_is_a() { run_diff("super_is_a"); }
 #[test] fn regexp_names() { run_diff("regexp_names"); }
 #[cfg(feature = "regex")]
