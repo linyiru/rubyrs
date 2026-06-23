@@ -2232,7 +2232,35 @@ impl Vm {
     /// Hash receivers use `ruby_eq` key lookup; Array uses Int
     /// index (negative wraps from end). Anything else → nil so
     /// the caller can short-circuit cleanly.
-    pub(crate) fn dig_step(&mut self, recv: &Value, key: &Value) -> Result<Value, Trap> {
+    pub(crate) fn dig_step(&mut self, recv: &Value, key: &Value, allow_dispatch: bool) -> Result<Value, Trap> {
+        // A NESTED value (allow_dispatch) that defines its own `dig`
+        // — a Hash/Array SUBCLASS (class_tag) whose override re-converts
+        // keys (Sinatra's IndifferentHash), or any user object with a
+        // `dig` method (the Digger fixture) — is dispatched to, one key
+        // at a time. The FIRST step (allow_dispatch = false) is the
+        // receiver whose native `dig` is already running, so it must use
+        // the internal lookup below — dispatching there would recurse
+        // through the subclass override forever.
+        if allow_dispatch {
+            let dig_cls = match recv {
+                Value::Hash(id) => self.heap.hash_class_tag(*id),
+                Value::Array(id) => self.heap.array_class_tag(*id),
+                Value::Object(oid) => Some(self.heap.class_of(*oid)),
+                _ => None,
+            };
+            if let Some(cls) = dig_cls {
+                let dig_id = self.interner.intern("dig");
+                if let Some(m) = self.lookup_method_uncached(&cls, dig_id) {
+                    let pre_frames = self.frames.len();
+                    let mut g = PinGuard::new(self);
+                    g.pin(recv.clone());
+                    g.pin(key.clone());
+                    g.vm.invoke_method(m, recv.clone(), vec![key.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    return Ok(g.vm.stack.pop().unwrap_or(Value::Nil));
+                }
+            }
+        }
         match recv {
             Value::Hash(id) => {
                 let id = *id;
@@ -2292,26 +2320,10 @@ impl Vm {
             }
             // `dig_step` is only ever reached with a key still to
             // consume, so a non-nil intermediate that isn't a Hash /
-            // Array is the CRuby TypeError —
-            //   `{"a"=>"1"}.dig("a", 1)` => "String does not have
-            //   #dig method" (spec_headers#test_dig). A user object
-            // that defines its own `dig` is dispatched to instead
-            // (one key at a time — the common nested case).
+            // Array (and didn't dispatch its own `dig` above) is the
+            // CRuby TypeError — `{"a"=>"1"}.dig("a", 1)` => "String does
+            // not have #dig method" (spec_headers#test_dig).
             other => {
-                if let Value::Object(oid) = other {
-                    let dig_id = self.interner.intern("dig");
-                    let cls = self.heap.class_of(*oid);
-                    if let Some(m) = self.lookup_method_uncached(&cls, dig_id) {
-                        let pre_frames = self.frames.len();
-                        let mut g = PinGuard::new(self);
-                        g.pin(other.clone());
-                        g.pin(key.clone());
-                        g.vm.invoke_method(m, other.clone(), vec![key.clone()])?;
-                        g.vm.dispatch_until(pre_frames)?;
-                        let result = g.vm.stack.pop().unwrap_or(Value::Nil);
-                        return Ok(result);
-                    }
-                }
                 let cname = match other {
                     Value::Object(oid) => self
                         .heap

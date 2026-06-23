@@ -2602,14 +2602,18 @@ impl Vm {
                 };
                 let block_val = self.stack.pop().expect("ICE: ApplySuperBlock without block slot");
                 // `&nil` is the legitimate "no block" shape; map it
-                // to a None block slot. Anything else must be a
-                // Block — we don't coerce `&method`/`&curried_proc`
-                // here yet (CallBlock has a richer arm). When
-                // sinatra-contrib forwards a real block this is
-                // always Value::Block.
+                // to a None block slot. A real block forwards as-is; a
+                // `&method(:x)` / `&curried_proc` (BoundMethod /
+                // CurriedProc) coerces to a forwarder block via
+                // `coerce_callable_to_block`, mirroring CallBlock's
+                // richer arm. Sinatra's IndifferentHash#transform_values!
+                // does `super(&method(:convert_value))`.
                 let block_id = match block_val {
                     Value::Block(id) => Some(id),
                     Value::Nil => None,
+                    Value::BoundMethod(_) | Value::CurriedProc(_) => {
+                        Some(self.coerce_callable_to_block(block_val)?)
+                    }
                     other => return Err(self.trap(RubyError::TypeError {
                         msg: format!(
                             "wrong argument type {} (expected Proc)",
@@ -2739,9 +2743,26 @@ impl Vm {
                                     self.stack.push(Value::Nil);
                                 } else {
                                     let recv = Value::Hash(id);
-                                    match self.collection_call(&recv, &nm, &args)? {
-                                        Some(v) => self.stack.push(v),
-                                        None => return Err(trap),
+                                    // Block-form FIRST when a block is
+                                    // forwarded: a non-block `fetch` /
+                                    // `fetch_values` RAISES KeyError on a
+                                    // miss (never returns None), so a
+                                    // block-carrying `super` must reach
+                                    // the block-form (`fetch { }`) first.
+                                    // `super(&method(:convert_value))` from
+                                    // IndifferentHash#transform_values! and
+                                    // `def fetch(k,*d,&b); super; end` both
+                                    // land here. bypass the subclass-override
+                                    // deferral (no user super method).
+                                    if let Some(bid) = block_id
+                                        && let Some(v) =
+                                            self.collection_call_block(&recv, &nm, &args, bid, true)?
+                                    {
+                                        self.stack.push(v);
+                                    } else if let Some(v) = self.collection_call(&recv, &nm, &args)? {
+                                        self.stack.push(v);
+                                    } else {
+                                        return Err(trap);
                                     }
                                 }
                             }

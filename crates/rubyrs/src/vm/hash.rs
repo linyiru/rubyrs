@@ -63,14 +63,37 @@ impl Vm {
                         }));
                     }
                     // `default` no-arg returns the scalar default
-                    // (set via `Hash.new(value)`) or nil. CRuby's
-                    // 1-arg form `h.default(key)` invokes the
-                    // default_proc with the key — that variant is
-                    // out of subset (needs the step_block scaffold
-                    // and pin discipline; the `[]` arm above
-                    // already routes the lookup-miss path).
+                    // (set via `Hash.new(value)`) or nil.
                     ("default", []) => {
                         Some(self.heap.hash_default_value(id).unwrap_or(Value::Nil))
+                    }
+                    // 1-arg `h.default(key)`: a default_proc (block) is
+                    // invoked with `(self, key)`; otherwise the scalar
+                    // default (or nil) is returned, ignoring the key.
+                    // Mirrors the `[]` lookup-miss default-block path
+                    // below. Sinatra's `IndifferentHash#default(*args)`
+                    // maps keys then `super(*args)` here (test_default_block:
+                    // `IH.new { |h, k| h[k] = k.upcase }.default(:a) == "A"`).
+                    ("default", [key]) => {
+                        if let Some(block_id) = self.heap.hash_default_block(id) {
+                            let key = key.clone();
+                            let pre_frames = self.frames.len();
+                            let mut g = PinGuard::new(self);
+                            g.pin(Value::Hash(id));
+                            g.pin(key.clone());
+                            g.pin(Value::Block(block_id));
+                            match g.vm.step_block(block_id, vec![Value::Hash(id), key], pre_frames)? {
+                                crate::vm::iter::BlockStep::MethodReturn => Some(Value::Nil),
+                                crate::vm::iter::BlockStep::Break(_) => {
+                                    return Err(g.vm.trap(crate::error::RubyError::LocalJumpError {
+                                        msg: "break from proc-closure".into(),
+                                    }));
+                                }
+                                crate::vm::iter::BlockStep::Value(r) => Some(r),
+                            }
+                        } else {
+                            Some(self.heap.hash_default_value(id).unwrap_or(Value::Nil))
+                        }
                     }
                     // `default=` — set (or nil-clear) the scalar
                     // default. CRuby semantics: assigning a scalar
@@ -213,12 +236,13 @@ impl Vm {
                     ("dig", keys) if !keys.is_empty() => {
                         // Walk the keys/indices, looking up at each
                         // step. Nil at any level short-circuits.
-                        // Type-dispatch per step: Hash → ruby_eql
-                        // lookup, Array → integer index. Other types
-                        // would need `dig` defined; treat as nil.
+                        // `dig_step` dispatches `.dig` on a nested
+                        // subclass / user object (so a nested
+                        // IndifferentHash re-converts its key) and
+                        // raises TypeError on a non-diggable value.
                         let mut cur = Value::Hash(id);
-                        for key in keys {
-                            cur = self.dig_step(&cur, key)?;
+                        for (i, key) in keys.iter().enumerate() {
+                            cur = self.dig_step(&cur, key, i > 0)?;
                             if matches!(cur, Value::Nil) { break; }
                         }
                         Some(cur)

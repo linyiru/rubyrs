@@ -990,8 +990,10 @@ impl Vm {
                 "merge" | "merge!" | "update" | "replace" | "clear" | "delete" | "invert" | "key" | "store" | "except" | "slice" | "dup" | "clone" |
                 "each" | "each_pair" |
                 "select" | "filter" | "reject" | "find" | "detect" |
+                "select!" | "filter!" | "reject!" | "keep_if" | "delete_if" |
                 "any?" | "all?" | "none?" |
                 "each_with_index" | "map" | "collect" | "fetch" |
+                "fetch_values" | "dig" | "assoc" | "rassoc" |
                 "sort" | "sort_by" | "min_by" | "max_by" | "group_by" |
                 "transform_keys" | "transform_values" |
                 "transform_keys!" | "transform_values!" |
@@ -2402,6 +2404,29 @@ impl Vm {
                         // no-op), so it falls through to nil.
                         (_, Some(Value::Hash(id))) if self.heap.hash_class_tag(id).is_some() => {
                             let recv = Value::Hash(id);
+                            // Block-form primitives (`transform_values!`,
+                            // `select!`, `reject!`, `fetch`/`fetch_values`
+                            // with a block, ...) are handled by
+                            // `collection_call_block`, not the non-block
+                            // arm — forward the calling frame's block.
+                            // Tried BEFORE `collection_call` because a
+                            // non-block `fetch`/`fetch_values` RAISES
+                            // KeyError on a miss (never returns None to
+                            // fall through), so a block-carrying
+                            // `super(key)` must reach the block-form first.
+                            // Sinatra's IndifferentHash supers into
+                            // `Hash#transform_values!`, `#select!`,
+                            // `#fetch { }`, etc. `bypass_override` skips
+                            // the subclass-override deferral — we already
+                            // know there's no user super method.
+                            let block = self.frames.last().and_then(|f| f.block_arg);
+                            if let Some(blk) = block
+                                && let Some(v) =
+                                    self.collection_call_block(&recv, &nm, &args, blk, true)?
+                            {
+                                self.stack.push(v);
+                                return Ok(());
+                            }
                             if let Some(v) = self.collection_call(&recv, &nm, &args)? {
                                 self.stack.push(v);
                                 return Ok(());
@@ -2445,6 +2470,18 @@ impl Vm {
                         // fallback mirrors the Hash shape.)
                         (_, Some(Value::Array(id))) if self.heap.array_class_tag(id).is_some() => {
                             let recv = Value::Array(id);
+                            // Block-form first (twin of the Hash arm) so a
+                            // block-carrying `super` reaches `map!`/
+                            // `select!`/`fetch { }` before the non-block
+                            // arm (which may raise on a miss).
+                            let block = self.frames.last().and_then(|f| f.block_arg);
+                            if let Some(blk) = block
+                                && let Some(v) =
+                                    self.collection_call_block(&recv, &nm, &args, blk, true)?
+                            {
+                                self.stack.push(v);
+                                return Ok(());
+                            }
                             if let Some(v) = self.collection_call(&recv, &nm, &args)? {
                                 self.stack.push(v);
                                 return Ok(());

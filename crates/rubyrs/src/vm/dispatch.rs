@@ -17222,7 +17222,7 @@ impl Vm {
             }
         }
         if let Some(r) = &recv
-            && let Some(v) = self.collection_call_block(r, &name, &args, block)? {
+            && let Some(v) = self.collection_call_block(r, &name, &args, block, false)? {
                 self.stack.push(v);
                 return Ok(());
             }
@@ -17240,7 +17240,7 @@ impl Vm {
                 let self_val = self.frames.last()
                     .expect("ICE: do_call_block(no_recv) empty frames for tap routing")
                     .self_val.clone();
-                if let Some(v) = self.collection_call_block(&self_val, &name, &args, block)? {
+                if let Some(v) = self.collection_call_block(&self_val, &name, &args, block, false)? {
                     self.stack.push(v);
                     return Ok(());
                 }

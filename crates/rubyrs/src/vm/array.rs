@@ -1144,9 +1144,12 @@ impl Vm {
                         return Err(self.arity_error_arg0_or_1_int(name, args));
                     }
                     ("dig", keys) if !keys.is_empty() => {
+                        // Walk indices/keys; `dig_step` dispatches `.dig`
+                        // on a nested subclass / user object and raises
+                        // TypeError on a non-diggable intermediate.
                         let mut cur = Value::Array(id);
-                        for key in keys {
-                            cur = self.dig_step(&cur, key)?;
+                        for (i, key) in keys.iter().enumerate() {
+                            cur = self.dig_step(&cur, key, i > 0)?;
                             if matches!(cur, Value::Nil) { break; }
                         }
                         Some(cur)

@@ -715,7 +715,7 @@ impl Vm {
         Ok(Some(early.unwrap_or(recv_return)))
     }
 
-    pub(crate) fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: ObjId) -> Result<Option<Value>, Trap> {
+    pub(crate) fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: ObjId, bypass_override: bool) -> Result<Option<Value>, Trap> {
         // Frozen guard for the block-form Array mutators (map! /
         // select! / reject! / sort_by! / keep_if / delete_if /
         // collect! / filter!) — these dispatch here, not through
@@ -744,22 +744,23 @@ impl Vm {
                 msg: format!("can't modify frozen Hash: {}", shown),
             }));
         }
-        // A Hash / Array SUBCLASS that OVERRIDES `transform_keys` /
-        // `transform_values` must run ITS override, not the native arm
-        // below — this function runs BEFORE user-method lookup in
-        // `do_call_block`, so without this an override is silently
-        // shadowed. Concretely: `Rack::Headers#transform_keys` /
-        // `#transform_values` re-downcase keys via their own `[]=`, but
-        // the native Hash arms skipped that (spec_headers). Scoped to
-        // these transforms (incl. their `!` variants — Rack::Headers
-        // overrides `transform_keys!` too, and its non-bang form calls
-        // `dup.transform_keys!`); a broader probe regressed block-form
-        // `fetch`, whose deferred dispatch has a separate issue. Only
-        // defers when an override actually exists on the subclass chain.
-        if matches!(
-            name,
-            "transform_keys" | "transform_values" | "transform_keys!" | "transform_values!"
-        ) {
+        // A Hash / Array SUBCLASS that OVERRIDES a block-form method
+        // must run ITS override, not the native arm below — this
+        // function runs BEFORE user-method lookup in `do_call_block`,
+        // so without this an override is silently shadowed. Mirrors the
+        // non-block override gate in `do_call` (dispatch.rs ~10428).
+        // Concretely: `Rack::Headers#transform_keys` re-downcases keys
+        // via its own `[]=`, and Sinatra's `IndifferentHash#select` /
+        // `#reject` return `dup.tap { ... }` (an IndifferentHash, not a
+        // bare Hash). Safe to generalise because rubyrs's Hash/Array
+        // class chains do NOT include Enumerable (its methods are a
+        // separate `try_enumerable_module_fallback`), so the lookup
+        // only hits a method the subclass genuinely defines — a plain
+        // subclass that doesn't override the name finds nothing and
+        // takes the native arm. `bypass_override` is set when this is
+        // reached FROM the super path (we already know there's no user
+        // super method, so deferring would loop back into the override).
+        if !bypass_override {
             let override_tag = match recv {
                 Value::Hash(id) => self.heap.hash_class_tag(*id),
                 Value::Array(id) => self.heap.array_class_tag(*id),
@@ -2282,6 +2283,50 @@ impl Vm {
                     BlockStep::Break(r) | BlockStep::Value(r) => Some(r),
                 }
             }
+            // Block form: `h.fetch_values(*keys) { |k| default }` — the
+            // block resolves each MISSING key (no KeyError). The blockless
+            // form lives in hash.rs. Sinatra's IndifferentHash#fetch_values
+            // supers here with converted keys + the forwarded block.
+            (Value::Hash(id), "fetch_values", keys) => {
+                let id = *id;
+                let keys: Vec<Value> = keys.to_vec();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                for k in &keys {
+                    g.pin(k.clone());
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut out: Vec<Value> = Vec::with_capacity(keys.len());
+                let mut early = None;
+                for key in &keys {
+                    let pos = g.vm.heap.hash(id).iter()
+                        .position(|(hk, _)| hk.ruby_eql(key, &g.vm.heap));
+                    match pos {
+                        Some(p) => {
+                            let v = g.vm.heap.hash(id)[p].1.clone();
+                            g.pin(v.clone());
+                            out.push(v);
+                        }
+                        None => match g.vm.step_block1(block, key.clone(), pre_frames)? {
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                            BlockStep::Break(r) => { early = Some(r); break; }
+                            BlockStep::Value(r) => {
+                                g.pin(r.clone());
+                                out.push(r);
+                            }
+                        },
+                    }
+                }
+                if let Some(r) = early {
+                    Some(r)
+                } else {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
+                    Some(Value::Array(nid))
+                }
+            }
             (Value::Int(start), "upto", [Value::Int(stop)]) => {
                 // Pin the block — the body may allocate freely
                 // (e.g. `1.upto(10) { (1..1000).to_a }`), and GC
@@ -2869,7 +2914,7 @@ impl Vm {
             // arms (each_slice/each_cons × Array/Hash/Range).
             (Value::Range(_), "each_slice", [Value::Float(f)]) => {
                 let n = self.float_to_int_arg(*f)?;
-                return self.collection_call_block(recv, name, &[Value::Int(n)], block);
+                return self.collection_call_block(recv, name, &[Value::Int(n)], block, false);
             }
             (Value::Range(id), "each_slice", [Value::Int(n)]) => {
                 if *n <= 0 {
@@ -2971,7 +3016,7 @@ impl Vm {
             }
             (Value::Range(_), "each_cons", [Value::Float(f)]) => {
                 let n = self.float_to_int_arg(*f)?;
-                return self.collection_call_block(recv, name, &[Value::Int(n)], block);
+                return self.collection_call_block(recv, name, &[Value::Int(n)], block, false);
             }
             // `(b..e).each_cons(n) { |window| ... }` — sliding
             // window of n consecutive Ints; return receiver.
@@ -3397,7 +3442,7 @@ impl Vm {
             // path including check_alloc / step_block traps.
             (Value::Array(_), "each_slice", [Value::Float(f)]) => {
                 let n = self.float_to_int_arg(*f)?;
-                return self.collection_call_block(recv, name, &[Value::Int(n)], block);
+                return self.collection_call_block(recv, name, &[Value::Int(n)], block, false);
             }
             (Value::Array(id), "each_slice", [Value::Int(n)]) => {
                 if *n <= 0 {
@@ -3454,7 +3499,7 @@ impl Vm {
             // Values keep their ObjId, so identity is preserved).
             (Value::Array(_), "each_cons", [Value::Float(f)]) => {
                 let n = self.float_to_int_arg(*f)?;
-                return self.collection_call_block(recv, name, &[Value::Int(n)], block);
+                return self.collection_call_block(recv, name, &[Value::Int(n)], block, false);
             }
             (Value::Array(id), "each_cons", [Value::Int(n)]) => {
                 if *n <= 0 {
@@ -4745,7 +4790,7 @@ impl Vm {
             // not nil). Last slice may be shorter than n.
             (Value::Hash(_), "each_slice", [Value::Float(f)]) => {
                 let n = self.float_to_int_arg(*f)?;
-                return self.collection_call_block(recv, name, &[Value::Int(n)], block);
+                return self.collection_call_block(recv, name, &[Value::Int(n)], block, false);
             }
             (Value::Hash(id), "each_slice", [Value::Int(n)]) => {
                 if *n <= 0 {
@@ -4821,7 +4866,7 @@ impl Vm {
             // receiver Hash (CRuby parity).
             (Value::Hash(_), "each_cons", [Value::Float(f)]) => {
                 let n = self.float_to_int_arg(*f)?;
-                return self.collection_call_block(recv, name, &[Value::Int(n)], block);
+                return self.collection_call_block(recv, name, &[Value::Int(n)], block, false);
             }
             (Value::Hash(id), "each_cons", [Value::Int(n)]) => {
                 if *n <= 0 {
@@ -5566,7 +5611,7 @@ impl Vm {
                 let arr_id = g.vm.heap.alloc(HeapObj::Array(elems.into()));
                 g.pin(Value::Array(arr_id));
                 let arr_val = Value::Array(arr_id);
-                return g.vm.collection_call_block(&arr_val, name, args, block);
+                return g.vm.collection_call_block(&arr_val, name, args, block, false);
             }
             _ => None,
         })
