@@ -1191,6 +1191,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // iso8601/strptime parsers, UTC-instant inspect tuple.
 #[cfg(feature = "stdlib")]
 #[test] fn datetime_methods() { run_diff_gem("datetime_methods", "date"); }
+// IPAddr: succ / private? / loopback? + to_range endpoints.
+#[cfg(feature = "stdlib")]
+#[test] fn ipaddr_methods() { run_diff_gem("ipaddr_methods", "ipaddr"); }
 // `Monitor` autoloaded (available without explicit require, as in a
 // full Ruby env). Oracle is gem-enabled CRuby (`--disable=gems` lacks
 // the ambient Monitor). Surfaced by dotenv's bare `Monitor.new`.

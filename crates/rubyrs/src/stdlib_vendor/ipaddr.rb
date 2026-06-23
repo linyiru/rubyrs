@@ -132,6 +132,34 @@ class IPAddr
     IPAddr.new(@addr, @family)..IPAddr.new(last, @family)
   end
 
+  # Next address (same family / netmask) — also what makes the
+  # `to_range` Range iterable (Range#each needs `succ` + `<=>`).
+  def succ
+    clone = IPAddr.new(@addr + 1, @family)
+    clone.instance_variable_set(:@mask_addr, @mask_addr)
+    clone
+  end
+
+  # RFC 1918 (IPv4) / RFC 4193 unique-local (IPv6 fc00::/7).
+  def private?
+    if ipv4?
+      (@addr & 0xff000000) == 0x0a000000 ||   # 10.0.0.0/8
+        (@addr & 0xfff00000) == 0xac100000 || # 172.16.0.0/12
+        (@addr & 0xffff0000) == 0xc0a80000    # 192.168.0.0/16
+    else
+      (@addr >> 121) == 0x7e                   # fc00::/7
+    end
+  end
+
+  # 127.0.0.0/8 (IPv4) / ::1 (IPv6).
+  def loopback?
+    if ipv4?
+      (@addr & 0xff000000) == 0x7f000000
+    else
+      @addr == 1
+    end
+  end
+
   def <=>(other)
     other = coerce_other(other)
     return nil unless other.family == @family
