@@ -135,7 +135,10 @@ module OpenSSL
     # 128 bytes for the SHA-512 family, 64 for the rest.
     def self.__generic(algo, key, data)
       block = (algo == "SHA512" || algo == "SHA384") ? 128 : 64
-      hash = ->(d) { OpenSSL::Digest.new(algo).digest(d) }
+      # `.b` keeps every intermediate ASCII-8BIT — the digest output is
+      # UTF-8-tagged, which would clash when concatenated with the
+      # BINARY pads (e.g. a key longer than the block, hashed down).
+      hash = ->(d) { OpenSSL::Digest.new(algo).digest(d).b }
       k = key.b
       k = hash.call(k) if k.bytesize > block
       k += ("\x00".b * (block - k.bytesize)) if k.bytesize < block

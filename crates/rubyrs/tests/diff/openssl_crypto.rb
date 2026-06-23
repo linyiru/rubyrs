@@ -17,16 +17,24 @@ d.update("a"); d << "bc"
 p d.hexdigest
 p OpenSSL::Digest::SHA256.new.digest_length
 
+# --- SHA-512 (native, 64-bit-word digest) ---
+p OpenSSL::Digest::SHA512.hexdigest("abc")
+p OpenSSL::Digest.new("SHA512").hexdigest("")
+p OpenSSL::Digest::SHA512.new.digest_length
+
 # --- HMAC across algorithms ---
 p OpenSSL::HMAC.hexdigest("SHA256", "key", "data")
 p OpenSSL::HMAC.hexdigest("SHA1", "key", "data")
+p OpenSSL::HMAC.hexdigest("SHA512", "key", "data")
 p OpenSSL::HMAC.hexdigest("MD5", "key", "data")
 p OpenSSL::HMAC.hexdigest("SHA256", "k" * 100, "data")  # key longer than block
+p OpenSSL::HMAC.hexdigest("SHA512", "k" * 200, "data")  # key longer than 128-byte block
 p OpenSSL::HMAC.hexdigest(OpenSSL::Digest.new("SHA1"), "key", "data")  # digest-object arg
 
 # --- PBKDF2 (RFC 2898) ---
 p OpenSSL::KDF.pbkdf2_hmac("password", salt: "salt", iterations: 1000, length: 32, hash: "SHA256").unpack1("H*")
 p OpenSSL::KDF.pbkdf2_hmac("password", salt: "salt", iterations: 2048, length: 20, hash: "SHA1").unpack1("H*")
+p OpenSSL::KDF.pbkdf2_hmac("password", salt: "salt", iterations: 1000, length: 64, hash: "SHA512").unpack1("H*")
 p OpenSSL::PKCS5.pbkdf2_hmac("pw", "salt", 1000, 32, OpenSSL::Digest.new("SHA256")).unpack1("H*")
 p OpenSSL::PKCS5.pbkdf2_hmac_sha1("pw", "salt", 1000, 20).unpack1("H*")
 

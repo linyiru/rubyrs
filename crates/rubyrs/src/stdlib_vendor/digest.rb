@@ -69,6 +69,12 @@ module Digest
     end
   end
 
+  class SHA512 < RubyrsBase
+    def self.algorithm_tag
+      "sha512"
+    end
+  end
+
   # CRuby's `Digest::SHA2` selects a bit length at construction and
   # defaults to the 256-bit variant. rubyrs models the 256 case (the
   # 384/512 selector is not plumbed); this is the shape jekyll's
