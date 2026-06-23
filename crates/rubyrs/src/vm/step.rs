@@ -1955,8 +1955,21 @@ impl Vm {
                             let head_id = self.interner.intern(head);
                             if let Some(Value::Class(head_cls)) =
                                 self.const_via_ancestors(&cref, head_id)
+                                // `prefer_own_autoload = true`: the head was
+                                // EXPLICITLY resolved (`Types` → `Dry::Types`),
+                                // so `rest` (`Array`) is a scoped lookup under a
+                                // real scope — a pending `Dry::Types::Array`
+                                // autoload must win over the toplevel core
+                                // `::Array` (the flag only suppresses the
+                                // toplevel fallback WHEN such an autoload is
+                                // pending, so the no-autoload case still falls
+                                // back as before). dry-types' `Types::Array`
+                                // (a zeitwerk autoload shadowing core Array)
+                                // otherwise bound `::Array`, and `::Array.new(
+                                // SomeClass)` raised "no implicit conversion of
+                                // Class into Integer".
                                 && let crate::vm::dispatch::ConstPathOutcome::Found(v) =
-                                    self.resolve_const_path(&head_cls, rest, true, false)
+                                    self.resolve_const_path(&head_cls, rest, true, true)
                             {
                                 found = Some(v);
                             }

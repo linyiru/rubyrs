@@ -831,6 +831,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn const_added_hook() { run_diff("const_added_hook"); }
 #[test] fn symbol_with_predicates() { run_diff("symbol_with_predicates"); }
 #[test] fn string_affix_variadic() { run_diff("string_affix_variadic"); }
+#[test] fn scoped_const_autoload_shadow() { run_diff("scoped_const_autoload_shadow"); }
 #[cfg(feature = "regex")]
 #[test] fn regexp_symbol_arg() { run_diff("regexp_symbol_arg"); }
 #[test] fn module_class_variable_reflection() { run_diff("module_class_variable_reflection"); }
