@@ -12,7 +12,13 @@
 #
 # Loaded by `require "bigdecimal"` (always-on extra); also installs the
 # Kernel#BigDecimal() conversion function CRuby exposes on require.
-class BigDecimal
+# `< Numeric` matches CRuby's ancestry (`BigDecimal.ancestors`
+# includes Numeric): duck-typing checks like `x.is_a?(Numeric)` and
+# `case x; when Numeric` must see BigDecimal as a number, and it lets
+# this class inherit the shared real-number protocol from the Numeric
+# preamble (real / imaginary / conjugate / rectangular / polar / arg /
+# abs2 / magnitude / real? / integer?) instead of redefining each.
+class BigDecimal < Numeric
   # Rounding-mode constants (CRuby values). money's `setup_defaults`
   # reads `BigDecimal::ROUND_HALF_EVEN` (banker's rounding) at load.
   ROUND_UP = 1
@@ -136,6 +142,16 @@ class BigDecimal
   def finite?; true; end
   def infinite?; nil; end
   def nan?; false; end
+
+  # numerator / denominator / fdiv come from the backing Rational.
+  # CRuby installs the rest of the Numeric complex-decomposition
+  # protocol (real / imaginary / conjugate / rectangular / polar /
+  # arg / abs2 / magnitude / real? / integer?) on Numeric, which this
+  # class now inherits (see the `< Numeric` declaration), so only these
+  # three Rational-derived helpers need spelling out here.
+  def numerator; @r.numerator; end
+  def denominator; @r.denominator; end
+  def fdiv(other, *); BigDecimal.new(@r / __coerce_r(other)); end
 
   # `sign` — CRuby's SIGN_* magnitude: +2 (POSITIVE_FINITE) / -2
   # (NEGATIVE_FINITE) for non-zero, +1 (POSITIVE_ZERO) for zero (we

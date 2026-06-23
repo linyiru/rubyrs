@@ -1179,6 +1179,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // predicates / #sign, and bigdecimal/util #to_d. Surfaced by money.
 #[cfg(feature = "stdlib")]
 #[test] fn bigdecimal_modes_util() { run_diff_gem("bigdecimal_modes_util", "bigdecimal"); }
+// BigDecimal < Numeric ancestry + the inherited real-number complex
+// protocol and Rational-derived numerator/denominator/fdiv.
+#[cfg(feature = "stdlib")]
+#[test] fn bigdecimal_numeric_protocol() { run_diff_gem("bigdecimal_numeric_protocol", "bigdecimal"); }
 // `Monitor` autoloaded (available without explicit require, as in a
 // full Ruby env). Oracle is gem-enabled CRuby (`--disable=gems` lacks
 // the ambient Monitor). Surfaced by dotenv's bare `Monitor.new`.
