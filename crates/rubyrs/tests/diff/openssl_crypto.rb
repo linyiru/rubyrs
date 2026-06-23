@@ -51,3 +51,13 @@ rescue => e
 end
 p OpenSSL.secure_compare("abcdef", "abcdef")
 p OpenSSL.secure_compare("ab", "abc")
+
+# --- asymmetric-algorithm load surface (constant shells + version) ---
+# Gems that SUPPORT RSA/EC reference these at load even when only the
+# symmetric path is used (e.g. jwt's JWK). Values that match CRuby
+# byte-for-byte: defined? is "constant"; the version number clears the
+# 1.0.0 floor on any real/modern provider.
+p defined?(OpenSSL::PKey::EC)
+p defined?(OpenSSL::PKey::RSA)
+p defined?(OpenSSL::PKey::PKeyError)
+p OpenSSL::OPENSSL_VERSION_NUMBER >= 0x10000000

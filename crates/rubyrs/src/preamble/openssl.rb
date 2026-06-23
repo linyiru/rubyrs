@@ -25,6 +25,29 @@ end
 module OpenSSL
   class OpenSSLError < StandardError; end
 
+  # Version constants gems probe for capability/quirk detection (e.g.
+  # jwt's `openssl_3?`). rubyrs's crypto is a pure-Rust reimplementation,
+  # not a libssl binding, but it behaves like a modern (3.x) provider —
+  # report that so version gates pick the current code paths.
+  VERSION = "3.0.0"
+  OPENSSL_VERSION = "OpenSSL 3.0.0 (rubyrs)"
+  OPENSSL_VERSION_NUMBER = 0x30000000
+  OPENSSL_LIBRARY_VERSION = "rubyrs pure-Rust crypto"
+
+  # `OpenSSL::PKey` — constant shells only. The asymmetric algorithms
+  # (RSA/EC/DSA sign/verify) aren't implemented, but gems that support
+  # them reference these constants at load time (e.g. jwt's JWK builds
+  # `[KTY, OpenSSL::PKey::EC]` key-type dispatch arrays). The symmetric
+  # path (HMAC / AES) never touches them; calling a method here is a
+  # NameError/NoMethodError, matching the "feature-absent surface".
+  module PKey
+    class PKeyError < OpenSSL::OpenSSLError; end
+    class PKey; end
+    class RSA < PKey; end
+    class EC < PKey; end
+    class DSA < PKey; end
+  end
+
   # `OpenSSL::Random.random_bytes(n)` — n cryptographically-random bytes
   # as a binary (ASCII-8BIT) String. Backed by the same CSPRNG as
   # `SecureRandom` (the host RNG); the two are interchangeable for
