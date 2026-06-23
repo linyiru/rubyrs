@@ -320,6 +320,10 @@ const BUILTIN_EXCEPTION_PARENT: &[(&str, &str)] = &[
     // `< StandardError` so bare `rescue` catches it, matching
     // CRuby.
     ("Math::DomainError", "StandardError"),
+    // FiberError — `Fiber#resume` on a dead/running fiber, or
+    // `Fiber.yield` outside a fiber / under a cext frame. `<
+    // StandardError` (CRuby). Raised by the `_fiber` host fns.
+    ("FiberError", "StandardError"),
     // SystemCallError + the most-common Errno::* subclasses.
     // Full CRuby table has ~140 platform-specific entries; we
     // pin the subset gems actually reach for in `rescue

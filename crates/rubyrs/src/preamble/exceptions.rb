@@ -402,6 +402,14 @@ module Math
   end
 end
 
+## `FiberError` — raised by the `_fiber` Fiber primitives (resuming a
+## dead/running fiber, yielding outside a fiber / under a cext frame).
+## `< StandardError` (CRuby), so a bare `rescue` catches it. Defined
+## unconditionally so `rescue FiberError` parses in any build; only
+## the `_fiber` host fns actually raise it.
+class FiberError < StandardError
+end
+
 ## `SystemCallError` + `Errno::*` — OS-error hierarchy. CRuby's
 ## actual table has ~140 platform-specific Errno classes; we
 ## pre-install the most common ones gems reach for in

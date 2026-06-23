@@ -439,6 +439,13 @@ fn main() {
     // loads + runs as a fast-JSON drop-in.
     #[cfg(feature = "_oj")]
     rubyrs::register_oj_host_fns(&mut rt);
+    // `_fiber`: cooperative-concurrency primitives backing the Ruby
+    // `Fiber` class API (preamble/fiber.rb). Per ADR 0023 the
+    // _http_server battery registers these too for its streaming path;
+    // registering here makes `Fiber.new { }.resume` work in plain
+    // scripts (e.g. concurrent-ruby's lock_local_var probe).
+    #[cfg(feature = "_fiber")]
+    rubyrs::register_fiber_host_fns(&mut rt);
     let result = rt.eval_file(path);
     trace.at("eval_done");
     match result {

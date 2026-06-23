@@ -468,6 +468,15 @@ pub(crate) struct Heap {
     /// Array-fast-path perf-regression guard.
     #[cfg(feature = "_fiber")]
     pub(crate) fiber_alloc_count: u64,
+    /// The registered `Fiber` class, cached so `class_of` /
+    /// `real_class_of` can report it for the class-less
+    /// `HeapObj::Fiber` slots (a fiber handle behaves as a `Fiber`
+    /// instance everywhere — `fib.class`, `is_a?`, `==`, hashing —
+    /// not just on the method-dispatch path). Set once after the
+    /// preamble defines `Fiber`; `None` only during early boot
+    /// (before any fiber can exist).
+    #[cfg(feature = "_fiber")]
+    pub(crate) fiber_class: Option<std::rc::Rc<crate::value::Class>>,
 }
 
 impl Heap {
@@ -490,7 +499,19 @@ impl Heap {
             max_live: None,
             #[cfg(feature = "_fiber")]
             fiber_alloc_count: 0,
+            #[cfg(feature = "_fiber")]
+            fiber_class: None,
         }
+    }
+
+    /// Resolve a `HeapObj::Fiber` slot's class to the cached `Fiber`
+    /// class. Panics if the class wasn't cached yet — a boot-ordering
+    /// bug, since no fiber handle can exist before the preamble runs.
+    #[cfg(feature = "_fiber")]
+    fn fiber_class(&self) -> std::rc::Rc<crate::value::Class> {
+        self.fiber_class
+            .clone()
+            .expect("ICE: Fiber class not cached before a fiber slot was inspected")
     }
     pub(crate) fn alloc(&mut self, obj: HeapObj) -> ObjId {
         self.live_count += 1;
@@ -549,6 +570,8 @@ impl Heap {
                 None => i.class.clone(),
             },
             HeapObj::TypedData(d) => d.class.clone(),
+            #[cfg(feature = "_fiber")]
+            HeapObj::Fiber(_) => self.fiber_class(),
             _ => panic!("ICE: class_of called on non-Object slot"),
         }
     }
@@ -566,6 +589,8 @@ impl Heap {
                 None => i.class.clone(),
             }),
             HeapObj::TypedData(d) => Some(d.class.clone()),
+            #[cfg(feature = "_fiber")]
+            HeapObj::Fiber(_) => Some(self.fiber_class()),
             _ => None,
         }
     }
@@ -576,6 +601,8 @@ impl Heap {
         match self.get(id) {
             HeapObj::Instance(i) => i.class.clone(),
             HeapObj::TypedData(d) => d.class.clone(),
+            #[cfg(feature = "_fiber")]
+            HeapObj::Fiber(_) => self.fiber_class(),
             _ => panic!("ICE: real_class_of called on non-Object slot"),
         }
     }
@@ -592,6 +619,8 @@ impl Heap {
         match &self.slots[idx] {
             Slot::Live(HeapObj::Instance(i)) => Some(i.class.clone()),
             Slot::Live(HeapObj::TypedData(d)) => Some(d.class.clone()),
+            #[cfg(feature = "_fiber")]
+            Slot::Live(HeapObj::Fiber(_)) => self.fiber_class.clone(),
             _ => None,
         }
     }

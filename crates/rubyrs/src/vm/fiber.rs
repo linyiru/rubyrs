@@ -545,16 +545,18 @@ pub(crate) fn resume_fiber(
     match initial_state {
         FiberState::Returned => {
             return Err(Trap {
-                err: RubyError::RuntimeError {
-                    msg: "FiberError: dead fiber called".to_string(),
+                err: RubyError::HostException {
+                    class_name: "FiberError".to_string(),
+                    message: "attempt to resume a terminated fiber".to_string(),
                 },
                 backtrace: vec![],
             });
         }
         FiberState::Running => {
             return Err(Trap {
-                err: RubyError::RuntimeError {
-                    msg: "FiberError: double resume (fiber already running)".to_string(),
+                err: RubyError::HostException {
+                    class_name: "FiberError".to_string(),
+                    message: "double resume (fiber already running)".to_string(),
                 },
                 backtrace: vec![],
             });
@@ -687,10 +689,9 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             && vm.heap.count_live_fibers() >= cap
         {
             return Err(Trap {
-                err: RubyError::RuntimeError {
-                    msg: format!(
-                        "FiberError: max_live_fibers cap reached (cap = {cap})",
-                    ),
+                err: RubyError::HostException {
+                    class_name: "FiberError".to_string(),
+                    message: format!("max_live_fibers cap reached (cap = {cap})"),
                 },
                 backtrace: vec![],
             });
@@ -726,8 +727,9 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         // P1d.2 guard — see comment above.
         if vm.cext_depth > 0 {
             return Err(Trap {
-                err: RubyError::RuntimeError {
-                    msg: "FiberError: can't yield from cext".to_string(),
+                err: RubyError::HostException {
+                    class_name: "FiberError".to_string(),
+                    message: "can't yield from cext".to_string(),
                 },
                 backtrace: vec![],
             });
@@ -1882,10 +1884,14 @@ mod tests {
             __rubyrs_fiber_resume(fib, nil)
             __rubyrs_fiber_resume(fib, nil)
         "#, "p1c2c_dead.rb").expect_err("resume on dead fiber should raise");
+        // Raised as a FiberError (rescuable as such — the fiber_api
+        // diff fixture covers `rescue FiberError`); the uncaught Debug
+        // wrapper stamps the generic HostException tag, so assert on the
+        // CRuby-matching message here.
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("dead fiber called"),
-            "expected dead-fiber error, got: {msg}",
+            msg.contains("attempt to resume a terminated fiber"),
+            "expected terminated-fiber message, got: {msg}",
         );
     }
 

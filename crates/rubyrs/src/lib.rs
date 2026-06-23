@@ -2333,13 +2333,28 @@ impl Runtime {
                         &self.vm, &dir, key, pre_interner_len, pre_protos_len, &steps,
                     );
                 }
+                self.cache_fiber_class();
                 self.startup_prof_report(_t_total);
                 return;
             }
         }
         self.load_preamble_inner();
+        self.cache_fiber_class();
         self.startup_prof_report(_t_total);
     }
+
+    /// Cache the `Fiber` class on the heap so class_of / real_class_of
+    /// report it for class-less `HeapObj::Fiber` slots. Called after the
+    /// preamble loads on BOTH the cache-hit and miss paths (the class
+    /// table is restored either way; the cached snapshot doesn't carry
+    /// the heap's fiber_class field). No-op without `_fiber`.
+    #[cfg(feature = "_fiber")]
+    fn cache_fiber_class(&mut self) {
+        let fiber_id = self.vm.interner.intern("Fiber");
+        self.vm.heap.fiber_class = self.vm.classes.get(&fiber_id).cloned();
+    }
+    #[cfg(not(feature = "_fiber"))]
+    fn cache_fiber_class(&mut self) {}
 
     fn startup_prof_report(&self, _t_total: std::time::Instant) {
         if std::env::var_os("RUBYRS_STARTUP_PROF").is_some() {
@@ -2497,6 +2512,17 @@ impl Runtime {
             "<rubyrs:preamble:thread>",
         )
             .expect("ICE: failed to load Thread preamble");
+        // Fiber class API (Fiber.new/#resume/Fiber.yield/#alive?) over the
+        // `_fiber` host fns. Reopens thread.rb's `class Fiber` (which has
+        // `.current`); gated so non-fiber builds keep the bare shell.
+        // The heap's `fiber_class` cache is set by `cache_fiber_class`
+        // after load_preamble (both cache hit + miss paths).
+        #[cfg(feature = "_fiber")]
+        self.eval_inner(
+            include_str!("preamble/fiber.rb"),
+            "<rubyrs:preamble:fiber>",
+        )
+            .expect("ICE: failed to load Fiber preamble");
         // Gem::Version — minimal version-comparison shim. CRuby
         // always has `Gem` loaded (RubyGems auto-runs at startup);
         // rubyrs needs an explicit preamble because ecosystem code

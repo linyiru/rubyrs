@@ -1127,6 +1127,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "stdlib")]
 #[test] fn digest_hexdigest() { run_diff("digest_hexdigest"); }
 #[test] fn unpack_base64_strict() { run_diff("unpack_base64_strict"); }
+// Ruby-level Fiber class API (Fiber.new/#resume/Fiber.yield/#alive?/
+// FiberError) — needs the `_fiber` build; CRuby has Fiber natively.
+#[cfg(feature = "_fiber")]
+#[test] fn fiber_api() { run_diff("fiber_api"); }
 #[test] fn regex_line_anchors() { run_diff("regex_line_anchors"); }
 #[test] fn array_insert() { run_diff("array_insert"); }
 #[test] fn array_insert_too_big() { run_diff("array_insert_too_big"); }

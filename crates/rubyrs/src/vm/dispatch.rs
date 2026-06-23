@@ -9400,10 +9400,10 @@ impl Vm {
             self.invoke_method(m, recv.clone(), args.into_vec())?;
             return Ok(());
         }
-        // `try_class_of`: a class-less Object slot (HeapObj::Fiber)
-        // skips the user-method lookup and falls through to the
-        // universal primitive arms below (nil? / == / to_s) instead
-        // of ICE-ing in class_of.
+        // A `HeapObj::Fiber` slot now reports the `Fiber` class via
+        // `try_class_of` (heap.rs caches it), so the user-method lookup
+        // below routes `fib.resume` / `#alive?` to the Ruby Fiber
+        // veneer (preamble/fiber.rb) like any other instance.
         if let Value::Object(id) = &recv
             && let Some(cls) = self.heap.try_class_of(*id)
         {

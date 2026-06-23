@@ -1278,6 +1278,8 @@ impl Vm {
             // user-declared class, not the eigenclass. Use
             // `real_class_of` so a `def obj.foo` installation
             // doesn't change what `obj.class` returns.
+            // (A class-less HeapObj::Fiber slot resolves to the cached
+            // `Fiber` class inside real_class_of — see heap.rs.)
             Value::Object(id) => return Value::Class(self.heap.real_class_of(*id)),
         };
         if let Some(c) = &self.builtin_class_cache[idx] {
