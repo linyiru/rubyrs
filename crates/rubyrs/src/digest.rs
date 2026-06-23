@@ -1,4 +1,5 @@
-//! Pure-Rust message-digest primitives (SHA-256, SHA-512, SHA-1, MD5).
+//! Pure-Rust message-digest primitives (SHA-256, SHA-512, SHA-384,
+//! SHA-1, MD5).
 //!
 //! ADR 0026 "blessed reimplementation": the real `digest` stdlib
 //! extension is a C extension wrapping OpenSSL. rather than host
@@ -276,10 +277,40 @@ fn padded128(data: &[u8]) -> Vec<u8> {
 /// SHA-512 of `data` → 64 raw bytes (FIPS 180-4). 64-bit words, 80
 /// rounds, 128-byte blocks.
 pub fn sha512(data: &[u8]) -> [u8; 64] {
-    let mut h: [u64; 8] = [
-        0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
-        0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
-    ];
+    let h = sha512_core(
+        data,
+        [
+            0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
+            0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
+        ],
+    );
+    let mut out = [0u8; 64];
+    for (i, word) in h.iter().enumerate() {
+        out[i * 8..i * 8 + 8].copy_from_slice(&word.to_be_bytes());
+    }
+    out
+}
+
+/// SHA-384 of `data` → 48 raw bytes (FIPS 180-4). Same compression as
+/// SHA-512 with a distinct IV, truncated to the first six 64-bit words.
+pub fn sha384(data: &[u8]) -> [u8; 48] {
+    let h = sha512_core(
+        data,
+        [
+            0xcbbb9d5dc1059ed8, 0x629a292a367cd507, 0x9159015a3070dd17, 0x152fecd8f70e5939,
+            0x67332667ffc00b31, 0x8eb44a8768581511, 0xdb0c2e0d64f98fa7, 0x47b5481dbefa4fa4,
+        ],
+    );
+    let mut out = [0u8; 48];
+    for (i, word) in h.iter().take(6).enumerate() {
+        out[i * 8..i * 8 + 8].copy_from_slice(&word.to_be_bytes());
+    }
+    out
+}
+
+/// Shared SHA-512/384 compression: returns the eight 64-bit hash words
+/// from the given IV (callers serialize / truncate as needed).
+fn sha512_core(data: &[u8], mut h: [u64; 8]) -> [u64; 8] {
     for chunk in padded128(data).chunks_exact(128) {
         let mut w = [0u64; 80];
         for (i, word) in w.iter_mut().enumerate().take(16) {
@@ -328,11 +359,7 @@ pub fn sha512(data: &[u8]) -> [u8; 64] {
         h[6] = h[6].wrapping_add(g);
         h[7] = h[7].wrapping_add(hh);
     }
-    let mut out = [0u8; 64];
-    for (i, word) in h.iter().enumerate() {
-        out[i * 8..i * 8 + 8].copy_from_slice(&word.to_be_bytes());
-    }
-    out
+    h
 }
 
 /// Raw digest bytes for a `Digest::*` algorithm name, or `None` if
@@ -342,6 +369,7 @@ pub fn raw(algo: &str, data: &[u8]) -> Option<Vec<u8>> {
     match algo {
         "sha256" | "sha2" => Some(sha256(data).to_vec()),
         "sha512" => Some(sha512(data).to_vec()),
+        "sha384" => Some(sha384(data).to_vec()),
         "sha1" => Some(sha1(data).to_vec()),
         "md5" => Some(md5(data).to_vec()),
         _ => None,
@@ -387,6 +415,18 @@ mod tests {
         assert_eq!(
             to_hex(&sha512(&data)),
             "67ba5535a46e3f86dbfbed8cbbaf0125c76ed549ff8b0b9e03e0c88cf90fa634fa7b12b47d77b694de488ace8d9a65967dc96df599727d3292a8d9d447709c97"
+        );
+    }
+
+    #[test]
+    fn sha384_known_vectors() {
+        assert_eq!(
+            to_hex(&sha384(b"")),
+            "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b"
+        );
+        assert_eq!(
+            to_hex(&sha384(b"abc")),
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7"
         );
     }
 

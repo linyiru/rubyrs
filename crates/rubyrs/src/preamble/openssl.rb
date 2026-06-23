@@ -51,9 +51,9 @@ module OpenSSL
     # length. Backed directly by the native digest so OpenSSL::Digest
     # does NOT depend on the `digest` stdlib being required first.
     TAGS = { "SHA256" => "sha256", "SHA2" => "sha256", "SHA1" => "sha1",
-             "MD5" => "md5", "SHA512" => "sha512" }.freeze
+             "MD5" => "md5", "SHA512" => "sha512", "SHA384" => "sha384" }.freeze
     LENS = { "SHA256" => 32, "SHA2" => 32, "SHA1" => 20,
-             "MD5" => 16, "SHA512" => 64 }.freeze
+             "MD5" => 16, "SHA512" => 64, "SHA384" => 48 }.freeze
 
     def initialize(name)
       @name = name.to_s.upcase
@@ -102,6 +102,11 @@ module OpenSSL
     end
     class SHA512 < Digest
       def initialize(*); super("SHA512"); end
+      def self.digest(data); new.digest(data); end
+      def self.hexdigest(data); new.hexdigest(data); end
+    end
+    class SHA384 < Digest
+      def initialize(*); super("SHA384"); end
       def self.digest(data); new.digest(data); end
       def self.hexdigest(data); new.hexdigest(data); end
     end
