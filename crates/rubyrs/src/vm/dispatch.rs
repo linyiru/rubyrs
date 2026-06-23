@@ -3542,7 +3542,16 @@ impl Vm {
         // slot, panicking later in `class_of`.
         if matches!(name, "method" | "singleton_method" | "public_method")
             && args.len() == 1
-            && let Value::Sym(bound_name_id) = &args[0] {
+            && matches!(&args[0], Value::Sym(_) | Value::Str(_)) {
+                // CRuby accepts a String name too (to_sym'd) —
+                // `Kernel.method("Integer")` (dry-types builds coercers
+                // with `::Kernel.method(primitive.name)`, a String).
+                let bound_name_id_val = match &args[0] {
+                    Value::Sym(s) => *s,
+                    Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                    _ => unreachable!(),
+                };
+                let bound_name_id = &bound_name_id_val;
                 // Snapshot the resolved Method at capture time so
                 // `bm.call` survives a subsequent `remove_method`
                 // (CRuby parity, matches the `instance_method` arm).
@@ -7622,6 +7631,12 @@ impl Vm {
                     // `def probe; inspect; end` reopened on NilClass
                     // raised "undefined method inspect for nil".
                     | "nil?"
+                    // Identity universals: a bare `equal?(x)` / `eql?(x)`
+                    // inside a method dispatches on self. dry-core's
+                    // `Undefined.default` (`def undefined.default(x, y =
+                    // self); if equal?(x)`) calls `equal?` bare.
+                    | "equal?"
+                    | "eql?"
             )
         {
             let self_val = self.frames.last()
