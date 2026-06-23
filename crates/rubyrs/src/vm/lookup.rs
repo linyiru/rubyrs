@@ -2627,7 +2627,8 @@ impl Vm {
                     "inherited" | "included" | "prepended" | "extended"
                         | "method_added" | "singleton_method_added"
                         | "method_removed" | "singleton_method_removed"
-                        | "method_undefined" | "singleton_method_undefined",
+                        | "method_undefined" | "singleton_method_undefined"
+                        | "const_added",
                 );
                 // Restrict the no-op to Class/Module singleton-hook
                 // contexts only. If `self` is anything else (e.g. an

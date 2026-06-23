@@ -828,6 +828,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn ruby_version_constants() { run_diff("ruby_version_constants"); }
 #[test] fn instance_method_universal() { run_diff("instance_method_universal"); }
 #[test] fn class_self_expr_value() { run_diff("class_self_expr_value"); }
+#[test] fn const_added_hook() { run_diff("const_added_hook"); }
+#[test] fn symbol_with_predicates() { run_diff("symbol_with_predicates"); }
 #[cfg(feature = "regex")]
 #[test] fn regexp_symbol_arg() { run_diff("regexp_symbol_arg"); }
 #[test] fn module_class_variable_reflection() { run_diff("module_class_variable_reflection"); }

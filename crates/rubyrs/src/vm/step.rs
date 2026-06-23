@@ -2821,7 +2821,7 @@ impl Vm {
                                     "included" | "extended" | "prepended" | "inherited"
                                     | "method_added" | "method_removed" | "method_undefined"
                                     | "singleton_method_added" | "singleton_method_removed"
-                                    | "singleton_method_undefined") =>
+                                    | "singleton_method_undefined" | "const_added") =>
                             {
                                 self.stack.push(Value::Nil);
                             }
@@ -4498,6 +4498,27 @@ impl Vm {
                     let short_id = self.interner.intern(&short);
                     scope.consts.borrow_mut().insert(short_id, Value::Class(cls.clone()));
                     self.bump_const_gen();
+                }
+                // `Module#const_added` (CRuby 3.2+): fire on the enclosing
+                // module the moment a FRESH nested class/module constant
+                // appears, BEFORE the body runs — zeitwerk (which
+                // `Module.prepend`s a const_added) registers a namespace's
+                // child autoloads here, so `class Container; include
+                // Container::Mixin` (dry-core) sees Mixin's autoload. Only
+                // on first definition (CRuby doesn't re-fire on reopen);
+                // skipped for the compact `A::B::C` form (owner ambiguous)
+                // and gated on `const_added` being interned at all.
+                if was_fresh
+                    && self.interner.contains("const_added")
+                    && !self.interner.resolve(name_id).contains("::")
+                {
+                    let owner = self.class_stack.last().cloned().or_else(|| {
+                        let obj = self.interner.intern("Object");
+                        self.classes.get(&obj).cloned()
+                    });
+                    if let Some(owner) = owner {
+                        self.fire_const_added(&owner, name_id)?;
+                    }
                 }
                 self.class_stack.push(cls.clone());
                 self.class_visibility_stack.push(Visibility::Public);

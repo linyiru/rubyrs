@@ -15000,6 +15000,41 @@ impl Vm {
     /// parent's class-singleton chain via
     /// `lookup_class_singleton_method`; absent-hook is a
     /// silent no-op (CRuby's `Object#inherited` default).
+    /// `Module#const_added(cname)` hook (CRuby 3.2+) — fired on `owner`
+    /// when a constant `cname` is first defined on it. Unlike
+    /// `inherited` (a class-singleton method on the parent),
+    /// `const_added` is an INSTANCE method of `Module`: zeitwerk does
+    /// `Module.prepend(ConstAdded)` with a `def const_added`, so it
+    /// resolves through `owner`'s class (Module/Class) chain. zeitwerk
+    /// uses it to register a namespace's child autoloads the moment the
+    /// namespace constant appears — `class Container; include
+    /// Container::Mixin` (dry-core) relies on Mixin's autoload being set
+    /// by the time the body runs. Absent-hook (no prepended/defined
+    /// const_added) is a silent no-op; the fast-path gate at the call
+    /// site (`interner.contains("const_added")`) skips it entirely until
+    /// some library installs one.
+    pub(crate) fn fire_const_added(&mut self, owner: &Rc<crate::value::Class>, cname: SymId) -> Result<(), Trap> {
+        let ca_sym = self.interner.intern("const_added");
+        // Resolve `owner.const_added` the way a normal call would: the
+        // owner's SINGLETON methods first (`extend ConstTracker` /
+        // `def self.const_added`), then the owner's class chain
+        // (`Module.prepend(ConstAdded)` — zeitwerk).
+        let m = self.lookup_class_singleton_method(owner, ca_sym).or_else(|| {
+            match self.class_of(&Value::Class(owner.clone())) {
+                Value::Class(c) => self.lookup_method_uncached(&c, ca_sym),
+                _ => None,
+            }
+        });
+        let Some(m) = m else {
+            return Ok(());
+        };
+        let pre = self.frames.len();
+        self.invoke_method(m, Value::Class(owner.clone()), vec![Value::Sym(cname)])?;
+        self.dispatch_until(pre)?;
+        self.stack.pop();
+        Ok(())
+    }
+
     pub(crate) fn invoke_inherited_hook(&mut self, new_cls: &Rc<crate::value::Class>) -> Result<(), Trap> {
         let parent_rc = new_cls.superclass.borrow().clone();
         let Some(parent) = parent_rc else { return Ok(()); };
