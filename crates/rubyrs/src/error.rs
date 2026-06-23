@@ -494,6 +494,20 @@ impl RubyError {
             RubyError::AlreadyCaught => "AlreadyCaught",
         }
     }
+
+    /// The Ruby-level class name as a `String` — like [`class_name`]
+    /// but reads the carried field for `Uncaught` / `HostException`
+    /// (whose real class isn't a static discriminant). Use this
+    /// wherever a name is surfaced to a script or the CLI (synthesised
+    /// `Uncaught` traps, error formatting); a host fn raising e.g.
+    /// `FiberError` must report `FiberError`, not `HostException`.
+    pub(crate) fn ruby_class_name(&self) -> String {
+        match self {
+            RubyError::Uncaught { class_name, .. }
+            | RubyError::HostException { class_name, .. } => class_name.clone(),
+            other => other.class_name().to_string(),
+        }
+    }
     pub(crate) fn message(&self) -> String {
         match self {
             RubyError::SyntaxError { msg }

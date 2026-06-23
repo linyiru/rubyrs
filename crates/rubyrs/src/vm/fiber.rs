@@ -1884,15 +1884,15 @@ mod tests {
             __rubyrs_fiber_resume(fib, nil)
             __rubyrs_fiber_resume(fib, nil)
         "#, "p1c2c_dead.rb").expect_err("resume on dead fiber should raise");
-        // Raised as a FiberError (rescuable as such — the fiber_api
-        // diff fixture covers `rescue FiberError`); the uncaught Debug
-        // wrapper stamps the generic HostException tag, so assert on the
-        // CRuby-matching message here.
-        let msg = format!("{err:?}");
-        assert!(
-            msg.contains("attempt to resume a terminated fiber"),
-            "expected terminated-fiber message, got: {msg}",
-        );
+        // CRuby-matching message…
+        assert_eq!(err.err.message(), "attempt to resume a terminated fiber");
+        // …and the real Ruby class name surfaces as FiberError (the
+        // uncaught trap carries it; `ruby_class_name` reads the field
+        // rather than the generic HostException/Uncaught discriminant).
+        // This is what the CLI prints as `(FiberError)` and what
+        // `rescue FiberError` matches (fiber_api diff fixture).
+        assert_eq!(err.err.ruby_class_name(), "FiberError");
+        assert!(err.err.is_a("StandardError"));
     }
 
     // ===== P1c.2b: vm.fiber_yield_pending field + dispatch_until extension =====

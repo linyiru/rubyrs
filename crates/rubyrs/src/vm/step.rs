@@ -617,7 +617,7 @@ impl Vm {
                             None => return Err(trap),
                         };
                         let original_bt = trap.backtrace.clone();
-                        let original_class = trap.err.class_name().to_string();
+                        let original_class = trap.err.ruby_class_name();
                         let original_msg = trap.err.message();
                         match self.unwind_with_exception(exc) {
                             Ok(()) => continue,
@@ -685,7 +685,7 @@ impl Vm {
                         // already gone). Preserve the call-site
                         // info from the trap that actually fired.
                         let original_bt = trap.backtrace.clone();
-                        let original_class = trap.err.class_name().to_string();
+                        let original_class = trap.err.ruby_class_name();
                         let original_msg = trap.err.message();
                         match self.unwind_with_exception(exc) {
                             Ok(()) => continue, // handler set up, resume dispatch
@@ -978,7 +978,7 @@ impl Vm {
                     // up the call chain.
                     if let Some(exc) = self.trap_to_exception(&trap) {
                         let original_bt = trap.backtrace.clone();
-                        let original_class = trap.err.class_name().to_string();
+                        let original_class = trap.err.ruby_class_name();
                         let original_msg = trap.err.message();
                         match self.unwind_with_exception(exc) {
                             Ok(()) => {

@@ -3557,10 +3557,10 @@ self.eval_inner(
         // exception class name (e.g. `MyError`), not the host-side
         // "Uncaught" tag. Matches CRuby's
         // `foo.rb:1: msg (MyError)` style.
-        let cls: String = match &trap.err {
-            RubyError::Uncaught { class_name, .. } => class_name.clone(),
-            other => other.class_name().to_string(),
-        };
+        // `ruby_class_name` reads the carried field for Uncaught /
+        // HostException (a host fn raising e.g. FiberError must surface
+        // as `(FiberError)`, not the `(HostException)` discriminant).
+        let cls: String = trap.err.ruby_class_name();
         let msg = trap.err.message();
         if let Some(top) = frames.first() {
             let line = self.line_for(&top.filename, top.span.byte_offset);

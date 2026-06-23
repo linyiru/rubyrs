@@ -899,7 +899,14 @@ mod tests {
     }
 
     #[test]
-    fn normalize_exception_class_stamps_class_name_message() {
+    fn normalize_exception_class_dispatches_new() {
+        // `raise SomeClass` == `SomeClass.new` — normalize_exception
+        // dispatches `new` so a user `initialize` runs (the `@message`
+        // default is initialize's job; in a real runtime that yields
+        // `e.message == "SomeClass"`, covered byte-for-byte by the
+        // `raise MyError` diff test). Here, in a bare VM with no
+        // preamble Exception#initialize, the contract we assert is the
+        // structural one: the result is an instance of the class.
         let mut vm = mk_vm();
         let cls = mk_class("MyError", None);
         let v = Value::Class(cls.clone());
@@ -909,16 +916,6 @@ mod tests {
             other => panic!("expected Object, got {other:?}"),
         };
         assert!(Rc::ptr_eq(&vm.heap.class_of(id), &cls));
-        // `@message` defaults to the class name — CRuby:
-        // `raise MyError` then `e.message` is "MyError" (what the
-        // preamble's `Exception#initialize(nil)` fallback would
-        // produce if we dispatched it).
-        let msg_sym = vm.interner.intern("@message");
-        let msg = vm.heap.instance(id).ivars.get(&msg_sym).cloned();
-        match msg {
-            Some(Value::Str(s)) => assert_eq!(s.to_string_lossy(), "MyError"),
-            other => panic!("expected @message String, got {other:?}"),
-        }
     }
 
     #[test]
