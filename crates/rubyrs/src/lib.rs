@@ -2902,6 +2902,14 @@ Encoding::BINARY = Encoding::ASCII_8BIT
 RUBY_VERSION = "3.4.0".freeze
 RUBY_PLATFORM = "rubyrs".freeze
 RUBY_ENGINE = "ruby".freeze
+## MRI also exposes RUBY_DESCRIPTION (the `ruby -v` banner) and
+## RUBY_PATCHLEVEL. Gems parse the description to sniff the engine /
+## old-version bugs (rspec-mocks does `RUBY_DESCRIPTION.include?(
+## '2.0.0p247')`), so ship a plausible MRI-shaped string keyed off the
+## version above. PATCHLEVEL is an Integer (0 = a released build).
+RUBY_DESCRIPTION = "ruby 3.4.0 (rubyrs) [rubyrs]".freeze
+RUBY_PATCHLEVEL = 0
+RUBY_ENGINE_VERSION = "3.4.0".freeze
 ## M27 GAP #4: the unambiguous "we're rubyrs" sentinel for
 ## library adapter shims. CRuby leaves this undefined; rubyrs
 ## pins it to a frozen String so `defined?(RUBYRS)` is the
