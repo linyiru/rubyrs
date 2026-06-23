@@ -134,6 +134,21 @@ end
 ## NoMethodError (NoMethodError < NameError < StandardError) and for
 ## `assert_raises(NameError)` accepting a NoMethodError (Tilt's specs).
 class NameError < StandardError
+  # CRuby: `NameError.new(msg = nil, name = nil, receiver: nil)` — the
+  # second positional is the offending constant/variable/method name,
+  # exposed via `#name`. zeitwerk raises `Zeitwerk::NameError.new(msg,
+  # cref.cname)` on a failed autoload; const_missing hooks build them too.
+  def initialize(msg = nil, name = nil, receiver: nil)
+    super(msg)
+    @name = name
+    @receiver = receiver
+  end
+  def name
+    @name
+  end
+  def receiver
+    @receiver
+  end
 end
 class NoMethodError < NameError
 end
