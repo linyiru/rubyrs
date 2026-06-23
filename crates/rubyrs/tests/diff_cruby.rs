@@ -1004,6 +1004,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn rational_literal() { run_diff("rational_literal"); }
 #[test] fn rational_methods() { run_diff("rational_methods"); }
 #[test] fn complex_numbers() { run_diff("complex_numbers"); }
+#[test] fn numeric_complex_protocol() { run_diff("numeric_complex_protocol"); }
+#[test] fn complex_protocol_extras() { run_diff("complex_protocol_extras"); }
+#[test] fn integer_bit_range() { run_diff("integer_bit_range"); }
+#[test] fn float_adjacent() { run_diff("float_adjacent"); }
 #[test] fn numeric_coerce_protocol() { run_diff("numeric_coerce_protocol"); }
 #[test] fn cext_msgpack_pure_ruby_load() { run_diff("cext_msgpack_pure_ruby_load"); }
 #[test] fn alias_singleton_keyword() { run_diff("alias_singleton_keyword"); }

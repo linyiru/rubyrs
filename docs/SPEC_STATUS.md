@@ -12,8 +12,8 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 166 |
-| Examples in corpus | 1103 |
+| Files | 171 |
+| Examples in corpus | 1137 |
 | Skipped `it` traces | 155 |
 
 ### Skipped traces by category
@@ -42,11 +42,13 @@ Find blocks unlocked by a future feature with e.g.
 | Autoload | 1 | 20 | 0 |
 | BasicObject | 3 | 15 | 0 |
 | Block | 1 | 8 | 0 |
-| Float | 2 | 11 | 0 |
+| Complex | 1 | 5 | 0 |
+| Float | 3 | 15 | 0 |
 | Hash | 41 | 207 | 51 |
-| Integer | 37 | 322 | 30 |
+| Integer | 39 | 339 | 30 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
+| Numeric | 1 | 8 | 0 |
 | Range | 2 | 30 | 0 |
 | Rational | 10 | 60 | 0 |
 | String | 24 | 165 | 24 |
@@ -85,7 +87,9 @@ Find blocks unlocked by a future feature with e.g.
 | `class_eval_spec.rb` | Module#class_eval | `core/module/class_eval_spec.rb` | 6 | 0 |
 | `collection_arity_arg1_int_spec.rb` | Array#each_slice / #each_cons arity & type guards | `core/array/each_slice_spec.rb (error-class assertions)` | 16 | 0 |
 | `collection_float_coerce_spec.rb` | Array#each_slice / #each_cons Float coercion | `core/array/each_slice_spec.rb (Float coerce semantics)` | 10 | 0 |
+| `complex_protocol_spec.rb` | Complex#numerator / #denominator | `core/complex/{numerator,denominator,finite, infinite,zero,rationalize}_spec.rb` | 5 | 0 |
 | `define_method_spec.rb` | Module#define_method | `core/module/define_method_spec.rb` | 4 | 0 |
+| `float_adjacent_spec.rb` | Float#next_float / #prev_float | `core/float/{next_float,prev_float}_spec.rb` | 4 | 0 |
 | `float_rationalize_spec.rb` | Float#rationalize | `core/float/rationalize_spec.rb` | 7 | 0 |
 | `float_to_r_spec.rb` | Float#to_r | `core/float/to_r_spec.rb` | 4 | 0 |
 | `hash_any_spec.rb` | Hash#any? | `core/hash/any_spec.rb` | 5 | 1 |
@@ -136,6 +140,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_bit_and_spec.rb` | Integer#& | `core/integer/bit_and_spec.rb` | 11 | 0 |
 | `integer_bit_length_spec.rb` | Integer#bit_length | `core/integer/bit_length_spec.rb` | 4 | 0 |
 | `integer_bit_or_spec.rb` | Integer#\| | `core/integer/bit_or_spec.rb` | 10 | 0 |
+| `integer_bit_range_spec.rb` | Integer#[] with a Range | `core/integer/element_reference_spec.rb` | 6 | 0 |
 | `integer_bit_xor_spec.rb` | Integer#^ | `core/integer/bit_xor_spec.rb` | 11 | 0 |
 | `integer_case_compare_spec.rb` | Integer#=== | `core/integer/case_compare_spec.rb + core/integer/shared/equal.rb` | 9 | 1 |
 | `integer_ceil_spec.rb` | Integer#ceil | `core/integer/ceil_spec.rb + shared/to_i.rb + shared/integer_rounding.rb + shared/integer_ceil_precision.rb` | 10 | 1 |
@@ -180,6 +185,8 @@ Find blocks unlocked by a future feature with e.g.
 | `method_source_location_spec.rb` | Method#source_location | `core/method/source_location_spec.rb` | 2 | 0 |
 | `method_to_proc_spec.rb` | Method#to_proc | `core/method/to_proc_spec.rb` | 7 | 0 |
 | `method_unbind_spec.rb` | Method#unbind | `core/method/unbind_spec.rb` | 4 | 0 |
+| `numeric_complex_protocol_spec.rb` | Numeric complex-decomposition protocol | `core/numeric/{real,imaginary,conjugate, rectangular,polar,arg,abs2,real}_spec.rb` | 8 | 0 |
+| `numeric_to_rational_helpers_spec.rb` | Integer numeric helpers | `core/{integer,float}/{integer,numerator, denominator,finite,infinite}_spec.rb` | 11 | 0 |
 | `range_chunk_while_spec.rb` | Range#chunk_while | `core/range/chunk_while_spec.rb (Enumerable-inherited behaviour)` | 10 | 0 |
 | `range_each_slice_spec.rb` | Range#each_slice | `core/range/each_slice_spec.rb / each_cons_spec.rb (Enumerable-inherited behaviour)` | 20 | 0 |
 | `rational_abs_spec.rb` | Rational#abs | `core/rational/{abs,uminus,abs2}_spec.rb` | 7 | 0 |

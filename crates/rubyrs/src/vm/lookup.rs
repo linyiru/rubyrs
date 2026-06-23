@@ -706,6 +706,7 @@ impl Vm {
             "to_i" | "to_int" | "to_f" | "abs" |
             "zero?" | "nonzero?" | "positive?" | "negative?" |
             "nan?" | "infinite?" | "finite?" |
+            "next_float" | "prev_float" |
             "eql?" | "hash" |
             "floor" | "ceil" | "round" | "truncate" | "divmod" | "step" |
             "-@" | "+@" |

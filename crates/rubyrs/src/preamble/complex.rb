@@ -164,17 +164,17 @@ class Complex < Numeric
   end
 
   def to_i
-    raise RangeError, "can't convert #{inspect} into Integer" unless @imaginary == 0
+    raise RangeError, "can't convert #{self} into Integer" unless @imaginary == 0
     @real.to_i
   end
 
   def to_f
-    raise RangeError, "can't convert #{inspect} into Float" unless @imaginary == 0
+    raise RangeError, "can't convert #{self} into Float" unless @imaginary == 0
     @real.to_f
   end
 
   def to_r
-    raise RangeError, "can't convert #{inspect} into Rational" unless @imaginary == 0
+    raise RangeError, "can't convert #{self} into Rational" unless @imaginary == 0
     @real.to_r
   end
 
@@ -193,6 +193,49 @@ class Complex < Numeric
 
   def fdiv(other)
     Complex.rectangular(@real.fdiv(other), @imaginary.fdiv(other))
+  end
+
+  # numerator / denominator clear the fractional parts of BOTH
+  # components over their common denominator, matching CRuby's
+  # complex.c: `denominator` is the lcm of the two part
+  # denominators, `numerator` scales each part up to it.
+  def denominator
+    @real.denominator.lcm(@imaginary.denominator)
+  end
+
+  def numerator
+    cd = denominator
+    Complex.rectangular(
+      @real.numerator * (cd / @real.denominator),
+      @imaginary.numerator * (cd / @imaginary.denominator),
+    )
+  end
+
+  # finite? / infinite? fold over both components: a Complex is
+  # finite only when both parts are; infinite? yields 1 if either
+  # part is infinite, else nil.
+  def finite?
+    @real.finite? && @imaginary.finite?
+  end
+
+  def infinite?
+    (@real.infinite? || @imaginary.infinite?) ? 1 : nil
+  end
+
+  def zero?
+    @real.zero? && @imaginary.zero?
+  end
+
+  def nonzero?
+    zero? ? nil : self
+  end
+
+  # rationalize only succeeds for a real-valued Complex.
+  def rationalize(*args)
+    unless @imaginary == 0
+      raise RangeError, "can't convert #{self} into Rational"
+    end
+    @real.rationalize(*args)
   end
 
   private

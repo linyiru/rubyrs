@@ -1454,12 +1454,51 @@ pub(crate) fn numeric_call(
             }
         }
         (Value::Float(a), "finite?", []) => Some(Value::Bool(a.is_finite())),
+        // `Float#next_float` / `#prev_float` — the adjacent
+        // representable doubles (IEEE-754 nextUp / nextDown). NaN
+        // maps to itself; the infinities saturate to ±MAX on the
+        // inward step; ±0.0 step to the smallest ± subnormal.
+        (Value::Float(a), "next_float", []) => Some(Value::Float(float_adjacent(*a, true))),
+        (Value::Float(a), "prev_float", []) => Some(Value::Float(float_adjacent(*a, false))),
         (Value::Float(a), "floor", []) => Some(Value::Int(a.floor() as i64)),
         (Value::Float(a), "ceil", []) => Some(Value::Int(a.ceil() as i64)),
         (Value::Float(a), "round", []) => Some(Value::Int(a.round() as i64)),
         (Value::Float(a), "truncate", []) => Some(Value::Int(a.trunc() as i64)),
         _ => None,
     })
+}
+
+/// IEEE-754 nextUp (`up == true`) / nextDown for an `f64`, matching
+/// CRuby's `Float#next_float` / `#prev_float`:
+///   - NaN → itself.
+///   - Stepping off an infinity inward saturates to ±MAX; stepping
+///     further outward stays at the infinity.
+///   - ±0.0 both step to the smallest subnormal of the step's sign.
+/// Implemented via the bit representation so it's independent of the
+/// toolchain's `f64::next_up` availability.
+fn float_adjacent(f: f64, up: bool) -> f64 {
+    if f.is_nan() {
+        return f;
+    }
+    if f == f64::INFINITY {
+        return if up { f } else { f64::MAX };
+    }
+    if f == f64::NEG_INFINITY {
+        return if up { f64::MIN } else { f };
+    }
+    // `f` is finite here. `to_bits` is monotonic in magnitude within
+    // a sign, so +1 on the bit pattern moves away from zero for a
+    // positive value and toward zero for a negative one.
+    if f == 0.0 {
+        // Smallest ± subnormal (sign bit + mantissa 1).
+        return if up { f64::from_bits(1) } else { f64::from_bits(1 | (1u64 << 63)) };
+    }
+    let bits = f.to_bits();
+    // Going up increases a positive value (bits + 1) and increases a
+    // negative value toward zero (bits - 1); going down is the mirror.
+    let step_away_from_zero = up == (f > 0.0);
+    let next = if step_away_from_zero { bits + 1 } else { bits - 1 };
+    f64::from_bits(next)
 }
 
 /// Ruby class-name for the `"<X> can't be coerced into Integer"`

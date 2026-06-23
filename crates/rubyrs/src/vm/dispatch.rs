@@ -1802,6 +1802,82 @@ impl Vm {
         }
     }
 
+    /// `Integer#[](range)` — the Range form of bit access (Ruby 2.7+).
+    /// `n[i..j]` / `n[i...j]` extract the bitfield from bit `i` up to
+    /// (and including / excluding) bit `j`; `n[i..]` (endless) is the
+    /// full right shift with no width mask. Range semantics differ
+    /// from the `n[offset, length]` form: a computed length <= 0 means
+    /// "no mask" (return the shifted value), not zero.
+    ///
+    /// Needs `&mut self` for the heap (to read the Range bounds) that
+    /// the stateless `numeric_call` can't see — same rationale as
+    /// `try_push_int_chr_encoding`. Returns `Ok(true)` when handled,
+    /// `Ok(false)` to fall through.
+    ///
+    /// A beginless range raises CRuby's ArgumentError. A negative
+    /// `begin` (which CRuby treats as a left shift, overflowing the
+    /// i64 fast path into a Bignum) declines so the value type stays
+    /// honest — these bit ranges effectively never appear in practice.
+    pub(crate) fn try_push_int_bit_range(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        args: &[Value],
+    ) -> Result<bool, Trap> {
+        let n = match recv {
+            Value::Int(n) if name == "[]" && args.len() == 1 => *n,
+            _ => return Ok(false),
+        };
+        let Value::Range(rid) = &args[0] else {
+            return Ok(false);
+        };
+        let r = self.heap.range(*rid);
+        let begin = r.begin.clone();
+        let end = r.end.clone();
+        let exclusive = r.exclusive;
+
+        let beg = match begin {
+            Value::Nil => {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "The beginless range for Integer#[] results in infinity"
+                        .to_string(),
+                }));
+            }
+            Value::Int(b) if b >= 0 => b,
+            // Negative begin → left shift into Bignum territory; decline.
+            // Non-Integer begin → not a bit range; decline.
+            _ => return Ok(false),
+        };
+
+        // Arithmetic right shift with two's-complement saturation past
+        // the i64 width (matches the existing `n[i]` / `n[off, len]` arms).
+        let shifted: i64 = if beg >= 64 {
+            if n < 0 { -1 } else { 0 }
+        } else {
+            n >> (beg as u32)
+        };
+
+        let result = match end {
+            // Endless range — the full shift, unmasked.
+            Value::Nil => shifted,
+            Value::Int(e) => {
+                let len = if exclusive { e - beg } else { e - beg + 1 };
+                if len <= 0 {
+                    // CRuby leaves the shifted value unmasked here.
+                    shifted
+                } else if len >= 64 {
+                    shifted
+                } else {
+                    shifted & ((1i64 << len) - 1)
+                }
+            }
+            // Non-Integer end — not a bit range; decline.
+            _ => return Ok(false),
+        };
+        self.stack.push(Value::Int(result));
+        Ok(true)
+    }
+
     /// Re-entrant dispatch entry for C extensions calling back into
     /// Ruby via `rb_funcall*`. Invokes `recv.method(args)` through
     /// the normal `do_call` path, leaving the result on the stack
@@ -9113,6 +9189,9 @@ impl Vm {
         }
 
         if self.try_push_int_chr_encoding(&recv, &name, &args)? {
+            return Ok(());
+        }
+        if self.try_push_int_bit_range(&recv, &name, &args)? {
             return Ok(());
         }
         if self.try_string_encoding_ops(&recv, &name, &args)? {
@@ -17981,6 +18060,9 @@ impl Vm {
         }
 
         if self.try_push_int_chr_encoding(&recv, &name, &args)? {
+            return Ok(());
+        }
+        if self.try_push_int_bit_range(&recv, &name, &args)? {
             return Ok(());
         }
         if self.try_string_encoding_ops(&recv, &name, &args)? {

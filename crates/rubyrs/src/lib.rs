@@ -2402,6 +2402,15 @@ impl Runtime {
             "<rubyrs:preamble:float>",
         )
             .expect("ICE: failed to load Float preamble");
+        // Shared Numeric real-number protocol (real / imaginary /
+        // conjugate / arg / polar / abs2 / numerator / ... ) on the
+        // common Numeric superclass. Loaded before complex.rb so
+        // Complex's overrides win for its non-zero-imaginary cases.
+        self.eval_inner(
+            include_str!("preamble/numeric.rb"),
+            "<rubyrs:preamble:numeric>",
+        )
+            .expect("ICE: failed to load Numeric preamble");
         // Synthesise builtin Method records on Kernel for the
         // inline-handled primitives (`class`, `nil?`, `respond_to?`,
         // ...). The records carry real arity / parameters /
