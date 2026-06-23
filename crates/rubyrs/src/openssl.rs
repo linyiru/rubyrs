@@ -284,4 +284,47 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         let offset = u64::try_from(offset).unwrap_or(0);
         Ok(Value::new_str_bytes_binary(crate::aes::aes256_ctr_xor(&key, &iv, offset, &data)))
     });
+
+    // `__rubyrs_aes256_gcm_encrypt(key, iv, aad, plaintext)` → a BINARY
+    // String of `ciphertext || tag` (the 16-byte auth tag is appended;
+    // the OpenSSL::Cipher veneer splits it back off).
+    rt.register_fn("__rubyrs_aes256_gcm_encrypt", |args| {
+        let (key, iv, aad, data) = match args {
+            [Value::Str(k), Value::Str(v), Value::Str(a), Value::Str(d)] => (
+                k.borrow().clone(), v.borrow().clone(), a.borrow().clone(), d.borrow().clone(),
+            ),
+            _ => return Err(arg_err(
+                "__rubyrs_aes256_gcm_encrypt(key: String, iv: String, aad: String, plaintext: String)",
+            )),
+        };
+        let key: [u8; 32] = key.as_slice().try_into()
+            .map_err(|_| ssl_err(format!("aes-256-gcm key must be 32 bytes (got {})", key.len())))?;
+        let (mut ct, tag) = crate::aes::aes256_gcm_encrypt(&key, &iv, &aad, &data);
+        ct.extend_from_slice(&tag);
+        Ok(Value::new_str_bytes_binary(ct))
+    });
+
+    // `__rubyrs_aes256_gcm_decrypt(key, iv, aad, ciphertext, tag)` → the
+    // plaintext BINARY String, or an OpenSSLError if the tag fails to
+    // authenticate (surfaced as CipherError from Cipher#final).
+    rt.register_fn("__rubyrs_aes256_gcm_decrypt", |args| {
+        let (key, iv, aad, ct, tag) = match args {
+            [Value::Str(k), Value::Str(v), Value::Str(a), Value::Str(c), Value::Str(t)] => (
+                k.borrow().clone(), v.borrow().clone(), a.borrow().clone(),
+                c.borrow().clone(), t.borrow().clone(),
+            ),
+            _ => return Err(arg_err(
+                "__rubyrs_aes256_gcm_decrypt(key: String, iv: String, aad: String, ct: String, tag: String)",
+            )),
+        };
+        let key: [u8; 32] = key.as_slice().try_into()
+            .map_err(|_| ssl_err(format!("aes-256-gcm key must be 32 bytes (got {})", key.len())))?;
+        // `nil` on auth failure — the Cipher#final veneer turns it into
+        // a Ruby OpenSSL::Cipher::CipherError (a rescuable StandardError),
+        // not the host-level exception a host-fn `Err` would raise.
+        match crate::aes::aes256_gcm_decrypt(&key, &iv, &aad, &ct, &tag) {
+            Some(pt) => Ok(Value::new_str_bytes_binary(pt)),
+            None => Ok(Value::Nil),
+        }
+    });
 }

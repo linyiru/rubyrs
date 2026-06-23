@@ -204,30 +204,35 @@ module OpenSSL
     fixed_length_secure_compare(a, b)
   end
 
-  # `OpenSSL::Cipher` — AES-256-CTR only (Rack 3 `Encryptor`'s
-  # `new('aes-256-ctr')`). CTR is a stream cipher, so `encrypt` /
-  # `decrypt` select the same XOR transform and differ only in intent;
-  # `update` streams immediately (tracking the keystream byte offset so
-  # split updates resume correctly) and `final` is empty. Other ciphers
-  # raise — the native AES core is 256-bit-only.
+  # `OpenSSL::Cipher` — AES-256 in CTR or GCM mode (the native AES core
+  # is 256-bit-only). CTR is a stream cipher: `update` streams
+  # immediately (tracking the keystream byte offset so split updates
+  # resume) and `final` is empty. GCM is authenticated: `update` buffers
+  # and `final` runs the one-shot encrypt/decrypt — emitting the
+  # ciphertext (and capturing #auth_tag) on encrypt, or verifying the
+  # tag and returning the plaintext on decrypt (raising on mismatch).
   class Cipher
     class CipherError < OpenSSL::OpenSSLError; end
 
     def initialize(name)
       n = name.to_s.downcase
-      unless n == "aes-256-ctr"
-        raise CipherError, "unsupported cipher #{name.inspect} (only aes-256-ctr)"
+      unless n == "aes-256-ctr" || n == "aes-256-gcm"
+        raise CipherError, "unsupported cipher #{name.inspect} (only aes-256-ctr, aes-256-gcm)"
       end
       @name = n
+      @gcm = (n == "aes-256-gcm")
       @key = nil
       @iv = nil
       @offset = 0
+      @mode = :encrypt
+      @aad = "".b
+      @buffer = "".b
+      @auth_tag = nil
     end
 
-    # Mode selectors — no-ops for CTR beyond resetting the stream
-    # position, matching OpenSSL's "call before key/iv" contract.
-    def encrypt; @offset = 0; self; end
-    def decrypt; @offset = 0; self; end
+    # Mode selectors — reset the stream position / GCM buffer.
+    def encrypt; @mode = :encrypt; @offset = 0; @buffer = "".b; self; end
+    def decrypt; @mode = :decrypt; @offset = 0; @buffer = "".b; self; end
 
     def key=(k)
       k = k.to_s
@@ -239,17 +244,29 @@ module OpenSSL
 
     def iv=(v)
       v = v.to_s
-      raise CipherError, "iv must be 16 bytes" unless v.bytesize == 16
+      # CTR needs a full 16-byte counter; GCM's IV is variable (12 is
+      # standard and what Rails / MessageEncryptor use).
+      unless @gcm || v.bytesize == 16
+        raise CipherError, "iv must be 16 bytes"
+      end
       @iv = v.dup.force_encoding("BINARY")
       @offset = 0
       v
     end
 
     def key_len; 32; end
-    def iv_len; 16; end
+    def iv_len; @gcm ? 12 : 16; end
+
+    # GCM authenticated-data + tag accessors (no-ops / errors for CTR).
+    def auth_data=(a); @aad = a.to_s.b; a; end
+    def auth_tag=(t); @auth_tag = t.to_s.b; t; end
+    def auth_tag(len = 16)
+      raise CipherError, "auth_tag not available" if @auth_tag.nil?
+      @auth_tag[0, len]
+    end
 
     def random_iv
-      self.iv = SecureRandom.random_bytes(16)
+      self.iv = SecureRandom.random_bytes(iv_len)
       @iv
     end
 
@@ -262,13 +279,30 @@ module OpenSSL
       raise CipherError, "cipher key not set" if @key.nil?
       raise CipherError, "cipher iv not set" if @iv.nil?
       data = data.to_s
-      out = __rubyrs_aes256_ctr(@key, @iv, @offset, data)
-      @offset += data.bytesize
-      out
+      if @gcm
+        # GCM needs the whole message for the tag — buffer here, emit in
+        # final (so `update(x) + final` yields the full result).
+        @buffer += data.b
+        "".b
+      else
+        out = __rubyrs_aes256_ctr(@key, @iv, @offset, data)
+        @offset += data.bytesize
+        out
+      end
     end
 
     def final
-      "".dup.force_encoding("BINARY")
+      return "".dup.force_encoding("BINARY") unless @gcm
+      if @mode == :decrypt
+        raise CipherError, "auth_tag not set" if @auth_tag.nil?
+        pt = __rubyrs_aes256_gcm_decrypt(@key, @iv, @aad, @buffer, @auth_tag)
+        raise CipherError, "bad decrypt" if pt.nil?
+        pt
+      else
+        res = __rubyrs_aes256_gcm_encrypt(@key, @iv, @aad, @buffer)
+        @auth_tag = res[-16..].b
+        res[0...-16].b
+      end
     end
   end
 

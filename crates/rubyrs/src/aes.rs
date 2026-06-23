@@ -178,6 +178,158 @@ fn add_counter(ctr: &mut [u8; 16], n: u64) {
     }
 }
 
+// ---- AES-256-GCM (NIST SP 800-38D) ----
+//
+// GCM authenticates with GHASH over GF(2^128) and encrypts with a
+// 32-bit-incrementing counter mode (GCTR). Only the forward block
+// cipher is needed (both encrypt and decrypt run GCTR). The hash
+// subkey is H = E_K(0^128); for a 96-bit IV (the common / Rails case)
+// the pre-counter block J0 = IV || 0^31 || 1, else J0 = GHASH_H of the
+// padded IV. The 128-bit tag T = E_K(J0) XOR GHASH_H(A,C).
+
+/// GF(2^128) multiply under the GCM bit ordering (reduction poly
+/// x^128 + x^7 + x^2 + x + 1, represented big-endian as 0xe1...).
+fn gcm_mult(x: &[u8; 16], y: &[u8; 16]) -> [u8; 16] {
+    let mut z = [0u8; 16];
+    let mut v = *y;
+    for i in 0..128 {
+        if (x[i / 8] >> (7 - (i % 8))) & 1 == 1 {
+            for j in 0..16 {
+                z[j] ^= v[j];
+            }
+        }
+        // V >>= 1 over the full 128-bit word, then fold in R on underflow.
+        let lsb = v[15] & 1;
+        let mut carry = 0u8;
+        for j in 0..16 {
+            let next = v[j] & 1;
+            v[j] = (v[j] >> 1) | (carry << 7);
+            carry = next;
+        }
+        if lsb == 1 {
+            v[0] ^= 0xe1;
+        }
+    }
+    z
+}
+
+/// GHASH_H over `data` (which the caller has already padded to a 16-byte
+/// boundary and length-framed). Y_0 = 0; Y_i = (Y_{i-1} XOR B_i) • H.
+fn ghash(h: &[u8; 16], data: &[u8]) -> [u8; 16] {
+    let mut y = [0u8; 16];
+    for chunk in data.chunks(16) {
+        for (j, &b) in chunk.iter().enumerate() {
+            y[j] ^= b;
+        }
+        y = gcm_mult(&y, h);
+    }
+    y
+}
+
+/// Increment the rightmost 32 bits of a counter block (big-endian, wrapping).
+fn inc32(cb: &mut [u8; 16]) {
+    let n = u32::from_be_bytes([cb[12], cb[13], cb[14], cb[15]]).wrapping_add(1);
+    cb[12..16].copy_from_slice(&n.to_be_bytes());
+}
+
+/// GCTR: counter mode keyed by the expanded schedule, starting from the
+/// initial counter block `icb`, incrementing the low 32 bits per block.
+fn gctr(w: &[[u8; 4]; 4 * (NR + 1)], icb: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut cb = *icb;
+    for chunk in data.chunks(16) {
+        let mut ks = cb;
+        encrypt_block(w, &mut ks);
+        for (i, &b) in chunk.iter().enumerate() {
+            out.push(b ^ ks[i]);
+        }
+        inc32(&mut cb);
+    }
+    out
+}
+
+/// Derive (H, J0) for a key schedule and IV.
+fn gcm_setup(w: &[[u8; 4]; 4 * (NR + 1)], iv: &[u8]) -> ([u8; 16], [u8; 16]) {
+    let mut h = [0u8; 16];
+    encrypt_block(w, &mut h);
+    let j0 = if iv.len() == 12 {
+        let mut j = [0u8; 16];
+        j[..12].copy_from_slice(iv);
+        j[15] = 1;
+        j
+    } else {
+        let mut data = iv.to_vec();
+        while data.len() % 16 != 0 {
+            data.push(0);
+        }
+        data.extend_from_slice(&[0u8; 8]);
+        data.extend_from_slice(&((iv.len() as u64) * 8).to_be_bytes());
+        ghash(&h, &data)
+    };
+    (h, j0)
+}
+
+/// GHASH over AAD || pad || C || pad || [bitlen(A)]_64 || [bitlen(C)]_64.
+fn gcm_tag(w: &[[u8; 4]; 4 * (NR + 1)], h: &[u8; 16], j0: &[u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
+    let mut g = Vec::with_capacity(aad.len() + ct.len() + 48);
+    g.extend_from_slice(aad);
+    while g.len() % 16 != 0 {
+        g.push(0);
+    }
+    g.extend_from_slice(ct);
+    while g.len() % 16 != 0 {
+        g.push(0);
+    }
+    g.extend_from_slice(&((aad.len() as u64) * 8).to_be_bytes());
+    g.extend_from_slice(&((ct.len() as u64) * 8).to_be_bytes());
+    let s = ghash(h, &g);
+    let mut ej0 = *j0;
+    encrypt_block(w, &mut ej0);
+    let mut tag = [0u8; 16];
+    for i in 0..16 {
+        tag[i] = ej0[i] ^ s[i];
+    }
+    tag
+}
+
+/// AES-256-GCM encrypt → (ciphertext, 16-byte tag).
+pub fn aes256_gcm_encrypt(key: &[u8; 32], iv: &[u8], aad: &[u8], plaintext: &[u8]) -> (Vec<u8>, [u8; 16]) {
+    let w = key_schedule(key);
+    let (h, j0) = gcm_setup(&w, iv);
+    let mut cb = j0;
+    inc32(&mut cb);
+    let ct = gctr(&w, &cb, plaintext);
+    let tag = gcm_tag(&w, &h, &j0, aad, &ct);
+    (ct, tag)
+}
+
+/// AES-256-GCM decrypt with tag verification → plaintext, or `None` if
+/// the tag doesn't authenticate (constant-time compare).
+pub fn aes256_gcm_decrypt(
+    key: &[u8; 32],
+    iv: &[u8],
+    aad: &[u8],
+    ct: &[u8],
+    tag: &[u8],
+) -> Option<Vec<u8>> {
+    let w = key_schedule(key);
+    let (h, j0) = gcm_setup(&w, iv);
+    let expected = gcm_tag(&w, &h, &j0, aad, ct);
+    let mut diff = 0u8;
+    if tag.len() != 16 {
+        return None;
+    }
+    for i in 0..16 {
+        diff |= expected[i] ^ tag[i];
+    }
+    if diff != 0 {
+        return None;
+    }
+    let mut cb = j0;
+    inc32(&mut cb);
+    Some(gctr(&w, &cb, ct))
+}
+
 /// HMAC-SHA256 (RFC 2104). Returns the 32-byte MAC.
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     const BLOCK: usize = 64; // SHA-256 block size.
@@ -266,6 +418,44 @@ mod tests {
         let a = aes256_ctr_xor(&key, &iv, 0, &data[..23]);
         let b = aes256_ctr_xor(&key, &iv, 23, &data[23..]);
         assert_eq!([a, b].concat(), whole);
+    }
+
+    #[test]
+    fn aes256_gcm_nist_test_case_14() {
+        // GCM spec (McGrew/Viega) Test Case 14, AES-256: all-zero key/IV,
+        // empty AAD/plaintext → empty ct, known tag.
+        let key = [0u8; 32];
+        let iv = [0u8; 12];
+        let (ct, tag) = aes256_gcm_encrypt(&key, &iv, &[], &[]);
+        assert!(ct.is_empty());
+        assert_eq!(hex(&tag), "530f8afbc74536b9a963b4f1c4cb738b");
+    }
+
+    #[test]
+    fn aes256_gcm_nist_test_case_16() {
+        // GCM Test Case 16, AES-256: non-empty plaintext + AAD.
+        let key: [u8; 32] = unhex(
+            "feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308",
+        ).try_into().unwrap();
+        let iv = unhex("cafebabefacedbaddecaf888");
+        let aad = unhex("feedfacedeadbeeffeedfacedeadbeefabaddad2");
+        let pt = unhex(concat!(
+            "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72",
+            "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+        ));
+        let (ct, tag) = aes256_gcm_encrypt(&key, &iv, &aad, &pt);
+        assert_eq!(hex(&ct), concat!(
+            "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa",
+            "8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662",
+        ));
+        assert_eq!(hex(&tag), "76fc6ece0f4e1768cddf8853bb2d551b");
+        // Round-trip with tag verification.
+        let back = aes256_gcm_decrypt(&key, &iv, &aad, &ct, &tag).unwrap();
+        assert_eq!(back, pt);
+        // A flipped tag byte must fail authentication.
+        let mut bad = tag;
+        bad[0] ^= 1;
+        assert!(aes256_gcm_decrypt(&key, &iv, &aad, &ct, &bad).is_none());
     }
 
     #[test]

@@ -763,6 +763,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // oracle (loadable under --disable-gems).
 #[cfg(feature = "_openssl")]
 #[test] fn openssl_crypto() { run_diff("openssl_crypto"); }
+// AES-256-GCM authenticated encryption (Cipher) — encrypt/tag,
+// verified decrypt, tamper detection.
+#[cfg(feature = "_openssl")]
+#[test] fn openssl_aes_gcm() { run_diff("openssl_aes_gcm"); }
 #[test] fn super_to_primitive() { run_diff("super_to_primitive"); }
 #[test] fn fancy_regex_captures() { run_diff("fancy_regex_captures"); }
 #[test] fn numeric_comparable() { run_diff("numeric_comparable"); }
