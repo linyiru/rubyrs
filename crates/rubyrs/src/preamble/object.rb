@@ -88,6 +88,14 @@ end
 # false — dry-core's `defines(:x, type: Object)` class-attribute check
 # (`type === value`) then rejected every module-valued attribute.
 class Module < Object
+  # `Module.new { ... }` runs the block as the module body; the no-block
+  # form is a no-op. Primarily the `super()` target for a user
+  # `Module` subclass's `initialize` (`class Tagged < Module; def
+  # initialize(t); super(); @tag = t; end`) — dry-core's Deprecations.
+  def initialize(&block)
+    module_eval(&block) if block
+    self
+  end
 end
 class Class < Module
 end

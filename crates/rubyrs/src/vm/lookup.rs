@@ -1244,6 +1244,14 @@ impl Vm {
             && let Some(c) = s.class_tag.borrow().clone() {
             return Value::Class(c);
         }
+        // A module/class VALUE that is an instance of a user `Module`/
+        // `Class` subclass (`class Tagged < Module; end; Tagged.new`)
+        // reports that subclass as its class (CRuby), not the generic
+        // `Module`/`Class`.
+        if let Value::Class(c) = recv
+            && let Some(t) = &c.class_tag {
+            return Value::Class(t.clone());
+        }
         // Builtin receivers resolve through a per-type Rc<Class> cache
         // (`builtin_class_cache`) instead of interning the class-name
         // string on EVERY call — this sits on the dispatch hot path
@@ -2032,7 +2040,16 @@ impl Vm {
         // chain). The instance-method ancestor walk wouldn't find
         // it because the methods aren't in `methods` and a class's
         // own class is "Class", not its inheritance chain.
-        if let Value::Class(cls) = &self_val {
+        // A tagged-module instance (`class Tagged < Module; Tagged.new`)
+        // is an INSTANCE, not a class-method context: its `super` must
+        // walk the class_tag ancestry's INSTANCE methods (Tagged →
+        // Module → …), so fall through to the instance branch below
+        // (where `class_of` resolves the class_tag). Without this guard
+        // the class-method walk uses the module's own (empty) superclass
+        // chain and `super()` in `Tagged#initialize` finds nothing.
+        if let Value::Class(cls) = &self_val
+            && cls.class_tag.is_none()
+        {
             // Build the class-method ancestor chain. Each node
             // carries an `is_module` flag so the post-defining walk
             // knows where to look: a singleton-prepended module
@@ -2875,6 +2892,7 @@ mod tests {
                     class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
+            class_tag: None,
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         })

@@ -823,6 +823,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn super_to_native_class_method() { run_diff("super_to_native_class_method"); }
 #[test] fn class_self_nested_const() { run_diff("class_self_nested_const"); }
 #[test] fn module_class_hierarchy() { run_diff("module_class_hierarchy"); }
+#[test] fn module_subclass() { run_diff("module_subclass"); }
 #[cfg(feature = "regex")]
 #[test] fn regexp_symbol_arg() { run_diff("regexp_symbol_arg"); }
 #[test] fn module_class_variable_reflection() { run_diff("module_class_variable_reflection"); }

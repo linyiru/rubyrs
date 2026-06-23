@@ -3229,6 +3229,7 @@ impl Vm {
                                         class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                                         consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                                         assigned_name: std::cell::RefCell::new(None),
+                                        class_tag: None,
                                         ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                                         #[cfg(feature = "cext")]
                                         cext_alloc_func: std::cell::Cell::new(None),

@@ -6233,6 +6233,7 @@ impl Vm {
             class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),
+            class_tag: None,
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -6393,6 +6394,7 @@ impl Vm {
             class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),
+            class_tag: None,
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -6906,6 +6908,76 @@ impl Vm {
         let obj = self.alloc_default_instance(cls)?;
         self.stack.push(obj);
         return Ok(ClassOutcome::Handled);
+    }
+    // `T.new` where T is a USER subclass of `Module` (or `Class`) —
+    // `class Tagged < Module; end; Tagged.new(...)`. CRuby allocates a
+    // real module/class VALUE that IS an instance of T: it has its own
+    // method table, is `extend`-able, fires inclusion hooks, and reports
+    // T as its `.class`. Build a fresh `Value::Class` tagged with T
+    // (class_tag), then run T#initialize on it (whose `super()` reaches
+    // `Module#initialize`). dry-core's `Deprecations::Tagged` /
+    // `ClassAttributes` use this — the whole dry-rb stack depends on it.
+    // Skipped for `Module`/`Class` themselves (their own `new` arms
+    // above) and for already-tagged receivers.
+    if name_id == new_id
+        && let Value::Class(cls) = &recv
+        && cls.class_tag.is_none()
+    {
+        let mod_sym = self.interner.intern("Module");
+        let cls_sym = self.interner.intern("Class");
+        let module_cls = self.classes.get(&mod_sym).cloned();
+        let class_cls = self.classes.get(&cls_sym).cloned();
+        if let (Some(mc), Some(cc)) = (module_cls, class_cls)
+            && !Rc::ptr_eq(cls, &mc)
+            && !Rc::ptr_eq(cls, &cc)
+            && super::class_is_a(cls, &mc)
+        {
+            // `T < Class` → the instance is a CLASS (is_module false,
+            // default superclass Object); `T < Module` → a module.
+            let as_class = super::class_is_a(cls, &cc);
+            let sup = if as_class {
+                self.classes.get(&self.interner.intern("Object")).cloned()
+            } else {
+                None
+            };
+            self.anon_class_counter += 1;
+            let serial = self.anon_class_counter;
+            let new_obj = Rc::new(crate::value::Class {
+                name: String::new(),
+                is_module: !as_class,
+                undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
+                anon_serial: std::cell::Cell::new(serial),
+                ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                superclass: std::cell::RefCell::new(sup),
+                includes: std::cell::RefCell::new(Vec::new()),
+                prepends: std::cell::RefCell::new(Vec::new()),
+                singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                singleton_includes: std::cell::RefCell::new(Vec::new()),
+                singleton_view: std::cell::RefCell::new(None),
+                singleton_target: std::cell::RefCell::new(None),
+                class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                assigned_name: std::cell::RefCell::new(None),
+                class_tag: Some(cls.clone()),
+                #[cfg(feature = "cext")]
+                cext_alloc_func: std::cell::Cell::new(None),
+            });
+            let modv = Value::Class(new_obj);
+            // Run T#initialize (forwarding args); its return is
+            // discarded — `new` yields the module itself.
+            let init_id = self.interner.intern("initialize");
+            if let Some(m) = self.lookup_method_uncached(cls, init_id) {
+                self.invoke_method(m, modv.clone(), args.into_vec())?;
+                self.frames.last_mut()
+                    .expect("ICE: frames empty after module-subclass new")
+                    .swap_return = Some(modv);
+            } else {
+                self.stack.push(modv);
+            }
+            return Ok(ClassOutcome::Handled);
+        }
     }
     if name_id == new_id
         && let Value::Class(cls) = &recv {
@@ -7865,6 +7937,19 @@ impl Vm {
                 && let Some(m) = self.lookup_class_singleton_method(c, name_id) {
                 self.invoke_method(m, self_val.clone(), args.into_vec())?;
                 return Ok(());
+            }
+            // Bare call inside a tagged-module instance's method (self =
+            // `Tagged.new` module value): resolve INSTANCE methods from
+            // its class (class_tag). dry-core `Equalizer#initialize`
+            // calls the private `define_methods` with implicit self.
+            if let Value::Class(c) = &self_val
+                && let Some(t) = &c.class_tag
+            {
+                let t = t.clone();
+                if let Some(m) = self.lookup_method_uncached(&t, name_id) {
+                    self.invoke_method(m, self_val.clone(), args.into_vec())?;
+                    return Ok(());
+                }
             }
             // Kernel private methods are implicit-self callable from ANY
             // self — every object's ancestry includes Kernel (via
@@ -9607,6 +9692,21 @@ impl Vm {
                 }
                 let target_self = recv.clone();
                 return self.invoke_method(m, target_self, args.into_vec());
+            }
+            // Tagged-module instance (`class Tagged < Module; Tagged.new`):
+            // after its own singleton methods, resolve INSTANCE methods
+            // from its class (class_tag) — a module VALUE that is an
+            // instance of a Module subclass answers that subclass's
+            // instance methods. dry-core's `Equalizer#initialize` calls
+            // the private `define_methods` (an Equalizer instance method)
+            // on the equalizer module value.
+            if !force_primitive
+                && let Some(t) = &cls.class_tag
+            {
+                let t = t.clone();
+                if let Some(m) = self.lookup_method_uncached(&t, name_id) {
+                    return self.invoke_method(m, recv.clone(), args.into_vec());
+                }
             }
             // `Kernel.foo` / `Kernel::foo` — explicit-receiver
             // dispatch of a Kernel module-function. CRuby's Kernel
@@ -14039,7 +14139,17 @@ impl Vm {
         }
         let hook_id = self.interner.intern(hook_name);
         for src in sources {
-            if let Some(m) = self.lookup_class_singleton_method(src, hook_id) {
+            // Normal case: `def self.included(base)` on the module.
+            // Tagged-module case (`class Tagged < Module`): the hook is
+            // an INSTANCE method of the module's class (Tagged#extended),
+            // resolved via class_tag — `m.extended(base)` is an ordinary
+            // method call on the module value m.
+            let m = self.lookup_class_singleton_method(src, hook_id).or_else(|| {
+                src.class_tag
+                    .as_ref()
+                    .and_then(|t| self.lookup_method_uncached(t, hook_id))
+            });
+            if let Some(m) = m {
                 let pre_frames = self.frames.len();
                 self.invoke_method(
                     m,
@@ -15616,6 +15726,7 @@ impl Vm {
             class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),
+            class_tag: None,
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -17138,6 +17249,7 @@ impl Vm {
                 class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),
+            class_tag: None,
                 #[cfg(feature = "cext")]
                 cext_alloc_func: std::cell::Cell::new(None),
             });
@@ -17204,6 +17316,7 @@ impl Vm {
                 class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),
+            class_tag: None,
                 #[cfg(feature = "cext")]
                 cext_alloc_func: std::cell::Cell::new(None),
             });
@@ -19721,6 +19834,7 @@ impl Vm {
             class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),
+            class_tag: None,
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -19762,6 +19876,7 @@ impl Vm {
             class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),
+            class_tag: None,
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -19806,6 +19921,7 @@ impl Vm {
             class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),
+            class_tag: None,
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });

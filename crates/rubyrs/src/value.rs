@@ -701,6 +701,18 @@ pub struct Class {
     /// qualified-key read paths find them. Singleton-class shells
     /// are never stamped here (they report `nil` for `name`).
     pub(crate) assigned_name: RefCell<Option<String>>,
+    /// For a module VALUE that is an instance of a user-defined
+    /// `Module` subclass (`class Tagged < Module; end; Tagged.new`):
+    /// the actual class the module is an instance of. CRuby lets you
+    /// subclass `Module`/`Class`; an instance of such a subclass IS a
+    /// module/class (own `is_module`/method-table machinery) but its
+    /// `.class` is the subclass, and method calls on it resolve the
+    /// subclass's instance methods (dry-core's `Deprecations::Tagged`
+    /// defines `extended`/`deprecation_tag` this way). `None` for an
+    /// ordinary module/class (whose class is `Module`/`Class`). Set
+    /// once at allocation (`Tagged.new`); read by `class_of` and the
+    /// Class-receiver dispatch path.
+    pub(crate) class_tag: Option<Rc<Class>>,
     /// L3-F: optional cext-side allocator. When `Klass.new(args)` is
     /// dispatched and this is `Some(fn)`, the host calls `fn(klass)`
     /// to produce the instance handle (typically a
@@ -769,6 +781,7 @@ impl Class {
             class_vars: RefCell::new(self.class_vars.borrow().clone()),
             consts: RefCell::new(self.consts.borrow().clone()),
             assigned_name: RefCell::new(self.assigned_name.borrow().clone()),
+            class_tag: self.class_tag.clone(),
             #[cfg(feature = "cext")]
             cext_alloc_func: Cell::new(self.cext_alloc_func.get()),
         }
@@ -814,6 +827,7 @@ impl Class {
             class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
+            class_tag: None,
             #[cfg(feature = "cext")]
             cext_alloc_func: Cell::new(None),
         });
