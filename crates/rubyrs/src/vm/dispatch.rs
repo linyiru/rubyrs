@@ -9579,7 +9579,18 @@ impl Vm {
             // `Animal`'s `def self.kingdom`. The same helper is
             // used by the bare-call path (no_recv when self is a
             // Class) so `self.bar` and bare `bar` stay in sync.
-            let user_singleton = self.lookup_class_singleton_method(cls, name_id);
+            // `!force_primitive`: a `super` to a native class/module
+            // method (e.g. ActiveSupport's `autoload` override → super)
+            // sets force_primitive so the override is SKIPPED here and
+            // dispatch falls through to the native arm below — otherwise
+            // the super would re-find the same override and recurse.
+            // (The cached class-singleton paths above already gate on
+            // !force_primitive; this is the uncached canonical site.)
+            let user_singleton = if force_primitive {
+                None
+            } else {
+                self.lookup_class_singleton_method(cls, name_id)
+            };
             if let Some(m) = user_singleton {
                 // `private_class_method` visibility — same check (and
                 // same literal-`self` / `send` exemptions) the
@@ -19412,6 +19423,22 @@ impl Vm {
     /// primitive-forwarder Method when the source name isn't
     /// in the user-Method table.
     pub(crate) fn primitive_class_responds_to(&self, class_name: &str, sid: SymId) -> bool {
+        // Module / Class primitives a user override may `super` into.
+        // rubyrs handles these natively in dispatch (not as table
+        // methods), so the super chain finds nothing without flagging
+        // them here — the `super`-fallback then force-primitive-dispatches
+        // the native arm (the class-singleton site is force_primitive-
+        // gated, so it doesn't re-find the override). ActiveSupport's
+        // Dependencies::Autoload#autoload does `super const, path`.
+        if matches!(class_name, "Module" | "Class") {
+            return matches!(self.interner.resolve(sid).as_ref(),
+                "autoload" | "autoload?" | "const_get" | "const_set"
+                | "const_defined?" | "private_constant" | "public_constant"
+                | "deprecate_constant" | "attr_accessor" | "attr_reader"
+                | "attr_writer" | "define_method" | "alias_method"
+                | "module_function" | "private" | "public" | "protected"
+                | "include" | "prepend");
+        }
         let sentinel: Option<Value> = match class_name {
             "Integer" => Some(Value::Int(0)),
             "Float" => Some(Value::Float(0.0)),
