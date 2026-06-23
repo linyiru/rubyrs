@@ -1183,6 +1183,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // protocol and Rational-derived numerator/denominator/fdiv.
 #[cfg(feature = "stdlib")]
 #[test] fn bigdecimal_numeric_protocol() { run_diff_gem("bigdecimal_numeric_protocol", "bigdecimal"); }
+// Date method surface: commercial date, step/upto/downto, ld/mjd,
+// inspect tuple format, strptime. Oracle = CRuby's core `date`.
+#[cfg(feature = "stdlib")]
+#[test] fn date_methods() { run_diff_gem("date_methods", "date"); }
 // `Monitor` autoloaded (available without explicit require, as in a
 // full Ruby env). Oracle is gem-enabled CRuby (`--disable=gems` lacks
 // the ambient Monitor). Surfaced by dotenv's bare `Monitor.new`.

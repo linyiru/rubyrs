@@ -93,6 +93,68 @@ class Date
     end
   end
 
+  def self.strptime(str, fmt = '%F')
+    h = _strptime(str, fmt)
+    unless h && h[:year] && h[:mon] && h[:mday]
+      raise ArgumentError, "invalid strptime format - #{fmt.inspect}"
+    end
+    new(h[:year], h[:mon], h[:mday])
+  end
+
+  # Shared strptime parser (Date + DateTime). Returns a Hash with the
+  # components it could read (`:year :mon :mday :hour :min :sec`), or
+  # nil on a literal mismatch. Implements the common conversion
+  # specifiers; unknown ones are skipped best-effort.
+  def self._strptime(str, fmt)
+    res = {}
+    s = str.to_s
+    si = 0
+    fi = 0
+    while fi < fmt.length
+      c = fmt[fi]
+      if c == '%'
+        fi += 1
+        conv = fmt[fi]
+        case conv
+        when 'Y' then n = _strptime_int(s, si, 4); return nil unless n; res[:year] = n[0]; si = n[1]
+        when 'y' then n = _strptime_int(s, si, 2); return nil unless n; res[:year] = 2000 + n[0]; si = n[1]
+        when 'm' then n = _strptime_int(s, si, 2); return nil unless n; res[:mon] = n[0]; si = n[1]
+        when 'd', 'e' then n = _strptime_int(s, si, 2); return nil unless n; res[:mday] = n[0]; si = n[1]
+        when 'H' then n = _strptime_int(s, si, 2); return nil unless n; res[:hour] = n[0]; si = n[1]
+        when 'M' then n = _strptime_int(s, si, 2); return nil unless n; res[:min] = n[0]; si = n[1]
+        when 'S' then n = _strptime_int(s, si, 2); return nil unless n; res[:sec] = n[0]; si = n[1]
+        when '%' then return nil unless s[si] == '%'; si += 1
+        else
+          # Unsupported specifier — skip it without consuming input.
+        end
+        fi += 1
+      elsif c == ' '
+        si += 1 while si < s.length && s[si] == ' '
+        fi += 1
+      else
+        return nil unless s[si] == c
+        si += 1
+        fi += 1
+      end
+    end
+    res
+  end
+
+  # Read up to `maxlen` digits (skipping leading blanks, allowing a
+  # leading sign) from `s` at `si`. Returns [value, next_index] or nil.
+  def self._strptime_int(s, si, maxlen)
+    si += 1 while si < s.length && s[si] == ' '
+    start = si
+    si += 1 if si < s.length && (s[si] == '-' || s[si] == '+')
+    digits = 0
+    while si < s.length && s[si] =~ /\d/ && digits < maxlen
+      si += 1
+      digits += 1
+    end
+    return nil if digits.zero?
+    [s[start...si].to_i, si]
+  end
+
   def initialize(year = -4712, month = 1, day = 1)
     init_civil(year, month, day)
   end
@@ -116,6 +178,11 @@ class Date
   alias mday day
   def jd; @jd; end
 
+  # Lilian Date (days since 1582-10-15) and Modified Julian Day
+  # (days since 1858-11-17). Plain JDN offsets.
+  def ld; @jd - 2299160; end
+  def mjd; @jd - 2400001; end
+
   # 0 = Sunday … 6 = Saturday. JDN 0 is a Monday, so (jd + 1) % 7.
   def wday; (@jd + 1) % 7; end
   def sunday?;    wday == 0; end
@@ -131,6 +198,23 @@ class Date
   end
 
   def leap?; Date.leap?(@year); end
+
+  # ISO-8601 commercial date. `cwday` is Monday=1..Sunday=7; the
+  # commercial week (`cweek`) and year (`cwyear`) belong to whichever
+  # calendar year holds the Thursday of this week (so week 1 is the
+  # week containing the first Thursday).
+  def cwday; wday.zero? ? 7 : wday; end
+
+  def cwyear
+    thursday = @jd - cwday + 4
+    Date.jd_to_civil(thursday)[0]
+  end
+
+  def cweek
+    thursday = @jd - cwday + 4
+    y = Date.jd_to_civil(thursday)[0]
+    (thursday - Date.civil_to_jd(y, 1, 1)) / 7 + 1
+  end
 
   # Day arithmetic via the JDN; month/year arithmetic clamps the day.
   def +(n)
@@ -167,6 +251,30 @@ class Date
   def succ; self + 1; end
   alias next succ
 
+  # Iterate dates from self toward `limit` by `step` days (negative
+  # step counts down). No block → an Enumerator. `upto` / `downto`
+  # are the unit-step shorthands.
+  def step(limit, step = 1)
+    return enum_for(:step, limit, step) unless block_given?
+    raise ArgumentError, "step can't be 0" if step.zero?
+    d = self
+    if step > 0
+      while d <= limit
+        yield d
+        d += step
+      end
+    else
+      while d >= limit
+        yield d
+        d += step
+      end
+    end
+    self
+  end
+
+  def upto(max, &block); step(max, 1, &block); end
+  def downto(min, &block); step(min, -1, &block); end
+
   # Comparable across Date and DateTime via a single UTC-seconds key:
   # a plain Date sits at UTC midnight (time + offset zero).
   def cmp_key; @jd * 86400; end
@@ -192,7 +300,11 @@ class Date
 
   def to_s; format('%04d-%02d-%02d', @year, @month, @day); end
   alias iso8601 to_s
-  def inspect; "#<Date: #{to_s} ((#{@jd}j))>"; end
+  # CRuby renders the internal `(jd, day-fraction-seconds,
+  # nanoseconds), offset-seconds, gregorian-start-jd` tuple. A plain
+  # Date has no time-of-day (0s/0n), zero offset, and the default
+  # ITALY reform start (2299161j).
+  def inspect; "#<Date: #{to_s} ((#{@jd}j,0s,0n),+0s,2299161j)>"; end
 
   def strftime(fmt = '%F')
     Date._strftime(fmt, @year, @month, @day, 0, 0, 0, wday, yday, nil)
