@@ -5855,7 +5855,8 @@ impl Vm {
                             .and_then(std::rc::Weak::upgrade)
                             .and_then(|target| self.lookup_class_singleton_method(&target, *sid))
                     });
-                if snapshot.is_none() && !is_primitive_class_name(&cls.name) {
+                if snapshot.is_none() && !is_primitive_class_name(&cls.name)
+                    && !matches!(cls.name.as_str(), "Class" | "Module") {
                     let mname = self.interner.resolve(*sid).to_string();
                     return Err(self.trap(RubyError::NameError {
                         msg: format!("undefined method '{}' for class '{}'", mname, cls.name),
@@ -5896,7 +5897,8 @@ impl Vm {
                     // chain walk so inherited reflection works.
                     let snapshot = self.lookup_method_uncached(&cls, sid)
                         .or_else(|| self.builtin_method_via_ancestor_chain(&cls, sid));
-                    if snapshot.is_none() && !is_primitive_class_name(&cls.name) {
+                    if snapshot.is_none() && !is_primitive_class_name(&cls.name)
+                    && !matches!(cls.name.as_str(), "Class" | "Module") {
                         return Err(self.trap(RubyError::NameError {
                             msg: format!("undefined method '{}' for class '{}'", raw, cls.name),
                         }));

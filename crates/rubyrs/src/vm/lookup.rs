@@ -1728,6 +1728,19 @@ impl Vm {
             // reach `mod.method(:new)` for an owner check.
             ("method", 1, &[("req", None)], "<internal:kernel>"),
             ("public_method", 1, &[("req", None)], "<internal:kernel>"),
+            // Universal ivar / object methods. CRuby exposes these as
+            // UnboundMethods via `Object.instance_method(:X)`; rspec-mocks
+            // captures `Object.instance_method(:instance_variable_get)`
+            // to read doubles' ivars past any override.
+            ("instance_variable_get", 1, &[("req", None)], "<internal:kernel>"),
+            ("instance_variable_set", 2, &[("req", None), ("req", None)], "<internal:kernel>"),
+            ("instance_variable_defined?", 1, &[("req", None)], "<internal:kernel>"),
+            ("instance_variables", 0, &[], "<internal:kernel>"),
+            ("remove_instance_variable", 1, &[("req", None)], "<internal:kernel>"),
+            ("freeze", 0, &[], "<internal:kernel>"),
+            ("dup", 0, &[], "<internal:kernel>"),
+            ("clone", -1, &[("key", Some("freeze"))], "<internal:kernel>"),
+            ("tap", 0, &[], "<internal:kernel>"),
         ];
         for (name, arity, params, src_label) in entries {
             let name_id = self.interner.intern(name);
