@@ -296,6 +296,9 @@ module OpenSSL
 
     def key_len; @key_len; end
     def iv_len; @gcm ? 12 : 16; end
+    # AEAD detection — true for GCM (the only authenticated mode here).
+    # ActiveSupport::MessageEncryptor's `aead_mode?` keys off this.
+    def authenticated?; @gcm; end
 
     # PKCS#7 padding toggle (CBC). `padding = 0` requires block-aligned
     # input. CRuby accepts an integer; non-zero / true means on.

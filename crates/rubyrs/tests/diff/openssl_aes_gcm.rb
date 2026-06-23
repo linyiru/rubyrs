@@ -73,3 +73,7 @@ p e.auth_tag.unpack1("H*")
 
 p OpenSSL::Cipher.new("aes-256-gcm").iv_len
 p OpenSSL::Cipher.new("aes-256-gcm").key_len
+
+# authenticated? — true for GCM, false for CTR (ActiveSupport's aead_mode?).
+p OpenSSL::Cipher.new("aes-256-gcm").authenticated?
+p OpenSSL::Cipher.new("aes-256-ctr").authenticated?
