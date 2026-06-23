@@ -9308,8 +9308,27 @@ impl Vm {
         } else {
             false
         };
+        // CRuby implicitly coerces a Symbol argument to its name String
+        // for the Regexp match family (`/re/.match?(sym)` / `.match` /
+        // `===` — ActiveSupport's mattr_accessor validates names this
+        // way). Build a coerced arg view so primitive_call's String-arg
+        // arms apply. (String#match?(sym) is NOT coerced — there a
+        // Symbol is a pattern arg, which CRuby rejects with TypeError.)
+        #[cfg(feature = "regex")]
+        let coerced_args: Option<Vec<Value>> = if matches!(&recv, Value::Regex(_))
+            && matches!(&*name, "match?" | "===")
+            && let [Value::Sym(s)] = &args[..]
+        {
+            Some(vec![Value::new_str(self.interner.resolve(*s).to_string())])
+        } else {
+            None
+        };
+        #[cfg(feature = "regex")]
+        let prim_args: &[Value] = coerced_args.as_deref().unwrap_or(&args);
+        #[cfg(not(feature = "regex"))]
+        let prim_args: &[Value] = &args;
         if !class_intrinsic_overridden
-            && let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes)
+            && let Some(v) = primitive_call(&recv, &name, prim_args, self.max_value_bytes)
             .map_err(|e| self.trap(e))? {
             self.stack.push(v);
             return Ok(());
@@ -12432,6 +12451,12 @@ impl Vm {
                         let bound = s.to_string_lossy();
                         self.do_regexp_match(&re, bound)?
                     }
+                }
+                // CRuby coerces a Symbol subject to its name String.
+                Value::Sym(s) => {
+                    let re = re.clone();
+                    let bound = self.interner.resolve(*s).to_string();
+                    self.do_regexp_match(&re, bound)?
                 }
                 Value::Nil => {
                     self.save_match_scope_on_write();
