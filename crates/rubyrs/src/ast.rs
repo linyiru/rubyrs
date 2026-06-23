@@ -1643,6 +1643,35 @@ fn singleton_body_needs_real_eval(body_nodes: &[Node<'_>], recv_is_self: bool) -
                 return true;
             }
         }
+        // A `class << <expr>` (NON-self) whose body has ANY node the
+        // desugar can't handle — an arbitrary value-returning call
+        // (`(class << obj; ancestors; end)`), a literal, an assignment,
+        // an ivar read, etc. — is used for its VALUE (the last
+        // expression). The desugar only knows the def / attr_* / alias /
+        // prepend / reflective-table-call / bare-`self` shapes; route
+        // everything else to the real eigenclass body, which runs with
+        // self = the metaclass and yields the last expression.
+        // rspec-mocks' `(class << object; ancestors; end).map { … }`
+        // (space.rb) hits this. Scoped to non-self so a `class << self`
+        // body's @@cvar/const desugar interplay (class_self_cvar) is
+        // untouched. `self` stays on the desugar (it has a dedicated
+        // arm rewriting to `recv.singleton_class`).
+        if !recv_is_self
+            && bn.as_def_node().is_none()
+            && bn.as_alias_method_node().is_none()
+            && bn.as_self_node().is_none()
+            && bn.as_constant_write_node().is_none()
+            && bn.as_constant_path_write_node().is_none()
+            && !bn.as_call_node().map(|c| c.receiver().is_none()
+                && matches!(cid_to_string(c.name()).as_str(),
+                    "attr_reader" | "attr_writer" | "attr_accessor" | "prepend"
+                    | "define_method" | "undef_method" | "remove_method"
+                    | "alias_method" | "method_defined?" | "public_method_defined?"
+                    | "private_method_defined?" | "protected_method_defined?"
+                    | "instance_method")).unwrap_or(false)
+        {
+            return true;
+        }
         // Constant assignment in the body (`PATCH_MAP = {…}`): the
         // constant belongs to the eigenclass, and the body's methods
         // reference it BARE — which only resolves when those methods

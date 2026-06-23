@@ -5263,7 +5263,21 @@ impl Vm {
                     let cls = self.class_stack.pop().expect("ICE: class_stack empty on class-body return");
                     self.class_visibility_stack.pop();
                     self.module_function_active_stack.pop();
-                    self.stack.push(Value::Class(cls));
+                    // A REAL eigenclass body (`class << obj; …; end` run via
+                    // OpenSingletonClass) evaluates to its LAST expression
+                    // (CRuby): `(class << obj; ancestors; end)` yields the
+                    // ancestors, not the eigenclass. A class's eigenclass
+                    // carries `singleton_target`; an object's eigenclass
+                    // (heap.ensure_singleton_class) doesn't, but its name is
+                    // the `#<Class:…>` form. A regular `class`/`module` body
+                    // keeps rubyrs's return-the-class behaviour.
+                    if cls.singleton_target.borrow().is_some()
+                        || cls.name.starts_with("#<Class:")
+                    {
+                        self.stack.push(ret);
+                    } else {
+                        self.stack.push(Value::Class(cls));
+                    }
                 } else if let Some(replacement) = f.swap_return {
                     self.stack.push(replacement);
                 } else {
