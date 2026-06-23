@@ -15145,8 +15145,23 @@ impl Vm {
             // `caps.borrow_mut()` so the same borrow can drive every
             // write.
             let has_rest = self.protos[proto_idx].rest_param.is_some();
-            if (has_rest && given < n_params) || (!has_rest && given != n_params) {
-                let expected = if has_rest { format!("{}+", n_params) } else { format!("{}", n_params) };
+            // CRuby's `define_method` body honours OPTIONAL params:
+            // `define_method(:m) { |a, b = 1| }` accepts 1..2 args (not
+            // a strict count). For BLOCK protos optionals are counted in
+            // the positional slot count (`n_params`), so the true
+            // required count is `n_params - n_optional_params`; missing
+            // optionals are filled by the block body's default prologue
+            // (keyed on `n_given_positional`, set on the frame below).
+            let n_opt = self.protos[proto_idx].n_optional_params as usize;
+            let n_req = n_params.saturating_sub(n_opt);
+            if given < n_req || (!has_rest && given > n_params) {
+                let expected = if has_rest {
+                    format!("{}+", n_req)
+                } else if n_opt > 0 {
+                    format!("{}..{}", n_req, n_params)
+                } else {
+                    format!("{}", n_req)
+                };
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!("wrong number of arguments (given {}, expected {})", given, expected),
                 }));
