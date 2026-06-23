@@ -1932,8 +1932,25 @@ impl Vm {
                             _ => String::new(),
                         };
                         let mut stack = vec![id];
-                        let v = self.join_recursive(id, &sep, &mut stack)?;
-                        Some(Value::new_str(v))
+                        // Join at the BYTE level with encoding negotiation
+                        // (a binary element with high bytes must NOT be
+                        // re-encoded to UTF-8 — that doubled bytes >127).
+                        let mut enc = JoinEnc {
+                            tag: crate::value::EncodingTag::UsAscii,
+                            ascii_only: true,
+                        };
+                        let bytes = self.join_recursive(id, &sep, &mut stack, &mut enc)?;
+                        let v = if !enc.ascii_only
+                            && enc.tag == crate::value::EncodingTag::Binary
+                        {
+                            Value::new_str_bytes_binary(bytes)
+                        } else {
+                            // All-ASCII or UTF-8 content → UTF-8 (preserves
+                            // the prior tag for the overwhelmingly common
+                            // text-join case).
+                            Value::new_str_bytes(bytes)
+                        };
+                        Some(v)
                     }
                     ("+", [Value::Array(other)]) => {
                         // Pin both source Arrays across maybe_gc — by the
@@ -2443,7 +2460,8 @@ impl crate::vm::Vm {
         id: crate::value::ObjId,
         sep: &str,
         stack: &mut Vec<crate::value::ObjId>,
-    ) -> Result<String, crate::error::Trap> {
+        enc: &mut JoinEnc,
+    ) -> Result<Vec<u8>, crate::error::Trap> {
         let snapshot: Vec<Value> = self.heap.array(id).clone();
         // Pin the snapshot: a user to_s runs arbitrary code (→ GC)
         // and the drained Rust Vec isn't a root.
@@ -2454,8 +2472,12 @@ impl crate::vm::Vm {
                 g.pin(v.clone());
             }
         }
-        let mut parts: Vec<String> = Vec::with_capacity(snapshot.len());
-        for v in &snapshot {
+        let mut out: Vec<u8> = Vec::new();
+        for (i, v) in snapshot.iter().enumerate() {
+            if i > 0 {
+                g.vm.join_merge_enc(enc, crate::value::EncodingTag::Utf8, sep.as_bytes())?;
+                out.extend_from_slice(sep.as_bytes());
+            }
             match v {
                 Value::Array(aid) => {
                     if stack.contains(aid) {
@@ -2464,17 +2486,65 @@ impl crate::vm::Vm {
                         }));
                     }
                     stack.push(*aid);
-                    let inner = g.vm.join_recursive(*aid, sep, stack)?;
+                    let inner = g.vm.join_recursive(*aid, sep, stack, enc)?;
                     stack.pop();
-                    parts.push(inner);
+                    out.extend_from_slice(&inner);
                 }
-                Value::Str(s) => parts.push(s.to_string_lossy()),
+                Value::Str(s) => {
+                    let bytes = s.content.borrow().clone();
+                    g.vm.join_merge_enc(enc, s.encoding.get(), &bytes)?;
+                    out.extend_from_slice(&bytes);
+                }
                 other @ (Value::Object(_) | Value::Class(_)) => {
-                    parts.push(g.vm.stringify_for_output(other, false)?);
+                    let st = g.vm.stringify_for_output(other, false)?;
+                    g.vm.join_merge_enc(enc, crate::value::EncodingTag::Utf8, st.as_bytes())?;
+                    out.extend_from_slice(st.as_bytes());
                 }
-                other => parts.push(other.to_display(&g.vm.heap, &g.vm.interner)),
+                other => {
+                    let st = other.to_display(&g.vm.heap, &g.vm.interner);
+                    g.vm.join_merge_enc(enc, crate::value::EncodingTag::Utf8, st.as_bytes())?;
+                    out.extend_from_slice(st.as_bytes());
+                }
             }
         }
-        Ok(parts.join(sep))
+        Ok(out)
     }
+
+    /// Fold one join part's encoding into the running result encoding
+    /// (CRuby's `rb_enc_check` over the join). An ASCII-only part keeps
+    /// the current tag; the first non-ASCII part sets it; a second
+    /// non-ASCII part with an incompatible tag raises
+    /// Encoding::CompatibilityError.
+    fn join_merge_enc(
+        &mut self,
+        enc: &mut JoinEnc,
+        tag: crate::value::EncodingTag,
+        bytes: &[u8],
+    ) -> Result<(), crate::error::Trap> {
+        // Represent "what we have so far" to enc_compat by ascii-ness.
+        let acc_bytes: &[u8] = if enc.ascii_only { b"" } else { b"\xff" };
+        match crate::value::enc_compat(enc.tag, acc_bytes, tag, bytes) {
+            Some(t) => {
+                enc.tag = t;
+                if bytes.iter().any(|&x| x >= 0x80) {
+                    enc.ascii_only = false;
+                }
+                Ok(())
+            }
+            None => Err(self.trap(crate::error::RubyError::HostException {
+                class_name: "Encoding::CompatibilityError".to_string(),
+                message: format!(
+                    "incompatible character encodings: {} and {}",
+                    enc.tag.display(),
+                    tag.display(),
+                ),
+            })),
+        }
+    }
+}
+
+/// Running encoding state for `Array#join` byte-level negotiation.
+struct JoinEnc {
+    tag: crate::value::EncodingTag,
+    ascii_only: bool,
 }

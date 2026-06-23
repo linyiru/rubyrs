@@ -156,6 +156,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn integer_basics() { run_diff("integer_basics"); }
 #[test] fn string_basics() { run_diff("string_basics"); }
 #[test] fn array_basics() { run_diff("array_basics"); }
+#[test] fn array_join_binary() { run_diff("array_join_binary"); }
 #[test] fn hash_basics() { run_diff("hash_basics"); }
 #[test] fn hash_compare_by_identity() { run_diff("hash_compare_by_identity"); }
 #[test] fn index_fast_path() { run_diff("index_fast_path"); }
