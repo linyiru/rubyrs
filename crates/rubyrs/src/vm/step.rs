@@ -4735,7 +4735,7 @@ impl Vm {
                 self.check_alloc()?;
                 let n = n as usize;
                 let split = self.stack.len() - n * 2;
-                let flat: Vec<Value> = self.stack.drain(split..).collect();
+                let flat: smallvec::SmallVec<[Value; 16]> = self.stack.drain(split..).collect();
                 // Dedup `eql?`-equal keys with last-write-wins, matching
                 // CRuby's `{a: 1, a: 2}` → `{a: 2}` semantics. Pre-#193
                 // ratchet retire: `{1 => :a, 1 => :b}` was reported as
