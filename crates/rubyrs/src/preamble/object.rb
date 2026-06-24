@@ -65,6 +65,20 @@ rescue StopIteration => e
   e.result
 end
 
+# `Kernel#gem(name, *requirements)` — rubygems' version-activation call.
+# rubyrs ships no rubygems (gems sit directly on `$LOAD_PATH`, no
+# activation step), so this is a lenient no-op returning true; the
+# FOLLOWING `require` is what actually determines availability. The
+# canonical idiom `gem "msgpack", ">= 1.7.0"; require "msgpack"`
+# (ActiveSupport's MessagePack serializer) then proceeds: when the gem
+# is absent the `require` raises LoadError, which such call sites already
+# rescue (AS falls back to its JSON/Marshal serializer). Without this,
+# `gem` tripped NoMethodError — not a LoadError — so the rescue missed.
+# Same top-level-def rationale as `loop` above.
+def gem(*)
+  true
+end
+
 class Object < BasicObject
   include Kernel
   # Default reflection hook. `respond_to?` consults this only after
