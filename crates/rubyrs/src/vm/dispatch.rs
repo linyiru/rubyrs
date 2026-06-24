@@ -3400,6 +3400,79 @@ impl Vm {
             self.stack.push(Value::Int(arity));
             return Ok(CallableOutcome::Handled);
         }
+        // `Proc#parameters` — [[kind, name?], …] like Method#parameters,
+        // but a NON-lambda proc reports its required positionals as
+        // `:opt` (procs are arity-lenient), while a lambda reports `:req`.
+        // Block protos store optionals inside `n_required_positional`
+        // (so required = n_params - n_optional), positionals first in
+        // `proto.params`, keywords in `block_kw_params`. dry-core's
+        // container Item does `item.parameters.empty?`.
+        if let Value::Block(bid) = &recv
+            && name == "parameters" && args.is_empty() {
+            let (n_params, has_rest, is_lambda, proto_idx) = {
+                let bh = self.heap.block(*bid);
+                (bh.n_params as usize, bh.rest_slot.is_some(), bh.is_lambda, bh.proto_idx)
+            };
+            let proto = &self.protos[proto_idx];
+            let n_opt = proto.n_optional_params as usize;
+            let rp = n_params.saturating_sub(n_opt);
+            let req_kind = if is_lambda { "req" } else { "opt" };
+            // Drop compiler-internal placeholder names (anonymous params).
+            let real = |n: &String| -> Option<String> {
+                if n.starts_with("__rest_") || n.starts_with("__kwrest_")
+                    || n.starts_with("__blkarg_") || n.starts_with("__destruct_") {
+                    None
+                } else {
+                    Some(n.clone())
+                }
+            };
+            let mut params_info: Vec<(&'static str, Option<String>)> = Vec::new();
+            for i in 0..rp {
+                params_info.push((req_kind, proto.params.get(i).and_then(real)));
+            }
+            for i in rp..n_params {
+                params_info.push(("opt", proto.params.get(i).and_then(real)));
+            }
+            if has_rest {
+                // CRuby reports an ANONYMOUS splat as `:*` (Ruby 3.x
+                // forwarding name), a named one by its name.
+                let rn = proto.rest_param.as_ref().and_then(real).unwrap_or_else(|| "*".to_string());
+                params_info.push(("rest", Some(rn)));
+            }
+            for (kname, _slot, required) in &proto.block_kw_params {
+                params_info.push((if *required { "keyreq" } else { "key" }, Some(kname.clone())));
+            }
+            if let Some(kr) = &proto.kw_rest_param {
+                let kn = real(kr).unwrap_or_else(|| "**".to_string());
+                params_info.push(("keyrest", Some(kn)));
+            }
+            if let Some(bp) = &proto.block_param {
+                let bn = real(bp).unwrap_or_else(|| "&".to_string());
+                params_info.push(("block", Some(bn)));
+            }
+            // Build the [[kind, name?], …] Array (PinGuard across the
+            // loop — see the Method#parameters builder's rationale).
+            let mut g = crate::vm::PinGuard::new(self);
+            let mut outer: Vec<Value> = Vec::with_capacity(params_info.len());
+            for (kind, name_opt) in params_info {
+                let kind_sym = g.vm.interner.intern(kind);
+                let mut pair = vec![Value::Sym(kind_sym)];
+                if let Some(n) = name_opt {
+                    let nsym = g.vm.interner.intern(&n);
+                    pair.push(Value::Sym(nsym));
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let pid = g.vm.heap.alloc(HeapObj::Array(pair.into()));
+                g.pin(Value::Array(pid));
+                outer.push(Value::Array(pid));
+            }
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let aid = g.vm.heap.alloc(HeapObj::Array(outer.into()));
+            g.vm.stack.push(Value::Array(aid));
+            return Ok(CallableOutcome::Handled);
+        }
         // `Proc#lambda?` — the introspection bit set at creation
         // (`->`/`lambda`/Method|Symbol#to_proc → true, `proc`/blocks →
         // false). A CurriedProc inherits its underlying proc's flag.

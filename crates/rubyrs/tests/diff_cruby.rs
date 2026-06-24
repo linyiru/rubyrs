@@ -837,6 +837,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn hash_merge_variadic() { run_diff("hash_merge_variadic"); }
 #[test] fn name_error_two_arg() { run_diff("name_error_two_arg"); }
 #[test] fn loaded_features_completion_order() { run_diff("loaded_features_completion_order"); }
+#[test] fn proc_parameters() { run_diff("proc_parameters"); }
 #[cfg(feature = "regex")]
 #[test] fn regexp_symbol_arg() { run_diff("regexp_symbol_arg"); }
 #[test] fn module_class_variable_reflection() { run_diff("module_class_variable_reflection"); }
