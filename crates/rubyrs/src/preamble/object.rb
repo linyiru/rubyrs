@@ -79,6 +79,21 @@ def gem(*)
   true
 end
 
+# `Kernel#printf(format, *args)` — `print(format(format, *args))` to
+# $stdout; the `printf(io, format, *args)` form writes to `io` instead.
+# rubyrs had `format`/`sprintf` but not `printf`, so `printf("%d\n", n)`
+# tripped NoMethodError. Same top-level-def rationale as `loop`/`gem`.
+def printf(*args)
+  return nil if args.empty?
+  if args.first.is_a?(String)
+    $stdout.write(format(*args))
+  else
+    io = args.shift
+    io.write(format(*args))
+  end
+  nil
+end
+
 class Object < BasicObject
   include Kernel
   # Default reflection hook. `respond_to?` consults this only after

@@ -843,6 +843,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn define_method_from_builtin() { run_diff("define_method_from_builtin"); }
 #[test] fn io_class_read() { run_diff("io_class_read"); }
 #[test] fn gc_stat() { run_diff("gc_stat"); }
+#[cfg(feature = "stdlib")]
+#[test] fn kernel_printf() { run_diff("kernel_printf"); }
 #[test] fn kwsplat_empty_forwarding() { run_diff("kwsplat_empty_forwarding"); }
 #[test] fn block_brace_hash_and_kwsplat() { run_diff("block_brace_hash_and_kwsplat"); }
 #[cfg(feature = "regex")]
