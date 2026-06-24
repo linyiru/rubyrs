@@ -305,6 +305,7 @@ _http_server = [
 
 [dependencies]
 ruby-prism.workspace = true
+smallvec = { version = "1", features = ["union"] }
 mimalloc = { version = "0.1", optional = true, default-features = false }
 tikv-jemallocator = { version = "0.6", optional = true }
 # `_encoding_full`'s transcoding backend for the multi-byte + WHATWG

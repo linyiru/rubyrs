@@ -900,24 +900,28 @@ pub struct Instance {
 
 /// Per-instance variable table. The overwhelming majority of objects
 /// carry only a handful of ivars, so the table is an insertion-ordered
-/// `Vec` scanned linearly: no per-instance HashMap RawTable allocation
-/// on the first `@x=` (measured +59ns vs a plain push) and no hashing on
-/// read (measured ~5x faster than the HashMap get) — the small-table
-/// strategy CRuby uses. Insertion order is preserved, matching CRuby's
-/// `instance_variables` definition-order (a HashMap spill was rejected:
-/// it would scramble that order).
+/// small-vector scanned linearly: up to 4 ivars live INLINE in the
+/// instance — no heap allocation at all, not even on the first `@x=`
+/// (the old `FxHashMap` cost +59ns RawTable alloc there) — and reads are
+/// linear compares, no hashing (~5x faster than the HashMap get). The
+/// small-table strategy CRuby uses. Insertion order is preserved,
+/// matching CRuby's `instance_variables` definition-order; a HashMap
+/// spill was rejected because it would scramble that order. A
+/// pathological object with hundreds of ivars spills to the SmallVec
+/// heap and pays O(n) per access; the fix if it ever profiles hot is an
+/// order-preserving index (this Vec + a side HashMap for lookup), not a
+/// plain HashMap.
 ///
-/// An *inline* SmallVec<[_;4]> was measured and REJECTED: at 4 inline
-/// pairs IvarTable is ~96B, which makes Instance the largest `HeapObj`
-/// variant and bloats EVERY heap slot (the enum is sized to its max
-/// variant, stored inline in the slot) — that cost more (~50ns across
-/// all allocations) than the cheap mimalloc first-`@x=` alloc it saved.
-/// The Vec header (24B) keeps Instance small. A pathological object with
-/// hundreds of ivars pays O(n) per access; the fix if it ever profiles
-/// hot is an order-preserving index (this Vec + a side HashMap for
-/// lookup), not a plain HashMap.
+/// The 4-inline width is FREE on memory: `size_of::<HeapObj>()` is 136B,
+/// set by `HashObj`; Instance with this table is 128B, so it stays under
+/// that ceiling and the enum (sized to its max variant) does NOT grow —
+/// no other slot pays for it. Speed was confirmed with an INTERLEAVED
+/// A/B vs the plain-`Vec` form (alternating runs to cancel the ~40ns
+/// cross-session thermal drift that made a naive before/after comparison
+/// read it as a regression): C1..C4 construction −56ns, reads −14ns,
+/// consistent across 12 rounds.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct IvarTable(Vec<(crate::intern::SymId, Value)>);
+pub(crate) struct IvarTable(smallvec::SmallVec<[(crate::intern::SymId, Value); 4]>);
 
 impl IvarTable {
     pub(crate) fn get(&self, k: &crate::intern::SymId) -> Option<&Value> {
