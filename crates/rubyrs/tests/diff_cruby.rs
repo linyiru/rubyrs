@@ -841,6 +841,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn loaded_features_completion_order() { run_diff("loaded_features_completion_order"); }
 #[test] fn proc_parameters() { run_diff("proc_parameters"); }
 #[test] fn define_method_from_builtin() { run_diff("define_method_from_builtin"); }
+#[test] fn io_class_read() { run_diff("io_class_read"); }
 #[cfg(feature = "regex")]
 #[test] fn regexp_symbol_arg() { run_diff("regexp_symbol_arg"); }
 #[test] fn module_class_variable_reflection() { run_diff("module_class_variable_reflection"); }

@@ -9829,6 +9829,20 @@ impl Vm {
                     self.stack.push(v);
                     return Ok(());
                 }
+            // `IO.read`/`write`/… — File < IO in CRuby, so the I/O class
+            // methods live on IO and File inherits them. Route just those
+            // (NOT File-specific ones like `exist?`/`dirname`, which stay
+            // NoMethodError on IO, matching CRuby) to the shared
+            // dispatch. Sinatra's `enable :inline_templates` does
+            // `IO.read(file)` to slurp the app file for `__END__` views.
+            if cls.name.as_str() == "IO"
+                && matches!(&*name,
+                    "read" | "write" | "binread" | "binwrite"
+                    | "readlines" | "foreach")
+                && let Some(v) = self.file_class_dispatch(&name, &args)? {
+                    self.stack.push(v);
+                    return Ok(());
+                }
             if cls.name.as_str() == "Dir"
                 && let Some(v) = self.dir_class_dispatch(&name, &args)? {
                     self.stack.push(v);
