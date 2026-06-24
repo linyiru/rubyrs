@@ -2422,27 +2422,50 @@ impl Vm {
             // off into a dedicated channel before invoking the
             // method so primitive arms can consume `:foo` keys
             // instead of inspecting the positional Hash heuristically.
-            Op::CallKw(name_id, argc, cache_id) => {
-                // A CallKw trailing Hash is ALWAYS keyword args (`k: v` /
-                // `**h`), never a positional brace hash, so clear the
-                // positional-hash flag explicitly. The plain `Call` ops
-                // set it TRUE and reset it after; CallKw used to rely on
-                // the residual-false default, which broke when the call
-                // runs while an OUTER native call (e.g. `eval`, whose
-                // body dispatches synchronously inside `do_call`) still
-                // holds the flag TRUE — the callee then bound the kwargs
-                // positionally ("wrong number of arguments (given 1,
-                // expected 0)" against a kwarg-only method).
-                self.trailing_hash_positional = false;
-                let r = self.do_call_kw(name_id, argc as usize, false, cache_id);
-                self.trailing_hash_positional = false;
-                r?;
-            }
-            Op::CallKwNoRecv(name_id, argc, cache_id) => {
-                self.trailing_hash_positional = false;
-                let r = self.do_call_kw(name_id, argc as usize, true, cache_id);
-                self.trailing_hash_positional = false;
-                r?;
+            Op::CallKw(name_id, argc, cache_id)
+            | Op::CallKwNoRecv(name_id, argc, cache_id) => {
+                let no_recv = matches!(op, Op::CallKwNoRecv(_, _, _));
+                let mut argc = argc as usize;
+                // An EMPTY (or nil) trailing kwsplat contributes nothing —
+                // `f(x, **{})` passes just `x` in CRuby. Drop it and
+                // re-dispatch as a PLAIN positional call so a preceding
+                // brace-hash stays positional. Otherwise `f({a:1}, **{})`
+                // peeled the {a:1} into kwargs, leaving the positional
+                // `value` unbound ("given 0, expected 1") — which broke
+                // `ActiveSupport::MessageEncryptor#encrypt_and_sign(v)`
+                // (`create_message(value, **options)` with empty options).
+                // Mirrors the CallKwBlock arm; a non-empty kwargs Hash
+                // keeps the do_call_kw path below.
+                let drop_trailing = argc > 0 && match self.stack.last() {
+                    Some(crate::value::Value::Hash(hid)) => self.heap.hash(*hid).is_empty(),
+                    Some(crate::value::Value::Nil) => true,
+                    _ => false,
+                };
+                if drop_trailing {
+                    self.stack.pop();
+                    argc -= 1;
+                    // After the drop there are no kwargs, so a trailing
+                    // brace-hash is positional — same contract as Op::Call.
+                    self.trailing_hash_positional = true;
+                    let r = self.do_call(name_id, argc, no_recv, cache_id);
+                    self.trailing_hash_positional = false;
+                    r?;
+                } else {
+                    // A non-empty CallKw trailing Hash is ALWAYS keyword
+                    // args (`k: v` / `**h`), never a positional brace hash,
+                    // so clear the positional-hash flag explicitly. The
+                    // plain `Call` ops set it TRUE and reset it after;
+                    // relying on the residual-false default broke when the
+                    // call runs while an OUTER native call (e.g. `eval`,
+                    // whose body dispatches synchronously inside `do_call`)
+                    // still holds the flag TRUE — the callee then bound the
+                    // kwargs positionally ("given 1, expected 0" against a
+                    // kwarg-only method).
+                    self.trailing_hash_positional = false;
+                    let r = self.do_call_kw(name_id, argc, no_recv, cache_id);
+                    self.trailing_hash_positional = false;
+                    r?;
+                }
             }
             Op::ApplyCall(name_id, cache_id)
             | Op::ApplyCallNoRecv(name_id, cache_id)
