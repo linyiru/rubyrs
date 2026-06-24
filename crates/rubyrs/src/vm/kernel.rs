@@ -3526,7 +3526,8 @@ impl Vm {
                         tried.push(c.display().to_string());
                         let Ok(resolved) = std::fs::canonicalize(c) else { continue };
                         if self.check_load_allowed("load", Some(&resolved)).is_ok() {
-                            canon = Some(resolved);
+                            // Key by expand_path (CRuby), scope by realpath.
+                            canon = Some(Self::expand_load_path(c));
                             break;
                         }
                     }
@@ -3785,14 +3786,18 @@ impl Vm {
         } else {
             base_dir.join(format!("{path_str}.rb"))
         };
-        // Canonicalise so the duplicate-load check works regardless
-        // of `./` / `..` or relative-cwd shape.
-        let canon = match std::fs::canonicalize(&target) {
+        // `real` (realpath, symlink-resolved) probes existence and
+        // backs the allowlist-scope check; `canon` (expand_path, no
+        // symlink resolution) is the CRuby-faithful $LOADED_FEATURES /
+        // source key. They differ only across a symlink (macOS /tmp →
+        // /private/tmp).
+        let real = match std::fs::canonicalize(&target) {
             Ok(p) => p,
             Err(e) => return Err(self.trap(RubyError::RuntimeError {
                 msg: format!("require_relative: cannot find {} ({})", target.display(), e),
             })),
         };
+        let canon = Self::expand_load_path(&target);
         // Allowlist scope: bool gate already fired at the dispatch
         // arm (check_load_allowed("require_relative", None) before
         // path string handling, F6 ordering). This second call
@@ -3801,8 +3806,44 @@ impl Vm {
         // `Config::allowed_paths` prefix. Canon was already
         // symlink-resolved by `std::fs::canonicalize`, so we get
         // a true post-resolution prefix check.
-        self.check_load_allowed("require_relative", Some(&canon))?;
+        self.check_load_allowed("require_relative", Some(&real))?;
         self.load_ruby_source_from_canon(canon)
+    }
+
+    /// CRuby `File.expand_path` semantics for the require/load KEY:
+    /// make the path absolute (against cwd) and resolve `.`/`..`
+    /// LEXICALLY, WITHOUT resolving symlinks. CRuby keys
+    /// `$LOADED_FEATURES` and `Method#source_location` this way, so on
+    /// macOS `/tmp/x` stays `/tmp/x` rather than `std::fs::canonicalize`'s
+    /// realpath `/private/tmp/x`. We still `canonicalize` SEPARATELY for
+    /// the existence probe and the allowlist-scope check (symlink-
+    /// resolved → no symlink-escape), and only use this for the visible
+    /// key — so `$LOADED_FEATURES.delete("/tmp/x")` in user code (e.g.
+    /// sinatra/reloader) matches what require stored.
+    #[cfg(not(target_os = "wasi"))]
+    fn expand_load_path(p: &std::path::Path) -> std::path::PathBuf {
+        use std::path::{Component, PathBuf};
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(p))
+                .unwrap_or_else(|_| p.to_path_buf())
+        };
+        let mut out = PathBuf::new();
+        for comp in abs.components() {
+            match comp {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    // Pop a Normal segment; never climb past the root.
+                    if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                        out.pop();
+                    }
+                }
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
     }
 
     /// Does an existing class/module on this Vm already satisfy
@@ -4008,7 +4049,8 @@ impl Vm {
             tried.push(c.display().to_string());
             let Ok(resolved) = std::fs::canonicalize(c) else { continue };
             if self.check_load_allowed("require", Some(&resolved)).is_ok() {
-                canon = Some(resolved);
+                // Key by expand_path (CRuby), scope-check by realpath.
+                canon = Some(Self::expand_load_path(c));
                 break;
             }
         }
