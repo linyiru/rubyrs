@@ -1327,6 +1327,9 @@ pub(crate) struct Vm {
     /// (`try_fast_index`, vm/dispatch.rs).
     pub(crate) sym_index_op: SymId,
     pub(crate) sym_index_set_op: SymId,
+    /// Pre-interned `call` for the proc/lambda-invocation fast path in
+    /// do_call (skips the primitive-dispatch cascade for `p.call(...)`).
+    pub(crate) sym_call: SymId,
     /// Pre-interned Hash key-probe names (`key?` / `has_key?` /
     /// `include?` / `member?` — one canonical hash.rs arm, four
     /// spellings) for the same fast path. Liquid's `Drop#invokable?`
@@ -1740,6 +1743,7 @@ impl Vm {
         let sym_bang = interner.intern("$!");
         let sym_index_op = interner.intern("[]");
         let sym_index_set_op = interner.intern("[]=");
+        let sym_call = interner.intern("call");
         let sym_key_q = interner.intern("key?");
         let sym_has_key_q = interner.intern("has_key?");
         let sym_include_q = interner.intern("include?");
@@ -1911,6 +1915,7 @@ impl Vm {
             sym_bang,
             sym_index_op,
             sym_index_set_op,
+            sym_call,
             sym_key_q,
             sym_has_key_q,
             sym_include_q,

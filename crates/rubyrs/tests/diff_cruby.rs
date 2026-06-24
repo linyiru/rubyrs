@@ -843,6 +843,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn define_method_from_builtin() { run_diff("define_method_from_builtin"); }
 #[test] fn io_class_read() { run_diff("io_class_read"); }
 #[test] fn fused_local_recv_call() { run_diff("fused_local_recv_call"); }
+#[test] fn proc_call_fastpath() { run_diff("proc_call_fastpath"); }
 #[test] fn gc_stat() { run_diff("gc_stat"); }
 #[cfg(feature = "stdlib")]
 #[test] fn kernel_printf() { run_diff("kernel_printf"); }

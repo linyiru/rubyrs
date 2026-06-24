@@ -7597,6 +7597,40 @@ impl Vm {
                 }
             }
         }
+        // Fast path: `proc.call(args)` / `lambda.call(args)`. A Block
+        // receiver invoked via the bare `call` name — the hottest call
+        // shape in Rack/middleware (`app.call(env)`). Without this, a
+        // Block.call falls through try_fast_primitive + the explicit-recv
+        // path + the whole primitive cascade (numeric/string/sym/bigint/
+        // class intrinsics — all misses) plus a name resolve, before the
+        // general callable arm. Block singleton overrides were handled by
+        // the heap_singletons gate above; is_lambda arity is enforced
+        // inside invoke_block. Other aliases ([]/()/yield/===) stay on
+        // the general path (rare). Profiled: ~30% of `nilp.call` self-time
+        // was this wasted cascade.
+        if !maybe_refined && !no_recv && name_id == self.sym_call && argc < self.stack.len() {
+            let ridx = self.stack.len() - 1 - argc;
+            if matches!(self.stack.get(ridx), Some(Value::Block(_))) {
+                let split = self.stack.len() - argc;
+                let args: Vec<Value> = self.stack.drain(split..).collect();
+                let bid = match self.stack.pop() {
+                    Some(Value::Block(b)) => b,
+                    _ => unreachable!("ICE: proc.call fast path recv vanished"),
+                };
+                let pre_frames = self.frames.len();
+                self.invoke_block(bid, args)?;
+                self.dispatch_until(pre_frames)?;
+                if self.break_signaled {
+                    self.break_signaled = false;
+                    self.sync_control_signals();
+                    self.stack.pop();
+                    return Err(self.trap(RubyError::LocalJumpError {
+                        msg: "break from proc-closure".to_string(),
+                    }));
+                }
+                return Ok(());
+            }
+        }
         // Primitive-receiver fast-path. Runs after
         // `take_bypass_visibility()` above; the helper's doc
         // comment spells out why that's currently safe and what
