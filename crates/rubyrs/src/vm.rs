@@ -1330,6 +1330,10 @@ pub(crate) struct Vm {
     /// Pre-interned `call` for the proc/lambda-invocation fast path in
     /// do_call (skips the primitive-dispatch cascade for `p.call(...)`).
     pub(crate) sym_call: SymId,
+    /// Pre-interned `new` / `initialize` for the class-intrinsic `new`
+    /// dispatch (was re-interned per `Object.new` — hot in OOP code).
+    pub(crate) sym_new: SymId,
+    pub(crate) sym_initialize: SymId,
     /// Pre-interned Hash key-probe names (`key?` / `has_key?` /
     /// `include?` / `member?` — one canonical hash.rs arm, four
     /// spellings) for the same fast path. Liquid's `Drop#invokable?`
@@ -1744,6 +1748,8 @@ impl Vm {
         let sym_index_op = interner.intern("[]");
         let sym_index_set_op = interner.intern("[]=");
         let sym_call = interner.intern("call");
+        let sym_new = interner.intern("new");
+        let sym_initialize = interner.intern("initialize");
         let sym_key_q = interner.intern("key?");
         let sym_has_key_q = interner.intern("has_key?");
         let sym_include_q = interner.intern("include?");
@@ -1916,6 +1922,8 @@ impl Vm {
             sym_index_op,
             sym_index_set_op,
             sym_call,
+            sym_new,
+            sym_initialize,
             sym_key_q,
             sym_has_key_q,
             sym_include_q,

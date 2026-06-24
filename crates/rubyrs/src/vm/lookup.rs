@@ -377,28 +377,46 @@ impl Vm {
             }
             None
         }
-        let mut sc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
+        // Same allocation elision as `lookup_method_uncached`: the
+        // superclass-cycle guard becomes a depth counter, and the
+        // per-step `inc_visited` set is only created when this class
+        // actually has singleton extends (`extend`/`class<<self prepend`)
+        // to dedup. The overwhelmingly common case — a class with no
+        // singleton modules — checks `singleton_methods` directly with
+        // no HashSet. Hot on `Object.new` (resolving `new`/`initialize`
+        // walks Object→BasicObject, neither of which has extends).
         let mut current = cls.clone();
+        let mut depth = 0u32;
         loop {
-            if !sc_visited.insert(Rc::as_ptr(&current)) { return None; }
-            let mut inc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
-            for pre in current.singleton_prepends.borrow().iter() {
-                if let Some(found) = walk_module(pre, name_id, &mut inc_visited) {
-                    return Some(found);
-                }
+            depth += 1;
+            if depth > 4096 {
+                return None;
             }
-            if let Some(m) = current.singleton_methods.borrow().get(&name_id).cloned() {
+            let has_singleton_modules = !current.singleton_prepends.borrow().is_empty()
+                || !current.singleton_includes.borrow().is_empty();
+            if has_singleton_modules {
+                let mut inc_visited: crate::intern::FxHashSet<*const Class> =
+                    crate::intern::FxHashSet::default();
+                for pre in current.singleton_prepends.borrow().iter() {
+                    if let Some(found) = walk_module(pre, name_id, &mut inc_visited) {
+                        return Some(found);
+                    }
+                }
+                if let Some(m) = current.singleton_methods.borrow().get(&name_id).cloned() {
+                    return Some(m);
+                }
+                // Walk modules extended into this class's singleton —
+                // `Klass.extend Mod`. M's instance methods sit between
+                // Klass's own singleton_methods and the superclass step,
+                // matching CRuby's metaclass ancestor walk
+                // (Klass.singleton_class → Mod → superclass.singleton_class).
+                for inc in current.singleton_includes.borrow().iter() {
+                    if let Some(found) = walk_module(inc, name_id, &mut inc_visited) {
+                        return Some(found);
+                    }
+                }
+            } else if let Some(m) = current.singleton_methods.borrow().get(&name_id).cloned() {
                 return Some(m);
-            }
-            // Walk modules extended into this class's singleton —
-            // `Klass.extend Mod`. M's instance methods sit between
-            // Klass's own singleton_methods and the superclass step,
-            // matching CRuby's metaclass ancestor walk
-            // (Klass.singleton_class → Mod → superclass.singleton_class).
-            for inc in current.singleton_includes.borrow().iter() {
-                if let Some(found) = walk_module(inc, name_id, &mut inc_visited) {
-                    return Some(found);
-                }
             }
             let parent = current.superclass.borrow().clone();
             match parent {
@@ -453,21 +471,40 @@ impl Vm {
             }
             None
         }
-        // Two separate visited sets:
-        // - `sc_visited` protects against superclass-chain cycles.
-        // - The inner set (fresh per superclass step) protects
-        //   against include/prepend graph cycles + diamonds at
-        //   ONE level. We can't share one set: a module
-        //   transitively included at multiple superclass levels
-        //   (rare but legal) needs to be walked at each level.
-        let mut sc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
+        // Superclass-chain walk. Two allocation hazards used to live
+        // here, both hot on `Object.new` (uncached `new`/`initialize`
+        // lookups): a per-call `sc_visited` HashSet and a per-step
+        // `inc_visited` HashSet. Both are eliminated for the common
+        // shape:
+        // - `sc_visited` (superclass cycle guard) → a depth counter.
+        //   Superclass chains are acyclic in practice; the counter
+        //   gives the same runaway protection without a HashSet
+        //   (same approach as `class_inherits_named`).
+        // - `inc_visited` is only needed to dedup include/prepend
+        //   diamonds at one level. A class with NO prepends AND NO
+        //   includes resolves to just its own method table — no
+        //   recursion, no set. Only classes carrying modules pay for
+        //   the (still per-step) visited set.
+        // A module transitively included at multiple superclass
+        // levels still needs walking at each level, so the set stays
+        // fresh per step when it IS allocated.
         let mut current = cls.clone();
+        let mut depth = 0u32;
         loop {
-            if !sc_visited.insert(Rc::as_ptr(&current)) {
+            depth += 1;
+            if depth > 4096 {
                 return None;
             }
-            let mut inc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
-            if let Some(m) = walk_module(&current, name_id, &mut inc_visited) {
+            let has_modules = !current.prepends.borrow().is_empty()
+                || !current.includes.borrow().is_empty();
+            let found = if has_modules {
+                let mut inc_visited: crate::intern::FxHashSet<*const Class> =
+                    crate::intern::FxHashSet::default();
+                walk_module(&current, name_id, &mut inc_visited)
+            } else {
+                current.methods.borrow().get(&name_id).cloned()
+            };
+            if let Some(m) = found {
                 return Some(m);
             }
             // `undef_method` tombstone: the name is dead from this

@@ -6009,12 +6009,10 @@ impl Vm {
         recv: Value,
         force_primitive: bool,
     ) -> Result<ClassOutcome, Trap> {
-        // Local SymId for "new" — used by the `cls.new`
-        // override arm. Originally derived in the surrounding
-        // `do_call` body above the extracted cluster; computed
-        // inside the helper now so the cluster is self-
-        // contained.
-        let new_id = self.interner.intern("new");
+        // Pre-interned `new` (Vm::sym_new) — used by the `cls.new`
+        // override arms throughout this cluster. Was re-interned per
+        // call (a HashMap hash+lookup on every `Object.new`).
+        let new_id = self.sym_new;
     // Singleton-class-shell fence: `A.singleton_class.new` raises
     // TypeError in CRuby ("can't create instance of singleton
     // class"). Without this fence the shell falls into the
@@ -6507,7 +6505,7 @@ impl Vm {
         // Rack::Headers, which has no `initialize`). The `def self.new`
         // override precedence was already handled upstream.
         && {
-            let init_id = self.interner.intern("initialize");
+            let init_id = self.sym_initialize;
             self.lookup_method_uncached(cls, init_id).is_none()
         }
     {
@@ -7051,7 +7049,7 @@ impl Vm {
             let modv = Value::Class(new_obj);
             // Run T#initialize (forwarding args); its return is
             // discarded — `new` yields the module itself.
-            let init_id = self.interner.intern("initialize");
+            let init_id = self.sym_initialize;
             if let Some(m) = self.lookup_method_uncached(cls, init_id) {
                 self.invoke_method(m, modv.clone(), args.into_vec())?;
                 self.frames.last_mut()
@@ -7168,7 +7166,7 @@ impl Vm {
             // a maybe_gc inside the (cext-defined or Ruby-defined)
             // initialize doesn't sweep it.
             g.pin(obj.clone());
-            let init_id = g.vm.interner.intern("initialize");
+            let init_id = g.vm.sym_initialize;
             let ruby_init = g.vm.lookup_method_uncached(cls, init_id);
             if let Some(m) = ruby_init {
                 // Ruby-defined initialize takes precedence.
@@ -17912,7 +17910,7 @@ impl Vm {
             // own `initialize` falls through to the generic Class#new
             // dispatch below (which runs that initialize with the
             // block). The literal Hash class always qualifies.
-            let init_id = self.interner.intern("initialize");
+            let init_id = self.sym_initialize;
             if self.lookup_method_uncached(cls, init_id).is_none() {
                 if !args.is_empty() {
                     return Err(self.trap(RubyError::ArgumentError {
@@ -18687,7 +18685,7 @@ impl Vm {
                 g.pin(Value::Block(block));
                 let obj = g.vm.alloc_default_instance(cls)?;
                 g.pin(obj.clone());
-                let init_id = g.vm.interner.intern("initialize");
+                let init_id = g.vm.sym_initialize;
                 let ruby_init = g.vm.lookup_method_uncached(cls, init_id);
                 if let Some(m) = ruby_init {
                     g.vm.invoke_method_with_block(m, obj.clone(), args, Some(block))?;
