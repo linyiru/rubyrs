@@ -2406,13 +2406,14 @@ pub(crate) fn compile_expr(
             let name_id = interner.intern(name);
             let cid = *cc as u16; *cc += 1;
             match (has_recv, block_arg.is_some(), kwsplat.is_some()) {
-                // kwsplat is only ever set when block_arg is None (see ast.rs).
                 (true,  false, true)  => b.emit(Op::ApplyCallKw(name_id, cid)),
                 (false, false, true)  => b.emit(Op::ApplyCallKwNoRecv(name_id, cid)),
+                (true,  true,  true)  => b.emit(Op::ApplyCallKwBlock(name_id, cid)),
+                (false, true,  true)  => b.emit(Op::ApplyCallKwNoRecvBlock(name_id, cid)),
                 (true,  false, false) => b.emit(Op::ApplyCall(name_id, cid)),
                 (false, false, false) => b.emit(Op::ApplyCallNoRecv(name_id, cid)),
-                (true,  true,  _)     => b.emit(Op::ApplyCallBlock(name_id, cid)),
-                (false, true,  _)     => b.emit(Op::ApplyCallNoRecvBlock(name_id, cid)),
+                (true,  true,  false) => b.emit(Op::ApplyCallBlock(name_id, cid)),
+                (false, true,  false) => b.emit(Op::ApplyCallNoRecvBlock(name_id, cid)),
             };
         }
         Expr::Lambda { params, body, is_lambda } => {

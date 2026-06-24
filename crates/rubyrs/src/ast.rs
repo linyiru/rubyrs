@@ -4077,22 +4077,14 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
                     }
                     let kwhash = tr_kwhash(ctx, node, cn, &kh);
-                    if early_block_arg.is_none() {
-                        // No block: carry the kwsplat SEPARATELY so the VM
-                        // (Op::ApplyCallKw) can drop an empty `**{}` and
-                        // keep a trailing positional brace-hash positional
-                        // (`f({a:1}, **{})` → value={a:1}). Folding it into
-                        // the array — the old `kwsplat_chunk` path — made an
-                        // empty kwsplat vanish, after which the binder
-                        // peeled the real positional hash as kwargs.
-                        kwsplat_expr = Some(kwhash);
-                    } else {
-                        // With a block we keep the older folded path
-                        // (kwsplat_chunk drops an empty result) — the
-                        // separate-kwsplat op is wired for the no-block
-                        // shape only.
-                        chunks.push(kwsplat_chunk(node, kwhash));
-                    }
+                    // Carry the kwsplat SEPARATELY (Op::ApplyCallKw, or the
+                    // *Block variant when a block is also present) so the VM
+                    // can drop an empty `**{}` and keep a trailing positional
+                    // brace-hash positional (`f({a:1}, **{})` → value={a:1}).
+                    // Folding it into the array — the old `kwsplat_chunk`
+                    // path — made an empty kwsplat vanish, after which the
+                    // binder peeled the real positional hash as kwargs.
+                    kwsplat_expr = Some(kwhash);
                 } else {
                     buf.push(tr(ctx, cn));
                 }

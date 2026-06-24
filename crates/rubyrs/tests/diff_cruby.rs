@@ -844,6 +844,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn io_class_read() { run_diff("io_class_read"); }
 #[test] fn gc_stat() { run_diff("gc_stat"); }
 #[test] fn kwsplat_empty_forwarding() { run_diff("kwsplat_empty_forwarding"); }
+#[test] fn block_brace_hash_and_kwsplat() { run_diff("block_brace_hash_and_kwsplat"); }
 #[cfg(feature = "regex")]
 #[test] fn regexp_symbol_arg() { run_diff("regexp_symbol_arg"); }
 #[test] fn module_class_variable_reflection() { run_diff("module_class_variable_reflection"); }

@@ -263,6 +263,13 @@ pub(crate) enum Op {
     /// `f({x:1}, **{})`-shaped forwarding (e.g. generic delegators).
     ApplyCallKw(SymId, u16),
     ApplyCallKwNoRecv(SymId, u16),
+    /// `foo(*args, **kw, &blk)` — block + separately-carried keyword
+    /// splat. Stack (bottom→top): `[recv?, block, array, kwsplat]`.
+    /// Same empty-kwsplat-drop semantics as `ApplyCallKw`, dispatched
+    /// through the block path (the popped block installs as the callee's
+    /// block).
+    ApplyCallKwBlock(SymId, u16),
+    ApplyCallKwNoRecvBlock(SymId, u16),
     /// Like `ApplyCall` (with-recv `self.name(*args)`) but forces
     /// PRIMITIVE dispatch — sets `force_primitive_dispatch` so `do_call`
     /// skips a subclass's user override and runs the primitive. Emitted

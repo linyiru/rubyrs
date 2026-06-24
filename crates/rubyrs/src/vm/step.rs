@@ -2590,23 +2590,22 @@ impl Vm {
                 }
             }
             Op::CallBlock(name_id, argc, cache_id) => {
-                // Block calls don't carry the kwargs-vs-positional bit in
-                // the bytecode (the block+kwargs combo reuses this op —
-                // see emit_method_call). The method binder peels a
-                // trailing Hash as kwargs only when the callee declares kw
-                // params AND `trailing_hash_positional` is false, so the
-                // de-facto behaviour relies on the flag being false here.
-                // Set it explicitly (rather than inheriting a stale TRUE
-                // from an enclosing native call like `eval`, whose body
-                // dispatches synchronously) so `obj.new(k: v) { … }` binds
-                // its kwargs the same inside eval as outside.
-                self.trailing_hash_positional = false;
+                // `CallBlock` is emitted ONLY for the NON-kwargs block call
+                // (`foo(args, &blk)`); a `k: v` / `**h` + block goes to
+                // `CallKwBlock` (see emit_method_call). So a trailing brace
+                // Hash here is POSITIONAL in Ruby 3 — same contract as the
+                // plain `Op::Call`. Set the flag TRUE so the binder doesn't
+                // peel it as kwargs (`m({k:1}, &b)` → a={k:1}); a hash var
+                // in positional position likewise stays positional.
+                self.trailing_hash_positional = true;
                 let r = self.do_call_block(name_id, argc as usize, false, cache_id);
                 self.trailing_hash_positional = false;
                 r?;
             }
             Op::CallNoRecvBlock(name_id, argc, cache_id) => {
-                self.trailing_hash_positional = false;
+                // Non-kwargs block call (no receiver) — trailing brace Hash
+                // is positional, same as CallBlock above.
+                self.trailing_hash_positional = true;
                 let r = self.do_call_block(name_id, argc as usize, true, cache_id);
                 self.trailing_hash_positional = false;
                 r?;
@@ -2665,6 +2664,44 @@ impl Vm {
                 for v in elems { g.vm.stack.push(v); }
                 drop(g);
                 self.do_call_block(name_id, argc, no_recv, cache_id)?;
+            }
+            Op::ApplyCallKwBlock(name_id, cache_id)
+            | Op::ApplyCallKwNoRecvBlock(name_id, cache_id) => {
+                // `foo(*args, **kw, &blk)` — block path of ApplyCallKw.
+                // Stack (bottom→top): `[recv?, block, array, kwsplat]`.
+                // Expand the array as positional (above the block), drop an
+                // EMPTY kwsplat (trailing positional hash stays positional)
+                // or ride a non-empty one as the trailing kwargs arg, then
+                // dispatch through the block path so the block installs.
+                let no_recv = matches!(op, Op::ApplyCallKwNoRecvBlock(_, _));
+                let kw_val = self.stack.pop().expect("ICE: ApplyCallKwBlock without kwsplat");
+                let arr_val = self.stack.pop().expect("ICE: ApplyCallKwBlock without arg array");
+                let arr_id = match arr_val {
+                    Value::Array(id) => id,
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("no implicit conversion of {} into Array (splat arg)", other.type_name()),
+                    })),
+                };
+                let kw_empty = match &kw_val {
+                    Value::Hash(hid) => self.heap.hash(*hid).is_empty(),
+                    Value::Nil => true,
+                    _ => false,
+                };
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(Value::Array(arr_id));
+                g.pin(kw_val.clone());
+                let elems: Vec<Value> = g.vm.heap.array(arr_id).clone();
+                let mut argc = elems.len();
+                for v in elems { g.vm.stack.push(v); }
+                if !kw_empty {
+                    g.vm.stack.push(kw_val);
+                    argc += 1;
+                }
+                drop(g);
+                self.trailing_hash_positional = kw_empty;
+                let r = self.do_call_block(name_id, argc, no_recv, cache_id);
+                self.trailing_hash_positional = false;
+                r?;
             }
             Op::ApplySuper(name_id) => {
                 // Pop assembled args Array and drain elements
