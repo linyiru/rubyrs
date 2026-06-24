@@ -18969,7 +18969,47 @@ impl Vm {
         visibility: crate::value::Visibility,
     ) -> Result<crate::intern::SymId, RubyError> {
         let anchor = target_cls.effective_install_class();
-        let m = self.build_method_from_value(src, &anchor, visibility, name_sym)?;
+        // Built-in source (a Bound/UnboundMethod wrapping a native /
+        // universal-arm method, no Proto snapshot): synthesize a
+        // name-forwarding Method that re-dispatches the ORIGINAL method
+        // name on the new receiver. CRuby can re-install builtins via
+        // define_method — dry-struct does `define_method(:prepend,
+        // ::Module.method(:prepend))` to restore the native prepend over
+        // dry-types' Builder#prepend. (The Proto path below handles
+        // Proc / Ruby-defined Method sources.)
+        let builtin_orig: Option<crate::intern::SymId> = match src {
+            Value::BoundMethod(id) => {
+                let (_, nid, snap) = self.heap.bound_method_full(*id);
+                snap.is_none().then_some(nid)
+            }
+            Value::UnboundMethod(id) => {
+                let (_, nid, snap) = self.heap.unbound_method_full(*id);
+                snap.is_none().then_some(nid)
+            }
+            _ => None,
+        };
+        // The forwarder re-dispatches `orig_id` force-primitively. That
+        // bypasses the just-installed method when it's a class-singleton
+        // (the class-singleton dispatch is force_primitive-gated — the
+        // dry-struct `class << self; define_method(:prepend, …)` case) or
+        // when it's installed under a DIFFERENT name (alias-like). But a
+        // SAME-NAME INSTANCE re-install of a universal method (`define_
+        // method(:frozen?, Object.instance_method(:frozen?))`) would have
+        // the forwarder re-find itself → infinite recursion. Fall back to
+        // the (old) TypeError there rather than overflow the stack.
+        let synth_safe = builtin_orig.is_some_and(|orig_id| {
+            orig_id != name_sym
+                || target_cls.singleton_target.borrow().is_some()
+                || target_cls.name.starts_with("#<Class:")
+        });
+        let builtin_orig = if synth_safe { builtin_orig } else { None };
+        let m = if let Some(orig_id) = builtin_orig {
+            let fwd = self.synth_primitive_forwarder(&anchor, orig_id);
+            fwd.visibility.set(visibility);
+            fwd
+        } else {
+            self.build_method_from_value(src, &anchor, visibility, name_sym)?
+        };
         target_cls.install_method(name_sym, m);
         self.method_gen = self.method_gen.wrapping_add(1);
         // `Module#method_added(name)` fires for `define_method`
