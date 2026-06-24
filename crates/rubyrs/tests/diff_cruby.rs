@@ -1815,6 +1815,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 
 // `Pathname#join`. Surfaced by bridgetown-core/collection.rb#relative_path.
 #[test] fn pathname_join() { run_diff("pathname_join"); }
+#[cfg(feature = "stdlib")]
+#[test] fn pathname_realpath() { run_diff("pathname_realpath"); }
 
 // Kernel#Pathname() + Pathname#{expand_path, basename(suffix), fnmatch?}
 // — the vendored Pathname surface Bridgetown's Site read path uses.

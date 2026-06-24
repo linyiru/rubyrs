@@ -121,6 +121,24 @@ class Pathname
     Pathname.new(expanded)
   end
 
+  # `realpath` / `realdirpath` — the absolute path with `.`/`..`
+  # resolved. CRuby also resolves symlinks; rubyrs approximates via
+  # `File.expand_path` (no symlink resolution — documented divergence,
+  # fine when no symlinks are on the path). `realpath` requires the file
+  # to EXIST (raises Errno::ENOENT otherwise); `realdirpath` doesn't.
+  # dry-validation resolves its bundled config/errors.yml with
+  # `Pathname(__FILE__).join(...).realpath`.
+  def realpath(base = nil)
+    expanded = base ? File.expand_path(@path, base.to_s) : File.expand_path(@path)
+    raise Errno::ENOENT, expanded unless File.exist?(expanded)
+    Pathname.new(expanded)
+  end
+
+  def realdirpath(base = nil)
+    expanded = base ? File.expand_path(@path, base.to_s) : File.expand_path(@path)
+    Pathname.new(expanded)
+  end
+
   def parent
     dirname
   end
