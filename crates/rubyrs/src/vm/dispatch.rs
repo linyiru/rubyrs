@@ -11248,6 +11248,13 @@ impl Vm {
         // empty Array.
         if &*name == "instance_variables" && args.is_empty() {
             let mut names: Vec<Value> = Vec::new();
+            // Instance ivars are stored insertion-ordered (IvarTable's
+            // Vec), so a plain Object can report CRuby's definition
+            // order directly. Class / String-subclass ivars still live
+            // in unordered HashMaps, so those keep the alphabetical sort
+            // below for deterministic output until their tables are
+            // ordered too.
+            let preserve_order = matches!(&recv, Value::Object(_));
             let ivar_ids: Vec<crate::intern::SymId> = match &recv {
                 Value::Object(id) => {
                     if let crate::heap::HeapObj::Instance(inst) = self.heap.get(*id) {
@@ -11303,7 +11310,9 @@ impl Vm {
                         (key, s)
                     })
                     .collect();
-                decorated.sort_by(|a, b| a.0.cmp(&b.0));
+                if !preserve_order {
+                    decorated.sort_by(|a, b| a.0.cmp(&b.0));
+                }
                 for (key, _) in decorated {
                     let sid = self.interner.intern(&key);
                     names.push(Value::Sym(sid));

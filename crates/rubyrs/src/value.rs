@@ -905,9 +905,16 @@ pub struct Instance {
 /// read (measured ~5x faster than the HashMap get) — the small-table
 /// strategy CRuby uses. Insertion order is preserved, matching CRuby's
 /// `instance_variables` definition-order (a HashMap spill was rejected:
-/// it would scramble that order). A pathological object with hundreds of
-/// ivars pays O(n) per access; if that ever shows up in a profile the
-/// fix is an order-preserving index (Vec for order + a side HashMap for
+/// it would scramble that order).
+///
+/// An *inline* SmallVec<[_;4]> was measured and REJECTED: at 4 inline
+/// pairs IvarTable is ~96B, which makes Instance the largest `HeapObj`
+/// variant and bloats EVERY heap slot (the enum is sized to its max
+/// variant, stored inline in the slot) — that cost more (~50ns across
+/// all allocations) than the cheap mimalloc first-`@x=` alloc it saved.
+/// The Vec header (24B) keeps Instance small. A pathological object with
+/// hundreds of ivars pays O(n) per access; the fix if it ever profiles
+/// hot is an order-preserving index (this Vec + a side HashMap for
 /// lookup), not a plain HashMap.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct IvarTable(Vec<(crate::intern::SymId, Value)>);
