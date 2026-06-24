@@ -243,12 +243,22 @@ impl Vm {
         // shape). Skips when the ivar is already set (e.g.
         // re-raise of an already-rescued exception that preserves
         // its original backtrace, matching CRuby).
+        // `throw`/`catch` rides the exception machinery via an internal
+        // `RubyrsThrowSignal` (see the handler-walk note below). It is
+        // control flow — a `catch` block consumes it and NOTHING ever
+        // reads its backtrace. Eagerly materializing the full backtrace
+        // (one formatted, line-computed, heap-allocated String per frame)
+        // for it was measured at ~68% of a Sinatra request — which
+        // `throw :halt`s on EVERY request (483µs→153µs with it skipped).
+        // Skip the build for the throw carrier; real raises still get it.
+        let exc_is_throw = matches!(&exc, Value::Object(id)
+            if class_chain_has_name(&self.heap.real_class_of(*id), "RubyrsThrowSignal"));
         if let Value::Object(exc_id) = &exc {
             let bt_sym = self.interner.intern("@backtrace");
             let already_set = self.heap.instance(*exc_id).ivars.get(&bt_sym)
                 .map(|v| !matches!(v, Value::Nil))
                 .unwrap_or(false);
-            if !already_set {
+            if !already_set && !exc_is_throw {
                 // Innermost frame first (the raise site), oldest
                 // last — CRuby `Exception#backtrace` ordering.
                 let bt_strings: Vec<Value> = self.frames.iter().rev().map(|f| {
