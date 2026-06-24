@@ -846,6 +846,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn proc_call_fastpath() { run_diff("proc_call_fastpath"); }
 #[test] fn method_lookup_lazy_set() { run_diff("method_lookup_lazy_set"); }
 #[test] fn ivar_table() { run_diff("ivar_table"); }
+#[test] fn hash_literal_dedup() { run_diff("hash_literal_dedup"); }
 #[test] fn gc_stat() { run_diff("gc_stat"); }
 #[cfg(feature = "stdlib")]
 #[test] fn kernel_printf() { run_diff("kernel_printf"); }
