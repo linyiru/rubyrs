@@ -456,6 +456,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_encoding_e1() { run_diff("string_encoding_e1"); }
 #[test] fn string_encoding_compat() { run_diff("string_encoding_compat"); }
 #[cfg(feature = "_encoding_full")]
+#[test] fn encoding_iso_2022_jp() { run_diff("encoding_iso_2022_jp"); }
+#[cfg(feature = "_encoding_full")]
 #[test] fn encoding_full_latin1() { run_diff("encoding_full_latin1"); }
 #[cfg(feature = "_encoding_full")]
 #[test] fn encoding_full_seven() { run_diff("encoding_full_seven"); }

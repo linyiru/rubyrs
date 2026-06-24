@@ -29,6 +29,12 @@ class Encoding
   ## owns the SJIS/CP932 aliases); shares the WHATWG shift_jis
   ## transcoder. Diverges only on a few vendor/wave-dash code points.
   Shift_JIS = Encoding.new("Shift_JIS")
+  ## ISO-2022-JP — a legacy stateful (CRuby "dummy") Japanese encoding.
+  ## rubyrs doesn't transcode through it, but the constant must EXIST:
+  ## rack 3.2.6's multipart parser builds `REENCODE_DUMMY_ENCODINGS =
+  ## { Encoding::ISO_2022_JP => true }` at load, so requiring rack (and
+  ## thus Sinatra 4.x) hit an undefined constant without it.
+  ISO_2022_JP = Encoding.new("ISO-2022-JP")
 
   class << self
     alias __rubyrs_find_core find
@@ -42,6 +48,7 @@ class Encoding
       when "KOI8-R", "KOI8R" then KOI8_R
       when "WINDOWS-31J", "CP932", "SJIS" then Windows_31J
       when "SHIFT_JIS", "SHIFT-JIS" then Shift_JIS
+      when "ISO-2022-JP", "ISO2022-JP" then ISO_2022_JP
       when "EUC-JP", "EUCJP" then EUC_JP
       when "GBK", "CP936" then GBK
       when "BIG5" then Big5
@@ -60,7 +67,7 @@ class Encoding
       __rubyrs_list_core + [
         ISO_8859_1, Windows_1252, ISO_8859_15, KOI8_R,
         Windows_31J, EUC_JP, GBK, Big5, UTF_16LE, UTF_16BE, UTF_16,
-        UTF_32LE, UTF_32BE, UTF_32, Shift_JIS,
+        UTF_32LE, UTF_32BE, UTF_32, Shift_JIS, ISO_2022_JP,
       ]
     end
 
