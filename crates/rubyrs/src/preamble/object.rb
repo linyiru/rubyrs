@@ -358,12 +358,45 @@ end
 # false (the previous "was disabled" state, which is always false here),
 # `count` → 0 (no collections have run). Real gems call `GC.start` in
 # benchmarks/teardown and `GC.disable` around hot loops; defining the
-# module lets that code run instead of tripping a NameError. `GC.stat`
-# is deliberately omitted — fabricating a stats Hash would mislead code
-# that reads its keys; an absent method is the truthful surface.
+# module lets that code run instead of tripping a NameError.
+#
+# `GC.stat` returns an all-zero stats Hash (or 0 for a single key / a
+# filled Hash for the in-place form). rubyrs can't report real
+# allocation counters, so anything reading these gets a flat 0 — code
+# that *diffs* a counter around a block (ActiveSupport::Notifications'
+# Event measures `GC.stat(:total_allocated_objects)` before/after) then
+# sees a 0 delta. That's an honest "unmeasured" rather than blocking the
+# load on a missing method, which matters because Notifications is a
+# very common AS entry point. The key set mirrors CRuby's so
+# `.key?(:total_allocated_objects)`-style probes resolve.
 module GC
   def self.start(*); nil; end
   def self.enable; false; end
   def self.disable; false; end
   def self.count; 0; end
+
+  STAT_KEYS = %i[
+    count time heap_allocated_pages heap_sorted_length
+    heap_allocatable_pages heap_available_slots heap_live_slots
+    heap_free_slots heap_final_slots heap_marked_slots
+    heap_eden_pages heap_tomb_pages total_allocated_pages
+    total_freed_pages total_allocated_objects total_freed_objects
+    malloc_increase_bytes malloc_increase_bytes_limit minor_gc_count
+    major_gc_count compact_count read_barrier_faults
+    total_moved_objects
+  ].freeze
+
+  def self.stat(arg = nil)
+    case arg
+    when nil
+      STAT_KEYS.each_with_object({}) { |k, h| h[k] = 0 }
+    when Symbol
+      0
+    when Hash
+      STAT_KEYS.each { |k| arg[k] = 0 }
+      arg
+    else
+      STAT_KEYS.each_with_object({}) { |k, h| h[k] = 0 }
+    end
+  end
 end
