@@ -4235,7 +4235,21 @@ impl Vm {
         canon: std::path::PathBuf,
     ) -> Result<Value, Trap> {
         if self.loaded_features.contains(&canon) {
-            return Ok(Value::Bool(false));
+            // Mid-load circular re-require (canon is loading but not yet
+            // completed): always dedup — re-loading would recurse.
+            if !self.completed_features.contains(&canon) {
+                return Ok(Value::Bool(false));
+            }
+            // Completed before. Honor the dev-reload idiom
+            // `$LOADED_FEATURES.delete(path); require path` (sinatra/
+            // reloader, Rails): dedup only while canon is still in the
+            // script-visible $LOADED_FEATURES array. If the user removed
+            // it, drop the internal markers and fall through to re-load.
+            if self.script_loaded_features_contains(&canon) {
+                return Ok(Value::Bool(false));
+            }
+            self.loaded_features.remove(&canon);
+            self.completed_features.remove(&canon);
         }
         let source = match std::fs::read_to_string(&canon) {
             Ok(s) => s,
@@ -4528,7 +4542,25 @@ impl Vm {
                 }
             }
         }
+        // Mark COMPLETED (body ran to the end) so a later forced reload
+        // (`$LOADED_FEATURES.delete`) can be told apart from a still-
+        // loading circular re-require in the dedup check above.
+        self.completed_features.insert(canon.clone());
         Ok(Value::Bool(true))
+    }
+
+    /// True if `canon` (a completed feature's path) is still present in
+    /// the script-visible `$LOADED_FEATURES` array — i.e. the user has
+    /// NOT removed it to force a reload. On any error reading the array
+    /// we assume present (dedup), preserving the prior no-reload
+    /// behavior. `#[cfg]`-gated alongside the require machinery.
+    #[cfg(not(target_os = "wasi"))]
+    fn script_loaded_features_contains(&mut self, canon: &std::path::Path) -> bool {
+        let path_str = canon.to_string_lossy();
+        let Ok(lf_id) = self.ensure_loaded_features_list() else { return true };
+        matches!(self.heap.get(lf_id), HeapObj::Array(arr)
+            if arr.iter().any(|v| matches!(v, Value::Str(s)
+                if s.borrow().as_slice() == path_str.as_bytes())))
     }
 
     /// `Kernel#eval(string)` / `Class#class_eval(string, ...)`

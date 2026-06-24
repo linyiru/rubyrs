@@ -780,6 +780,17 @@ pub(crate) struct Vm {
     /// build shape).
     #[cfg(not(target_os = "wasi"))]
     pub(crate) loaded_features: std::collections::HashSet<std::path::PathBuf>,
+    /// Canon paths whose `require` body has SUCCESSFULLY COMPLETED
+    /// (a strict subset of `loaded_features`, which also holds
+    /// mid-load files for circular-require dedup). Lets `require`
+    /// honor the dev-reload idiom `$LOADED_FEATURES.delete(path);
+    /// require path` (sinatra/reloader, Rails) WITHOUT mistaking a
+    /// mid-load circular re-require for a forced reload: only a
+    /// COMPLETED feature that the user removed from the script-
+    /// visible `$LOADED_FEATURES` array re-loads; a still-loading
+    /// one (not yet here) keeps deduping.
+    #[cfg(not(target_os = "wasi"))]
+    pub(crate) completed_features: std::collections::HashSet<std::path::PathBuf>,
     /// Set of stdlib stub names (`uri`, `logger`, `json`, ...)
     /// that have been "loaded" via the lenient require stub.
     /// CRuby's `require` returns `true` on first load and
@@ -1778,6 +1789,8 @@ impl Vm {
             const_source_locations: FxHashMap::default(),
             #[cfg(not(target_os = "wasi"))]
             loaded_features: std::collections::HashSet::new(),
+            #[cfg(not(target_os = "wasi"))]
+            completed_features: std::collections::HashSet::new(),
             #[cfg(not(target_os = "wasi"))]
             loaded_stdlib_stubs: std::collections::HashSet::new(),
             #[cfg(not(target_os = "wasi"))]

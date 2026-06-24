@@ -1821,6 +1821,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn pathname_join() { run_diff("pathname_join"); }
 #[cfg(feature = "stdlib")]
 #[test] fn pathname_realpath() { run_diff("pathname_realpath"); }
+#[cfg(feature = "stdlib")]
+#[test] fn require_force_reload() { run_diff("require_force_reload"); }
 
 // Kernel#Pathname() + Pathname#{expand_path, basename(suffix), fnmatch?}
 // — the vendored Pathname surface Bridgetown's Site read path uses.
