@@ -603,7 +603,7 @@ impl Vm {
         g.vm.check_alloc()?;
         let inst_id = g.vm.heap.alloc(HeapObj::Instance(crate::value::Instance {
             class: cls,
-            ivars: crate::intern::FxHashMap::default(),
+            ivars: crate::value::IvarTable::default(),
             singleton_class: None,
             frozen: std::cell::Cell::new(false),
         }));

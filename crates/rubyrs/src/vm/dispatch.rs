@@ -3530,7 +3530,7 @@ impl Vm {
             }
             self.maybe_gc();
             self.check_alloc()?;
-            let mut ivars = crate::intern::FxHashMap::default();
+            let mut ivars = crate::value::IvarTable::default();
             ivars.insert(self.interner.intern("@__self"), self_val);
             if let Some(c) = lex {
                 ivars.insert(self.interner.intern("@__lexical_class"), Value::Class(c));
@@ -19745,7 +19745,7 @@ impl Vm {
         }
         let id = self.heap.alloc(HeapObj::Instance(Instance {
             class: cls.clone(),
-            ivars: crate::intern::FxHashMap::default(),
+            ivars: crate::value::IvarTable::default(),
             singleton_class: None,
             frozen: std::cell::Cell::new(false),
         }));

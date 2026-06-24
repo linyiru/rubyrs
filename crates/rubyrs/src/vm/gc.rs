@@ -58,7 +58,7 @@ impl Vm {
         };
         let id = self.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
             class: cls,
-            ivars: crate::intern::FxHashMap::default(),
+            ivars: crate::value::IvarTable::default(),
             singleton_class: None,
             frozen: std::cell::Cell::new(false),
         }));

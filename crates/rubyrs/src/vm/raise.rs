@@ -39,7 +39,7 @@ impl Vm {
                     self.maybe_gc();
                     let id = self.heap.alloc(HeapObj::Instance(Instance {
                         class: cls,
-                        ivars: crate::intern::FxHashMap::default(),
+                        ivars: crate::value::IvarTable::default(),
                         singleton_class: None,
             frozen: std::cell::Cell::new(false),
                     }));
@@ -82,7 +82,7 @@ impl Vm {
                         let msg = Value::new_str(cls.name.clone());
                         let id = self.heap.alloc(HeapObj::Instance(Instance {
                             class: cls.clone(),
-                            ivars: crate::intern::FxHashMap::default(),
+                            ivars: crate::value::IvarTable::default(),
                             singleton_class: None,
                             frozen: std::cell::Cell::new(false),
                         }));
@@ -105,7 +105,7 @@ impl Vm {
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Instance(Instance {
                             class: cls,
-                            ivars: crate::intern::FxHashMap::default(),
+                            ivars: crate::value::IvarTable::default(),
                             singleton_class: None,
                             frozen: std::cell::Cell::new(false),
                         }));
@@ -168,7 +168,7 @@ impl Vm {
         self.maybe_gc();
         let id = self.heap.alloc(HeapObj::Instance(Instance {
             class: cls,
-            ivars: crate::intern::FxHashMap::default(),
+            ivars: crate::value::IvarTable::default(),
             singleton_class: None,
             frozen: std::cell::Cell::new(false),
         }));
@@ -790,7 +790,7 @@ pub(crate) fn build_interrupt_exception(vm: &mut crate::vm::Vm) -> Option<crate:
     }
     let id = vm.heap.alloc(HeapObj::Instance(Instance {
         class: cls,
-        ivars: crate::intern::FxHashMap::default(),
+        ivars: crate::value::IvarTable::default(),
         singleton_class: None,
             frozen: std::cell::Cell::new(false),
     }));
@@ -855,7 +855,7 @@ mod tests {
         // Allocate an empty Instance directly.
         let id = vm.heap.alloc(HeapObj::Instance(Instance {
             class: cls,
-            ivars: crate::intern::FxHashMap::default(),
+            ivars: crate::value::IvarTable::default(),
             singleton_class: None,
             frozen: std::cell::Cell::new(false),
         }));

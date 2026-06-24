@@ -486,7 +486,7 @@ impl Vm {
                 if let Err(e) = self.check_alloc() {
                     return Some(Err(e));
                 }
-                let mut ivars = crate::intern::FxHashMap::default();
+                let mut ivars = crate::value::IvarTable::default();
                 ivars.insert(self.interner.intern("@__self"), self_val);
                 if let Some(c) = lex {
                     ivars.insert(self.interner.intern("@__lexical_class"), Value::Class(c));
@@ -6065,7 +6065,7 @@ impl MarshalReader<'_> {
                 vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
                 let id = vm.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
                     class: cls,
-                    ivars: crate::intern::FxHashMap::default(),
+                    ivars: crate::value::IvarTable::default(),
                     singleton_class: None,
                     frozen: std::cell::Cell::new(false),
                 }));
@@ -6110,7 +6110,7 @@ impl MarshalReader<'_> {
                 vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
                 let id = vm.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
                     class: cls,
-                    ivars: crate::intern::FxHashMap::default(),
+                    ivars: crate::value::IvarTable::default(),
                     singleton_class: None,
                     frozen: std::cell::Cell::new(false),
                 }));
@@ -6175,7 +6175,7 @@ impl MarshalReader<'_> {
                 vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
                 let id = vm.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
                     class: cls,
-                    ivars: crate::intern::FxHashMap::default(),
+                    ivars: crate::value::IvarTable::default(),
                     singleton_class: None,
                     frozen: std::cell::Cell::new(false),
                 }));
@@ -6699,7 +6699,7 @@ fn raise_system_exit(vm: &mut Vm, status: i32, message: &str) -> Option<Result<V
     // state, no need to round-trip through invoke_method).
     let id = vm.heap.alloc(HeapObj::Instance(crate::value::Instance {
         class: cls,
-        ivars: crate::intern::FxHashMap::default(),
+        ivars: crate::value::IvarTable::default(),
         singleton_class: None,
             frozen: std::cell::Cell::new(false),
     }));
