@@ -2960,6 +2960,24 @@ RUBYRS = "rubyrs".freeze
             "<rubyrs:preamble:set-autoload>",
         )
             .expect("ICE: failed to register Set autoload");
+        // Since Ruby 3.2 `Array#/Hash#/Range#to_set` are also available
+        // without an explicit `require "set"` — gems call them at load
+        // (ActiveSupport delegation.rb: `%w(...).to_set.freeze`). The
+        // `autoload :Set` above only fires on a `Set` *constant*
+        // reference, not a bare `[...].to_set`, so define trampolines
+        // that reference `Set` (firing the autoload → loading the
+        // vendored set, which overwrites these with identical bodies).
+        // This stays LAZY: `require "set"` still returns true on first
+        // explicit call when nothing referenced Set/to_set yet (CRuby
+        // parity), unlike eagerly evaling the set body here.
+        #[cfg(feature = "stdlib")]
+        self.eval_inner(
+            "class Array; def to_set; Set.new(self); end; end\n\
+             class Hash;  def to_set; Set.new(to_a); end; end\n\
+             class Range; def to_set; Set.new(to_a); end; end",
+            "<rubyrs:preamble:to_set-trampoline>",
+        )
+            .expect("ICE: failed to register to_set trampolines");
         // `Monitor` is available without an explicit `require "monitor"`
         // in a full Ruby environment (rubygems pre-loads it), and gems
         // lean on that — dotenv references `Monitor.new` at module load
