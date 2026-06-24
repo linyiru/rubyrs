@@ -946,6 +946,19 @@ impl Vm {
                 let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
                 Value::Bool(is_dir)
             }
+            // `File.symlink?(path)` — lstat (no symlink follow); false
+            // when the path is absent or not a link. Companion to
+            // `File.symlink` / `File.readlink`; tooling that walks trees
+            // (FileUtils, dev-reloaders) probes it before `readlink`.
+            ("symlink?", [p]) => {
+                self.check_filesystem_io_allowed("File.symlink?", None)?;
+                let path = path_arg(p)?;
+                self.check_filesystem_io_allowed("File.symlink?", Some(Path::new(&path)))?;
+                let is_link = std::fs::symlink_metadata(&path)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+                Value::Bool(is_link)
+            }
             ("size", [p]) => {
                 self.check_filesystem_io_allowed("File.size", None)?;
                 let path = path_arg(p)?;
@@ -1100,6 +1113,18 @@ impl Vm {
                 std::os::unix::fs::symlink(&oldp, &newp)
                     .map_err(|e| self.trap(io_error(&e, Some(Path::new(&newp)))))?;
                 Value::Int(0)
+            }
+            // `File.readlink(path)` — the target of a symlink (one level,
+            // not realpath-resolved); raises Errno (ENOENT/EINVAL) when
+            // the path is missing or not a link, matching CRuby.
+            ("readlink", [p]) => {
+                self.check_filesystem_io_allowed("File.readlink", None)?;
+                let path = path_arg(p)?;
+                self.check_filesystem_io_allowed("File.readlink", Some(Path::new(&path)))?;
+                match std::fs::read_link(&path) {
+                    Ok(target) => Value::new_str(target.to_string_lossy().into_owned()),
+                    Err(e) => return Err(self.trap(io_error(&e, Some(Path::new(&path))))),
+                }
             }
             // `File.rename(old, new)` — atomic rename / move. Returns 0
             // (CRuby). Tilt's Template caching test renames a temp file

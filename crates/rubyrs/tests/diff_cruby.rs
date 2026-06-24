@@ -1825,6 +1825,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn require_force_reload() { run_diff("require_force_reload"); }
 #[cfg(feature = "stdlib")]
 #[test] fn require_loaded_features_expand_path() { run_diff("require_loaded_features_expand_path"); }
+#[cfg(feature = "stdlib")]
+#[test] fn file_symlink_readlink() { run_diff("file_symlink_readlink"); }
 
 // Kernel#Pathname() + Pathname#{expand_path, basename(suffix), fnmatch?}
 // — the vendored Pathname surface Bridgetown's Site read path uses.
