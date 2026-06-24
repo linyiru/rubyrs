@@ -498,6 +498,13 @@ pub(crate) enum Expr {
         name: String,
         splat: Box<SExpr>,
         block_arg: Option<Box<SExpr>>,
+        /// Keyword-splat carried SEPARATELY from `splat` (the positional
+        /// array) so the VM can drop an empty `**{}` and keep a trailing
+        /// positional brace-hash positional. `None` = no kwsplat (the
+        /// classic `f(*args)` shape). Only set for the no-block
+        /// `f(*args, **kw)` path; with a block the kwsplat stays folded
+        /// into `splat` (the older path). Emits `Op::ApplyCallKw`.
+        kwsplat: Option<Box<SExpr>>,
     },
     /// `->(params) { body }` — lambda literal. Compiles to the
     /// same `CreateBlock` opcode as a regular `{ |x| ... }` block,
@@ -2088,6 +2095,7 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             name: "send".into(),
                             splat: Box::new(args_array),
                             block_arg: None,
+                            kwsplat: None,
                         }));
                         continue;
                     }
@@ -3994,6 +4002,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 name,
                 splat: Box::new(acc),
                 block_arg: Some(Box::new(sp(node, Expr::LVarRead("&".to_string())))),
+                kwsplat: None,
             }));
         }
         if arg_nodes.len() == 1
@@ -4016,6 +4025,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             kwargs_trailing: false,
                         })),
                         block_arg: early_block_arg,
+                        kwsplat: None,
                     }));
                 }
         // Detect any splat anywhere in the args; if present and
@@ -4033,6 +4043,9 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             // Walk and group: build the array from the elements.
             let mut chunks: Vec<SExpr> = Vec::new();
             let mut buf: Vec<SExpr> = Vec::new();
+            // Keyword-splat carried separately from the positional array
+            // for the no-block `f(*args, **kw)` path (see below).
+            let mut kwsplat_expr: Option<SExpr> = None;
             for c in &arg_nodes {
                 let cn: &ruby_prism::Node<'_> = c;
                 if let Some(sn) = cn.as_splat_node() {
@@ -4058,15 +4071,28 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             kwargs_trailing: false,
                         }));
                     } else if let Some(kh) = cn.as_keyword_hash_node() {
-                    // Trailing kwarg-hash (`**opts` merges via
-                    // tr_kwhash's `.merge` chain). Route it through
-                    // `kwsplat_chunk` so an EMPTY result (`n(*a, **{})`)
-                    // drops instead of landing as a phantom positional.
+                    // Trailing kwarg-hash (`**opts` / `k: v`). Flush any
+                    // pending positionals first.
                     if !buf.is_empty() {
                         chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
                     }
                     let kwhash = tr_kwhash(ctx, node, cn, &kh);
-                    chunks.push(kwsplat_chunk(node, kwhash));
+                    if early_block_arg.is_none() {
+                        // No block: carry the kwsplat SEPARATELY so the VM
+                        // (Op::ApplyCallKw) can drop an empty `**{}` and
+                        // keep a trailing positional brace-hash positional
+                        // (`f({a:1}, **{})` → value={a:1}). Folding it into
+                        // the array — the old `kwsplat_chunk` path — made an
+                        // empty kwsplat vanish, after which the binder
+                        // peeled the real positional hash as kwargs.
+                        kwsplat_expr = Some(kwhash);
+                    } else {
+                        // With a block we keep the older folded path
+                        // (kwsplat_chunk drops an empty result) — the
+                        // separate-kwsplat op is wired for the no-block
+                        // shape only.
+                        chunks.push(kwsplat_chunk(node, kwhash));
+                    }
                 } else {
                     buf.push(tr(ctx, cn));
                 }
@@ -4085,6 +4111,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 name,
                 splat: Box::new(acc),
                 block_arg: early_block_arg,
+                kwsplat: kwsplat_expr.map(Box::new),
             }));
         }
         // KeywordHashNode at the tail of an argument list — Prism
@@ -4186,6 +4213,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             name: method_name,
                             splat: Box::new(rest),
                             block_arg: None,
+                            kwsplat: None,
                         });
                         return wrap_sn(sp(node, Expr::CallWithBlock {
                             receiver, name, args,

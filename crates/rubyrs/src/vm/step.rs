@@ -2512,6 +2512,52 @@ impl Vm {
                 drop(g);
                 self.do_call(name_id, argc, no_recv, cache_id)?;
             }
+            Op::ApplyCallKw(name_id, cache_id)
+            | Op::ApplyCallKwNoRecv(name_id, cache_id) => {
+                // `foo(*args, **kw)` — the kwsplat Hash is carried
+                // SEPARATELY on top of the positional array. Stack
+                // (bottom→top): `[recv?, array, kwsplat]`. Expand the
+                // array as POSITIONAL args; an EMPTY kwsplat is dropped
+                // (so a trailing positional brace-hash stays positional —
+                // `f({a:1}, **{})` → value={a:1}), a non-empty one rides
+                // as the trailing kwargs arg (trailing_hash_positional
+                // false → the binder peels it, not the array's tail).
+                let no_recv = matches!(op, Op::ApplyCallKwNoRecv(_, _));
+                let kw_val = self.stack.pop().expect("ICE: ApplyCallKw without kwsplat");
+                let arr_val = self.stack.pop().expect("ICE: ApplyCallKw without arg array");
+                let arr_id = match arr_val {
+                    Value::Array(id) => id,
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("no implicit conversion of {} into Array (splat arg)", other.type_name()),
+                    })),
+                };
+                let kw_empty = match &kw_val {
+                    Value::Hash(hid) => self.heap.hash(*hid).is_empty(),
+                    Value::Nil => true,
+                    _ => false,
+                };
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(Value::Array(arr_id));
+                g.pin(kw_val.clone());
+                let elems: Vec<Value> = g.vm.heap.array(arr_id).clone();
+                let mut argc = elems.len();
+                for v in elems { g.vm.stack.push(v); }
+                if !kw_empty {
+                    g.vm.stack.push(kw_val);
+                    argc += 1;
+                }
+                drop(g);
+                if kw_empty {
+                    // No kwargs survive: array tail (if a Hash) is positional.
+                    self.trailing_hash_positional = true;
+                } else {
+                    // The trailing arg is the kwsplat → let the binder peel it.
+                    self.trailing_hash_positional = false;
+                }
+                let r = self.do_call(name_id, argc, no_recv, cache_id);
+                self.trailing_hash_positional = false;
+                r?;
+            }
             Op::CallBuiltinDirect(name_id) => {
                 // Pop the `*args` Array and invoke the Kernel builtin
                 // directly via `builtin_call`, bypassing `do_call` (and

@@ -2382,7 +2382,7 @@ pub(crate) fn compile_expr(
             // Sentinel for stack-balance of any unreachable trailing code.
             b.emit(Op::LoadNil);
         }
-        Expr::Apply { receiver, name, splat, block_arg } => {
+        Expr::Apply { receiver, name, splat, block_arg, kwsplat } => {
             // `foo(*arr)` — compile receiver (if any) then the
             // splat expression. The VM op `ApplyCall(NoRecv)`
             // pops the Array and uses its elements as args.
@@ -2390,17 +2390,29 @@ pub(crate) fn compile_expr(
             // emit the block-aware variant: stack becomes
             // `[recv?, block, array]` and the VM expands+dispatches
             // through the block path.
+            //
+            // A separate `kwsplat` (set only for the no-block
+            // `foo(*arr, **kw)` shape) compiles as an extra hash on top
+            // of the array — stack `[recv?, array, kwsplat]` — and emits
+            // `Op::ApplyCallKw(NoRecv)`, which drops the hash when empty
+            // and otherwise passes it as the trailing kwargs arg.
             let has_recv = receiver.is_some();
             if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
             if let Some(ba) = block_arg { compile_expr(b, ba, protos, interner, cc); }
             compile_expr(b, splat, protos, interner, cc);
+            if let Some(kw) = kwsplat {
+                compile_expr(b, kw, protos, interner, cc);
+            }
             let name_id = interner.intern(name);
             let cid = *cc as u16; *cc += 1;
-            match (has_recv, block_arg.is_some()) {
-                (true,  false) => b.emit(Op::ApplyCall(name_id, cid)),
-                (false, false) => b.emit(Op::ApplyCallNoRecv(name_id, cid)),
-                (true,  true)  => b.emit(Op::ApplyCallBlock(name_id, cid)),
-                (false, true)  => b.emit(Op::ApplyCallNoRecvBlock(name_id, cid)),
+            match (has_recv, block_arg.is_some(), kwsplat.is_some()) {
+                // kwsplat is only ever set when block_arg is None (see ast.rs).
+                (true,  false, true)  => b.emit(Op::ApplyCallKw(name_id, cid)),
+                (false, false, true)  => b.emit(Op::ApplyCallKwNoRecv(name_id, cid)),
+                (true,  false, false) => b.emit(Op::ApplyCall(name_id, cid)),
+                (false, false, false) => b.emit(Op::ApplyCallNoRecv(name_id, cid)),
+                (true,  true,  _)     => b.emit(Op::ApplyCallBlock(name_id, cid)),
+                (false, true,  _)     => b.emit(Op::ApplyCallNoRecvBlock(name_id, cid)),
             };
         }
         Expr::Lambda { params, body, is_lambda } => {

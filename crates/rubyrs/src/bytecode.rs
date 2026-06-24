@@ -252,6 +252,17 @@ pub(crate) enum Op {
     /// contain a SplatNode at the only position.
     ApplyCall(SymId, u16),
     ApplyCallNoRecv(SymId, u16),
+    /// `foo(*args, **kw)` — splat call carrying the keyword-splat
+    /// SEPARATELY from the positional array (unlike `ApplyCall`, which
+    /// folds everything into one array and can't tell a kwsplat from a
+    /// trailing positional hash). Stack layout (bottom→top): `[recv?,
+    /// array, kwsplat_hash]`. The VM expands the array as POSITIONAL
+    /// args, then: an EMPTY kwsplat hash is dropped (CRuby `f(*a, **{})`
+    /// passes only `a`, leaving a trailing positional hash positional);
+    /// a non-empty one travels as the trailing kwargs arg. Fixes
+    /// `f({x:1}, **{})`-shaped forwarding (e.g. generic delegators).
+    ApplyCallKw(SymId, u16),
+    ApplyCallKwNoRecv(SymId, u16),
     /// Like `ApplyCall` (with-recv `self.name(*args)`) but forces
     /// PRIMITIVE dispatch — sets `force_primitive_dispatch` so `do_call`
     /// skips a subclass's user override and runs the primitive. Emitted
