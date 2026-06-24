@@ -233,6 +233,15 @@ pub(crate) enum Op {
     /// Args: name SymId, argc, per-call-site inline-cache slot id.
     Call(SymId, u8, u16),
     CallNoRecv(SymId, u8, u16),
+    /// Superinstruction: `LoadLocal(slot); Call(name, 0, cache)` fused —
+    /// a ZERO-ARG method call whose receiver is a local variable
+    /// (`x.foo`). The single hottest static-adjacent op pair in web
+    /// workloads (~5.7% of Sinatra pairs). Args: receiver-local slot,
+    /// method name SymId, inline-cache slot id. Pushes the local then
+    /// runs the same dispatch as `Call(name, 0, …)` — one dispatch
+    /// instead of two. Emitted at compile time (compile_call_arm), so
+    /// jump offsets are naturally correct.
+    LoadLocalCall(u16, SymId, u16),
     /// Variant of `Call` / `CallNoRecv` for call sites that the
     /// compiler determined have a trailing kwargs hash (i.e. the
     /// last arg originated from a `KeywordHashNode`, the `foo(a: 1)`

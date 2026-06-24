@@ -2375,6 +2375,23 @@ impl Vm {
                 self.trailing_hash_positional = false;
                 r?;
             }
+            // Superinstruction: `LoadLocal(slot); Call(name, 0, cache)`.
+            // Push the local receiver (mirrors Op::LoadLocal), then run
+            // the same zero-arg dispatch as Op::Call — one dispatch.
+            Op::LoadLocalCall(slot, name_id, cache_id) => {
+                let f = self.frames.last().expect("ICE: LoadLocalCall no frame");
+                let v = match &f.locals {
+                    crate::vm::Locals::Stack(base) => {
+                        self.locals_arena[*base as usize + slot as usize].clone()
+                    }
+                    crate::vm::Locals::Shared(rc) => rc.borrow()[slot as usize].clone(),
+                };
+                self.stack.push(v);
+                self.trailing_hash_positional = true;
+                let r = self.do_call(name_id, 0, false, cache_id);
+                self.trailing_hash_positional = false;
+                r?;
+            }
             Op::InterpToS(cache_id) => {
                 // Interpolation part: a String stays as-is (CRuby's
                 // rb_obj_as_string — user String#to_s NOT consulted);

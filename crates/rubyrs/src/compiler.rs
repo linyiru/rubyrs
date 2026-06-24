@@ -1196,6 +1196,22 @@ fn compile_call_arm(
     }
     // Generic dispatch.
     let name_id = interner.intern(name);
+    // Superinstruction: a ZERO-ARG call on a LOCAL-VAR receiver
+    // (`x.foo`) — the #1 static-adjacent op pair (LoadLocal→Call). Fuse
+    // `LoadLocal(slot); Call(name,0,cache)` into one op. `LVarRead` is a
+    // prism-confirmed local (same guarantee BinOpLocalLocal relies on),
+    // so `local_slot` returns its real slot. Skipped when kwargs/args are
+    // present (then the receiver+args aren't adjacent to the Call).
+    if !kwargs_trailing
+        && args.is_empty()
+        && let Some(r) = receiver
+        && let Expr::LVarRead(lname) = &r.node
+    {
+        let slot = b.local_slot(lname);
+        let cid = *cc as u16; *cc += 1;
+        b.emit(Op::LoadLocalCall(slot, name_id, cid));
+        return;
+    }
     let has_recv = receiver.is_some();
     if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
     for a in args { compile_expr(b, a, protos, interner, cc); }
