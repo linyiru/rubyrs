@@ -14812,6 +14812,29 @@ impl Vm {
         {
             return Ok(false);
         }
+        // PoC getter fast path (ADR-0031 follow-up): a trivial
+        // attr_reader (`obj.foo`, body `[LoadIvar(@foo), Return]`, no
+        // params) is served by reading the receiver's ivar directly —
+        // NO frame push, NO 2-op run, NO frame pop. The receiver is
+        // already a known `Value::Object(id)`; this mirrors
+        // `Op::LoadIvar`'s Object case exactly (missing ivar → Nil).
+        // `argc == 0` is required: `obj.foo(x)` must fall through to
+        // the arity check below so it still raises ArgumentError.
+        if argc == 0
+            && let Some(gsym) = self.protos[m.proto_idx].getter_ivar
+        {
+            let v = self
+                .heap
+                .instance(id)
+                .ivars
+                .get(&gsym)
+                .cloned()
+                .unwrap_or(Value::Nil);
+            // argc == 0 → the receiver is the stack top; overwrite it
+            // with the result (pop recv + push value in one move).
+            self.stack[recv_idx] = v;
+            return Ok(true);
+        }
         let fixed = match m.fixed_arity {
             Some(f) if f.required as usize == argc => f,
             _ => return Ok(false),
@@ -16263,6 +16286,7 @@ impl Vm {
                 // shared captured cell — it must never be considered
                 // for the Locals::Stack representation.
                 creates_block: true,
+                getter_ivar: None,
                 frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![
                     Op::LoadLocal(0),
@@ -16370,6 +16394,7 @@ impl Vm {
                 // locals live in a shared captured cell — never
                 // Stack-eligible.
                 creates_block: true,
+                getter_ivar: None,
                 frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![
                     Op::LoadLocal(0),                   // [outer]
@@ -19911,6 +19936,7 @@ impl Vm {
                 block_param: None,
                 n_locals: 0,
                 creates_block: false,
+                getter_ivar: Some(ivar_id),
                 frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![Op::LoadIvar(ivar_id), Op::Return],
                 op_spans: vec![Span::ZERO; 2],
@@ -19953,6 +19979,7 @@ impl Vm {
                 block_param: None,
                 n_locals: 1,
                 creates_block: false,
+                getter_ivar: None,
                 frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![Op::LoadLocal(0), Op::Dup, Op::StoreIvar(ivar_id), Op::Return],
                 op_spans: vec![Span::ZERO; 4],
@@ -20069,6 +20096,7 @@ impl Vm {
             block_param: None,
             n_locals: 1,
             creates_block: false,
+            getter_ivar: None,
             frozen_string_literal: false, line_base: 1, source_encoding: None,
             code: vec![
                 Op::LoadSelf,
@@ -20258,6 +20286,7 @@ impl Vm {
             block_param: None,
             n_locals: 1,
             creates_block: false,
+            getter_ivar: None,
             frozen_string_literal: false, line_base: 1, source_encoding: None,
             code: vec![
                 Op::LoadLocal(0),
@@ -20408,6 +20437,7 @@ impl Vm {
             block_param: None,
             n_locals: 1,
             creates_block: false,
+            getter_ivar: None,
             frozen_string_literal: false, line_base: 1, source_encoding: None,
             code: vec![Op::LoadNil, Op::Return],
             op_spans: vec![Span::ZERO; 2],

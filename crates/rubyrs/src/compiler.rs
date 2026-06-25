@@ -1337,8 +1337,19 @@ impl ProtoBuilder {
                 *entry = nm.clone();
             }
         }
+        // PoC: detect a trivial attr_reader getter — no params and a
+        // body of exactly `[LoadIvar(sym), Return]` — so the cached
+        // dispatch fast path can serve it without a frame.
+        let getter_ivar = if params.is_empty()
+            && let [Op::LoadIvar(sym), Op::Return] = self.code.as_slice()
+        {
+            Some(*sym)
+        } else {
+            None
+        };
         Proto {
             name, params, n_required_positional, local_names,
+            getter_ivar,
             // Default false; the parse entries (file load / require /
             // eval) stamp `true` across the whole proto range when the
             // source carried a `# frozen_string_literal: true` comment.

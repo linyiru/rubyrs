@@ -900,6 +900,13 @@ pub(crate) struct Proto {
     /// body is emitted; conservatively `true` would only cost
     /// performance, never correctness.
     pub(crate) creates_block: bool,
+    /// PoC (ADR-0031 follow-up): `Some(sym)` when this proto is a
+    /// trivial attr_reader getter — body is exactly
+    /// `[LoadIvar(sym), Return]` with no params. The cached
+    /// explicit-recv fast path serves `obj.foo` by reading the
+    /// receiver's `@sym` ivar directly, skipping the frame push +
+    /// 2-op run + frame pop. `None` for everything else.
+    pub(crate) getter_ivar: Option<crate::intern::SymId>,
     pub(crate) code: Vec<Op>,
     /// Parallel to `code`: op_spans[i] is the source span where code[i] was emitted.
     pub(crate) op_spans: Vec<Span>,
