@@ -1,76 +1,96 @@
-# sinatra-fast — B1 Phase 1 (lean-dispatch shim)
+# sinatra-fast — B1 Phase 1.5 (lean-dispatch shim)
 
 A pure-Ruby shim that speeds up Sinatra request dispatch on rubyrs without
 touching observable behaviour, plus a parity test that proves it.
 
-This is the **Phase 1** deliverable of the B1 "native framework core" lever
-(see memory `b1-native-framework-validated`). The validation gate for B1
-PASSED: ~99% of a Sinatra request is framework plumbing (the route block is
-~0µs), and a lean dispatch recovers a real chunk of it while staying
-byte-identical to Sinatra.
+Phase-1.5 deliverable of the B1 "native framework core" lever (see memory
+`b1-native-framework-validated`). ~99% of a Sinatra request is framework
+plumbing (the route block is ~0µs). An earlier route!-only override
+recovered only the mustermann loop (~1.2×); a precise per-component
+ablation showed the dispatch generality is much larger, and a *faithful*
+reimplementation recovers ~2×.
 
 ## What it does
 
-`lean_dispatch.rb` overrides **only** `Sinatra::Base#route!` — the
-mustermann route-finding loop. For an app's own `static` / `:param` routes
-(no conditions) it native-segment-matches the path and runs the matched
-route through Sinatra's **unchanged** `route_eval` → `invoke` path. Every
-other semantic — `call!`, `dispatch!`, before/after filters, `halt`/`pass`,
-`redirect`, explicit status, `[status, headers, body]` returns, error
-handling, the response build, sessions/middleware — is Sinatra's own code,
-so the shim *cannot* change behaviour, only speed. Anything it can't match
-(splat `*`, regexp, conditioned routes, or a complex route defined before
-the match) falls back to the real mustermann `route!`.
+`lean_dispatch.rb` replaces `Sinatra::Base#call!` for an app's own
+`static` / `:param` routes (no conditions) with a lean reimplementation
+that REUSES Sinatra's own `invoke` / `filter!` / `handle_exception!` /
+`error_block!` / `content_type` / `Response#finish` — so behaviour can't
+change, only speed. Versus stock `call!` → `dispatch!` → `route!` it:
+
+1. native-segment-matches the one route instead of the mustermann route!
+   loop (+ its per-route content-type reset, param-revert, superclass
+   recursion, route_missing);
+2. collapses call!'s `invoke { dispatch! }` + dispatch!'s inner `invoke`
+   into a single `invoke`;
+3. skips the `@request.params` parse (~13µs) when there are demonstrably no
+   params (empty QUERY_STRING + no body — `@request.params` would be `{}`);
+4. skips `filter!` / `error_block!` when the app (walking the superclass
+   chain) has zero filters / zero error handlers — both are no-ops then;
+5. inlines `Response#finish` for the common non-drop-body case.
+
+Anything it can't match (splat `*`, regexp, conditioned routes, or a
+complex route defined before the match) falls back to the real `call!`.
 
 Order safety: routes are captured in definition order; the matcher bails to
 the fallback the moment it reaches an ineligible route before a match, so a
 later eligible route can never win over an earlier complex one (Sinatra is
-first-match-wins).
+first-match-wins). Inherited filters/error handlers are honoured (the no-op
+flags walk the superclass chain, like Sinatra's own `filter!`/`error_block!`).
 
 ## Results (rubyrs, sinatra-4.2.1)
 
-`parity_test.rb` runs 19 request shapes through the same app with the shim
+`parity_test.rb` runs 21 request shapes through the same app with the shim
 enabled vs disabled and asserts `[status, headers, body]` are
 byte-identical **and** that the fast path was actually taken on eligible
 routes / fell back on the rest:
 
 ```
-PARITY: PASS (19/19)
-  static  full=135.9  fast=115.0  1.18x
-  param   full=173.3  fast=136.6  1.27x
-  json    full=260.1  fast=227.7  1.14x
+PARITY: PASS (21/21)
+  static  full=138.3  fast= 71.6  1.93x
+  param   full=180.7  fast= 93.0  1.93x
+  json    full=265.5  fast=186.6  1.42x
 ```
 
 Covered: static, `:param` (params-style + block-arg-style), multi-param,
 query params, `content_type`, explicit `status`, `redirect`, `halt`
-(string and `[status,headers,body]`), bare array return, **a raising route
-(→500)**, **a raising route with a custom `error` handler (→422)**, HEAD,
-404, condition-guarded route (provides), splat, regexp, and the
-ineligible-before-eligible order case.
+(string and `[status,headers,body]`), bare array return, a raising route
+(→500), a raising route with a custom `error` handler (→422), HEAD, 404,
+condition-guarded route (provides), splat, regexp, the
+ineligible-before-eligible order case, **and inherited before-filter +
+inherited error handler on a subclass route**.
 
 ## Honest decomposition / where the win is
 
-- **This shim (route!-override): ~1.2×, fully safe AND faithful.** It
-  reuses all of Sinatra's call!/dispatch!/invoke semantics — including the
-  rescue/ensure that handles raised routes, custom `error` blocks, and
-  after-filters-on-error (covered: `raise-500`, `custom-error`). It only
-  short-circuits the mustermann route! loop, a *small* fraction → ~1.2×.
-- **A `call!` replacement does NOT cleanly buy more.** An earlier PoC that
-  reimplemented a lean call! measured ~2.0–2.4× — but it was UNFAITHFUL:
-  it skipped dispatch!'s rescue/ensure, so it only worked on the happy
-  path and would diverge on error / custom-error / after-on-error routes
-  (the cases this test now covers). A *faithful* call! replacement has to
-  add that machinery back, which collapses the win toward ~1.2×. So **~1.2×
-  is the safe Ruby ceiling** for dispatch; pure-Ruby has little more to give.
+The ~1.2× figure from the earlier route!-only override was misleading — it
+recovered only the mustermann loop. A precise per-component ablation of a
+static request (sessionless, `full ≈ 135µs`) shows where the time actually
+is, and how much is **faithfully** recoverable in pure Ruby:
+
+| component | cost | recovered by |
+|---|---|---|
+| route! loop + double-`invoke` nesting | ~42µs | faithful call! replacement (→1.65×) |
+| `@request.params` parse (empty query) | ~13µs | skip when no params (→2.05×) |
+| `filter!` with zero filters | ~5µs | skip when app has none (chain-aware) |
+| `error_block!` probe, no handlers | ~5µs | skip when app has none (chain-aware) |
+| `Response#finish` predicates | ~2µs | inline common case |
+| Request.new + Response.new + dup | ~7µs | **not recoverable in Ruby** (Phase 2) |
+| `invoke` catch(:halt) + route block + finish content-length | ~35µs | **irreducible Ruby method-call cost** |
+
+So the **faithful pure-Ruby ceiling is ~1.9× static/param, ~1.4× json**
+(json does real `to_json` work, so less of it is plumbing). NOT 1.2× (the
+route!-only undershoot) and NOT 3–4× (finish/dup turned out small). The
+remaining ~45µs is genuine Rack object construction + the interpreter's
+~5–9×/call floor.
+
 - **~10–20× needs native-backed lazy `Request`/`Response` (Phase 2):** the
-  ~50µs of per-request object construction (Request/Response/IndifferentHash
-  + response.finish) is recoverable only in Rust. This is the multi-quarter
-  part (big Rack::Request API surface) and is the actual B1 lever.
+  remaining per-request object construction + the per-call interpreter
+  floor are recoverable only in Rust. This is the multi-quarter part (big
+  Rack::Request API surface) and is the actual B1 lever.
 - Floor is ~2.3µs (interpret the route block + wrap), matching bare Rack.
 
-Net: Phase 1 (this shim) is a safe ~1.2× foundation + the parity gate. The
-next real step is Phase 2 (native Request/Response), not a fancier Ruby
-dispatch.
+Net: this shim is a faithful ~1.9× foundation + the parity gate. The next
+real step is Phase 2 (native Request/Response).
 
 ## Run
 

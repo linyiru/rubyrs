@@ -170,7 +170,34 @@ CASES.each do |label, path, qs, opts, expect_fast|
   end
 end
 
-puts(failures.empty? ? "\nPARITY: PASS (#{CASES.length}/#{CASES.length})" : "\nPARITY: FAIL — #{failures.join(', ')}")
+# Inheritance: a before-filter + error handler defined on a BASE class must
+# still fire for a route on a SUBCLASS — the shim's no-op flags walk the
+# superclass chain, so they must NOT skip inherited filters/handlers.
+class BaseApp < Sinatra::Base
+  set :host_authorization, { permitted_hosts: [] }
+  set :protection, false
+  set :environment, :production
+  before { @from_base = "base" }
+  error RuntimeError do
+    status 533
+    "base handled: #{env['sinatra.error'].message}"
+  end
+end
+class ChildApp < BaseApp
+  get("/inherited") { "child sees #{@from_base}" }     # inherited before-filter must run
+  get("/child_boom") { raise "kaboom" }                # inherited error handler must catch
+end
+child = ChildApp.new
+[["/inherited", "child sees base"], ["/child_boom", "base handled: kaboom"]].each do |path, want|
+  Sinatra::LeanDispatch.enabled = true;  fs, fh, fb = child.call(env_for(path))
+  Sinatra::LeanDispatch.enabled = false; os, oh, ob = child.call(env_for(path))
+  fbody = drain(fb); obody = drain(ob)
+  same = (fs == os) && (fbody == obody) && (fbody == want)
+  failures << "inherit:#{path}" unless same
+  printf("  %-4s %-13s status=%-3d body=%s\n", same ? "ok" : "FAIL", "inherit#{path}", fs, fbody[0, 26].inspect)
+end
+
+puts(failures.empty? ? "\nPARITY: PASS (#{CASES.length + 2}/#{CASES.length + 2})" : "\nPARITY: FAIL — #{failures.join(', ')}")
 
 # ---- speedup on the eligible routes (fast vs full, same app/middleware) ----
 # Fresh env per call: rack-session writes its cookie into env on each
