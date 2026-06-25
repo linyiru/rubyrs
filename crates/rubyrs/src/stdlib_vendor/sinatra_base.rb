@@ -629,6 +629,9 @@ module Sinatra
 
       # "/say/*/to/:name" -> [[:lit,"say"],[:splat],[:lit,"to"],[:cap,"name"]]
       def compile(path)
+        # A Regexp route is stored as-is; `match` detects it and matches the
+        # raw PATH_INFO instead of segment-by-segment.
+        return path if path.is_a?(Regexp)
         path.split("/").reject { |seg| seg.empty? }.map do |seg|
           if seg == "*"
             [:splat]
@@ -870,8 +873,9 @@ module Sinatra
             route_verb, pattern, block, conditions = entry[0], entry[1], entry[2], entry[3]
             conditions ||= []
             next unless route_verb == verb
-            captured = match(pattern, segs)
-            next unless captured
+            matchdata = match(pattern, segs, env["PATH_INFO"] || "/")
+            next unless matchdata
+            captured, block_args = matchdata
             @params = base_params.merge(captured)
             # Per-route conditions — declared via `condition { ...
             # }` from inside a block-form `set(:key) { |arg| ... }`
@@ -885,7 +889,7 @@ module Sinatra
             # fall through to the next matching route. A normal return is
             # wrapped in [:done, triplet] so it's distinguishable from the
             # nil that catch(:pass) yields on a throw.
-            outcome = catch(:pass) { [:done, finalize(instance_exec(&block))] }
+            outcome = catch(:pass) { [:done, finalize(instance_exec(*block_args, &block))] }
             if outcome.is_a?(Array) && outcome[0] == :done
               matched = outcome[1]
               break
@@ -1134,19 +1138,33 @@ module Sinatra
     end
 
     # Returns a params Hash on match (incl. "splat" => [...]), or nil.
-    def match(pattern, segs)
-      # Catch-all single-splat pattern (`"*"` compiled to
-      # `[[:splat]]`) absorbs every request path. sinatra-cors's
-      # `app.options "*", is_cors_preflight: true do … end`
-      # CORS-preflight catch-all needs this — without it the
-      # length-equality guard below would reject multi-segment
-      # request paths.
+    # Returns `[params, block_args]` on a match (block_args are the captures
+    # passed to a `do |cap|` route block, in order), or nil. `path` is the
+    # raw PATH_INFO (needed for Regexp routes).
+    def match(pattern, segs, path)
+      # Regexp route (`get %r{/posts/(\d+)} do |id| … end`): match the raw
+      # path; positional captures → params["captures"] + block args, named
+      # captures → params[name] — mirroring real Sinatra/mustermann.
+      if pattern.is_a?(Regexp)
+        m = pattern.match(path)
+        return nil unless m
+        params = {}
+        m.names.each { |n| params[n] = m[n] }
+        caps = m.captures
+        params["captures"] = caps
+        return [params, caps]
+      end
+      # Catch-all single-splat pattern (`"*"` compiled to `[[:splat]]`)
+      # absorbs every request path. sinatra-cors's CORS-preflight catch-all
+      # `app.options "*", is_cors_preflight: true do … end` needs this.
       if pattern.length == 1 && pattern[0][0] == :splat
-        return { "splat" => segs.map { |s| unescape(s) } }
+        sp = segs.map { |s| unescape(s) }
+        return [{ "splat" => sp }, sp]
       end
       return nil unless pattern.length == segs.length
       params = {}
       splat = []
+      block_args = []
       i = 0
       while i < pattern.length
         kind = pattern[i][0]
@@ -1154,14 +1172,18 @@ module Sinatra
         if kind == :lit
           return nil unless pattern[i][1] == seg
         elsif kind == :cap
-          params[pattern[i][1]] = unescape(seg)
+          v = unescape(seg)
+          params[pattern[i][1]] = v
+          block_args << v
         else # :splat
-          splat << unescape(seg)
+          v = unescape(seg)
+          splat << v
+          block_args << v
         end
         i += 1
       end
       params["splat"] = splat unless splat.empty?
-      params
+      [params, block_args]
     end
 
     def params
