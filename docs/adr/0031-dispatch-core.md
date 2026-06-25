@@ -137,3 +137,17 @@ those allocs is a borrow conflict, so this is an intricate refactor in
 the most correctness-critical function (wrong arg binding = silent wrong
 behavior across all Ruby code). Warrants a dedicated, fresh-context
 effort with full diff-suite gating, NOT a tail-of-session change.
+
+## Faster-binder attempt result (2026-06-24)
+
+ATTEMPTED the "safe" version (reusable `binder_locals_scratch` buffer
+replacing per-call `vec_nil`, drained back into the arena). Correctness
+perfect (diff 1002/0, STRESS_GC identical). But **+10.4% wall / +9.0%
+cycles — reverted.** `vec![Nil; n]` + `extend(move)` is already
+near-optimal; scratch-reuse + `extend(drain)` is worse (cache/codegen).
+This is the 3rd variadic-path regression (with inc 2's +9.7%): the
+variadic binding cost is INHERENT, not avoidable allocation. The full
+arena-bind (no vec_nil, no copy) remains the only untried lever but
+carries early-return arena-corruption risk (no clean RAII across the
+interleaved rest/kw `heap.alloc`s) — a genuine fresh-context research
+problem. The dispatch/binder accessible wins are exhausted.
