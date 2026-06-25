@@ -175,6 +175,10 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         "sinatra/base" => Some(include_str!("stdlib_vendor/sinatra_base.rb")),
         "sinatra" => Some("require \"sinatra/base\"\n"),
         "sinatra/version" => Some("require \"sinatra/base\"\n"),
+        // sinatra-contrib Reloader: a dev-only code reloader — vendored as
+        // a no-op so `configure :development { register Sinatra::Reloader }`
+        // loads + is inert (production-correct).
+        "sinatra/reloader" => Some(include_str!("stdlib_vendor/sinatra_reloader.rb")),
         "pp" => Some(include_str!("stdlib_vendor/pp.rb")),
         "bigdecimal/util" => Some(include_str!("stdlib_vendor/bigdecimal_util.rb")),
         "set" => Some(include_str!("stdlib_vendor/set.rb")),

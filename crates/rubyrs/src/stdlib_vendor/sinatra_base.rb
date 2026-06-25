@@ -453,6 +453,28 @@ module Sinatra
       # behaviour is fixed, so these just record values for compatibility
       # (e.g. the shared app does `set :environment, :production`).
       def settings_store; @settings_store ||= {}; end
+
+      # `environment` — the current run environment (`set :environment`,
+      # else $APP_ENV/$RACK_ENV, else :development), mirroring real Sinatra.
+      # Drives `configure` + the `*?` predicates. ENV may be absent on
+      # rubyrs (ADR 0017), so guard the lookup.
+      def environment
+        (settings_store[:environment] ||
+          (defined?(ENV) && (ENV["APP_ENV"] || ENV["RACK_ENV"])) ||
+          :development).to_sym
+      end
+      def development?; environment == :development; end
+      def production?;  environment == :production;  end
+      def test?;        environment == :test;        end
+
+      # `configure(*envs) { |app| ... }` — run the block (with the app class)
+      # only when no env is given OR the current environment is one of them.
+      # Real apps wrap dev-only setup like `configure :development do
+      # require "sinatra/reloader"; register Sinatra::Reloader end` — which
+      # is then a no-op in production (the block never runs).
+      def configure(*envs)
+        yield self if envs.empty? || envs.include?(environment)
+      end
       # Sinatra's `set :foo, val` doubles as both storage AND a
       # reflection surface — `settings.foo` returns the value
       # and `settings.respond_to?(:foo)` reports true. Real
