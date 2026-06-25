@@ -854,6 +854,33 @@ module Sinatra
       @env["rack.session"] ||= {}
     end
 
+    # `erb(template, options = {}, locals = {})` — render an ERB template in
+    # THIS request instance's binding, so `@ivars` (and helper methods) set
+    # by the route are visible (`erb :index` after `@todos = ...`). The
+    # template is an inline String (`erb "<%= @x %>"`) or a Symbol naming a
+    # file under the views dir (`erb :index` → `<views>/index.erb`,
+    # views = `set :views` or "./views").
+    #
+    # FAITHFULNESS: real Sinatra 4 renders erb via Erubi (through Tilt).
+    # This uses stdlib ERB with trim_mode "<>", which trims the newline after
+    # a code-only `<% ... %>` line exactly like Erubi — so output is
+    # byte-identical to real Sinatra for inline expressions AND multi-line
+    # templates whose `<% %>` lines start at column 0 (the common style).
+    # Remaining divergence vs Erubi: INDENTED code-only lines (`  <% %>`),
+    # and `<%= yield %>` layouts / `locals:` (need `ERB#def_method` /
+    # `Binding#local_variable_set`, not yet in the vendored ERB) — deferred.
+    def erb(template, _options = {}, _locals = {})
+      require "erb"
+      src =
+        if template.is_a?(Symbol)
+          views = self.class.settings_store[:views] || "./views"
+          File.read(File.join(views, "#{template}.erb"))
+        else
+          template.to_s
+        end
+      ERB.new(src, trim_mode: "<>").result(binding)
+    end
+
     # `settings` returns the application class itself, mirroring
     # real Sinatra. Combined with `set :key, val` defining a
     # singleton method on the class, this lets plugin / route
