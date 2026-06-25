@@ -360,6 +360,17 @@ module Sinatra
         paths, opts = _normalise_paths_and_opts(paths_and_opts, opts)
         paths.each { |p| add_route("OPTIONS", p, opts, &block) }
       end
+      # PATCH (REST partial-update — todo-backend's `patch "/todos/:id"`)
+      # and HEAD. Sinatra auto-registers HEAD for every GET; an explicit
+      # `head` route is rarer but real.
+      def patch(*paths_and_opts, **opts, &block)
+        paths, opts = _normalise_paths_and_opts(paths_and_opts, opts)
+        paths.each { |p| add_route("PATCH", p, opts, &block) }
+      end
+      def head(*paths_and_opts, **opts, &block)
+        paths, opts = _normalise_paths_and_opts(paths_and_opts, opts)
+        paths.each { |p| add_route("HEAD", p, opts, &block) }
+      end
 
       # Splits the positional args into a flat list of path Strings
       # and merges any trailing positional Hash with the kwargs hash.
@@ -760,6 +771,16 @@ module Sinatra
 
     # ---- dispatch ----
 
+    # Instance `call` — the Rack entry point for a MODULAR app used as a
+    # pre-built instance: `run TodoApp.new(repo)` (config.ru), where the
+    # custom `initialize(repo)` means the class-level `call` (`new.dispatch`)
+    # can't construct it. `dup` per request so the shared prototype state
+    # (e.g. @repo) is preserved while @env/@params/@status stay per-request
+    # — mirrors real Sinatra's `def call(env); dup.call!(env); end`.
+    def call(env)
+      dup.dispatch(env)
+    end
+
     def dispatch(env)
       @env     = env
       @status  = 200
@@ -863,6 +884,13 @@ module Sinatra
     # env["sinatra.error"]; we also keep it here for helpers).
     def request
       @request ||= Request.new(@env)
+    end
+
+    # `env` — the raw Rack env Hash, exposed as a helper (real Sinatra:
+    # `request.env` and the `env` method both reach it). Apps read it for
+    # raw headers (`env["HTTP_..."]`) and `env["rack.input"]`.
+    def env
+      @env
     end
 
     # `session` — the Hash-shaped session installed by the
