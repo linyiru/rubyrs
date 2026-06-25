@@ -115,8 +115,16 @@ pub(crate) enum HeapObj {
     /// the regular root walker (vm.stack / vm.frames) only sees
     /// the actively-resumed Fiber's state, never the suspended
     /// ones' snapshots.
+    /// `Box`ed: `FiberObject` is ~472 bytes (it inlines a suspended
+    /// execution snapshot), vs the next-largest HeapObj variant at
+    /// ~136. Left unboxed it would size EVERY heap slot to 480 bytes
+    /// — even Strings/Arrays/Hashes, even when no fiber is alive (a
+    /// Rust enum is sized to its largest variant). Boxing keeps the
+    /// rare, heavyweight fiber state off-slab so the common slot is
+    /// ~136 bytes (3.5× smaller slab + GC-walk stride). Fibers are
+    /// rare and already expensive, so the extra indirection is noise.
     #[cfg(feature = "_fiber")]
-    Fiber(crate::vm::fiber::FiberObject),
+    Fiber(Box<crate::vm::fiber::FiberObject>),
 }
 
 /// Heap representation of a CRuby-shape TypedData object. See
@@ -915,7 +923,7 @@ impl Heap {
     #[allow(dead_code)] // P1c.2 consumes this
     pub(crate) fn alloc_fiber(&mut self, body_block: ObjId) -> ObjId {
         self.fiber_alloc_count = self.fiber_alloc_count.saturating_add(1);
-        self.alloc(HeapObj::Fiber(crate::vm::fiber::FiberObject::new(body_block)))
+        self.alloc(HeapObj::Fiber(Box::new(crate::vm::fiber::FiberObject::new(body_block))))
     }
 
     /// P1e.1: count currently-live `HeapObj::Fiber` slots.
