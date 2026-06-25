@@ -13875,19 +13875,32 @@ impl Vm {
                 // Rational → as-is. Non-numeric → TypeError (CRuby).
                 ("coerce", 1) => {
                     let other = &args[0];
+                    // GC root hole: `make_rational*` below allocates (maybe_gc
+                    // → heap.alloc) while the receiver's Rational ObjId is held
+                    // only in the `recv` Rust local — it was popped off the
+                    // operand stack into dispatch, so it is no longer a GC root.
+                    // Under STRESS_GC the receiver slot is swept and recycled,
+                    // and the `recv.clone()` stored into the result pair (and
+                    // the final result Array alloc) then captures a dangling
+                    // ObjId → a later `heap.rational` panics. Pin the receiver
+                    // across the whole pair-build + result alloc.
+                    let mut g = PinGuard::new(self);
+                    g.pin(Value::Rational(*id));
                     let pair = match other {
                         Value::Int(n) => {
-                            let or = self.make_rational(*n, 1)?;
+                            let or = g.vm.make_rational(*n, 1)?;
                             vec![or, recv.clone()]
                         }
+                        // (pair elements pinned below, before maybe_gc)
                         #[cfg(feature = "bignum")]
                         Value::BigInt(_) => {
                             use num_bigint::BigInt;
-                            let b = self
+                            let b = g
+                                .vm
                                 .as_bigint_ref(other)
                                 .expect("BigInt value coerces")
                                 .into_owned();
-                            let or = self.make_rational_bigint(b, BigInt::from(1))?;
+                            let or = g.vm.make_rational_bigint(b, BigInt::from(1))?;
                             vec![or, recv.clone()]
                         }
                         Value::Float(f) => {
@@ -13898,7 +13911,7 @@ impl Vm {
                         }
                         Value::Rational(_) => vec![other.clone(), recv.clone()],
                         _ => {
-                            return Err(self.trap(RubyError::TypeError {
+                            return Err(g.vm.trap(RubyError::TypeError {
                                 msg: format!(
                                     "{} can't be coerced into Rational",
                                     crate::vm::numeric::type_name_for_coerce(other),
@@ -13906,10 +13919,19 @@ impl Vm {
                             }));
                         }
                     };
-                    self.maybe_gc();
-                    self.check_alloc()?;
-                    let id = self.heap.alloc(HeapObj::Array(pair.into()));
-                    self.stack.push(Value::Array(id));
+                    // The pair holds freshly-made / pass-through Rational
+                    // ObjIds rooted only in this Rust Vec; pin them across
+                    // the maybe_gc below (else it sweeps them → the result
+                    // Array gets a dangling slot). Mirrors the numeric
+                    // coerce sibling above.
+                    for v in &pair {
+                        g.pin(v.clone());
+                    }
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let arr_id = g.vm.heap.alloc(HeapObj::Array(pair.into()));
+                    drop(g);
+                    self.stack.push(Value::Array(arr_id));
                     return Ok(());
                 }
                 // `Rational#floor` / `#ceil` / `#truncate` / `#round`
@@ -17193,28 +17215,39 @@ impl Vm {
         if let Some(Value::Class(c)) = &recv
             && c.name.as_str() == "Dir"
             && matches!(&*name, "glob" | "[]")
-            && let Some(arr) = self.dir_class_dispatch(&name, &args)?
         {
-            if &*name == "[]" {
-                self.stack.push(arr);
-                return Ok(());
-            }
-            let arr_id = match arr { Value::Array(id) => id, _ => unreachable!("glob returns Array") };
-            let paths: Vec<Value> = self.heap.array(arr_id).clone();
+            // Pin the block BEFORE dir_class_dispatch: the glob arm
+            // allocates the results Array (maybe_gc + heap.alloc). The
+            // block was popped off the operand stack into a Rust local at
+            // fn entry and is not yet a GC root, so under STRESS_GC that
+            // sweep would reclaim it → a later `step_block1`/`heap.block`
+            // panics "not a Block". `dir_class_dispatch` may still decline
+            // (Ok(None), e.g. a wrong arg shape), so keep the
+            // None→fall-through: the guard simply drops on that path.
             let mut g = crate::vm::PinGuard::new(self);
             g.pin(Value::Block(block));
-            let pre_frames = g.vm.frames.len();
-            let mut early = None;
-            for p in paths {
-                match g.vm.step_block1(block, p, pre_frames)? {
-                    super::iter::BlockStep::MethodReturn => break,
-                    super::iter::BlockStep::Break(r) => { early = Some(r); break; }
-                    super::iter::BlockStep::Value(_) => {}
+            if let Some(arr) = g.vm.dir_class_dispatch(&name, &args)? {
+                if &*name == "[]" {
+                    drop(g);
+                    self.stack.push(arr);
+                    return Ok(());
                 }
+                let arr_id = match arr { Value::Array(id) => id, _ => unreachable!("glob returns Array") };
+                let paths: Vec<Value> = g.vm.heap.array(arr_id).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for p in paths {
+                    match g.vm.step_block1(block, p, pre_frames)? {
+                        super::iter::BlockStep::MethodReturn => break,
+                        super::iter::BlockStep::Break(r) => { early = Some(r); break; }
+                        super::iter::BlockStep::Value(_) => {}
+                    }
+                }
+                drop(g);
+                self.stack.push(early.unwrap_or(Value::Nil));
+                return Ok(());
             }
-            drop(g);
-            self.stack.push(early.unwrap_or(Value::Nil));
-            return Ok(());
+            // dir_class_dispatch declined → fall through (g drops here).
         }
 
         // Reopen-precedence early gate — block-form twin of

@@ -1143,13 +1143,17 @@ impl Vm {
             && (1..=2).contains(&args.len())
         {
             let s = s.clone();
-            let md = self.string_match_run(&s, args)?;
+            // Pin the block BEFORE `string_match_run`, which allocates the
+            // MatchData — under STRESS_GC that collection would otherwise
+            // sweep the not-yet-pinned block (its slot recycles → a later
+            // `heap.block(block)` panics "not a Block").
+            let mut g = PinGuard::new(self);
+            g.pin(Value::Block(block));
+            let md = g.vm.string_match_run(&s, args)?;
             if matches!(md, Value::Nil) {
                 return Ok(Some(Value::Nil));
             }
-            let mut g = PinGuard::new(self);
             g.pin(md.clone());
-            g.pin(Value::Block(block));
             let pre_frames = g.vm.frames.len();
             return match g.vm.step_block1(block, md, pre_frames)? {
                 BlockStep::MethodReturn => Ok(Some(Value::Nil)),

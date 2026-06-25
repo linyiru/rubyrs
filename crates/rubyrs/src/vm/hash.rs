@@ -344,18 +344,31 @@ impl Vm {
                     }
                     ("keys", []) => {
                         let keys: Vec<Value> = self.heap.hash(id).iter().map(|(k, _)| k.clone()).collect();
-                        self.maybe_gc();
+                        // The receiver Hash was popped off the operand stack at
+                        // the do_call boundary, so it is no longer a GC root.
+                        // Under STRESS_GC `maybe_gc` would sweep it AND every key
+                        // it holds (e.g. Set#divide's inner-Set keys reached via
+                        // `@hash.keys`), recycling their slots into the result
+                        // Array's alloc → dangling ObjIds. Pin across the alloc.
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        g.vm.maybe_gc();
                         // check_alloc would need a `?`; collection_call returns Option,
                         // so we skip the cap check here. Embedders should set
                         // max_live with a small slack to account for these
                         // derived allocations.
-                        let nid = self.heap.alloc(HeapObj::Array(keys.into()));
+                        let nid = g.vm.heap.alloc(HeapObj::Array(keys.into()));
                         Some(Value::Array(nid))
                     }
                     ("values", []) => {
                         let vals: Vec<Value> = self.heap.hash(id).iter().map(|(_, v)| v.clone()).collect();
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(vals.into()));
+                        // Same hazard as `keys`: pin the popped receiver across
+                        // maybe_gc/alloc (Set#divide's `classify().values` keeps
+                        // the inner Sets reachable only through these values).
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(vals.into()));
                         Some(Value::Array(nid))
                     }
                     // `h.values_at(*keys)` → the value for each key (a
