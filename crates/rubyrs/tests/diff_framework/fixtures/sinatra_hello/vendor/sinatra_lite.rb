@@ -179,6 +179,36 @@ module Rack
 end
 
 module Sinatra
+  # Sinatra's params hash: a key is reachable as either a String or a
+  # Symbol (`params["id"]` == `params[:id]`). Real Sinatra uses
+  # Sinatra::IndifferentHash; this is the same contract, String-backed.
+  # Used everywhere a route block reads params, which is ~every real app.
+  class IndifferentHash < Hash
+    def self.from(h)
+      out = new
+      h.each { |k, v| out[k] = v } if h
+      out
+    end
+    def [](key);        super(key.to_s); end
+    def []=(key, val);  super(key.to_s, val); end
+    def key?(key);      super(key.to_s); end
+    alias_method :has_key?, :key?
+    alias_method :include?, :key?
+    alias_method :member?, :key?
+    def fetch(key, *a, &b); super(key.to_s, *a, &b); end
+    def dig(key, *rest);    super(key.to_s, *rest); end
+    def values_at(*keys);   keys.map { |k| self[k] }; end
+    def merge(other)
+      out = dup
+      other.each { |k, v| out[k] = v }
+      out
+    end
+    def merge!(other)
+      other.each { |k, v| self[k] = v }
+      self
+    end
+  end
+
   # Minimal Rack::Request-ish wrapper. Real Sinatra exposes `request`
   # inside route blocks; apps read `request.user_agent`, `request.path`,
   # `request.request_method`, header access, etc.
@@ -710,8 +740,9 @@ module Sinatra
       verb     = env["REQUEST_METHOD"]
       segs     = (env["PATH_INFO"] || "/").split("/").reject { |s| s.empty? }
       # Real Sinatra merges query-string AND form-body params (and path
-      # captures) into one `params` hash.
-      base_params = parse_query(env["QUERY_STRING"]).merge(parse_form_body)
+      # captures) into one indifferent (String/Symbol) `params` hash.
+      base_params = IndifferentHash.from(parse_query(env["QUERY_STRING"]))
+      base_params.merge!(parse_form_body)
 
       # `halt`/`redirect` `throw :halt, triplet`; the catch returns it.
       result = catch(:halt) do
@@ -947,7 +978,7 @@ module Sinatra
     end
 
     def params
-      @params ||= {}
+      @params ||= IndifferentHash.new
     end
 
     def request_body
