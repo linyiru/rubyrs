@@ -30,11 +30,9 @@ class Encoding
   ## transcoder. Diverges only on a few vendor/wave-dash code points.
   Shift_JIS = Encoding.new("Shift_JIS")
   ## ISO-2022-JP — a legacy stateful (CRuby "dummy") Japanese encoding.
-  ## rubyrs doesn't transcode through it, but the constant must EXIST:
-  ## rack 3.2.6's multipart parser builds `REENCODE_DUMMY_ENCODINGS =
-  ## { Encoding::ISO_2022_JP => true }` at load, so requiring rack (and
-  ## thus Sinatra 4.x) hit an undefined constant without it.
-  ISO_2022_JP = Encoding.new("ISO-2022-JP")
+  ## The CONSTANT is now defined ALWAYS-ON in the core preamble (lib.rs)
+  ## because rack references it at load time and must work without
+  ## `_encoding_full`. Referenced below (find/list) via the core constant.
 
   class << self
     alias __rubyrs_find_core find

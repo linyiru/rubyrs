@@ -2886,6 +2886,16 @@ Encoding::US_ASCII = Encoding.new("US-ASCII")
 Encoding::ASCII = Encoding::US_ASCII
 Encoding::ASCII_8BIT = Encoding.new("ASCII-8BIT")
 Encoding::BINARY = Encoding::ASCII_8BIT
+## ISO-2022-JP is a "dummy encoding" that CRuby ships ALWAYS-ON, and
+## rack (a ubiquitous gem) references `Encoding::ISO_2022_JP` at
+## class-body load time (multipart/parser.rb's REENCODE_DUMMY_ENCODINGS).
+## So the bare constant must exist in EVERY build, not just behind
+## `_encoding_full` — otherwise `require "rack"` (hence Sinatra, Rails,
+## any web stack) NameErrors on a default-features rubyrs. The full
+## transcoding for ISO-2022-JP input still requires `_encoding_full`;
+## the always-on constant only needs to exist + be a usable hash key,
+## which the core `Encoding.new` provides without the registry.
+Encoding::ISO_2022_JP = Encoding.new("ISO-2022-JP")
 
 ## Version sentinels. Real codebases use `RUBY_VERSION >= '3'`
 ## (tilt does at template.rb:239) to pick between bind_call and
