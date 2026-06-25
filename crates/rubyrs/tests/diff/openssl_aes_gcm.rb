@@ -77,3 +77,29 @@ p OpenSSL::Cipher.new("aes-256-gcm").key_len
 # authenticated? — true for GCM, false for CTR (ActiveSupport's aead_mode?).
 p OpenSSL::Cipher.new("aes-256-gcm").authenticated?
 p OpenSSL::Cipher.new("aes-256-ctr").authenticated?
+
+# iv_len= — AEAD IV-length control. rack-session 2.x sets `iv_len = 12`
+# before `random_iv` when encrypting session cookies; without it the
+# encryptor raised NoMethodError. The set value is reflected by the getter,
+# and a non-default length still round-trips through the GCM core.
+g = OpenSSL::Cipher.new("aes-256-gcm")
+g.iv_len = 7
+p g.iv_len                                   # 7
+ge = OpenSSL::Cipher.new("aes-256-gcm")
+ge.encrypt
+ge.key = key
+ge.iv_len = 12                               # the rack-session pattern
+ge.iv = iv                                   # fixed 12-byte iv for determinism
+ge.auth_data = aad
+ct2 = ge.update(pt) + ge.final
+tag2 = ge.auth_tag
+p ct2.unpack1("H*") == ct.unpack1("H*")      # same as the iv_len-default run
+p tag2.unpack1("H*") == tag.unpack1("H*")
+
+# iv_len= on a non-AEAD cipher raises CipherError (CRuby parity).
+begin
+  OpenSSL::Cipher.new("aes-256-ctr").iv_len = 12
+  puts "NO RAISE"
+rescue OpenSSL::Cipher::CipherError
+  puts "CipherError"
+end

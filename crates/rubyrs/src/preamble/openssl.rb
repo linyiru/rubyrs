@@ -264,6 +264,7 @@ module OpenSSL
       @aad = "".b
       @buffer = "".b
       @auth_tag = nil
+      @iv_len = nil
       @padding = true
     end
 
@@ -295,7 +296,21 @@ module OpenSSL
     end
 
     def key_len; @key_len; end
-    def iv_len; @gcm ? 12 : 16; end
+    # IV length in bytes. GCM defaults to 12 (96-bit, the standard / Rails
+    # case) but is variable — `iv_len=` overrides it (the native GCM core
+    # handles both the 12-byte fast path and the general GHASH-padded IV).
+    # CTR/CBC are fixed at 16.
+    def iv_len; @iv_len || (@gcm ? 12 : 16); end
+    # `cipher.iv_len = 12` — AEAD IV-length control (rack-session 2.x sets
+    # this before `random_iv` when encrypting AES-256-GCM session cookies).
+    # Only meaningful for GCM; CRuby raises CipherError on a non-AEAD cipher.
+    def iv_len=(len)
+      len = len.to_i
+      raise CipherError, "cipher does not support AEAD (iv_len=)" unless @gcm
+      raise ArgumentError, "iv_len must be positive" if len < 1
+      @iv_len = len
+      len
+    end
     # AEAD detection — true for GCM (the only authenticated mode here).
     # ActiveSupport::MessageEncryptor's `aead_mode?` keys off this.
     def authenticated?; @gcm; end
