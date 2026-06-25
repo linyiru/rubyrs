@@ -417,7 +417,12 @@ module Sinatra
           # `condition { ... }` — same self-rebind contract
           # real Sinatra uses for the
           # `set(:key) do |arg| condition { ... } end` shape.
-          instance_exec(val, &handler) if handler
+          if handler
+            instance_exec(val, &handler)
+          elsif key == :provides
+            # Built-in content-negotiation condition.
+            provides(*Array(val))
+          end
         end
         @pending_conditions = nil
         routes_array << [verb, compile(path), block, per_route_conditions]
@@ -432,6 +437,26 @@ module Sinatra
       def condition(&block)
         if @pending_conditions
           @pending_conditions << block
+        end
+      end
+
+      # `provides(:json, :html, ...)` — content negotiation. Used as the
+      # `provides:` route option (`get "/", provides: :json do … end`): the
+      # route only matches when the request's Accept header prefers one of
+      # the types, and the negotiated type is set as the response
+      # content_type. Mirrors real Sinatra's provides condition.
+      def provides(*types)
+        mimes = types.flatten.map do |t|
+          t.is_a?(Symbol) ? (CONTENT_TYPE_SHORTHANDS[t] || t.to_s) : t
+        end
+        condition do
+          preferred = preferred_type(mimes)
+          if preferred
+            content_type(preferred)
+            true
+          else
+            false
+          end
         end
       end
 
@@ -973,6 +998,41 @@ module Sinatra
     # env["sinatra.error"]; we also keep it here for helpers).
     def request
       @request ||= Request.new(@env)
+    end
+
+    # Content negotiation: from the request's Accept header, return the first
+    # of `types` (in Accept's quality/order preference) that the client
+    # accepts, or nil. Handles `q=` weights, `*/*` and `type/*` wildcards.
+    def preferred_type(types)
+      accept_ranges.each do |range|
+        match = types.find { |t| accept_range_matches?(range, t) }
+        return match if match
+      end
+      nil
+    end
+
+    # Parse Accept into media ranges ordered by descending q (stable on ties).
+    def accept_ranges
+      header = @env["HTTP_ACCEPT"]
+      return ["*/*"] if header.nil? || header.strip.empty?
+      ranges = []
+      header.split(",").each_with_index do |part, i|
+        seg = part.strip.split(";")
+        q = 1.0
+        seg.drop(1).each do |p|
+          k, v = p.split("=", 2)
+          q = v.to_f if k && k.strip == "q" && v
+        end
+        ranges << [seg[0].strip, q, i]
+      end
+      ranges.sort_by { |_r, q, i| [-q, i] }.map { |r, _q, _i| r }
+    end
+
+    def accept_range_matches?(range, type)
+      return true if range == "*/*" || range == type
+      rp = range.split("/")
+      tp = type.split("/")
+      rp[0] == tp[0] && rp[1] == "*"
     end
 
     # `env` — the raw Rack env Hash, exposed as a helper (real Sinatra:
