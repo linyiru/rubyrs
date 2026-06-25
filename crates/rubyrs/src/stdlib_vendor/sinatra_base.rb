@@ -892,7 +892,21 @@ module Sinatra
     def host_authorized?(env)
       permitted = Array(self.class.host_authorization[:permitted_hosts])
       return true if permitted.empty?
-      host = (env["HTTP_HOST"] || "").split(/:\d+\z/).first.to_s.downcase
+      origin = extract_host_authority(env["HTTP_HOST"])
+      return false unless host_permitted?(origin, permitted)
+      # When behind a proxy, the forwarded host (X-Forwarded-Host, first if
+      # comma-separated) must ALSO be permitted — Rack::Protection checks
+      # both origin and forwarded authority.
+      fwd = env["HTTP_X_FORWARDED_HOST"]
+      return true if fwd.nil? || fwd.empty?
+      host_permitted?(extract_host_authority(fwd.split(",").first), permitted)
+    end
+
+    def extract_host_authority(authority)
+      authority.to_s.split(/:\d+\z/).first.to_s.strip.downcase
+    end
+
+    def host_permitted?(host, permitted)
       permitted.any? do |h|
         if h.is_a?(IPAddr)
           begin h.include?(IPAddr.new(host)); rescue StandardError; false; end
