@@ -97,3 +97,43 @@ a fraction, cutting the per-call instruction cost across ~25% of all ops.
 Order-of-magnitude target: a few % of the Sinatra request each — chained,
 a double-digit-% dent in the 6.6× gap. To be confirmed per-increment by
 measurement; no increment ships without a measured ≥0.3% wall win.
+
+## Results (2026-06-24)
+
+- **Increment 1 (no_recv fixed-arity fast path) — SHIPPED, −2.3% wall**
+  (commit `8c4be14b`). Resolves implicit-self calls on an Object self via
+  the cached fast path, stack-direct. Correctness: diff 1001/0 +
+  norecv_self_dispatch fixture. CRITICAL MEASUREMENT LESSON: this path is
+  **+15.6% instructions-retired yet −2.3% wall / −1.7% cycles** — the
+  extra (cheap, predicted) instructions buy avoidance of the slow
+  cascade's memory-stally work. It was nearly discarded on the
+  instruction count alone. **Instructions-retired is MISLEADING for
+  dispatch/memory-pattern changes; wall + cycles are the arbiters.**
+
+- **Increment 2 (explicit-recv variadic via invoke_method) — REJECTED,
+  +9.7% wall / +8.3% cycles** (reverted). Falling back to the general
+  binder for non-fixed-arity calls regressed (both wall AND cycles up —
+  a real regression). PRINCIPLE: the cascade-skip only pays off when the
+  invoke is ALSO cheap (stack-direct, arena, no Vec). Variadic calls need
+  the expensive general binder (+ a `drain.collect()` Vec / pre-empting a
+  cheaper slow-path route), which the cascade-skip can't offset.
+
+## Spun off: faster general binder (scoped, NOT yet implemented)
+
+The variadic slice (~46.7% of slow-cascade calls) is binder-bound. The
+binder is `invoke_method_with_block_inner`'s non-closure path
+(dispatch.rs ~15632+). Per-call costs identified:
+  - `vec_nil(n_locals)` — a FRESH heap locals Vec per variadic call
+    (~51/request), where the fixed-arity path reuses the locals ARENA.
+  - `kw_param_defaults.clone()` + `kw_has_computed_default.clone()` —
+    snapshot clones per call (to release the `self.protos` borrow before
+    the rest-Array `heap.alloc`); cheap when kw_count==0, a real clone
+    otherwise.
+Proposed: route stack-eligible variadic protos through the arena for
+their locals buffer (avoid the per-call Vec). CHALLENGE: the binder
+writes `locals` by index INTERLEAVED with `heap.alloc` for the `*rest`
+Array under PinGuard GC-root guards — holding an arena borrow across
+those allocs is a borrow conflict, so this is an intricate refactor in
+the most correctness-critical function (wrong arg binding = silent wrong
+behavior across all Ruby code). Warrants a dedicated, fresh-context
+effort with full diff-suite gating, NOT a tail-of-session change.
