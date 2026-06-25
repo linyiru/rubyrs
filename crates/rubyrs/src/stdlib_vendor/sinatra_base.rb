@@ -865,6 +865,21 @@ module Sinatra
       base_params = IndifferentHash.from(parse_query(env["QUERY_STRING"]))
       base_params.merge!(parse_form_body)
 
+      # method_override (Rack::MethodOverride): an HTML form can only GET/POST,
+      # so a POST with `_method=put` (hidden field) — or an
+      # `X-HTTP-Method-Override` header — is re-routed as that verb. Enabled
+      # via `set :method_override, true` (on by default in classic apps); the
+      # `<key>?` reader walks the class chain. Mutate env so request.* reflects
+      # the effective verb, keeping the original like Rack does.
+      if verb == "POST" && self.class.respond_to?(:method_override?) && self.class.method_override?
+        ov = (base_params["_method"] || env["HTTP_X_HTTP_METHOD_OVERRIDE"]).to_s.upcase
+        if %w[GET HEAD PUT POST DELETE OPTIONS PATCH LINK UNLINK].include?(ov)
+          env["rack.methodoverride.original_method"] = verb
+          env["REQUEST_METHOD"] = ov
+          verb = ov
+        end
+      end
+
       # `halt`/`redirect` `throw :halt, triplet`; the catch returns it.
       result = catch(:halt) do
         begin

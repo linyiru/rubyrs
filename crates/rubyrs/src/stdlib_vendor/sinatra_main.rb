@@ -16,6 +16,7 @@ module Sinatra
   class Application < Base
     set :app_file, $0
     set :run, true
+    set :method_override, true   # classic apps enable it by default
   end
 
   module Delegator
