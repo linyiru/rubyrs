@@ -744,7 +744,7 @@ module Sinatra
     end
 
     def headers(hash = nil)
-      @headers ||= { "content-type" => "text/html" }
+      @headers ||= { "content-type" => "text/html;charset=utf-8" }
       @headers.merge!(hash) if hash
       @headers
     end
@@ -780,18 +780,20 @@ module Sinatra
     # is used by sinatra-param's `if content_type and
     # content_type.match(mime_type(:json))` to decide between
     # plain-text vs JSON error encoding.
-    def content_type(type = nil)
-      if type.nil?
-        headers["content-type"]
-      else
-        headers["content-type"] = if type.is_a?(Symbol)
-          CONTENT_TYPE_SHORTHANDS.fetch(type) do
-            raise ArgumentError, "Unknown media type for #{type.inspect}"
-          end
-        else
-          type.to_s
-        end
+    # Sinatra adds `;charset=utf-8` to the media types in `add_charset`
+    # (every text/*, plus application/javascript|xml|xhtml+xml) unless a
+    # charset is already present — so `content_type :html` is
+    # `text/html;charset=utf-8`, byte-matching the real gem.
+    ADD_CHARSET = [%r{^text/}, "application/javascript", "application/xml", "application/xhtml+xml"].freeze
+
+    def content_type(type = nil, params = {})
+      return headers["content-type"] if type.nil?
+      mime = type.is_a?(Symbol) ? CONTENT_TYPE_SHORTHANDS.fetch(type) { raise ArgumentError, "Unknown media type for #{type.inspect}" } : type.to_s
+      mime = mime.dup
+      unless mime.include?("charset") || ADD_CHARSET.all? { |p| !(p === mime) }
+        mime << ";charset=utf-8"
       end
+      headers["content-type"] = mime
     end
 
     # `mime_type(:symbol)` — look up the canonical media type
@@ -882,7 +884,7 @@ module Sinatra
       @env     = env
       return [403, { "content-type" => "text/plain" }, ["Host not permitted"]] unless host_authorized?(env)
       @status  = 200
-      @headers = { "content-type" => "text/html" }
+      @headers = { "content-type" => "text/html;charset=utf-8" }
       verb     = env["REQUEST_METHOD"]
       segs     = (env["PATH_INFO"] || "/").split("/").reject { |s| s.empty? }
       # Real Sinatra merges query-string AND form-body params (and path
