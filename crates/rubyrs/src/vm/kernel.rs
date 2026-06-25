@@ -5412,7 +5412,7 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "english" | "English"
         // `optparse`: vendored real parser (stdlib_vendor/optparse.rb)
         | "optparse"
-        | "bigdecimal" | "bigdecimal/util" | "monitor" | "erb"
+        | "bigdecimal" | "bigdecimal/util" | "monitor" | "erb" | "erubi"
         // `sinatra` / `sinatra/base` / `sinatra/version`: rubyrs's blessed
         // in-tree micro-Sinatra (stdlib_vendor/sinatra_base.rb). Lets a real
         // Sinatra app + the sinatra-* extension gems load with zero code

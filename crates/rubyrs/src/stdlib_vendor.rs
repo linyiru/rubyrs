@@ -164,6 +164,11 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         // (exception, path, frames, ...), which Kernel#binding now
         // captures. The Compiler is verbatim so output is byte-exact.
         "erb" => Some(include_str!("stdlib_vendor/erb.rb")),
+        // Erubi: the ERB-compatible engine Sinatra 4 uses for `erb` (via
+        // Tilt). Vendored 1:1 so sinatra_lite renders templates with
+        // byte-identical whitespace trimming. Pure Ruby; its escape helper
+        // falls back to CGI/a literal table when erb/escape is absent.
+        "erubi" => Some(include_str!("stdlib_vendor/erubi.rb")),
         // Sinatra: rubyrs's blessed in-tree micro-Sinatra (B1 / native
         // framework core). `require "sinatra"` / `"sinatra/base"` resolve
         // here so a real Sinatra app — and the sinatra-* extension gems

@@ -934,24 +934,36 @@ module Sinatra
     # file under the views dir (`erb :index` → `<views>/index.erb`,
     # views = `set :views` or "./views").
     #
-    # FAITHFULNESS: real Sinatra 4 renders erb via Erubi (through Tilt).
-    # This uses stdlib ERB with trim_mode "<>", which trims the newline after
-    # a code-only `<% ... %>` line exactly like Erubi — so output is
-    # byte-identical to real Sinatra for inline expressions AND multi-line
-    # templates whose `<% %>` lines start at column 0 (the common style).
-    # Remaining divergence vs Erubi: INDENTED code-only lines (`  <% %>`),
-    # and `<%= yield %>` layouts / `locals:` (need `ERB#def_method` /
-    # `Binding#local_variable_set`, not yet in the vendored ERB) — deferred.
-    def erb(template, _options = {}, _locals = {})
-      require "erb"
-      src =
-        if template.is_a?(Symbol)
-          views = self.class.settings_store[:views] || "./views"
-          File.read(File.join(views, "#{template}.erb"))
-        else
-          template.to_s
+    # Renders via Erubi — the SAME engine real Sinatra 4 uses (through Tilt)
+    # — so output (including whitespace trimming around `<% %>` vs `<%= %>`
+    # lines, and HTML escaping) is byte-identical to the real gem.
+    #   - inline String (`erb "<%= @x %>"`) or Symbol → `<views>/<name>.erb`
+    #     (views = `set :views` or "./views");
+    #   - rendered in this request instance's binding, so route-set `@ivars`
+    #     are visible;
+    #   - LAYOUT: wrapped in `<views>/layout.erb`'s `<%= yield %>` when it
+    #     exists; `layout: false` disables, `layout: :name` picks another.
+    # `locals:` (template-local vars) are still deferred — they need
+    # Binding#local_variable_set, which rubyrs doesn't expose yet.
+    def erb(template, options = {}, _locals = {})
+      require "erubi"
+      views = self.class.settings_store[:views] || "./views"
+      src = template.is_a?(Symbol) ? File.read(File.join(views, "#{template}.erb")) : template.to_s
+      rendered = eval(Erubi::Engine.new(src).src, binding)
+      layout = options.key?(:layout) ? options[:layout] : :layout
+      if layout
+        lname = layout == true ? :layout : layout
+        lpath = File.join(views, "#{lname}.erb")
+        if File.exist?(lpath)
+          # Wrap the layout's compiled source in a method so its `<%= yield %>`
+          # yields the inner-rendered content (like Tilt does).
+          lmod = Module.new
+          lmod.module_eval("def __erb_layout\n#{Erubi::Engine.new(File.read(lpath)).src}\nend")
+          extend(lmod)
+          rendered = __erb_layout { rendered }
         end
-      ERB.new(src, trim_mode: "<>").result(binding)
+      end
+      rendered
     end
 
     # `settings` returns the application class itself, mirroring
