@@ -178,7 +178,9 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         // chain to it (require tracks each name once). `run!` needs the
         // `_http_server` battery; in-process `app.call(env)` does not.
         "sinatra/base" => Some(include_str!("stdlib_vendor/sinatra_base.rb")),
-        "sinatra" => Some("require \"sinatra/base\"\n"),
+        // `require "sinatra"` = classic top-level DSL (Application +
+        // Delegator + at_exit auto-run); `"sinatra/base"` is modular-only.
+        "sinatra" => Some(include_str!("stdlib_vendor/sinatra_main.rb")),
         "sinatra/version" => Some("require \"sinatra/base\"\n"),
         // sinatra-contrib Reloader: a dev-only code reloader — vendored as
         // a no-op so `configure :development { register Sinatra::Reloader }`
