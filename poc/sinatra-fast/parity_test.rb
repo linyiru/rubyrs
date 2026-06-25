@@ -67,6 +67,16 @@ class App < Sinatra::Base
   get "/array_ret" do                   # bare [status, headers, body] return
     [202, { "X-R" => "z" }, "arr"]
   end
+  # `pass` from the first of two same-path routes → the second must run.
+  # Defined BEFORE the splat/regexp routes so the order-safe matcher reaches
+  # it (an ineligible route before a match makes the matcher fall back).
+  get "/passes" do
+    pass if params["skip"]
+    "first"
+  end
+  get "/passes" do
+    "second (passed)"
+  end
   get "/boom" do                        # raises → error handling (dispatch! rescue)
     raise "boom"
   end
@@ -129,6 +139,8 @@ CASES = [
   ["halt-string",   "/halt_s",    "",       {},                 true],
   ["halt-code",     "/halt_code", "",       {},                 true],
   ["array-return",  "/array_ret", "",       {},                 true],
+  ["no-pass",       "/passes",    "",       {},                 true],
+  ["pass",          "/passes",    "skip=1", {},                 true],
   ["raise-500",     "/boom",      "",       {},                 true],
   ["custom-error",  "/custom_err","",       {},                 true],
   ["HEAD",          "/",          "",       { method: "HEAD" }, true],

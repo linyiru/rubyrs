@@ -153,7 +153,14 @@ module Sinatra
           end
           filter!(:before) { @pinned_response = !response["content-type"].nil? } unless flags[:no_filters]
           @env["sinatra.route"] = "#{@request.request_method} #{entry[:src]}"
-          route_eval { entry[:wrapper].call(self, pp ? pp.values : []) }
+          # route_eval throws :halt with the block's value on normal return.
+          # A `pass` throws :pass — catch it and defer to the real mustermann
+          # route! to find the NEXT matching route (it re-tries routes in
+          # order, honours pass again, and route_missings to 404). Filters
+          # already ran above (route! is after :before filters in Sinatra),
+          # so they are not re-run.
+          catch(:pass) { route_eval { entry[:wrapper].call(self, pp ? pp.values : []) } }
+          route!
         end
       rescue ::Exception => e # rubocop:disable Lint/RescueException
         invoke { handle_exception!(e) }
