@@ -3579,6 +3579,38 @@ self.eval_inner(
         self.eval(&source, &filename)
     }
 
+    /// If `trap` is an uncaught `SystemExit` (i.e. the script called
+    /// `Kernel#exit`/`abort`), return the requested process exit status —
+    /// `Some(0)` for `exit`/`exit(0)`/`exit(true)`, `Some(1)` for
+    /// `exit(false)`/`abort`, `Some(n)` for `exit(n)`. A CLI host should
+    /// `process::exit` with this code and print NOTHING — a SystemExit is a
+    /// clean exit, not an error (CRuby never prints a SystemExit). Returns
+    /// `None` for every other trap, which the host should report + exit
+    /// non-zero as usual. The status comes from the `@status` ivar of the
+    /// retained uncaught exception (read immediately after `eval_*`, before
+    /// any further allocation, so the object is still live).
+    pub fn system_exit_code(&self, trap: &Trap) -> Option<i32> {
+        if !trap.err.is("SystemExit") {
+            return None;
+        }
+        let code = match (
+            self.vm.last_uncaught_exception.as_ref(),
+            self.vm.interner.get_id("@status"),
+        ) {
+            (Some(crate::value::Value::Object(id)), Some(sym)) => {
+                match self.vm.heap.get(*id) {
+                    crate::heap::HeapObj::Instance(inst) => match inst.ivars.get(&sym) {
+                        Some(crate::value::Value::Int(n)) => *n as i32,
+                        _ => 0,
+                    },
+                    _ => 0,
+                }
+            }
+            _ => 0,
+        };
+        Some(code)
+    }
+
     /// Format a [`Trap`] CRuby-style:
     /// `file:line:in 'method': msg (Class)`, with one `\tfrom ...` line
     /// per remaining backtrace frame.

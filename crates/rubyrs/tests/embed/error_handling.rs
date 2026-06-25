@@ -856,3 +856,33 @@ fn panic_trap_populates_backtrace_with_script_location() {
         "format_trap should preserve the panic payload; got {formatted:?}",
     );
 }
+
+#[test]
+fn system_exit_code_maps_kernel_exit_to_a_clean_status() {
+    // `Kernel#exit` / `abort` raise SystemExit, which surfaces as an
+    // uncaught Trap. `system_exit_code` extracts the requested process
+    // status so a CLI host can `process::exit(code)` and print nothing — a
+    // SystemExit is a clean exit, not an error. Regression: previously the
+    // CLI printed `exit (SystemExit)` and returned 1 even for `exit 0`.
+    let mut rt = Runtime::new();
+    let t = rt.eval("exit 0", "t.rb").unwrap_err();
+    assert!(t.err.is("SystemExit"));
+    assert_eq!(rt.system_exit_code(&t), Some(0));
+
+    let mut rt = Runtime::new();
+    let t = rt.eval("exit 2", "t.rb").unwrap_err();
+    assert_eq!(rt.system_exit_code(&t), Some(2));
+
+    // No-arg / true → 0; false → 1; abort → 1.
+    for (src, want) in [("exit", 0), ("exit true", 0), ("exit false", 1), ("abort", 1)] {
+        let mut rt = Runtime::new();
+        let t = rt.eval(src, "t.rb").unwrap_err();
+        assert_eq!(rt.system_exit_code(&t), Some(want), "src={src:?}");
+    }
+
+    // A real uncaught error is NOT a SystemExit → None (host prints + exits
+    // non-zero as usual).
+    let mut rt = Runtime::new();
+    let t = rt.eval(r#"raise "boom""#, "t.rb").unwrap_err();
+    assert_eq!(rt.system_exit_code(&t), None);
+}

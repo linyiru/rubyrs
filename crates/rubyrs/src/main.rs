@@ -451,6 +451,13 @@ fn main() {
     match result {
         Ok(_) => {}
         Err(trap) => {
+            // `Kernel#exit`/`abort` raise SystemExit, which reaches here as
+            // an uncaught Trap. It is a CLEAN exit, not an error: exit with
+            // the requested status and print nothing (CRuby never prints a
+            // SystemExit). Only non-SystemExit traps are real errors.
+            if let Some(code) = rt.system_exit_code(&trap) {
+                process::exit(code);
+            }
             eprint!("{}", rt.format_trap(&trap));
             process::exit(1);
         }
