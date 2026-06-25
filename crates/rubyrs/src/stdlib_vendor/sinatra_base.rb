@@ -893,6 +893,29 @@ module Sinatra
       @env
     end
 
+    # `url(addr) / uri(addr) / to(addr)` — build a URL for a path. Absolute
+    # by default (`redirect to("/x")`, `todo_url = uri "/todos/#{id}"`).
+    # Mirrors real Sinatra: a full URI is returned as-is; otherwise
+    # scheme://host[:port] + SCRIPT_NAME + addr, File.join'd (so slashes
+    # collapse the same way). The default port (80/443) is stripped to match.
+    def uri(addr = nil, absolute = true, add_script_name = true)
+      return addr if addr.to_s =~ /\A[a-z][a-z0-9+.\-]*:/i
+      parts = [host = +""]
+      if absolute
+        scheme = @env["rack.url_scheme"] || "http"
+        host << "#{scheme}://"
+        raw = @env["HTTP_HOST"] || "#{@env['SERVER_NAME']}:#{@env['SERVER_PORT']}"
+        default = scheme == "https" ? ":443" : ":80"
+        raw = raw[0...-default.length] if raw.end_with?(default)
+        host << raw
+      end
+      parts << @env["SCRIPT_NAME"].to_s if add_script_name
+      parts << (addr || @env["PATH_INFO"]).to_s
+      File.join(parts)
+    end
+    alias_method :url, :uri
+    alias_method :to, :uri
+
     # `session` — the Hash-shaped session installed by the
     # session middleware (e.g. `Rack::Session::Cookie`). Returns
     # an empty Hash if no session middleware is in the chain,
