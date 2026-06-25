@@ -1005,7 +1005,23 @@ module Sinatra
       # `Access-Control-Allow-Origin` etc. — is visible in the
       # outgoing response without rebuilding the triplet.
       self.class.after_filters.each { |f| instance_exec(&f) }
+      apply_content_length(result)
       result
+    end
+
+    # Set Content-Length on the final response, like Sinatra's
+    # Response#finish: bytesize of an Array body when a content-type is
+    # present and none is set yet; and drop content-length + content-type for
+    # 1xx / 204 / 304 (no-body) responses. Streaming bodies (not Arrays) are
+    # left chunked.
+    def apply_content_length(triplet)
+      status, hdrs, body = triplet
+      if status < 200 || status == 204 || status == 304
+        hdrs.delete("content-length")
+        hdrs.delete("content-type")
+      elsif hdrs["content-type"] && !hdrs["content-length"] && body.is_a?(Array)
+        hdrs["content-length"] = body.map { |s| s.to_s.bytesize }.reduce(0, :+).to_s
+      end
     end
 
     # Sinatra's default "no route matched" 404. In production a plain
