@@ -1218,22 +1218,28 @@ module Sinatra
     #     exists; `layout: false` disables, `layout: :name` picks another.
     # `locals:` (template-local vars) are still deferred — they need
     # Binding#local_variable_set, which rubyrs doesn't expose yet.
-    def erb(template, options = {}, _locals = {})
+    def erb(template, options = {}, locals = {})
       require "erubi"
       views = self.class.settings_store[:views] || "./views"
       src = template.is_a?(Symbol) ? File.read(File.join(views, "#{template}.erb")) : template.to_s
-      rendered = eval(Erubi::Engine.new(src).src, binding)
+      # `locals:` — expose each as a template-local variable. Prepend
+      # assignments from the `locals` hash to the compiled source (no
+      # Binding#local_variable_set needed; the eval runs in this method's
+      # binding, where `locals` is in scope). Real Sinatra passes locals to
+      # both the template and its layout.
+      preamble = locals.keys.map { |k| "#{k} = locals[#{k.inspect}];" }.join
+      rendered = eval(preamble + Erubi::Engine.new(src).src, binding)
       layout = options.key?(:layout) ? options[:layout] : :layout
       if layout
         lname = layout == true ? :layout : layout
         lpath = File.join(views, "#{lname}.erb")
         if File.exist?(lpath)
-          # Wrap the layout's compiled source in a method so its `<%= yield %>`
-          # yields the inner-rendered content (like Tilt does).
+          # Wrap the layout's compiled source in a method (so its
+          # `<%= yield %>` yields the inner render) that takes the locals.
           lmod = Module.new
-          lmod.module_eval("def __erb_layout\n#{Erubi::Engine.new(File.read(lpath)).src}\nend")
+          lmod.module_eval("def __erb_layout(locals)\n#{preamble}#{Erubi::Engine.new(File.read(lpath)).src}\nend")
           extend(lmod)
-          rendered = __erb_layout { rendered }
+          rendered = __erb_layout(locals) { rendered }
         end
       end
       rendered
