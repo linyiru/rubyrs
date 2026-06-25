@@ -179,6 +179,11 @@ module Rack
 end
 
 module Sinatra
+  # rubyrs's blessed in-tree Sinatra (`require "sinatra"` / `"sinatra/base"`
+  # resolve here via stdlib_vendor). MUST NOT engine-branch on RUBYRS
+  # (ADR 0026 v2 anti-pattern). Grown from the micro sinatra_lite toward a
+  # real/complete Sinatra; the diff_framework Sinatra fixtures are its gate.
+  VERSION = "4.2.1-rubyrs".freeze unless defined?(VERSION)
   # Sinatra's params hash: a key is reachable as either a String or a
   # Symbol (`params["id"]` == `params[:id]`). Real Sinatra uses
   # Sinatra::IndifferentHash; this is the same contract, String-backed.

@@ -5413,6 +5413,11 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         // `optparse`: vendored real parser (stdlib_vendor/optparse.rb)
         | "optparse"
         | "bigdecimal" | "bigdecimal/util" | "monitor" | "erb"
+        // `sinatra` / `sinatra/base` / `sinatra/version`: rubyrs's blessed
+        // in-tree micro-Sinatra (stdlib_vendor/sinatra_base.rb). Lets a real
+        // Sinatra app + the sinatra-* extension gems load with zero code
+        // change (`require "sinatra"`), instead of pulling the real gem.
+        | "sinatra" | "sinatra/base" | "sinatra/version"
         // `pp`: Kernel#pp is native; the vendored pp.rb adds
         // Object#pretty_inspect + the PP module. faraday's logging
         // formatter `require 'pp'` for `Hash#pretty_inspect`.

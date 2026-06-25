@@ -22,7 +22,7 @@ HARNESS_SECS = (ENV["HARNESS_SECS"] || "15").to_i
 
 if defined?(RUBYRS)
   # ---- rubyrs path: vendored micro-Sinatra on the _http_server battery ----
-  require_relative "vendor/sinatra_lite"
+  require "sinatra/base"
   SERVER_BACKEND = "rubyrs micro-Sinatra (_http_server battery)"
   HARNESS_RUN_APP = ->(app_class) {
     app_class.run!(bind: "127.0.0.1", port: HARNESS_PORT, duration: HARNESS_SECS)

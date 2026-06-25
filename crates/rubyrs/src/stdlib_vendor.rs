@@ -164,6 +164,17 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         // (exception, path, frames, ...), which Kernel#binding now
         // captures. The Compiler is verbatim so output is byte-exact.
         "erb" => Some(include_str!("stdlib_vendor/erb.rb")),
+        // Sinatra: rubyrs's blessed in-tree micro-Sinatra (B1 / native
+        // framework core). `require "sinatra"` / `"sinatra/base"` resolve
+        // here so a real Sinatra app — and the sinatra-* extension gems
+        // (sinatra-param/cors/flash, which do a bare `require
+        // "sinatra/base"`) — load with ZERO code change. The full source
+        // lives under "sinatra/base"; "sinatra" and "sinatra/version" just
+        // chain to it (require tracks each name once). `run!` needs the
+        // `_http_server` battery; in-process `app.call(env)` does not.
+        "sinatra/base" => Some(include_str!("stdlib_vendor/sinatra_base.rb")),
+        "sinatra" => Some("require \"sinatra/base\"\n"),
+        "sinatra/version" => Some("require \"sinatra/base\"\n"),
         "pp" => Some(include_str!("stdlib_vendor/pp.rb")),
         "bigdecimal/util" => Some(include_str!("stdlib_vendor/bigdecimal_util.rb")),
         "set" => Some(include_str!("stdlib_vendor/set.rb")),

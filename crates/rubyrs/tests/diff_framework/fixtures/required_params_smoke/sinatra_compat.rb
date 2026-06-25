@@ -7,7 +7,7 @@ HARNESS_PORT = (ENV["HARNESS_PORT"] || "9299").to_i
 HARNESS_SECS = (ENV["HARNESS_SECS"] || "15").to_i
 
 if defined?(RUBYRS)
-  require_relative "../sinatra_hello/vendor/sinatra_lite"
+  require "sinatra/base"
   $LOAD_PATH.unshift File.expand_path("vendor", __dir__)
   require "sinatra/required_params"
   SERVER_BACKEND = "rubyrs micro-Sinatra (_http_server battery)"

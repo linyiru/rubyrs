@@ -13,7 +13,7 @@ HARNESS_PORT = (ENV["HARNESS_PORT"] || "9295").to_i
 HARNESS_SECS = (ENV["HARNESS_SECS"] || "15").to_i
 
 if defined?(RUBYRS)
-  require_relative "../sinatra_hello/vendor/sinatra_lite"
+  require "sinatra/base"
   # Put this fixture's vendor/ on the load path so the
   # vendored sinatra/jsonp.rb's `require 'multi_json'` finds
   # the shim, and so `require 'sinatra/jsonp'` resolves to
