@@ -849,6 +849,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn hash_literal_dedup() { run_diff("hash_literal_dedup"); }
 #[test] fn throw_no_backtrace() { run_diff("throw_no_backtrace"); }
 #[test] fn dir_pwd_cache() { run_diff("dir_pwd_cache"); }
+#[test] fn norecv_self_dispatch() { run_diff("norecv_self_dispatch"); }
 #[test] fn gc_stat() { run_diff("gc_stat"); }
 #[cfg(feature = "stdlib")]
 #[test] fn kernel_printf() { run_diff("kernel_printf"); }

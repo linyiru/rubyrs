@@ -7523,6 +7523,17 @@ impl Vm {
         // refinements active, only the few refined names detour.
         let maybe_refined = !self.refined_method_names.is_empty()
             && self.refined_method_names.contains(&name_id);
+        // Implicit-self cached fast path (ADR 0031 increment 1): a bare
+        // `foo(args)` on an Object self — the bulk of a Sinatra request —
+        // otherwise falls through the whole cascade. `!host_fns` keeps a
+        // host-registered function's precedence (matches the toplevel
+        // path). −2.3% wall on the Sinatra request; see the helper's doc.
+        if no_recv && !maybe_refined && !force_primitive
+            && !self.host_fns.contains_key(&name_id)
+            && self.try_invoke_self_recv_cached(name_id, argc, cache_id)?
+        {
+            return Ok(());
+        }
         // Hash per-instance eigenclass methods (`def h.x` /
         // `h.define_singleton_method`) override EVERYTHING below,
         // including the primitive/index fast paths. Gated on the
@@ -14854,6 +14865,62 @@ impl Vm {
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
         // the first last_match write inside this method scope.
         Ok(true)
+    }
+
+    /// Implicit-self (`no_recv`) cached fast path — the sibling of
+    /// `try_invoke_explicit_recv_cached` for a bare `foo(args)` whose
+    /// receiver is the current frame's `self` (ADR 0031 increment 1). The
+    /// bulk of a Sinatra request is helper/DSL calls on an Object self,
+    /// yet they fell through the whole cascade: the explicit-recv fast
+    /// path gates on `!no_recv` and the toplevel no_recv fast path handles
+    /// only main/nil self. Resolves via the SAME `try_class_of` +
+    /// `lookup_method_cached` the slow path uses (singletons + the
+    /// polymorphic inline cache resolve identically). Differs from the
+    /// explicit path: receiver is `self` (nothing to pop — a no_recv stack
+    /// is `[.., a1..aN]`), and NO visibility gate (an implicit-self call
+    /// legally invokes private AND protected methods). Returns `Ok(false)`
+    /// (stack untouched) on any miss → full path runs unchanged.
+    ///
+    /// `main` is excluded: a top-level `def` is a toplevel-table entry
+    /// (NOT a normal Object method) that must win over a same-named Kernel
+    /// method, so `main`'s implicit calls need the toplevel + slow paths.
+    ///
+    /// MEASUREMENT NOTE (the research payoff): this path executes +15.6%
+    /// MORE instructions-retired, yet is −2.3% WALL / −1.7% cycles. The
+    /// extra instructions (the lookup, plus a second resolution for the
+    /// ~49% that miss the arity gate) are cheap + branch-predicted, while
+    /// fast-pathing the ~51% that hit avoids the slow cascade's
+    /// memory-stally work — a net wall win. Instructions-retired is
+    /// actively MISLEADING for dispatch/memory-pattern changes; wall +
+    /// cycles are the arbiters. (Increment 1 was nearly discarded on the
+    /// instruction count alone.)
+    fn try_invoke_self_recv_cached(
+        &mut self,
+        name_id: SymId,
+        argc: usize,
+        cache_id: u16,
+    ) -> Result<bool, Trap> {
+        let self_val = match self.frames.last() {
+            Some(f) => f.self_val.clone(),
+            None => return Ok(false),
+        };
+        let id = match &self_val {
+            Value::Object(id) => *id,
+            _ => return Ok(false),
+        };
+        if self.is_main_self(&self_val) {
+            return Ok(false);
+        }
+        let Some(cls) = self.heap.try_class_of(id) else {
+            return Ok(false);
+        };
+        let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) else {
+            return Ok(false);
+        };
+        if m.builtin.is_some() {
+            return Ok(false);
+        }
+        self.try_invoke_fixed_method_from_stack(m, self_val, argc, None)
     }
 
     /// Block-form sibling of `try_invoke_explicit_recv_cached`.
