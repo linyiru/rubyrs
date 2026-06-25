@@ -18080,20 +18080,30 @@ impl Vm {
                     msg: format!("negative array size ({})", size),
                 }));
             }
-            // Pin both the block (which the iter closure captures
-            // through frames; if GC reaps it mid-loop the next
-            // step_block call segfaults) and a running Vec<Value>
-            // accumulator (via a placeholder Array allocation).
-            // The accumulator is rebuilt as a real Array at the end
-            // — pinning it as we go would mean N allocations
-            // instead of 1, which defeats the purpose of the
-            // pre-sized Vec.
+            // Pin the block (the iter closure captures it through
+            // frames; if GC reaps it mid-loop the next step_block
+            // segfaults) AND the result Array. The block can allocate
+            // (e.g. `{ Foo.new }`) and trigger GC on any iteration, so
+            // the elements accumulated so far MUST be a GC root — a
+            // plain Rust `Vec<Value>` is invisible to the collector, so
+            // the prior code's accumulator got swept mid-build (its
+            // slots recycled → element aliasing → use-after-free under
+            // heap pressure / STRESS_GC). Accumulate directly into a
+            // pinned heap Array instead: the GC walks the pinned
+            // array's already-pushed elements, so they survive. Still
+            // ONE backing allocation (pre-sized Vec) — the per-element
+            // `push` grows that Vec, it does NOT allocate heap slots.
             let mut g = PinGuard::new(self);
             g.pin(Value::Block(block));
+            g.vm.check_alloc()?;
+            let aid = g
+                .vm
+                .heap
+                .alloc(HeapObj::Array(Vec::with_capacity(size.max(0) as usize).into()));
+            g.pin(Value::Array(aid));
             // pre_frames captures the frame depth so step_block can
             // detect non-local return / break correctly.
             let pre_frames = g.vm.frames.len();
-            let mut elems: Vec<Value> = Vec::with_capacity(size.max(0) as usize);
             for i in 0..size {
                 match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
                     super::iter::BlockStep::MethodReturn => return Ok(()),
@@ -18101,12 +18111,9 @@ impl Vm {
                         g.vm.stack.push(v);
                         return Ok(());
                     }
-                    super::iter::BlockStep::Value(v) => elems.push(v),
+                    super::iter::BlockStep::Value(v) => g.vm.heap.array_mut(aid).push(v),
                 }
             }
-            g.vm.maybe_gc();
-            g.vm.check_alloc()?;
-            let aid = g.vm.heap.alloc(HeapObj::Array(elems.into()));
             g.vm.stack.push(Value::Array(aid));
             return Ok(());
         }
