@@ -658,12 +658,23 @@ module Sinatra
       end
 
       def call(env)
-        (@built_app ||= build_app).call(env)
+        # Class entry point: a fresh instance per request, wrapped in the
+        # middleware chain (`App.call` for a no-arg app, or via the request
+        # server). Custom-initialize apps go through the instance path below.
+        (@built_app ||= build_middleware(->(e) { new.dispatch(e) })).call(env)
       end
 
       def build_app
-        app_class = self
-        inner = ->(env) { app_class.new.dispatch(env) }
+        build_middleware(->(e) { new.dispatch(e) })
+      end
+
+      # Wrap `inner` (a `->(env)` that runs the app's dispatch) in the
+      # middleware chain: any `use`d middleware plus the auto-wired session
+      # cookie. The SAME chain is used for the class call path (fresh
+      # instance per request) and the instance path (`dup` of a pre-built
+      # modular app per request) — so `run App.new(repo)` gets sessions /
+      # host_authorization / `use`d middleware exactly like `App.call`.
+      def build_middleware(inner)
         stack = middleware_stack.dup
         # `enable :sessions` auto-wires the session-cookie middleware, like
         # Sinatra's setup_sessions (`use session_store` when `sessions?`) —
@@ -808,11 +819,15 @@ module Sinatra
     # Instance `call` — the Rack entry point for a MODULAR app used as a
     # pre-built instance: `run TodoApp.new(repo)` (config.ru), where the
     # custom `initialize(repo)` means the class-level `call` (`new.dispatch`)
-    # can't construct it. `dup` per request so the shared prototype state
-    # (e.g. @repo) is preserved while @env/@params/@status stay per-request
-    # — mirrors real Sinatra's `def call(env); dup.call!(env); end`.
+    # can't construct it. Routes through the SAME middleware chain as the
+    # class path (build_middleware), so a modular instance app gets sessions
+    # / host_authorization / `use`d middleware too — closing the gap where
+    # `dup.dispatch` bypassed them. `dup` per request preserves the shared
+    # prototype state (e.g. @repo) while @env/@params/@status stay
+    # per-request — mirrors real Sinatra's `def call(env); dup.call!(env)`.
     def call(env)
-      dup.dispatch(env)
+      @built_app ||= self.class.build_middleware(->(e) { dup.dispatch(e) })
+      @built_app.call(env)
     end
 
     # Rack::Protection::HostAuthorization, faithfully: accept when the
