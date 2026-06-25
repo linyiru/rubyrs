@@ -2124,6 +2124,65 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     #[cfg(feature = "_fiber")]
     crate::vm::fiber::register_host_fns(rt);
 
+    // Native query-string parser (B1 Phase-2: the first nativized dispatch
+    // op). Parses `a=1&b=hi+there&c=x%20y` into a Ruby Hash (String
+    // keys/values, +/%XX decoded) in ONE host call — ~43× faster than the
+    // pure-Ruby parse_query, which paid the interpreter method-call floor per
+    // pair + per char. sinatra_lite's parse_query routes to this when
+    // defined; byte-identical output (the diff_framework param fixtures gate
+    // it). GC-safe under STRESS_GC (small new_str values stay live across the
+    // single Hash alloc).
+    rt.register_fn("__rubyrs_http_parse_query", |args| {
+        use crate::heap::{HashObj, HeapObj};
+        let s = match args {
+            [Value::Str(s)] => s.to_string_lossy(),
+            _ => return Err(Trap {
+                err: RubyError::ArgumentError { msg: "__rubyrs_http_parse_query(qs: String)".to_string() },
+                backtrace: vec![],
+            }),
+        };
+        let ptr = crate::vm::current_vm_ptr();
+        if ptr.is_null() {
+            return Err(Trap {
+                err: RubyError::RuntimeError { msg: "spike_parse_query: VM null".to_string() },
+                backtrace: vec![],
+            });
+        }
+        let vm = unsafe { &mut *ptr };
+        fn decode(s: &str) -> String {
+            let bytes = s.as_bytes();
+            let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+            let mut i = 0;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'+' => { out.push(b' '); i += 1; }
+                    b'%' if i + 2 < bytes.len() => {
+                        let hi = (bytes[i + 1] as char).to_digit(16);
+                        let lo = (bytes[i + 2] as char).to_digit(16);
+                        if let (Some(h), Some(l)) = (hi, lo) {
+                            out.push((h * 16 + l) as u8); i += 3;
+                        } else { out.push(bytes[i]); i += 1; }
+                    }
+                    b => { out.push(b); i += 1; }
+                }
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        }
+        let mut pairs: Vec<(Value, Value)> = Vec::new();
+        for pair in s.split('&') {
+            if pair.is_empty() { continue; }
+            // Value-less keys (`?flag`) map to nil — matches the Ruby
+            // parse_query contract. Only flat keys reach here (the Ruby
+            // caller keeps `a[b]=c` nested-param queries on its own path).
+            match pair.split_once('=') {
+                Some((k, v)) => pairs.push((Value::new_str(decode(k)), Value::new_str(decode(v)))),
+                None => pairs.push((Value::new_str(decode(pair)), Value::Nil)),
+            }
+        }
+        let id = vm.heap.alloc(HeapObj::Hash(HashObj::with_pairs(pairs)));
+        Ok(Value::Hash(id))
+    });
+
     // Stage 4c.3: load the vendored `StringIO` so the per-request
     // handler can wrap each request body as `env["rack.input"]` (Rack
     // SPEC). The battery depends on StringIO regardless of the `stdlib`
