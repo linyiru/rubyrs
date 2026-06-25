@@ -29,13 +29,13 @@ first-match-wins).
 
 ## Results (rubyrs, sinatra-4.2.1)
 
-`parity_test.rb` runs 17 request shapes through the same app with the shim
+`parity_test.rb` runs 19 request shapes through the same app with the shim
 enabled vs disabled and asserts `[status, headers, body]` are
 byte-identical **and** that the fast path was actually taken on eligible
 routes / fell back on the rest:
 
 ```
-PARITY: PASS (17/17)
+PARITY: PASS (19/19)
   static  full=135.9  fast=115.0  1.18x
   param   full=173.3  fast=136.6  1.27x
   json    full=260.1  fast=227.7  1.14x
@@ -43,24 +43,34 @@ PARITY: PASS (17/17)
 
 Covered: static, `:param` (params-style + block-arg-style), multi-param,
 query params, `content_type`, explicit `status`, `redirect`, `halt`
-(string and `[status,headers,body]`), bare array return, HEAD, 404,
-condition-guarded route (provides), splat, regexp, and the
+(string and `[status,headers,body]`), bare array return, **a raising route
+(→500)**, **a raising route with a custom `error` handler (→422)**, HEAD,
+404, condition-guarded route (provides), splat, regexp, and the
 ineligible-before-eligible order case.
 
 ## Honest decomposition / where the win is
 
-- **This shim (route!-override): ~1.2×, fully safe.** It reuses all of
-  Sinatra's call!/invoke semantics, so it can't diverge — but it only
-  recovers the mustermann route! loop, which is a *small* fraction.
-- **~2× needs a `call!` replacement (Phase 1b):** a separate PoC that
-  reimplemented the lean call! (skipping dispatch!/invoke nesting, leaner
-  param handling) measured **2.0–2.4×** and stayed byte-identical — but it
-  reimplements more of Sinatra, so it must be gated by this parity test
-  before shipping. Still reuses Ruby `Request`/`Response`.
+- **This shim (route!-override): ~1.2×, fully safe AND faithful.** It
+  reuses all of Sinatra's call!/dispatch!/invoke semantics — including the
+  rescue/ensure that handles raised routes, custom `error` blocks, and
+  after-filters-on-error (covered: `raise-500`, `custom-error`). It only
+  short-circuits the mustermann route! loop, a *small* fraction → ~1.2×.
+- **A `call!` replacement does NOT cleanly buy more.** An earlier PoC that
+  reimplemented a lean call! measured ~2.0–2.4× — but it was UNFAITHFUL:
+  it skipped dispatch!'s rescue/ensure, so it only worked on the happy
+  path and would diverge on error / custom-error / after-on-error routes
+  (the cases this test now covers). A *faithful* call! replacement has to
+  add that machinery back, which collapses the win toward ~1.2×. So **~1.2×
+  is the safe Ruby ceiling** for dispatch; pure-Ruby has little more to give.
 - **~10–20× needs native-backed lazy `Request`/`Response` (Phase 2):** the
-  ~50µs of per-request object construction is recoverable only in Rust.
-  This is the multi-quarter part (big Rack::Request API surface).
+  ~50µs of per-request object construction (Request/Response/IndifferentHash
+  + response.finish) is recoverable only in Rust. This is the multi-quarter
+  part (big Rack::Request API surface) and is the actual B1 lever.
 - Floor is ~2.3µs (interpret the route block + wrap), matching bare Rack.
+
+Net: Phase 1 (this shim) is a safe ~1.2× foundation + the parity gate. The
+next real step is Phase 2 (native Request/Response), not a fancier Ruby
+dispatch.
 
 ## Run
 

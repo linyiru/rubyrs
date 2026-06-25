@@ -67,6 +67,16 @@ class App < Sinatra::Base
   get "/array_ret" do                   # bare [status, headers, body] return
     [202, { "X-R" => "z" }, "arr"]
   end
+  get "/boom" do                        # raises → error handling (dispatch! rescue)
+    raise "boom"
+  end
+  get "/custom_err" do                  # raises → custom error handler below
+    raise ArgumentError, "bad"
+  end
+  error ArgumentError do                 # custom error block + after-filter-on-error
+    status 422
+    "handled: #{env['sinatra.error'].message}"
+  end
   # order-sensitivity: an ELIGIBLE-looking path that is actually guarded by a
   # condition (ineligible) is defined BEFORE the plain one. The shim must NOT
   # let the plain one win for an Accept: it can't evaluate.
@@ -119,6 +129,8 @@ CASES = [
   ["halt-string",   "/halt_s",    "",       {},                 true],
   ["halt-code",     "/halt_code", "",       {},                 true],
   ["array-return",  "/array_ret", "",       {},                 true],
+  ["raise-500",     "/boom",      "",       {},                 true],
+  ["custom-error",  "/custom_err","",       {},                 true],
   ["HEAD",          "/",          "",       { method: "HEAD" }, true],
   ["404",           "/nope",      "",       {},                 false],
   ["cond-json",     "/cond",      "",       { accept: "application/json" }, false],
