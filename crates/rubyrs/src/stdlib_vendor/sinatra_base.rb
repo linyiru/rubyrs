@@ -949,7 +949,7 @@ module Sinatra
               @status = 404
               finalize(instance_exec(&nf))
             else
-              [404, { "content-type" => "text/plain" }, ["Not Found\n"]]
+              default_not_found_response
             end
           end
         rescue UncaughtThrowError
@@ -958,13 +958,17 @@ module Sinatra
           raise
         rescue => e
           # Route raised — dispatch to a registered `error` handler if one
-          # matches the exception's class; otherwise re-raise (the server
-          # maps it to a 500).
+          # matches the exception's class; otherwise Sinatra's default
+          # production handler returns a 500 page (`<h1>Internal Server
+          # Error</h1>`) instead of letting the exception escape.
           handler = error_handler_for(e)
-          raise unless handler
           @sinatra_error = e
           @status = 500 # default error status; the handler may override
-          finalize(instance_exec(&handler))
+          if handler
+            finalize(instance_exec(&handler))
+          else
+            [500, { "content-type" => "text/html;charset=utf-8" }, ["<h1>Internal Server Error</h1>"]]
+          end
         end
       end
       # After-filters run regardless of halt / normal exit / error
@@ -975,6 +979,43 @@ module Sinatra
       # outgoing response without rebuilding the triplet.
       self.class.after_filters.each { |f| instance_exec(&f) }
       result
+    end
+
+    # Sinatra's default "no route matched" 404. In production a plain
+    # `<h1>Not Found</h1>`; in development the styled "ditty" page (the
+    # configure :development NotFound handler), with a code suggestion for
+    # the unmatched route — byte-matching real Sinatra.
+    def default_not_found_response
+      # The styled "ditty" page is registered by Sinatra's `configure
+      # :development` at LIBRARY-LOAD time and then inherited — so it shows
+      # whenever Sinatra was loaded with RACK_ENV/APP_ENV unset-or-development
+      # (the common dev run), regardless of a later `set :environment`. Mirror
+      # that by keying off the env vars, not the app's current environment.
+      load_env = (defined?(ENV) && (ENV["APP_ENV"] || ENV["RACK_ENV"])) || "development"
+      body = load_env.to_s == "development" ? sinatra_not_found_page : "<h1>Not Found</h1>"
+      [404, { "content-type" => "text/html;charset=utf-8" }, [body]]
+    end
+
+    def sinatra_not_found_page
+      require "cgi"
+      meth = (@env["REQUEST_METHOD"] || "GET").downcase
+      path = @env["PATH_INFO"]
+      if defined?(::Sinatra::Application) && self.class == ::Sinatra::Application
+        code = "#{meth} '#{path}' do\n  \"Hello World\"\nend\n"
+      else
+        code = "class #{self.class}\n  #{meth} '#{path}' do\n    \"Hello World\"\n  end\nend\n"
+        # Base subclasses don't track app_file; fall back to $0 (the running
+        # script) — correct for the common single-file app.
+        file = (self.class.settings_store[:app_file] || $0).to_s
+        code = "# in #{File.basename(file)}\n#{code}" unless file.empty?
+      end
+      sn = @env["SCRIPT_NAME"].to_s
+      "<!DOCTYPE html>\n<html>\n<head>\n  <style type=\"text/css\">\n" \
+      "  body { text-align:center;font-family:helvetica,arial;font-size:22px;\n" \
+      "    color:#888;margin:20px}\n  #c {margin:0 auto;width:500px;text-align:left}\n" \
+      "  </style>\n</head>\n<body>\n  <h2>Sinatra doesn’t know this ditty.</h2>\n" \
+      "  <img src='#{sn}/__sinatra__/404.png'>\n  <div id=\"c\">\n    Try this:\n" \
+      "    <pre>#{CGI.escapeHTML(code)}</pre>\n  </div>\n</body>\n</html>\n"
     end
 
     # Wrap a route's return value into a Rack body triplet. A streaming
