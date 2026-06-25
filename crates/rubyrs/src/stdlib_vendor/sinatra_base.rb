@@ -934,6 +934,9 @@ module Sinatra
       # `halt`/`redirect` `throw :halt, triplet`; the catch returns it.
       result = catch(:halt) do
         begin
+          # Static files (public folder) are served before routing, like
+          # Sinatra's static! — halts with the file response on a hit.
+          serve_static!
           matched = nil
           self.class.routes_array.each do |entry|
             route_verb, pattern, block, conditions = entry[0], entry[1], entry[2], entry[3]
@@ -1065,6 +1068,60 @@ module Sinatra
     # env["sinatra.error"]; we also keep it here for helpers).
     def request
       @request ||= Request.new(@env)
+    end
+
+    # Extension → media type for static/send_file (Sinatra uses Rack::Mime's
+    # big table; this is the common static-asset subset).
+    MIME_BY_EXT = {
+      ".html" => "text/html", ".htm" => "text/html", ".css" => "text/css",
+      ".js" => "application/javascript", ".mjs" => "application/javascript",
+      ".json" => "application/json", ".xml" => "application/xml",
+      ".txt" => "text/plain", ".csv" => "text/csv", ".md" => "text/markdown",
+      ".png" => "image/png", ".jpg" => "image/jpeg", ".jpeg" => "image/jpeg",
+      ".gif" => "image/gif", ".svg" => "image/svg+xml", ".ico" => "image/vnd.microsoft.icon",
+      ".webp" => "image/webp", ".bmp" => "image/bmp",
+      ".woff" => "font/woff", ".woff2" => "font/woff2", ".ttf" => "font/ttf", ".otf" => "font/otf",
+      ".pdf" => "application/pdf", ".zip" => "application/zip",
+      ".mp4" => "video/mp4", ".webm" => "video/webm", ".mp3" => "audio/mpeg",
+      ".map" => "application/json", ".wasm" => "application/wasm",
+    }.freeze
+
+    # `send_file(path, opts)` — serve a file: content-type from its extension
+    # (text types get ;charset=utf-8 via content_type), content-length,
+    # last-modified, and `x-content-type-options: nosniff`, byte-matching
+    # real Sinatra's Rack::Files-backed serving. A missing file 404s.
+    # opts: :type, :filename/:disposition (Content-Disposition), :status.
+    def send_file(path, opts = {})
+      unless File.file?(path)
+        @status = 404
+        throw :halt, default_not_found_response
+      end
+      mime = opts[:type] || MIME_BY_EXT[File.extname(path).downcase] || "application/octet-stream"
+      content_type(mime)
+      headers["content-length"] = File.size(path).to_s
+      headers["last-modified"]  = File.mtime(path).httpdate
+      headers["x-content-type-options"] = "nosniff"
+      if (fn = opts[:filename]) || (disp = opts[:disposition])
+        disp ||= :attachment
+        fname = fn || File.basename(path)
+        headers["content-disposition"] = "#{disp}; filename=\"#{fname}\""
+      end
+      data = File.binread(path)
+      throw :halt, [opts[:status] || 200, headers, [data]]
+    end
+
+    # Serve a file from the public folder (`set :public_folder, dir`) before
+    # routing, for GET/HEAD — Sinatra's static!. Path-traversal-safe: the
+    # resolved path must stay under the public folder. Halts on a hit.
+    def serve_static!
+      return unless %w[GET HEAD].include?(@env["REQUEST_METHOD"])
+      pub = self.class.settings_store[:public_folder]
+      return if pub.nil? || pub.to_s.empty?
+      candidate = "#{pub}#{unescape(@env['PATH_INFO'] || '')}"
+      full = File.expand_path(candidate)
+      return unless full.start_with?("#{File.expand_path(pub)}/")
+      return unless File.file?(full)
+      send_file(full)
     end
 
     # Content negotiation: from the request's Accept header, return the first
