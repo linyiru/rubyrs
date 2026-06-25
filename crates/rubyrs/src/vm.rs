@@ -1330,6 +1330,12 @@ pub(crate) struct Vm {
     /// Pre-interned `call` for the proc/lambda-invocation fast path in
     /// do_call (skips the primitive-dispatch cascade for `p.call(...)`).
     pub(crate) sym_call: SymId,
+    /// Cached current working directory (the `getcwd` result). `Dir.pwd`
+    /// / `File.expand_path(rel)` resolve the cwd on every call; on macOS
+    /// `getcwd` opens + walks the filesystem, which dominated a Sinatra
+    /// request (Rack expand_path's per request). The cwd only changes via
+    /// `Dir.chdir`, so cache it and invalidate there. `None` = unresolved.
+    pub(crate) cwd_cache: Option<String>,
     /// Pre-interned `new` / `initialize` for the class-intrinsic `new`
     /// dispatch (was re-interned per `Object.new` — hot in OOP code).
     pub(crate) sym_new: SymId,
@@ -1922,6 +1928,7 @@ impl Vm {
             sym_index_op,
             sym_index_set_op,
             sym_call,
+            cwd_cache: None,
             sym_new,
             sym_initialize,
             sym_key_q,

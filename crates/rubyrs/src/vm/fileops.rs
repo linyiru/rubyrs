@@ -509,6 +509,26 @@ impl Vm {
         }
     }
 
+    /// Current working directory as a String, CACHED (Vm::cwd_cache).
+    /// `getcwd` on macOS opens + walks the filesystem; `Dir.pwd` and
+    /// `File.expand_path(relative)` would pay it on every call. The cwd
+    /// only changes via `Dir.chdir` (which clears the cache), so cache the
+    /// first resolution. `None` only on a getcwd error (not cached, so it
+    /// retries).
+    pub(crate) fn cached_cwd(&mut self) -> Option<String> {
+        if self.cwd_cache.is_some() {
+            return self.cwd_cache.clone();
+        }
+        match std::env::current_dir() {
+            Ok(d) => {
+                let s = d.to_string_lossy().into_owned();
+                self.cwd_cache = Some(s.clone());
+                Some(s)
+            }
+            Err(_) => None,
+        }
+    }
+
     pub(crate) fn file_class_dispatch(&mut self, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
         // Pre-coerce path-like Object arguments (Pathname / Tempfile /
         // anything with `to_path` or `to_str`) to Strings up-front, so
@@ -1340,9 +1360,7 @@ impl Vm {
                     // File.expand_path — gems and
                     // `$LOAD_PATH.unshift` consumers rely on the
                     // absolute-shape).
-                    _ if wide_open => std::env::current_dir()
-                        .map(|d| d.to_string_lossy().into_owned())
-                        .unwrap_or_else(|_| ".".to_string()),
+                    _ if wide_open => self.cached_cwd().unwrap_or_else(|| ".".to_string()),
                     _ => "/".to_string(),
                 };
                 let p_path = Path::new(&path);
@@ -1465,11 +1483,7 @@ impl Vm {
             }
             ("pwd", []) | ("getwd", []) => {
                 self.check_filesystem_io_allowed("Dir.pwd", None)?;
-                Value::new_str(
-                    std::env::current_dir()
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                )
+                Value::new_str(self.cached_cwd().unwrap_or_default())
             }
             // `Dir.__chdir(path)` — the OS-level `set_current_dir`
             // backing the `Dir.chdir` veneer (preamble). The block /
@@ -1483,7 +1497,7 @@ impl Vm {
                 let path = str_arg(p)?;
                 self.check_filesystem_io_allowed("Dir.chdir", Some(Path::new(&path)))?;
                 match std::env::set_current_dir(&path) {
-                    Ok(()) => Value::new_str(path),
+                    Ok(()) => { self.cwd_cache = None; Value::new_str(path) }
                     Err(e) => {
                         return Err(self.trap(io_error(&e, Some(Path::new(&path)))));
                     }
