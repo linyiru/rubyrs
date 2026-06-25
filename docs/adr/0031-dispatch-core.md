@@ -151,3 +151,21 @@ arena-bind (no vec_nil, no copy) remains the only untried lever but
 carries early-return arena-corruption risk (no clean RAII across the
 interleaved rest/kw `heap.alloc`s) — a genuine fresh-context research
 problem. The dispatch/binder accessible wins are exhausted.
+
+## Full arena-bind VALIDATED (2026-06-24): NEUTRAL — binder is at its floor
+
+Implemented the full arena-bind as a happy-path WALL spike (bind directly
+into the GC-rooted arena, no vec_nil, no extend; locals PinGuards dropped;
+early-return truncation deferred since the Sinatra workload doesn't hit
+those paths). Correctness on the happy path verified (variadic + STRESS_GC
++ Sinatra all OK). WALL+cycles A/B (inc1 vs arena, 14 rounds): **WALL
++0.7% (within noise), CYCLES +0.2% — NEUTRAL.** Conclusions:
+  - The per-call `vec_nil` locals allocation is NOT a meaningful cost —
+    eliminating it (arena-bind) is net-zero.
+  - The scratch attempt's +10.4% was the `extend(drain(..))` iterator
+    overhead, NOT the alloc-elimination (arena-bind, which avoids extend
+    entirely, is neutral — isolating the cause).
+  - The variadic binding cost is purely the inherent binding logic.
+Neutral perf + the intricate early-return arena-corruption hardening it
+would still need = not worth shipping. **The dispatch/binder optimization
+frontier is conclusively exhausted.** Reverted to increment 1 (8c4be14b).
