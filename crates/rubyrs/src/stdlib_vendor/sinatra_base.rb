@@ -1134,10 +1134,23 @@ module Sinatra
         @status = 404
         throw :halt, default_not_found_response
       end
+      last_mod = File.mtime(path).httpdate
+      # Conditional GET: if the client's cached copy is current
+      # (If-Modified-Since >= the file's mtime, at httpdate's whole-second
+      # resolution), return 304 Not Modified with no body — like Rack::Files.
+      if (ims = @env["HTTP_IF_MODIFIED_SINCE"])
+        require "time"
+        not_modified = begin
+          Time.httpdate(last_mod) <= Time.httpdate(ims)
+        rescue StandardError
+          false
+        end
+        throw :halt, [304, {}, []] if not_modified
+      end
       mime = opts[:type] || MIME_BY_EXT[File.extname(path).downcase] || "application/octet-stream"
       content_type(mime)
       headers["content-length"] = File.size(path).to_s
-      headers["last-modified"]  = File.mtime(path).httpdate
+      headers["last-modified"]  = last_mod
       headers["x-content-type-options"] = "nosniff"
       if (fn = opts[:filename]) || (disp = opts[:disposition])
         disp ||= :attachment
