@@ -926,9 +926,16 @@ module Sinatra
       verb     = env["REQUEST_METHOD"]
       segs     = (env["PATH_INFO"] || "/").split("/").reject { |s| s.empty? }
       # Real Sinatra merges query-string AND form-body params (and path
-      # captures) into one indifferent (String/Symbol) `params` hash.
-      base_params = IndifferentHash.from(parse_query(env["QUERY_STRING"]))
-      base_params.merge!(parse_form_body)
+      # captures) into one indifferent (String/Symbol) `params` hash. Fast
+      # path: an empty query string on a non-body verb has no base params, so
+      # skip the parse + form-body work (the common GET case).
+      qs = env["QUERY_STRING"]
+      base_params =
+        if (qs.nil? || qs.empty?) && verb != "POST" && verb != "PUT" && verb != "PATCH"
+          IndifferentHash.new
+        else
+          IndifferentHash.from(parse_query(qs)).tap { |bp| bp.merge!(parse_form_body) }
+        end
 
       # method_override (Rack::MethodOverride): an HTML form can only GET/POST,
       # so a POST with `_method=put` (hidden field) — or an
@@ -959,7 +966,8 @@ module Sinatra
             matchdata = match(pattern, segs, env["PATH_INFO"] || "/")
             next unless matchdata
             captured, block_args = matchdata
-            @params = base_params.merge(captured)
+            # Avoid copying base_params when the route has no captures.
+            @params = captured.empty? ? base_params : base_params.merge(captured)
             # Per-route conditions — declared via `condition { ...
             # }` from inside a block-form `set(:key) { |arg| ... }`
             # handler. Each condition is a block that returns
@@ -1029,15 +1037,17 @@ module Sinatra
     # every response (XSSHeader nosniff); x-frame-options + x-xss-protection
     # only to HTML/XML responses (FrameOptions / XSSHeader are html-gated).
     # All use `||=` so an app/middleware that set its own value wins.
-    PROTECTION_HTML_TYPES = %w[text/html application/xhtml text/xml application/xml].freeze
 
     def apply_protection_headers(triplet)
       on = self.class.respond_to?(:protection?) ? self.class.protection? : true
       return unless on
       hdrs = triplet[1]
       hdrs["x-content-type-options"] ||= "nosniff"
-      ct = hdrs["content-type"].to_s[%r{^\w+/\w+}]
-      if PROTECTION_HTML_TYPES.include?(ct)
+      # html-gated headers — prefix check is cheaper than the `^\w+/\w+`
+      # regex and matches the same media types (charset suffix ignored).
+      ct = hdrs["content-type"]
+      if ct && (ct.start_with?("text/html") || ct.start_with?("text/xml") ||
+                ct.start_with?("application/xml") || ct.start_with?("application/xhtml"))
         hdrs["x-frame-options"] ||= "SAMEORIGIN"
         hdrs["x-xss-protection"] ||= "1; mode=block"
       end
