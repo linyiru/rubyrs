@@ -486,6 +486,24 @@ module Sinatra
       def configure(*envs)
         yield self if envs.empty? || envs.include?(environment)
       end
+
+      # `host_authorization` config (Rack::Protection::HostAuthorization).
+      # A Hash `{permitted_hosts: [...]}`, or a callable returning one.
+      # Default matches real Sinatra 4: in development, localhost/.localhost/
+      # .test + any IP (0.0.0.0/0, ::/0); in production, `{}` (empty → accept
+      # all). `set :host_authorization, {permitted_hosts: []}` ⇒ accept all.
+      def host_authorization
+        cfg = settings_store[:host_authorization]
+        cfg = cfg.call if cfg.respond_to?(:call)
+        return cfg if cfg
+        if development?
+          require "ipaddr"
+          { permitted_hosts: ["localhost", ".localhost", ".test",
+                              IPAddr.new("0.0.0.0/0"), IPAddr.new("::/0")] }
+        else
+          {}
+        end
+      end
       # Sinatra's `set :foo, val` doubles as both storage AND a
       # reflection surface — `settings.foo` returns the value
       # and `settings.respond_to?(:foo)` reports true. Real
@@ -781,8 +799,29 @@ module Sinatra
       dup.dispatch(env)
     end
 
+    # Rack::Protection::HostAuthorization, faithfully: accept when the
+    # permitted-host list is empty (production default / `permitted_hosts:
+    # []`); otherwise the Host (port stripped, downcased) must match an exact
+    # host, a `.domain` suffix, or fall inside a permitted IPAddr range —
+    # else 403 "Host not permitted". (X-Forwarded-Host is not yet checked.)
+    def host_authorized?(env)
+      permitted = Array(self.class.host_authorization[:permitted_hosts])
+      return true if permitted.empty?
+      host = (env["HTTP_HOST"] || "").split(/:\d+\z/).first.to_s.downcase
+      permitted.any? do |h|
+        if h.is_a?(IPAddr)
+          begin h.include?(IPAddr.new(host)); rescue StandardError; false; end
+        elsif h.respond_to?(:start_with?) && h.start_with?(".")
+          /\A[a-z0-9\-.]+#{Regexp.escape(h[1..-1].downcase)}\z/i.match?(host)
+        else
+          h.to_s.downcase == host
+        end
+      end
+    end
+
     def dispatch(env)
       @env     = env
+      return [403, { "content-type" => "text/plain" }, ["Host not permitted"]] unless host_authorized?(env)
       @status  = 200
       @headers = { "content-type" => "text/html" }
       verb     = env["REQUEST_METHOD"]
