@@ -260,7 +260,31 @@ module Sinatra
   class StreamingBody
     def initialize(blk)
       @blk = blk
+      @front = nil
+      @closed = false
     end
+
+    # Standard Rack streaming body: the server (or in-process consumer)
+    # calls `each` with a block; the route's `stream { |out| … }` block then
+    # runs with this body as `out`, and every `out << chunk` is yielded to
+    # that block. Mirrors real Sinatra's Stream#each. This makes `stream`
+    # work with `App.call(env)` and any Rack server, not just run!.
+    def each(&front)
+      @front = front
+      @blk.call(self)
+      self
+    end
+
+    def <<(data)
+      @front.call(data.to_s) if @front
+      self
+    end
+
+    def close;   @closed = true; end
+    def closed?; @closed; end
+
+    # run! / _http_server path: the Fiber-backed socket writer is `out`, so
+    # each `out << chunk` flushes a chunked HTTP/1.1 frame to the socket.
     def call(out)
       @blk.call(out)
       out.close
