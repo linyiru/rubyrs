@@ -335,8 +335,17 @@ impl Vm {
                         };
                         match first {
                             Some((k, v)) => {
-                                self.maybe_gc();
-                                let nid = self.heap.alloc(HeapObj::Array(vec![k, v].into()));
+                                // The pair was just REMOVED from the hash and is
+                                // held only in these Rust locals; the receiver
+                                // hash is off-stack (not a root) and no longer
+                                // contains them, so pinning it wouldn't help.
+                                // Pin k and v directly across maybe_gc + alloc
+                                // (else they're swept → dangling result slots).
+                                let mut g = PinGuard::new(self);
+                                g.pin(k.clone());
+                                g.pin(v.clone());
+                                g.vm.maybe_gc();
+                                let nid = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
                                 Some(Value::Array(nid))
                             }
                             None => Some(Value::Nil),

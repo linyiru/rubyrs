@@ -852,6 +852,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn norecv_self_dispatch() { run_diff("norecv_self_dispatch"); }
 #[test] fn attr_reader_getter_fastpath() { run_diff("attr_reader_getter_fastpath"); }
 #[test] fn array_new_block_gc_root() { run_diff("array_new_block_gc_root"); }
+#[test] fn hash_shift_gc_root() { run_diff("hash_shift_gc_root"); }
 #[test] fn gc_stat() { run_diff("gc_stat"); }
 #[cfg(feature = "stdlib")]
 #[test] fn kernel_printf() { run_diff("kernel_printf"); }
