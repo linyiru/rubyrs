@@ -142,7 +142,11 @@ module Rack
       private
 
       def load_session(env)
-        session = {}
+        # IndifferentHash so `session[:k]` and `session["k"]` are the same
+        # slot — Rack's SessionHash stringifies keys, and the JSON round-trip
+        # turns every key into a String, so a symbol-keyed write would
+        # otherwise read back nil. Matches real Rack session semantics.
+        session = ::Sinatra::IndifferentHash.new
         cookie_header = env["HTTP_COOKIE"]
         return session if cookie_header.nil? || cookie_header.empty?
         cookie_header.split(";").each do |pair|
@@ -660,7 +664,19 @@ module Sinatra
       def build_app
         app_class = self
         inner = ->(env) { app_class.new.dispatch(env) }
-        middleware_stack.reverse.inject(inner) do |inner_app, mw|
+        stack = middleware_stack.dup
+        # `enable :sessions` auto-wires the session-cookie middleware, like
+        # Sinatra's setup_sessions (`use session_store` when `sessions?`) —
+        # so `session[:k]` persists across requests with no explicit `use`.
+        # Skipped if already present (an app may `use Rack::Session::Cookie`).
+        sess = settings_store[:sessions]
+        if sess && stack.none? { |klass, _, _| klass == ::Rack::Session::Cookie }
+          opts = {}
+          opts[:secret] = settings_store[:session_secret] if settings_store[:session_secret]
+          opts.merge!(sess) if sess.respond_to?(:to_hash)
+          stack = [[::Rack::Session::Cookie, [opts], nil]] + stack
+        end
+        stack.reverse.inject(inner) do |inner_app, mw|
           klass, args, block = mw
           klass.new(inner_app, *args, &block)
         end
@@ -963,7 +979,7 @@ module Sinatra
     # this helper; the actual storage layer is whatever
     # middleware set `env["rack.session"]`.
     def session
-      @env["rack.session"] ||= {}
+      @env["rack.session"] ||= ::Sinatra::IndifferentHash.new
     end
 
     # `erb(template, options = {}, locals = {})` — render an ERB template in
