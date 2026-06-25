@@ -1006,7 +1006,27 @@ module Sinatra
       # outgoing response without rebuilding the triplet.
       self.class.after_filters.each { |f| instance_exec(&f) }
       apply_content_length(result)
+      apply_protection_headers(result)
       result
+    end
+
+    # Rack::Protection's default security headers (on by default;
+    # `set :protection, false` disables). x-content-type-options is added to
+    # every response (XSSHeader nosniff); x-frame-options + x-xss-protection
+    # only to HTML/XML responses (FrameOptions / XSSHeader are html-gated).
+    # All use `||=` so an app/middleware that set its own value wins.
+    PROTECTION_HTML_TYPES = %w[text/html application/xhtml text/xml application/xml].freeze
+
+    def apply_protection_headers(triplet)
+      on = self.class.respond_to?(:protection?) ? self.class.protection? : true
+      return unless on
+      hdrs = triplet[1]
+      hdrs["x-content-type-options"] ||= "nosniff"
+      ct = hdrs["content-type"].to_s[%r{^\w+/\w+}]
+      if PROTECTION_HTML_TYPES.include?(ct)
+        hdrs["x-frame-options"] ||= "SAMEORIGIN"
+        hdrs["x-xss-protection"] ||= "1; mode=block"
+      end
     end
 
     # Set Content-Length on the final response, like Sinatra's
@@ -1036,7 +1056,9 @@ module Sinatra
       # that by keying off the env vars, not the app's current environment.
       load_env = (defined?(ENV) && (ENV["APP_ENV"] || ENV["RACK_ENV"])) || "development"
       body = load_env.to_s == "development" ? sinatra_not_found_page : "<h1>Not Found</h1>"
-      [404, { "content-type" => "text/html;charset=utf-8" }, [body]]
+      # x-cascade: pass — Sinatra marks an unmatched route so a wrapping
+      # Rack::Cascade can fall through to the next app.
+      [404, { "content-type" => "text/html;charset=utf-8", "x-cascade" => "pass" }, [body]]
     end
 
     def sinatra_not_found_page
