@@ -8695,7 +8695,8 @@ impl Vm {
             // Motivating use: MRI `lib/erb.rb:264`
             // (`deprecate_constant :Revision`).
             if matches!(&*name, "private_constant" | "public_constant" | "deprecate_constant")
-                && let Value::Class(_) = &self_val {
+                && let Value::Class(owner) = &self_val {
+                self.record_const_visibility(owner.clone(), &name, &args);
                 self.stack.push(self_val);
                 return Ok(());
             }
@@ -10329,7 +10330,8 @@ impl Vm {
             return Ok(());
         }
         if matches!(&*name, "private_constant" | "public_constant" | "deprecate_constant")
-            && let Value::Class(_) = &recv {
+            && let Value::Class(owner) = &recv {
+            self.record_const_visibility(owner.clone(), &name, &args);
             self.stack.push(recv);
             return Ok(());
         }
@@ -15329,6 +15331,37 @@ impl Vm {
     /// const_added) is a silent no-op; the fast-path gate at the call
     /// site (`interner.contains("const_added")`) skips it entirely until
     /// some library installs one.
+    /// Record `private_constant`/`public_constant` on `owner` into
+    /// `self.private_consts` (keyed by the qualified `"Owner::Cname"`, or bare
+    /// at top level). Enforced on explicit `Owner::Cname` reads in
+    /// Op::LoadConst. `deprecate_constant` is ignored (rubyrs models no
+    /// deprecation warnings, and it doesn't change visibility).
+    pub(crate) fn record_const_visibility(&mut self, owner: Rc<crate::value::Class>, name: &str, args: &[Value]) {
+        let make_private = match name {
+            "private_constant" => true,
+            "public_constant" => false,
+            _ => return,
+        };
+        let owner_name = owner.effective_name();
+        for a in args {
+            let cn = match a {
+                Value::Sym(s) => self.interner.resolve(*s).to_string(),
+                Value::Str(s) => s.to_string_lossy(),
+                _ => continue,
+            };
+            let key = match owner_name.as_deref() {
+                None | Some("Object") => cn,
+                Some(on) => format!("{}::{}", on, cn),
+            };
+            let kid = self.interner.intern(&key);
+            if make_private {
+                self.private_consts.insert(kid);
+            } else {
+                self.private_consts.remove(&kid);
+            }
+        }
+    }
+
     pub(crate) fn fire_const_added(&mut self, owner: &Rc<crate::value::Class>, cname: SymId) -> Result<(), Trap> {
         let ca_sym = self.interner.intern("const_added");
         // Resolve `owner.const_added` the way a normal call would: the

@@ -846,6 +846,11 @@ pub(crate) struct Vm {
     /// relies on this — it `remove_const`s then raises Zeitwerk::NameError.
     /// Cleared when the constant is later actually defined.
     pub(crate) consumed_autoloads: std::collections::HashSet<SymId>,
+    /// Qualified const keys (`"M::X"` SymIds) marked `private_constant`.
+    /// CRuby raises "private constant M::X referenced" on EXPLICIT `M::X`
+    /// access (even from inside M), while bare/lexical reads and `const_get`
+    /// still work. Enforced in the qualified Op::LoadConst path only.
+    pub(crate) private_consts: std::collections::HashSet<SymId>,
     /// Per-call-site inline-cache counter. Each compiled `Op::Call`
     /// gets a unique u16 slot id; the Vm side allocates
     /// `call_caches[id]` lazily. Lives on the Vm so kernel
@@ -1822,6 +1827,7 @@ impl Vm {
             #[cfg(not(target_os = "wasi"))]
             autoloads_scoped: HashMap::new(),
             consumed_autoloads: std::collections::HashSet::new(),
+            private_consts: std::collections::HashSet::new(),
             cache_counter: 0,
             globals: FxHashMap::default(),
             toplevel_methods: FxHashMap::default(),

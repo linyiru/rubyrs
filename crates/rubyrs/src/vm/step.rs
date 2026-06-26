@@ -1711,6 +1711,17 @@ impl Vm {
                 }
             }
             Op::LoadConst(name_id) => {
+                // Explicit `Scope::Const` access to a `private_constant` always
+                // raises (CRuby), even from inside the owning module — bare /
+                // lexical reads (LoadConstChain) and `const_get` are unaffected.
+                // The flat LoadConst key is the qualified `"Scope::Const"`, which
+                // is exactly what `record_const_visibility` stored.
+                if !self.private_consts.is_empty() && self.private_consts.contains(&name_id) {
+                    let full = self.interner.resolve(name_id).to_string();
+                    return Err(self.trap(crate::error::RubyError::NameError {
+                        msg: format!("private constant {} referenced", full),
+                    }));
+                }
                 // Inline constant cache — resolution below depends only
                 // on the global tables, so a per-SymId entry tagged with
                 // `const_gen` short-circuits the whole walk. See the
@@ -2021,6 +2032,20 @@ impl Vm {
                                 && let crate::vm::dispatch::ConstPathOutcome::Found(v) =
                                     self.resolve_const_path(&head_cls, rest, true, true)
                             {
+                                // Explicit `Head::rest` read (the source wrote
+                                // `::`) — enforce `private_constant` on the
+                                // resolved single-segment const, matching the
+                                // flat LoadConst path. Bare lexical reads take
+                                // the `else` branch below and are unaffected.
+                                if !self.private_consts.is_empty() && !rest.contains("::") {
+                                    let pk = format!("{}::{}", head_cls.effective_name().unwrap_or_default(), rest);
+                                    let pkid = self.interner.intern(&pk);
+                                    if self.private_consts.contains(&pkid) {
+                                        return Err(self.trap(crate::error::RubyError::NameError {
+                                            msg: format!("private constant {} referenced", pk),
+                                        }));
+                                    }
+                                }
                                 found = Some(v);
                             }
                         } else {
