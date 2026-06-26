@@ -1405,6 +1405,44 @@ fn build_lexical_scope(
 /// runtime, given the lexical `class_path` at emit time. Returns
 /// `None` when the chain is just `[bare_sym]` (no inner scopes) —
 /// the caller should fall back to a plain `LoadConst(bare_sym)`
+/// For a qualified constant write `A::B::C = v`, emit a READ of the owner
+/// `A::B` (result popped) so its autoload chain fires before the store. CRuby
+/// resolves the owner to assign on it — raising if undefined — and a managed
+/// autoloader (zeitwerk) autovivifies + tracks each intermediate namespace as
+/// the owner resolves. Plain code just re-reads already-defined modules
+/// (idempotent). No-op for bare names (no `::`) and absolute writes (`::X = v`
+/// targets toplevel — no owner chain). Mirrors the `Expr::ConstReadOrNil` arm
+/// (OrNil so an undefined owner yields nil here instead of raising; the store
+/// itself still lands the flat key, preserving rubyrs's prior leniency).
+fn emit_const_owner_read(
+    b: &mut ProtoBuilder,
+    name: &str,
+    absolute: bool,
+    interner: &mut crate::intern::Interner,
+) {
+    if absolute {
+        return;
+    }
+    let Some((owner, _)) = name.rsplit_once("::") else {
+        return;
+    };
+    // FIRING reads (not the OrNil variants, which don't trigger autoloads):
+    // CRuby resolves a write's owner for real, firing its autoload chain and
+    // raising on a genuinely-undefined owner.
+    if let Some(abs) = crate::const_marker::strip_absolute(owner) {
+        let id = interner.intern(abs);
+        b.emit(Op::LoadConst(id));
+    } else if let Some(chain) = build_const_chain(&b.class_path, owner, interner) {
+        let idx = b.const_chains.len() as u32;
+        b.const_chains.push(chain);
+        b.emit(Op::LoadConstChain(idx));
+    } else {
+        let id = interner.intern(owner);
+        b.emit(Op::LoadConst(id));
+    }
+    b.emit(Op::Pop);
+}
+
 /// in that case (saves one indirection through `Proto.const_chains`).
 ///
 /// Chain order is innermost-scope first, matching CRuby's "cref
@@ -1546,6 +1584,14 @@ fn compile_stmt(
             // IVarWrite arms above. Saves `Dup + Pop` per top-level
             // `FOO = ...` line.
             compile_expr(b, val, protos, interner, cc);
+            // A qualified write `A::B::C = v` must RESOLVE its owner `A::B`
+            // first: CRuby raises if it's undefined, and a managed autoloader
+            // (zeitwerk) autovivifies + tracks each intermediate namespace as
+            // the owner chain resolves. Read the owner here (result discarded)
+            // to fire that autoload chain — rubyrs otherwise just inserted the
+            // flat `A::B::C` key, so `require`ing such a file directly left the
+            // deep namespaces untracked (zeitwerk test_require_interaction).
+            emit_const_owner_read(b, name, *absolute, interner);
             let id = interner.intern(name);
             // Class-path alias: inside `module Foo; X = 1; end`,
             // also store under `Foo::X` so `Foo::X` reads work
@@ -1783,6 +1829,9 @@ pub(crate) fn compile_expr(
             // class_path alias — see the stmt-form arm for the
             // rationale.
             compile_expr(b, val, protos, interner, cc);
+            // See the statement-form arm: resolve a qualified write's owner so
+            // its autoload chain fires (zeitwerk autovivification + tracking).
+            emit_const_owner_read(b, name, *absolute, interner);
             let id = interner.intern(name);
             let prefixed_id = (!b.class_path.is_empty() && !*absolute && !name.contains("::"))
                 .then(|| interner.intern(&format!("{}::{}", b.class_path.join("::"), name)));
