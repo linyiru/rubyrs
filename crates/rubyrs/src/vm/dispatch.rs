@@ -10160,9 +10160,33 @@ impl Vm {
                 let short = self.interner.intern(&const_name);
                 let found = self.classes.contains_key(&key)
                     || self.constants.contains_key(&key)
-                    || cls.consts.borrow().contains_key(&short);
+                    || cls.consts.borrow().contains_key(&short)
+                    // A registered-but-unloaded autoload counts as defined
+                    // (CRuby): `const_defined?` reports it true WITHOUT
+                    // triggering the load. zeitwerk's unload + Ruby-compat
+                    // suites rely on this.
+                    || self.autoloads_scoped.contains_key(&key);
                 self.stack.push(Value::Bool(found));
                 return Ok(());
+            }
+            // inherit=true, bare name: a registered autoload on the receiver
+            // is "defined" too — short-circuit to true BEFORE
+            // resolve_const_path, which would otherwise TRIGGER the autoload
+            // (const_defined? must never load the file).
+            if !split {
+                let key_str = match cls.effective_name().as_deref() {
+                    Some("Object") | None => const_name.clone(),
+                    Some(on) => format!("{}::{}", on, const_name),
+                };
+                let key = self.interner.intern(&key_str);
+                let short = self.interner.intern(&const_name);
+                let already = self.classes.contains_key(&key)
+                    || self.constants.contains_key(&key)
+                    || cls.consts.borrow().contains_key(&short);
+                if !already && self.autoloads_scoped.contains_key(&key) {
+                    self.stack.push(Value::Bool(true));
+                    return Ok(());
+                }
             }
             let cls_clone = cls.clone();
             let outcome = self.resolve_const_path(&cls_clone, &const_name, split, true);
