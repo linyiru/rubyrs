@@ -622,6 +622,9 @@ module Sinatra
           end
         end
         settings_store[key] = value
+        # :environment / :host_authorization feed host_auth_bypassed? — drop
+        # its cache so a post-boot `set` is reflected on the next request.
+        @host_auth_bypassed = nil if key == :environment || key == :host_authorization
         unless respond_to?(key)
           # Reader walks the superclass chain so settings declared
           # on `Sinatra::Base` (real-gem idiom for plugin
