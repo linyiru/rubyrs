@@ -2107,6 +2107,117 @@ pub(crate) fn run_blocking_for_duration(
 /// `Runtime::new()`. Auto-registration at Runtime
 /// construction is intentionally deferred — embedders who
 /// don't want the host fn surface skip the call.
+/// Percent-decode (`%XX`); no `+`→space (path captures, not query values).
+/// Shared by the route matcher + predispatch.
+fn http_pdecode(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len()
+            && let (Some(h), Some(l)) = ((b[i + 1] as char).to_digit(16), (b[i + 2] as char).to_digit(16))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Parse a FLAT query string into a Ruby Hash (tagged `ih` — IndifferentHash
+/// — when given). `+`→space then `%XX` decode; value-less keys → nil. Shared
+/// by `__rubyrs_http_parse_query` + the predispatch core.
+fn http_parse_query_hash(vm: &mut crate::vm::Vm, qs: &str, ih: &Option<std::rc::Rc<crate::value::Class>>) -> crate::value::Value {
+    use crate::heap::{HashObj, HeapObj};
+    use crate::value::Value;
+    let dec = |s: &str| http_pdecode(&s.replace('+', " "));
+    let mut pairs: Vec<(Value, Value)> = Vec::new();
+    for pair in qs.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        match pair.split_once('=') {
+            Some((k, v)) => pairs.push((Value::new_str(dec(k)), Value::new_str(dec(v)))),
+            None => pairs.push((Value::new_str(dec(pair)), Value::Nil)),
+        }
+    }
+    let mut h = HashObj::with_pairs(pairs);
+    h.class_tag = ih.clone();
+    Value::Hash(vm.heap.alloc(HeapObj::Hash(h)))
+}
+
+/// Match `path` against the newline-joined "VERB /pat" `table`, returning
+/// `(index, captures, block_args)` for the first verb+segment match (lit/
+/// :cap/splat) — captures is nil for splat/catch-all (Ruby builds those),
+/// index is -1 for no match. Shared by `__rubyrs_http_route_match` + the
+/// predispatch core. heap.alloc never GCs, so the built Values stay live.
+fn http_match_route(vm: &mut crate::vm::Vm, verb: &str, path: &str, table: &str, ih: &Option<std::rc::Rc<crate::value::Class>>) -> (i64, crate::value::Value, crate::value::Value) {
+    use crate::heap::{HashObj, HeapObj};
+    use crate::value::Value;
+    let psegs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    for (idx, line) in table.split('\n').enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let (rverb, pat) = match line.split_once(' ') {
+            Some(x) => x,
+            None => continue,
+        };
+        if rverb != verb {
+            continue;
+        }
+        let pat_segs: Vec<&str> = pat.split('/').filter(|s| !s.is_empty()).collect();
+        if pat_segs.len() == 1 && pat_segs[0] == "*" {
+            return (idx as i64, Value::Nil, Value::Nil);
+        }
+        if pat_segs.len() != psegs.len() {
+            continue;
+        }
+        let mut ok = true;
+        let mut has_splat = false;
+        for (ps, rs) in psegs.iter().zip(pat_segs.iter()) {
+            if rs.starts_with(':') {
+                continue;
+            }
+            if *rs == "*" {
+                has_splat = true;
+                continue;
+            }
+            if rs != ps {
+                ok = false;
+                break;
+            }
+        }
+        if !ok {
+            continue;
+        }
+        if has_splat {
+            return (idx as i64, Value::Nil, Value::Nil);
+        }
+        let mut pairs: Vec<(Value, Value)> = Vec::new();
+        let mut block_args: Vec<Value> = Vec::new();
+        for (ps, rs) in psegs.iter().zip(pat_segs.iter()) {
+            if let Some(name) = rs.strip_prefix(':') {
+                let val = Value::new_str(http_pdecode(ps));
+                pairs.push((Value::new_str(name.to_string()), val.clone()));
+                block_args.push(val);
+            }
+        }
+        let mut hobj = HashObj::with_pairs(pairs);
+        hobj.class_tag = ih.clone();
+        let cap = Value::Hash(vm.heap.alloc(HeapObj::Hash(hobj)));
+        let ba = Value::Array(vm.heap.alloc(HeapObj::Array(block_args.into())));
+        return (idx as i64, cap, ba);
+    }
+    (-1, Value::Nil, Value::Nil)
+}
+
 pub fn register_host_fns(rt: &mut crate::Runtime) {
     use crate::error::RubyError;
     use crate::value::Value;
@@ -2133,7 +2244,6 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     // it). GC-safe under STRESS_GC (small new_str values stay live across the
     // single Hash alloc).
     rt.register_fn("__rubyrs_http_parse_query", |args| {
-        use crate::heap::{HashObj, HeapObj};
         // Optional 2nd arg: a Hash subclass (IndifferentHash) to tag the
         // result with — so the returned Hash IS an IndifferentHash directly,
         // skipping the Ruby-side `IndifferentHash.from` re-iteration (which
@@ -2154,40 +2264,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             });
         }
         let vm = unsafe { &mut *ptr };
-        fn decode(s: &str) -> String {
-            let bytes = s.as_bytes();
-            let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-            let mut i = 0;
-            while i < bytes.len() {
-                match bytes[i] {
-                    b'+' => { out.push(b' '); i += 1; }
-                    b'%' if i + 2 < bytes.len() => {
-                        let hi = (bytes[i + 1] as char).to_digit(16);
-                        let lo = (bytes[i + 2] as char).to_digit(16);
-                        if let (Some(h), Some(l)) = (hi, lo) {
-                            out.push((h * 16 + l) as u8); i += 3;
-                        } else { out.push(bytes[i]); i += 1; }
-                    }
-                    b => { out.push(b); i += 1; }
-                }
-            }
-            String::from_utf8_lossy(&out).into_owned()
-        }
-        let mut pairs: Vec<(Value, Value)> = Vec::new();
-        for pair in s.split('&') {
-            if pair.is_empty() { continue; }
-            // Value-less keys (`?flag`) map to nil — matches the Ruby
-            // parse_query contract. Only flat keys reach here (the Ruby
-            // caller keeps `a[b]=c` nested-param queries on its own path).
-            match pair.split_once('=') {
-                Some((k, v)) => pairs.push((Value::new_str(decode(k)), Value::new_str(decode(v)))),
-                None => pairs.push((Value::new_str(decode(pair)), Value::Nil)),
-            }
-        }
-        let mut hobj = HashObj::with_pairs(pairs);
-        hobj.class_tag = class_tag; // None → plain Hash; Some → IndifferentHash
-        let id = vm.heap.alloc(HeapObj::Hash(hobj));
-        Ok(Value::Hash(id))
+        Ok(http_parse_query_hash(vm, &s, &class_tag))
     });
 
     // Native route matcher (B1 Phase-2). `routes` is a newline-joined table
@@ -2199,7 +2276,6 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     // pass stay exactly as the full Ruby scan. Used only for native-eligible
     // route tables (no regexp / conditions — see native_route_table).
     rt.register_fn("__rubyrs_http_route_match", |args| {
-        use crate::heap::{HashObj, HeapObj};
         // 4th arg (optional): IndifferentHash class to tag the captures Hash.
         let (verb, path, routes, ih) = match args {
             [Value::Str(v), Value::Str(p), Value::Str(r), Value::Class(c)] =>
@@ -2212,69 +2288,8 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             }),
         };
         let vm = unsafe { &mut *crate::vm::current_vm_ptr() };
-        // percent-decode (no plus→space; path captures match Ruby unescape)
-        fn pdecode(s: &str) -> String {
-            if !s.contains('%') { return s.to_string(); }
-            let b = s.as_bytes();
-            let mut out = Vec::with_capacity(b.len());
-            let mut i = 0;
-            while i < b.len() {
-                if b[i] == b'%' && i + 2 < b.len() {
-                    let h = (b[i + 1] as char).to_digit(16);
-                    let l = (b[i + 2] as char).to_digit(16);
-                    if let (Some(h), Some(l)) = (h, l) { out.push((h * 16 + l) as u8); i += 3; continue; }
-                }
-                out.push(b[i]); i += 1;
-            }
-            String::from_utf8_lossy(&out).into_owned()
-        }
-        // Build the [idx, captures, block_args] result. heap.alloc never GCs
-        // (GC runs at maybe_gc points, not raw allocs), so the intermediate
-        // Values stay live across these allocs — no pinning needed.
-        let triple = |vm: &mut crate::vm::Vm, idx: i64, cap: Value, ba: Value| {
-            Value::Array(vm.heap.alloc(HeapObj::Array(vec![Value::Int(idx), cap, ba].into())))
-        };
-        let psegs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        for (idx, line) in routes.split('\n').enumerate() {
-            if line.is_empty() { continue; }
-            let (rverb, pat) = match line.split_once(' ') { Some(x) => x, None => continue };
-            if rverb != verb { continue; }
-            let pat_segs: Vec<&str> = pat.split('/').filter(|s| !s.is_empty()).collect();
-            // catch-all single splat → matched; captures done in Ruby (nil).
-            if pat_segs.len() == 1 && pat_segs[0] == "*" {
-                return Ok(triple(vm, idx as i64, Value::Nil, Value::Nil));
-            }
-            if pat_segs.len() != psegs.len() { continue; }
-            let mut ok = true;
-            let mut has_splat = false;
-            for (ps, rs) in psegs.iter().zip(pat_segs.iter()) {
-                if rs.starts_with(':') { continue; }
-                if *rs == "*" { has_splat = true; continue; }
-                if rs != ps { ok = false; break; }
-            }
-            if !ok { continue; }
-            // Splat routes: matched, but let Ruby build the splat captures.
-            if has_splat {
-                return Ok(triple(vm, idx as i64, Value::Nil, Value::Nil));
-            }
-            // lit/:cap match → build captures IndifferentHash + ordered
-            // block_args (the values passed to a `do |id|` block).
-            let mut pairs: Vec<(Value, Value)> = Vec::new();
-            let mut block_args: Vec<Value> = Vec::new();
-            for (ps, rs) in psegs.iter().zip(pat_segs.iter()) {
-                if let Some(name) = rs.strip_prefix(':') {
-                    let v = Value::new_str(pdecode(ps));
-                    pairs.push((Value::new_str(name.to_string()), v.clone()));
-                    block_args.push(v);
-                }
-            }
-            let mut hobj = HashObj::with_pairs(pairs);
-            hobj.class_tag = ih.clone();
-            let cap = Value::Hash(vm.heap.alloc(HeapObj::Hash(hobj)));
-            let ba = Value::Array(vm.heap.alloc(HeapObj::Array(block_args.into())));
-            return Ok(triple(vm, idx as i64, cap, ba));
-        }
-        Ok(triple(vm, -1, Value::Nil, Value::Nil))
+        let (idx, cap, ba) = http_match_route(vm, &verb, &path, &routes, &ih);
+        Ok(Value::Array(vm.heap.alloc(crate::heap::HeapObj::Array(vec![Value::Int(idx), cap, ba].into()))))
     });
 
     // Native predispatch core (B1 Phase-2). Combines env-read + query parse
@@ -2283,12 +2298,10 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     // IndifferentHash, host_auth_bypassed, has_public_folder). Returns false
     // to BAIL to the full Ruby dispatch (non-GET/HEAD, host_auth not
     // bypassed, has public folder, nested `[` query), else [idx, captures,
-    // block_args, base_params] (idx<0 = 404). NB the parse + segment-match
-    // logic here MIRRORS __rubyrs_http_route_match + the query parser — both
-    // are gated byte-identical by the diff_framework + parity tests; a
-    // cleanup would factor them into shared Rust helpers.
+    // block_args, base_params] (idx<0 = 404). The query parse + segment match
+    // are the shared http_parse_query_hash / http_match_route helpers (same
+    // code as the standalone host fns — no duplication).
     rt.register_fn("__rubyrs_http_predispatch", |args| {
-        use crate::heap::{HashObj, HeapObj};
         let (env_id, table, ih, bypass, has_pub) = match args {
             [Value::Hash(e), Value::Str(t), Value::Class(c), Value::Bool(b), Value::Bool(p)] =>
                 (*e, t.to_string_lossy(), c.clone(), *b, *p),
@@ -2313,71 +2326,17 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             }
         }
         // Only GET/HEAD on this fast path (POST/PUT/PATCH bodies + method
-        // override stay in Ruby).
-        if verb != "GET" && verb != "HEAD" { return Ok(Value::Bool(false)); }
-        fn pdecode(s: &str) -> String {
-            if !s.contains('%') { return s.to_string(); }
-            let b = s.as_bytes(); let mut out = Vec::with_capacity(b.len()); let mut i = 0;
-            while i < b.len() {
-                if b[i] == b'%' && i + 2 < b.len()
-                    && let (Some(h), Some(l)) = ((b[i+1] as char).to_digit(16), (b[i+2] as char).to_digit(16))
-                {
-                    out.push((h*16+l) as u8); i += 3; continue;
-                }
-                out.push(b[i]); i += 1;
-            }
-            String::from_utf8_lossy(&out).into_owned()
-        }
-        // base_params from the query (flat only; bail if nested `[`).
-        if qs.contains('[') { return Ok(Value::Bool(false)); }
-        let mut bp_pairs: Vec<(Value, Value)> = Vec::new();
-        for pair in qs.split('&') {
-            if pair.is_empty() { continue; }
-            match pair.split_once('=') {
-                Some((k, v)) => {
-                    let dec = |s: &str| { let mut t = String::with_capacity(s.len()); for c in s.chars() { t.push(if c == '+' { ' ' } else { c }); } pdecode(&t) };
-                    bp_pairs.push((Value::new_str(dec(k)), Value::new_str(dec(v))));
-                }
-                None => bp_pairs.push((Value::new_str(pdecode(&pair.replace('+', " "))), Value::Nil)),
-            }
-        }
-        let mut bp = HashObj::with_pairs(bp_pairs); bp.class_tag = Some(ih.clone());
-        let base_params = Value::Hash(vm.heap.alloc(HeapObj::Hash(bp)));
-        // Route match (lit/:cap/splat) → idx + captures + block_args.
-        let psegs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        let mk = |vm: &mut crate::vm::Vm, idx: i64, cap: Value, ba: Value| {
-            Value::Array(vm.heap.alloc(HeapObj::Array(vec![Value::Int(idx), cap, ba, base_params].into())))
-        };
-        for (idx, line) in table.split('\n').enumerate() {
-            if line.is_empty() { continue; }
-            let (rverb, pat) = match line.split_once(' ') { Some(x) => x, None => continue };
-            if rverb != verb { continue; }
-            let pat_segs: Vec<&str> = pat.split('/').filter(|s| !s.is_empty()).collect();
-            if pat_segs.len() == 1 && pat_segs[0] == "*" { return Ok(mk(vm, idx as i64, Value::Nil, Value::Nil)); }
-            if pat_segs.len() != psegs.len() { continue; }
-            let mut ok = true; let mut has_splat = false;
-            for (ps, rs) in psegs.iter().zip(pat_segs.iter()) {
-                if rs.starts_with(':') { continue; }
-                if *rs == "*" { has_splat = true; continue; }
-                if rs != ps { ok = false; break; }
-            }
-            if !ok { continue; }
-            if has_splat { return Ok(mk(vm, idx as i64, Value::Nil, Value::Nil)); }
-            let mut pairs: Vec<(Value, Value)> = Vec::new();
-            let mut block_args: Vec<Value> = Vec::new();
-            for (ps, rs) in psegs.iter().zip(pat_segs.iter()) {
-                if let Some(name) = rs.strip_prefix(':') {
-                    let val = Value::new_str(pdecode(ps));
-                    pairs.push((Value::new_str(name.to_string()), val.clone()));
-                    block_args.push(val);
-                }
-            }
-            let mut hobj = HashObj::with_pairs(pairs); hobj.class_tag = Some(ih.clone());
-            let cap = Value::Hash(vm.heap.alloc(HeapObj::Hash(hobj)));
-            let ba = Value::Array(vm.heap.alloc(HeapObj::Array(block_args.into())));
-            return Ok(mk(vm, idx as i64, cap, ba));
-        }
-        Ok(mk(vm, -1, Value::Nil, Value::Nil))
+        // override stay in Ruby); nested `[` queries stay in Ruby too.
+        if (verb != "GET" && verb != "HEAD") || qs.contains('[') { return Ok(Value::Bool(false)); }
+        let ihc = Some(ih.clone());
+        // Query → base_params, then route match — the SAME shared helpers the
+        // standalone parse_query / route_match host fns use (no duplication).
+        // heap.alloc never GCs, so base_params stays live across the match.
+        let base_params = http_parse_query_hash(vm, &qs, &ihc);
+        let (idx, cap, ba) = http_match_route(vm, &verb, &path, &table, &ihc);
+        Ok(Value::Array(vm.heap.alloc(crate::heap::HeapObj::Array(
+            vec![Value::Int(idx), cap, ba, base_params].into(),
+        ))))
     });
 
     // Native response-finish: Content-Length + Rack::Protection headers in
