@@ -10571,14 +10571,37 @@ impl Vm {
             // zeitwerk's "X is already defined in …" shadow log reads
             // const_source_location after a reload removed + redefined X.
             {
-                let loc_key = if matches!(owner.name.as_str(), "Object" | "Class" | "Module") {
-                    self.interner.intern(&const_name)
+                let key_string = if matches!(owner.name.as_str(), "Object" | "Class" | "Module") {
+                    const_name.clone()
                 } else if let Some(owner_name) = owner.effective_name() {
-                    self.interner.intern(&format!("{}::{}", owner_name, const_name))
+                    format!("{}::{}", owner_name, const_name)
                 } else {
-                    self.interner.intern(&const_name)
+                    const_name.clone()
                 };
+                let loc_key = self.interner.intern(&key_string);
                 self.const_source_locations.remove(&loc_key);
+                // CRuby: removing a namespace constant makes its NESTED constants
+                // unreachable too. rubyrs stores `Ns::Child` as a FLAT interned
+                // key, so removing `Ns` must also drop every `Ns::*` descendant
+                // (classes, constants, their source locations, and pending
+                // autoloads) — otherwise a later recreated `Ns` still sees the
+                // stale children as defined. zeitwerk's reload teardown does
+                // `remove_const :Ns` between tests and then reloads.
+                let prefix = format!("{}::", key_string);
+                let mut to_drop: Vec<SymId> = Vec::new();
+                for k in self.classes.keys().chain(self.constants.keys()) {
+                    if self.interner.resolve(*k).starts_with(&prefix) {
+                        to_drop.push(*k);
+                    }
+                }
+                for k in to_drop {
+                    self.classes.remove(&k);
+                    self.constants.remove(&k);
+                    self.const_source_locations.remove(&k);
+                    self.autoloads_scoped.remove(&k);
+                    self.autoloads_toplevel.remove(&k);
+                    self.consumed_autoloads.remove(&k);
+                }
             }
             match removed {
                 Some(v) => {

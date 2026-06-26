@@ -1903,6 +1903,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn random_mt19937_exact() { run_diff("random_mt19937_exact"); }
 #[test] fn remove_const_clears_source_location() { run_diff("remove_const_clears_source_location"); }
 #[test] fn super_empty_kwsplat() { run_diff("super_empty_kwsplat"); }
+#[test] fn remove_const_drops_children() { run_diff("remove_const_drops_children"); }
 #[test] fn singleton_method_yield_capture_gc() { run_diff("singleton_method_yield_capture_gc"); }
 #[test] fn const_defined_autoload() { run_diff("const_defined_autoload"); }
 #[test] fn real_mod_name_bind() { run_diff("real_mod_name_bind"); }
