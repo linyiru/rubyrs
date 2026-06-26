@@ -10105,6 +10105,22 @@ impl Vm {
                         }));
                     }
                 };
+                // CRuby IGNORES `autoload(:X, path)` when `path` is a file
+                // CURRENTLY being required (zeitwerk's "inception" edge: a file
+                // that does `autoload(:Foo, __FILE__)`, or one up the require
+                // chain). "Currently loading" = in loaded_features but NOT yet
+                // completed; a file fully loaded by a PRIOR require is a
+                // different case (don't over-skip — that broke other autoload
+                // tests). Skip registration so a later reference doesn't
+                // re-require the in-flight file.
+                let canon = std::fs::canonicalize(&path)
+                    .unwrap_or_else(|_| std::path::PathBuf::from(&path));
+                if self.loaded_features.contains(&canon)
+                    && !self.completed_features.contains(&canon)
+                {
+                    self.stack.push(Value::Nil);
+                    return Ok(());
+                }
                 let key = match owner.effective_name().as_deref() {
                     None | Some("Object") => const_name,
                     Some(on) => format!("{}::{}", on, const_name),
