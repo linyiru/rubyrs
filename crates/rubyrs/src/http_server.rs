@@ -2277,6 +2277,82 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         Ok(triple(vm, -1, Value::Nil, Value::Nil))
     });
 
+    // Native response-finish: Content-Length + Rack::Protection headers in
+    // one host call, replacing apply_content_length + apply_protection_headers
+    // (~1.4us/request). Args: (status, headers Hash, body, protection_on).
+    // KEEP THESE RULES IN SYNC with the Ruby apply_* fallbacks in
+    // sinatra_base.rb — both must stay byte-identical (diff_framework gates).
+    rt.register_fn("__rubyrs_http_finish", |args| {
+        let (status, hid, body, prot) = match args {
+            [Value::Int(s), Value::Hash(h), b, Value::Bool(p)] => (*s, *h, b.clone(), *p),
+            _ => return Err(Trap {
+                err: RubyError::ArgumentError { msg: "__rubyrs_http_finish(status, headers, body, protection_on)".to_string() },
+                backtrace: vec![],
+            }),
+        };
+        let vm = unsafe { &mut *crate::vm::current_vm_ptr() };
+        // Read header state in one pass (no alloc — compare key bytes).
+        let (mut has_ct, mut has_cl) = (false, false);
+        let (mut has_nosniff, mut has_frame, mut has_xss) = (false, false, false);
+        let mut is_html = false;
+        for (k, v) in vm.heap.hash(hid) {
+            if let Value::Str(ks) = k {
+                let kb = ks.borrow();
+                match kb.as_slice() {
+                    b"content-type" => {
+                        has_ct = true;
+                        if let Value::Str(vs) = v {
+                            let vb = vs.borrow();
+                            is_html = vb.starts_with(b"text/html") || vb.starts_with(b"text/xml")
+                                || vb.starts_with(b"application/xml") || vb.starts_with(b"application/xhtml");
+                        }
+                    }
+                    b"content-length" => has_cl = true,
+                    b"x-content-type-options" => has_nosniff = true,
+                    b"x-frame-options" => has_frame = true,
+                    b"x-xss-protection" => has_xss = true,
+                    _ => {}
+                }
+            }
+        }
+        // Content-Length (Response#finish): drop cl+ct for 1xx/204/304;
+        // else bytesize of an Array body when ct present and cl absent.
+        if status < 200 || status == 204 || status == 304 {
+            vm.heap.hash_delete(hid, &Value::new_str("content-length"));
+            vm.heap.hash_delete(hid, &Value::new_str("content-type"));
+        } else if has_ct && !has_cl {
+            if let Value::Array(bid) = body {
+                let mut total = 0usize;
+                let mut all_str = true;
+                for el in vm.heap.array(bid) {
+                    match el {
+                        Value::Str(rs) => total += rs.borrow().len(),
+                        _ => { all_str = false; break; }
+                    }
+                }
+                if all_str {
+                    vm.heap.hash_insert(hid, Value::new_str("content-length"), Value::new_str(total.to_string()));
+                }
+            }
+        }
+        // Rack::Protection defaults: nosniff on every response; frame/xss
+        // only on HTML/XML; all `||=` (skip when already set).
+        if prot {
+            if !has_nosniff {
+                vm.heap.hash_insert(hid, Value::new_str("x-content-type-options"), Value::new_str("nosniff"));
+            }
+            if is_html {
+                if !has_frame {
+                    vm.heap.hash_insert(hid, Value::new_str("x-frame-options"), Value::new_str("SAMEORIGIN"));
+                }
+                if !has_xss {
+                    vm.heap.hash_insert(hid, Value::new_str("x-xss-protection"), Value::new_str("1; mode=block"));
+                }
+            }
+        }
+        Ok(Value::Nil)
+    });
+
     // Stage 4c.3: load the vendored `StringIO` so the per-request
     // handler can wrap each request body as `env["rack.input"]` (Rack
     // SPEC). The battery depends on StringIO regardless of the `stdlib`

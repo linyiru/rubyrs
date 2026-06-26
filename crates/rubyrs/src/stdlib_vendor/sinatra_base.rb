@@ -1046,8 +1046,15 @@ module Sinatra
       # `Access-Control-Allow-Origin` etc. — is visible in the
       # outgoing response without rebuilding the triplet.
       self.class.after_filters.each { |f| instance_exec(&f) }
-      apply_content_length(result)
-      apply_protection_headers(result)
+      # Content-Length + protection headers — one native call when the
+      # _http_server battery is present, else the Ruby pair below.
+      prot = self.class.respond_to?(:protection?) ? self.class.protection? : true
+      if defined?(__rubyrs_http_finish)
+        __rubyrs_http_finish(result[0], result[1], result[2], prot)
+      else
+        apply_content_length(result)
+        apply_protection_headers(result)
+      end
       result
     end
 
