@@ -2320,19 +2320,17 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         if status < 200 || status == 204 || status == 304 {
             vm.heap.hash_delete(hid, &Value::new_str("content-length"));
             vm.heap.hash_delete(hid, &Value::new_str("content-type"));
-        } else if has_ct && !has_cl {
-            if let Value::Array(bid) = body {
-                let mut total = 0usize;
-                let mut all_str = true;
-                for el in vm.heap.array(bid) {
-                    match el {
-                        Value::Str(rs) => total += rs.borrow().len(),
-                        _ => { all_str = false; break; }
-                    }
+        } else if has_ct && !has_cl && let Value::Array(bid) = body {
+            let mut total = 0usize;
+            let mut all_str = true;
+            for el in vm.heap.array(bid) {
+                match el {
+                    Value::Str(rs) => total += rs.borrow().len(),
+                    _ => { all_str = false; break; }
                 }
-                if all_str {
-                    vm.heap.hash_insert(hid, Value::new_str("content-length"), Value::new_str(total.to_string()));
-                }
+            }
+            if all_str {
+                vm.heap.hash_insert(hid, Value::new_str("content-length"), Value::new_str(total.to_string()));
             }
         }
         // Rack::Protection defaults: nosniff on every response; frame/xss
