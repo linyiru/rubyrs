@@ -4822,6 +4822,11 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             });
         }
         let has_splat = arg_nodes.iter().any(|c| c.as_splat_node().is_some());
+        // A `**kwsplat` in an explicit super call must be forwarded as
+        // KEYWORDS, dropped when empty (CRuby keyword separation) — not folded
+        // into the positional array as a trailing Hash. `super(**k)` /
+        // `super(*a, **k)` route through the empty-aware kwsplat_chunk below.
+        let has_kwhash = arg_nodes.iter().any(|c| c.as_keyword_hash_node().is_some());
         // `super(args) do … end` — a block LITERAL (not `&proc`). The
         // splat-free arg form is the common shape; a splat combined
         // with a literal block falls through to the plain paths below.
@@ -4838,7 +4843,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 block_body,
             });
         }
-        if has_splat {
+        if has_splat || has_kwhash {
             let mut chunks: Vec<SExpr> = Vec::new();
             let mut buf: Vec<SExpr> = Vec::new();
             for c in &arg_nodes {
@@ -4848,6 +4853,14 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
                     }
                     chunks.push(tr(ctx, &inner));
+                } else if let Some(kh) = c.as_keyword_hash_node() {
+                    // `**kwsplat` chunk — empty-aware: forwards `[hash]` when
+                    // non-empty (ApplySuper peels the trailing Hash as kwargs),
+                    // `[]` when empty (CRuby forwards no keywords).
+                    if !buf.is_empty() {
+                        chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
+                    }
+                    chunks.push(kwsplat_chunk(node, tr_kwhash(ctx, node, c, &kh)));
                 } else {
                     buf.push(tr_super_arg(ctx, c));
                 }
