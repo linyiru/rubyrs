@@ -10540,9 +10540,16 @@ impl Vm {
                         keys.push(self.interner.intern(&format!("{}::{}", owner_name, const_name)));
                     }
                     let mut removed_autoload = false;
-                    for k in keys {
-                        if self.autoloads_toplevel.remove(&k).is_some() { removed_autoload = true; }
-                        if self.autoloads_scoped.remove(&k).is_some() { removed_autoload = true; }
+                    for k in &keys {
+                        if self.autoloads_toplevel.remove(k).is_some() { removed_autoload = true; }
+                        if self.autoloads_scoped.remove(k).is_some() { removed_autoload = true; }
+                        // CRuby also lets `remove_const` succeed for a const
+                        // whose autoload FIRED but never defined it (the
+                        // "undef-after-autoload" slot — consumed_autoloads).
+                        // zeitwerk's on_file_autoloaded `remove_const`s such a
+                        // cref before raising Zeitwerk::NameError; without this
+                        // a plain NameError surfaces instead.
+                        if self.consumed_autoloads.remove(k) { removed_autoload = true; }
                     }
                     if removed_autoload {
                         self.stack.push(Value::Nil);
@@ -19353,7 +19360,21 @@ impl Vm {
                 .remove(&pid)
                 .or_else(|| self.autoloads_scoped.remove(&pid));
             if let Some(path) = path {
+                // Mark consumed BEFORE the require: if the file fails to
+                // DEFINE this constant, a later `remove_const` must still
+                // succeed (the undef-after-autoload slot zeitwerk's
+                // on_file_autoloaded removes before raising Zeitwerk::NameError).
+                // Clear the marker if the require actually defines it. NOTE
+                // (SUBSET divergence): CRuby raises from remove_const after a
+                // fired-but-failed autoload triggered by a plain reference;
+                // rubyrs lets it succeed. Pathological (real code never
+                // references-then-removes a broken autoload); the alternative
+                // loses ~10 zeitwerk tests, which is the wrong trade.
+                self.consumed_autoloads.insert(pid);
                 self.invoke_require_for_autoload(Value::new_str(path))?;
+                if self.classes.contains_key(&pid) || self.constants.contains_key(&pid) {
+                    self.consumed_autoloads.remove(&pid);
+                }
                 return Ok(true);
             }
         }
@@ -19761,6 +19782,11 @@ impl Vm {
             {
                 let lookup_id = self.interner.intern(&lookup);
                 if let Some(al_path) = self.autoloads_scoped.remove(&lookup_id) {
+                    // Mark consumed: if the require fails to define `lookup`,
+                    // a later `remove_const` must still succeed (CRuby's
+                    // undef-after-autoload slot). Cleared in the Ok arm below
+                    // when the require actually defines it.
+                    self.consumed_autoloads.insert(lookup_id);
                     // Route through a user `Kernel#require` override when
                     // one is defined — same as `fire_pending_autoload`.
                     // `const_get(cname, false)` / `const_defined?` reach
@@ -19773,8 +19799,10 @@ impl Vm {
                     match self.invoke_require_for_autoload(Value::new_str(al_path)) {
                         Ok(_) => {
                             if let Some(c) = self.classes.get(&lookup_id).cloned() {
+                                self.consumed_autoloads.remove(&lookup_id);
                                 hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
                             } else if let Some(v) = self.constants.get(&lookup_id).cloned() {
+                                self.consumed_autoloads.remove(&lookup_id);
                                 hit = Some((v.clone(), const_scope_name(&v)));
                             }
                             // require ran but didn't define `lookup`

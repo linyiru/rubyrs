@@ -838,6 +838,14 @@ pub(crate) struct Vm {
     /// `require`, which traps on wasm32-wasi (no file I/O).
     #[cfg(not(target_os = "wasi"))]
     pub(crate) autoloads_scoped: HashMap<SymId, String>,
+    /// Constant keys (full qualified-name SymIds) whose autoload was
+    /// FIRED/consumed but whose file did NOT define the constant. CRuby
+    /// leaves such a const in a removable "undef-after-autoload" slot:
+    /// `autoload?`/`const_defined?` report nil/false, yet `remove_const`
+    /// SUCCEEDS (no "not defined" NameError). zeitwerk's on_file_autoloaded
+    /// relies on this — it `remove_const`s then raises Zeitwerk::NameError.
+    /// Cleared when the constant is later actually defined.
+    pub(crate) consumed_autoloads: std::collections::HashSet<SymId>,
     /// Per-call-site inline-cache counter. Each compiled `Op::Call`
     /// gets a unique u16 slot id; the Vm side allocates
     /// `call_caches[id]` lazily. Lives on the Vm so kernel
@@ -1813,6 +1821,7 @@ impl Vm {
             autoloads_toplevel: HashMap::new(),
             #[cfg(not(target_os = "wasi"))]
             autoloads_scoped: HashMap::new(),
+            consumed_autoloads: std::collections::HashSet::new(),
             cache_counter: 0,
             globals: FxHashMap::default(),
             toplevel_methods: FxHashMap::default(),
