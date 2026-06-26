@@ -5548,10 +5548,14 @@ impl Vm {
                 // Top-level constants live in the tables under their BARE name
                 // (no "Object::" qualifier), so `Object.constants` uses an empty
                 // prefix; named modules use "Name::".
-                let own_prefix = if cls.name == "Object" {
+                // effective_name, not the structural name: an autovivified
+                // zeitwerk namespace has an empty structural name but a real
+                // effective name under which its consts/autoloads are keyed.
+                let own_name = cls.effective_name().unwrap_or_else(|| cls.name.clone());
+                let own_prefix = if own_name == "Object" {
                     String::new()
                 } else {
-                    format!("{}::", cls.name)
+                    format!("{}::", own_name)
                 };
                 collect(&own_prefix, &mut names);
                 if inherit {
@@ -5561,13 +5565,14 @@ impl Vm {
                     // its toplevel constants are NOT reported by
                     // `Foo.constants` in CRuby.
                     for anc in super::flatten_ancestors(&cls) {
-                        if anc.name.is_empty()
-                            || anc.name == cls.name
-                            || anc.name == "Object"
+                        let anc_name = anc.effective_name().unwrap_or_else(|| anc.name.clone());
+                        if anc_name.is_empty()
+                            || anc_name == own_name
+                            || anc_name == "Object"
                         {
                             continue;
                         }
-                        let anc_prefix = format!("{}::", anc.name);
+                        let anc_prefix = format!("{}::", anc_name);
                         collect(&anc_prefix, &mut names);
                     }
                 }
@@ -19905,8 +19910,13 @@ impl Vm {
                     let seg_id = self.interner.intern(segment);
                     let mut fired = false;
                     for anc in super::flatten_ancestors(&scope_cls) {
-                        if anc.name.is_empty() { continue; }
-                        let key = format!("{}::{}", anc.name, segment);
+                        // effective_name, not the structural name — an
+                        // autovivified zeitwerk namespace has an EMPTY
+                        // structural name but a real effective name, and its
+                        // child autoloads are keyed under it.
+                        let Some(anc_name) = anc.effective_name() else { continue };
+                        if anc_name.is_empty() { continue; }
+                        let key = format!("{}::{}", anc_name, segment);
                         if !self.interner.contains(&key) { continue; }
                         let kid = self.interner.intern(&key);
                         if let Some(p) = self.autoloads_scoped.remove(&kid) {

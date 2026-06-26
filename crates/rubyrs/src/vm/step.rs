@@ -2061,8 +2061,11 @@ impl Vm {
                             if found.is_none() {
                                 let mut fired = false;
                                 for anc in super::flatten_ancestors(&cref) {
-                                    if anc.name.is_empty() { continue; }
-                                    let key = format!("{}::{}", anc.name, bare_str);
+                                    // effective_name: autovivified zeitwerk
+                                    // namespaces have an empty structural name.
+                                    let Some(anc_name) = anc.effective_name() else { continue };
+                                    if anc_name.is_empty() { continue; }
+                                    let key = format!("{}::{}", anc_name, bare_str);
                                     if !self.interner.contains(&key) { continue; }
                                     let kid = self.interner.intern(&key);
                                     if let Some(p) = self.autoloads_scoped.remove(&kid) {

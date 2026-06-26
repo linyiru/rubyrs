@@ -1643,16 +1643,21 @@ impl Vm {
             if let Some(v) = anc.consts.borrow().get(&bare).cloned() {
                 return Some(v);
             }
-            // Anonymous scope: only the per-class table applies.
-            if anc.name.is_empty() {
+            // effective_name, not the structural name: an autovivified
+            // zeitwerk namespace has an empty structural name but a real
+            // effective name under which its child consts/classes are keyed
+            // (`ContainerModule::ChildClass`). Truly-anonymous scopes (no
+            // effective name) only expose their per-class table, handled above.
+            let anc_name = anc.effective_name().unwrap_or_default();
+            if anc_name.is_empty() {
                 continue;
             }
             // Named scope: probe the qualified global key. Only intern
             // when the name already exists so a miss doesn't grow the
             // interner (mirrors `resolve_const_path`'s `contains`
             // guard — keeps `const_defined?` misses cheap).
-            let mut qual = String::with_capacity(anc.name.len() + 2 + bare_name.len());
-            qual.push_str(&anc.name);
+            let mut qual = String::with_capacity(anc_name.len() + 2 + bare_name.len());
+            qual.push_str(&anc_name);
             qual.push_str("::");
             qual.push_str(&bare_name);
             if !self.interner.contains(&qual) {
