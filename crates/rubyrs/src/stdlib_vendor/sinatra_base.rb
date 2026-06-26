@@ -450,6 +450,29 @@ module Sinatra
         end
         @pending_conditions = nil
         routes_array << [verb, compile(path), block, per_route_conditions]
+        @native_route_table = nil # invalidate the cached native table
+      end
+
+      # Newline-joined "VERB /pat" table for the native route matcher
+      # (`__rubyrs_http_route_match`) — built once per class, cached, and
+      # used only when EVERY route is native-eligible: an Array segment
+      # pattern (not a Regexp) with no per-route conditions. Otherwise
+      # returns false and dispatch keeps the full Ruby scan (which handles
+      # regexp / conditioned routes). `:lit`→literal, `:cap`→`:name`,
+      # `:splat`→`*` — the same shapes the native matcher understands.
+      def native_route_table
+        cached = @native_route_table
+        return cached unless cached.nil?
+        lines = []
+        routes_array.each do |entry|
+          pattern, conditions = entry[1], entry[3]
+          unless pattern.is_a?(Array) && (conditions.nil? || conditions.empty?)
+            return (@native_route_table = false)
+          end
+          pat = pattern.map { |s| s[0] == :lit ? s[1] : (s[0] == :cap ? ":#{s[1]}" : "*") }.join("/")
+          lines << "#{entry[0]} /#{pat}"
+        end
+        @native_route_table = lines.join("\n")
       end
 
       # `condition { ... }` from inside a `set(:key) { |arg|
@@ -963,35 +986,22 @@ module Sinatra
           # Static files (public folder) are served before routing, like
           # Sinatra's static! — halts with the file response on a hit.
           serve_static!
-          matched = nil
-          self.class.routes_array.each do |entry|
-            route_verb, pattern, block, conditions = entry[0], entry[1], entry[2], entry[3]
-            conditions ||= []
-            next unless route_verb == verb
-            matchdata = match(pattern, segs, env["PATH_INFO"] || "/")
-            next unless matchdata
-            captured, block_args = matchdata
-            # Avoid copying base_params when the route has no captures.
-            @params = captured.empty? ? base_params : base_params.merge(captured)
-            # Per-route conditions — declared via `condition { ...
-            # }` from inside a block-form `set(:key) { |arg| ... }`
-            # handler. Each condition is a block that returns
-            # truthy/falsy in the dispatch instance's context.
-            # All must pass for the route to fire. sinatra-cors
-            # uses this for `is_cors_preflight: true`.
-            next unless conditions.all? { |c| instance_exec(&c) }
-            run_filters
-            # `pass` inside the block throws :pass; catch it here and
-            # fall through to the next matching route. A normal return is
-            # wrapped in [:done, triplet] so it's distinguishable from the
-            # nil that catch(:pass) yields on a throw.
-            outcome = catch(:pass) { [:done, finalize(instance_exec(*block_args, &block))] }
-            if outcome.is_a?(Array) && outcome[0] == :done
-              matched = outcome[1]
-              break
+          path = env["PATH_INFO"] || "/"
+          # Native route matcher finds the first-matching index, skipping the
+          # O(routes) Ruby scan (~3us/route → ~30× on route-heavy apps), when
+          # every route is native-eligible (segment pattern, no conditions).
+          # The Ruby `find_route` then runs FROM that index, preserving
+          # captures / conditions / filters / pass exactly. Falls back to a
+          # full scan (start 0) when the table is absent or has regexp /
+          # conditioned routes.
+          table = self.class.native_route_table
+          matched =
+            if table && defined?(__rubyrs_http_route_match)
+              start = __rubyrs_http_route_match(verb, path, table)
+              start < 0 ? nil : find_route(verb, segs, path, base_params, start)
+            else
+              find_route(verb, segs, path, base_params, 0)
             end
-            # passed -> try the next route
-          end
 
           if matched
             matched
@@ -1110,6 +1120,33 @@ module Sinatra
       "  </style>\n</head>\n<body>\n  <h2>Sinatra doesn’t know this ditty.</h2>\n" \
       "  <img src='#{sn}/__sinatra__/404.png'>\n  <div id=\"c\">\n    Try this:\n" \
       "    <pre>#{CGI.escapeHTML(code)}</pre>\n  </div>\n</body>\n</html>\n"
+    end
+
+    # Scan routes from `start` for the first that matches verb+path, passes
+    # its conditions, and whose block doesn't `pass` — running its filters +
+    # block and returning the response triplet (or nil if none match). The
+    # native matcher supplies a `start` that skips the non-matching prefix;
+    # the full Ruby scan uses start 0. Re-matching from `start` keeps this
+    # self-correcting (the native index is a hint, re-verified by `match`).
+    def find_route(verb, segs, path, base_params, start)
+      routes = self.class.routes_array
+      i = start
+      while i < routes.length
+        entry = routes[i]
+        i += 1
+        next unless entry[0] == verb
+        matchdata = match(entry[1], segs, path)
+        next unless matchdata
+        captured, block_args = matchdata
+        @params = captured.empty? ? base_params : base_params.merge(captured)
+        conditions = entry[3] || []
+        next unless conditions.all? { |c| instance_exec(&c) }
+        run_filters
+        outcome = catch(:pass) { [:done, finalize(instance_exec(*block_args, &entry[2]))] }
+        return outcome[1] if outcome.is_a?(Array) && outcome[0] == :done
+        # passed -> continue scanning
+      end
+      nil
     end
 
     # Wrap a route's return value into a Rack body triplet. A streaming

@@ -2190,6 +2190,47 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         Ok(Value::Hash(id))
     });
 
+    // Native route matcher (B1 Phase-2). `routes` is a newline-joined table
+    // "VERB /pat/:id\nVERB /other\n..."; returns the index of the first route
+    // whose verb + segment pattern matches `path` (lit/:cap/*), or -1. Moves
+    // the O(routes) Ruby scan (~3us/route → ~180us for 60 routes) into Rust
+    // (~5us); sinatra_lite then runs find_route FROM that index, re-verifying
+    // the match in Ruby (the index is a hint), so captures/conditions/filters/
+    // pass stay exactly as the full Ruby scan. Used only for native-eligible
+    // route tables (no regexp / conditions — see native_route_table).
+    rt.register_fn("__rubyrs_http_route_match", |args| {
+        let (verb, path, routes) = match args {
+            [Value::Str(v), Value::Str(p), Value::Str(r)] =>
+                (v.to_string_lossy(), p.to_string_lossy(), r.to_string_lossy()),
+            _ => return Err(Trap {
+                err: RubyError::ArgumentError { msg: "__rubyrs_http_route_match(verb, path, routes_str)".to_string() },
+                backtrace: vec![],
+            }),
+        };
+        let psegs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        for (idx, line) in routes.split('\n').enumerate() {
+            if line.is_empty() { continue; }
+            let (rverb, pat) = match line.split_once(' ') {
+                Some(x) => x,
+                None => continue,
+            };
+            if rverb != verb { continue; }
+            let pat_segs: Vec<&str> = pat.split('/').filter(|s| !s.is_empty()).collect();
+            // catch-all single splat
+            if pat_segs.len() == 1 && pat_segs[0] == "*" {
+                return Ok(Value::Int(idx as i64));
+            }
+            if pat_segs.len() != psegs.len() { continue; }
+            let mut ok = true;
+            for (ps, rs) in psegs.iter().zip(pat_segs.iter()) {
+                if rs.starts_with(':') || *rs == "*" { continue; } // capture/splat
+                if rs != ps { ok = false; break; }
+            }
+            if ok { return Ok(Value::Int(idx as i64)); }
+        }
+        Ok(Value::Int(-1))
+    });
+
     // Stage 4c.3: load the vendored `StringIO` so the per-request
     // handler can wrap each request body as `env["rack.input"]` (Rack
     // SPEC). The battery depends on StringIO regardless of the `stdlib`
