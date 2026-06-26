@@ -2134,17 +2134,22 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     // single Hash alloc).
     rt.register_fn("__rubyrs_http_parse_query", |args| {
         use crate::heap::{HashObj, HeapObj};
-        let s = match args {
-            [Value::Str(s)] => s.to_string_lossy(),
+        // Optional 2nd arg: a Hash subclass (IndifferentHash) to tag the
+        // result with — so the returned Hash IS an IndifferentHash directly,
+        // skipping the Ruby-side `IndifferentHash.from` re-iteration (which
+        // the profile showed costs ~6× the parse itself).
+        let (s, class_tag) = match args {
+            [Value::Str(s)] => (s.to_string_lossy(), None),
+            [Value::Str(s), Value::Class(c)] => (s.to_string_lossy(), Some(c.clone())),
             _ => return Err(Trap {
-                err: RubyError::ArgumentError { msg: "__rubyrs_http_parse_query(qs: String)".to_string() },
+                err: RubyError::ArgumentError { msg: "__rubyrs_http_parse_query(qs: String[, klass])".to_string() },
                 backtrace: vec![],
             }),
         };
         let ptr = crate::vm::current_vm_ptr();
         if ptr.is_null() {
             return Err(Trap {
-                err: RubyError::RuntimeError { msg: "spike_parse_query: VM null".to_string() },
+                err: RubyError::RuntimeError { msg: "http_parse_query: VM null".to_string() },
                 backtrace: vec![],
             });
         }
@@ -2179,7 +2184,9 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 None => pairs.push((Value::new_str(decode(pair)), Value::Nil)),
             }
         }
-        let id = vm.heap.alloc(HeapObj::Hash(HashObj::with_pairs(pairs)));
+        let mut hobj = HashObj::with_pairs(pairs);
+        hobj.class_tag = class_tag; // None → plain Hash; Some → IndifferentHash
+        let id = vm.heap.alloc(HeapObj::Hash(hobj));
         Ok(Value::Hash(id))
     });
 

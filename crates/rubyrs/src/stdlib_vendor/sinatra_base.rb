@@ -934,7 +934,12 @@ module Sinatra
         if (qs.nil? || qs.empty?) && verb != "POST" && verb != "PUT" && verb != "PATCH"
           IndifferentHash.new
         else
-          IndifferentHash.from(parse_query(qs)).tap { |bp| bp.merge!(parse_form_body) }
+          bp = parse_query(qs)
+          # Native flat parse already returns an IndifferentHash; only the
+          # Ruby (nested/fallback) path needs the from-wrap.
+          bp = IndifferentHash.from(bp) unless bp.is_a?(IndifferentHash)
+          bp.merge!(parse_form_body)
+          bp
         end
 
       # method_override (Rack::MethodOverride): an HTML form can only GET/POST,
@@ -1496,7 +1501,10 @@ module Sinatra
       # battery's parser. Nested `a[b]=c` queries stay on the Ruby path below
       # (which builds the nested hashes via _normalise_into).
       if !qs.include?("[") && defined?(__rubyrs_http_parse_query)
-        return __rubyrs_http_parse_query(qs)
+        # Pass IndifferentHash so the native parser tags the result directly
+        # — returns a ready IndifferentHash, skipping the Ruby-side
+        # `IndifferentHash.from` re-iteration (the dominant params cost).
+        return __rubyrs_http_parse_query(qs, IndifferentHash)
       end
       qs.split("&").each do |pair|
         next if pair.empty?
