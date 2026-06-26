@@ -1901,6 +1901,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn autoload_nearer_ancestor_wins() { run_diff("autoload_nearer_ancestor_wins"); }
 #[test] fn qualified_write_fires_owner_autoload() { run_diff("qualified_write_fires_owner_autoload"); }
 #[test] fn random_mt19937_exact() { run_diff("random_mt19937_exact"); }
+#[test] fn remove_const_clears_source_location() { run_diff("remove_const_clears_source_location"); }
 #[test] fn singleton_method_yield_capture_gc() { run_diff("singleton_method_yield_capture_gc"); }
 #[test] fn const_defined_autoload() { run_diff("const_defined_autoload"); }
 #[test] fn real_mod_name_bind() { run_diff("real_mod_name_bind"); }

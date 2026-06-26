@@ -10564,6 +10564,22 @@ impl Vm {
                 }
             };
             self.bump_const_gen();
+            // Clear the removed constant's recorded source location so a later
+            // REDEFINITION records the new one. StoreConst is first-write-wins
+            // (to keep a `class Foo` location over its nested-scope twin), so
+            // without this a removed+redefined const keeps its stale location —
+            // zeitwerk's "X is already defined in …" shadow log reads
+            // const_source_location after a reload removed + redefined X.
+            {
+                let loc_key = if matches!(owner.name.as_str(), "Object" | "Class" | "Module") {
+                    self.interner.intern(&const_name)
+                } else if let Some(owner_name) = owner.effective_name() {
+                    self.interner.intern(&format!("{}::{}", owner_name, const_name))
+                } else {
+                    self.interner.intern(&const_name)
+                };
+                self.const_source_locations.remove(&loc_key);
+            }
             match removed {
                 Some(v) => {
                     self.stack.push(v);
