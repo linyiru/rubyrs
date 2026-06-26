@@ -1893,3 +1893,4 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn const_added_scoped_class() { run_diff("const_added_scoped_class"); }
 #[test] fn singleton_method_yield_capture_gc() { run_diff("singleton_method_yield_capture_gc"); }
 #[test] fn const_defined_autoload() { run_diff("const_defined_autoload"); }
+#[test] fn real_mod_name_bind() { run_diff("real_mod_name_bind"); }

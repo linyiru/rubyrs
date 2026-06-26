@@ -4004,6 +4004,14 @@ impl Vm {
                     ),
                 }));
             }
+            // real_mod_name (Method form): bypass a `def self.name` override
+            // and return the real constant name — see the UnboundMethod arm.
+            if self.interner.resolve(bm_name_id).as_ref() == "name"
+                && let Value::Class(c) = &target {
+                let v = c.effective_name().map(Value::new_str).unwrap_or(Value::Nil);
+                self.stack.push(v);
+                return Ok(CallableOutcome::Handled);
+            }
             match bm_method.or_else(|| self.lookup_method_uncached(&cap_class, bm_name_id)) {
                 Some(m) => { self.invoke_method(m, target, args)?; }
                 None => {
@@ -4080,6 +4088,17 @@ impl Vm {
             // lookup when no snapshot exists (e.g. UnboundMethod
             // values created from `unbind` paths that pre-date
             // the snapshot field).
+            // real_mod_name: `Module.instance_method(:name).bind_call(mod)`
+            // returns mod's REAL constant name, bypassing a `def self.name`
+            // override — CRuby invokes the captured builtin, not the override.
+            // `name` is a SYNTHESISED builtin Method, so cap_method is Some and
+            // the snapshot dispatch below would re-find the override; intercept.
+            if self.interner.resolve(cap_name_id).as_ref() == "name"
+                && let Value::Class(c) = &target {
+                let v = c.effective_name().map(Value::new_str).unwrap_or(Value::Nil);
+                self.stack.push(v);
+                return Ok(CallableOutcome::Handled);
+            }
             match cap_method.or_else(|| self.lookup_method_uncached(&cap_class, cap_name_id)) {
                 Some(m) => { self.invoke_method(m, target, args)?; }
                 None => {
@@ -4775,6 +4794,17 @@ impl Vm {
                     }
                     _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
                 };
+                // real_mod_name (bound form): `Module.instance_method(:name)
+                // .bind(mod).call` must bypass a `def self.name` override and
+                // return the real constant name — same as the bind_call path.
+                // `name` is a synthesised builtin (bm_method is Some), so the
+                // snapshot fast path below would re-dispatch to the override.
+                if self.interner.resolve(bm_name_id).as_ref() == "name"
+                    && let Value::Class(c) = &bm_recv {
+                    let v = c.effective_name().map(Value::new_str).unwrap_or(Value::Nil);
+                    self.stack.push(v);
+                    return Ok(CallableOutcome::Handled);
+                }
                 // Snapshot fast path: invoke the captured Method
                 // directly so a `remove_method` on the captured
                 // class between capture and call doesn't break
