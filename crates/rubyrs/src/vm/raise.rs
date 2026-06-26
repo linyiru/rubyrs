@@ -165,6 +165,16 @@ impl Vm {
         let cls_id = self.interner.intern(class_name);
         let cls = self.classes.get(&cls_id).cloned()?;
         let message = trap.err.message();
+        // CRuby populates NameError#name. The "wrong constant name X" raised by
+        // const_get / const_defined? on a malformed name carries X as its name
+        // (a Symbol) — zeitwerk's inflector-error path re-raises a
+        // Zeitwerk::NameError with `error.name`, and test_exceptions asserts it
+        // equals `:"Foo-bar"`. Without this the re-raise propagates `nil`.
+        let wrong_const_name: Option<String> = (class_name == "NameError")
+            .then(|| message.strip_prefix("wrong constant name "))
+            .flatten()
+            .map(|rest| rest.split(['\n', ' ']).next().unwrap_or(rest).trim().to_string())
+            .filter(|s| !s.is_empty());
         self.maybe_gc();
         let id = self.heap.alloc(HeapObj::Instance(Instance {
             class: cls,
@@ -174,6 +184,11 @@ impl Vm {
         }));
         let msg_sym = self.interner.intern("@message");
         self.heap.instance_mut(id).ivars.insert(msg_sym, Value::new_str(message));
+        if let Some(nm) = wrong_const_name {
+            let name_sym = self.interner.intern(&nm);
+            let name_ivar = self.interner.intern("@name");
+            self.heap.instance_mut(id).ivars.insert(name_ivar, Value::Sym(name_sym));
+        }
         // `@backtrace` is filled centrally by `unwind_with_exception`
         // from the live frame stack on the first unwind hop — same
         // path the user-`raise`d Object route takes — so it stays
