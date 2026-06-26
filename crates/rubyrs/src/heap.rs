@@ -1084,6 +1084,19 @@ impl Heap {
                                 for v in cl.captured.borrow().iter() {
                                     Heap::visit_value(v, &mut self.marks, &mut worklist);
                                 }
+                                // A closure method that captures an enclosing
+                                // `yield` block (`define_singleton_method(:m) {
+                                // yield }` — the on_teardown idiom) holds that
+                                // block ONLY via captured_yield_block. Without
+                                // tracing it, the block is swept once the
+                                // defining scope returns, and the singleton
+                                // method later yields to a dead slot
+                                // (use-after-free). The Vm root-walker traces
+                                // it for `Vm.classes` methods (gc.rs); instance
+                                // eigenclasses need it here.
+                                if let Some(b) = cl.captured_yield_block {
+                                    Heap::visit_value(&crate::value::Value::Block(b), &mut self.marks, &mut worklist);
+                                }
                             }
                         }
                         // Singleton-class ivars (PR #102 addendum).

@@ -4644,16 +4644,33 @@ impl Vm {
                 // on first definition (CRuby doesn't re-fire on reopen);
                 // skipped for the compact `A::B::C` form (owner ambiguous)
                 // and gated on `const_added` being interned at all.
-                if was_fresh
-                    && self.interner.contains("const_added")
-                    && !self.interner.resolve(name_id).contains("::")
-                {
-                    let owner = self.class_stack.last().cloned().or_else(|| {
-                        let obj = self.interner.intern("Object");
-                        self.classes.get(&obj).cloned()
-                    });
+                if was_fresh && self.interner.contains("const_added") {
+                    // Owner + short cname. For the compact `class A::B` form
+                    // the name is qualified ("A::B"): owner is the resolved
+                    // parent path `A`, cname the short last component `B`
+                    // (CRuby fires on the parent with the short symbol). This
+                    // form was previously SKIPPED, which broke zeitwerk's
+                    // namespace child-autoload setup — it `Module.prepend`s a
+                    // const_added that registers `Foo/`'s autoloads the moment
+                    // `MyGem::Foo` is defined. The bare form ("Foo") fires on
+                    // the lexical scope (or Object) as before.
+                    let full = self.interner.resolve(name_id).to_string();
+                    let (owner, cname) = match full.rfind("::") {
+                        Some(pos) => {
+                            let parent_id = self.interner.intern(&full[..pos]);
+                            let cname_id = self.interner.intern(&full[pos + 2..]);
+                            (self.classes.get(&parent_id).cloned(), cname_id)
+                        }
+                        None => {
+                            let o = self.class_stack.last().cloned().or_else(|| {
+                                let obj = self.interner.intern("Object");
+                                self.classes.get(&obj).cloned()
+                            });
+                            (o, name_id)
+                        }
+                    };
                     if let Some(owner) = owner {
-                        self.fire_const_added(&owner, name_id)?;
+                        self.fire_const_added(&owner, cname)?;
                     }
                 }
                 self.class_stack.push(cls.clone());
