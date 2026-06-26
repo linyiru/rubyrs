@@ -1894,6 +1894,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn const_added_assignment() { run_diff("const_added_assignment"); }
 #[test] fn require_to_path() { run_diff("require_to_path"); }
 #[test] fn private_constant() { run_diff("private_constant"); }
+#[test] fn constants_includes_autoload() { run_diff("constants_includes_autoload"); }
 #[test] fn singleton_method_yield_capture_gc() { run_diff("singleton_method_yield_capture_gc"); }
 #[test] fn const_defined_autoload() { run_diff("const_defined_autoload"); }
 #[test] fn real_mod_name_bind() { run_diff("real_mod_name_bind"); }

@@ -5531,8 +5531,28 @@ impl Vm {
                     for k in self.classes.keys() {
                         push_short(k, names);
                     }
+                    // Registered-but-unloaded autoloads are listed too (CRuby):
+                    // `Mod.constants` includes `autoload`ed names. zeitwerk's
+                    // reload re-arms autoloads, and test_reloading checks
+                    // `constants.include?(:X)` before X is referenced.
+                    #[cfg(not(target_os = "wasi"))]
+                    {
+                        for k in self.autoloads_scoped.keys() {
+                            push_short(k, names);
+                        }
+                        for k in self.autoloads_toplevel.keys() {
+                            push_short(k, names);
+                        }
+                    }
                 };
-                let own_prefix = format!("{}::", cls.name);
+                // Top-level constants live in the tables under their BARE name
+                // (no "Object::" qualifier), so `Object.constants` uses an empty
+                // prefix; named modules use "Name::".
+                let own_prefix = if cls.name == "Object" {
+                    String::new()
+                } else {
+                    format!("{}::", cls.name)
+                };
                 collect(&own_prefix, &mut names);
                 if inherit {
                     // Walk the full ancestry (prepends, includes,
