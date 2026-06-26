@@ -5850,15 +5850,35 @@ impl MarshalReader<'_> {
             Value::Sym(s) => vm.interner.resolve(*s).to_string(),
             _ => return Err("class name must be a symbol".into()),
         };
-        let cid = vm.interner.intern(&cname);
-        match vm.constants.get(&cid) {
-            Some(Value::Class(c)) => Ok(c.clone()),
-            _ => vm
-                .classes
-                .get(&cid)
-                .cloned()
-                .ok_or_else(|| format!("undefined class/module {cname}")),
+        Self::marshal_resolve_cname(vm, &cname)
+    }
+
+    /// Resolve a Marshal class name to its Class, firing a pending autoload if
+    /// the class isn't loaded. CRuby triggers autoloads during Marshal.load;
+    /// zeitwerk's reload re-arms class autoloads, then Marshal.load
+    /// re-materialises the dumped instances. Shared by marshal_lookup_class and
+    /// the inline object/struct/data readers below.
+    fn marshal_resolve_cname(vm: &mut Vm, cname: &str) -> Result<std::rc::Rc<crate::value::Class>, String> {
+        let cid = vm.interner.intern(cname);
+        if let Some(Value::Class(c)) = vm.constants.get(&cid).cloned() {
+            return Ok(c);
         }
+        if let Some(c) = vm.classes.get(&cid).cloned() {
+            return Ok(c);
+        }
+        #[cfg(not(target_os = "wasi"))]
+        if vm
+            .fire_pending_autoload(cname)
+            .map_err(|_| format!("undefined class/module {cname}"))?
+        {
+            if let Some(Value::Class(c)) = vm.constants.get(&cid).cloned() {
+                return Ok(c);
+            }
+            if let Some(c) = vm.classes.get(&cid).cloned() {
+                return Ok(c);
+            }
+        }
+        Err(format!("undefined class/module {cname}"))
     }
 
     fn read_value(&mut self, vm: &mut Vm) -> Result<Value, String> {
@@ -6023,15 +6043,7 @@ impl MarshalReader<'_> {
                     Value::Sym(s) => vm.interner.resolve(s).to_string(),
                     _ => return Err("subclass tag must be a symbol".into()),
                 };
-                let cid = vm.interner.intern(&cname);
-                let cls = match vm.constants.get(&cid) {
-                    Some(Value::Class(c)) => c.clone(),
-                    _ => vm
-                        .classes
-                        .get(&cid)
-                        .cloned()
-                        .ok_or_else(|| format!("undefined class/module {cname}"))?,
-                };
+                let cls = Self::marshal_resolve_cname(vm, &cname)?;
                 let inner = self.read_value(vm)?;
                 match &inner {
                     Value::Array(aid) => {
@@ -6119,15 +6131,7 @@ impl MarshalReader<'_> {
                     Value::Sym(s) => vm.interner.resolve(s).to_string(),
                     _ => return Err("object class must be a symbol".into()),
                 };
-                let cid = vm.interner.intern(&cname);
-                let cls = match vm.constants.get(&cid) {
-                    Some(Value::Class(c)) => c.clone(),
-                    _ => vm
-                        .classes
-                        .get(&cid)
-                        .cloned()
-                        .ok_or_else(|| format!("undefined class/module {cname}"))?,
-                };
+                let cls = Self::marshal_resolve_cname(vm, &cname)?;
                 let is_exc = marshal_is_exception(&cls);
                 vm.maybe_gc();
                 vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
