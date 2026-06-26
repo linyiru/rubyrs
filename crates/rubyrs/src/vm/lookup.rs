@@ -818,6 +818,23 @@ impl Vm {
     /// arms grow. Universal methods (`nil?`, `to_s`,
     /// `respond_to?` itself, `==` / `!=`) are matched first
     /// regardless of receiver.
+    /// Class-method names handled by host dispatch shims rather than registered
+    /// Method objects (currently `Dir`'s `dir_class_dispatch` surface). Used by
+    /// `responds_to` (so `respond_to?` agrees with dispatch) and by super's
+    /// not-found fallback (so a forwarding singleton method's `super` reaches
+    /// the shim) — both needed for minitest's `Dir.stub(:children, …)`.
+    pub(crate) fn class_method_shim_exists(class_name: &str, method: &str) -> bool {
+        match class_name {
+            "Dir" => matches!(
+                method,
+                "children" | "entries" | "glob" | "[]" | "exist?" | "exists?"
+                    | "directory?" | "pwd" | "getwd" | "mkdir" | "rmdir"
+                    | "delete" | "unlink" | "chdir" | "home"
+            ),
+            _ => false,
+        }
+    }
+
     pub(crate) fn responds_to(&self, recv: &Value, name_id: SymId, include_private: bool) -> bool {
         // Host fns (`register_fn(...)` — battery / cext / embed-host
         // wiring) are reachable as bareword calls from any frame. The
@@ -833,6 +850,16 @@ impl Vm {
         // Receiver-agnostic on purpose: host fns aren't bound to a
         // class, dispatch on them ignores receiver shape.
         if self.host_fns.contains_key(&name_id) {
+            return true;
+        }
+        // Class-method shims dispatched by host helpers (`Dir.children`,
+        // `Dir.glob`, …) aren't registered Method objects, but reflection must
+        // report them — otherwise `Dir.respond_to?(:children)` is false and
+        // minitest's `Dir.stub(:children, …)` (which gates on respond_to? before
+        // installing a forwarding method) raises "undefined method 'children'".
+        if let Value::Class(c) = recv
+            && Self::class_method_shim_exists(c.name.as_str(), self.interner.resolve(name_id))
+        {
             return true;
         }
         // Hash per-instance eigenclass methods. A user method on the
@@ -2709,7 +2736,14 @@ impl Vm {
                 {
                     let nm = self.interner.resolve(name_id).clone();
                     let prim_class = matches!(self.class_of(&sv), Value::Class(ref c)
-                        if self.primitive_class_responds_to(&c.name, name_id));
+                        if self.primitive_class_responds_to(&c.name, name_id))
+                        // Class-method dispatch shims (`Dir.children`, …): a
+                        // forwarding singleton method's `super` (left behind by
+                        // minitest's `Dir.stub :children`) must reach the host
+                        // dispatch, like CRuby's real `Dir.children`. self here
+                        // IS the class object.
+                        || matches!(&sv, Value::Class(c)
+                            if Self::class_method_shim_exists(&c.name, &nm));
                     // Only the PUBLIC universal arms + primitive-class methods.
                     // NOT `universal_object_private` — its missing hooks
                     // (`method_missing`/`respond_to_missing?`) have special
