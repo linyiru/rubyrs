@@ -997,8 +997,12 @@ module Sinatra
           table = self.class.native_route_table
           matched =
             if table && defined?(__rubyrs_http_route_match)
-              start = __rubyrs_http_route_match(verb, path, table)
-              start < 0 ? nil : find_route(verb, segs, path, base_params, start)
+              # Native matcher returns [index, captures, block_args]: it both
+              # finds the route AND builds the :param captures (skipping the
+              # Ruby match() re-do, ~4us). captures is nil for splat routes
+              # (Ruby builds those); index < 0 means no match.
+              res = __rubyrs_http_route_match(verb, path, table, IndifferentHash)
+              res[0] < 0 ? nil : run_matched(res[0], res[1], res[2], verb, segs, path, base_params)
             else
               find_route(verb, segs, path, base_params, 0)
             end
@@ -1128,6 +1132,22 @@ module Sinatra
     # native matcher supplies a `start` that skips the non-matching prefix;
     # the full Ruby scan uses start 0. Re-matching from `start` keeps this
     # self-correcting (the native index is a hint, re-verified by `match`).
+    # Run the route the native matcher found (index + captures + block_args).
+    # `captured` nil ⇒ a splat route the native matcher left for Ruby; build
+    # those captures here. On `pass`, continue with the full Ruby scan from
+    # the next index. Only reached for native-eligible apps (no conditions).
+    def run_matched(idx, captured, block_args, verb, segs, path, base_params)
+      entry = self.class.routes_array[idx]
+      if captured.nil?
+        captured, block_args = match(entry[1], segs, path)
+      end
+      @params = captured.empty? ? base_params : base_params.merge(captured)
+      run_filters
+      outcome = catch(:pass) { [:done, finalize(instance_exec(*block_args, &entry[2]))] }
+      return outcome[1] if outcome.is_a?(Array) && outcome[0] == :done
+      find_route(verb, segs, path, base_params, idx + 1) # passed → keep scanning
+    end
+
     def find_route(verb, segs, path, base_params, start)
       routes = self.class.routes_array
       i = start
