@@ -1598,6 +1598,10 @@ impl Vm {
                 // the assigned value also remains on the stack as
                 // the expression's result (CRuby semantics).
                 let v = self.stack.pop().expect("ICE: StoreConst stack underflow");
+                // Whether this is the FIRST definition of this key — gates the
+                // Module#const_added hook below (CRuby fires it only once).
+                let store_was_fresh = !self.constants.contains_key(&name_id)
+                    && !self.classes.contains_key(&name_id);
                 // CRuby names an anonymous class/module on its first
                 // const-assignment (`C = Class.new` ⇒ `C.name ==
                 // "C"`). `name_id` is the constant's key — bare at
@@ -1664,6 +1668,47 @@ impl Vm {
                     self.const_source_locations.insert(name_id, loc);
                 }
                 self.bump_const_gen();
+                // The constant is now defined — drop any consumed-autoload
+                // marker for this key (it's no longer an undef slot).
+                #[cfg(not(target_os = "wasi"))]
+                self.consumed_autoloads.remove(&name_id);
+                // `Module#const_added` (CRuby 3.2+) ALSO fires on constant
+                // ASSIGNMENT (`C = Class.new`, `M::X = v`), not just class/
+                // module defs — zeitwerk's nsfile namespaces are defined as
+                // `Widget = Class.new`, and its prepended const_added sets up
+                // the namespace's child autoloads here. Owner/cname derivation
+                // mirrors the DefClass fire: qualified name → resolved parent +
+                // short cname; bare → lexical scope (or Object). Gated on
+                // first-definition + const_added being interned.
+                if store_was_fresh && self.interner.contains("const_added") {
+                    let full = self.interner.resolve(name_id).to_string();
+                    // A bare const written INSIDE a class/module body is
+                    // compiled as TWO stores — the bare name AND a qualified
+                    // `Scope::name` twin (ConstWrite). Both reach here; fire
+                    // only on the qualified twin so const_added fires ONCE
+                    // (CRuby parity). Top-level bare assignments (no scope) and
+                    // explicit `Scope::X =` keep firing.
+                    let is_bare_in_body = !full.contains("::") && !self.class_stack.is_empty();
+                    if !is_bare_in_body {
+                        let (owner, cname) = match full.rfind("::") {
+                            Some(pos) => {
+                                let parent_id = self.interner.intern(&full[..pos]);
+                                let cname_id = self.interner.intern(&full[pos + 2..]);
+                                (self.classes.get(&parent_id).cloned(), cname_id)
+                            }
+                            None => {
+                                let o = self.class_stack.last().cloned().or_else(|| {
+                                    let obj = self.interner.intern("Object");
+                                    self.classes.get(&obj).cloned()
+                                });
+                                (o, name_id)
+                            }
+                        };
+                        if let Some(owner) = owner {
+                            self.fire_const_added(&owner, cname)?;
+                        }
+                    }
+                }
             }
             Op::LoadConst(name_id) => {
                 // Inline constant cache — resolution below depends only
