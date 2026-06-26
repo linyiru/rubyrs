@@ -580,6 +580,15 @@ module Sinatra
           {}
         end
       end
+
+      # True when host_authorization permits all hosts (empty permitted list
+      # — the production default), so the native predispatch can skip the
+      # host check. Memoised; add_route doesn't affect it, but `set` clears
+      # the native table cache which is the only thing keyed off settings.
+      def host_auth_bypassed?
+        @host_auth_bypassed = Array(host_authorization[:permitted_hosts]).empty? if @host_auth_bypassed.nil?
+        @host_auth_bypassed
+      end
       # Sinatra's `set :foo, val` doubles as both storage AND a
       # reflection surface — `settings.foo` returns the value
       # and `settings.respond_to?(:foo)` reports true. Real
@@ -942,7 +951,16 @@ module Sinatra
     end
 
     def dispatch(env)
-      @env     = env
+      @env = env
+      # Native predispatch fast path: one host call does env-read + query
+      # parse + route match for the common GET-eligible case, shrinking the
+      # Ruby dispatch to filters+block+finish. Bails (false) to the full
+      # path below for POST bodies / dev host_auth / public-folder apps.
+      if defined?(__rubyrs_http_predispatch) && (rt = self.class.native_route_table)
+        res = __rubyrs_http_predispatch(env, rt, IndifferentHash,
+                self.class.host_auth_bypassed?, self.class.settings_store.key?(:public_folder))
+        return run_predispatched(env, res) unless res == false
+      end
       return [403, { "content-type" => "text/plain" }, ["Host not permitted"]] unless host_authorized?(env)
       @status  = 200
       @headers = { "content-type" => "text/html;charset=utf-8" }
@@ -1153,6 +1171,68 @@ module Sinatra
       outcome = catch(:pass) { [:done, finalize(instance_exec(*block_args, &entry[2]))] }
       return outcome[1] if outcome.is_a?(Array) && outcome[0] == :done
       find_route(verb, segs, path, base_params, idx + 1) # passed → keep scanning
+    end
+
+    # Run the response after the native predispatch (which gave [idx,
+    # captures, block_args, base_params]). Mirrors the dispatch tail — the
+    # catch(:halt)/filters/block/error/finish — but skips host_auth, the
+    # segs split, the params build, method_override, static, and the route
+    # loop (all done natively). segs/path are only rebuilt for splat/pass.
+    def run_predispatched(env, res)
+      @status  = 200
+      @headers = { "content-type" => "text/html;charset=utf-8" }
+      idx, captured, block_args, base_params = res
+      result = catch(:halt) do
+        begin
+          if idx < 0
+            nf = self.class.not_found_handler
+            if nf
+              @params = base_params
+              @status = 404
+              finalize(instance_exec(&nf))
+            else
+              default_not_found_response
+            end
+          else
+            entry = self.class.routes_array[idx]
+            if captured.nil? # splat route — build captures in Ruby
+              path = env["PATH_INFO"] || "/"
+              segs = path.split("/").reject(&:empty?)
+              captured, block_args = match(entry[1], segs, path)
+            end
+            @params = captured.empty? ? base_params : base_params.merge(captured)
+            run_filters
+            outcome = catch(:pass) { [:done, finalize(instance_exec(*block_args, &entry[2]))] }
+            if outcome.is_a?(Array) && outcome[0] == :done
+              outcome[1]
+            else
+              path = env["PATH_INFO"] || "/"
+              segs = path.split("/").reject(&:empty?)
+              find_route(env["REQUEST_METHOD"], segs, path, base_params, idx + 1)
+            end
+          end
+        rescue UncaughtThrowError
+          raise
+        rescue => e
+          handler = error_handler_for(e)
+          @sinatra_error = e
+          @status = 500
+          if handler
+            finalize(instance_exec(&handler))
+          else
+            [500, { "content-type" => "text/html;charset=utf-8" }, ["<h1>Internal Server Error</h1>"]]
+          end
+        end
+      end
+      self.class.after_filters.each { |f| instance_exec(&f) }
+      prot = self.class.respond_to?(:protection?) ? self.class.protection? : true
+      if defined?(__rubyrs_http_finish)
+        __rubyrs_http_finish(result[0], result[1], result[2], prot)
+      else
+        apply_content_length(result)
+        apply_protection_headers(result)
+      end
+      result
     end
 
     def find_route(verb, segs, path, base_params, start)

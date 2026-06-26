@@ -2277,6 +2277,109 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         Ok(triple(vm, -1, Value::Nil, Value::Nil))
     });
 
+    // Native predispatch core (B1 Phase-2). Combines env-read + query parse
+    // + route match into ONE host call, so the Ruby dispatch shrinks to
+    // filters+block+finish (static 14.6→10.7us). Args: (env, routes_table,
+    // IndifferentHash, host_auth_bypassed, has_public_folder). Returns false
+    // to BAIL to the full Ruby dispatch (non-GET/HEAD, host_auth not
+    // bypassed, has public folder, nested `[` query), else [idx, captures,
+    // block_args, base_params] (idx<0 = 404). NB the parse + segment-match
+    // logic here MIRRORS __rubyrs_http_route_match + the query parser — both
+    // are gated byte-identical by the diff_framework + parity tests; a
+    // cleanup would factor them into shared Rust helpers.
+    rt.register_fn("__rubyrs_http_predispatch", |args| {
+        use crate::heap::{HashObj, HeapObj};
+        let (env_id, table, ih, bypass, has_pub) = match args {
+            [Value::Hash(e), Value::Str(t), Value::Class(c), Value::Bool(b), Value::Bool(p)] =>
+                (*e, t.to_string_lossy(), c.clone(), *b, *p),
+            _ => return Err(Trap {
+                err: RubyError::ArgumentError { msg: "__rubyrs_http_predispatch(env, table, klass, bypass, has_pub)".to_string() },
+                backtrace: vec![],
+            }),
+        };
+        // Bail conditions that need the full Ruby path.
+        if !bypass || has_pub { return Ok(Value::Bool(false)); }
+        let vm = unsafe { &mut *crate::vm::current_vm_ptr() };
+        // Read REQUEST_METHOD / PATH_INFO / QUERY_STRING from env (one pass).
+        let (mut verb, mut path, mut qs) = (String::new(), String::from("/"), String::new());
+        for (k, v) in vm.heap.hash(env_id) {
+            if let (Value::Str(ks), Value::Str(vs)) = (k, v) {
+                match ks.borrow().as_slice() {
+                    b"REQUEST_METHOD" => verb = vs.to_string_lossy(),
+                    b"PATH_INFO" => path = vs.to_string_lossy(),
+                    b"QUERY_STRING" => qs = vs.to_string_lossy(),
+                    _ => {}
+                }
+            }
+        }
+        // Only GET/HEAD on this fast path (POST/PUT/PATCH bodies + method
+        // override stay in Ruby).
+        if verb != "GET" && verb != "HEAD" { return Ok(Value::Bool(false)); }
+        fn pdecode(s: &str) -> String {
+            if !s.contains('%') { return s.to_string(); }
+            let b = s.as_bytes(); let mut out = Vec::with_capacity(b.len()); let mut i = 0;
+            while i < b.len() {
+                if b[i] == b'%' && i + 2 < b.len()
+                    && let (Some(h), Some(l)) = ((b[i+1] as char).to_digit(16), (b[i+2] as char).to_digit(16))
+                {
+                    out.push((h*16+l) as u8); i += 3; continue;
+                }
+                out.push(b[i]); i += 1;
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        }
+        // base_params from the query (flat only; bail if nested `[`).
+        if qs.contains('[') { return Ok(Value::Bool(false)); }
+        let mut bp_pairs: Vec<(Value, Value)> = Vec::new();
+        for pair in qs.split('&') {
+            if pair.is_empty() { continue; }
+            match pair.split_once('=') {
+                Some((k, v)) => {
+                    let dec = |s: &str| { let mut t = String::with_capacity(s.len()); for c in s.chars() { t.push(if c == '+' { ' ' } else { c }); } pdecode(&t) };
+                    bp_pairs.push((Value::new_str(dec(k)), Value::new_str(dec(v))));
+                }
+                None => bp_pairs.push((Value::new_str(pdecode(&pair.replace('+', " "))), Value::Nil)),
+            }
+        }
+        let mut bp = HashObj::with_pairs(bp_pairs); bp.class_tag = Some(ih.clone());
+        let base_params = Value::Hash(vm.heap.alloc(HeapObj::Hash(bp)));
+        // Route match (lit/:cap/splat) → idx + captures + block_args.
+        let psegs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let mk = |vm: &mut crate::vm::Vm, idx: i64, cap: Value, ba: Value| {
+            Value::Array(vm.heap.alloc(HeapObj::Array(vec![Value::Int(idx), cap, ba, base_params].into())))
+        };
+        for (idx, line) in table.split('\n').enumerate() {
+            if line.is_empty() { continue; }
+            let (rverb, pat) = match line.split_once(' ') { Some(x) => x, None => continue };
+            if rverb != verb { continue; }
+            let pat_segs: Vec<&str> = pat.split('/').filter(|s| !s.is_empty()).collect();
+            if pat_segs.len() == 1 && pat_segs[0] == "*" { return Ok(mk(vm, idx as i64, Value::Nil, Value::Nil)); }
+            if pat_segs.len() != psegs.len() { continue; }
+            let mut ok = true; let mut has_splat = false;
+            for (ps, rs) in psegs.iter().zip(pat_segs.iter()) {
+                if rs.starts_with(':') { continue; }
+                if *rs == "*" { has_splat = true; continue; }
+                if rs != ps { ok = false; break; }
+            }
+            if !ok { continue; }
+            if has_splat { return Ok(mk(vm, idx as i64, Value::Nil, Value::Nil)); }
+            let mut pairs: Vec<(Value, Value)> = Vec::new();
+            let mut block_args: Vec<Value> = Vec::new();
+            for (ps, rs) in psegs.iter().zip(pat_segs.iter()) {
+                if let Some(name) = rs.strip_prefix(':') {
+                    let val = Value::new_str(pdecode(ps));
+                    pairs.push((Value::new_str(name.to_string()), val.clone()));
+                    block_args.push(val);
+                }
+            }
+            let mut hobj = HashObj::with_pairs(pairs); hobj.class_tag = Some(ih.clone());
+            let cap = Value::Hash(vm.heap.alloc(HeapObj::Hash(hobj)));
+            let ba = Value::Array(vm.heap.alloc(HeapObj::Array(block_args.into())));
+            return Ok(mk(vm, idx as i64, cap, ba));
+        }
+        Ok(mk(vm, -1, Value::Nil, Value::Nil))
+    });
+
     // Native response-finish: Content-Length + Rack::Protection headers in
     // one host call, replacing apply_content_length + apply_protection_headers
     // (~1.4us/request). Args: (status, headers Hash, body, protection_on).
