@@ -851,6 +851,12 @@ pub(crate) struct Vm {
     /// access (even from inside M), while bare/lexical reads and `const_get`
     /// still work. Enforced in the qualified Op::LoadConst path only.
     pub(crate) private_consts: std::collections::HashSet<SymId>,
+    /// Reverse map: canonicalized autoload-target path -> the const keys whose
+    /// autoload points there. CRuby `require`ing a file SATISFIES (consumes)
+    /// any autoload registered for it (`autoload?` returns nil afterward).
+    /// Populated at autoload-registration time (one canonicalize there, none in
+    /// the require hot path); consulted O(1) when a require completes.
+    pub(crate) autoload_paths: std::collections::HashMap<std::path::PathBuf, Vec<SymId>>,
     /// Per-call-site inline-cache counter. Each compiled `Op::Call`
     /// gets a unique u16 slot id; the Vm side allocates
     /// `call_caches[id]` lazily. Lives on the Vm so kernel
@@ -1828,6 +1834,7 @@ impl Vm {
             autoloads_scoped: HashMap::new(),
             consumed_autoloads: std::collections::HashSet::new(),
             private_consts: std::collections::HashSet::new(),
+            autoload_paths: std::collections::HashMap::new(),
             cache_counter: 0,
             globals: FxHashMap::default(),
             toplevel_methods: FxHashMap::default(),

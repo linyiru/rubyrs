@@ -1897,6 +1897,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn constants_includes_autoload() { run_diff("constants_includes_autoload"); }
 #[test] fn marshal_load_autoload() { run_diff("marshal_load_autoload"); }
 #[test] fn autoload_inception_ignored() { run_diff("autoload_inception_ignored"); }
+#[test] fn require_consumes_autoload() { run_diff("require_consumes_autoload"); }
 #[test] fn singleton_method_yield_capture_gc() { run_diff("singleton_method_yield_capture_gc"); }
 #[test] fn const_defined_autoload() { run_diff("const_defined_autoload"); }
 #[test] fn real_mod_name_bind() { run_diff("real_mod_name_bind"); }

@@ -10126,6 +10126,7 @@ impl Vm {
                     Some(on) => format!("{}::{}", on, const_name),
                 };
                 let key_id = self.interner.intern(&key);
+                self.autoload_paths.entry(canon).or_default().push(key_id);
                 self.autoloads_scoped.insert(key_id, path);
             }
             self.stack.push(Value::Nil);

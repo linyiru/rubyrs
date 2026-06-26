@@ -4362,6 +4362,27 @@ impl Vm {
         // "already loading"; the partially-defined module is visible
         // to the re-entrant require).
         self.loaded_features.insert(canon.clone());
+        // CRuby: a file marked "loading" SATISFIES any autoload registered for
+        // it — `autoload?` returns nil from this point on (so a file doing
+        // `autoload(:Self, __FILE__)` and checking autoload? mid-body sees nil,
+        // and one up the require chain is ignored too). Consume the matching
+        // autoloads NOW (at load start), via the O(1) reverse map — the
+        // canonicalize happened once at registration, not in this hot path. The
+        // const isn't defined yet, so leave a removable undef-slot; StoreConst
+        // clears it if the body defines the constant.
+        #[cfg(not(target_os = "wasi"))]
+        if let Some(keys) = self.autoload_paths.remove(&canon) {
+            for k in keys {
+                let removed = self.autoloads_scoped.remove(&k).is_some()
+                    | self.autoloads_toplevel.remove(&k).is_some();
+                if removed
+                    && !self.classes.contains_key(&k)
+                    && !self.constants.contains_key(&k)
+                {
+                    self.consumed_autoloads.insert(k);
+                }
+            }
+        }
         // NOTE: the script-visible `$LOADED_FEATURES` Array is pushed on
         // SUCCESSFUL COMPLETION below (CRuby order), NOT here — so a
         // nested `require` inside this body sees the just-completed inner
