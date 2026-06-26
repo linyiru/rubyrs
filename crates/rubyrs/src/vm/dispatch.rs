@@ -19394,7 +19394,7 @@ impl Vm {
     /// `.rb` files, which routes to the builtin (the alias forwarder
     /// is name `zeitwerk_original_require`, not `require`, so there is
     /// no re-entry here).
-    fn invoke_require_for_autoload(&mut self, path: Value) -> Result<Value, Trap> {
+    pub(crate) fn invoke_require_for_autoload(&mut self, path: Value) -> Result<Value, Trap> {
         let require_id = self.interner.intern("require");
         let main = self.main_object();
         let user_require = match &main {
@@ -19812,6 +19812,50 @@ impl Vm {
                         // error in the target, …) — surface it rather
                         // than masking as "uninitialized constant".
                         Err(t) => return ConstPathOutcome::Trap(t),
+                    }
+                }
+            }
+            // Ancestor scoped-autoload: `segment` is autoloaded on an
+            // ANCESTOR of the current scope (superclass / included module),
+            // not on the scope itself. The direct `scope::segment` autoload
+            // missed above; resolve the scope class — `current_value` for a
+            // stepped segment, else `scope_name` for the first segment — and
+            // fire the first `ancestor::segment` autoload, then re-resolve via
+            // the ancestry. `C::X` where X lives on a parent class
+            // (zeitwerk test_ancestors / test_nsfiles).
+            #[cfg(not(target_os = "wasi"))]
+            if hit.is_none() {
+                let scope_cls = match &current_value {
+                    Some(Value::Class(c)) => Some(c.clone()),
+                    _ if !scope_name.is_empty() && self.interner.contains(&scope_name) =>
+                        self.classes.get(&self.interner.intern(&scope_name)).cloned(),
+                    _ => None,
+                };
+                if let Some(scope_cls) = scope_cls {
+                    let seg_id = self.interner.intern(segment);
+                    let mut fired = false;
+                    for anc in super::flatten_ancestors(&scope_cls) {
+                        if anc.name.is_empty() { continue; }
+                        let key = format!("{}::{}", anc.name, segment);
+                        if !self.interner.contains(&key) { continue; }
+                        let kid = self.interner.intern(&key);
+                        if let Some(p) = self.autoloads_scoped.remove(&kid) {
+                            self.consumed_autoloads.insert(kid);
+                            match self.invoke_require_for_autoload(Value::new_str(p)) {
+                                Ok(_) => {
+                                    if self.classes.contains_key(&kid) || self.constants.contains_key(&kid) {
+                                        self.consumed_autoloads.remove(&kid);
+                                    }
+                                    fired = true;
+                                    break;
+                                }
+                                Err(t) => return ConstPathOutcome::Trap(t),
+                            }
+                        }
+                    }
+                    if fired
+                        && let Some(v) = self.const_via_ancestors(&scope_cls, seg_id) {
+                        hit = Some((v.clone(), const_scope_name(&v)));
                     }
                 }
             }

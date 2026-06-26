@@ -1953,21 +1953,26 @@ impl Vm {
                             // resolved class (which walks ITS ancestry too —
                             // `Entity::NAME` → XMLTokens::NAME via include).
                             let head_id = self.interner.intern(head);
-                            if let Some(Value::Class(head_cls)) =
-                                self.const_via_ancestors(&cref, head_id)
-                                // `prefer_own_autoload = true`: the head was
-                                // EXPLICITLY resolved (`Types` → `Dry::Types`),
-                                // so `rest` (`Array`) is a scoped lookup under a
-                                // real scope — a pending `Dry::Types::Array`
-                                // autoload must win over the toplevel core
-                                // `::Array` (the flag only suppresses the
-                                // toplevel fallback WHEN such an autoload is
-                                // pending, so the no-autoload case still falls
-                                // back as before). dry-types' `Types::Array`
-                                // (a zeitwerk autoload shadowing core Array)
-                                // otherwise bound `::Array`, and `::Array.new(
-                                // SomeClass)` raised "no implicit conversion of
-                                // Class into Integer".
+                            let mut head_cls = match self.const_via_ancestors(&cref, head_id) {
+                                Some(Value::Class(c)) => Some(c),
+                                _ => None,
+                            };
+                            // The head may itself be an autoload not yet loaded
+                            // — e.g. top-level `C` in a nested `C::X` reference
+                            // where C<B<A are all zeitwerk autoloads. Fire it,
+                            // then take the now-defined class (zeitwerk
+                            // test_ancestors).
+                            #[cfg(not(target_os = "wasi"))]
+                            if head_cls.is_none() && self.fire_pending_autoload(head)? {
+                                head_cls = self.classes.get(&head_id).cloned();
+                            }
+                            // `prefer_own_autoload = true`: `rest` is a scoped
+                            // lookup under a real resolved scope — a pending
+                            // `Head::rest` autoload must win over the toplevel
+                            // core name (dry-types' `Types::Array` shadowing
+                            // `::Array`; the flag only suppresses the toplevel
+                            // fallback WHEN such an autoload is pending).
+                            if let Some(head_cls) = head_cls
                                 && let crate::vm::dispatch::ConstPathOutcome::Found(v) =
                                     self.resolve_const_path(&head_cls, rest, true, true)
                             {
@@ -1975,6 +1980,35 @@ impl Vm {
                             }
                         } else {
                             found = self.const_via_ancestors(&cref, bare_sym);
+                            // Ancestor scoped-autoload: `C::X` where X is
+                            // autoloaded on an ANCESTOR of C (a superclass or
+                            // included module), not on C itself.
+                            // const_via_ancestors only sees DEFINED ancestor
+                            // consts; walk the ancestry, fire the first pending
+                            // `Ancestor::X` autoload, then re-resolve. zeitwerk's
+                            // test_ancestors / test_nsfiles need this.
+                            #[cfg(not(target_os = "wasi"))]
+                            if found.is_none() {
+                                let mut fired = false;
+                                for anc in super::flatten_ancestors(&cref) {
+                                    if anc.name.is_empty() { continue; }
+                                    let key = format!("{}::{}", anc.name, bare_str);
+                                    if !self.interner.contains(&key) { continue; }
+                                    let kid = self.interner.intern(&key);
+                                    if let Some(p) = self.autoloads_scoped.remove(&kid) {
+                                        self.consumed_autoloads.insert(kid);
+                                        self.invoke_require_for_autoload(Value::new_str(p))?;
+                                        if self.classes.contains_key(&kid) || self.constants.contains_key(&kid) {
+                                            self.consumed_autoloads.remove(&kid);
+                                        }
+                                        fired = true;
+                                        break;
+                                    }
+                                }
+                                if fired {
+                                    found = self.const_via_ancestors(&cref, bare_sym);
+                                }
+                            }
                         }
                     }
                 }
