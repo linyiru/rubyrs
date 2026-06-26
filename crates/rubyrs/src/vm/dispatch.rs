@@ -19769,6 +19769,32 @@ impl Vm {
                         hit = Some((v.clone(), const_scope_name(&v)));
                         break;
                     }
+                    // A pending AUTOLOAD on this (nearest-first) ancestor wins
+                    // over an already-DEFINED constant on a FARTHER one — fire
+                    // it here so `C::X` (B<A, A::X defined, B::X autoloaded)
+                    // resolves to B::X (CRuby ancestry order), not A::X.
+                    #[cfg(not(target_os = "wasi"))]
+                    if let Some(p) = self.autoloads_scoped.remove(&chain_qid) {
+                        self.consumed_autoloads.insert(chain_qid);
+                        match self.invoke_require_for_autoload(Value::new_str(p)) {
+                            Ok(_) => {
+                                if self.classes.contains_key(&chain_qid)
+                                    || self.constants.contains_key(&chain_qid)
+                                {
+                                    self.consumed_autoloads.remove(&chain_qid);
+                                }
+                                if let Some(c) = self.classes.get(&chain_qid).cloned() {
+                                    hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
+                                    break;
+                                }
+                                if let Some(v) = self.constants.get(&chain_qid).cloned() {
+                                    hit = Some((v.clone(), const_scope_name(&v)));
+                                    break;
+                                }
+                            }
+                            Err(t) => return ConstPathOutcome::Trap(t),
+                        }
+                    }
                 }
                 // Per-class `consts` table probe: a constant defined
                 // inside a module (`module Toks; NAME = …; end`) lives in
@@ -19825,12 +19851,73 @@ impl Vm {
             // stepped-into final segment reaches the ancestry. Makes
             // `M::Ent::NAME` resolve NAME from a module Ent includes
             // (rexml's `Entity < Child; include XMLTokens` → Entity::NAME).
-            if hit.is_none()
-                && let Some(Value::Class(scope_cls)) = current_value.clone()
-            {
-                let seg_id = self.interner.intern(segment);
-                if let Some(v) = self.const_via_ancestors(&scope_cls, seg_id) {
-                    hit = Some((v.clone(), const_scope_name(&v)));
+            // INTERLEAVED ancestry walk: nearest-first, and at EACH ancestor
+            // check DEFINED (own const table, then the qualified global key)
+            // THEN a pending AUTOLOAD before moving outward. This is what lets a
+            // NEARER ancestor's autoloaded constant win over a FARTHER
+            // ancestor's already-defined one — `C::X` with `B < A`, `A::X`
+            // defined but `B::X` autoloaded, resolves to `B::X` (CRuby). Scope
+            // is `current_value` for a stepped segment, else `scope_name` for
+            // the first. Replaces the old const_via_ancestors-then-autoload
+            // two-pass, which let a farther DEFINED const beat a nearer
+            // AUTOLOAD.
+            if hit.is_none() {
+                let scope_cls = match &current_value {
+                    Some(Value::Class(c)) => Some(c.clone()),
+                    _ if !scope_name.is_empty() && self.interner.contains(&scope_name) =>
+                        self.classes.get(&self.interner.intern(&scope_name)).cloned(),
+                    _ => None,
+                };
+                if let Some(scope_cls) = scope_cls {
+                    let seg_id = self.interner.intern(segment);
+                    let chain: Vec<std::rc::Rc<crate::value::Class>> =
+                        std::iter::once(scope_cls.clone())
+                            .chain(super::flatten_ancestors(&scope_cls))
+                            .collect();
+                    for anc in &chain {
+                        // (1) own per-class const table
+                        if let Some(v) = anc.consts.borrow().get(&seg_id).cloned() {
+                            hit = Some((v.clone(), const_scope_name(&v)));
+                            break;
+                        }
+                        // effective_name: an autovivified zeitwerk namespace has
+                        // an empty structural name but a real effective name.
+                        let Some(anc_name) = anc.effective_name() else { continue };
+                        if anc_name.is_empty() { continue; }
+                        let qual = format!("{}::{}", anc_name, segment);
+                        if !self.interner.contains(&qual) { continue; }
+                        let qid = self.interner.intern(&qual);
+                        // (2) qualified global key (already defined)
+                        if let Some(c) = self.classes.get(&qid).cloned() {
+                            hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
+                            break;
+                        }
+                        if let Some(v) = self.constants.get(&qid).cloned() {
+                            hit = Some((v.clone(), const_scope_name(&v)));
+                            break;
+                        }
+                        // (3) pending autoload on THIS ancestor — fire + retry.
+                        #[cfg(not(target_os = "wasi"))]
+                        if let Some(p) = self.autoloads_scoped.remove(&qid) {
+                            self.consumed_autoloads.insert(qid);
+                            match self.invoke_require_for_autoload(Value::new_str(p)) {
+                                Ok(_) => {
+                                    if self.classes.contains_key(&qid) || self.constants.contains_key(&qid) {
+                                        self.consumed_autoloads.remove(&qid);
+                                    }
+                                    if let Some(c) = self.classes.get(&qid).cloned() {
+                                        hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
+                                        break;
+                                    }
+                                    if let Some(v) = self.constants.get(&qid).cloned() {
+                                        hit = Some((v.clone(), const_scope_name(&v)));
+                                        break;
+                                    }
+                                }
+                                Err(t) => return ConstPathOutcome::Trap(t),
+                            }
+                        }
+                    }
                 }
             }
             // Scoped autoload trigger — Phase 2 of issue #224.
