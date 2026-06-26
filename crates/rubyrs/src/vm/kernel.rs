@@ -3078,7 +3078,24 @@ impl Vm {
             // `autoload` are still deferred. Auto-populated
             // stdlib/gem paths are NOT pre-seeded — scripts
             // opt in by mutating `$LOAD_PATH` themselves.
-            "require" => match args {
+            "require" => {
+                // CRuby's `require` accepts anything convertible to a path
+                // (Pathname etc.) via `to_path`/`to_str` (rb_get_path). Coerce
+                // a single non-String arg here so `require Pathname.new(...)`
+                // works; zeitwerk's loaders pass abspaths that may be Pathnames.
+                let coerced: Option<Value> = match args {
+                    [Value::Str(_)] => None,
+                    [v] => match self.coerce_path_string(v, &[]) {
+                        Ok(o) => o.map(Value::new_str),
+                        Err(t) => return Some(Err(t)),
+                    },
+                    _ => None,
+                };
+                let args: &[Value] = match &coerced {
+                    Some(v) => std::slice::from_ref(v),
+                    None => args,
+                };
+                match args {
                 [Value::Str(path)] => {
                     #[cfg(not(target_os = "wasi"))]
                     {
@@ -3380,6 +3397,7 @@ impl Vm {
                         args.len()
                     ),
                 }))),
+                }
             },
             // `require_relative "name"` — resolve relative to the
             // CURRENTLY-EXECUTING file's directory (not cwd), auto-

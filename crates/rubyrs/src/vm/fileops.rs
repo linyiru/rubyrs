@@ -427,7 +427,7 @@ impl Vm {
     /// (`invoke_method` + `dispatch_until`, the `invoke_inherited_hook`
     /// pattern), so `maybe_gc` can run: `v` and the caller's
     /// not-yet-processed `also_pin` args are pinned for the duration.
-    fn coerce_path_string(&mut self, v: &Value, also_pin: &[Value]) -> Result<Option<String>, Trap> {
+    pub(crate) fn coerce_path_string(&mut self, v: &Value, also_pin: &[Value]) -> Result<Option<String>, Trap> {
         if let Value::Str(s) = v {
             return Ok(Some(s.to_string_lossy()));
         }
