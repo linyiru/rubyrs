@@ -2233,6 +2233,20 @@ impl Vm {
                     None => break,
                 }
             }
+            // A class object is an instance of `Class` (< Module < Object <
+            // Kernel < BasicObject), so its class-method chain continues into
+            // the INSTANCE methods of that metaclass-ancestry tail. Without
+            // this, `super` from a class method defined in an extended module
+            // can't reach e.g. `Object#respond_to_missing?` — AR's
+            // `DynamicMatchers#respond_to_missing?` (extended onto a model
+            // class) calls `super`. These nodes look in `methods` (instance),
+            // distinct from the singleton-chain nodes above, so no dedup
+            // against `sc_visited` (Object appears in both, different tables).
+            if let Value::Class(meta) = self.class_of(&Value::Class(cls.clone())) {
+                for anc in flatten_ancestors(&meta) {
+                    chain.push((anc, true));
+                }
+            }
             let m = chain.iter()
                 .position(|(c, _)| Rc::ptr_eq(c, &defining))
                 .map(|i| i + 1)
