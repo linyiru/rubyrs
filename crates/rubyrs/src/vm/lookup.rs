@@ -1500,18 +1500,56 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
     // Two separate visited sets — same rationale as
     // `lookup_method_uncached`: superclass-chain cycles vs.
     // include/prepend-graph cycles need independent protection.
-    let mut sc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
-    let mut current = child.clone();
-    loop {
-        if !sc_visited.insert(Rc::as_ptr(&current)) { return false; }
-        let mut inc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
-        if walks_through(&current, ancestor, &mut inc_visited) { return true; }
-        let parent = current.superclass.borrow().clone();
-        match parent {
-            Some(p) => current = p,
-            None => return false,
+    // PERF: these sets were allocated fresh on EVERY call (and one per
+    // superclass for `inc_visited`). class_is_a is a leaf computation hammered
+    // by ActiveModel/Rails validators (is_a?/kind_of? per check), so the
+    // per-call hashset alloc showed as ~4.5% in the ActiveModel profile. Reuse
+    // thread-local scratch sets (cleared, not reallocated). class_is_a never
+    // dispatches Ruby so it isn't normally re-entrant, but try_borrow guards any
+    // future nested call by falling back to fresh sets.
+    fn run(
+        child: &Rc<Class>,
+        ancestor: &Rc<Class>,
+        sc_visited: &mut crate::intern::FxHashSet<*const Class>,
+        inc_visited: &mut crate::intern::FxHashSet<*const Class>,
+    ) -> bool {
+        sc_visited.clear();
+        let mut current = child.clone();
+        loop {
+            if !sc_visited.insert(Rc::as_ptr(&current)) {
+                return false;
+            }
+            inc_visited.clear();
+            if walks_through(&current, ancestor, inc_visited) {
+                return true;
+            }
+            let parent = current.superclass.borrow().clone();
+            match parent {
+                Some(p) => current = p,
+                None => return false,
+            }
         }
     }
+    thread_local! {
+        static SCRATCH: std::cell::RefCell<(
+            crate::intern::FxHashSet<*const Class>,
+            crate::intern::FxHashSet<*const Class>,
+        )> = std::cell::RefCell::new((
+            crate::intern::FxHashSet::default(),
+            crate::intern::FxHashSet::default(),
+        ));
+    }
+    SCRATCH.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut g) => {
+            let (sc, inc) = &mut *g;
+            run(child, ancestor, sc, inc)
+        }
+        Err(_) => {
+            let mut sc = crate::intern::FxHashSet::default();
+            let mut inc = crate::intern::FxHashSet::default();
+            run(child, ancestor, &mut sc, &mut inc)
+        }
+    })
 }
 
 /// `target` is reachable via `cls`'s own `singleton_prepends`
