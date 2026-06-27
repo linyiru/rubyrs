@@ -1194,6 +1194,14 @@ pub(crate) struct Vm {
     /// defining module), the list of `(target_class, refinement_holder)`
     /// pairs `refine` recorded; `using M` reads it to activate.
     pub(crate) module_refinements: crate::intern::FxHashMap<usize, RefinementList>,
+    /// Reverse link from a refinement holder (the empty anon module `refine
+    /// Target do … end` creates) to its `Target`. Keyed by
+    /// `Rc::as_ptr(holder) as usize`. Lets `alias`/`alias_method` inside the
+    /// refine block resolve the source method — including a primitive like
+    /// `Array#sum` — from `Target` rather than the empty holder (the AS
+    /// `refine Array do alias :orig_sum :sum end` shape).
+    pub(crate) refinement_targets:
+        crate::intern::FxHashMap<usize, std::rc::Rc<crate::value::Class>>,
     /// `(target_class_name, method_name)` → the active refined method.
     pub(crate) active_refinements:
         crate::intern::FxHashMap<(SymId, SymId), std::rc::Rc<crate::value::Method>>,
@@ -1896,6 +1904,7 @@ impl Vm {
             default_external: crate::value::EncodingTag::Utf8,
             default_internal: None,
             module_refinements: crate::intern::FxHashMap::default(),
+            refinement_targets: crate::intern::FxHashMap::default(),
             active_refinements: crate::intern::FxHashMap::default(),
             refined_method_names: crate::intern::FxHashSet::default(),
             stack: Vec::with_capacity(1024),

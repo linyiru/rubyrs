@@ -76,4 +76,22 @@ module Gem
   def self.find_files(_glob)
     []
   end
+
+  # Gem install locations. rubyrs has no gem database; derive a best-effort
+  # answer from GEM_HOME / GEM_PATH (set by rbenv/bundler) so consumers like
+  # ActiveSupport::BacktraceCleaner#add_gem_filter (which only builds a
+  # cosmetic backtrace regexp and guards the empty case) work without raising.
+  def self.default_dir
+    ENV["GEM_HOME"] || ""
+  end
+
+  def self.dir
+    default_dir
+  end
+
+  def self.path
+    gp = ENV["GEM_PATH"]
+    list = (gp.nil? || gp.empty?) ? [default_dir] : gp.split(":")
+    list.reject { |p| p.nil? || p.empty? }
+  end
 end

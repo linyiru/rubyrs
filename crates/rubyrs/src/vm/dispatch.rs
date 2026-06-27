@@ -16382,6 +16382,10 @@ impl Vm {
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
+        // Link holder → target so `alias`/`alias_method` inside the block
+        // resolves source methods (incl. primitives) from the refined class.
+        self.refinement_targets
+            .insert(std::rc::Rc::as_ptr(&holder) as usize, target.clone());
         // Run the refine block as a class body on `holder`.
         let pre = self.frames.len();
         self.invoke_block_with_self(block, Value::Class(holder.clone()), true, vec![])?;

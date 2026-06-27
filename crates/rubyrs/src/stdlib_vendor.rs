@@ -135,6 +135,9 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         // `mutex_m`: the `Mutex_m` mixin, dropped from Ruby 3.4's default
         // stdlib. ActiveSupport 7.0's Notifications::Fanout requires it.
         "mutex_m" => Some(include_str!("stdlib_vendor/mutex_m.rb")),
+        // `benchmark`: dropped from Ruby 3.5's default stdlib. ActiveSupport
+        // 7.0's benchmarkable.rb requires it for `Benchmark.realtime`.
+        "benchmark" => Some(include_str!("stdlib_vendor/benchmark.rb")),
         // Singleton: `.instance` memoisation + privatised `.new` via the
         // `included` hook. Was a bare empty module; rake/early_time.rb
         // (`include Singleton`) needs the real behaviour.

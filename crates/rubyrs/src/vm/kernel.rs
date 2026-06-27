@@ -5261,6 +5261,7 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
         "bigdecimal" => &[("BigDecimal", false)],
         "monitor" => &[("Monitor", false), ("MonitorMixin", true)],
         "mutex_m" => &[("Mutex_m", true)],
+        "benchmark" => &[("Benchmark", true)],
         "erb" => &[("ERB", false)],
         "open3" => &[("Open3", true)],
         "shellwords" => &[("Shellwords", true)],
@@ -5452,7 +5453,7 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "english" | "English"
         // `optparse`: vendored real parser (stdlib_vendor/optparse.rb)
         | "optparse"
-        | "bigdecimal" | "bigdecimal/util" | "monitor" | "mutex_m" | "erb" | "erubi"
+        | "bigdecimal" | "bigdecimal/util" | "monitor" | "mutex_m" | "benchmark" | "erb" | "erubi"
         // `sinatra` / `sinatra/base` / `sinatra/version`: rubyrs's blessed
         // in-tree micro-Sinatra (stdlib_vendor/sinatra_base.rb). Lets a real
         // Sinatra app + the sinatra-* extension gems load with zero code

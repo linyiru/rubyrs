@@ -3898,6 +3898,13 @@ impl Vm {
                 let existing = if let Some(cls) = self.class_stack.last() {
                     if let Some(real) = cls.singleton_target.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
                         self.lookup_class_singleton_method(&real, old_id)
+                    } else if let Some(t) = self
+                        .refinement_targets
+                        .get(&(std::rc::Rc::as_ptr(cls) as usize))
+                        .cloned()
+                    {
+                        // `refine Target do alias … end`: resolve from Target.
+                        self.lookup_method_uncached(&t, old_id)
                     } else {
                         self.lookup_method_uncached(cls, old_id)
                     }
@@ -3968,6 +3975,13 @@ impl Vm {
                             // user class synthesises the same
                             // forwarder (mock.rb's
                             // `alias __respond_to? respond_to?`).
+                            // Inside `refine Target do … end`, walk/forward
+                            // against Target, not the empty holder.
+                            let resolution = self
+                                .refinement_targets
+                                .get(&(Rc::as_ptr(cls) as usize))
+                                .cloned()
+                                .unwrap_or_else(|| cls.clone());
                             let old_name_str = self.interner.resolve(old_id).to_string();
                             let mut primitive_hit =
                                 crate::vm::Vm::universal_arm_name(&old_name_str)
@@ -3989,7 +4003,7 @@ impl Vm {
                             // (Code-review #320 round 1.)
                             let mut visited: std::collections::HashSet<*const crate::value::Class> =
                                 std::collections::HashSet::new();
-                            let mut walker: Option<Rc<Class>> = Some(cls.clone());
+                            let mut walker: Option<Rc<Class>> = Some(resolution.clone());
                             while let Some(c) = walker {
                                 if !visited.insert(Rc::as_ptr(&c)) { break; }
                                 if self.primitive_class_responds_to(&c.name, old_id) {
@@ -3999,7 +4013,7 @@ impl Vm {
                                 walker = c.superclass.borrow().clone();
                             }
                             if primitive_hit || shell_class_whitelist_hit {
-                                let forwarder_cls = probe_cls.as_ref().unwrap_or(cls);
+                                let forwarder_cls = probe_cls.as_ref().unwrap_or(&resolution);
                                 let synth = self.synth_primitive_forwarder(forwarder_cls, old_id);
                                 cls.install_method(new_id, synth);
                                 self.method_gen = self.method_gen.wrapping_add(1);
