@@ -26,6 +26,76 @@ pub(crate) fn is_hash_mutator(name: &str) -> bool {
 }
 
 impl Vm {
+    /// Resolve a USER-defined `hash` / `eql?` method for a Hash key, or `None`
+    /// for the builtin. Only object-shaped keys (instances and Class/Module
+    /// objects) can override these; primitives always use the fast heap path.
+    /// Used so a Hash whose keys override `hash`/`eql?` matches CRuby (which
+    /// calls `key.hash` on insert and `key.eql?` to disambiguate collisions).
+    pub(crate) fn key_user_method(
+        &self,
+        key: &Value,
+        name_id: crate::intern::SymId,
+    ) -> Option<std::rc::Rc<crate::value::Method>> {
+        match key {
+            Value::Object(id) => {
+                let cls = self.heap.class_of(*id);
+                self.lookup_method_uncached(&cls, name_id)
+            }
+            Value::Class(c) => self.lookup_class_singleton_method(c, name_id),
+            _ => None,
+        }
+    }
+
+    /// `true` if the key overrides `hash` or `eql?` — such keys can't use the
+    /// identity-based heap index and must be compared via Ruby dispatch.
+    /// `hash_sym`/`eql_sym` are interned once by the caller.
+    pub(crate) fn key_needs_ruby_hash(
+        &self,
+        key: &Value,
+        hash_sym: crate::intern::SymId,
+        eql_sym: crate::intern::SymId,
+    ) -> bool {
+        if !matches!(key, Value::Object(_) | Value::Class(_)) {
+            return false;
+        }
+        self.key_user_method(key, hash_sym).is_some()
+            || self.key_user_method(key, eql_sym).is_some()
+    }
+
+    /// Synchronously invoke a resolved method and return its result (propagating
+    /// a raise as a `Trap`). The `invoke_method` + `dispatch_until` pattern.
+    pub(crate) fn call_resolved_method(
+        &mut self,
+        m: std::rc::Rc<crate::value::Method>,
+        recv: Value,
+        args: Vec<Value>,
+    ) -> Result<Value, Trap> {
+        let pre_frames = self.frames.len();
+        let mut g = PinGuard::new(self);
+        g.pin(recv.clone());
+        for a in &args {
+            g.pin(a.clone());
+        }
+        g.vm.invoke_method(m, recv, args)?;
+        g.vm.dispatch_until(pre_frames)?;
+        Ok(g.vm.stack.pop().unwrap_or(Value::Nil))
+    }
+
+    /// Ruby-level key equality for keys that override `hash`/`eql?`: `a.eql?(b)`.
+    /// Falls back to the fast `ruby_eql` when `a` has no user `eql?`.
+    pub(crate) fn keys_ruby_eql(
+        &mut self,
+        a: &Value,
+        b: &Value,
+        eql_sym: crate::intern::SymId,
+    ) -> Result<bool, Trap> {
+        if let Some(m) = self.key_user_method(a, eql_sym) {
+            let r = self.call_resolved_method(m, a.clone(), vec![b.clone()])?;
+            return Ok(!matches!(r, Value::Nil | Value::Bool(false)));
+        }
+        Ok(a.ruby_eql(b, &self.heap))
+    }
+
     /// Hash#X methods that don't take a block. Block-form
     /// methods (each / map / sort_by / etc.) still live in
     /// `collection_call_block` until that gets factored out.

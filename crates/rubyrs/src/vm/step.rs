@@ -5715,6 +5715,22 @@ impl Vm {
         self.maybe_gc();
         self.check_alloc()?;
         let split = self.stack.len() - n * 2;
+        // Keys that override `hash`/`eql?` (e.g. zeitwerk's non-hashable test
+        // modules) need Ruby-level handling: CRuby calls `key.hash` on insert
+        // (so a wrong-arity `hash` raises here) and `key.eql?` for collisions.
+        let hash_sym = self.interner.intern("hash");
+        let eql_sym = self.interner.intern("eql?");
+        let has_user = (0..n)
+            .any(|i| self.key_needs_ruby_hash(&self.stack[split + i * 2], hash_sym, eql_sym));
+        if has_user {
+            // Keys are still on the stack (GC-rooted) for these dispatches.
+            for i in 0..n {
+                let k = self.stack[split + i * 2].clone();
+                if let Some(m) = self.key_user_method(&k, hash_sym) {
+                    self.call_resolved_method(m, k, vec![])?;
+                }
+            }
+        }
         let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(n);
         {
             let mut d = self.stack.drain(split..);
@@ -5722,18 +5738,42 @@ impl Vm {
                 pairs.push((k, v));
             }
         }
-        let mut i = 0;
-        while i < pairs.len() {
-            let mut j = i + 1;
-            while j < pairs.len() {
-                if pairs[j].0.ruby_eql(&pairs[i].0, &self.heap) {
-                    pairs[i].1 = pairs[j].1.clone();
-                    pairs.remove(j);
-                } else {
-                    j += 1;
-                }
+        if has_user {
+            // Pin the drained pairs across the `eql?` dispatch (they left the
+            // GC-rooted stack), then dedup with Ruby equality.
+            let mut g = crate::vm::PinGuard::new(self);
+            for (k, v) in &pairs {
+                g.pin(k.clone());
+                g.pin(v.clone());
             }
-            i += 1;
+            let mut i = 0;
+            while i < pairs.len() {
+                let mut j = i + 1;
+                while j < pairs.len() {
+                    let (ki, kj) = (pairs[i].0.clone(), pairs[j].0.clone());
+                    if g.vm.keys_ruby_eql(&ki, &kj, eql_sym)? {
+                        pairs[i].1 = pairs[j].1.clone();
+                        pairs.remove(j);
+                    } else {
+                        j += 1;
+                    }
+                }
+                i += 1;
+            }
+        } else {
+            let mut i = 0;
+            while i < pairs.len() {
+                let mut j = i + 1;
+                while j < pairs.len() {
+                    if pairs[j].0.ruby_eql(&pairs[i].0, &self.heap) {
+                        pairs[i].1 = pairs[j].1.clone();
+                        pairs.remove(j);
+                    } else {
+                        j += 1;
+                    }
+                }
+                i += 1;
+            }
         }
         let id = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
         self.stack.push(Value::Hash(id));
