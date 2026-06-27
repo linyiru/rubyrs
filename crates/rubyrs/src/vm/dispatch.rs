@@ -2091,6 +2091,14 @@ impl Vm {
                 .heap
                 .array_class_tag(*aid)
                 .and_then(|tag| self.lookup_method_uncached(&tag, mm_id)),
+            // String subclass twin (`class QuestionableString < String`): a
+            // class-tagged String consults its class's `method_missing`.
+            // Bridgetown's `String#questionable` returns one whose
+            // `method_missing` answers `env.production?`/`development?`.
+            Value::Str(rs) => {
+                let tag = rs.class_tag.borrow().clone();
+                tag.and_then(|tag| self.lookup_method_uncached(&tag, mm_id))
+            }
             _ => None,
         };
         let m = match m {
