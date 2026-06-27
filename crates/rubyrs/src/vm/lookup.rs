@@ -2414,7 +2414,16 @@ impl Vm {
             // `super(&block)` / `super(&nil)` shapes go through
             // Op::ApplySuperBlock instead, so they never reach here.
             Ok((m, self_val)) => {
-                let block = self.frames.last().and_then(|f| f.block_arg);
+                // Forward the enclosing METHOD's block. Directly in a method
+                // that's the frame's `block_arg`; inside a block it's the
+                // `captured_yield_block` (the same binding `yield` resolves) —
+                // so `wrap { super }` threads the outer method's block into the
+                // superclass method's `yield`. concurrent-ruby's
+                // `compute_if_absent(key) { @lock.synchronize { super } }` over
+                // a `yield`ing base is the forcing case.
+                let block = self.frames.last().and_then(|f| {
+                    if f.is_block { f.captured_yield_block } else { f.block_arg }
+                });
                 self.invoke_method_with_block(m, self_val, args, block)
             }
             Err(trap) => {
