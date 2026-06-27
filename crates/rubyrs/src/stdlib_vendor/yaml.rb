@@ -15,18 +15,21 @@
 
 module YAML
   class << self
-    def load(source, *_args, **_opts)
-      RubyrsYAMLParse.parse_document(source)
+    def load(source, *_args, **opts)
+      data = RubyrsYAMLParse.parse_document(source)
+      opts[:symbolize_names] ? RubyrsYAMLParse.deep_symbolize_keys(data) : data
     end
     alias_method :safe_load, :load
     alias_method :unsafe_load, :load
     alias_method :parse, :load
 
-    def load_file(path, *_args, **_opts)
+    def load_file(path, *_args, **opts)
       # Call the parser directly rather than bare `load` — inside this
       # singleton method a bare `load` can resolve to Kernel#load (the
-      # file loader) instead of YAML.load.
-      RubyrsYAMLParse.parse_document(File.read(path))
+      # file loader) instead of YAML.load. `symbolize_names: true` (Psych's
+      # option) returns Symbol keys — i18n's load_yml relies on it.
+      data = RubyrsYAMLParse.parse_document(File.read(path))
+      opts[:symbolize_names] ? RubyrsYAMLParse.deep_symbolize_keys(data) : data
     end
     alias_method :safe_load_file, :load_file
     alias_method :unsafe_load_file, :load_file
@@ -89,6 +92,22 @@ end
 # those modules elsewhere can't clobber the parser internals.
 module RubyrsYAMLParse
   module_function
+
+  # Recursively turn String Hash keys into Symbols (Psych's
+  # `symbolize_names: true`). Used by YAML.load/load_file — i18n's backend
+  # loads locale files with this option and stores them as symbolized.
+  def deep_symbolize_keys(obj)
+    case obj
+    when Hash
+      obj.each_with_object({}) do |(k, v), out|
+        out[k.is_a?(String) ? k.to_sym : k] = deep_symbolize_keys(v)
+      end
+    when Array
+      obj.map { |e| deep_symbolize_keys(e) }
+    else
+      obj
+    end
+  end
 
   def parse_document(source)
     return nil if source.nil?

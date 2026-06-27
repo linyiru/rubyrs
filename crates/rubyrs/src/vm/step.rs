@@ -455,6 +455,25 @@ impl Vm {
         if frame.is_block && frame.lexical_cvar_class.is_some() {
             return frame.lexical_cvar_class.clone();
         }
+        // A METHOD body resolves `@@cvar` through its LEXICAL scope — the class
+        // where the method was DEFINED (CRuby's cref) — not `self`. These differ
+        // when the method is reached via `extend`/`include`: `self` is the host,
+        // but the method (and its cvars) live in the mixed-in module. i18n's
+        // `@@normalized_key_cache` is set in `I18n::Base`'s body and read by
+        // `Base#normalize_key`, which runs as `I18n.normalize_key` (I18n extends
+        // Base) — so `self` is I18n but the cvar lives on Base. Class-BODY frames
+        // keep the self rule (the cvar belongs to the class being defined).
+        if !frame.is_block
+            && !frame.is_class_body
+            && let Some(dc) = &frame.defining_class
+        {
+            if let Some(attached) =
+                dc.singleton_target.borrow().as_ref().and_then(|w| w.upgrade())
+            {
+                return Some(attached);
+            }
+            return Some(dc.clone());
+        }
         let cls = match &frame.self_val {
             Value::Class(c) => c.clone(),
             Value::Object(id) => self.heap.real_class_of(*id),

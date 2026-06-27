@@ -35,6 +35,8 @@ rescue Exception => e
   (e.backtrace || []).first(10).each { |f| puts "  #{f}" }
 end
 
+I18n.load_path << "/Users/linyiru/.rbenv/versions/3.4.1/lib/ruby/gems/3.4.0/gems/activemodel-7.0.10/lib/active_model/locale/en.yml"
+I18n.backend.load_translations
 puts "== phase 3: validate instances =="
 begin
   good = Person.new(name: "Ada", age: 30)
