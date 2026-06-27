@@ -7567,6 +7567,13 @@ impl Vm {
             self.stack.push(result);
             Ok(())
         }
+        #[cfg(feature = "jit-native")]
+        #[inline]
+        fn jit_native_bypass(&self) -> bool { self.jit_native_on }
+        #[cfg(not(feature = "jit-native"))]
+        #[inline]
+        fn jit_native_bypass(&self) -> bool { false }
+
         pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         // Consume `bypass_visibility_once` at the dispatch
         // boundary, before any arm runs. A naive consume-at-the-
@@ -15090,6 +15097,7 @@ impl Vm {
         argc: usize,
         cache_id: u16,
     ) -> Result<bool, Trap> {
+        if self.jit_native_bypass() { return Ok(false); }
         // Explicit-recv stack layout: [..., recv, a1, ..., aN].
         let recv_idx = match self.stack.len().checked_sub(argc + 1) {
             Some(i) => i,
@@ -15226,6 +15234,7 @@ impl Vm {
         argc: usize,
         cache_id: u16,
     ) -> Result<bool, Trap> {
+        if self.jit_native_bypass() { return Ok(false); }
         let self_val = match self.frames.last() {
             Some(f) => f.self_val.clone(),
             None => return Ok(false),
@@ -15709,6 +15718,30 @@ impl Vm {
             } else {
                 for a in args { self.stack.push(a); }
                 return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
+            }
+        }
+        // Native-JIT hook (ADR 0030 finding #4, `jit-native` feature): a
+        // non-closure 1-Int-arg method whose body lowers to integer machine
+        // code runs as a native call instead of an interpreted frame. Any
+        // overflow (or a recompile-ineligible op) deopts back to the
+        // interpreter, so the result can never change — only the speed.
+        #[cfg(feature = "jit-native")]
+        if self.jit_native_on && m.closure.is_none() && args.len() == 1 {
+            let proto_idx = m.proto_idx;
+            if !self.jit_native.contains_key(&proto_idx) {
+                let compiled = crate::jit_native::compile(&self.protos[proto_idx]);
+                self.jit_native.insert(proto_idx, compiled);
+            }
+            let native: Option<Option<i64>> = match (
+                self.jit_native.get(&proto_idx).unwrap(),
+                crate::jit_native::as_int(&args[0]),
+            ) {
+                (Some(np), Some(x)) => Some(np.call(x)),
+                _ => None,
+            };
+            if let Some(Some(r)) = native {
+                self.stack.push(Value::Int(r));
+                return Ok(());
             }
         }
         // `define_method`-installed methods carry a captured Rc and

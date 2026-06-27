@@ -1,0 +1,311 @@
+//! End-to-end native (Cranelift) JIT for 1-parameter integer methods.
+//! ADR 0030 finding #4: lower a real `Proto` to machine code so a Ruby
+//! method call dispatches into native code, with an overflow-guard deopt.
+//!
+//! Eligibility (else `None`, stays interpreted): exactly one required
+//! positional param, no rest/kw, and every op in a small integer set
+//! (const/local load+store, +/-/* and comparisons, jumps, return). Any
+//! arithmetic overflow OR an arg that isn't an `Int` deopts to the
+//! interpreter — so the JIT can never change a result, only its speed.
+
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Value as ClValue};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_module::{Linkage, Module};
+
+use crate::bytecode::{BinOpKind, Op, Proto};
+use crate::value::Value;
+
+#[repr(C)]
+struct NRet {
+    res: i64,
+    ovf: u8,
+}
+
+/// A compiled native 1-param integer method.
+pub(crate) struct NativeProto {
+    _module: JITModule,
+    ptr: extern "C" fn(i64) -> NRet,
+}
+
+impl NativeProto {
+    /// Run native code on an `Int` arg. `None` = deopt (overflow): the
+    /// caller must fall back to the interpreter (which promotes to Bignum).
+    #[inline]
+    pub(crate) fn call(&self, x: i64) -> Option<i64> {
+        let r = (self.ptr)(x);
+        if r.ovf == 0 {
+            Some(r.res)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Int,
+    Bool,
+    Nil,
+}
+
+/// Compile an eligible `Proto` to native code, or `None` to keep interpreting.
+pub(crate) fn compile(proto: &Proto) -> Option<NativeProto> {
+    // Shape gate: exactly one required positional param, nothing fancy.
+    if proto.n_required_positional != 1
+        || proto.params.len() != 1
+        || proto.rest_param.is_some()
+        || !proto.kw_param_defaults.is_empty()
+    {
+        return None;
+    }
+    let code = &proto.code;
+    // Op gate: every op must be one we model.
+    for op in code {
+        match op {
+            Op::LoadConstInt(_)
+            | Op::LoadLocal(_)
+            | Op::StoreLocal(_)
+            | Op::IncLocal(_)
+            | Op::IncLocalNoPush(_)
+            | Op::Jump(_)
+            | Op::JumpIfFalse(_)
+            | Op::Return
+            | Op::Pop
+            | Op::Dup
+            | Op::EnterLoop
+            | Op::ExitLoop
+            | Op::LoadNil => {}
+            Op::BinOp(k) | Op::BinOpLocalLocal(k, _, _) | Op::BinOpInt(k, _) => match k {
+                BinOpKind::Add
+                | BinOpKind::Sub
+                | BinOpKind::Mul
+                | BinOpKind::Lt
+                | BinOpKind::Le
+                | BinOpKind::Gt
+                | BinOpKind::Ge
+                | BinOpKind::Eq
+                | BinOpKind::Ne => {}
+                // Div/Mod need floor-semantics + div-by-zero deopt — not modelled yet.
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+
+    // Basic-block leaders: ip 0, jump targets, and fall-through after jumps.
+    // Jump target = ip + 1 + off (ip is pre-incremented by the dispatch loop).
+    let n = code.len();
+    let mut leader = vec![false; n + 1];
+    leader[0] = true;
+    for (ip, op) in code.iter().enumerate() {
+        if let Op::Jump(off) | Op::JumpIfFalse(off) = op {
+            let t = (ip as i64 + 1 + *off as i64) as usize;
+            if t <= n {
+                leader[t.min(n)] = true;
+            }
+            if ip + 1 <= n {
+                leader[ip + 1] = true;
+            }
+        }
+    }
+
+    let builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    let mut module = JITModule::new(builder);
+    let mut ctx = module.make_context();
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I8));
+    ctx.func.signature = sig.clone();
+    let fid = module.declare_function("m", Linkage::Export, &sig).ok()?;
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+
+        // Cranelift block per leader ip; a final `done` for the post-Return tail.
+        let mut blocks: Vec<Option<cranelift_codegen::ir::Block>> = vec![None; n + 1];
+        for (ip, &is_l) in leader.iter().enumerate() {
+            if is_l {
+                blocks[ip] = Some(fb.create_block());
+            }
+        }
+        // Entry block: receive param, init locals + overflow var, jump to ip 0.
+        let entry = fb.create_block();
+        fb.append_block_params_for_function_params(entry);
+        fb.switch_to_block(entry);
+        let param = fb.block_params(entry)[0];
+        let nloc = proto.n_locals as usize;
+        let vars: Vec<Variable> = (0..nloc).map(|_| fb.declare_var(types::I64)).collect();
+        for (i, v) in vars.iter().enumerate() {
+            if i == 0 {
+                fb.def_var(*v, param);
+            } else {
+                let z = fb.ins().iconst(types::I64, 0);
+                fb.def_var(*v, z);
+            }
+        }
+        let ovf_var = fb.declare_var(types::I8);
+        let z8 = fb.ins().iconst(types::I8, 0);
+        fb.def_var(ovf_var, z8);
+        fb.ins().jump(blocks[0].unwrap(), &[]);
+        fb.seal_block(entry);
+
+        // Per-block straight-line codegen with an Int/Bool kind stack.
+        let mut stack: Vec<(ClValue, Kind)> = Vec::new();
+        let mut cur_open = false; // is the current block unterminated?
+        let mut ip = 0usize;
+        while ip < n {
+            if let Some(b) = blocks[ip] {
+                // New block leader: terminate fall-through from the previous.
+                if cur_open {
+                    fb.ins().jump(b, &[]);
+                }
+                fb.switch_to_block(b);
+                stack.clear();
+                cur_open = true;
+            }
+            let acc_ovf = |fb: &mut FunctionBuilder, of: ClValue| {
+                let cur = fb.use_var(ovf_var);
+                let nv = fb.ins().bor(cur, of);
+                fb.def_var(ovf_var, nv);
+            };
+            match &code[ip] {
+                Op::LoadConstInt(i) => {
+                    let v = fb.ins().iconst(types::I64, *i);
+                    stack.push((v, Kind::Int));
+                }
+                Op::LoadNil => {
+                    // Only ever consumed by Pop in an eligible int method
+                    // (a `while` evaluates to nil); a dummy keeps the stack
+                    // typed, and the kind guards below reject any real use.
+                    let v = fb.ins().iconst(types::I64, 0);
+                    stack.push((v, Kind::Nil));
+                }
+                Op::LoadLocal(s) => {
+                    let v = fb.use_var(vars[*s as usize]);
+                    stack.push((v, Kind::Int));
+                }
+                Op::StoreLocal(s) => {
+                    let (v, k) = stack.pop()?;
+                    if k != Kind::Int {
+                        return None;
+                    }
+                    fb.def_var(vars[*s as usize], v);
+                }
+                Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
+                    let cur = fb.use_var(vars[*s as usize]);
+                    let one = fb.ins().iconst(types::I64, 1);
+                    let (nv, of) = fb.ins().sadd_overflow(cur, one);
+                    acc_ovf(&mut fb, of);
+                    fb.def_var(vars[*s as usize], nv);
+                    if matches!(&code[ip], Op::IncLocal(_)) {
+                        stack.push((nv, Kind::Int));
+                    }
+                }
+                Op::Pop => {
+                    stack.pop()?;
+                }
+                Op::Dup => {
+                    let top = *stack.last()?;
+                    stack.push(top);
+                }
+                Op::BinOp(k) => {
+                    let (b, kb) = stack.pop()?;
+                    let (a, ka) = stack.pop()?;
+                    if ka != Kind::Int || kb != Kind::Int {
+                        return None;
+                    }
+                    emit_binop(&mut fb, *k, a, b, &mut stack, ovf_var);
+                }
+                Op::BinOpLocalLocal(k, a_slot, b_slot) => {
+                    let a = fb.use_var(vars[*a_slot as usize]);
+                    let b = fb.use_var(vars[*b_slot as usize]);
+                    emit_binop(&mut fb, *k, a, b, &mut stack, ovf_var);
+                }
+                Op::BinOpInt(k, imm) => {
+                    let (a, _) = stack.pop()?;
+                    let b = fb.ins().iconst(types::I64, *imm);
+                    emit_binop(&mut fb, *k, a, b, &mut stack, ovf_var);
+                }
+                Op::Jump(off) => {
+                    let t = (ip as i64 + 1 + *off as i64) as usize;
+                    fb.ins().jump(blocks[t].unwrap(), &[]);
+                    cur_open = false;
+                }
+                Op::JumpIfFalse(off) => {
+                    let (cond, k) = stack.pop()?;
+                    if k != Kind::Bool {
+                        return None; // only comparison conditions modelled
+                    }
+                    let t = (ip as i64 + 1 + *off as i64) as usize;
+                    let fall = blocks[ip + 1].unwrap();
+                    // brif: non-zero (true) -> fall-through, zero (false) -> target.
+                    fb.ins().brif(cond, fall, &[], blocks[t].unwrap(), &[]);
+                    cur_open = false;
+                }
+                Op::Return => {
+                    let (v, _) = stack.pop()?;
+                    let ov = fb.use_var(ovf_var);
+                    fb.ins().return_(&[v, ov]);
+                    cur_open = false;
+                }
+                Op::EnterLoop | Op::ExitLoop => {} // interpreter loop-stack bookkeeping; no native state
+                _ => return None,
+            }
+            ip += 1;
+        }
+        fb.seal_all_blocks();
+        fb.finalize();
+    }
+    module.define_function(fid, &mut ctx).ok()?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().ok()?;
+    let code_ptr = module.get_finalized_function(fid);
+    let ptr = unsafe { std::mem::transmute::<_, extern "C" fn(i64) -> NRet>(code_ptr) };
+    Some(NativeProto { _module: module, ptr })
+}
+
+fn emit_binop(
+    fb: &mut FunctionBuilder,
+    k: BinOpKind,
+    a: ClValue,
+    b: ClValue,
+    stack: &mut Vec<(ClValue, Kind)>,
+    ovf_var: Variable,
+) {
+    let cc = |k: BinOpKind| match k {
+        BinOpKind::Lt => Some(IntCC::SignedLessThan),
+        BinOpKind::Le => Some(IntCC::SignedLessThanOrEqual),
+        BinOpKind::Gt => Some(IntCC::SignedGreaterThan),
+        BinOpKind::Ge => Some(IntCC::SignedGreaterThanOrEqual),
+        BinOpKind::Eq => Some(IntCC::Equal),
+        BinOpKind::Ne => Some(IntCC::NotEqual),
+        _ => None,
+    };
+    if let Some(cond) = cc(k) {
+        let r = fb.ins().icmp(cond, a, b);
+        stack.push((r, Kind::Bool));
+        return;
+    }
+    let (res, of) = match k {
+        BinOpKind::Add => fb.ins().sadd_overflow(a, b),
+        BinOpKind::Sub => fb.ins().ssub_overflow(a, b),
+        BinOpKind::Mul => fb.ins().smul_overflow(a, b),
+        _ => unreachable!("non-arith binop reached emit"),
+    };
+    let cur = fb.use_var(ovf_var);
+    let nv = fb.ins().bor(cur, of);
+    fb.def_var(ovf_var, nv);
+    stack.push((res, Kind::Int));
+}
+
+/// Extract an i64 from an `Int` value (the guard before calling native).
+#[inline]
+pub(crate) fn as_int(v: &Value) -> Option<i64> {
+    match v {
+        Value::Int(n) => Some(*n),
+        _ => None,
+    }
+}

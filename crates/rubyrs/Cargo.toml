@@ -41,6 +41,7 @@ categories = ["compilers", "wasm", "command-line-utilities"]
 # stdlib / mri-compat tiers as well — they require larger surgery
 # and are explicitly out of scope for this PoC.)
 [features]
+jit-native = ["dep:cranelift-jit", "dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-module"]
 default = ["cext", "regex", "bignum", "std-sink", "preamble-cache"]
 # EXPERIMENT: swap the system allocator for mimalloc (a fast
 # small-object allocator). The VM is allocation-heavy, so the system
@@ -305,6 +306,11 @@ _http_server = [
 
 [dependencies]
 ruby-prism.workspace = true
+rubyrs-jit = { path = "../rubyrs-jit" }
+cranelift-jit = { version = "0.133", optional = true }
+cranelift-codegen = { version = "0.133", optional = true }
+cranelift-frontend = { version = "0.133", optional = true }
+cranelift-module = { version = "0.133", optional = true }
 smallvec = { version = "1", features = ["union"] }
 mimalloc = { version = "0.1", optional = true, default-features = false }
 tikv-jemallocator = { version = "0.6", optional = true }

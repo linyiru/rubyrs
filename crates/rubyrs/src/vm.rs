@@ -747,6 +747,10 @@ pub(crate) type RefinementList = Vec<(std::rc::Rc<Class>, std::rc::Rc<Class>)>;
 
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_on: bool,
     pub(crate) interner: Interner,
     pub(crate) classes: FxHashMap<SymId, Rc<Class>>,
     /// Bare constant assignments (`FOO = expr`), kept in a separate
@@ -1817,6 +1821,10 @@ impl Vm {
         .map(|n| interner.intern(n))
         .collect();
         Vm {
+            #[cfg(feature = "jit-native")]
+            jit_native: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_on: std::env::var_os("RUBYRS_JIT_NATIVE").is_some(),
             protos,
             interner,
             classes: FxHashMap::default(),
