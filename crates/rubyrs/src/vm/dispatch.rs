@@ -11094,6 +11094,37 @@ impl Vm {
                 self.stack.push(recv.clone());
                 return Ok(());
             }
+        // Native `Module#extend_object(obj)`: the insert primitive that
+        // `extend` dispatches into — add `self`'s instance methods to `obj`'s
+        // singleton. A module that overrides it (Mutex_m's `extend_object`
+        // does `super; obj.mu_extended`) force-dispatches here on `super`.
+        // Idempotent. Handles obj = a module/class (singleton_includes) or a
+        // plain object (its eigenclass `includes`).
+        if let Value::Class(module) = &recv
+            && &*name == "extend_object"
+            && args.len() == 1 {
+                match &args[0] {
+                    Value::Class(obj) => {
+                        let dup = obj.singleton_includes.borrow().iter().any(|m| Rc::ptr_eq(m, module));
+                        if !dup {
+                            obj.singleton_includes.borrow_mut().insert(0, module.clone());
+                            self.bump_const_gen();
+                        }
+                    }
+                    Value::Object(id) => {
+                        let sc = self.heap.ensure_singleton_class(*id);
+                        if !super::class_is_a(&sc, module) {
+                            sc.includes.borrow_mut().insert(0, module.clone());
+                            self.bump_const_gen();
+                        }
+                    }
+                    _ => {}
+                }
+                self.method_gen = self.method_gen.wrapping_add(1);
+                // CRuby's extend_object returns the extended object.
+                self.stack.push(args[0].clone());
+                return Ok(());
+            }
         if let Value::Class(target) = &recv
             && matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty() {
                 // Explicit-receiver form: `MyClass.include(Mod)` /
@@ -11156,7 +11187,11 @@ impl Vm {
                         );
                         self.lookup_class_singleton_method(&src, fs)
                     } else {
-                        None
+                        // `extend` routes through an overridden `extend_object`
+                        // (Mutex_m runs `super; obj.mu_extended`); its super
+                        // force-dispatches the native extend_object arm.
+                        let eo = self.interner.intern("extend_object");
+                        self.lookup_class_singleton_method(&src, eo)
                     };
                     if let Some(m) = feature_override {
                         self.call_resolved_method(
@@ -19235,6 +19270,19 @@ impl Vm {
                 self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
                 return Ok(());
             }
+            // Tagged-module instance (`class Tagged < Module; Tagged.new`):
+            // resolve instance methods from its class — the block-form twin
+            // of `try_dispatch_class_intrinsics`' class_tag arm, which the
+            // no-block path already has. AR's GeneratedAttributeMethods (an
+            // instance of a `< Module` class that `include Mutex_m`s) does
+            // `generated_attribute_methods.synchronize do … end`.
+            if let Some(t) = &recv_cls.class_tag {
+                let t = t.clone();
+                if let Some(m) = self.lookup_method_uncached(&t, name_id) {
+                    self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
+                    return Ok(());
+                }
+            }
         }
         if self.try_method_missing(&recv, name_id, args, Some(block))? {
             return Ok(());
@@ -20428,7 +20476,11 @@ impl Vm {
                 // primitives `include`/`prepend` dispatch to. A module that
                 // overrides them (ActiveSupport::Concern) calls `super` to do
                 // the real insert — force-dispatch reaches the native arm.
-                | "append_features" | "prepend_features");
+                | "append_features" | "prepend_features"
+                // `extend_object`: the singleton-insert primitive `extend`
+                // dispatches to. A module overriding it (Mutex_m) calls
+                // `super` to do the real insert — same force-dispatch path.
+                | "extend_object");
         }
         let sentinel: Option<Value> = match class_name {
             "Integer" => Some(Value::Int(0)),
