@@ -135,6 +135,111 @@ pub fn compile_int1(ops: &[IntOp]) -> CompiledInt1 {
     CompiledInt1 { _module: module, ptr }
 }
 
+/// Compile a SELF-CONTAINED integer loop method to native code — the first
+/// shape that makes a fair, end-to-end comparison with YJIT possible (the
+/// whole computation is the method body; one call, the loop runs native in
+/// both engines, so call overhead is amortised away).
+///
+/// Compiles exactly:
+/// ```ruby
+/// def f(n)
+///   s = 0; i = 0
+///   while i < n
+///     s = s ^ (i*i + i*7 + 13)   # XOR: bounded, no overflow, not DCE-able
+///     i = i + 1
+///   end
+///   s
+/// end
+/// ```
+/// Multiplies/adds are overflow-checked (deopt flag); XOR and the loop
+/// counter can't overflow for the benchmarked `n`.
+pub fn compile_poly_loop() -> CompiledInt1 {
+    use cranelift_codegen::ir::condcodes::IntCC;
+    let builder = JITBuilder::new(cranelift_module::default_libcall_names()).unwrap();
+    let mut module = JITModule::new(builder);
+    let mut ctx = module.make_context();
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I64)); // n
+    sig.returns.push(AbiParam::new(types::I64)); // s
+    sig.returns.push(AbiParam::new(types::I8)); // overflow
+    ctx.func.signature = sig.clone();
+    let fid = module.declare_function("polyloop", Linkage::Export, &sig).unwrap();
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let entry = fb.create_block();
+        fb.append_block_params_for_function_params(entry);
+        let header = fb.create_block();
+        fb.append_block_param(header, types::I64); // s
+        fb.append_block_param(header, types::I64); // i
+        fb.append_block_param(header, types::I8); // ovf
+        let body = fb.create_block();
+        fb.append_block_param(body, types::I64);
+        fb.append_block_param(body, types::I64);
+        fb.append_block_param(body, types::I8);
+        let exit = fb.create_block();
+        fb.append_block_param(exit, types::I64); // s
+        fb.append_block_param(exit, types::I8); // ovf
+
+        // entry: s=0, i=0, ovf=0 → header
+        fb.switch_to_block(entry);
+        let n = fb.block_params(entry)[0];
+        let z64 = fb.ins().iconst(types::I64, 0);
+        let z8 = fb.ins().iconst(types::I8, 0);
+        fb.ins().jump(header, &[z64.into(), z64.into(), z8.into()]);
+        fb.seal_block(entry);
+
+        // header: while i < n
+        fb.switch_to_block(header);
+        let (hs, hi, hovf) = {
+            let p = fb.block_params(header);
+            (p[0], p[1], p[2])
+        };
+        let cond = fb.ins().icmp(IntCC::SignedLessThan, hi, n);
+        fb.ins()
+            .brif(cond, body, &[hs.into(), hi.into(), hovf.into()], exit, &[hs.into(), hovf.into()]);
+
+        // body: s = s ^ (i*i + i*7 + 13); i = i+1
+        fb.switch_to_block(body);
+        let (s, i, ovf) = {
+            let p = fb.block_params(body);
+            (p[0], p[1], p[2])
+        };
+        let (ii, o1) = fb.ins().smul_overflow(i, i);
+        let c7 = fb.ins().iconst(types::I64, 7);
+        let (i7, o2) = fb.ins().smul_overflow(i, c7);
+        let (p1, o3) = fb.ins().sadd_overflow(ii, i7);
+        let c13 = fb.ins().iconst(types::I64, 13);
+        let (poly, o4) = fb.ins().sadd_overflow(p1, c13);
+        let new_s = fb.ins().bxor(s, poly);
+        let one = fb.ins().iconst(types::I64, 1);
+        let (new_i, o5) = fb.ins().sadd_overflow(i, one);
+        let mut ov = fb.ins().bor(ovf, o1);
+        for o in [o2, o3, o4, o5] {
+            ov = fb.ins().bor(ov, o);
+        }
+        fb.ins().jump(header, &[new_s.into(), new_i.into(), ov.into()]);
+        fb.seal_block(body);
+        fb.seal_block(header);
+
+        // exit: return (s, ovf)
+        fb.switch_to_block(exit);
+        let (es, eovf) = {
+            let p = fb.block_params(exit);
+            (p[0], p[1])
+        };
+        fb.ins().return_(&[es, eovf]);
+        fb.seal_block(exit);
+        fb.finalize();
+    }
+    module.define_function(fid, &mut ctx).unwrap();
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().unwrap();
+    let code = module.get_finalized_function(fid);
+    let ptr = unsafe { std::mem::transmute::<_, extern "C" fn(i64) -> IntRet>(code) };
+    CompiledInt1 { _module: module, ptr }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +266,39 @@ mod tests {
     fn jit_const_runs() {
         let f = super::jit_const(12345);
         assert_eq!(f(), 12345);
+    }
+
+    #[test]
+    fn poly_loop_correct() {
+        let f = compile_poly_loop();
+        let reference = |n: i64| {
+            let mut s = 0i64;
+            let mut i = 0i64;
+            while i < n {
+                s ^= i * i + i * 7 + 13;
+                i += 1;
+            }
+            s
+        };
+        for n in [0, 1, 10, 1000, 1_000_000] {
+            assert_eq!(f.call(n), Some(reference(n)), "n={n}");
+        }
+    }
+
+    // `cargo test -p rubyrs-jit --release --features native poly_loop_throughput -- --nocapture`
+    #[test]
+    fn poly_loop_throughput() {
+        let f = compile_poly_loop();
+        let n: i64 = 1_000_000_000;
+        let t = std::time::Instant::now();
+        let r = f.call(n);
+        let e = t.elapsed().as_secs_f64();
+        eprintln!(
+            "[native-jit] f(n)=XOR poly(i), f({}): {:.0} M iter/sec  (result={:?})",
+            n,
+            n as f64 / e / 1e6,
+            r
+        );
     }
 
     // `cargo test -p rubyrs-jit --features native int1_poly_throughput -- --nocapture`
