@@ -455,11 +455,20 @@ impl Vm {
         if frame.is_block && frame.lexical_cvar_class.is_some() {
             return frame.lexical_cvar_class.clone();
         }
-        match &frame.self_val {
-            Value::Class(c) => Some(c.clone()),
-            Value::Object(id) => Some(self.heap.real_class_of(*id)),
-            _ => None,
+        let cls = match &frame.self_val {
+            Value::Class(c) => c.clone(),
+            Value::Object(id) => self.heap.real_class_of(*id),
+            _ => return None,
+        };
+        // A singleton (metaclass) scope's class variables belong to the ATTACHED
+        // class — CRuby's `class << self; @@x = …` stores `@@x` on the BASE
+        // class (`M.class_variables` includes it), and a singleton method reading
+        // `@@x` resolves it there. Map a metaclass scope to its base class so the
+        // set and the read agree.
+        if let Some(attached) = cls.singleton_target.borrow().as_ref().and_then(|w| w.upgrade()) {
+            return Some(attached);
         }
+        Some(cls)
     }
 
     /// The class along `start`'s superclass chain that owns class

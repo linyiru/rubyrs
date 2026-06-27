@@ -145,6 +145,12 @@ pub(crate) struct ProtoBuilder {
     /// modelling CRuby's full cref-walk constant lookup. See the
     /// class_path emit sites and the docs/SUBSET.md note.
     pub(crate) class_path: Vec<String>,
+    /// True only for an eigenclass body proto (`class << self ; … ; end`). A
+    /// bare `CONST = v` there must KEEP its top-level-keyed store (that is how
+    /// `obj.singleton_class::CONST` reaches it under the flat const model),
+    /// whereas a bare write in a REGULAR class/module body emits ONLY the
+    /// qualified `Scope::CONST` twin — see the `Expr::ConstWrite` arms.
+    pub(crate) in_singleton_body: bool,
 }
 
 /// Scope-bounded `current_span` override. Restores the previous
@@ -1276,6 +1282,7 @@ impl ProtoBuilder {
             block_redo_target: None,
             retry_targets: vec![],
             class_path: vec![],
+            in_singleton_body: false,
             byte_literals: vec![],
             const_chains: vec![],
         };
@@ -1601,12 +1608,20 @@ fn compile_stmt(
             // leading `::` explicitly targets top-level only).
             let prefixed_id = (!b.class_path.is_empty() && !*absolute && !name.contains("::"))
                 .then(|| interner.intern(&format!("{}::{}", b.class_path.join("::"), name)));
-            if prefixed_id.is_some() {
-                b.emit(Op::Dup);
-            }
-            b.emit(Op::StoreConst(id));
-            if let Some(pid) = prefixed_id {
-                b.emit(Op::StoreConst(pid));
+            // Inside a REGULAR class/module body a bare `X = v` is scoped to that
+            // module (`Foo::X`) — CRuby never creates a TOP-LEVEL `X`. Emit ONLY
+            // the qualified store; the bare store would leak `X` into Object's
+            // constant table (`class Hotel; X = 1; end` polluting top-level `X`,
+            // which then shadowed a later `module X` in zeitwerk). Eigenclass
+            // bodies KEEP the bare store (singleton_class::CONST reads it).
+            match prefixed_id {
+                Some(pid) if !b.in_singleton_body => { b.emit(Op::StoreConst(pid)); }
+                Some(pid) => {
+                    b.emit(Op::Dup);
+                    b.emit(Op::StoreConst(id));
+                    b.emit(Op::StoreConst(pid));
+                }
+                None => { b.emit(Op::StoreConst(id)); }
             }
         }
         Expr::GVarWrite(name, val) => {
@@ -1841,13 +1856,17 @@ pub(crate) fn compile_expr(
             //   no alias: Dup, StoreConst(bare)            → [val]
             //   alias:    Dup, Dup, StoreConst(bare),
             //                       StoreConst(prefixed)   → [val]
+            // Leave val on the stack as the expression result; inside a regular
+            // class body emit ONLY the qualified store (see the statement form).
             b.emit(Op::Dup);
-            if prefixed_id.is_some() {
-                b.emit(Op::Dup);
-            }
-            b.emit(Op::StoreConst(id));
-            if let Some(pid) = prefixed_id {
-                b.emit(Op::StoreConst(pid));
+            match prefixed_id {
+                Some(pid) if !b.in_singleton_body => { b.emit(Op::StoreConst(pid)); }
+                Some(pid) => {
+                    b.emit(Op::Dup);
+                    b.emit(Op::StoreConst(id));
+                    b.emit(Op::StoreConst(pid));
+                }
+                None => { b.emit(Op::StoreConst(id)); }
             }
         }
         Expr::GVarRead(name) => {
@@ -2679,6 +2698,10 @@ pub(crate) fn compile_proto_kind(
 ) -> usize {
     let mut b = ProtoBuilder::new(&params, filename);
     b.class_path = class_path;
+    // The eigenclass-body proto is the only one minted with this name (see the
+    // `Expr::SingletonClass` compile site). Flag it so a bare `CONST = v` keeps
+    // its top-level store — `singleton_class::CONST` depends on it.
+    b.in_singleton_body = name == "<singleton class>";
     if is_method {
         b.method_name = Some(name.clone());
         b.method_param_count = params.len() as u16;
@@ -2836,6 +2859,9 @@ pub(crate) fn compile_block(
         // codebases rarely do this; blocks are inherited for
         // consistency, not because we expect it to fire often.
         class_path: parent.class_path.clone(),
+        // A block inside an eigenclass body keeps the singleton-body const
+        // semantics (bare CONST kept) of its enclosing proto.
+        in_singleton_body: parent.in_singleton_body,
         // Blocks get a fresh per-Proto binary-literal pool. The
         // emitted bytecode embeds indices that the runtime
         // resolves through the block's own Proto.

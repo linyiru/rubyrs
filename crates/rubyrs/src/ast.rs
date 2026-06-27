@@ -1598,6 +1598,15 @@ fn singleton_body_needs_real_eval(body_nodes: &[Node<'_>], recv_is_self: bool) -
         if bn.as_module_node().is_some() || bn.as_class_node().is_some() {
             return true;
         }
+        // A constant assignment in the eigenclass body. The per-statement
+        // desugar compiles it in the SURROUNDING module's scope, where the
+        // regular-body bare-write suppression would drop the top-level key that
+        // `singleton_class::CONST` relies on under the flat const model. The
+        // real eigenclass-body proto is flagged `in_singleton_body`, so it KEEPS
+        // the bare store. (`class << self; CALLERS = [...].freeze` — sinatra.)
+        if bn.as_constant_write_node().is_some() {
+            return true;
+        }
         // Control-flow wrapping defs — `if/elsif/else def …`,
         // `unless`, `case/when def …`. The per-statement desugar only
         // admits a single `if`/`else` of pure defs and BAILS on an
