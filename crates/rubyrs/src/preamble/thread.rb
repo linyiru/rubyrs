@@ -364,6 +364,21 @@ class ConditionVariable
   def broadcast
     self
   end
+  # MonitorMixin::ConditionVariable convenience loops. ActiveRecord's
+  # connection pool waits on resource availability via these. In the
+  # single-threaded no-op model `wait` makes no progress, so the loop is a
+  # plain predicate check — which is exactly the common path (the resource
+  # is already available, so the block is false/true on the first test).
+  def wait_while
+    while yield
+      wait
+    end
+  end
+  def wait_until
+    until yield
+      wait
+    end
+  end
 end
 
 # Thread::Queue — the single-threaded companion to Mutex /

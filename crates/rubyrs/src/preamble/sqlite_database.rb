@@ -45,6 +45,13 @@ module SQLite3
   class NotADatabaseException    < Exception; end
 
   class Database
+    # `SQLite3::Database.quote(str)` — SQL string-literal escaping (double
+    # the single quotes). ActiveRecord's sqlite3 adapter calls
+    # `@connection.class.quote(s)` from `quote_string`.
+    def self.quote(string)
+      string.to_s.gsub("'", "''")
+    end
+
     # `db = SQLite3::Database.new("app.db")` opens a connection.
     # `:memory:` (literal) opens an anonymous in-memory DB —
     # convenient for tests + the Sequel-lite fixture in Phase 6.
@@ -197,6 +204,38 @@ module SQLite3
     def query(*params)
       raise SQLite3::Exception, "closed statement" if @closed
       __rubyrs_sqlite_stmt_query(@handle, params)
+    end
+
+    # `stmt.columns` — column names of the prepared statement, in
+    # declaration order. ActiveRecord's sqlite3 adapter calls this before
+    # stepping (`cols = stmt.columns`) to build the result's column set.
+    def columns
+      raise SQLite3::Exception, "closed statement" if @closed
+      __rubyrs_sqlite_stmt_columns(@handle)
+    end
+
+    # `stmt.bind_params(*params)` — stash positional binds for the next
+    # `to_a` (the host `query` op binds + steps in one shot). Accepts a
+    # single Array (AR's `stmt.bind_params(type_casted_binds)`) or varargs.
+    def bind_params(*params)
+      params = params.first if params.length == 1 && params.first.is_a?(Array)
+      @bound_params = params
+      self
+    end
+
+    # `stmt.to_a` — step through all rows with the params bound by the most
+    # recent `bind_params`, returning `Array<Array<Value>>`.
+    def to_a
+      raise SQLite3::Exception, "closed statement" if @closed
+      __rubyrs_sqlite_stmt_query(@handle, @bound_params || [])
+    end
+
+    # `stmt.reset!` — clear bound params so the statement can be re-bound
+    # and re-stepped (AR's prepared-statement-cache path). The host `query`
+    # op clears bindings on each call, so this just drops our stash.
+    def reset!
+      @bound_params = nil
+      self
     end
 
     def close

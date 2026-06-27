@@ -302,6 +302,20 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         })
     });
 
+    rt.register_fn("__rubyrs_sqlite_stmt_columns", |args| {
+        let stmt_handle = handle_arg(args, "__rubyrs_sqlite_stmt_columns(stmt_handle)")?;
+        with_stmt(stmt_handle, |st_stmt, vm| {
+            let names: Vec<Value> = st_stmt
+                .stmt
+                .column_names()
+                .iter()
+                .map(|n| Value::new_str((*n).to_string()))
+                .collect();
+            let id = vm.heap.alloc(HeapObj::Array(names.into()));
+            Ok(Value::Array(id))
+        })
+    });
+
     rt.register_fn("__rubyrs_sqlite_stmt_close", |args| {
         let stmt_handle = handle_arg(args, "__rubyrs_sqlite_stmt_close(stmt_handle)")?;
         STMT_HANDLES.with(|m| {
