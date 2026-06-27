@@ -1053,6 +1053,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn file_realpath() { run_diff("file_realpath"); }
 #[test] fn str_subclass_method_missing() { run_diff("str_subclass_method_missing"); }
 #[test] fn string_extend() { run_diff("string_extend"); }
+#[test] fn yaml_safe_load_file() { run_diff("yaml_safe_load_file"); }
 #[test] fn cext_msgpack_bigint() { run_diff("cext_msgpack_bigint"); }
 #[test] fn string_unpack1() { run_diff("string_unpack1"); }
 #[test] fn string_encoding_query() { run_diff("string_encoding_query"); }

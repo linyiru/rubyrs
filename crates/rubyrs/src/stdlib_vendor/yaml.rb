@@ -28,6 +28,8 @@ module YAML
       # file loader) instead of YAML.load.
       RubyrsYAMLParse.parse_document(File.read(path))
     end
+    alias_method :safe_load_file, :load_file
+    alias_method :unsafe_load_file, :load_file
   end
 end
 
