@@ -2620,27 +2620,39 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 out.push(tr(ctx, bn));
                 continue;
             }
-            // Bare-receiver method call at body top level — `extend
-            // Gem::Deprecate`, `deprecate :x, …`, `ruby2_keywords
-            // :foo`, etc. Translated through the regular path and run
-            // in the surrounding context (self = the enclosing
-            // class). For `extend M` this matches CRuby's observable
-            // effect: M's instance methods become callable as class
-            // methods, and a following bare call to one of them (e.g.
-            // addressable idna's `deprecate` after `extend
-            // Gem::Deprecate`) then dispatches to it. The `attr_*` /
-            // `prepend` names that WOULD be silently misdirected are
-            // already consumed by their dedicated arms above. Known
-            // divergence: `include M` here installs M on the
-            // surrounding class's instance methods rather than its
-            // singleton (rubyrs's flat per-class model) — rare and
-            // documented. Motivating case: addressable's idna/pure.rb
-            // `class << self; …; extend Gem::Deprecate; deprecate
-            // :unicode_normalize_kc, …; end`.
+            // Bare-receiver method call at body top level — `delegate
+            // :x, to: :y`, `extend Gem::Deprecate`, `deprecate :x, …`,
+            // `ruby2_keywords :foo`, etc. Run with `self` = the singleton
+            // class (faithful `class << self` semantics) by desugaring to
+            // `self.singleton_class.class_eval { <call> }`. This is what
+            // makes def-generating macros correct: ActiveSupport's
+            // `delegate` `module_eval`s `def`s that must install CLASS
+            // methods (ActiveRecord::ExplainRegistry's `class << self;
+            // delegate :collect?, to: :instance; end`). The previous spike
+            // ran the call in the surrounding context (self = the enclosing
+            // class), so `delegate` defined INSTANCE methods and
+            // `Foo.collect?` was undefined. `extend M` / `deprecate` now
+            // also match CRuby's metaclass semantics (`S.extend(M)`,
+            // deprecate wraps the CLASS method). `attr_*` / `prepend` /
+            // const / cvar are already consumed by their dedicated arms
+            // above; only genuine bare calls reach here.
             if recv_is_self
                 && bn.as_call_node().is_some()
             {
-                out.push(tr(ctx, bn));
+                let inner = tr(ctx, bn);
+                out.push(sp(bn, Expr::CallWithBlock {
+                    receiver: Some(Box::new(sp(bn, Expr::Call {
+                        receiver: Some(Box::new(sp(bn, Expr::SelfExpr))),
+                        name: "singleton_class".into(),
+                        args: vec![],
+                        kwargs_trailing: false,
+                    }))),
+                    name: "class_eval".into(),
+                    args: vec![],
+                    block_params: vec![],
+                    block_body: vec![inner],
+                    kwargs_trailing: false,
+                }));
                 continue;
             }
             // Bare `self` in the body — the metaclass-expression
