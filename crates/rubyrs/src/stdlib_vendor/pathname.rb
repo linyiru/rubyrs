@@ -147,6 +147,34 @@ class Pathname
     File.extname(@path)
   end
 
+  # `Pathname#sub_ext(replacement)` — replace the trailing extension with
+  # `replacement` (no extension → append). Bridgetown's liquid partial
+  # renderer (`liquid_renderer/file_system.rb`) does
+  # `path.sub_ext(".liquid")` resolving `{% render %}` partials.
+  def sub_ext(replacement)
+    ext = File.extname(@path)
+    Pathname.new(@path[0, @path.length - ext.length] + replacement)
+  end
+
+  # File-status predicates / reads delegate to File, matching CRuby's
+  # Pathname. Bridgetown's liquid partial renderer probes
+  # `path_variants.find(&:exist?)` then `.read`s the winner.
+  def exist?
+    File.exist?(@path)
+  end
+
+  def file?
+    File.file?(@path)
+  end
+
+  def directory?
+    File.directory?(@path)
+  end
+
+  def read(*args)
+    File.read(@path, *args)
+  end
+
   # `Pathname#fnmatch?(pattern, flags = 0)` — glob-match the path
   # string (delegates to `File.fnmatch?`). Surfaced by bridgetown-core's
   # `Resource::Destination#warn_on_rails_style_extension`.
