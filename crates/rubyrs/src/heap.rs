@@ -719,7 +719,7 @@ impl Heap {
             panic!("ICE: heap slot is not a Hash")
         }
     }
-    fn hash_obj_mut(&mut self, id: ObjId) -> &mut HashObj {
+    pub(crate) fn hash_obj_mut(&mut self, id: ObjId) -> &mut HashObj {
         if let HeapObj::Hash(h) = self.get_mut(id) { h } else { panic!("ICE: heap slot is not a Hash") }
     }
     /// Build the key index (`ruby_hash(key)` → positions) for a Hash

@@ -62,6 +62,14 @@ impl Vm {
             || self.key_user_method(key, eql_sym).is_some()
     }
 
+    /// A `compare_by_identity` Hash keys strictly on object identity and NEVER
+    /// calls `hash`/`eql?` — zeitwerk's Cref::Map relies on this to store
+    /// non-hashable module objects as keys. Such Hashes must always use the fast
+    /// identity path even when the key overrides `hash`/`eql?`.
+    pub(crate) fn hash_is_by_identity(&self, id: ObjId) -> bool {
+        matches!(self.heap.get(id), HeapObj::Hash(h) if h.by_identity.get())
+    }
+
     /// Synchronously invoke a resolved method and return its result (propagating
     /// a raise as a `Trap`). The `invoke_method` + `dispatch_until` pattern.
     pub(crate) fn call_resolved_method(
@@ -94,6 +102,95 @@ impl Vm {
             return Ok(!matches!(r, Value::Nil | Value::Bool(false)));
         }
         Ok(a.ruby_eql(b, &self.heap))
+    }
+
+    /// Find the index of `key` in Hash `id`, honoring a user-defined `eql?` on
+    /// the QUERY key (linear `eql?` scan). Falls back to the fast identity-based
+    /// heap index for ordinary keys (zero overhead). Used by `[]` / `fetch` /
+    /// `key?` / `delete` / `assoc` so a Hash with hash/eql-overriding keys
+    /// matches CRuby.
+    pub(crate) fn vm_hash_find(&mut self, id: ObjId, key: &Value) -> Result<Option<usize>, Trap> {
+        let hash_sym = self.interner.intern("hash");
+        let eql_sym = self.interner.intern("eql?");
+        if self.hash_is_by_identity(id) || !self.key_needs_ruby_hash(key, hash_sym, eql_sym) {
+            return Ok(self.heap.hash_index_lookup(id, key));
+        }
+        let n = self.heap.hash(id).len();
+        let mut pg = PinGuard::new(self);
+        pg.pin(key.clone());
+        for i in 0..n {
+            let existing = match pg.vm.heap.get(id) {
+                HeapObj::Hash(h) if i < h.pairs.len() => h.pairs[i].0.clone(),
+                _ => break,
+            };
+            if pg.vm.keys_ruby_eql(key, &existing, eql_sym)? {
+                return Ok(Some(i));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Insert `key`→`val`, honoring user-defined `hash`/`eql?`: calls `key.hash`
+    /// (so a wrong-arity override raises, like CRuby) and finds an existing
+    /// entry via `eql?`. Ordinary keys take the fast index-maintaining heap
+    /// path. User keys are stored in the pairs Vec only (the identity index
+    /// can't hold them), found henceforth via `vm_hash_find`.
+    pub(crate) fn vm_hash_insert(
+        &mut self,
+        id: ObjId,
+        key: Value,
+        val: Value,
+    ) -> Result<Option<Value>, Trap> {
+        let hash_sym = self.interner.intern("hash");
+        let eql_sym = self.interner.intern("eql?");
+        if self.hash_is_by_identity(id) || !self.key_needs_ruby_hash(&key, hash_sym, eql_sym) {
+            return Ok(self.heap.hash_insert(id, key, val));
+        }
+        if let Some(m) = self.key_user_method(&key, hash_sym) {
+            self.call_resolved_method(m, key.clone(), vec![])?;
+        }
+        match self.vm_hash_find(id, &key)? {
+            Some(i) => {
+                let h = self.heap.hash_obj_mut(id);
+                Ok(Some(std::mem::replace(&mut h.pairs[i].1, val)))
+            }
+            None => {
+                let h = self.heap.hash_obj_mut(id);
+                h.pairs.push((key, val));
+                Ok(None)
+            }
+        }
+    }
+
+    /// Cheap gate for the Op-level Hash fast paths: a key overriding
+    /// `hash`/`eql?` can't use the identity index, so the fast path must defer
+    /// to the (vm-aware) slow path. Primitives short-circuit with no interning.
+    pub(crate) fn hash_key_needs_slow(&mut self, key: &Value) -> bool {
+        if !matches!(key, Value::Object(_) | Value::Class(_)) {
+            return false;
+        }
+        let hs = self.interner.intern("hash");
+        let es = self.interner.intern("eql?");
+        self.key_needs_ruby_hash(key, hs, es)
+    }
+
+    /// Delete `key`, honoring user `hash`/`eql?` (eql? scan). Ordinary keys use
+    /// the fast heap delete.
+    pub(crate) fn vm_hash_delete(&mut self, id: ObjId, key: &Value) -> Result<Option<Value>, Trap> {
+        let hash_sym = self.interner.intern("hash");
+        let eql_sym = self.interner.intern("eql?");
+        if self.hash_is_by_identity(id) || !self.key_needs_ruby_hash(key, hash_sym, eql_sym) {
+            return Ok(self.heap.hash_delete(id, key));
+        }
+        match self.vm_hash_find(id, key)? {
+            Some(i) => {
+                let h = self.heap.hash_obj_mut(id);
+                let (_, v) = h.pairs.remove(i);
+                h.index = None; // positions shifted — drop the index, rebuilt lazily
+                Ok(Some(v))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Hash#X methods that don't take a block. Block-form
@@ -217,8 +314,8 @@ impl Vm {
                     // `Array#count` block).
                     ("count", []) => Some(Value::Int(self.heap.hash(id).len() as i64)),
                     ("[]", [k]) => {
-                        // O(1) indexed hit.
-                        if let Some(pos) = self.heap.hash_index_lookup(id, k) {
+                        // O(1) indexed hit (or eql?-aware for user keys).
+                        if let Some(pos) = self.vm_hash_find(id, k)? {
                             return Ok(Some(self.heap.hash(id)[pos].1.clone()));
                         }
                         // Missing key — invoke default-block if the
@@ -288,7 +385,7 @@ impl Vm {
                         // membership probe entirely then — `hash_insert`
                         // does its own single O(1) lookup.
                         if let Some(max) = self.max_value_bytes
-                            && self.heap.hash_index_lookup(id, k).is_none()
+                            && self.vm_hash_find(id, k)?.is_none()
                         {
                             let new_len = self.heap.hash(id).len().saturating_add(1);
                             if new_len.saturating_mul(std::mem::size_of::<(Value, Value)>()) > max {
@@ -297,9 +394,9 @@ impl Vm {
                                 }));
                             }
                         }
-                        // Index-maintaining insert: O(1) amortised, so
-                        // building an N-key Hash is O(n), not O(n²).
-                        self.heap.hash_insert(id, k.clone(), v.clone());
+                        // Index-maintaining insert (or eql?-aware for keys
+                        // overriding hash/eql).
+                        self.vm_hash_insert(id, k.clone(), v.clone())?;
                         Some(v.clone())
                     }
                     ("empty?", []) => Some(Value::Bool(self.heap.hash(id).is_empty())),
@@ -323,7 +420,7 @@ impl Vm {
                         // machinery by `dispatch`, so a script
                         // `begin ... rescue KeyError => e; ... end`
                         // catches it like CRuby.
-                        match self.heap.hash_index_lookup(id, k) {
+                        match self.vm_hash_find(id, k)? {
                             Some(p) => Some(self.heap.hash(id)[p].1.clone()),
                             None => {
                                 return Err(self.trap(RubyError::KeyError {
@@ -334,7 +431,7 @@ impl Vm {
                         }
                     }
                     ("fetch", [k, default]) => {
-                        Some(match self.heap.hash_index_lookup(id, k) {
+                        Some(match self.vm_hash_find(id, k)? {
                             Some(p) => self.heap.hash(id)[p].1.clone(),
                             None => default.clone(),
                         })
@@ -356,14 +453,14 @@ impl Vm {
                         }));
                     }
                     ("include?", [k]) | ("has_key?", [k]) | ("key?", [k]) | ("member?", [k]) => {
-                        Some(Value::Bool(self.heap.hash_index_lookup(id, k).is_some()))
+                        Some(Value::Bool(self.vm_hash_find(id, k)?.is_some()))
                     }
                     // `h.assoc(key)` → [key, value] or nil. CRuby
                     // compares with ==; the index lookup uses eql?,
                     // identical for the string/symbol keys real
                     // callers (rack Headers#assoc supers here) use.
                     ("assoc", [k]) => {
-                        let found = self.heap.hash_index_lookup(id, k)
+                        let found = self.vm_hash_find(id, k)?
                             .map(|pos| self.heap.hash(id)[pos].1.clone());
                         match found {
                             Some(v) => {
@@ -1339,7 +1436,7 @@ impl Vm {
                         // Index-aware delete (O(1) lookup; drops + lazily
                         // rebuilds the index since removal shifts later
                         // positions). Returns the removed value or nil.
-                        Some(self.heap.hash_delete(id, k).unwrap_or(Value::Nil))
+                        Some(self.vm_hash_delete(id, k)?.unwrap_or(Value::Nil))
                     }
                     // `Hash#key(value)` — the first key whose value
                     // `==` the argument, or nil. Reverse of `[]`.

@@ -2962,6 +2962,14 @@ impl Vm {
                     if !self.fast_index_hash_key_safe {
                         return false;
                     }
+                    if matches!(&self.stack[n - 1], Value::Object(_) | Value::Class(_))
+                        && !self.hash_is_by_identity(id)
+                    {
+                        let probe = self.stack[n - 1].clone();
+                        if self.hash_key_needs_slow(&probe) {
+                            return false;
+                        }
+                    }
                     let v = Value::Bool(
                         self.heap.hash_index_lookup(id, &self.stack[n - 1]).is_some(),
                     );
@@ -2972,6 +2980,14 @@ impl Vm {
                 if is_get {
                     if !self.fast_index_hash_safe {
                         return false;
+                    }
+                    if matches!(&self.stack[n - 1], Value::Object(_) | Value::Class(_))
+                        && !self.hash_is_by_identity(id)
+                    {
+                        let probe = self.stack[n - 1].clone();
+                        if self.hash_key_needs_slow(&probe) {
+                            return false;
+                        }
                     }
                     let v = if let Some(pos) = self.heap.hash_index_lookup(id, &self.stack[n - 1])
                     {
@@ -3004,8 +3020,11 @@ impl Vm {
                     if self.max_value_bytes.is_some() {
                         return false;
                     }
-                    let v = self.stack[n - 1].clone();
                     let k = self.stack[n - 2].clone();
+                    if !self.hash_is_by_identity(id) && self.hash_key_needs_slow(&k) {
+                        return false;
+                    }
+                    let v = self.stack[n - 1].clone();
                     self.heap.hash_insert(id, k, v.clone());
                     self.stack.truncate(recv_idx);
                     self.stack.push(v);
