@@ -15,6 +15,10 @@ class Encoding
   Windows_31J = Encoding.new("Windows-31J")
   EUC_JP = Encoding.new("EUC-JP")
   GBK = Encoding.new("GBK")
+  ## GB18030 — the Unicode-complete Chinese national standard (superset of
+  ## GBK). ActiveSupport's Inflector lists it in
+  ## ALLOWED_ENCODINGS_FOR_TRANSLITERATE, so the constant must resolve.
+  GB18030 = Encoding.new("GB18030")
   Big5 = Encoding.new("Big5")
   ## Fixed-endianness UTF-16 (hand-rolled transcoder; the BOM-form
   ## "UTF-16" dummy encoding is not registered — it needs decode-time
@@ -49,6 +53,7 @@ class Encoding
       when "ISO-2022-JP", "ISO2022-JP" then ISO_2022_JP
       when "EUC-JP", "EUCJP" then EUC_JP
       when "GBK", "CP936" then GBK
+      when "GB18030" then GB18030
       when "BIG5" then Big5
       when "UTF-16LE", "UTF16LE" then UTF_16LE
       when "UTF-16BE", "UTF16BE" then UTF_16BE
@@ -64,7 +69,7 @@ class Encoding
     def list
       __rubyrs_list_core + [
         ISO_8859_1, Windows_1252, ISO_8859_15, KOI8_R,
-        Windows_31J, EUC_JP, GBK, Big5, UTF_16LE, UTF_16BE, UTF_16,
+        Windows_31J, EUC_JP, GBK, GB18030, Big5, UTF_16LE, UTF_16BE, UTF_16,
         UTF_32LE, UTF_32BE, UTF_32, Shift_JIS, ISO_2022_JP,
       ]
     end

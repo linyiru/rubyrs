@@ -132,6 +132,9 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         "etc" => Some(include_str!("stdlib_vendor/etc.rb")),
         "timeout" => Some(include_str!("stdlib_vendor/timeout.rb")),
         "monitor" => Some(include_str!("stdlib_vendor/monitor.rb")),
+        // `mutex_m`: the `Mutex_m` mixin, dropped from Ruby 3.4's default
+        // stdlib. ActiveSupport 7.0's Notifications::Fanout requires it.
+        "mutex_m" => Some(include_str!("stdlib_vendor/mutex_m.rb")),
         // Singleton: `.instance` memoisation + privatised `.new` via the
         // `included` hook. Was a bare empty module; rake/early_time.rb
         // (`include Singleton`) needs the real behaviour.

@@ -30,6 +30,26 @@ module YAML
     end
     alias_method :safe_load_file, :load_file
     alias_method :unsafe_load_file, :load_file
+
+    # Psych's custom-tag registries (tag string → class). ActiveSupport's
+    # TimeWithZone registers `!ruby/object:ActiveSupport::TimeWithZone` here
+    # at load. rubyrs's loader doesn't consume them (it parses the core YAML
+    # types), but the mutable Hash accessors must exist.
+    def load_tags
+      @load_tags ||= {}
+    end
+
+    def load_tags=(tags)
+      @load_tags = tags
+    end
+
+    def dump_tags
+      @dump_tags ||= {}
+    end
+
+    def dump_tags=(tags)
+      @dump_tags = tags
+    end
   end
 end
 
