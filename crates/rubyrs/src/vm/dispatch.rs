@@ -10817,6 +10817,59 @@ impl Vm {
                 self.stack.push(recv.clone());
                 return Ok(());
             }
+        // `str.extend(M)` — String twin of the Object arm above. A String
+        // gets its singleton via `ensure_str_singleton`, then M's methods
+        // sit on the eigenclass `includes`. Sinatra's `render` does
+        // `output.extend(...)` on the rendered String to attach a
+        // content-type accessor.
+        if let Value::Str(_) = &recv
+            && &*name == "extend" && args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "wrong number of arguments (given 0, expected 1+)".to_string(),
+                }));
+            }
+        if let Value::Str(s) = &recv
+            && &*name == "extend" && !args.is_empty() {
+                let s = s.clone();
+                let mut modules: Vec<std::rc::Rc<crate::value::Class>> = Vec::with_capacity(args.len());
+                for a in args.iter().rev() {
+                    match a {
+                        Value::Class(c) if c.is_module => modules.push(c.clone()),
+                        Value::Class(_) => return Err(self.trap(RubyError::TypeError {
+                            msg: "wrong argument type Class (expected Module)".to_string(),
+                        })),
+                        _ => return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "wrong argument type {} (expected Module)",
+                                a.type_name(),
+                            ),
+                        })),
+                    }
+                }
+                let sc = self.ensure_str_singleton(&s);
+                let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
+                for src in modules {
+                    if !super::class_is_a(&sc, &src) {
+                        sc.includes.borrow_mut().insert(0, src.clone());
+                        self.bump_const_gen();
+                    }
+                    fire_hooks.push(src);
+                }
+                self.method_gen = self.method_gen.wrapping_add(1);
+                let target_v = recv.clone();
+                self.fire_inclusion_hooks(&fire_hooks, &target_v, "extended")?;
+                self.stack.push(recv.clone());
+                return Ok(());
+            }
+        // Immediate values can't carry a singleton, so `5.extend(M)` /
+        // `:s.extend(M)` / `1.5.extend(M)` raise TypeError in CRuby (nil/
+        // true/false DO allow it, so they're not matched here).
+        if &*name == "extend" && !args.is_empty()
+            && matches!(&recv, Value::Int(_) | Value::Float(_) | Value::Sym(_)) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: "can't define singleton".to_string(),
+                }));
+            }
         // `Klass.alias_method(:new_name, :old_name)` — runtime
         // dispatch path (compile-time intercept at compiler.rs:225
         // only catches the literal-Symbol shape inside a class
@@ -11159,6 +11212,16 @@ impl Vm {
                     // `obj.extend(M); obj.is_a?(M)` was false.)
                     let walk_class = match &recv {
                         Value::Object(id) => self.heap.class_of(*id),
+                        // A String `extend`ed with M has its eigenclass (with M
+                        // in `includes`) in the str_singletons side-table; walk
+                        // it so `s.extend(M); s.is_a?(M)` is true.
+                        Value::Str(s) => {
+                            let key = std::rc::Rc::as_ptr(s) as usize;
+                            self.str_singletons
+                                .get(&key)
+                                .map(|(_, sc)| sc.clone())
+                                .unwrap_or_else(|| recv_class.clone())
+                        }
                         _ => recv_class.clone(),
                     };
                     super::class_is_a(&walk_class, target)
