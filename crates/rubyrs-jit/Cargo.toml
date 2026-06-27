@@ -1,0 +1,31 @@
+# rubyrs-jit — backend-agnostic tiered-JIT scaffolding for the rubyrs VM.
+#
+# PoC for ADR 0030 (the "future contributor plugs a JIT in" path that
+# ADR 0002 explicitly left open). This crate deliberately depends on
+# NOTHING from `rubyrs`: it owns only the parts of a tiered JIT that
+# don't need to see the VM internals — the hotness *policy*, the
+# *stats* counters, and the *config* knobs. The closure-threading
+# compiler that must name the crate-private `Op` / `Vm` / `Value`
+# types lives inside `rubyrs` behind its `jit` feature (see
+# `crates/rubyrs/src/jit.rs` and ADR 0030 §"Why this isn't one clean
+# crate yet").
+[package]
+name = "rubyrs-jit"
+description = "Backend-agnostic tiered-JIT policy + stats for the rubyrs VM (closure-threading PoC, ADR 0030)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+keywords = ["ruby", "jit", "interpreter", "vm"]
+categories = ["compilers"]
+
+[dependencies]
+cranelift-jit = { version = "0.133", optional = true }
+cranelift-module = { version = "0.133", optional = true }
+cranelift-codegen = { version = "0.133", optional = true }
+cranelift-frontend = { version = "0.133", optional = true }
+
+[features]
+native = ["dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-codegen", "dep:cranelift-frontend"]

@@ -51,6 +51,7 @@ members = [
     "crates/liquidus",
     "crates/rostdown",
     "crates/rubyrs",
+    "crates/rubyrs-jit",
     "crates/rubyrs-cext",
     "crates/rubund",
     "crates/rubyrs-gapscan",
