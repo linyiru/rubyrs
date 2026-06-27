@@ -1057,6 +1057,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn pathname_sub_ext_filetests() { run_diff("pathname_sub_ext_filetests"); }
 #[test] fn encoding_gb18030() { run_diff("encoding_gb18030"); }
 #[test] fn yaml_load_tags() { run_diff("yaml_load_tags"); }
+#[test] fn include_append_features_super() { run_diff("include_append_features_super"); }
 #[test] fn cext_msgpack_bigint() { run_diff("cext_msgpack_bigint"); }
 #[test] fn string_unpack1() { run_diff("string_unpack1"); }
 #[test] fn string_encoding_query() { run_diff("string_encoding_query"); }

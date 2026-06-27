@@ -11063,6 +11063,30 @@ impl Vm {
                 }
             }
         }
+        // Native `Module#append_features(base)` / `prepend_features(base)`:
+        // insert `self` (the module receiver) into base's include/prepend
+        // chain. This is the default `include`/`prepend` dispatch into — a
+        // module that overrides it (ActiveSupport::Concern) does its extra
+        // wiring then calls `super`, which force-dispatches here. Reached
+        // either directly or via the super fallback; idempotent.
+        if let Value::Class(module) = &recv
+            && matches!(&*name, "append_features" | "prepend_features")
+            && args.len() == 1
+            && let Value::Class(base) = &args[0] {
+                let is_prep = &*name == "prepend_features";
+                if !super::class_reaches_via_chain(base, module, is_prep) {
+                    if is_prep {
+                        base.prepends.borrow_mut().insert(0, module.clone());
+                    } else {
+                        base.includes.borrow_mut().insert(0, module.clone());
+                    }
+                    self.bump_const_gen();
+                }
+                self.method_gen = self.method_gen.wrapping_add(1);
+                // CRuby's append_features returns the module (self).
+                self.stack.push(recv.clone());
+                return Ok(());
+            }
         if let Value::Class(target) = &recv
             && matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty() {
                 // Explicit-receiver form: `MyClass.include(Mod)` /
@@ -11113,6 +11137,29 @@ impl Vm {
                     // MultiRoute` shape, where the gem expects
                     // `Klass.get` to resolve to MultiRoute's override.
                     let is_extend = !is_include && !is_prepend;
+                    // Route through a user `append_features`/`prepend_features`
+                    // override (ActiveSupport::Concern) — same as the
+                    // no-receiver path in do_module_inclusion. Needed for
+                    // nested Concern dependencies, where Concern's own
+                    // append_features does `base.include(dep)` (this
+                    // explicit-receiver form) for each dependency.
+                    let feature_override = if !is_extend {
+                        let fs = self.interner.intern(
+                            if is_prepend { "prepend_features" } else { "append_features" },
+                        );
+                        self.lookup_class_singleton_method(&src, fs)
+                    } else {
+                        None
+                    };
+                    if let Some(m) = feature_override {
+                        self.call_resolved_method(
+                            m,
+                            Value::Class(src.clone()),
+                            vec![Value::Class(target_cls.clone())],
+                        )?;
+                        fire_hooks.push(src);
+                        continue;
+                    }
                     let already_reachable = if is_extend {
                         target_cls.singleton_includes.borrow().iter().any(|m| Rc::ptr_eq(m, &src))
                     } else {
@@ -20339,7 +20386,12 @@ impl Vm {
                 | "deprecate_constant" | "attr_accessor" | "attr_reader"
                 | "attr_writer" | "define_method" | "alias_method"
                 | "module_function" | "private" | "public" | "protected"
-                | "include" | "prepend");
+                | "include" | "prepend"
+                // `append_features`/`prepend_features`: the insertion
+                // primitives `include`/`prepend` dispatch to. A module that
+                // overrides them (ActiveSupport::Concern) calls `super` to do
+                // the real insert — force-dispatch reaches the native arm.
+                | "append_features" | "prepend_features");
         }
         let sentinel: Option<Value> = match class_name {
             "Integer" => Some(Value::Int(0)),
@@ -20839,6 +20891,31 @@ impl Vm {
             // it's checked first by the lookup walk. Idempotency is
             // PER-CHAIN for include / prepend (distinct insertion slots).
             let is_extend = !is_include && !is_prepend;
+            // A module that overrides `append_features`/`prepend_features`
+            // (the canonical case: ActiveSupport::Concern, the foundation of
+            // Rails) does its own wiring there — `base.extend(ClassMethods)`,
+            // the `included do` block — then calls `super` to do the real
+            // insert. Dispatch the override (its `super` force-dispatches the
+            // native insert arm); CRuby still fires `included` afterwards, so
+            // fall through to the shared hook push. Skipped for `extend`
+            // (extend_object) and the eigenclass-shell include-redirect.
+            let feature_override = if !is_extend && !include_redirect {
+                let fs = self
+                    .interner
+                    .intern(if is_prepend { "prepend_features" } else { "append_features" });
+                self.lookup_class_singleton_method(&src, fs)
+            } else {
+                None
+            };
+            if let Some(m) = feature_override {
+                self.call_resolved_method(
+                    m,
+                    Value::Class(src.clone()),
+                    vec![Value::Class(target_cls.clone())],
+                )?;
+                fire_hooks.push(src);
+                continue;
+            }
             let already_reachable = if include_redirect {
                 shell_real.as_ref().unwrap()
                     .singleton_includes.borrow().iter()
