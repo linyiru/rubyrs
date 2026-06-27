@@ -1050,6 +1050,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn class_body_const_no_toplevel_leak() { run_diff("class_body_const_no_toplevel_leak"); }
 #[test] fn hash_literal_user_hash_eql() { run_diff("hash_literal_user_hash_eql"); }
 #[test] fn hash_api_user_hash_eql() { run_diff("hash_api_user_hash_eql"); }
+#[test] fn file_realpath() { run_diff("file_realpath"); }
 #[test] fn cext_msgpack_bigint() { run_diff("cext_msgpack_bigint"); }
 #[test] fn string_unpack1() { run_diff("string_unpack1"); }
 #[test] fn string_encoding_query() { run_diff("string_encoding_query"); }

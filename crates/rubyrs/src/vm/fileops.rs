@@ -1390,6 +1390,30 @@ impl Vm {
                 // `File.join(Dir.tmpdir, name)`.
                 Value::new_str(resolved.to_string_lossy().into_owned())
             }
+            ("realpath", [p]) | ("realpath", [p, _]) => {
+                // `File.realpath(path[, basedir])` — the canonical absolute path
+                // with ALL symlinks resolved (the filesystem-touching
+                // counterpart of the purely-lexical `expand_path` above; macOS's
+                // `/tmp` → `/private/tmp`). The path MUST exist.
+                use std::path::{Path, PathBuf};
+                self.check_filesystem_io_allowed("File.realpath", None)?;
+                let path = path_arg(p)?;
+                let pp = Path::new(&path);
+                let joined: PathBuf = if pp.is_absolute() {
+                    pp.to_path_buf()
+                } else {
+                    let base = match args.get(1) {
+                        Some(Value::Str(s)) => s.to_string_lossy(),
+                        _ => self.cached_cwd().unwrap_or_else(|| ".".to_string()),
+                    };
+                    Path::new(&base).join(pp)
+                };
+                self.check_filesystem_io_allowed("File.realpath", Some(&joined))?;
+                match std::fs::canonicalize(&joined) {
+                    Ok(c) => Value::new_str(c.to_string_lossy().into_owned()),
+                    Err(e) => return Err(self.trap(io_error(&e, Some(&joined)))),
+                }
+            }
             _ => return Ok(None),
         }))
     }
