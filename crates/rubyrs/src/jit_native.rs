@@ -377,21 +377,26 @@ fn emit_binop(
 // value-method shape is the attr reader `def v; @v; end` — its native code is a
 // single call to `jit_ivar_get` with the ivar name baked in.
 
-/// A compiled value-method: `fn(vm, recv, out)` — reads from `recv` (a `Value`
-/// pointer) and writes the result `Value` to `out`. Holds the `JITModule`.
+/// A compiled value-method: `fn(vm, recv, arg0, out)` — takes the receiver and
+/// the first argument as `Value` pointers and writes the result `Value` to
+/// `out`. Holds the `JITModule`. (`arg0` is `&Nil` for 0-arg shapes.)
 pub(crate) struct ValueProto {
     _module: JITModule,
-    ptr: extern "C" fn(*const crate::vm::Vm, *const Value, *mut Value),
+    ptr: extern "C" fn(*const crate::vm::Vm, *const Value, *const Value, *mut Value),
 }
 
 impl ValueProto {
-    /// Run the native value-method: `recv` is the receiver, the result is
-    /// returned (written through an out-slot). `vm` is borrowed shared for the
-    /// duration of the call (the primitive only reads the heap).
+    /// Run the native value-method. `vm` is borrowed shared for the duration of
+    /// the call (the primitive only reads the heap).
     #[inline]
-    pub(crate) fn call(&self, vm: *const crate::vm::Vm, recv: &Value) -> Value {
+    pub(crate) fn call(&self, vm: *const crate::vm::Vm, recv: &Value, arg0: &Value) -> Value {
         let mut out = Value::Nil;
-        (self.ptr)(vm, recv as *const Value, &mut out as *mut Value);
+        (self.ptr)(
+            vm,
+            recv as *const Value,
+            arg0 as *const Value,
+            &mut out as *mut Value,
+        );
         out
     }
 }
@@ -424,9 +429,25 @@ pub(crate) unsafe extern "C" fn jit_ivar_get(
     unsafe { std::ptr::write(out, v) };
 }
 
-/// Compile an attr reader (`def v; @v; end`, body `[LoadIvar(sym), Return]`) to
-/// native code that calls `jit_ivar_get` with `getter_sym` baked in.
-pub(crate) fn compile_attr_reader(getter_sym: crate::intern::SymId) -> Option<ValueProto> {
+/// Compile a value-method whose body is a single ivar read, to a native call
+/// into `jit_ivar_get`. Two recognised shapes (else `None`):
+///   - getter:        `[LoadIvar(s), Return]`                       → read recv's `@s`
+///   - ivar_get wrap: `[LoadLocal(0), LoadSymbol(s), Call(ivg,1), Return]`
+///                                                                  → read arg0's `@s`
+/// The latter is the AR-shaped, NON-fast-pathed win: the interpreter pays a full
+/// `instance_variable_get` dispatch + a frame; native code pays one direct call.
+pub(crate) fn compile_value(proto: &Proto, ivg_sym: crate::intern::SymId) -> Option<ValueProto> {
+    // (ivar name sym, which incoming Value to read — recv=param1 or arg0=param2)
+    let (ivar_sym, read_arg0): (crate::intern::SymId, bool) = match proto.code.as_slice() {
+        [Op::LoadIvar(s), Op::Return] => (*s, false),
+        [Op::LoadLocal(0), Op::LoadSymbol(s), Op::Call(name, 1, _), Op::Return]
+            if *name == ivg_sym =>
+        {
+            (*s, true)
+        }
+        _ => return None,
+    };
+
     let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
     builder.symbol("jit_ivar_get", jit_ivar_get as *const u8);
     let mut module = JITModule::new(builder);
@@ -434,13 +455,14 @@ pub(crate) fn compile_attr_reader(getter_sym: crate::intern::SymId) -> Option<Va
     let mut ctx = module.make_context();
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(ptr_ty)); // vm
-    sig.params.push(AbiParam::new(ptr_ty)); // recv (*const Value)
-    sig.params.push(AbiParam::new(ptr_ty)); // out  (*mut Value)
+    sig.params.push(AbiParam::new(ptr_ty)); // recv
+    sig.params.push(AbiParam::new(ptr_ty)); // arg0
+    sig.params.push(AbiParam::new(ptr_ty)); // out
     ctx.func.signature = sig.clone();
     let fid = module.declare_function("g", Linkage::Export, &sig).ok()?;
     let mut hsig = module.make_signature();
     hsig.params.push(AbiParam::new(ptr_ty)); // vm
-    hsig.params.push(AbiParam::new(ptr_ty)); // recv
+    hsig.params.push(AbiParam::new(ptr_ty)); // target recv
     hsig.params.push(AbiParam::new(types::I32)); // name
     hsig.params.push(AbiParam::new(ptr_ty)); // out
     let hid = module.declare_function("jit_ivar_get", Linkage::Import, &hsig).ok()?;
@@ -453,10 +475,10 @@ pub(crate) fn compile_attr_reader(getter_sym: crate::intern::SymId) -> Option<Va
         fb.switch_to_block(b);
         fb.seal_block(b);
         let vm = fb.block_params(b)[0];
-        let recv = fb.block_params(b)[1];
-        let out = fb.block_params(b)[2];
-        let name = fb.ins().iconst(types::I32, getter_sym.0 as i64);
-        fb.ins().call(href, &[vm, recv, name, out]);
+        let target = fb.block_params(b)[if read_arg0 { 2 } else { 1 }];
+        let out = fb.block_params(b)[3];
+        let name = fb.ins().iconst(types::I32, ivar_sym.0 as i64);
+        fb.ins().call(href, &[vm, target, name, out]);
         fb.ins().return_(&[]);
         fb.finalize();
     }
@@ -465,7 +487,10 @@ pub(crate) fn compile_attr_reader(getter_sym: crate::intern::SymId) -> Option<Va
     module.finalize_definitions().ok()?;
     let code = module.get_finalized_function(fid);
     let ptr = unsafe {
-        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, *mut Value)>(code)
+        std::mem::transmute::<
+            _,
+            extern "C" fn(*const crate::vm::Vm, *const Value, *const Value, *mut Value),
+        >(code)
     };
     Some(ValueProto { _module: module, ptr })
 }

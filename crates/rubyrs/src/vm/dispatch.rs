@@ -7596,17 +7596,19 @@ impl Vm {
             {
                 return true;
             }
-            // Eligible shape not yet ruled out → route to the hook, which
-            // compiles + caches (Some = native, None = ineligible). Once known
-            // ineligible, stop routing so the method stays on the fast path.
+            // Eligible shape not yet ruled out → route to the hook, which tries
+            // the integer JIT then the value JIT, caching each (Some = native,
+            // None = ineligible). Keep routing a 1-arg method until BOTH are
+            // ruled out, then it stays on the fast path forever.
             //
-            // NOTE: getters (the value-method JIT's only shape so far) are
-            // deliberately NOT routed — the interpreter's `getter_ivar` fast
-            // path already serves them with no frame, beating a native call for
-            // a 1-op body. The value-method JIT's production win needs MULTI-op,
-            // non-fast-pathed value methods (not yet compiled). Until then only
-            // the integer JIT routes, so non-integer code keeps its fast paths.
-            argc == 1 && !matches!(self.jit_native.get(&proto_idx), Some(None))
+            // Getters are NOT routed here (argc == 0): the interpreter's
+            // `getter_ivar` fast path serves `obj.foo` frame-free, beating a
+            // native call for a 1-op body. The value JIT's win is the 1-arg
+            // `instance_variable_get(:lit)` shape — NOT fast-pathed, so native
+            // dispatch-elimination pays off.
+            let int_dead = matches!(self.jit_native.get(&proto_idx), Some(None));
+            let val_dead = matches!(self.jit_value.get(&proto_idx), Some(None));
+            argc == 1 && !(int_dead && val_dead)
         }
         #[cfg(not(feature = "jit-native"))]
         #[inline]
@@ -15803,30 +15805,6 @@ impl Vm {
                 return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
             }
         }
-        // Native-JIT hook, value-method path (D Layer 3): a 0-arg attr reader
-        // (`def v; @v; end`) compiles to a native call into `jit_ivar_get` —
-        // the first non-integer method shape, passing the receiver `Value` by
-        // pointer. The result is whatever the ivar holds (any `Value`), so
-        // there's no deopt — correctness is preserved by construction.
-        #[cfg(feature = "jit-native")]
-        if self.jit_native_on && m.closure.is_none() && args.is_empty() {
-            let proto_idx = m.proto_idx;
-            if let Some(getter_sym) = self.protos[proto_idx].getter_ivar {
-                if !self.jit_value.contains_key(&proto_idx) {
-                    let compiled = crate::jit_native::compile_attr_reader(getter_sym);
-                    self.jit_value.insert(proto_idx, compiled);
-                }
-                let vm_ptr = self as *const crate::vm::Vm;
-                let result = match self.jit_value.get(&proto_idx) {
-                    Some(Some(vp)) => Some(vp.call(vm_ptr, &self_val)),
-                    _ => None,
-                };
-                if let Some(out) = result {
-                    self.stack.push(out);
-                    return Ok(());
-                }
-            }
-        }
         // Native-JIT hook (ADR 0030 finding #4, `jit-native` feature): a
         // non-closure 1-Int-arg method whose body lowers to integer machine
         // code runs as a native call instead of an interpreted frame. Any
@@ -15850,6 +15828,26 @@ impl Vm {
             };
             if let Some(Some(r)) = native {
                 self.stack.push(Value::Int(r));
+                return Ok(());
+            }
+            // Value-method path (D Layer 3, the AR-shaped win): if the integer
+            // JIT rejected this 1-arg method, try the value JIT — the
+            // `instance_variable_get(:lit)` wrapper shape compiles to a single
+            // native `jit_ivar_get`, beating the interpreter's full dispatch +
+            // frame. Result is any `Value` (no deopt; correct by construction).
+            if !self.jit_value.contains_key(&proto_idx) {
+                let ivg_sym = self.interner.intern("instance_variable_get");
+                let compiled =
+                    crate::jit_native::compile_value(&self.protos[proto_idx], ivg_sym);
+                self.jit_value.insert(proto_idx, compiled);
+            }
+            let vm_ptr = self as *const crate::vm::Vm;
+            let vresult = match self.jit_value.get(&proto_idx) {
+                Some(Some(vp)) => Some(vp.call(vm_ptr, &self_val, &args[0])),
+                _ => None,
+            };
+            if let Some(out) = vresult {
+                self.stack.push(out);
                 return Ok(());
             }
         }
