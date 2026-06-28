@@ -15547,15 +15547,40 @@ impl Vm {
         let Some(m) = self.lookup_class_singleton_cached(&cls, name_id, cache_id) else {
             return Ok(false);
         };
-        if m.visibility.get() != Visibility::Public
-            || m.closure.is_some()
-            || m.builtin.is_some()
-        {
+        // Builtin constructor arms (new/allocate) and private/protected class
+        // methods keep their slow-path handling (special builtin dispatch and
+        // the NoMethodError visibility shape, respectively).
+        if m.builtin.is_some() || m.visibility.get() != Visibility::Public {
             return Ok(false);
         }
         let fixed = match m.fixed_arity {
-            Some(f) if f.required as usize == argc => f,
-            _ => return Ok(false),
+            Some(f) if m.closure.is_none() && f.required as usize == argc => f,
+            _ => {
+                // Public, non-builtin, but a CLOSURE (delegate /
+                // define_singleton_method) or a non-matching-arity (optional /
+                // splat) class method — AR defines many of these. `m` is
+                // already resolved through the (warm) singleton inline cache;
+                // invoke it via the general path HERE rather than returning
+                // false and letting the slow path RE-RESOLVE it uncached
+                // (`lookup_class_singleton_method` → walk_module over the deep
+                // singleton ancestor chain — the hot miss path on AR CRUD).
+                // The `class_singleton_deny` gate above guarantees this name's
+                // canonical dispatch IS this singleton arm, so invoking here is
+                // equivalent to the arm the old fall-through reached.
+                let mut argv = vec![Value::Nil; argc];
+                for i in (0..argc).rev() {
+                    argv[i] = self
+                        .stack
+                        .pop()
+                        .expect("ICE: class-singleton closure arg underflow");
+                }
+                let recv = self
+                    .stack
+                    .pop()
+                    .expect("ICE: class-singleton closure recv underflow");
+                self.invoke_method(m, recv, argv)?;
+                return Ok(true);
+            }
         };
         self.check_frames()?;
         let n_locals = fixed.n_locals as usize;
