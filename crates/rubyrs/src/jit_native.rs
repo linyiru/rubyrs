@@ -76,6 +76,7 @@ pub(crate) fn compile(
     proto: &Proto,
     self_name_id: SymId,
     callees: &FxHashMap<SymId, usize>,
+    syms: &JitSyms,
 ) -> Option<NativeProto> {
     // Shape gate: exactly one required positional param, nothing fancy.
     if proto.n_required_positional != 1
@@ -126,6 +127,9 @@ pub(crate) fn compile(
                     used_callees.push(*name);
                 }
             }
+            // `@arr.length` / `@arr.size` — fused with the preceding LoadIvar in
+            // codegen; a standalone one (no LoadIvar before) is rejected there.
+            Op::Call(m, 0, _) if *m == syms.length || *m == syms.size => {}
             _ => return None,
         }
     }
@@ -152,8 +156,9 @@ pub(crate) fn compile(
     for cid in &used_callees {
         builder.symbol(format!("c{}", cid.0), callees[cid] as *const u8);
     }
-    // `jit_ivar_get_int` is callable from the body (reading an Int ivar).
+    // `jit_ivar_get_int` / `jit_ivar_arraylen` are callable from the body.
     builder.symbol("jit_ivar_get_int", jit_ivar_get_int as *const u8);
+    builder.symbol("jit_ivar_arraylen", jit_ivar_arraylen as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
     let mut ctx = module.make_context();
@@ -175,6 +180,10 @@ pub(crate) fn compile(
     let ivid = module
         .declare_function("jit_ivar_get_int", Linkage::Import, &ivsig)
         .ok()?;
+    // `jit_ivar_arraylen` shares the same `(vm, self, name:i32) -> (i64, i8)` sig.
+    let alid = module
+        .declare_function("jit_ivar_arraylen", Linkage::Import, &ivsig)
+        .ok()?;
     // Each callee imports with the same `(vm, self, i64) -> (i64, i8)` signature.
     let mut callee_fids: FxHashMap<SymId, cranelift_module::FuncId> = FxHashMap::default();
     for cid in &used_callees {
@@ -190,6 +199,7 @@ pub(crate) fn compile(
         // (`fib(n-1)` → a native call back into the same code).
         let self_ref = module.declare_func_in_func(fid, fb.func);
         let ivar_ref = module.declare_func_in_func(ivid, fb.func);
+        let arraylen_ref = module.declare_func_in_func(alid, fb.func);
         // FuncRefs for each external callee.
         let mut callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
         for (cid, cfid) in &callee_fids {
@@ -265,17 +275,27 @@ pub(crate) fn compile(
                     let v = fb.ins().iconst(types::I64, *i);
                     stack.push((v, Kind::Int));
                 }
-                // Read an Int ivar via the native primitive (value-touching path,
-                // AR aggregation). A non-Int / missing ivar sets ovf → deopt.
+                // Read an ivar via a native primitive (value-touching, AR shape).
+                // `@arr.length`/`@arr.size` fuses into one Array-length call;
+                // otherwise read an Int ivar. A non-matching heap shape sets ovf
+                // → deopt. The fused Call op is skipped (`ip += 1`).
                 Op::LoadIvar(s) => {
+                    let fuse_len = matches!(
+                        code.get(ip + 1),
+                        Some(Op::Call(m, 0, _)) if *m == syms.length || *m == syms.size
+                    );
+                    let prim = if fuse_len { arraylen_ref } else { ivar_ref };
                     let name = fb.ins().iconst(types::I32, s.0 as i64);
-                    let inst = fb.ins().call(ivar_ref, &[vm_param, self_param, name]);
+                    let inst = fb.ins().call(prim, &[vm_param, self_param, name]);
                     let (res, of) = {
                         let r = fb.inst_results(inst);
                         (r[0], r[1])
                     };
                     acc_ovf(&mut fb, of);
                     stack.push((res, Kind::Int));
+                    if fuse_len {
+                        ip += 1; // consume the fused Call (loop's ip += 1 finishes)
+                    }
                 }
                 Op::LoadNil => {
                     // Only ever consumed by Pop in an eligible int method
@@ -545,6 +565,44 @@ pub(crate) unsafe extern "C" fn jit_ivar_get_int(
     match v {
         Some(Value::Int(n)) => NRet { res: n, ovf: 0 },
         _ => NRet { res: 0, ovf: 1 }, // missing or non-Int → deopt to the interpreter
+    }
+}
+
+/// Method-name syms the JIT recognises for value-primitive fusion (e.g. fusing
+/// `@items.size` into one native length call). Built once by the hook.
+pub(crate) struct JitSyms {
+    pub length: SymId,
+    pub size: SymId,
+}
+
+/// Native primitive: `recv.@name.length` where the ivar is an Array — returns
+/// the element count as i64, else deopt. The AR `has_many` collection-size
+/// shape (`record.comments.size` aggregated in a loop).
+///
+/// # Safety
+/// `vm`, `recv` must be valid for the call.
+pub(crate) unsafe extern "C" fn jit_ivar_arraylen(
+    vm: *const crate::vm::Vm,
+    recv: *const Value,
+    name: u32,
+) -> NRet {
+    let vm = unsafe { &*vm };
+    let recv = unsafe { &*recv };
+    let name_id = crate::intern::SymId(name);
+    let v = match recv {
+        Value::Object(oid) => match vm.heap.get(*oid) {
+            crate::heap::HeapObj::Instance(inst) => inst.ivars.get(&name_id).cloned(),
+            _ => None,
+        },
+        Value::Class(cls) => cls.ivars.borrow().get(&name_id).cloned(),
+        _ => None,
+    };
+    match v {
+        Some(Value::Array(aid)) => NRet {
+            res: vm.heap.array(aid).len() as i64,
+            ovf: 0,
+        },
+        _ => NRet { res: 0, ovf: 1 }, // not an Array → deopt
     }
 }
 

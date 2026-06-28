@@ -15873,8 +15873,16 @@ impl Vm {
                 for nid in ambiguous {
                     callees.remove(&nid);
                 }
-                let compiled =
-                    crate::jit_native::compile(&self.protos[proto_idx], self_name_id, &callees);
+                let syms = crate::jit_native::JitSyms {
+                    length: self.interner.intern("length"),
+                    size: self.interner.intern("size"),
+                };
+                let compiled = crate::jit_native::compile(
+                    &self.protos[proto_idx],
+                    self_name_id,
+                    &callees,
+                    &syms,
+                );
                 self.jit_native.insert(proto_idx, compiled);
             }
             let vm_ptr = self as *const crate::vm::Vm;
