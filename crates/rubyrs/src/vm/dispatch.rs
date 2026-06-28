@@ -15219,12 +15219,20 @@ impl Vm {
                     return Ok(true);
                 }
                 // Integer method: deopt (non-Int arg or overflow) falls through.
+                // Polymorphism guard: code with baked cross-calls (guard_class
+                // != 0) only runs on the class its callees were resolved on — a
+                // subclass that overrides a callee falls through to the
+                // interpreter.
                 if let Some(Some(np)) = self.jit_native.get(&pidx) {
-                    if let Some(x) = crate::jit_native::as_int(&self.stack[recv_idx + 1]) {
-                        if let Some(r) = np.call(vm_ptr, &self.stack[recv_idx], x) {
-                            self.stack[recv_idx] = Value::Int(r);
-                            self.stack.truncate(recv_idx + 1);
-                            return Ok(true);
+                    let gc = np.guard_class.get();
+                    let class_ok = gc == 0 || gc == std::rc::Rc::as_ptr(&cls) as usize;
+                    if class_ok {
+                        if let Some(x) = crate::jit_native::as_int(&self.stack[recv_idx + 1]) {
+                            if let Some(r) = np.call(vm_ptr, &self.stack[recv_idx], x) {
+                                self.stack[recv_idx] = Value::Int(r);
+                                self.stack.truncate(recv_idx + 1);
+                                return Ok(true);
+                            }
                         }
                     }
                 }
@@ -15847,31 +15855,37 @@ impl Vm {
             if !self.jit_native.contains_key(&proto_idx) {
                 let self_name = self.protos[proto_idx].name.clone();
                 let self_name_id = self.interner.intern(&self_name);
-                // Build the callee map (name → machine address) from methods
-                // already JIT-compiled, so this method can compile native calls
-                // into them — its whole call tree runs native (compilation
-                // scope, the AR-surpass lever).
-                let compiled_addrs: Vec<(usize, usize)> = self
-                    .jit_native
+                // Build the callee map by resolving each no-recv 1-arg call on
+                // the RECEIVER's class — so a baked native call targets exactly
+                // the method this receiver would dispatch to (polymorphism-safe:
+                // a subclass override resolves to ITS method here). The method is
+                // then class-guarded at dispatch. If the receiver isn't an
+                // Object, no cross-calls are baked.
+                let call_names: Vec<crate::intern::SymId> = self.protos[proto_idx]
+                    .code
                     .iter()
-                    .filter_map(|(p, np)| np.as_ref().map(|n| (*p, n.addr())))
+                    .filter_map(|op| match op {
+                        crate::bytecode::Op::CallNoRecv(name, 1, _) if *name != self_name_id => {
+                            Some(*name)
+                        }
+                        _ => None,
+                    })
                     .collect();
+                let recv_cls = match &self_val {
+                    Value::Object(oid) => self.heap.try_class_of(*oid),
+                    _ => None,
+                };
                 let mut callees: crate::intern::FxHashMap<crate::intern::SymId, usize> =
                     Default::default();
-                let mut ambiguous: Vec<crate::intern::SymId> = Vec::new();
-                for (p, addr) in compiled_addrs {
-                    let nm = self.protos[p].name.clone();
-                    let nid = self.interner.intern(&nm);
-                    // A name shared by two compiled methods (different classes)
-                    // can't be resolved statically — drop it so such calls stay
-                    // interpreted (correctness over reach; a real receiver-guard
-                    // inline cache is the proper fix).
-                    if callees.insert(nid, addr).is_some() {
-                        ambiguous.push(nid);
+                if let Some(cls) = &recv_cls {
+                    for name in call_names {
+                        if let Some(cm) = self.lookup_method_uncached(cls, name) {
+                            let cpidx = cm.proto_idx;
+                            if let Some(Some(np)) = self.jit_native.get(&cpidx) {
+                                callees.insert(name, np.addr());
+                            }
+                        }
                     }
-                }
-                for nid in ambiguous {
-                    callees.remove(&nid);
                 }
                 let syms = crate::jit_native::JitSyms {
                     length: self.interner.intern("length"),
@@ -15884,14 +15898,37 @@ impl Vm {
                     &callees,
                     &syms,
                 );
+                // Guard the compiled code to the class its callees were resolved
+                // on (only when it actually baked cross-calls).
+                if let (Some(np), false) = (&compiled, callees.is_empty()) {
+                    if let Some(cls) = &recv_cls {
+                        np.guard_class.set(std::rc::Rc::as_ptr(cls) as usize);
+                    }
+                }
                 self.jit_native.insert(proto_idx, compiled);
             }
             let vm_ptr = self as *const crate::vm::Vm;
+            // Polymorphism guard (same as the in-place fast path): code with
+            // baked cross-calls only runs on the class it was compiled for.
+            let recv_class_ptr = match &self_val {
+                Value::Object(oid) => self
+                    .heap
+                    .try_class_of(*oid)
+                    .map(|c| std::rc::Rc::as_ptr(&c) as usize),
+                _ => None,
+            };
             let native: Option<Option<i64>> = match (
                 self.jit_native.get(&proto_idx).unwrap(),
                 crate::jit_native::as_int(&args[0]),
             ) {
-                (Some(np), Some(x)) => Some(np.call(vm_ptr, &self_val, x)),
+                (Some(np), Some(x)) => {
+                    let gc = np.guard_class.get();
+                    if gc == 0 || Some(gc) == recv_class_ptr {
+                        Some(np.call(vm_ptr, &self_val, x))
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             };
             if let Some(Some(r)) = native {

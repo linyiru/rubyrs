@@ -19,7 +19,7 @@ use crate::intern::{FxHashMap, SymId};
 use crate::value::Value;
 
 #[repr(C)]
-struct NRet {
+pub(crate) struct NRet {
     res: i64,
     ovf: u8,
 }
@@ -31,6 +31,11 @@ struct NRet {
 pub(crate) struct NativeProto {
     _module: JITModule,
     ptr: extern "C" fn(*const crate::vm::Vm, *const Value, i64) -> NRet,
+    /// Polymorphism guard: if non-zero, this code baked in cross-method callees
+    /// resolved on ONE specific receiver class (the `Rc<Class>` pointer), so it
+    /// is only valid when dispatched on that class — a subclass that overrides a
+    /// callee must NOT use it. 0 = no baked cross-calls, valid for any receiver.
+    pub(crate) guard_class: std::cell::Cell<usize>,
 }
 
 impl NativeProto {
@@ -463,7 +468,11 @@ pub(crate) fn compile(
             code_ptr,
         )
     };
-    Some(NativeProto { _module: module, ptr })
+    Some(NativeProto {
+        _module: module,
+        ptr,
+        guard_class: std::cell::Cell::new(0),
+    })
 }
 
 /// Compute the block-call arguments for branching to `block` with the current
