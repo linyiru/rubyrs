@@ -121,19 +121,10 @@ pub(crate) fn compile(
             // Key push for a fused `@h[:k]`; standalone use rejected in codegen.
             | Op::LoadSymbol(_)
             | Op::LoadNil => {}
-            Op::BinOp(k) | Op::BinOpLocalLocal(k, _, _) | Op::BinOpInt(k, _) => match k {
-                BinOpKind::Add
-                | BinOpKind::Sub
-                | BinOpKind::Mul
-                | BinOpKind::Lt
-                | BinOpKind::Le
-                | BinOpKind::Gt
-                | BinOpKind::Ge
-                | BinOpKind::Eq
-                | BinOpKind::Ne => {}
-                // Div/Mod need floor-semantics + div-by-zero deopt — not modelled yet.
-                _ => return None,
-            },
+            // All BinOpKinds are modelled in `emit_binop`. Div/Mod emit Ruby
+            // floored semantics with a branchless deopt on b==0 and the
+            // `i64::MIN / -1` overflow (both fall back to the interpreter).
+            Op::BinOp(_) | Op::BinOpLocalLocal(_, _, _) | Op::BinOpInt(_, _) => {}
             // Self-recursive 1-arg call (`fib(n-1)`) → native self-call.
             Op::CallNoRecv(name, 1, _) if *name == self_name_id => {}
             // Call to another already-compiled 1-arg method → native call.
@@ -605,6 +596,40 @@ fn emit_binop(
     if let Some(cond) = cc(k) {
         let r = fb.ins().icmp(cond, a, b);
         stack.push((r, Kind::Bool));
+        return;
+    }
+    // Div/Mod: Ruby floored division (remainder takes the divisor's sign),
+    // mirroring `floor_div_i64`/`floor_mod_i64`. Deopt (ovf=1) on `b == 0` and
+    // the lone overflow case `i64::MIN / -1`; the divisor is guarded to 1 in
+    // those cases so Cranelift's trapping `sdiv`/`srem` never fire (the result
+    // is discarded by the caller on deopt). Branchless via `select`.
+    if matches!(k, BinOpKind::Div | BinOpKind::Mod) {
+        let zero = fb.ins().iconst(types::I64, 0);
+        let neg1 = fb.ins().iconst(types::I64, -1);
+        let one = fb.ins().iconst(types::I64, 1);
+        let min = fb.ins().iconst(types::I64, i64::MIN);
+        let is_zero = fb.ins().icmp(IntCC::Equal, b, zero);
+        let a_min = fb.ins().icmp(IntCC::Equal, a, min);
+        let b_neg1 = fb.ins().icmp(IntCC::Equal, b, neg1);
+        let ovf_case = fb.ins().band(a_min, b_neg1);
+        let deopt = fb.ins().bor(is_zero, ovf_case);
+        let safe_b = fb.ins().select(deopt, one, b);
+        let q = fb.ins().sdiv(a, safe_b);
+        let r = fb.ins().srem(a, safe_b);
+        // need_adj = (r != 0) && ((r ^ safe_b) < 0)  — signs of r and b differ.
+        let r_ne0 = fb.ins().icmp(IntCC::NotEqual, r, zero);
+        let rxorb = fb.ins().bxor(r, safe_b);
+        let signs_differ = fb.ins().icmp(IntCC::SignedLessThan, rxorb, zero);
+        let need_adj = fb.ins().band(r_ne0, signs_differ);
+        let q_adj = fb.ins().iadd_imm(q, -1);
+        let r_adj = fb.ins().iadd(r, safe_b);
+        let q_final = fb.ins().select(need_adj, q_adj, q);
+        let r_final = fb.ins().select(need_adj, r_adj, r);
+        let res = if matches!(k, BinOpKind::Div) { q_final } else { r_final };
+        let cur = fb.use_var(ovf_var);
+        let nv = fb.ins().bor(cur, deopt);
+        fb.def_var(ovf_var, nv);
+        stack.push((res, Kind::Int));
         return;
     }
     let (res, of) = match k {

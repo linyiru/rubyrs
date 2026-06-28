@@ -15641,6 +15641,56 @@ impl Vm {
             Some(fixed) if fixed.required as usize == argc => fixed,
             _ => return Ok(false),
         };
+        // B1 (ADR 0034): native-JIT dispatch for a no_recv / self / top-level
+        // 1-Int-arg method, using the ALREADY-RESOLVED `m` (so method
+        // resolution — top-level def vs Kernel, redefinition — is unchanged;
+        // we only add native execution for the exact method the interpreter
+        // would have run). The self-recv path routes to the hook before
+        // reaching here (PIC-served), and explicit-recv has its own in-place
+        // dispatch, so this is the top-level driver's entry into the JIT. On a
+        // guard miss, a non-Int arg, or an overflow/type deopt we fall through
+        // to the interpreter frame below with the operand stack untouched.
+        #[cfg(feature = "jit-native")]
+        if self.jit_native_on && block.is_none() && argc == 1 && m.builtin.is_none() {
+            let proto_idx = m.proto_idx;
+            if !self.jit_native.contains_key(&proto_idx) {
+                let recv_cls = match &self_val {
+                    Value::Object(oid) => self.heap.try_class_of(*oid),
+                    _ => None,
+                };
+                let compiled = self.compile_native_for_class(proto_idx, recv_cls.as_ref());
+                self.jit_native.insert(proto_idx, compiled);
+            }
+            if let Some(Some(np)) = self.jit_native.get(&proto_idx) {
+                let gc = np.guard_class.get();
+                let class_ok = gc == 0
+                    || match &self_val {
+                        Value::Object(oid) => self
+                            .heap
+                            .try_class_of(*oid)
+                            .is_some_and(|c| std::rc::Rc::as_ptr(&c) as usize == gc),
+                        _ => false,
+                    };
+                if class_ok
+                    && let Some(&x) = self.stack.last().and_then(|v| match v {
+                        Value::Int(n) => Some(n),
+                        _ => None,
+                    })
+                {
+                    let is_array = np.returns_array.get();
+                    let vm_ptr = self as *const crate::vm::Vm;
+                    if let Some(r) = np.call(vm_ptr, &self_val, x) {
+                        let top = self.stack.len() - 1;
+                        self.stack[top] = if is_array {
+                            Value::Array(crate::value::ObjId(r as u32))
+                        } else {
+                            Value::Int(r)
+                        };
+                        return Ok(true);
+                    }
+                }
+            }
+        }
         self.check_frames()?;
         let n_locals = fixed.n_locals as usize;
         // Stack-eligible protos go straight to the arena; the rest
@@ -15828,6 +15878,24 @@ impl Vm {
         proto_idx: usize,
         recv_cls: Option<&std::rc::Rc<crate::value::Class>>,
     ) -> Option<crate::jit_native::NativeProto> {
+        let mut visited = crate::intern::FxHashSet::default();
+        self.compile_native_for_class_rec(proto_idx, recv_cls, &mut visited)
+    }
+
+    /// Recursive core of [`compile_native_for_class`]. `visited` holds the
+    /// protos currently being compiled on this stack, so a callee that (perhaps
+    /// transitively) calls back into one of them is left uncompiled rather than
+    /// recursing forever — that caller then declines, which is correct (the
+    /// interpreter runs it). B3 (ADR 0034): a callee that isn't compiled YET is
+    /// compiled on demand here (for the SAME receiver class), so a method's call
+    /// tree no longer requires callee-before-caller warmup ordering.
+    #[cfg(feature = "jit-native")]
+    fn compile_native_for_class_rec(
+        &mut self,
+        proto_idx: usize,
+        recv_cls: Option<&std::rc::Rc<crate::value::Class>>,
+        visited: &mut crate::intern::FxHashSet<usize>,
+    ) -> Option<crate::jit_native::NativeProto> {
         let self_name = self.protos[proto_idx].name.clone();
         let self_name_id = self.interner.intern(&self_name);
         let call_names: Vec<crate::intern::SymId> = self.protos[proto_idx]
@@ -15839,14 +15907,43 @@ impl Vm {
             })
             .collect();
         let mut callees: crate::intern::FxHashMap<crate::intern::SymId, usize> = Default::default();
-        if let Some(cls) = recv_cls {
+        if !call_names.is_empty() {
+            visited.insert(proto_idx);
             for name in call_names {
-                if let Some(cm) = self.lookup_method_uncached(cls, name) {
-                    if let Some(Some(np)) = self.jit_native.get(&cm.proto_idx) {
-                        callees.insert(name, np.addr());
+                // Resolve the callee against the receiver class (instance-method
+                // call tree), falling back to the top-level method table. A
+                // top-level driver runs with the `main` Object as self, so a bare
+                // call to another top-level method (`run` → `sq`/`inc`) misses
+                // the class table but hits `toplevel_methods` — which is exactly
+                // where rubyrs's `def` at the top level installs it, and where
+                // the interpreter's own no_recv dispatch resolves it. (B1+B3.)
+                let cm = recv_cls
+                    .and_then(|cls| self.lookup_method_uncached(cls, name))
+                    .or_else(|| self.toplevel_methods.get(&name).cloned());
+                let Some(cm) = cm else { continue };
+                let cp = cm.proto_idx;
+                // Already compiled → bake its address directly.
+                if let Some(Some(np)) = self.jit_native.get(&cp) {
+                    callees.insert(name, np.addr());
+                    continue;
+                }
+                // Not yet compiled and not on the current compile stack: compile
+                // it on demand in the SAME context so its address can be baked.
+                // A cycle (cp in `visited`) or a prior decline (`Some(None)`)
+                // leaves it absent → the caller declines. (B3.)
+                if !visited.contains(&cp)
+                    && cm.closure.is_none()
+                    && !matches!(self.jit_native.get(&cp), Some(None))
+                {
+                    let variant = self.compile_native_for_class_rec(cp, recv_cls, visited);
+                    let addr = variant.as_ref().map(|np| np.addr());
+                    self.jit_native.insert(cp, variant);
+                    if let Some(a) = addr {
+                        callees.insert(name, a);
                     }
                 }
             }
+            visited.remove(&proto_idx);
         }
         let syms = crate::jit_native::JitSyms {
             length: self.interner.intern("length"),
