@@ -112,15 +112,43 @@ So the two ceilings to surpassing CRuby on call-heavy AR workloads are:
    per-op cost, which trails CRuby's. A true call-site inline cache shaves more
    per-call resolution but cannot cross the loop floor alone.
 
+### 6. Compilation scope — PROVEN: cross-method native calls surpass CRuby+YJIT
+
+Scope is a lever, not a wall, and pulling it works. A method's no-recv call to
+ANOTHER already-compiled integer method now compiles to a native call into that
+method's machine code (its address registered as a JIT symbol, imported with the
+`(i64)->(i64,i8)` signature, called like a self-recursion with the overflow flag
+threaded through). So a method whose LOOP calls another method runs the **whole
+tree native** — the call-from-loop shape of finding #5, made self-contained.
+
+`def sum_n(n); total=0;i=0; while i<n; total=total+sq(i); i+=1; end; total; end`
+calling `def sq(x); x*x; end`, sum_n(2M):
+
+```
+rubyrs + JIT     5ms   — 7.2x YJIT, 9.4x CRuby, 50x rubyrs-interp
+CRuby + YJIT    36ms
+CRuby           47ms
+rubyrs interp  253ms
+```
+
+The AR-surpass path is no longer hypothetical: compile the calling context and
+call-from-loop **surpasses CRuby+YJIT**, exactly as finding #5 predicted. What
+remains to reach real AR is breadth, not a new wall — extend cross-method
+compilation to VALUE call trees (value loops + value cross-method calls), and add
+a receiver-guard inline cache so callee resolution is sound under polymorphism
+(today it is by-name + monomorphic; the callee must be compiled first, and a name
+shared by two compiled methods is dropped — interpreted, not mis-dispatched).
+
 ## Consequences
 
 - **The original question is answered with a qualified yes.** rubyrs's native
   codegen *can* surpass CRuby+YJIT — demonstrably, on self-contained hot methods
   (`fib` 2× YJIT). The codegen ceiling is not the wall.
-- **For AR (call-from-loop), the wall is scope + base speed, now precisely
-  located.** This converts "can we surpass AR?" from an open research question
-  into a costed engineering decision: build a call-tree/trace JIT (multi-person-
-  month) and/or close the base-interpreter per-op gap.
+- **The compilation-scope lever is no longer hypothetical — it is proven
+  (finding #6).** Cross-method native calls make a call-from-loop method
+  self-contained and it surpasses CRuby+YJIT (sum_n 7.2× YJIT). "Can we surpass
+  AR?" is now a breadth problem (extend cross-method compilation to value call
+  trees + a polymorphism-safe inline cache), not an open research question.
 - **Correctness is preserved by construction.** Deopt on overflow/non-Int;
   value methods return whatever the heap holds; cold code is byte-unchanged;
   `jit-off` and `default` builds are untouched. The differential and the
@@ -132,12 +160,14 @@ So the two ceilings to surpassing CRuby on call-heavy AR workloads are:
 
 ### Path forward (priority order, if pursued)
 
-1. **Compile the calling context** — extend from leaf-method JIT to whole call
-   trees (or a trace JIT over hot loops). This is the only path that makes
-   call-from-loop behave like `fib`.
-2. **Call-site inline cache** — cache the resolved native fn at the `Op::Call`
-   site, killing the per-call method resolution + cache lookups (shaves per-call
-   cost; does not cross the loop floor alone).
+1. **Compile the calling context** — DONE for integer call trees (finding #6):
+   cross-method native calls, sum_n 7.2× YJIT. Next: extend to VALUE call trees
+   (value loops + value cross-method calls) so AR's attribute-heavy iteration
+   compiles whole.
+2. **Call-site inline cache** — a receiver-guard cache at the `Op::Call` site:
+   makes cross-method callee resolution sound under polymorphism (today's
+   by-name map is monomorphic), AND kills the per-call method resolution + cache
+   lookups for the still-interpreted callers.
 3. **Base per-op interpreter speed** — independent of the JIT; lowers the floor
    for everything that stays interpreted.
 4. **Carve the `JitHost` surface** (0030 finding #1) so the `Vm`-coupled lowering
