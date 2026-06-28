@@ -408,8 +408,8 @@ pub(crate) unsafe extern "C" fn jit_ivar_get(
     name: u32,
     out: *mut Value,
 ) {
-    let vm = &*vm;
-    let recv = &*recv;
+    let vm = unsafe { &*vm };
+    let recv = unsafe { &*recv };
     let name_id = crate::intern::SymId(name);
     let v = match recv {
         Value::Object(oid) => match vm.heap.get(*oid) {
@@ -421,7 +421,7 @@ pub(crate) unsafe extern "C" fn jit_ivar_get(
         Value::Class(cls) => cls.ivars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
         _ => Value::Nil,
     };
-    std::ptr::write(out, v);
+    unsafe { std::ptr::write(out, v) };
 }
 
 /// Compile an attr reader (`def v; @v; end`, body `[LoadIvar(sym), Return]`) to

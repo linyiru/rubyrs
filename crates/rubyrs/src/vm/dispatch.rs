@@ -7578,12 +7578,39 @@ impl Vm {
             self.stack.push(result);
             Ok(())
         }
+        // D selective routing: instead of globally bypassing the interpreter
+        // fast paths when the JIT is on (which slows ALL non-JIT'd code), route
+        // ONLY methods the JIT can handle to the hook — after the fast path has
+        // resolved the method, so the decision is per-method. Everything else
+        // keeps its fast path. This makes the JIT production-shaped: it speeds
+        // up hot compiled methods without taxing the surrounding code.
         #[cfg(feature = "jit-native")]
         #[inline]
-        fn jit_native_bypass(&self) -> bool { self.jit_native_on }
+        fn jit_should_route(&self, proto_idx: usize, argc: usize) -> bool {
+            if !self.jit_native_on {
+                return false;
+            }
+            // Already compiled (integer or value) → route to use the native code.
+            if matches!(self.jit_native.get(&proto_idx), Some(Some(_)))
+                || matches!(self.jit_value.get(&proto_idx), Some(Some(_)))
+            {
+                return true;
+            }
+            // Eligible shape not yet ruled out → route to the hook, which
+            // compiles + caches (Some = native, None = ineligible). Once known
+            // ineligible, stop routing so the method stays on the fast path.
+            //
+            // NOTE: getters (the value-method JIT's only shape so far) are
+            // deliberately NOT routed — the interpreter's `getter_ivar` fast
+            // path already serves them with no frame, beating a native call for
+            // a 1-op body. The value-method JIT's production win needs MULTI-op,
+            // non-fast-pathed value methods (not yet compiled). Until then only
+            // the integer JIT routes, so non-integer code keeps its fast paths.
+            argc == 1 && !matches!(self.jit_native.get(&proto_idx), Some(None))
+        }
         #[cfg(not(feature = "jit-native"))]
         #[inline]
-        fn jit_native_bypass(&self) -> bool { false }
+        fn jit_should_route(&self, _proto_idx: usize, _argc: usize) -> bool { false }
 
         pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         // Consume `bypass_visibility_once` at the dispatch
@@ -15143,7 +15170,6 @@ impl Vm {
         argc: usize,
         cache_id: u16,
     ) -> Result<bool, Trap> {
-        if self.jit_native_bypass() { return Ok(false); }
         // Explicit-recv stack layout: [..., recv, a1, ..., aN].
         let recv_idx = match self.stack.len().checked_sub(argc + 1) {
             Some(i) => i,
@@ -15167,6 +15193,12 @@ impl Vm {
             || m.closure.is_some()
             || m.builtin.is_some()
         {
+            return Ok(false);
+        }
+        // D selective routing: hand this resolved method to the JIT hook only if
+        // the JIT can speed it up (compiled, or eligible + not-yet-ruled-out).
+        #[cfg(feature = "jit-native")]
+        if self.jit_should_route(m.proto_idx, argc) {
             return Ok(false);
         }
         // PoC getter fast path (ADR-0031 follow-up): a trivial
@@ -15280,7 +15312,6 @@ impl Vm {
         argc: usize,
         cache_id: u16,
     ) -> Result<bool, Trap> {
-        if self.jit_native_bypass() { return Ok(false); }
         let self_val = match self.frames.last() {
             Some(f) => f.self_val.clone(),
             None => return Ok(false),
@@ -15299,6 +15330,12 @@ impl Vm {
             return Ok(false);
         };
         if m.builtin.is_some() {
+            return Ok(false);
+        }
+        // D selective routing (self-recv): route to the JIT hook only for
+        // non-closure methods the JIT can speed up; everything else stays fast.
+        #[cfg(feature = "jit-native")]
+        if m.closure.is_none() && self.jit_should_route(m.proto_idx, argc) {
             return Ok(false);
         }
         self.try_invoke_fixed_method_from_stack(m, self_val, argc, None)
