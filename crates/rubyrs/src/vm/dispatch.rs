@@ -15221,7 +15221,7 @@ impl Vm {
                 // Integer method: deopt (non-Int arg or overflow) falls through.
                 if let Some(Some(np)) = self.jit_native.get(&pidx) {
                     if let Some(x) = crate::jit_native::as_int(&self.stack[recv_idx + 1]) {
-                        if let Some(r) = np.call(x) {
+                        if let Some(r) = np.call(vm_ptr, &self.stack[recv_idx], x) {
                             self.stack[recv_idx] = Value::Int(r);
                             self.stack.truncate(recv_idx + 1);
                             return Ok(true);
@@ -15877,11 +15877,12 @@ impl Vm {
                     crate::jit_native::compile(&self.protos[proto_idx], self_name_id, &callees);
                 self.jit_native.insert(proto_idx, compiled);
             }
+            let vm_ptr = self as *const crate::vm::Vm;
             let native: Option<Option<i64>> = match (
                 self.jit_native.get(&proto_idx).unwrap(),
                 crate::jit_native::as_int(&args[0]),
             ) {
-                (Some(np), Some(x)) => Some(np.call(x)),
+                (Some(np), Some(x)) => Some(np.call(vm_ptr, &self_val, x)),
                 _ => None,
             };
             if let Some(Some(r)) = native {

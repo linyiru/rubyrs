@@ -24,18 +24,22 @@ struct NRet {
     ovf: u8,
 }
 
-/// A compiled native 1-param integer method.
+/// A compiled native 1-param integer method. The convention is
+/// `(vm, self, i64_arg) -> (i64, ovf)`: `vm` + `self` are threaded so the body
+/// can call primitives that touch the heap (e.g. read an `Int` ivar) — unused
+/// by pure-integer methods, the foundation for value-touching call trees.
 pub(crate) struct NativeProto {
     _module: JITModule,
-    ptr: extern "C" fn(i64) -> NRet,
+    ptr: extern "C" fn(*const crate::vm::Vm, *const Value, i64) -> NRet,
 }
 
 impl NativeProto {
-    /// Run native code on an `Int` arg. `None` = deopt (overflow): the
-    /// caller must fall back to the interpreter (which promotes to Bignum).
+    /// Run native code. `recv` is the receiver (read by ivar primitives; ignored
+    /// by pure-integer methods). `None` = deopt (overflow, or a non-Int ivar):
+    /// the caller falls back to the interpreter.
     #[inline]
-    pub(crate) fn call(&self, x: i64) -> Option<i64> {
-        let r = (self.ptr)(x);
+    pub(crate) fn call(&self, vm: *const crate::vm::Vm, recv: &Value, x: i64) -> Option<i64> {
+        let r = (self.ptr)(vm, recv as *const Value, x);
         if r.ovf == 0 {
             Some(r.res)
         } else {
@@ -99,6 +103,7 @@ pub(crate) fn compile(
             | Op::Dup
             | Op::EnterLoop
             | Op::ExitLoop
+            | Op::LoadIvar(_)
             | Op::LoadNil => {}
             Op::BinOp(k) | Op::BinOpLocalLocal(k, _, _) | Op::BinOpInt(k, _) => match k {
                 BinOpKind::Add
@@ -147,15 +152,30 @@ pub(crate) fn compile(
     for cid in &used_callees {
         builder.symbol(format!("c{}", cid.0), callees[cid] as *const u8);
     }
+    // `jit_ivar_get_int` is callable from the body (reading an Int ivar).
+    builder.symbol("jit_ivar_get_int", jit_ivar_get_int as *const u8);
     let mut module = JITModule::new(builder);
+    let ptr_ty = module.target_config().pointer_type();
     let mut ctx = module.make_context();
     let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(ptr_ty)); // vm
+    sig.params.push(AbiParam::new(ptr_ty)); // self (receiver)
+    sig.params.push(AbiParam::new(types::I64)); // the i64 arg
     sig.returns.push(AbiParam::new(types::I64));
     sig.returns.push(AbiParam::new(types::I8));
     ctx.func.signature = sig.clone();
     let fid = module.declare_function("m", Linkage::Export, &sig).ok()?;
-    // Each callee imports with the same `(i64) -> (i64, i8)` integer signature.
+    // The ivar-read primitive: (vm, self, name:i32) -> (i64, i8).
+    let mut ivsig = module.make_signature();
+    ivsig.params.push(AbiParam::new(ptr_ty));
+    ivsig.params.push(AbiParam::new(ptr_ty));
+    ivsig.params.push(AbiParam::new(types::I32));
+    ivsig.returns.push(AbiParam::new(types::I64));
+    ivsig.returns.push(AbiParam::new(types::I8));
+    let ivid = module
+        .declare_function("jit_ivar_get_int", Linkage::Import, &ivsig)
+        .ok()?;
+    // Each callee imports with the same `(vm, self, i64) -> (i64, i8)` signature.
     let mut callee_fids: FxHashMap<SymId, cranelift_module::FuncId> = FxHashMap::default();
     for cid in &used_callees {
         let cfid = module
@@ -169,6 +189,7 @@ pub(crate) fn compile(
         // A reference to THIS function, for compiling self-recursive calls
         // (`fib(n-1)` → a native call back into the same code).
         let self_ref = module.declare_func_in_func(fid, fb.func);
+        let ivar_ref = module.declare_func_in_func(ivid, fb.func);
         // FuncRefs for each external callee.
         let mut callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
         for (cid, cfid) in &callee_fids {
@@ -186,7 +207,10 @@ pub(crate) fn compile(
         let entry = fb.create_block();
         fb.append_block_params_for_function_params(entry);
         fb.switch_to_block(entry);
-        let param = fb.block_params(entry)[0];
+        // Params: [0]=vm, [1]=self (receiver), [2]=the i64 arg.
+        let vm_param = fb.block_params(entry)[0];
+        let self_param = fb.block_params(entry)[1];
+        let param = fb.block_params(entry)[2];
         let nloc = proto.n_locals as usize;
         let vars: Vec<Variable> = (0..nloc).map(|_| fb.declare_var(types::I64)).collect();
         for (i, v) in vars.iter().enumerate() {
@@ -240,6 +264,18 @@ pub(crate) fn compile(
                 Op::LoadConstInt(i) => {
                     let v = fb.ins().iconst(types::I64, *i);
                     stack.push((v, Kind::Int));
+                }
+                // Read an Int ivar via the native primitive (value-touching path,
+                // AR aggregation). A non-Int / missing ivar sets ovf → deopt.
+                Op::LoadIvar(s) => {
+                    let name = fb.ins().iconst(types::I32, s.0 as i64);
+                    let inst = fb.ins().call(ivar_ref, &[vm_param, self_param, name]);
+                    let (res, of) = {
+                        let r = fb.inst_results(inst);
+                        (r[0], r[1])
+                    };
+                    acc_ovf(&mut fb, of);
+                    stack.push((res, Kind::Int));
                 }
                 Op::LoadNil => {
                     // Only ever consumed by Pop in an eligible int method
@@ -339,7 +375,8 @@ pub(crate) fn compile(
                     if ka != Kind::Int {
                         return None;
                     }
-                    let inst = fb.ins().call(fref, &[arg]);
+                    // Forward vm + self so the callee can touch the heap too.
+                    let inst = fb.ins().call(fref, &[vm_param, self_param, arg]);
                     let (res, ovf) = {
                         let r = fb.inst_results(inst);
                         (r[0], r[1])
@@ -361,7 +398,11 @@ pub(crate) fn compile(
     module.clear_context(&mut ctx);
     module.finalize_definitions().ok()?;
     let code_ptr = module.get_finalized_function(fid);
-    let ptr = unsafe { std::mem::transmute::<_, extern "C" fn(i64) -> NRet>(code_ptr) };
+    let ptr = unsafe {
+        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64) -> NRet>(
+            code_ptr,
+        )
+    };
     Some(NativeProto { _module: module, ptr })
 }
 
@@ -476,6 +517,35 @@ pub(crate) unsafe extern "C" fn jit_ivar_get(
         _ => Value::Nil,
     };
     unsafe { std::ptr::write(out, v) };
+}
+
+/// Native primitive for the INTEGER JIT: read `recv`'s ivar `name` and return it
+/// as i64 if it's an `Int`, else signal deopt (`ovf = 1`). This is the seam by
+/// which an integer-typed native loop reads an Integer attribute — the AR
+/// aggregation shape (`while …; total += @amount; …`).
+///
+/// # Safety
+/// `vm`, `recv` must be valid for the call.
+pub(crate) unsafe extern "C" fn jit_ivar_get_int(
+    vm: *const crate::vm::Vm,
+    recv: *const Value,
+    name: u32,
+) -> NRet {
+    let vm = unsafe { &*vm };
+    let recv = unsafe { &*recv };
+    let name_id = crate::intern::SymId(name);
+    let v = match recv {
+        Value::Object(oid) => match vm.heap.get(*oid) {
+            crate::heap::HeapObj::Instance(inst) => inst.ivars.get(&name_id).cloned(),
+            _ => None,
+        },
+        Value::Class(cls) => cls.ivars.borrow().get(&name_id).cloned(),
+        _ => None,
+    };
+    match v {
+        Some(Value::Int(n)) => NRet { res: n, ovf: 0 },
+        _ => NRet { res: 0, ovf: 1 }, // missing or non-Int → deopt to the interpreter
+    }
 }
 
 /// Compile a value-method whose body is a single ivar read, to a native call
