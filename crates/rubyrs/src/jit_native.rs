@@ -169,6 +169,7 @@ pub(crate) fn compile(
     builder.symbol("jit_ivar_get_int", jit_ivar_get_int as *const u8);
     builder.symbol("jit_ivar_len", jit_ivar_len as *const u8);
     builder.symbol("jit_ivar_hash_get_int", jit_ivar_hash_get_int as *const u8);
+    builder.symbol("jit_ivar_array_get_int", jit_ivar_array_get_int as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
     let mut ctx = module.make_context();
@@ -205,6 +206,17 @@ pub(crate) fn compile(
     let hgid = module
         .declare_function("jit_ivar_hash_get_int", Linkage::Import, &hgsig)
         .ok()?;
+    // `jit_ivar_array_get_int`: (vm, self, name:i32, index:i64) -> (i64, i8).
+    let mut agsig = module.make_signature();
+    agsig.params.push(AbiParam::new(ptr_ty));
+    agsig.params.push(AbiParam::new(ptr_ty));
+    agsig.params.push(AbiParam::new(types::I32));
+    agsig.params.push(AbiParam::new(types::I64));
+    agsig.returns.push(AbiParam::new(types::I64));
+    agsig.returns.push(AbiParam::new(types::I8));
+    let agid = module
+        .declare_function("jit_ivar_array_get_int", Linkage::Import, &agsig)
+        .ok()?;
     // Each callee imports with the same `(vm, self, i64) -> (i64, i8)` signature.
     let mut callee_fids: FxHashMap<SymId, cranelift_module::FuncId> = FxHashMap::default();
     for cid in &used_callees {
@@ -222,6 +234,7 @@ pub(crate) fn compile(
         let ivar_ref = module.declare_func_in_func(ivid, fb.func);
         let arraylen_ref = module.declare_func_in_func(alid, fb.func);
         let hashget_ref = module.declare_func_in_func(hgid, fb.func);
+        let arrget_ref = module.declare_func_in_func(agid, fb.func);
         // FuncRefs for each external callee.
         let mut callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
         for (cid, cfid) in &callee_fids {
@@ -311,6 +324,15 @@ pub(crate) fn compile(
                         }
                         _ => None,
                     };
+                    // `@arr[int]` → LoadIvar, LoadConstInt(idx), Call([], 1).
+                    let arr_idx = match (code.get(ip + 1), code.get(ip + 2)) {
+                        (Some(Op::LoadConstInt(idx)), Some(Op::Call(m, 1, _)))
+                            if *m == syms.bracket =>
+                        {
+                            Some(*idx)
+                        }
+                        _ => None,
+                    };
                     let name = fb.ins().iconst(types::I32, s.0 as i64);
                     if let Some(k) = hash_key {
                         let key = fb.ins().iconst(types::I32, k.0 as i64);
@@ -323,6 +345,17 @@ pub(crate) fn compile(
                         acc_ovf(&mut fb, of);
                         stack.push((res, Kind::Int));
                         ip += 2; // consume LoadSymbol + Call
+                    } else if let Some(idx) = arr_idx {
+                        let index = fb.ins().iconst(types::I64, idx);
+                        let inst =
+                            fb.ins().call(arrget_ref, &[vm_param, self_param, name, index]);
+                        let (res, of) = {
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
+                        };
+                        acc_ovf(&mut fb, of);
+                        stack.push((res, Kind::Int));
+                        ip += 2; // consume LoadConstInt + Call
                     } else {
                         // `@arr.length`/`.size` → arraylen; else a plain Int ivar.
                         let fuse_len = matches!(
@@ -670,6 +703,57 @@ pub(crate) unsafe extern "C" fn jit_ivar_hash_get_int(
             NRet { res: 0, ovf: 1 } // key absent (CRuby nil) → deopt
         }
         _ => NRet { res: 0, ovf: 1 },
+    }
+}
+
+/// Native primitive: `recv.@name[index]` where the ivar is an Array and the
+/// element is an Int — returns it as i64, else deopt. The AR result-row
+/// column-read shape (`row[2]` over a query result). Ruby negative indices
+/// supported; out-of-bounds (CRuby nil) or non-Int element → deopt.
+///
+/// # Safety
+/// `vm`, `recv` must be valid for the call.
+pub(crate) unsafe extern "C" fn jit_ivar_array_get_int(
+    vm: *const crate::vm::Vm,
+    recv: *const Value,
+    name: u32,
+    index: i64,
+) -> NRet {
+    let vm = unsafe { &*vm };
+    let recv = unsafe { &*recv };
+    let name_id = crate::intern::SymId(name);
+    let read = |iv: Option<&Value>| -> Option<i64> {
+        match iv {
+            Some(Value::Array(aid)) => {
+                let arr = vm.heap.array(*aid);
+                let i = if index < 0 {
+                    arr.len() as i64 + index
+                } else {
+                    index
+                };
+                if i >= 0 && (i as usize) < arr.len() {
+                    match &arr[i as usize] {
+                        Value::Int(n) => Some(*n),
+                        _ => None, // non-Int element → deopt
+                    }
+                } else {
+                    None // out of bounds (CRuby nil) → deopt
+                }
+            }
+            _ => None,
+        }
+    };
+    let res = match recv {
+        Value::Object(oid) => match vm.heap.get(*oid) {
+            crate::heap::HeapObj::Instance(inst) => read(inst.ivars.get(&name_id)),
+            _ => None,
+        },
+        Value::Class(cls) => read(cls.ivars.borrow().get(&name_id)),
+        _ => None,
+    };
+    match res {
+        Some(n) => NRet { res: n, ovf: 0 },
+        None => NRet { res: 0, ovf: 1 },
     }
 }
 
