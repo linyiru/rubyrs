@@ -135,6 +135,65 @@ pub fn compile_int1(ops: &[IntOp]) -> CompiledInt1 {
     CompiledInt1 { _module: module, ptr }
 }
 
+/// A stand-in for a rubyrs primitive: reads a value THROUGH A POINTER and
+/// returns a result. The pointer-passing is the point — it's how the JIT will
+/// hand a `Value` to a native primitive without baking the enum layout into
+/// codegen (D Layer 3/5: `Hash#[]`, `instance_variable_get`, … as native calls).
+extern "C" fn jit_test_helper(p: *const i64) -> i64 {
+    unsafe { *p * 10 }
+}
+
+/// D Layer 3 PoC: a JIT'd `f(x) = jit_test_helper(&x) + 1`. Proves the external-
+/// primitive-call mechanism — register the helper's address as a symbol, import
+/// it, spill `x` to a stack slot, pass its ADDRESS to the helper, use the
+/// result. This is the seam through which a value-representation JIT calls
+/// rubyrs's string/hash/object primitives.
+pub fn compile_with_helper() -> extern "C" fn(i64) -> i64 {
+    use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
+    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).unwrap();
+    builder.symbol("jit_test_helper", jit_test_helper as *const u8);
+    let mut module = JITModule::new(builder);
+    let ptr_ty = module.target_config().pointer_type();
+    let mut ctx = module.make_context();
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I64));
+    ctx.func.signature = sig.clone();
+    let fid = module.declare_function("f", Linkage::Export, &sig).unwrap();
+    // Import the external primitive: fn(*const i64) -> i64.
+    let mut helper_sig = module.make_signature();
+    helper_sig.params.push(AbiParam::new(ptr_ty));
+    helper_sig.returns.push(AbiParam::new(types::I64));
+    let helper_id = module
+        .declare_function("jit_test_helper", Linkage::Import, &helper_sig)
+        .unwrap();
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let helper_ref = module.declare_func_in_func(helper_id, fb.func);
+        let b = fb.create_block();
+        fb.append_block_params_for_function_params(b);
+        fb.switch_to_block(b);
+        fb.seal_block(b);
+        let x = fb.block_params(b)[0];
+        // Spill x to a stack slot and pass its address (the Value-by-pointer seam).
+        let slot = fb.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
+        fb.ins().stack_store(x, slot, 0);
+        let p = fb.ins().stack_addr(ptr_ty, slot, 0);
+        let inst = fb.ins().call(helper_ref, &[p]);
+        let h = fb.inst_results(inst)[0];
+        let one = fb.ins().iconst(types::I64, 1);
+        let r = fb.ins().iadd(h, one);
+        fb.ins().return_(&[r]);
+        fb.finalize();
+    }
+    module.define_function(fid, &mut ctx).unwrap();
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().unwrap();
+    let code = module.get_finalized_function(fid);
+    unsafe { std::mem::transmute::<_, extern "C" fn(i64) -> i64>(code) }
+}
+
 /// Compile a SELF-CONTAINED integer loop method to native code — the first
 /// shape that makes a fair, end-to-end comparison with YJIT possible (the
 /// whole computation is the method body; one call, the loop runs native in
@@ -266,6 +325,15 @@ mod tests {
     fn jit_const_runs() {
         let f = super::jit_const(12345);
         assert_eq!(f(), 12345);
+    }
+
+    #[test]
+    fn external_helper_call() {
+        // jit_test_helper(&x) = x*10 ; compiled f(x) = x*10 + 1
+        let f = compile_with_helper();
+        assert_eq!(f(5), 51);
+        assert_eq!(f(7), 71);
+        assert_eq!(f(0), 1);
     }
 
     #[test]
