@@ -387,6 +387,12 @@ impl Vm {
         // walks Object→BasicObject, neither of which has extends).
         let mut current = cls.clone();
         let mut depth = 0u32;
+        // Lazily-allocated, then REUSED across superclass steps (`clear()` keeps
+        // capacity). A class with singleton extends (e.g. ActiveRecord::Base, which
+        // `extend`s many modules) hits the walk on every step; allocating a fresh
+        // set per step was ~hundreds of thousands of allocs+rehashes on AR CRUD.
+        // Stays `None` (zero cost) for the overwhelmingly common no-modules class.
+        let mut inc_visited: Option<crate::intern::FxHashSet<*const Class>> = None;
         loop {
             depth += 1;
             if depth > 4096 {
@@ -395,10 +401,10 @@ impl Vm {
             let has_singleton_modules = !current.singleton_prepends.borrow().is_empty()
                 || !current.singleton_includes.borrow().is_empty();
             if has_singleton_modules {
-                let mut inc_visited: crate::intern::FxHashSet<*const Class> =
-                    crate::intern::FxHashSet::default();
+                let inc_visited = inc_visited.get_or_insert_with(crate::intern::FxHashSet::default);
+                inc_visited.clear();
                 for pre in current.singleton_prepends.borrow().iter() {
-                    if let Some(found) = walk_module(pre, name_id, &mut inc_visited) {
+                    if let Some(found) = walk_module(pre, name_id, inc_visited) {
                         return Some(found);
                     }
                 }
@@ -411,7 +417,7 @@ impl Vm {
                 // matching CRuby's metaclass ancestor walk
                 // (Klass.singleton_class → Mod → superclass.singleton_class).
                 for inc in current.singleton_includes.borrow().iter() {
-                    if let Some(found) = walk_module(inc, name_id, &mut inc_visited) {
+                    if let Some(found) = walk_module(inc, name_id, inc_visited) {
                         return Some(found);
                     }
                 }
@@ -572,13 +578,23 @@ impl Vm {
             None
         }
         let mut past_anchor = false;
-        let mut sc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
+        // ONE include-cycle-guard set reused across superclass steps: `clear()`
+        // keeps the capacity, so there is no per-step allocation + rehash (the
+        // old code allocated a fresh HashSet for every superclass — O(depth)
+        // allocations per uncached lookup, ~20% of AR-CRUD time in profiling).
+        // The superclass chain itself is acyclic in any well-formed hierarchy,
+        // so a depth limit guards a (effectively impossible) cycle instead of a
+        // second per-call HashSet.
+        let mut inc_visited: crate::intern::FxHashSet<*const Class> =
+            crate::intern::FxHashSet::default();
         let mut current = cls.clone();
+        let mut depth = 0usize;
         loop {
-            if !sc_visited.insert(Rc::as_ptr(&current)) {
-                return None;
+            depth += 1;
+            if depth > 100_000 {
+                return None; // cyclic superclass chain — unreachable in a sane VM
             }
-            let mut inc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
+            inc_visited.clear();
             if let Some(r) = walk_module(&current, name_id, anchor, &mut past_anchor, &mut inc_visited) {
                 return Some(r);
             }
