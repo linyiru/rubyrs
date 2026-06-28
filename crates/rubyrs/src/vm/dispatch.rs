@@ -15197,11 +15197,42 @@ impl Vm {
         {
             return Ok(false);
         }
-        // D selective routing: hand this resolved method to the JIT hook only if
-        // the JIT can speed it up (compiled, or eligible + not-yet-ruled-out).
+        // D Layer 4 (inline-cache step 1): if this method is ALREADY compiled,
+        // dispatch the native code RIGHT HERE — no slow-path round-trip through
+        // invoke_method_with_block + the hook. This is the per-call win: a hot
+        // JIT'd method called in a loop pays only a cache lookup + the native
+        // call, not the full interpreter invocation machinery. Methods not yet
+        // compiled (but eligible) route to the hook once, to compile.
         #[cfg(feature = "jit-native")]
-        if self.jit_should_route(m.proto_idx, argc) {
-            return Ok(false);
+        if self.jit_native_on {
+            let pidx = m.proto_idx;
+            let vm_ptr = self as *const crate::vm::Vm;
+            if argc == 1 {
+                // Value method (e.g. the instance_variable_get wrapper). Pass
+                // the receiver + arg stack slots by reference (no clone) — both
+                // are immutable borrows of distinct fields, released before the
+                // result is written back.
+                if let Some(Some(vp)) = self.jit_value.get(&pidx) {
+                    let out = vp.call(vm_ptr, &self.stack[recv_idx], &self.stack[recv_idx + 1]);
+                    self.stack[recv_idx] = out;
+                    self.stack.truncate(recv_idx + 1);
+                    return Ok(true);
+                }
+                // Integer method: deopt (non-Int arg or overflow) falls through.
+                if let Some(Some(np)) = self.jit_native.get(&pidx) {
+                    if let Some(x) = crate::jit_native::as_int(&self.stack[recv_idx + 1]) {
+                        if let Some(r) = np.call(x) {
+                            self.stack[recv_idx] = Value::Int(r);
+                            self.stack.truncate(recv_idx + 1);
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+            // Not yet compiled but eligible → route to the hook to compile it.
+            if self.jit_should_route(pidx, argc) {
+                return Ok(false);
+            }
         }
         // PoC getter fast path (ADR-0031 follow-up): a trivial
         // attr_reader (`obj.foo`, body `[LoadIvar(@foo), Return]`, no
