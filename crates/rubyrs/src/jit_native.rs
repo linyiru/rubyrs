@@ -105,6 +105,8 @@ pub(crate) fn compile(
             | Op::EnterLoop
             | Op::ExitLoop
             | Op::LoadIvar(_)
+            // Key push for a fused `@h[:k]`; standalone use rejected in codegen.
+            | Op::LoadSymbol(_)
             | Op::LoadNil => {}
             Op::BinOp(k) | Op::BinOpLocalLocal(k, _, _) | Op::BinOpInt(k, _) => match k {
                 BinOpKind::Add
@@ -130,6 +132,8 @@ pub(crate) fn compile(
             // `@arr.length` / `@arr.size` — fused with the preceding LoadIvar in
             // codegen; a standalone one (no LoadIvar before) is rejected there.
             Op::Call(m, 0, _) if *m == syms.length || *m == syms.size => {}
+            // `@h[:k]` — `Call([], 1)`, fused with the LoadIvar + LoadSymbol.
+            Op::Call(m, 1, _) if *m == syms.bracket => {}
             _ => return None,
         }
     }
@@ -156,9 +160,10 @@ pub(crate) fn compile(
     for cid in &used_callees {
         builder.symbol(format!("c{}", cid.0), callees[cid] as *const u8);
     }
-    // `jit_ivar_get_int` / `jit_ivar_arraylen` are callable from the body.
+    // Value primitives callable from the body.
     builder.symbol("jit_ivar_get_int", jit_ivar_get_int as *const u8);
     builder.symbol("jit_ivar_arraylen", jit_ivar_arraylen as *const u8);
+    builder.symbol("jit_ivar_hash_get_int", jit_ivar_hash_get_int as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
     let mut ctx = module.make_context();
@@ -184,6 +189,17 @@ pub(crate) fn compile(
     let alid = module
         .declare_function("jit_ivar_arraylen", Linkage::Import, &ivsig)
         .ok()?;
+    // `jit_ivar_hash_get_int`: (vm, self, name:i32, key:i32) -> (i64, i8).
+    let mut hgsig = module.make_signature();
+    hgsig.params.push(AbiParam::new(ptr_ty));
+    hgsig.params.push(AbiParam::new(ptr_ty));
+    hgsig.params.push(AbiParam::new(types::I32));
+    hgsig.params.push(AbiParam::new(types::I32));
+    hgsig.returns.push(AbiParam::new(types::I64));
+    hgsig.returns.push(AbiParam::new(types::I8));
+    let hgid = module
+        .declare_function("jit_ivar_hash_get_int", Linkage::Import, &hgsig)
+        .ok()?;
     // Each callee imports with the same `(vm, self, i64) -> (i64, i8)` signature.
     let mut callee_fids: FxHashMap<SymId, cranelift_module::FuncId> = FxHashMap::default();
     for cid in &used_callees {
@@ -200,6 +216,7 @@ pub(crate) fn compile(
         let self_ref = module.declare_func_in_func(fid, fb.func);
         let ivar_ref = module.declare_func_in_func(ivid, fb.func);
         let arraylen_ref = module.declare_func_in_func(alid, fb.func);
+        let hashget_ref = module.declare_func_in_func(hgid, fb.func);
         // FuncRefs for each external callee.
         let mut callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
         for (cid, cfid) in &callee_fids {
@@ -280,21 +297,44 @@ pub(crate) fn compile(
                 // otherwise read an Int ivar. A non-matching heap shape sets ovf
                 // → deopt. The fused Call op is skipped (`ip += 1`).
                 Op::LoadIvar(s) => {
-                    let fuse_len = matches!(
-                        code.get(ip + 1),
-                        Some(Op::Call(m, 0, _)) if *m == syms.length || *m == syms.size
-                    );
-                    let prim = if fuse_len { arraylen_ref } else { ivar_ref };
-                    let name = fb.ins().iconst(types::I32, s.0 as i64);
-                    let inst = fb.ins().call(prim, &[vm_param, self_param, name]);
-                    let (res, of) = {
-                        let r = fb.inst_results(inst);
-                        (r[0], r[1])
+                    // `@h[:k]` → LoadIvar, LoadSymbol(k), Call([], 1).
+                    let hash_key = match (code.get(ip + 1), code.get(ip + 2)) {
+                        (Some(Op::LoadSymbol(k)), Some(Op::Call(m, 1, _)))
+                            if *m == syms.bracket =>
+                        {
+                            Some(*k)
+                        }
+                        _ => None,
                     };
-                    acc_ovf(&mut fb, of);
-                    stack.push((res, Kind::Int));
-                    if fuse_len {
-                        ip += 1; // consume the fused Call (loop's ip += 1 finishes)
+                    let name = fb.ins().iconst(types::I32, s.0 as i64);
+                    if let Some(k) = hash_key {
+                        let key = fb.ins().iconst(types::I32, k.0 as i64);
+                        let inst =
+                            fb.ins().call(hashget_ref, &[vm_param, self_param, name, key]);
+                        let (res, of) = {
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
+                        };
+                        acc_ovf(&mut fb, of);
+                        stack.push((res, Kind::Int));
+                        ip += 2; // consume LoadSymbol + Call
+                    } else {
+                        // `@arr.length`/`.size` → arraylen; else a plain Int ivar.
+                        let fuse_len = matches!(
+                            code.get(ip + 1),
+                            Some(Op::Call(m, 0, _)) if *m == syms.length || *m == syms.size
+                        );
+                        let prim = if fuse_len { arraylen_ref } else { ivar_ref };
+                        let inst = fb.ins().call(prim, &[vm_param, self_param, name]);
+                        let (res, of) = {
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
+                        };
+                        acc_ovf(&mut fb, of);
+                        stack.push((res, Kind::Int));
+                        if fuse_len {
+                            ip += 1;
+                        }
                     }
                 }
                 Op::LoadNil => {
@@ -569,10 +609,51 @@ pub(crate) unsafe extern "C" fn jit_ivar_get_int(
 }
 
 /// Method-name syms the JIT recognises for value-primitive fusion (e.g. fusing
-/// `@items.size` into one native length call). Built once by the hook.
+/// `@items.size` / `@h[:k]` into one native call). Built once by the hook.
 pub(crate) struct JitSyms {
     pub length: SymId,
     pub size: SymId,
+    pub bracket: SymId,
+}
+
+/// Native primitive: `recv.@name[:key]` where the ivar is a Hash with a Symbol
+/// key whose value is an Int — returns it as i64, else deopt. The AR
+/// `@attributes[:col]` shape (an integer attribute read in a loop).
+///
+/// # Safety
+/// `vm`, `recv` must be valid for the call.
+pub(crate) unsafe extern "C" fn jit_ivar_hash_get_int(
+    vm: *const crate::vm::Vm,
+    recv: *const Value,
+    name: u32,
+    key: u32,
+) -> NRet {
+    let vm = unsafe { &*vm };
+    let recv = unsafe { &*recv };
+    let name_id = crate::intern::SymId(name);
+    let v = match recv {
+        Value::Object(oid) => match vm.heap.get(*oid) {
+            crate::heap::HeapObj::Instance(inst) => inst.ivars.get(&name_id).cloned(),
+            _ => None,
+        },
+        Value::Class(cls) => cls.ivars.borrow().get(&name_id).cloned(),
+        _ => None,
+    };
+    match v {
+        Some(Value::Hash(hid)) => {
+            let want = Value::Sym(crate::intern::SymId(key));
+            for (hk, hv) in vm.heap.hash(hid) {
+                if hk.ruby_eql(&want, &vm.heap) {
+                    return match hv {
+                        Value::Int(n) => NRet { res: *n, ovf: 0 },
+                        _ => NRet { res: 0, ovf: 1 }, // non-Int value → deopt
+                    };
+                }
+            }
+            NRet { res: 0, ovf: 1 } // key absent (CRuby nil) → deopt
+        }
+        _ => NRet { res: 0, ovf: 1 },
+    }
 }
 
 /// Native primitive: `recv.@name.length` where the ivar is an Array — returns

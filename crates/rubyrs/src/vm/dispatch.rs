@@ -15876,6 +15876,7 @@ impl Vm {
                 let syms = crate::jit_native::JitSyms {
                     length: self.interner.intern("length"),
                     size: self.interner.intern("size"),
+                    bracket: self.interner.intern("[]"),
                 };
                 let compiled = crate::jit_native::compile(
                     &self.protos[proto_idx],
