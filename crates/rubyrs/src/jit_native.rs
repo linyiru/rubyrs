@@ -9,7 +9,7 @@
 //! interpreter — so the JIT can never change a result, only its speed.
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Value as ClValue};
+use cranelift_codegen::ir::{types, AbiParam, Block, BlockArg, InstBuilder, Value as ClValue};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
@@ -162,19 +162,33 @@ pub(crate) fn compile(proto: &Proto, self_name_id: crate::intern::SymId) -> Opti
         fb.ins().jump(blocks[0].unwrap(), &[]);
         fb.seal_block(entry);
 
-        // Per-block straight-line codegen with an Int/Bool kind stack.
+        // Per-block codegen with an Int/Bool/Nil kind stack. The operand stack
+        // that's live at a basic-block edge flows across via block PARAMETERS
+        // (Cranelift's SSA for cross-block values) — `block_kinds[ip]` records
+        // the kind of each param, set the first time we branch to that block.
         let mut stack: Vec<(ClValue, Kind)> = Vec::new();
         let mut cur_open = false; // is the current block unterminated?
+        let mut block_kinds: Vec<Option<Vec<Kind>>> = vec![None; n + 1];
         let mut ip = 0usize;
         while ip < n {
             if let Some(b) = blocks[ip] {
-                // New block leader: terminate fall-through from the previous.
+                // New block leader: pass the live operand stack across the
+                // fall-through edge, then re-materialise it from this block's
+                // parameters.
                 if cur_open {
-                    fb.ins().jump(b, &[]);
+                    let args = block_args(&mut fb, b, &mut block_kinds[ip], &stack);
+                    fb.ins().jump(b, &args);
                 }
                 fb.switch_to_block(b);
-                stack.clear();
+                let kinds = block_kinds[ip].clone().unwrap_or_default();
+                let params: Vec<ClValue> = fb.block_params(b).to_vec();
+                stack = params.iter().zip(kinds.iter()).map(|(v, k)| (*v, *k)).collect();
                 cur_open = true;
+            } else if !cur_open {
+                // Dead code after a terminator (e.g. the `if`-modifier tail past
+                // a `return`) — no reachable block to emit into, so skip it.
+                ip += 1;
+                continue;
             }
             let acc_ovf = |fb: &mut FunctionBuilder, of: ClValue| {
                 let cur = fb.use_var(ovf_var);
@@ -241,7 +255,9 @@ pub(crate) fn compile(proto: &Proto, self_name_id: crate::intern::SymId) -> Opti
                 }
                 Op::Jump(off) => {
                     let t = (ip as i64 + 1 + *off as i64) as usize;
-                    fb.ins().jump(blocks[t].unwrap(), &[]);
+                    let tb = blocks[t].unwrap();
+                    let args = block_args(&mut fb, tb, &mut block_kinds[t], &stack);
+                    fb.ins().jump(tb, &args);
                     cur_open = false;
                 }
                 Op::JumpIfFalse(off) => {
@@ -251,8 +267,13 @@ pub(crate) fn compile(proto: &Proto, self_name_id: crate::intern::SymId) -> Opti
                     }
                     let t = (ip as i64 + 1 + *off as i64) as usize;
                     let fall = blocks[ip + 1].unwrap();
+                    let target = blocks[t].unwrap();
+                    // The stack remaining after popping `cond` flows to BOTH
+                    // successors (same depth/kinds).
+                    let fall_args = block_args(&mut fb, fall, &mut block_kinds[ip + 1], &stack);
+                    let target_args = block_args(&mut fb, target, &mut block_kinds[t], &stack);
                     // brif: non-zero (true) -> fall-through, zero (false) -> target.
-                    fb.ins().brif(cond, fall, &[], blocks[t].unwrap(), &[]);
+                    fb.ins().brif(cond, fall, &fall_args, target, &target_args);
                     cur_open = false;
                 }
                 Op::Return => {
@@ -293,6 +314,25 @@ pub(crate) fn compile(proto: &Proto, self_name_id: crate::intern::SymId) -> Opti
     let code_ptr = module.get_finalized_function(fid);
     let ptr = unsafe { std::mem::transmute::<_, extern "C" fn(i64) -> NRet>(code_ptr) };
     Some(NativeProto { _module: module, ptr })
+}
+
+/// Compute the block-call arguments for branching to `block` with the current
+/// operand `stack` live. The FIRST branch to a block fixes its parameter count
+/// + kinds (`kinds_slot`); later branches must arrive with the same shape
+/// (true for structured bytecode). Returns the SSA values to pass as args.
+fn block_args(
+    fb: &mut FunctionBuilder,
+    block: Block,
+    kinds_slot: &mut Option<Vec<Kind>>,
+    stack: &[(ClValue, Kind)],
+) -> Vec<BlockArg> {
+    if kinds_slot.is_none() {
+        for _ in stack {
+            fb.append_block_param(block, types::I64);
+        }
+        *kinds_slot = Some(stack.iter().map(|(_, k)| *k).collect());
+    }
+    stack.iter().map(|(v, _)| (*v).into()).collect()
 }
 
 fn emit_binop(
