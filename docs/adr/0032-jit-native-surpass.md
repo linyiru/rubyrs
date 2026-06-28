@@ -139,6 +139,29 @@ a receiver-guard inline cache so callee resolution is sound under polymorphism
 (today it is by-name + monomorphic; the callee must be compiled first, and a name
 shared by two compiled methods is dropped — interpreted, not mis-dispatched).
 
+### 7. Value-touching native loops surpass CRuby+YJIT
+
+The first value-representation step INSIDE a compiled loop: reading a heap
+attribute. The integer convention grew from `(i64)` to `(vm, self, i64)` so the
+body can call `jit_ivar_get_int` (returns an Int ivar as i64, else deopts).
+`LoadIvar` in a native loop reads the attribute each iteration; the whole loop
+stays native.
+
+`def sum_amounts(n); total=0;i=0; while i<n; total+=@amount; i+=1; end; total;
+end`, sum_amounts(1e8):
+
+```
+rubyrs + JIT    939ms   — 1.49x YJIT, 1.49x CRuby, 7.5x rubyrs-interp
+CRuby + YJIT   1402ms
+```
+
+The AR aggregation shape (sum a column) surpassing CRuby+YJIT. Deopt-correct: a
+non-Int ivar falls back to the interpreter (raises TypeError, as CRuby). The
+remaining breadth for full AR is value methods that RETURN Values (Value
+locals/results threaded through the call tree) + string/hash primitives + a
+polymorphism-safe inline cache — each a known primitive/codegen extension, no new
+wall.
+
 ## Consequences
 
 - **The original question is answered with a qualified yes.** rubyrs's native
