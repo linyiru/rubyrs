@@ -750,6 +750,8 @@ pub(crate) struct Vm {
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
     #[cfg(feature = "jit-native")]
+    pub(crate) jit_value: crate::intern::FxHashMap<usize, Option<crate::jit_native::ValueProto>>,
+    #[cfg(feature = "jit-native")]
     pub(crate) jit_native_on: bool,
     pub(crate) interner: Interner,
     pub(crate) classes: FxHashMap<SymId, Rc<Class>>,
@@ -1831,6 +1833,8 @@ impl Vm {
         Vm {
             #[cfg(feature = "jit-native")]
             jit_native: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_value: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_on: std::env::var_os("RUBYRS_JIT_NATIVE").is_some(),
             protos,

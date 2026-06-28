@@ -369,6 +369,107 @@ fn emit_binop(
     stack.push((res, Kind::Int));
 }
 
+// ---- D Layer 3: value-representation method JIT ----
+//
+// The integer JIT above unboxes `Int` locals to raw i64. To compile a method
+// that handles arbitrary `Value`s (AR's attribute access, etc.) the JIT instead
+// passes Values BY POINTER and calls rubyrs primitives natively. This first
+// value-method shape is the attr reader `def v; @v; end` — its native code is a
+// single call to `jit_ivar_get` with the ivar name baked in.
+
+/// A compiled value-method: `fn(vm, recv, out)` — reads from `recv` (a `Value`
+/// pointer) and writes the result `Value` to `out`. Holds the `JITModule`.
+pub(crate) struct ValueProto {
+    _module: JITModule,
+    ptr: extern "C" fn(*const crate::vm::Vm, *const Value, *mut Value),
+}
+
+impl ValueProto {
+    /// Run the native value-method: `recv` is the receiver, the result is
+    /// returned (written through an out-slot). `vm` is borrowed shared for the
+    /// duration of the call (the primitive only reads the heap).
+    #[inline]
+    pub(crate) fn call(&self, vm: *const crate::vm::Vm, recv: &Value) -> Value {
+        let mut out = Value::Nil;
+        (self.ptr)(vm, recv as *const Value, &mut out as *mut Value);
+        out
+    }
+}
+
+/// Native primitive: read `recv`'s ivar `name`, write it to `out`. The seam a
+/// value-method JIT calls — `Value` crosses by pointer (no enum layout in
+/// codegen). Read-only on the heap, so `vm` is shared.
+///
+/// # Safety
+/// `vm`, `recv`, `out` must be valid, and `*vm` must outlive the call.
+pub(crate) unsafe extern "C" fn jit_ivar_get(
+    vm: *const crate::vm::Vm,
+    recv: *const Value,
+    name: u32,
+    out: *mut Value,
+) {
+    let vm = &*vm;
+    let recv = &*recv;
+    let name_id = crate::intern::SymId(name);
+    let v = match recv {
+        Value::Object(oid) => match vm.heap.get(*oid) {
+            crate::heap::HeapObj::Instance(inst) => {
+                inst.ivars.get(&name_id).cloned().unwrap_or(Value::Nil)
+            }
+            _ => Value::Nil,
+        },
+        Value::Class(cls) => cls.ivars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
+        _ => Value::Nil,
+    };
+    std::ptr::write(out, v);
+}
+
+/// Compile an attr reader (`def v; @v; end`, body `[LoadIvar(sym), Return]`) to
+/// native code that calls `jit_ivar_get` with `getter_sym` baked in.
+pub(crate) fn compile_attr_reader(getter_sym: crate::intern::SymId) -> Option<ValueProto> {
+    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    builder.symbol("jit_ivar_get", jit_ivar_get as *const u8);
+    let mut module = JITModule::new(builder);
+    let ptr_ty = module.target_config().pointer_type();
+    let mut ctx = module.make_context();
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(ptr_ty)); // vm
+    sig.params.push(AbiParam::new(ptr_ty)); // recv (*const Value)
+    sig.params.push(AbiParam::new(ptr_ty)); // out  (*mut Value)
+    ctx.func.signature = sig.clone();
+    let fid = module.declare_function("g", Linkage::Export, &sig).ok()?;
+    let mut hsig = module.make_signature();
+    hsig.params.push(AbiParam::new(ptr_ty)); // vm
+    hsig.params.push(AbiParam::new(ptr_ty)); // recv
+    hsig.params.push(AbiParam::new(types::I32)); // name
+    hsig.params.push(AbiParam::new(ptr_ty)); // out
+    let hid = module.declare_function("jit_ivar_get", Linkage::Import, &hsig).ok()?;
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let href = module.declare_func_in_func(hid, fb.func);
+        let b = fb.create_block();
+        fb.append_block_params_for_function_params(b);
+        fb.switch_to_block(b);
+        fb.seal_block(b);
+        let vm = fb.block_params(b)[0];
+        let recv = fb.block_params(b)[1];
+        let out = fb.block_params(b)[2];
+        let name = fb.ins().iconst(types::I32, getter_sym.0 as i64);
+        fb.ins().call(href, &[vm, recv, name, out]);
+        fb.ins().return_(&[]);
+        fb.finalize();
+    }
+    module.define_function(fid, &mut ctx).ok()?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().ok()?;
+    let code = module.get_finalized_function(fid);
+    let ptr = unsafe {
+        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, *mut Value)>(code)
+    };
+    Some(ValueProto { _module: module, ptr })
+}
+
 /// Extract an i64 from an `Int` value (the guard before calling native).
 #[inline]
 pub(crate) fn as_int(v: &Value) -> Option<i64> {

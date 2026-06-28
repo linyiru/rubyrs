@@ -15766,6 +15766,30 @@ impl Vm {
                 return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
             }
         }
+        // Native-JIT hook, value-method path (D Layer 3): a 0-arg attr reader
+        // (`def v; @v; end`) compiles to a native call into `jit_ivar_get` —
+        // the first non-integer method shape, passing the receiver `Value` by
+        // pointer. The result is whatever the ivar holds (any `Value`), so
+        // there's no deopt — correctness is preserved by construction.
+        #[cfg(feature = "jit-native")]
+        if self.jit_native_on && m.closure.is_none() && args.is_empty() {
+            let proto_idx = m.proto_idx;
+            if let Some(getter_sym) = self.protos[proto_idx].getter_ivar {
+                if !self.jit_value.contains_key(&proto_idx) {
+                    let compiled = crate::jit_native::compile_attr_reader(getter_sym);
+                    self.jit_value.insert(proto_idx, compiled);
+                }
+                let vm_ptr = self as *const crate::vm::Vm;
+                let result = match self.jit_value.get(&proto_idx) {
+                    Some(Some(vp)) => Some(vp.call(vm_ptr, &self_val)),
+                    _ => None,
+                };
+                if let Some(out) = result {
+                    self.stack.push(out);
+                    return Ok(());
+                }
+            }
+        }
         // Native-JIT hook (ADR 0030 finding #4, `jit-native` feature): a
         // non-closure 1-Int-arg method whose body lowers to integer machine
         // code runs as a native call instead of an interpreted frame. Any
