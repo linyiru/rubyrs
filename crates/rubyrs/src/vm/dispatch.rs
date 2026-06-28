@@ -11353,7 +11353,7 @@ impl Vm {
                         }
                         _ => recv_class.clone(),
                     };
-                    super::class_is_a(&walk_class, target)
+                    self.class_is_a_cached(&walk_class, target)
                 };
                 self.stack.push(Value::Bool(result));
                 return Ok(());

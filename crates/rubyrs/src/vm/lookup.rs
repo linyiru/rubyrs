@@ -1594,6 +1594,97 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
     })
 }
 
+/// The full set of ancestor pointers reachable from `child` exactly as
+/// `class_is_a` defines reachability: the superclass chain, plus every
+/// prepend / include (transitively) of each class on it. `class_is_a(child, X)`
+/// for ANY target X is `set.contains(X_ptr)`. Deliberately does NOT add the
+/// singleton-include extras `flatten_ancestors` surfaces — `class_is_a` doesn't
+/// walk those, so neither does this, keeping the two in exact agreement.
+fn build_ancestor_set(child: &Rc<Class>) -> crate::intern::FxHashSet<usize> {
+    fn collect(node: &Rc<Class>, out: &mut crate::intern::FxHashSet<usize>) {
+        if !out.insert(Rc::as_ptr(node) as usize) {
+            return; // already visited (diamond include / re-include)
+        }
+        for pre in node.prepends.borrow().iter() {
+            collect(pre, out);
+        }
+        for inc in node.includes.borrow().iter() {
+            collect(inc, out);
+        }
+    }
+    let mut out = crate::intern::FxHashSet::default();
+    let mut current = child.clone();
+    let mut depth = 0u32;
+    loop {
+        collect(&current, &mut out);
+        depth += 1;
+        if depth > 1_000_000 {
+            break; // cyclic superclass chain — unreachable in a sane VM
+        }
+        let parent = current.superclass.borrow().clone();
+        match parent {
+            Some(p) => current = p,
+            None => break,
+        }
+    }
+    out
+}
+
+impl super::Vm {
+    /// `class_is_a` with a per-class ancestor-set cache for the MODULE-target
+    /// case (`is_a?(Comparable)`, `case x when Enumerable`, …), the hot shape
+    /// `class_is_a`'s scratch-set walk pays for on deep module graphs (e.g.
+    /// ActiveModel/ActiveRecord). A CLASS target keeps the cheap superclass-only
+    /// pointer walk (`class_is_a`'s own fast path) — no set, nothing to cache.
+    ///
+    /// The cache is keyed by the child class pointer and validated two ways:
+    /// `method_gen` (bumped by every include/prepend/extend — the same signal
+    /// the method inline cache relies on, so a hierarchy change rebuilds the
+    /// set) AND a `Weak<Class>` + `ptr_eq` guard (so a freed anonymous class
+    /// whose heap address is reused by a different class can never serve a stale
+    /// set). A miss rebuilds via `build_ancestor_set`, which mirrors
+    /// `class_is_a`'s reachability exactly, so the cached answer is identical to
+    /// the uncached one.
+    pub(crate) fn class_is_a_cached(&self, child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
+        if !ancestor.is_module {
+            return class_is_a(child, ancestor);
+        }
+        thread_local! {
+            static CACHE: std::cell::RefCell<
+                crate::intern::FxHashMap<
+                    usize,
+                    (std::rc::Weak<Class>, u32, Rc<crate::intern::FxHashSet<usize>>),
+                >,
+            > = std::cell::RefCell::new(crate::intern::FxHashMap::default());
+        }
+        let cur_gen = self.method_gen;
+        let child_ptr = Rc::as_ptr(child) as usize;
+        let target = Rc::as_ptr(ancestor) as usize;
+        CACHE.with(|c| {
+            let mut cache = match c.try_borrow_mut() {
+                Ok(g) => g,
+                // class_is_a runs no Ruby so it is not normally re-entrant;
+                // fall back to the uncached walk if it somehow is.
+                Err(_) => return class_is_a(child, ancestor),
+            };
+            if let Some((weak, g, set)) = cache.get(&child_ptr)
+                && *g == cur_gen
+                && weak.upgrade().is_some_and(|rc| Rc::ptr_eq(&rc, child))
+            {
+                return set.contains(&target);
+            }
+            // Bound the table so pathological anonymous-class churn can't leak it.
+            if cache.len() > 8192 {
+                cache.clear();
+            }
+            let set = Rc::new(build_ancestor_set(child));
+            let contains = set.contains(&target);
+            cache.insert(child_ptr, (Rc::downgrade(child), cur_gen, set));
+            contains
+        })
+    }
+}
+
 /// `target` is reachable via `cls`'s own `singleton_prepends`
 /// (transitively through each prepended module's prepends /
 /// includes). Used to dedupe `class << self; prepend Mod; end`
