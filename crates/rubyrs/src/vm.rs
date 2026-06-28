@@ -761,6 +761,12 @@ pub(crate) struct Vm {
         crate::intern::FxHashMap<(usize, usize), Option<crate::jit_native::NativeProto>>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_value: crate::intern::FxHashMap<usize, Option<crate::jit_native::ValueProto>>,
+    /// Native-compiled 1-param BLOCKS, keyed by block proto_idx (B5). A Rust
+    /// iterator driver (`step_block1`) calls the native block instead of
+    /// re-entering the interpreter when the block is a pure int function of its
+    /// param. `Some(None)` = declined (not native-compilable).
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_block: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_on: bool,
     pub(crate) interner: Interner,
@@ -1847,6 +1853,8 @@ impl Vm {
             jit_native_poly: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_value: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_block: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_on: std::env::var_os("RUBYRS_JIT_NATIVE").is_some(),
             protos,

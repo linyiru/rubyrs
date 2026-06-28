@@ -15982,6 +15982,7 @@ impl Vm {
             &callees,
             &getters,
             &syms,
+            None,
         );
         if let (Some(np), false) = (&compiled, callees.is_empty() && getters.is_empty()) {
             if let Some(cls) = recv_cls {
@@ -15989,6 +15990,79 @@ impl Vm {
             }
         }
         compiled
+    }
+
+    /// Fast path for a Rust iterator driver (`step_block1`): run a 1-param block
+    /// as native code instead of re-entering the interpreter, when the block is
+    /// a pure int function of an Int param (B5). Returns `Some(result)` if it
+    /// ran natively, `None` to fall back to the interpreter (ineligible block,
+    /// non-Int arg, not native-compilable, or a deopt). Sound: a native block is
+    /// pure (the op-gate admits no side effect), and on a deopt nothing was
+    /// committed, so the interpreter re-runs it cleanly.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_block1(&mut self, block_id: ObjId, arg: &Value) -> Option<i64> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let x = match arg {
+            Value::Int(n) => *n,
+            _ => return None,
+        };
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        // Mirror invoke_block1's plain-1-param gate: exactly one param, no
+        // rest/kw/block-param. Anything else stays on the interpreter path.
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        if !self.jit_native_block.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32);
+            self.jit_native_block.insert(proto_idx, compiled);
+        }
+        let np = match self.jit_native_block.get(&proto_idx) {
+            Some(Some(np)) => np,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        np.call(vm_ptr, &self_val, x)
+    }
+
+    /// Compile a 1-param block proto to native (B5). The arg binds to the block's
+    /// `param_start`; reads of captured outer slots decline (see `compile`).
+    /// Blocks with method calls are not modelled yet, so callees/getters are
+    /// empty — a block with any call declines.
+    #[cfg(feature = "jit-native")]
+    fn compile_native_block(
+        &mut self,
+        proto_idx: usize,
+        param_start: u32,
+        body_local_start: u32,
+    ) -> Option<crate::jit_native::NativeProto> {
+        let dummy = self.interner.intern("\u{0}block\u{0}"); // never names a real call
+        let callees = crate::intern::FxHashMap::default();
+        let getters = crate::intern::FxHashMap::default();
+        let syms = crate::jit_native::JitSyms {
+            length: self.interner.intern("length"),
+            size: self.interner.intern("size"),
+            bracket: self.interner.intern("[]"),
+            lshift: self.interner.intern("<<"),
+        };
+        crate::jit_native::compile(
+            &self.protos[proto_idx],
+            dummy,
+            &callees,
+            &getters,
+            &syms,
+            Some((param_start, body_local_start)),
+        )
     }
 
     pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {

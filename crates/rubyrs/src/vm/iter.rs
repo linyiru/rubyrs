@@ -224,6 +224,13 @@ impl Vm {
         if self.fiber_yield_pending.is_some() {
             return Ok(BlockStep::Value(Value::Nil));
         }
+        // B5: run a pure-int 1-param block as native code, skipping the
+        // interpreter frame + dispatch entirely. Falls through on any
+        // ineligibility or deopt.
+        #[cfg(feature = "jit-native")]
+        if let Some(r) = self.try_native_block1(block, &arg) {
+            return Ok(BlockStep::Value(Value::Int(r)));
+        }
         self.invoke_block1(block, arg)?;
         self.dispatch_until(pre_frames)?;
         if self.method_return.is_some() {

@@ -96,20 +96,57 @@ enum Kind {
 /// no frame, no dispatch (B4, ADR 0034). Sound because the reader is a pure read
 /// with no side effects, so a deopt that re-runs the whole method is behaviour-
 /// preserving.
+/// `block` is `Some((param_slot, body_local_start))` when compiling a 1-param
+/// BLOCK rather than a method (B5): the single arg binds to `param_slot` (not
+/// local 0) in the block's shared-locals layout, and any access to a captured
+/// OUTER slot (`< body_local_start`, other than the param) declines — so only a
+/// pure function of the param + the block's own temporaries compiles. `None` =
+/// a normal method (param at slot 0, the method shape-gate applies).
 pub(crate) fn compile(
     proto: &Proto,
     self_name_id: SymId,
     callees: &FxHashMap<SymId, usize>,
     getters: &FxHashMap<SymId, SymId>,
     syms: &JitSyms,
+    block: Option<(u32, u32)>,
 ) -> Option<NativeProto> {
-    // Shape gate: exactly one required positional param, nothing fancy.
-    if proto.n_required_positional != 1
-        || proto.params.len() != 1
-        || proto.rest_param.is_some()
-        || !proto.kw_param_defaults.is_empty()
+    // Shape gate (methods only): exactly one required positional param. A block's
+    // 1-param eligibility is checked by the caller via its `BlockHandle` fields.
+    if block.is_none()
+        && (proto.n_required_positional != 1
+            || proto.params.len() != 1
+            || proto.rest_param.is_some()
+            || !proto.kw_param_defaults.is_empty())
     {
         return None;
+    }
+    let param_slot = block.map(|(p, _)| p).unwrap_or(0);
+    // For a block, reject reads/writes of captured outer slots (closure state):
+    // a slot below the body-local start that isn't the param. Methods (None)
+    // impose no such restriction.
+    if let Some((_, body_start)) = block {
+        for op in &proto.code {
+            let slot = match op {
+                Op::LoadLocal(s) | Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
+                    Some(*s)
+                }
+                Op::BinOpLocalLocal(_, a, b) => {
+                    if ((*a as u32) < body_start && *a as u32 != param_slot)
+                        || ((*b as u32) < body_start && *b as u32 != param_slot)
+                    {
+                        return None;
+                    }
+                    None
+                }
+                _ => None,
+            };
+            if let Some(s) = slot
+                && (s as u32) < body_start
+                && s as u32 != param_slot
+            {
+                return None;
+            }
+        }
     }
     let code = &proto.code;
     // Op gate: every op must be one we model. Collect the distinct external
@@ -319,8 +356,10 @@ pub(crate) fn compile(
         let param = fb.block_params(entry)[2];
         let nloc = proto.n_locals as usize;
         let vars: Vec<Variable> = (0..nloc).map(|_| fb.declare_var(types::I64)).collect();
+        // The arg binds to `param_slot` — 0 for a method, the block's
+        // `param_start` for a block; every other local inits to 0.
         for (i, v) in vars.iter().enumerate() {
-            if i == 0 {
+            if i == param_slot as usize {
                 fb.def_var(*v, param);
             } else {
                 let z = fb.ins().iconst(types::I64, 0);
@@ -555,8 +594,15 @@ pub(crate) fn compile(
                 }
                 Op::Return => {
                     let (v, k) = stack.pop()?;
-                    if k == Kind::ArrayObjId {
-                        returns_array = true;
+                    // Only an Int or an Array result boxes correctly at the
+                    // boundary. A Bool/Nil result must NOT be returned as a raw
+                    // i64 — a block `{ |x| x > 5 }` returns true/false, not 1/0,
+                    // and a Bool-returning method would mis-box too. Decline so
+                    // the interpreter produces the correctly-typed value.
+                    match k {
+                        Kind::Int => {}
+                        Kind::ArrayObjId => returns_array = true,
+                        Kind::Bool | Kind::Nil => return None,
                     }
                     let ov = fb.use_var(ovf_var);
                     fb.ins().return_(&[v, ov]);

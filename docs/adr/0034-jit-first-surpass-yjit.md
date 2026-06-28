@@ -208,6 +208,34 @@ clean; diff_cruby unchanged.
 Next within B4: a polymorphic (N-way) cache instead of monomorphic-or-deopt, so a
 genuinely megamorphic site stays native; then B5 (block iterators).
 
+### B5 — native blocks called from the Rust iterator drivers
+
+Investigation reshaped B5: `sum`/`map`/`each`/`times` are **Rust iterator
+drivers** (a Rust loop calling `step_block*` per element), not Ruby bytecode with
+`Op::Yield`. So the win isn't compiling `yield` — it's making the Rust driver call
+a **native-compiled block** instead of re-entering the interpreter per element.
+
+**Step 1 (shipped): a 1-param pure-int block runs native.** `step_block1` gains a
+fast path: if the block is a 1-param (no rest/kw/block-param) pure int function of
+its param, it's compiled to a `NativeProto` (`jit_native_block` cache) and called
+directly — no frame, no `dispatch_until`. The block compile reuses the method
+codegen with two changes: the arg binds to the block's `param_start` (not local
+0), and any read of a captured OUTER slot declines (so only a pure function of the
+param + the block's own temporaries qualifies — a closure over outer state stays
+interpreted). Soundness is automatic: a native block is pure (the op-gate admits
+no side effect), and a deopt commits nothing, so the interpreter re-runs cleanly.
+
+A `Return` kind-gate was added: a Bool/Nil result now declines (a block
+`{ |x| x > 5 }` returns true/false, not 1/0) — which also fixed the pre-existing
+`comparison_failed_message` jit quirk.
+
+Measured (`(0...1000).map { |x| x*x }.sum`, 20k iters): **0.42s vs YJIT 0.73s —
+1.7×**. Correctness verified vs CRuby: a capturing block, a block with a method
+call, and a Float-returning block all fall back to the interpreter; a block
+reading a self ivar runs native; STRESS_GC clean; diff_cruby drops to 10 failures
+(one fewer — the fixed quirk). Next: Object-param blocks (`rows.map { |r|
+r.amount }`) reusing B4's getter/PIC, then capture reads and block-local arrays.
+
 ## Risks
 
 - **YJIT-class scope.** A full method JIT with PIC + deopt + broad coverage is a
