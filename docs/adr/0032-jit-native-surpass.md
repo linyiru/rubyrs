@@ -171,6 +171,7 @@ each compiled into a native loop and benchmarked individually (×50M unless note
 |---|---|---|---|
 | `@arr.size` (has_many count) | `jit_ivar_len` | 179ms | 2.6× YJIT |
 | `@h[:k]` Int (`@attributes[:col]`) | `jit_ivar_hash_get_int` | 652ms | 2.2× YJIT |
+| `@arr[i]` Int (result-row column) | `jit_ivar_array_get_int` | 222ms | 3.1× YJIT |
 | `@str.length` (string attr) | `jit_ivar_len` | 221ms | 2.5× YJIT |
 | `@price*@qty - @discount` (line total, 3 reads) | `jit_ivar_get_int` ×3 | 449ms | **1.9× CRuby** |
 
