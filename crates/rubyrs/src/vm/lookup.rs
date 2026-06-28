@@ -1683,6 +1683,46 @@ impl super::Vm {
             contains
         })
     }
+
+    /// `flatten_ancestors` with a per-class MRO cache. Returns EXACTLY what
+    /// `flatten_ancestors(cls)` would, memoised. The MRO is stable between
+    /// hierarchy changes, and `flatten_ancestors` ALWAYS builds the whole list
+    /// (no early-exit to defeat), so caching is a pure win — unlike the
+    /// early-exit `class_is_a` callers, which regress under a full-set cache.
+    /// Used by the hot `super` resolution path, where the receiver class
+    /// repeats across AR's callback-heavy method chains. Same invalidation as
+    /// `class_is_a_cached`: `method_gen` (bumped by include/prepend/extend) plus
+    /// a `Weak<Class>`+`ptr_eq` guard against freed-anonymous-class ptr reuse.
+    pub(crate) fn ancestors_cached(&self, cls: &Rc<Class>) -> Rc<Vec<Rc<Class>>> {
+        thread_local! {
+            static MRO_CACHE: std::cell::RefCell<
+                crate::intern::FxHashMap<
+                    usize,
+                    (std::rc::Weak<Class>, u32, Rc<Vec<Rc<Class>>>),
+                >,
+            > = std::cell::RefCell::new(crate::intern::FxHashMap::default());
+        }
+        let cur_gen = self.method_gen;
+        let cls_ptr = Rc::as_ptr(cls) as usize;
+        MRO_CACHE.with(|c| {
+            let mut cache = match c.try_borrow_mut() {
+                Ok(g) => g,
+                Err(_) => return Rc::new(flatten_ancestors(cls)),
+            };
+            if let Some((weak, g, mro)) = cache.get(&cls_ptr)
+                && *g == cur_gen
+                && weak.upgrade().is_some_and(|rc| Rc::ptr_eq(&rc, cls))
+            {
+                return mro.clone();
+            }
+            if cache.len() > 8192 {
+                cache.clear();
+            }
+            let mro = Rc::new(flatten_ancestors(cls));
+            cache.insert(cls_ptr, (Rc::downgrade(cls), cur_gen, mro.clone()));
+            mro
+        })
+    }
 }
 
 /// `target` is reachable via `cls`'s own `singleton_prepends`
@@ -2430,7 +2470,7 @@ impl Vm {
                 }
             },
         };
-        let ancs = flatten_ancestors(&recv_cls);
+        let ancs = self.ancestors_cached(&recv_cls);
         let m = ancs.iter()
             .position(|a| Rc::ptr_eq(a, &defining))
             .map(|i| i + 1)
