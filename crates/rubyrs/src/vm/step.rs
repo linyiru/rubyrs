@@ -1993,6 +1993,30 @@ impl Vm {
                         break;
                     }
                 }
+                // Phase 1.5: a LEXICAL-scope entry may be a registered-but-
+                // unloaded autoload. CRuby triggers it during the lexical
+                // phase — bare `Callbacks` inside `module ActiveRecord; class
+                // Base` loads + binds `ActiveRecord::Callbacks` (an
+                // `autoload :Callbacks`) BEFORE the ancestor walk, instead of
+                // wrongly binding an ancestor's same-named const
+                // (ActiveModel::Validations::Callbacks). This is exactly AR's
+                // `include Callbacks` at base.rb. Innermost-first, matching
+                // the phase-1 order.
+                if found.is_none() {
+                    for sym in &chain[..lex_split] {
+                        let name_str = self.interner.resolve(*sym).to_string();
+                        if self.fire_pending_autoload(&name_str)? {
+                            if let Some(c) = self.classes.get(sym).cloned() {
+                                found = Some(Value::Class(c));
+                                break;
+                            }
+                            if let Some(v) = self.constants.get(sym).cloned() {
+                                found = Some(v);
+                                break;
+                            }
+                        }
+                    }
+                }
                 // Phase 2: ancestors of the innermost lexical cref.
                 // This is what makes `include M` bring M's constants
                 // into scope — `class C; include M; def f = FOO; end`

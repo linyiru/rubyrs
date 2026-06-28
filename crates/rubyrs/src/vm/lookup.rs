@@ -1649,6 +1649,23 @@ pub(crate) fn flatten_ancestors(cls: &Rc<Class>) -> Vec<Rc<Class>> {
         for inc in current.includes.borrow().iter() {
             flatten_module(inc, &mut out, &mut visited);
         }
+        // A singleton-class shell carries the modules brought in via
+        // `extend M` / `class << self; include M` on its TARGET's
+        // `singleton_includes`, not on its own `includes`. In CRuby's
+        // metaclass ancestry those sit right after the singleton class
+        // itself, so surface them here — otherwise `C.singleton_class.
+        // ancestors`/`include?(M)`/`included_modules` and ancestor-based
+        // const lookup all miss `M` even though dispatch (which consults
+        // `singleton_includes` via `lookup_class_singleton_method`) finds
+        // its methods. Only shells have a `singleton_target`, so this is
+        // a no-op for ordinary classes/modules.
+        if let Some(target) =
+            current.singleton_target.borrow().as_ref().and_then(|w| w.upgrade())
+        {
+            for inc in target.singleton_includes.borrow().iter() {
+                flatten_module(inc, &mut out, &mut visited);
+            }
+        }
         let parent = current.superclass.borrow().clone();
         match parent {
             Some(p) => current = p,

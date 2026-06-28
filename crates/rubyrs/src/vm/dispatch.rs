@@ -5227,7 +5227,18 @@ impl Vm {
                         msg: "wrong argument type Class (expected Module)".to_string(),
                     }));
                 }
-                let included = super::class_is_a(&cls, m);
+                let mut included = super::class_is_a(&cls, m);
+                // Singleton shell: `extend`ed modules live on the target's
+                // `singleton_includes`, which class_is_a doesn't walk — match
+                // the (now singleton-aware) `ancestors`.
+                if !included
+                    && let Some(target) =
+                        cls.singleton_target.borrow().as_ref().and_then(|w| w.upgrade())
+                {
+                    included = target.singleton_includes.borrow().iter().any(|inc| {
+                        Rc::ptr_eq(inc, m) || super::class_is_a(inc, m)
+                    });
+                }
                 self.stack.push(Value::Bool(included));
                 Ok(true)
             }
