@@ -196,6 +196,33 @@ needs a general Value-aware codegen plus GC rooting for ALLOCATING ops (`String#
 building results). The i64-returning aggregations already cross the line; the
 Value-returning ones are the one piece that is a codegen extension, not a primitive.
 
+### 9. Value-BUILDING loop surpasses CRuby — the "GC rooting" wall was avoidable
+
+The remaining frontier of finding #8 (a value-typed loop that BUILDS results) is
+crossed, and the feared GC-rooting machinery turned out to be unnecessary.
+`def collect(n); a=[]; i=0; while i<n; a<<i; i+=1; end; a; end`, collect(5M):
+
+```
+rubyrs + JIT    19ms   — 6.5x YJIT, 6.6x CRuby, 40x rubyrs-interp
+CRuby + YJIT   123ms
+```
+
+Two facts collapse the difficulty: (1) an Array is a Copy `ObjId`, so a
+value-local array is just an i64 in codegen — no Value slot, no Rc, no lifetime
+tracking (the method returns the ObjId through the normal `(i64,i8)` convention;
+a `returns_array` flag tells the dispatch to box it `Value::Array`). (2)
+`heap.alloc` does not call `maybe_gc` (collection is VM-step-driven) and the new
+`jit_array_new`/`jit_array_push` primitives don't either, so NO collection runs
+mid-method — the unrooted value-local array cannot be swept; it is rooted by the
+caller's stack the instant the dispatch boxes + pushes it on return. Verified
+GC-safe under `STRESS_GC=1` (20 built arrays + a 50000-elem array intact under
+forced-every-step GC, exact CRuby match). Caveat: bypasses the alloc cap
+(`check_alloc`) — fine while `jit-native` is opt-in/trusted; deopt before a
+sandbox ships it.
+
+So the value-returning/value-building shapes ALSO surpass CRuby, not just the
+i64 aggregations — the AR aggregate/read/build surface is covered.
+
 ## Consequences
 
 - **The original question is answered with a qualified yes.** rubyrs's native
