@@ -15817,6 +15817,53 @@ impl Vm {
         Ok(())
     }
 
+    /// Compile a 1-arg integer-method proto to native, resolving its baked
+    /// cross-calls on `recv_cls` and guarding the result to that class. Returns
+    /// the compiled `NativeProto` (caller decides where to cache it — the
+    /// monomorphic `jit_native` slot or a `jit_native_poly` PIC variant). Pure
+    /// extraction of the former inline hook logic; behaviour-identical.
+    #[cfg(feature = "jit-native")]
+    fn compile_native_for_class(
+        &mut self,
+        proto_idx: usize,
+        recv_cls: Option<&std::rc::Rc<crate::value::Class>>,
+    ) -> Option<crate::jit_native::NativeProto> {
+        let self_name = self.protos[proto_idx].name.clone();
+        let self_name_id = self.interner.intern(&self_name);
+        let call_names: Vec<crate::intern::SymId> = self.protos[proto_idx]
+            .code
+            .iter()
+            .filter_map(|op| match op {
+                crate::bytecode::Op::CallNoRecv(name, 1, _) if *name != self_name_id => Some(*name),
+                _ => None,
+            })
+            .collect();
+        let mut callees: crate::intern::FxHashMap<crate::intern::SymId, usize> = Default::default();
+        if let Some(cls) = recv_cls {
+            for name in call_names {
+                if let Some(cm) = self.lookup_method_uncached(cls, name) {
+                    if let Some(Some(np)) = self.jit_native.get(&cm.proto_idx) {
+                        callees.insert(name, np.addr());
+                    }
+                }
+            }
+        }
+        let syms = crate::jit_native::JitSyms {
+            length: self.interner.intern("length"),
+            size: self.interner.intern("size"),
+            bracket: self.interner.intern("[]"),
+            lshift: self.interner.intern("<<"),
+        };
+        let compiled =
+            crate::jit_native::compile(&self.protos[proto_idx], self_name_id, &callees, &syms);
+        if let (Some(np), false) = (&compiled, callees.is_empty()) {
+            if let Some(cls) = recv_cls {
+                np.guard_class.set(std::rc::Rc::as_ptr(cls) as usize);
+            }
+        }
+        compiled
+    }
+
     pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {
         // GC rooting for the pre-frame window: receiver, args, and
         // the block arrive as Rust locals (popped off the operand
@@ -15883,64 +15930,14 @@ impl Vm {
         if self.jit_native_on && m.closure.is_none() && args.len() == 1 {
             let proto_idx = m.proto_idx;
             if !self.jit_native.contains_key(&proto_idx) {
-                let self_name = self.protos[proto_idx].name.clone();
-                let self_name_id = self.interner.intern(&self_name);
-                // Build the callee map by resolving each no-recv 1-arg call on
-                // the RECEIVER's class — so a baked native call targets exactly
-                // the method this receiver would dispatch to (polymorphism-safe:
-                // a subclass override resolves to ITS method here). The method is
-                // then class-guarded at dispatch. If the receiver isn't an
-                // Object, no cross-calls are baked.
-                let call_names: Vec<crate::intern::SymId> = self.protos[proto_idx]
-                    .code
-                    .iter()
-                    .filter_map(|op| match op {
-                        crate::bytecode::Op::CallNoRecv(name, 1, _) if *name != self_name_id => {
-                            Some(*name)
-                        }
-                        _ => None,
-                    })
-                    .collect();
                 let recv_cls = match &self_val {
                     Value::Object(oid) => self.heap.try_class_of(*oid),
                     _ => None,
                 };
-                let mut callees: crate::intern::FxHashMap<crate::intern::SymId, usize> =
-                    Default::default();
-                if let Some(cls) = &recv_cls {
-                    for name in call_names {
-                        if let Some(cm) = self.lookup_method_uncached(cls, name) {
-                            let cpidx = cm.proto_idx;
-                            if let Some(Some(np)) = self.jit_native.get(&cpidx) {
-                                callees.insert(name, np.addr());
-                            }
-                        }
-                    }
-                }
-                let syms = crate::jit_native::JitSyms {
-                    length: self.interner.intern("length"),
-                    size: self.interner.intern("size"),
-                    bracket: self.interner.intern("[]"),
-                    lshift: self.interner.intern("<<"),
-                };
-                let compiled = crate::jit_native::compile(
-                    &self.protos[proto_idx],
-                    self_name_id,
-                    &callees,
-                    &syms,
-                );
-                // Guard the compiled code to the class its callees were resolved
-                // on (only when it actually baked cross-calls).
-                if let (Some(np), false) = (&compiled, callees.is_empty()) {
-                    if let Some(cls) = &recv_cls {
-                        np.guard_class.set(std::rc::Rc::as_ptr(cls) as usize);
-                    }
-                }
+                let compiled = self.compile_native_for_class(proto_idx, recv_cls.as_ref());
                 self.jit_native.insert(proto_idx, compiled);
             }
             let vm_ptr = self as *const crate::vm::Vm;
-            // Polymorphism guard (same as the in-place fast path): code with
-            // baked cross-calls only runs on the class it was compiled for.
             let recv_class_ptr = match &self_val {
                 Value::Object(oid) => self
                     .heap
@@ -15948,19 +15945,59 @@ impl Vm {
                     .map(|c| std::rc::Rc::as_ptr(&c) as usize),
                 _ => None,
             };
-            let native: Option<Option<i64>> = match (
-                self.jit_native.get(&proto_idx).unwrap(),
-                crate::jit_native::as_int(&args[0]),
-            ) {
+            let arg_int = crate::jit_native::as_int(&args[0]);
+            // Phase 1: the monomorphic primary variant. `guard_class == 0` (no
+            // baked cross-calls) runs for ANY class; otherwise it only runs for
+            // the class it was compiled for. On a guard MISS for a known class,
+            // signal it so phase 2 serves a PIC variant instead of deopting (ADR
+            // 0034).
+            enum Prim {
+                Ran(Option<i64>),
+                Miss(usize),
+                No,
+            }
+            let prim = match (self.jit_native.get(&proto_idx).unwrap(), arg_int) {
                 (Some(np), Some(x)) => {
                     let gc = np.guard_class.get();
                     if gc == 0 || Some(gc) == recv_class_ptr {
-                        Some(np.call(vm_ptr, &self_val, x))
+                        Prim::Ran(np.call(vm_ptr, &self_val, x))
+                    } else if let Some(c) = recv_class_ptr {
+                        Prim::Miss(c)
                     } else {
-                        None
+                        Prim::No
                     }
                 }
-                _ => None,
+                _ => Prim::No,
+            };
+            let native: Option<Option<i64>> = match prim {
+                Prim::Ran(r) => Some(r),
+                Prim::No => None,
+                Prim::Miss(rcp) => {
+                    // PIC: a per-(proto, class) variant, compiled lazily on the
+                    // first miss for this class and cached thereafter. Correct by
+                    // construction — its callees were resolved on THIS class and
+                    // it is guarded to it, so it can only ever run for this class.
+                    let key = (proto_idx, rcp);
+                    if !self.jit_native_poly.contains_key(&key) {
+                        let recv_cls = match &self_val {
+                            Value::Object(oid) => self.heap.try_class_of(*oid),
+                            _ => None,
+                        };
+                        let variant = self.compile_native_for_class(proto_idx, recv_cls.as_ref());
+                        self.jit_native_poly.insert(key, variant);
+                    }
+                    match (self.jit_native_poly.get(&key), arg_int) {
+                        (Some(Some(np)), Some(x)) => {
+                            let gc = np.guard_class.get();
+                            if gc == 0 || gc == rcp {
+                                Some(np.call(vm_ptr, &self_val, x))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                }
             };
             if let Some(Some(r)) = native {
                 let is_array = matches!(

@@ -749,6 +749,16 @@ pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// Polymorphic inline cache (ADR 0034): a cross-call-bearing method
+    /// (`guard_class != 0`) compiled for its FIRST receiver class lives in
+    /// `jit_native`; subsequent receiver classes get their own variant here,
+    /// keyed `(proto_idx, class_ptr)`, each compiled with its callees resolved
+    /// on THAT class and guarded to it — so a polymorphic call site runs native
+    /// for every class instead of deopting for all but the first. Correct by
+    /// construction: a variant only ever runs for the class it was compiled for.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_poly:
+        crate::intern::FxHashMap<(usize, usize), Option<crate::jit_native::NativeProto>>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_value: crate::intern::FxHashMap<usize, Option<crate::jit_native::ValueProto>>,
     #[cfg(feature = "jit-native")]
@@ -1833,6 +1843,8 @@ impl Vm {
         Vm {
             #[cfg(feature = "jit-native")]
             jit_native: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_poly: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_value: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
