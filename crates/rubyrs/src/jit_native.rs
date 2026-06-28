@@ -167,7 +167,7 @@ pub(crate) fn compile(
     }
     // Value primitives callable from the body.
     builder.symbol("jit_ivar_get_int", jit_ivar_get_int as *const u8);
-    builder.symbol("jit_ivar_arraylen", jit_ivar_arraylen as *const u8);
+    builder.symbol("jit_ivar_len", jit_ivar_len as *const u8);
     builder.symbol("jit_ivar_hash_get_int", jit_ivar_hash_get_int as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
@@ -190,9 +190,9 @@ pub(crate) fn compile(
     let ivid = module
         .declare_function("jit_ivar_get_int", Linkage::Import, &ivsig)
         .ok()?;
-    // `jit_ivar_arraylen` shares the same `(vm, self, name:i32) -> (i64, i8)` sig.
+    // `jit_ivar_len` shares the same `(vm, self, name:i32) -> (i64, i8)` sig.
     let alid = module
-        .declare_function("jit_ivar_arraylen", Linkage::Import, &ivsig)
+        .declare_function("jit_ivar_len", Linkage::Import, &ivsig)
         .ok()?;
     // `jit_ivar_hash_get_int`: (vm, self, name:i32, key:i32) -> (i64, i8).
     let mut hgsig = module.make_signature();
@@ -665,13 +665,15 @@ pub(crate) unsafe extern "C" fn jit_ivar_hash_get_int(
     }
 }
 
-/// Native primitive: `recv.@name.length` where the ivar is an Array — returns
-/// the element count as i64, else deopt. The AR `has_many` collection-size
-/// shape (`record.comments.size` aggregated in a loop).
+/// Native primitive: `recv.@name.length` / `.size` where the ivar is an Array
+/// (element count) or a String (character count) — returns it as i64, else
+/// deopt. The AR `has_many` collection-size and string-attribute-length shapes.
+/// Non-default (registry) string encodings deopt so the interpreter's
+/// encoding-aware count stays authoritative.
 ///
 /// # Safety
 /// `vm`, `recv` must be valid for the call.
-pub(crate) unsafe extern "C" fn jit_ivar_arraylen(
+pub(crate) unsafe extern "C" fn jit_ivar_len(
     vm: *const crate::vm::Vm,
     recv: *const Value,
     name: u32,
@@ -692,7 +694,14 @@ pub(crate) unsafe extern "C" fn jit_ivar_arraylen(
             res: vm.heap.array(aid).len() as i64,
             ovf: 0,
         },
-        _ => NRet { res: 0, ovf: 1 }, // not an Array → deopt
+        Some(Value::Str(rs)) => match rs.encoding.get() {
+            crate::value::EncodingTag::Other(_) => NRet { res: 0, ovf: 1 }, // registry enc → interp
+            _ => NRet {
+                res: rs.char_count() as i64,
+                ovf: 0,
+            },
+        },
+        _ => NRet { res: 0, ovf: 1 }, // not an Array/String → deopt
     }
 }
 
