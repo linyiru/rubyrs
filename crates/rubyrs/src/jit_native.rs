@@ -39,6 +39,11 @@ pub(crate) struct NativeProto {
     /// When true the i64 result is an Array `ObjId` — the dispatch boxes it to
     /// `Value::Array` instead of `Value::Int`.
     pub(crate) returns_array: std::cell::Cell<bool>,
+    /// Monomorphic inline caches for `@arr[i].getter` sites (B4). Each holds
+    /// `(element_class_ptr, ivar_sym)`; their stable heap addresses are baked
+    /// into the native code as constants, so the `Box`es must outlive the code —
+    /// they're owned here and dropped with the proto (and its module).
+    _caches: Vec<Box<std::cell::Cell<(usize, u32)>>>,
 }
 
 impl NativeProto {
@@ -145,7 +150,10 @@ pub(crate) fn compile(
             Op::CallNoRecv(name, 0, _) if getters.contains_key(name) => {}
             // `@arr.length` / `@arr.size` — fused with the preceding LoadIvar in
             // codegen; a standalone one (no LoadIvar before) is rejected there.
-            Op::Call(m, 0, _) if *m == syms.length || *m == syms.size => {}
+            // Any other 0-arg call is admitted here but only LOWERED by codegen
+            // when it's the `getter` of a fused `@arr[i].getter` (B4); a
+            // standalone one hits codegen's catch-all and declines the proto.
+            Op::Call(_, 0, _) => {}
             // `@h[:k]` — `Call([], 1)`, fused with the LoadIvar + LoadSymbol.
             Op::Call(m, 1, _) if *m == syms.bracket => {}
             // `[]` literal + `a << elem` — the array-building shape, where the
@@ -185,6 +193,7 @@ pub(crate) fn compile(
     builder.symbol("jit_ivar_array_get_int", jit_ivar_array_get_int as *const u8);
     builder.symbol("jit_array_new", jit_array_new as *const u8);
     builder.symbol("jit_array_push", jit_array_push as *const u8);
+    builder.symbol("jit_arr_elem_attr_int", jit_arr_elem_attr_int as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
     let mut ctx = module.make_context();
@@ -247,6 +256,20 @@ pub(crate) fn compile(
     let apid = module
         .declare_function("jit_array_push", Linkage::Import, &apsig)
         .ok()?;
+    // `jit_arr_elem_attr_int`: (vm, recv, arr_name:i32, index:i64, getter:i32,
+    // cache:ptr) -> (i64, i8).
+    let mut aesig = module.make_signature();
+    aesig.params.push(AbiParam::new(ptr_ty));
+    aesig.params.push(AbiParam::new(ptr_ty));
+    aesig.params.push(AbiParam::new(types::I32));
+    aesig.params.push(AbiParam::new(types::I64));
+    aesig.params.push(AbiParam::new(types::I32));
+    aesig.params.push(AbiParam::new(ptr_ty));
+    aesig.returns.push(AbiParam::new(types::I64));
+    aesig.returns.push(AbiParam::new(types::I8));
+    let aeid = module
+        .declare_function("jit_arr_elem_attr_int", Linkage::Import, &aesig)
+        .ok()?;
     // Each callee imports with the same `(vm, self, i64) -> (i64, i8)` signature.
     let mut callee_fids: FxHashMap<SymId, cranelift_module::FuncId> = FxHashMap::default();
     for cid in &used_callees {
@@ -258,6 +281,9 @@ pub(crate) fn compile(
     let mut fbctx = FunctionBuilderContext::new();
     // Set inside the codegen block when the returned value is an array ObjId.
     let mut returns_array = false;
+    // Inline-cache cells for `@arr[i].getter` sites (B4); their addresses are
+    // baked into the code, so they're moved into the NativeProto to outlive it.
+    let mut caches: Vec<Box<std::cell::Cell<(usize, u32)>>> = Vec::new();
     {
         let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         // A reference to THIS function, for compiling self-recursive calls
@@ -269,6 +295,7 @@ pub(crate) fn compile(
         let arrget_ref = module.declare_func_in_func(agid, fb.func);
         let arrnew_ref = module.declare_func_in_func(anid, fb.func);
         let arrpush_ref = module.declare_func_in_func(apid, fb.func);
+        let arrelem_ref = module.declare_func_in_func(aeid, fb.func);
         // FuncRefs for each external callee.
         let mut callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
         for (cid, cfid) in &callee_fids {
@@ -352,6 +379,43 @@ pub(crate) fn compile(
                 // otherwise read an Int ivar. A non-matching heap shape sets ovf
                 // → deopt. The fused Call op is skipped (`ip += 1`).
                 Op::LoadIvar(s) => {
+                    // `@arr[local].getter` (B4) → LoadIvar, LoadLocal, Call([],1),
+                    // Call(getter,0). Fused into one inline-cached primitive:
+                    // array-get + element-class PIC + int attribute read. The
+                    // index local must be Int.
+                    let arr_elem_attr = match (code.get(ip + 1), code.get(ip + 2), code.get(ip + 3))
+                    {
+                        (
+                            Some(Op::LoadLocal(slot)),
+                            Some(Op::Call(b, 1, _)),
+                            Some(Op::Call(g, 0, _)),
+                        ) if *b == syms.bracket && local_kinds[*slot as usize] == Kind::Int => {
+                            Some((*slot, *g))
+                        }
+                        _ => None,
+                    };
+                    if let Some((slot, getter)) = arr_elem_attr {
+                        let name = fb.ins().iconst(types::I32, s.0 as i64);
+                        let index = fb.use_var(vars[slot as usize]);
+                        let gname = fb.ins().iconst(types::I32, getter.0 as i64);
+                        let cache = Box::new(std::cell::Cell::new((0usize, 0u32)));
+                        let cache_addr =
+                            &*cache as *const std::cell::Cell<(usize, u32)> as i64;
+                        caches.push(cache);
+                        let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
+                        let inst = fb.ins().call(
+                            arrelem_ref,
+                            &[vm_param, self_param, name, index, gname, cache_const],
+                        );
+                        let (res, of) = {
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
+                        };
+                        acc_ovf(&mut fb, of);
+                        stack.push((res, Kind::Int));
+                        ip += 4; // consume LoadIvar + LoadLocal + Call([]) + Call(getter)
+                        continue;
+                    }
                     // `@h[:k]` → LoadIvar, LoadSymbol(k), Call([], 1).
                     let hash_key = match (code.get(ip + 1), code.get(ip + 2)) {
                         (Some(Op::LoadSymbol(k)), Some(Op::Call(m, 1, _)))
@@ -578,6 +642,7 @@ pub(crate) fn compile(
         ptr,
         guard_class: std::cell::Cell::new(0),
         returns_array: std::cell::Cell::new(returns_array),
+        _caches: caches,
     })
 }
 
@@ -887,6 +952,96 @@ pub(crate) unsafe extern "C" fn jit_ivar_array_get_int(
     match res {
         Some(n) => NRet { res: n, ovf: 0 },
         None => NRet { res: 0, ovf: 1 },
+    }
+}
+
+/// Native primitive (B4): `recv.@arr[index].getter`, where `getter` is a simple
+/// int attribute reader on the element. The AR aggregation shape — iterate a
+/// collection ivar and read an integer attribute off each element.
+///
+/// A MONOMORPHIC inline cache `cache` holds `(element_class_ptr, ivar_sym)`. On
+/// a class hit it reads the cached ivar; on an empty cache it fills it (resolve
+/// `getter` → `getter_ivar` on the element's class); on a class MISS (a
+/// different element class — megamorphic) it deopts, so the interpreter runs
+/// that iteration. Also deopts (ovf=1) on: a non-Array ivar, an out-of-bounds or
+/// non-Object element, a `getter` that isn't a simple reader, or a non-Int
+/// attribute. Every deopt re-runs the whole (pure) driver in the interpreter, so
+/// behaviour is preserved.
+///
+/// # Safety
+/// `vm`, `recv`, `cache` must be valid for the call.
+pub(crate) unsafe extern "C" fn jit_arr_elem_attr_int(
+    vm: *const crate::vm::Vm,
+    recv: *const Value,
+    arr_name: u32,
+    index: i64,
+    getter_name: u32,
+    cache: *const std::cell::Cell<(usize, u32)>,
+) -> NRet {
+    let deopt = NRet { res: 0, ovf: 1 };
+    let vm = unsafe { &*vm };
+    let recv = unsafe { &*recv };
+    let cache = unsafe { &*cache };
+    let arr_name_id = crate::intern::SymId(arr_name);
+    // recv.@arr — must be an Array ivar.
+    let arr_id = {
+        let iv = match recv {
+            Value::Object(oid) => match vm.heap.get(*oid) {
+                crate::heap::HeapObj::Instance(inst) => inst.ivars.get(&arr_name_id).cloned(),
+                _ => None,
+            },
+            Value::Class(cls) => cls.ivars.borrow().get(&arr_name_id).cloned(),
+            _ => None,
+        };
+        match iv {
+            Some(Value::Array(aid)) => aid,
+            _ => return deopt,
+        }
+    };
+    // element at index (Ruby negative wrap; out of bounds → deopt).
+    let elem_oid = {
+        let arr = vm.heap.array(arr_id);
+        let i = if index < 0 { arr.len() as i64 + index } else { index };
+        if i < 0 || i as usize >= arr.len() {
+            return deopt;
+        }
+        match &arr[i as usize] {
+            Value::Object(eoid) => *eoid,
+            _ => return deopt,
+        }
+    };
+    let ecls = match vm.heap.try_class_of(elem_oid) {
+        Some(c) => c,
+        None => return deopt,
+    };
+    let ecls_ptr = std::rc::Rc::as_ptr(&ecls) as usize;
+    // Inline cache: hit → cached ivar; empty → fill; class miss → deopt.
+    let (cls_ptr, cached_ivar) = cache.get();
+    let ivar = if cls_ptr == ecls_ptr {
+        cached_ivar
+    } else if cls_ptr == 0 {
+        let m = match vm.lookup_method_uncached(&ecls, crate::intern::SymId(getter_name)) {
+            Some(m) => m,
+            None => return deopt,
+        };
+        let iv = match vm.protos[m.proto_idx].getter_ivar {
+            Some(iv) => iv,
+            None => return deopt, // not a simple reader → interpreter
+        };
+        cache.set((ecls_ptr, iv.0));
+        iv.0
+    } else {
+        return deopt; // megamorphic site → interpreter
+    };
+    // element.@ivar — must be an Int.
+    match vm.heap.get(elem_oid) {
+        crate::heap::HeapObj::Instance(inst) => {
+            match inst.ivars.get(&crate::intern::SymId(ivar)) {
+                Some(Value::Int(n)) => NRet { res: *n, ovf: 0 },
+                _ => deopt,
+            }
+        }
+        _ => deopt,
     }
 }
 

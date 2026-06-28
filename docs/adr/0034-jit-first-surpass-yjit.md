@@ -189,8 +189,24 @@ methods). So B4 keeps that invariant rather than adding an arbitrary re-entry:
 frame, no dispatch. Resolved via the proto's precomputed `getter_ivar`, guarded
 to the resolving class. A non-Int ivar deopts (sound: pure read). Measured
 (`s += amount` aggregation driver, 20M calls): **0.06s vs YJIT 0.44s — 7×**.
-diff_cruby unchanged. Next: array-element receivers (`rows[j].amount`) with a
-real inline class-guard PIC — the megamorphic AR shape (s2).
+diff_cruby unchanged.
+
+**Step 2 (shipped): array-element attribute reads with a real inline PIC.** The
+AR aggregation `t += @rows[j].amount` (a collection ivar, variable index, int
+attribute) is fused into one primitive `jit_arr_elem_attr_int` doing array-get +
+element-class inline cache + attribute read. The cache is a per-site
+`Box<Cell<(class_ptr, ivar)>>` owned by the `NativeProto`, its address baked into
+the code as a constant — monomorphic: a hit reads the cached ivar, an empty cache
+fills it (resolve `getter`→`getter_ivar` on the element's class), and a class
+miss / non-Int / OOB / non-Object case deopts the whole pure driver to the
+interpreter (which handles the megamorphic tail). Measured (`@rows[j].amount`,
+1000×20k elements): **0.28s vs YJIT 0.51s — 1.8×**. Correctness verified against
+CRuby: megamorphic alternating classes, a non-Int (Float) attribute, and a
+non-Object array element all deopt to the exact interpreter result; STRESS_GC
+clean; diff_cruby unchanged.
+
+Next within B4: a polymorphic (N-way) cache instead of monomorphic-or-deopt, so a
+genuinely megamorphic site stays native; then B5 (block iterators).
 
 ## Risks
 
