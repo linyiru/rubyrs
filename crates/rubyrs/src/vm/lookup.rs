@@ -1546,6 +1546,32 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
             }
         }
     }
+    // Fast path: a CLASS ancestor (not a module) is reachable ONLY through the
+    // superclass chain — classes are never `include`d or `prepend`ed — so walk
+    // that chain directly by pointer with NO include/prepend HashSet. This is
+    // the hot `is_a?(SomeClass)` / `rescue SomeError` / `case x when SomeClass`
+    // shape and skips `run`'s per-superclass-level `walks_through` (and its set
+    // inserts over the deep include graph) entirely. Module targets still take
+    // the full graph walk below.
+    if !ancestor.is_module {
+        let target = Rc::as_ptr(ancestor);
+        let mut current = child.clone();
+        let mut depth = 0u32;
+        loop {
+            if Rc::as_ptr(&current) == target {
+                return true;
+            }
+            depth += 1;
+            if depth > 1_000_000 {
+                return false; // cyclic superclass chain — unreachable in a sane VM
+            }
+            let parent = current.superclass.borrow().clone();
+            match parent {
+                Some(p) => current = p,
+                None => return false,
+            }
+        }
+    }
     thread_local! {
         static SCRATCH: std::cell::RefCell<(
             crate::intern::FxHashSet<*const Class>,
