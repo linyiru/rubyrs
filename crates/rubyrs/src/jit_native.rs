@@ -9,12 +9,13 @@
 //! interpreter — so the JIT can never change a result, only its speed.
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, AbiParam, Block, BlockArg, InstBuilder, Value as ClValue};
+use cranelift_codegen::ir::{types, AbiParam, Block, BlockArg, FuncRef, InstBuilder, Value as ClValue};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
 
 use crate::bytecode::{BinOpKind, Op, Proto};
+use crate::intern::{FxHashMap, SymId};
 use crate::value::Value;
 
 #[repr(C)]
@@ -41,6 +42,15 @@ impl NativeProto {
             None
         }
     }
+
+    /// Machine address of the compiled code — registered as a JIT symbol so a
+    /// DIFFERENT method's compilation can emit a native call to this one
+    /// (cross-method call compilation; the receiver is assumed monomorphic,
+    /// invalidated on `method_gen` like every other cache).
+    #[inline]
+    pub(crate) fn addr(&self) -> usize {
+        self.ptr as usize
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -52,10 +62,17 @@ enum Kind {
 
 /// Compile an eligible `Proto` to native code, or `None` to keep interpreting.
 /// `self_name_id` is the SymId of the method's own name — a no-recv call to it
-/// is treated as self-recursion and compiled to a native self-call (the first
-/// step toward a call-compiling JIT; polymorphism via an overriding subclass
-/// is the next layer, an inline-cache guard).
-pub(crate) fn compile(proto: &Proto, self_name_id: crate::intern::SymId) -> Option<NativeProto> {
+/// is a self-recursive native call. `callees` maps the name of an
+/// already-compiled 1-arg integer method to its machine address, so a no-recv
+/// call to ANOTHER such method also compiles to a native call — this is the
+/// "compilation scope" step: a method's whole call tree can run native (like
+/// `fib`), not just the leaf. Polymorphism (an overriding subclass) is guarded
+/// only by `method_gen` invalidation for now.
+pub(crate) fn compile(
+    proto: &Proto,
+    self_name_id: SymId,
+    callees: &FxHashMap<SymId, usize>,
+) -> Option<NativeProto> {
     // Shape gate: exactly one required positional param, nothing fancy.
     if proto.n_required_positional != 1
         || proto.params.len() != 1
@@ -65,7 +82,9 @@ pub(crate) fn compile(proto: &Proto, self_name_id: crate::intern::SymId) -> Opti
         return None;
     }
     let code = &proto.code;
-    // Op gate: every op must be one we model.
+    // Op gate: every op must be one we model. Collect the distinct external
+    // callees actually used, so only those get a JIT symbol + import.
+    let mut used_callees: Vec<SymId> = Vec::new();
     for op in code {
         match op {
             Op::LoadConstInt(_)
@@ -94,9 +113,14 @@ pub(crate) fn compile(proto: &Proto, self_name_id: crate::intern::SymId) -> Opti
                 // Div/Mod need floor-semantics + div-by-zero deopt — not modelled yet.
                 _ => return None,
             },
-            // Self-recursive 1-arg call (`fib(n-1)`): compiled to a native
-            // self-call. Any other call shape is ineligible.
+            // Self-recursive 1-arg call (`fib(n-1)`) → native self-call.
             Op::CallNoRecv(name, 1, _) if *name == self_name_id => {}
+            // Call to another already-compiled 1-arg method → native call.
+            Op::CallNoRecv(name, 1, _) if callees.contains_key(name) => {
+                if !used_callees.contains(name) {
+                    used_callees.push(*name);
+                }
+            }
             _ => return None,
         }
     }
@@ -118,7 +142,11 @@ pub(crate) fn compile(proto: &Proto, self_name_id: crate::intern::SymId) -> Opti
         }
     }
 
-    let builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    // Register each used callee's machine address as a symbol the JIT links.
+    for cid in &used_callees {
+        builder.symbol(format!("c{}", cid.0), callees[cid] as *const u8);
+    }
     let mut module = JITModule::new(builder);
     let mut ctx = module.make_context();
     let mut sig = module.make_signature();
@@ -127,12 +155,25 @@ pub(crate) fn compile(proto: &Proto, self_name_id: crate::intern::SymId) -> Opti
     sig.returns.push(AbiParam::new(types::I8));
     ctx.func.signature = sig.clone();
     let fid = module.declare_function("m", Linkage::Export, &sig).ok()?;
+    // Each callee imports with the same `(i64) -> (i64, i8)` integer signature.
+    let mut callee_fids: FxHashMap<SymId, cranelift_module::FuncId> = FxHashMap::default();
+    for cid in &used_callees {
+        let cfid = module
+            .declare_function(&format!("c{}", cid.0), Linkage::Import, &sig)
+            .ok()?;
+        callee_fids.insert(*cid, cfid);
+    }
     let mut fbctx = FunctionBuilderContext::new();
     {
         let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         // A reference to THIS function, for compiling self-recursive calls
         // (`fib(n-1)` → a native call back into the same code).
         let self_ref = module.declare_func_in_func(fid, fb.func);
+        // FuncRefs for each external callee.
+        let mut callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
+        for (cid, cfid) in &callee_fids {
+            callee_refs.insert(*cid, module.declare_func_in_func(*cfid, fb.func));
+        }
 
         // Cranelift block per leader ip; a final `done` for the post-Return tail.
         let mut blocks: Vec<Option<cranelift_codegen::ir::Block>> = vec![None; n + 1];
@@ -282,15 +323,23 @@ pub(crate) fn compile(proto: &Proto, self_name_id: crate::intern::SymId) -> Opti
                     fb.ins().return_(&[v, ov]);
                     cur_open = false;
                 }
-                // Self-recursive call: pop the i64 arg, emit a native call to
-                // this same function, push the result, OR the callee's overflow
-                // flag into ours (so a deep overflow deopts the whole tree).
-                Op::CallNoRecv(name, 1, _) if *name == self_name_id => {
+                // 1-arg no-recv call: pop the i64 arg, emit a native call to
+                // this function (self-recursion) OR another compiled method,
+                // push the result, OR the callee's overflow flag into ours (so a
+                // deep overflow deopts the whole tree).
+                Op::CallNoRecv(name, 1, _)
+                    if *name == self_name_id || callee_refs.contains_key(name) =>
+                {
+                    let fref = if *name == self_name_id {
+                        self_ref
+                    } else {
+                        callee_refs[name]
+                    };
                     let (arg, ka) = stack.pop()?;
                     if ka != Kind::Int {
                         return None;
                     }
-                    let inst = fb.ins().call(self_ref, &[arg]);
+                    let inst = fb.ins().call(fref, &[arg]);
                     let (res, ovf) = {
                         let r = fb.inst_results(inst);
                         (r[0], r[1])

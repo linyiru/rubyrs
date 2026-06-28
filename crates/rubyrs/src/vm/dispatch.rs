@@ -15847,7 +15847,34 @@ impl Vm {
             if !self.jit_native.contains_key(&proto_idx) {
                 let self_name = self.protos[proto_idx].name.clone();
                 let self_name_id = self.interner.intern(&self_name);
-                let compiled = crate::jit_native::compile(&self.protos[proto_idx], self_name_id);
+                // Build the callee map (name → machine address) from methods
+                // already JIT-compiled, so this method can compile native calls
+                // into them — its whole call tree runs native (compilation
+                // scope, the AR-surpass lever).
+                let compiled_addrs: Vec<(usize, usize)> = self
+                    .jit_native
+                    .iter()
+                    .filter_map(|(p, np)| np.as_ref().map(|n| (*p, n.addr())))
+                    .collect();
+                let mut callees: crate::intern::FxHashMap<crate::intern::SymId, usize> =
+                    Default::default();
+                let mut ambiguous: Vec<crate::intern::SymId> = Vec::new();
+                for (p, addr) in compiled_addrs {
+                    let nm = self.protos[p].name.clone();
+                    let nid = self.interner.intern(&nm);
+                    // A name shared by two compiled methods (different classes)
+                    // can't be resolved statically — drop it so such calls stay
+                    // interpreted (correctness over reach; a real receiver-guard
+                    // inline cache is the proper fix).
+                    if callees.insert(nid, addr).is_some() {
+                        ambiguous.push(nid);
+                    }
+                }
+                for nid in ambiguous {
+                    callees.remove(&nid);
+                }
+                let compiled =
+                    crate::jit_native::compile(&self.protos[proto_idx], self_name_id, &callees);
                 self.jit_native.insert(proto_idx, compiled);
             }
             let native: Option<Option<i64>> = match (
