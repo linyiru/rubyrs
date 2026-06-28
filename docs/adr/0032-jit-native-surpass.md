@@ -162,6 +162,39 @@ locals/results threaded through the call tree) + string/hash primitives + a
 polymorphism-safe inline cache — each a known primitive/codegen extension, no new
 wall.
 
+### 8. AR value primitives surpass CRuby; polymorphism made safe; the frontier
+
+Building on findings #6–7, the value-touching JIT now covers the AR-hot shapes,
+each compiled into a native loop and benchmarked individually (×50M unless noted):
+
+| Shape | Native primitive | rubyrs+JIT | vs |
+|---|---|---|---|
+| `@arr.size` (has_many count) | `jit_ivar_len` | 179ms | 2.6× YJIT |
+| `@h[:k]` Int (`@attributes[:col]`) | `jit_ivar_hash_get_int` | 652ms | 2.2× YJIT |
+| `@str.length` (string attr) | `jit_ivar_len` | 221ms | 2.5× YJIT |
+| `@price*@qty - @discount` (line total, 3 reads) | `jit_ivar_get_int` ×3 | 449ms | **1.9× CRuby** |
+
+The multi-read case exposed — and fixed — a real bottleneck: the ivar primitives
+were CLONING the whole `Value` (a String clone bumps an Rc) to extract one i64.
+Matching by reference and copying out the i64 took the 3-read line-total from
+6225ms (a LOSS to the interpreter) to 449ms (1.9× CRuby); single-read demos
+improved 3× too. The native loop's win is otherwise eaten by per-read clones.
+
+Polymorphism is now SAFE (not just monomorphic-by-name): cross-call callees are
+resolved on the receiver's class via `lookup_method_uncached`, and `NativeProto`
+carries a `guard_class` checked at both dispatch sites — a subclass overriding a
+baked callee deopts to the interpreter (verified: `D<C` overriding `sq` makes
+`d.sum_n` correctly run the interpreter → 450, not the baked 285).
+
+Value-RETURNING is partly done: `def [](k); @attributes[k]; end` returns the
+column's actual Value of any type (`jit_hash_get_value`, copy-out, no allocation)
+— correct across String/Int/nil, 1.65× over interp. It does NOT surpass CRuby:
+a leaf value method from an interpreted loop. The remaining frontier is the
+value-TYPED loop — Value LOCALS threaded through a compiled loop/call tree — which
+needs a general Value-aware codegen plus GC rooting for ALLOCATING ops (`String#+`,
+building results). The i64-returning aggregations already cross the line; the
+Value-returning ones are the one piece that is a codegen extension, not a primitive.
+
 ## Consequences
 
 - **The original question is answered with a qualified yes.** rubyrs's native
