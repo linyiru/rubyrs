@@ -722,20 +722,77 @@ pub(crate) unsafe extern "C" fn jit_ivar_len(
 ///                                                                  → read arg0's `@s`
 /// The latter is the AR-shaped, NON-fast-pathed win: the interpreter pays a full
 /// `instance_variable_get` dispatch + a frame; native code pays one direct call.
-pub(crate) fn compile_value(proto: &Proto, ivg_sym: crate::intern::SymId) -> Option<ValueProto> {
-    // (ivar name sym, which incoming Value to read — recv=param1 or arg0=param2)
-    let (ivar_sym, read_arg0): (crate::intern::SymId, bool) = match proto.code.as_slice() {
-        [Op::LoadIvar(s), Op::Return] => (*s, false),
+/// Native primitive: `recv.@name[key]` returning the Hash value (ANY type) by
+/// pointer — the AR `record[:col]` attribute reader (a column's actual value, a
+/// String/Int/etc.), not just an Int. Absent key or non-Hash ivar → nil.
+/// Reads the heap and copies an EXISTING value out (no new allocation).
+///
+/// # Safety
+/// `vm`, `recv`, `key`, `out` must be valid for the call.
+pub(crate) unsafe extern "C" fn jit_hash_get_value(
+    vm: *const crate::vm::Vm,
+    recv: *const Value,
+    name: u32,
+    key: *const Value,
+    out: *mut Value,
+) {
+    let vm = unsafe { &*vm };
+    let recv = unsafe { &*recv };
+    let key = unsafe { &*key };
+    let name_id = crate::intern::SymId(name);
+    let result = match recv {
+        Value::Object(oid) => match vm.heap.get(*oid) {
+            crate::heap::HeapObj::Instance(inst) => match inst.ivars.get(&name_id) {
+                Some(Value::Hash(hid)) => {
+                    let hid = *hid;
+                    vm.heap
+                        .hash(hid)
+                        .iter()
+                        .find(|(hk, _)| hk.ruby_eql(key, &vm.heap))
+                        .map(|(_, v)| v.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    };
+    unsafe { std::ptr::write(out, result.unwrap_or(Value::Nil)) };
+}
+
+/// Recognised value-method body shapes.
+enum ValuePat {
+    /// `jit_ivar_get(target, sym)` — getter (target=recv) or ivar_get wrapper
+    /// (target=arg0).
+    IvarGet { sym: crate::intern::SymId, read_arg0: bool },
+    /// `jit_hash_get_value(recv, sym, arg0)` — `@h[key]` returning any Value.
+    HashAttr { sym: crate::intern::SymId },
+}
+
+pub(crate) fn compile_value(
+    proto: &Proto,
+    ivg_sym: crate::intern::SymId,
+    bracket_sym: crate::intern::SymId,
+) -> Option<ValueProto> {
+    let pat = match proto.code.as_slice() {
+        [Op::LoadIvar(s), Op::Return] => ValuePat::IvarGet { sym: *s, read_arg0: false },
         [Op::LoadLocal(0), Op::LoadSymbol(s), Op::Call(name, 1, _), Op::Return]
             if *name == ivg_sym =>
         {
-            (*s, true)
+            ValuePat::IvarGet { sym: *s, read_arg0: true }
+        }
+        // `def attr(k); @attributes[k]; end` → @ivar[arg0] returning any Value.
+        [Op::LoadIvar(s), Op::LoadLocal(0), Op::Call(name, 1, _), Op::Return]
+            if *name == bracket_sym =>
+        {
+            ValuePat::HashAttr { sym: *s }
         }
         _ => return None,
     };
 
     let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
     builder.symbol("jit_ivar_get", jit_ivar_get as *const u8);
+    builder.symbol("jit_hash_get_value", jit_hash_get_value as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
     let mut ctx = module.make_context();
@@ -746,25 +803,47 @@ pub(crate) fn compile_value(proto: &Proto, ivg_sym: crate::intern::SymId) -> Opt
     sig.params.push(AbiParam::new(ptr_ty)); // out
     ctx.func.signature = sig.clone();
     let fid = module.declare_function("g", Linkage::Export, &sig).ok()?;
-    let mut hsig = module.make_signature();
-    hsig.params.push(AbiParam::new(ptr_ty)); // vm
-    hsig.params.push(AbiParam::new(ptr_ty)); // target recv
-    hsig.params.push(AbiParam::new(types::I32)); // name
-    hsig.params.push(AbiParam::new(ptr_ty)); // out
-    let hid = module.declare_function("jit_ivar_get", Linkage::Import, &hsig).ok()?;
+    // jit_ivar_get: (vm, target, name:i32, out)
+    let mut igsig = module.make_signature();
+    igsig.params.push(AbiParam::new(ptr_ty));
+    igsig.params.push(AbiParam::new(ptr_ty));
+    igsig.params.push(AbiParam::new(types::I32));
+    igsig.params.push(AbiParam::new(ptr_ty));
+    let igid = module.declare_function("jit_ivar_get", Linkage::Import, &igsig).ok()?;
+    // jit_hash_get_value: (vm, recv, name:i32, key:ptr, out)
+    let mut hgsig = module.make_signature();
+    hgsig.params.push(AbiParam::new(ptr_ty));
+    hgsig.params.push(AbiParam::new(ptr_ty));
+    hgsig.params.push(AbiParam::new(types::I32));
+    hgsig.params.push(AbiParam::new(ptr_ty));
+    hgsig.params.push(AbiParam::new(ptr_ty));
+    let hgid = module
+        .declare_function("jit_hash_get_value", Linkage::Import, &hgsig)
+        .ok()?;
     let mut fbctx = FunctionBuilderContext::new();
     {
         let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
-        let href = module.declare_func_in_func(hid, fb.func);
+        let igref = module.declare_func_in_func(igid, fb.func);
+        let hgref = module.declare_func_in_func(hgid, fb.func);
         let b = fb.create_block();
         fb.append_block_params_for_function_params(b);
         fb.switch_to_block(b);
         fb.seal_block(b);
         let vm = fb.block_params(b)[0];
-        let target = fb.block_params(b)[if read_arg0 { 2 } else { 1 }];
+        let recv = fb.block_params(b)[1];
+        let arg0 = fb.block_params(b)[2];
         let out = fb.block_params(b)[3];
-        let name = fb.ins().iconst(types::I32, ivar_sym.0 as i64);
-        fb.ins().call(href, &[vm, target, name, out]);
+        match pat {
+            ValuePat::IvarGet { sym, read_arg0 } => {
+                let target = if read_arg0 { arg0 } else { recv };
+                let name = fb.ins().iconst(types::I32, sym.0 as i64);
+                fb.ins().call(igref, &[vm, target, name, out]);
+            }
+            ValuePat::HashAttr { sym } => {
+                let name = fb.ins().iconst(types::I32, sym.0 as i64);
+                fb.ins().call(hgref, &[vm, recv, name, arg0, out]);
+            }
+        }
         fb.ins().return_(&[]);
         fb.finalize();
     }

@@ -15942,8 +15942,12 @@ impl Vm {
             // frame. Result is any `Value` (no deopt; correct by construction).
             if !self.jit_value.contains_key(&proto_idx) {
                 let ivg_sym = self.interner.intern("instance_variable_get");
-                let compiled =
-                    crate::jit_native::compile_value(&self.protos[proto_idx], ivg_sym);
+                let bracket_sym = self.interner.intern("[]");
+                let compiled = crate::jit_native::compile_value(
+                    &self.protos[proto_idx],
+                    ivg_sym,
+                    bracket_sym,
+                );
                 self.jit_value.insert(proto_idx, compiled);
             }
             let vm_ptr = self as *const crate::vm::Vm;
