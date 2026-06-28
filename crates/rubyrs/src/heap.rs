@@ -464,6 +464,25 @@ pub(crate) struct Heap {
     pub(crate) free: Vec<u32>,
     pub(crate) live_count: usize,
     pub(crate) next_gc: usize,
+    /// Generational GC step 1 (groundwork — does not change GC behaviour yet):
+    /// `old[i] == true` once slot `i`'s object has survived a collection. New
+    /// allocations are young (`false`). A future minor GC will skip re-walking
+    /// old objects; `remembered` is the write-barrier's record of old objects
+    /// mutated since the last collection (the only way an old object can come to
+    /// reference a young one), so the minor GC still finds young objects held
+    /// only by an old one. The barrier lives in the single `get_mut` mutation
+    /// chokepoint, so it cannot be bypassed.
+    pub(crate) old: Vec<bool>,
+    pub(crate) remembered: Vec<u32>,
+    /// Minor collections since the last major (full) one. A minor never sweeps
+    /// old objects, so old garbage accumulates until a periodic major reclaims
+    /// it; this counter triggers that major.
+    pub(crate) minors_since_major: u32,
+    /// Slots allocated since the last collection — the YOUNG region. A minor GC
+    /// resets + sweeps ONLY these (O(young)), instead of scanning every slot
+    /// (O(heap)); old objects keep their mark from the last collection. Cleared
+    /// each collection (survivors are promoted to old, the rest freed).
+    pub(crate) young_slots: Vec<u32>,
     /// When `Some(n)`, the runtime refuses to allocate past `n` live
     /// objects; the caller traps with `ResourceExhausted`. Hosts running
     /// untrusted scripts should set this; default (None) is unlimited.
@@ -493,6 +512,10 @@ impl Heap {
             slots: vec![],
             marks: vec![],
             free: vec![],
+            old: vec![],
+            remembered: vec![],
+            minors_since_major: 0,
+            young_slots: vec![],
             live_count: 0,
             // Match the post-sweep min threshold so cold-start
             // workloads (preamble load + first eval) get the same
@@ -526,11 +549,15 @@ impl Heap {
         if let Some(i) = self.free.pop() {
             self.slots[i as usize] = Slot::Live(obj);
             self.marks[i as usize] = false;
+            self.old[i as usize] = false; // a freshly (re)allocated object is young
+            self.young_slots.push(i);
             return ObjId(i);
         }
         let i = self.slots.len() as u32;
         self.slots.push(Slot::Live(obj));
         self.marks.push(false);
+        self.old.push(false);
+        self.young_slots.push(i);
         ObjId(i)
     }
     pub(crate) fn get(&self, id: ObjId) -> &HeapObj {
@@ -548,6 +575,15 @@ impl Heap {
         matches!(self.slots.get(id.0 as usize), Some(Slot::Live(_)))
     }
     pub(crate) fn get_mut(&mut self, id: ObjId) -> &mut HeapObj {
+        // Generational write barrier (the single mutation chokepoint): if this
+        // object is OLD, record it — the mutation about to happen may store a
+        // young object into it, and the minor GC must then scan it to keep that
+        // young object alive. Conservative (records even mutations that don't
+        // create an old→young edge), which is always SAFE — never a missed edge.
+        let idx = id.0 as usize;
+        if idx < self.old.len() && self.old[idx] {
+            self.remembered.push(id.0);
+        }
         match &mut self.slots[id.0 as usize] {
             Slot::Live(o) => o,
             Slot::Dead => panic!("ICE: use-after-free ObjId({})", id.0),
@@ -1028,7 +1064,30 @@ impl Heap {
         &mut self,
         roots: &[Value],
     ) -> Vec<(unsafe extern "C" fn(*mut std::ffi::c_void), *mut std::ffi::c_void)> {
-        for m in self.marks.iter_mut() { *m = false; }
+        // Generational GC step 2: MINOR vs MAJOR. A minor pre-marks every OLD
+        // object live (so `visit_value`'s "already marked → skip" naturally
+        // avoids re-walking the stable old graph) and resets only YOUNG marks;
+        // it then force-walks the `remembered` old objects (the only ones that
+        // can hold a young object) to keep their young children alive. A major
+        // (every `MAJOR_EVERY` collections, or while there is no old gen yet)
+        // resets ALL marks and walks the whole heap, reclaiming old garbage.
+        const MAJOR_EVERY: u32 = 8;
+        let minor = self.minors_since_major + 1 < MAJOR_EVERY;
+        if minor {
+            self.minors_since_major += 1;
+            // Reset ONLY the young region's marks (O(young)); old objects RETAIN
+            // their mark (live) from the last collection — that retention is
+            // exactly what lets `visit_value` skip re-walking the old graph
+            // (an already-marked object is not re-queued). The first-ever
+            // collection has every slot young, so this degenerates to a full
+            // reset, matching a major.
+            for &yi in &self.young_slots {
+                self.marks[yi as usize] = false;
+            }
+        } else {
+            self.minors_since_major = 0;
+            for m in self.marks.iter_mut() { *m = false; }
+        }
         let mut worklist: Vec<ObjId> = Vec::new();
         // Classes whose ivar/method graph has already been walked via an
         // instance's `class` field this cycle — visit each at most once
@@ -1037,6 +1096,16 @@ impl Heap {
         let mut seen_inst_classes: crate::intern::FxHashSet<*const Class> =
             crate::intern::FxHashSet::default();
         for v in roots { Heap::visit_value(v, &mut self.marks, &mut worklist); }
+        // Minor: force-walk the remembered old objects so a young object held
+        // ONLY by an old one (via a post-promotion mutation) is still marked.
+        // They're pre-marked live, so push their ids directly to walk children.
+        if minor {
+            self.remembered.sort_unstable();
+            self.remembered.dedup();
+            for &rid in &self.remembered {
+                worklist.push(ObjId(rid));
+            }
+        }
         // Mark phase: iterate each greyed object's children in place.
         // The previous impl `let children: Vec<Value> = ...clone()` per
         // pop step turned every mark visit into a full copy of the
@@ -1303,26 +1372,62 @@ impl Heap {
         // is not re-entrant, so this is documented as a contract
         // violation if it ever happens — mirrors CRuby's own
         // gc-during-gc protection model.
-        let mut live = 0usize;
         let mut pending_frees: Vec<(unsafe extern "C" fn(*mut std::ffi::c_void), *mut std::ffi::c_void)> =
             Vec::new();
-        for i in 0..self.slots.len() {
-            match &self.slots[i] {
-                Slot::Live(_) => {
-                    if self.marks[i] { live += 1; }
-                    else {
+        if minor {
+            // MINOR sweep: scan ONLY the young region (O(young)). Old objects are
+            // untouched — their retained mark keeps them live; any old garbage
+            // waits for the next major. Each young slot is `Live` (nothing frees
+            // between collections), so it is either promoted or reclaimed here.
+            let mut young_freed = 0usize;
+            for k in 0..self.young_slots.len() {
+                let i = self.young_slots[k] as usize;
+                if let Slot::Live(_) = &self.slots[i] {
+                    if self.marks[i] {
+                        self.old[i] = true; // young survivor → promoted to old
+                    } else {
                         if let Slot::Live(HeapObj::TypedData(d)) = &self.slots[i]
                             && let Some(f) = d.dfree {
                                 pending_frees.push((f, d.data_ptr));
                             }
                         self.slots[i] = Slot::Dead;
                         self.free.push(i as u32);
+                        self.old[i] = false;
+                        young_freed += 1;
                     }
                 }
-                Slot::Dead => {}
             }
+            self.live_count -= young_freed;
+        } else {
+            // MAJOR sweep: full scan, recomputing the live set and reclaiming
+            // old garbage that minors never touch.
+            let mut live = 0usize;
+            for i in 0..self.slots.len() {
+                match &self.slots[i] {
+                    Slot::Live(_) => {
+                        if self.marks[i] {
+                            live += 1;
+                            self.old[i] = true; // a survivor is promoted to old
+                        } else {
+                            if let Slot::Live(HeapObj::TypedData(d)) = &self.slots[i]
+                                && let Some(f) = d.dfree {
+                                    pending_frees.push((f, d.data_ptr));
+                                }
+                            self.slots[i] = Slot::Dead;
+                            self.free.push(i as u32);
+                            self.old[i] = false;
+                        }
+                    }
+                    Slot::Dead => {}
+                }
+            }
+            self.live_count = live;
         }
-        self.live_count = live;
+        let live = self.live_count;
+        // The young region has been consumed (survivors promoted, rest freed) and
+        // the remembered old→young edges honoured by this collection. Reset both.
+        self.young_slots.clear();
+        self.remembered.clear();
         // `RUBYRS_GC_STATS=1`: per-sweep heap-shape line on stderr
         // (debug knob in the `RUBYRS_IC_STATS` shape). Used for RSS
         // attribution: on the jekyll liquid-1k build this showed the
