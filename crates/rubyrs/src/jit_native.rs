@@ -603,17 +603,25 @@ pub(crate) unsafe extern "C" fn jit_ivar_get_int(
     let vm = unsafe { &*vm };
     let recv = unsafe { &*recv };
     let name_id = crate::intern::SymId(name);
-    let v = match recv {
+    // Match the ivar by REFERENCE and copy out the i64 — no `Value` clone (this
+    // is hot: a method may read several ivars per loop iteration).
+    let n = match recv {
         Value::Object(oid) => match vm.heap.get(*oid) {
-            crate::heap::HeapObj::Instance(inst) => inst.ivars.get(&name_id).cloned(),
+            crate::heap::HeapObj::Instance(inst) => match inst.ivars.get(&name_id) {
+                Some(Value::Int(n)) => Some(*n),
+                _ => None,
+            },
             _ => None,
         },
-        Value::Class(cls) => cls.ivars.borrow().get(&name_id).cloned(),
+        Value::Class(cls) => match cls.ivars.borrow().get(&name_id) {
+            Some(Value::Int(n)) => Some(*n),
+            _ => None,
+        },
         _ => None,
     };
-    match v {
-        Some(Value::Int(n)) => NRet { res: n, ovf: 0 },
-        _ => NRet { res: 0, ovf: 1 }, // missing or non-Int → deopt to the interpreter
+    match n {
+        Some(n) => NRet { res: n, ovf: 0 },
+        None => NRet { res: 0, ovf: 1 }, // missing or non-Int → deopt to the interpreter
     }
 }
 
@@ -681,27 +689,29 @@ pub(crate) unsafe extern "C" fn jit_ivar_len(
     let vm = unsafe { &*vm };
     let recv = unsafe { &*recv };
     let name_id = crate::intern::SymId(name);
-    let v = match recv {
+    // Compute the length by REFERENCE — no `Value` clone (a String clone would
+    // bump the Rc every iteration).
+    let len = |iv: Option<&Value>| -> Option<i64> {
+        match iv {
+            Some(Value::Array(aid)) => Some(vm.heap.array(*aid).len() as i64),
+            Some(Value::Str(rs)) => match rs.encoding.get() {
+                crate::value::EncodingTag::Other(_) => None, // registry enc → interp
+                _ => Some(rs.char_count() as i64),
+            },
+            _ => None,
+        }
+    };
+    let res = match recv {
         Value::Object(oid) => match vm.heap.get(*oid) {
-            crate::heap::HeapObj::Instance(inst) => inst.ivars.get(&name_id).cloned(),
+            crate::heap::HeapObj::Instance(inst) => len(inst.ivars.get(&name_id)),
             _ => None,
         },
-        Value::Class(cls) => cls.ivars.borrow().get(&name_id).cloned(),
+        Value::Class(cls) => len(cls.ivars.borrow().get(&name_id)),
         _ => None,
     };
-    match v {
-        Some(Value::Array(aid)) => NRet {
-            res: vm.heap.array(aid).len() as i64,
-            ovf: 0,
-        },
-        Some(Value::Str(rs)) => match rs.encoding.get() {
-            crate::value::EncodingTag::Other(_) => NRet { res: 0, ovf: 1 }, // registry enc → interp
-            _ => NRet {
-                res: rs.char_count() as i64,
-                ovf: 0,
-            },
-        },
-        _ => NRet { res: 0, ovf: 1 }, // not an Array/String → deopt
+    match res {
+        Some(n) => NRet { res: n, ovf: 0 },
+        None => NRet { res: 0, ovf: 1 }, // not an Array/String → deopt
     }
 }
 
