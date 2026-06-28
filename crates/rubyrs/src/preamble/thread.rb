@@ -143,12 +143,26 @@ class Thread
     t
   end
 
+  # `Thread.current.status` — since `Thread.current` is the Thread class
+  # (single-threaded model), this class method answers for the running
+  # thread: always `"run"`, never `"aborting"`. ActiveRecord's
+  # `within_new_transaction` branches on `Thread.current.status == "aborting"`.
+  def self.status
+    "run"
+  end
+
   def __deferred_init(args, block)
     @args = args
     @block = block
     @done = false
     @value = nil
     self
+  end
+
+  # A deferred green thread's status: finished threads report `false`
+  # (CRuby's terminated-thread value), otherwise `"run"`.
+  def status
+    @done ? false : "run"
   end
 
   def __run_deferred

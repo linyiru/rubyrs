@@ -121,8 +121,17 @@ module SQLite3
     # Nested calls are outer-only in v1 — inner block executes
     # inside the outer transaction's frame, no SAVEPOINT.
     # SAVEPOINT-nesting is a Tier-B follow-up.
-    def transaction
+    def transaction(_mode = nil)
       raise SQLite3::Exception, "closed database" if @closed
+      # No-block form: open a transaction and return; the caller drives
+      # `commit` / `rollback` manually. ActiveRecord's `begin_db_transaction`
+      # calls `@raw_connection.transaction` (no block) then commit/rollback
+      # in separate adapter methods.
+      unless block_given?
+        execute("BEGIN") unless @in_transaction
+        @in_transaction = true
+        return true
+      end
       if @in_transaction
         # Nested — just run the body inline.
         return yield
@@ -144,6 +153,39 @@ module SQLite3
         end
         raise e
       end
+    end
+
+    # Manual transaction control (the block-less `transaction` companion).
+    def commit
+      raise SQLite3::Exception, "closed database" if @closed
+      execute("COMMIT") if @in_transaction
+      @in_transaction = false
+      true
+    end
+
+    def rollback
+      raise SQLite3::Exception, "closed database" if @closed
+      execute("ROLLBACK") if @in_transaction
+      @in_transaction = false
+      true
+    end
+
+    # `db.last_insert_row_id` — rowid of the most recent INSERT on this
+    # connection (sqlite3 gem API; ActiveRecord's `last_inserted_id` calls
+    # it). Equivalent to the C `sqlite3_last_insert_rowid`, surfaced via the
+    # SQL function on the same connection.
+    def last_insert_row_id
+      raise SQLite3::Exception, "closed database" if @closed
+      rows = query("SELECT last_insert_rowid()")
+      rows.first && rows.first.first
+    end
+
+    # `db.changes` — rows affected by the most recent INSERT/UPDATE/DELETE
+    # (ActiveRecord reads it for affected-row counts).
+    def changes
+      raise SQLite3::Exception, "closed database" if @closed
+      rows = query("SELECT changes()")
+      (rows.first && rows.first.first) || 0
     end
 
     def busy_timeout=(ms)
