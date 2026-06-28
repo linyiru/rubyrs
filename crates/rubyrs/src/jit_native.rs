@@ -85,10 +85,17 @@ enum Kind {
 /// "compilation scope" step: a method's whole call tree can run native (like
 /// `fib`), not just the leaf. Polymorphism (an overriding subclass) is guarded
 /// only by `method_gen` invalidation for now.
+/// `getters` maps the name of a 0-arg call (on `self`) that resolves to a simple
+/// int-returning attribute reader (`def amount; @amount; end`) to that reader's
+/// ivar SymId. Such a call is lowered to an INLINE ivar read on the receiver —
+/// no frame, no dispatch (B4, ADR 0034). Sound because the reader is a pure read
+/// with no side effects, so a deopt that re-runs the whole method is behaviour-
+/// preserving.
 pub(crate) fn compile(
     proto: &Proto,
     self_name_id: SymId,
     callees: &FxHashMap<SymId, usize>,
+    getters: &FxHashMap<SymId, SymId>,
     syms: &JitSyms,
 ) -> Option<NativeProto> {
     // Shape gate: exactly one required positional param, nothing fancy.
@@ -133,6 +140,9 @@ pub(crate) fn compile(
                     used_callees.push(*name);
                 }
             }
+            // Bare 0-arg call to a self attribute reader (`amount` → `@amount`)
+            // → inlined ivar read on the receiver (B4). No callee import needed.
+            Op::CallNoRecv(name, 0, _) if getters.contains_key(name) => {}
             // `@arr.length` / `@arr.size` — fused with the preceding LoadIvar in
             // codegen; a standalone one (no LoadIvar before) is rejected there.
             Op::Call(m, 0, _) if *m == syms.length || *m == syms.size => {}
@@ -504,6 +514,20 @@ pub(crate) fn compile(
                     }
                     fb.ins().call(arrpush_ref, &[vm_param, arr, elem]);
                     stack.push((arr, Kind::ArrayObjId));
+                }
+                // 0-arg bare call to a self attribute reader (`amount`) → inline
+                // the ivar read on the receiver (B4): one native call to
+                // `jit_ivar_get_int`, no frame/dispatch. A non-Int ivar deopts.
+                Op::CallNoRecv(name, 0, _) if getters.contains_key(name) => {
+                    let ivar = getters[name];
+                    let nm = fb.ins().iconst(types::I32, ivar.0 as i64);
+                    let inst = fb.ins().call(ivar_ref, &[vm_param, self_param, nm]);
+                    let (res, of) = {
+                        let r = fb.inst_results(inst);
+                        (r[0], r[1])
+                    };
+                    acc_ovf(&mut fb, of);
+                    stack.push((res, Kind::Int));
                 }
                 // 1-arg no-recv call: pop the i64 arg, emit a native call to
                 // this function (self-recursion) OR another compiled method,

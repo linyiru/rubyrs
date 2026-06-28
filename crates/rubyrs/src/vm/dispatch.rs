@@ -15945,15 +15945,45 @@ impl Vm {
             }
             visited.remove(&proto_idx);
         }
+        // Resolve 0-arg bare calls (`amount`) to a simple int-attribute reader's
+        // ivar, so the codegen inlines the read. Resolved on the receiver class
+        // (or top-level), so the proto must be guarded to that class — a
+        // different class's `amount` could read a different ivar. (B4.)
+        let getter_call_names: Vec<crate::intern::SymId> = self.protos[proto_idx]
+            .code
+            .iter()
+            .filter_map(|op| match op {
+                crate::bytecode::Op::CallNoRecv(name, 0, _) if *name != self_name_id => Some(*name),
+                _ => None,
+            })
+            .collect();
+        let mut getters: crate::intern::FxHashMap<crate::intern::SymId, crate::intern::SymId> =
+            Default::default();
+        for name in getter_call_names {
+            let cm = recv_cls
+                .and_then(|cls| self.lookup_method_uncached(cls, name))
+                .or_else(|| self.toplevel_methods.get(&name).cloned());
+            if let Some(cm) = cm
+                && cm.closure.is_none()
+                && let Some(ivar) = self.protos[cm.proto_idx].getter_ivar
+            {
+                getters.insert(name, ivar);
+            }
+        }
         let syms = crate::jit_native::JitSyms {
             length: self.interner.intern("length"),
             size: self.interner.intern("size"),
             bracket: self.interner.intern("[]"),
             lshift: self.interner.intern("<<"),
         };
-        let compiled =
-            crate::jit_native::compile(&self.protos[proto_idx], self_name_id, &callees, &syms);
-        if let (Some(np), false) = (&compiled, callees.is_empty()) {
+        let compiled = crate::jit_native::compile(
+            &self.protos[proto_idx],
+            self_name_id,
+            &callees,
+            &getters,
+            &syms,
+        );
+        if let (Some(np), false) = (&compiled, callees.is_empty() && getters.is_empty()) {
             if let Some(cls) = recv_cls {
                 np.guard_class.set(std::rc::Rc::as_ptr(cls) as usize);
             }

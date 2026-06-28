@@ -166,6 +166,32 @@ Still 0-win (expected, later layers): bare-`<main>` while-loop drivers (need the
 `<main>`/0-arg proto itself compiled), object-method calls inside a driver (B4),
 and block iterators (B5).
 
+### B4 — soundness pivot + step 1 (self attribute-reader calls)
+
+Building B4 surfaced a soundness result that re-shapes its design: **an
+after-the-fact "deopt = re-run the whole method in the interpreter" is UNSOUND
+for a re-entrant call whose callee has side effects** (the redo repeats them).
+The existing JIT's deopt is sound only because every compiled op is pure (local
+rw, int arith, reads, method-local arrays, and calls to *other compiled-pure*
+methods). So B4 keeps that invariant rather than adding an arbitrary re-entry:
+
+- **Compile only pure drivers** (the op-gate already admits no side-effecting op)
+  — so whole-method redo stays behaviour-preserving.
+- **Inline PIC, deopt-to-interpreter as the slow path** (not a re-entry helper):
+  on a class-guard miss the whole pure driver re-runs interpreted. A re-entry
+  helper that re-enters `do_call` per call is deferred — it can't beat the
+  interpreter's own dispatch anyway (the masked-leaf measurement), and it
+  re-introduces the side-effect-redo hazard. The interpreter handles the
+  megamorphic tail.
+
+**Step 1 (shipped): a 0-arg bare call to a simple int attribute reader
+(`amount` → `@amount`) is lowered to an INLINE ivar read** on the receiver — no
+frame, no dispatch. Resolved via the proto's precomputed `getter_ivar`, guarded
+to the resolving class. A non-Int ivar deopts (sound: pure read). Measured
+(`s += amount` aggregation driver, 20M calls): **0.06s vs YJIT 0.44s — 7×**.
+diff_cruby unchanged. Next: array-element receivers (`rows[j].amount`) with a
+real inline class-guard PIC — the megamorphic AR shape (s2).
+
 ## Risks
 
 - **YJIT-class scope.** A full method JIT with PIC + deopt + broad coverage is a
