@@ -36,6 +36,9 @@ pub(crate) struct NativeProto {
     /// is only valid when dispatched on that class — a subclass that overrides a
     /// callee must NOT use it. 0 = no baked cross-calls, valid for any receiver.
     pub(crate) guard_class: std::cell::Cell<usize>,
+    /// When true the i64 result is an Array `ObjId` — the dispatch boxes it to
+    /// `Value::Array` instead of `Value::Int`.
+    pub(crate) returns_array: std::cell::Cell<bool>,
 }
 
 impl NativeProto {
@@ -67,6 +70,11 @@ enum Kind {
     Int,
     Bool,
     Nil,
+    /// An i64 that is actually an Array's `ObjId` — a value-local array built
+    /// in-method (`a = []; a << x`). Boxed to `Value::Array` at dispatch. GC-safe
+    /// because the JIT primitives never call `maybe_gc`, so no collection runs
+    /// during the method (the array is rooted by the caller's stack on return).
+    ArrayObjId,
 }
 
 /// Compile an eligible `Proto` to native code, or `None` to keep interpreting.
@@ -139,6 +147,10 @@ pub(crate) fn compile(
             Op::Call(m, 0, _) if *m == syms.length || *m == syms.size => {}
             // `@h[:k]` — `Call([], 1)`, fused with the LoadIvar + LoadSymbol.
             Op::Call(m, 1, _) if *m == syms.bracket => {}
+            // `[]` literal + `a << elem` — the array-building shape, where the
+            // value-local array is just its Copy `ObjId` (an i64 in codegen).
+            Op::NewArray(0) => {}
+            Op::Call(m, 1, _) if *m == syms.lshift => {}
             _ => return None,
         }
     }
@@ -170,6 +182,8 @@ pub(crate) fn compile(
     builder.symbol("jit_ivar_len", jit_ivar_len as *const u8);
     builder.symbol("jit_ivar_hash_get_int", jit_ivar_hash_get_int as *const u8);
     builder.symbol("jit_ivar_array_get_int", jit_ivar_array_get_int as *const u8);
+    builder.symbol("jit_array_new", jit_array_new as *const u8);
+    builder.symbol("jit_array_push", jit_array_push as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
     let mut ctx = module.make_context();
@@ -217,6 +231,21 @@ pub(crate) fn compile(
     let agid = module
         .declare_function("jit_ivar_array_get_int", Linkage::Import, &agsig)
         .ok()?;
+    // `jit_array_new`: (vm) -> i64 (ObjId).
+    let mut ansig = module.make_signature();
+    ansig.params.push(AbiParam::new(ptr_ty));
+    ansig.returns.push(AbiParam::new(types::I64));
+    let anid = module
+        .declare_function("jit_array_new", Linkage::Import, &ansig)
+        .ok()?;
+    // `jit_array_push`: (vm, objid:i64, elem:i64) -> void.
+    let mut apsig = module.make_signature();
+    apsig.params.push(AbiParam::new(ptr_ty));
+    apsig.params.push(AbiParam::new(types::I64));
+    apsig.params.push(AbiParam::new(types::I64));
+    let apid = module
+        .declare_function("jit_array_push", Linkage::Import, &apsig)
+        .ok()?;
     // Each callee imports with the same `(vm, self, i64) -> (i64, i8)` signature.
     let mut callee_fids: FxHashMap<SymId, cranelift_module::FuncId> = FxHashMap::default();
     for cid in &used_callees {
@@ -226,6 +255,8 @@ pub(crate) fn compile(
         callee_fids.insert(*cid, cfid);
     }
     let mut fbctx = FunctionBuilderContext::new();
+    // Set inside the codegen block when the returned value is an array ObjId.
+    let mut returns_array = false;
     {
         let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         // A reference to THIS function, for compiling self-recursive calls
@@ -235,6 +266,8 @@ pub(crate) fn compile(
         let arraylen_ref = module.declare_func_in_func(alid, fb.func);
         let hashget_ref = module.declare_func_in_func(hgid, fb.func);
         let arrget_ref = module.declare_func_in_func(agid, fb.func);
+        let arrnew_ref = module.declare_func_in_func(anid, fb.func);
+        let arrpush_ref = module.declare_func_in_func(apid, fb.func);
         // FuncRefs for each external callee.
         let mut callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
         for (cid, cfid) in &callee_fids {
@@ -279,6 +312,9 @@ pub(crate) fn compile(
         let mut stack: Vec<(ClValue, Kind)> = Vec::new();
         let mut cur_open = false; // is the current block unterminated?
         let mut block_kinds: Vec<Option<Vec<Kind>>> = vec![None; n + 1];
+        // Per-local kind — Int by default (a no-op for non-array methods); an
+        // array-building local stays ArrayObjId across the loop.
+        let mut local_kinds: Vec<Kind> = vec![Kind::Int; nloc];
         let mut ip = 0usize;
         while ip < n {
             if let Some(b) = blocks[ip] {
@@ -384,13 +420,14 @@ pub(crate) fn compile(
                 }
                 Op::LoadLocal(s) => {
                     let v = fb.use_var(vars[*s as usize]);
-                    stack.push((v, Kind::Int));
+                    stack.push((v, local_kinds[*s as usize]));
                 }
                 Op::StoreLocal(s) => {
                     let (v, k) = stack.pop()?;
-                    if k != Kind::Int {
+                    if k != Kind::Int && k != Kind::ArrayObjId {
                         return None;
                     }
+                    local_kinds[*s as usize] = k;
                     fb.def_var(vars[*s as usize], v);
                 }
                 Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
@@ -452,10 +489,30 @@ pub(crate) fn compile(
                     cur_open = false;
                 }
                 Op::Return => {
-                    let (v, _) = stack.pop()?;
+                    let (v, k) = stack.pop()?;
+                    if k == Kind::ArrayObjId {
+                        returns_array = true;
+                    }
                     let ov = fb.use_var(ovf_var);
                     fb.ins().return_(&[v, ov]);
                     cur_open = false;
+                }
+                // `[]` literal → a fresh Array; its `ObjId` lives as an i64.
+                Op::NewArray(0) => {
+                    let inst = fb.ins().call(arrnew_ref, &[vm_param]);
+                    let objid = fb.inst_results(inst)[0];
+                    stack.push((objid, Kind::ArrayObjId));
+                }
+                // `arr << elem` — push the Int onto the array, leave the array
+                // (the receiver, since `<<` returns self) on the stack.
+                Op::Call(m, 1, _) if *m == syms.lshift => {
+                    let (elem, ek) = stack.pop()?;
+                    let (arr, ak) = stack.pop()?;
+                    if ek != Kind::Int || ak != Kind::ArrayObjId {
+                        return None;
+                    }
+                    fb.ins().call(arrpush_ref, &[vm_param, arr, elem]);
+                    stack.push((arr, Kind::ArrayObjId));
                 }
                 // 1-arg no-recv call: pop the i64 arg, emit a native call to
                 // this function (self-recursion) OR another compiled method,
@@ -505,6 +562,7 @@ pub(crate) fn compile(
         _module: module,
         ptr,
         guard_class: std::cell::Cell::new(0),
+        returns_array: std::cell::Cell::new(returns_array),
     })
 }
 
@@ -664,6 +722,32 @@ pub(crate) struct JitSyms {
     pub length: SymId,
     pub size: SymId,
     pub bracket: SymId,
+    pub lshift: SymId,
+}
+
+/// Native primitive: allocate a fresh empty Array, return its `ObjId` as i64.
+/// Does NOT call `maybe_gc`, so no collection runs mid-method — the array is
+/// rooted by the caller's stack on return, and nothing in between can collect.
+///
+/// # Safety
+/// `vm` must be valid; the call mutates the heap.
+pub(crate) unsafe extern "C" fn jit_array_new(vm: *mut crate::vm::Vm) -> i64 {
+    let vm = unsafe { &mut *vm };
+    let id = vm
+        .heap
+        .alloc(crate::heap::HeapObj::Array(Vec::<Value>::new().into()));
+    id.0 as i64
+}
+
+/// Native primitive: push `Value::Int(elem)` onto the Array `objid`.
+///
+/// # Safety
+/// `vm` valid; `objid` a live Array slot (produced by `jit_array_new` earlier in
+/// the same method, never collected mid-method).
+pub(crate) unsafe extern "C" fn jit_array_push(vm: *mut crate::vm::Vm, objid: i64, elem: i64) {
+    let vm = unsafe { &mut *vm };
+    let id = crate::value::ObjId(objid as u32);
+    vm.heap.array_mut(id).push(Value::Int(elem));
 }
 
 /// Native primitive: `recv.@name[:key]` where the ivar is a Hash with a Symbol

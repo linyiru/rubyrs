@@ -15226,10 +15226,15 @@ impl Vm {
                 if let Some(Some(np)) = self.jit_native.get(&pidx) {
                     let gc = np.guard_class.get();
                     let class_ok = gc == 0 || gc == std::rc::Rc::as_ptr(&cls) as usize;
+                    let is_array = np.returns_array.get();
                     if class_ok {
                         if let Some(x) = crate::jit_native::as_int(&self.stack[recv_idx + 1]) {
                             if let Some(r) = np.call(vm_ptr, &self.stack[recv_idx], x) {
-                                self.stack[recv_idx] = Value::Int(r);
+                                self.stack[recv_idx] = if is_array {
+                                    Value::Array(crate::value::ObjId(r as u32))
+                                } else {
+                                    Value::Int(r)
+                                };
                                 self.stack.truncate(recv_idx + 1);
                                 return Ok(true);
                             }
@@ -15891,6 +15896,7 @@ impl Vm {
                     length: self.interner.intern("length"),
                     size: self.interner.intern("size"),
                     bracket: self.interner.intern("[]"),
+                    lshift: self.interner.intern("<<"),
                 };
                 let compiled = crate::jit_native::compile(
                     &self.protos[proto_idx],
@@ -15932,7 +15938,15 @@ impl Vm {
                 _ => None,
             };
             if let Some(Some(r)) = native {
-                self.stack.push(Value::Int(r));
+                let is_array = matches!(
+                    self.jit_native.get(&proto_idx),
+                    Some(Some(np)) if np.returns_array.get()
+                );
+                self.stack.push(if is_array {
+                    Value::Array(crate::value::ObjId(r as u32))
+                } else {
+                    Value::Int(r)
+                });
                 return Ok(());
             }
             // Value-method path (D Layer 3, the AR-shaped win): if the integer
