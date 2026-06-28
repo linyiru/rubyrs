@@ -51,7 +51,11 @@ enum Kind {
 }
 
 /// Compile an eligible `Proto` to native code, or `None` to keep interpreting.
-pub(crate) fn compile(proto: &Proto) -> Option<NativeProto> {
+/// `self_name_id` is the SymId of the method's own name — a no-recv call to it
+/// is treated as self-recursion and compiled to a native self-call (the first
+/// step toward a call-compiling JIT; polymorphism via an overriding subclass
+/// is the next layer, an inline-cache guard).
+pub(crate) fn compile(proto: &Proto, self_name_id: crate::intern::SymId) -> Option<NativeProto> {
     // Shape gate: exactly one required positional param, nothing fancy.
     if proto.n_required_positional != 1
         || proto.params.len() != 1
@@ -90,6 +94,9 @@ pub(crate) fn compile(proto: &Proto) -> Option<NativeProto> {
                 // Div/Mod need floor-semantics + div-by-zero deopt — not modelled yet.
                 _ => return None,
             },
+            // Self-recursive 1-arg call (`fib(n-1)`): compiled to a native
+            // self-call. Any other call shape is ineligible.
+            Op::CallNoRecv(name, 1, _) if *name == self_name_id => {}
             _ => return None,
         }
     }
@@ -123,6 +130,9 @@ pub(crate) fn compile(proto: &Proto) -> Option<NativeProto> {
     let mut fbctx = FunctionBuilderContext::new();
     {
         let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        // A reference to THIS function, for compiling self-recursive calls
+        // (`fib(n-1)` → a native call back into the same code).
+        let self_ref = module.declare_func_in_func(fid, fb.func);
 
         // Cranelift block per leader ip; a final `done` for the post-Return tail.
         let mut blocks: Vec<Option<cranelift_codegen::ir::Block>> = vec![None; n + 1];
@@ -250,6 +260,24 @@ pub(crate) fn compile(proto: &Proto) -> Option<NativeProto> {
                     let ov = fb.use_var(ovf_var);
                     fb.ins().return_(&[v, ov]);
                     cur_open = false;
+                }
+                // Self-recursive call: pop the i64 arg, emit a native call to
+                // this same function, push the result, OR the callee's overflow
+                // flag into ours (so a deep overflow deopts the whole tree).
+                Op::CallNoRecv(name, 1, _) if *name == self_name_id => {
+                    let (arg, ka) = stack.pop()?;
+                    if ka != Kind::Int {
+                        return None;
+                    }
+                    let inst = fb.ins().call(self_ref, &[arg]);
+                    let (res, ovf) = {
+                        let r = fb.inst_results(inst);
+                        (r[0], r[1])
+                    };
+                    let cur = fb.use_var(ovf_var);
+                    let nv = fb.ins().bor(cur, ovf);
+                    fb.def_var(ovf_var, nv);
+                    stack.push((res, Kind::Int));
                 }
                 Op::EnterLoop | Op::ExitLoop => {} // interpreter loop-stack bookkeeping; no native state
                 _ => return None,

@@ -15775,7 +15775,9 @@ impl Vm {
         if self.jit_native_on && m.closure.is_none() && args.len() == 1 {
             let proto_idx = m.proto_idx;
             if !self.jit_native.contains_key(&proto_idx) {
-                let compiled = crate::jit_native::compile(&self.protos[proto_idx]);
+                let self_name = self.protos[proto_idx].name.clone();
+                let self_name_id = self.interner.intern(&self_name);
+                let compiled = crate::jit_native::compile(&self.protos[proto_idx], self_name_id);
                 self.jit_native.insert(proto_idx, compiled);
             }
             let native: Option<Option<i64>> = match (
