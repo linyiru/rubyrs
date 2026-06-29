@@ -1032,6 +1032,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn jit_float_key_sum_by_key() { run_diff("jit_float_key_sum_by_key"); }
 #[test] fn jit_objmethod_sum() { run_diff("jit_objmethod_sum"); }
 #[test] fn jit_obj_recv_call() { run_diff("jit_obj_recv_call"); }
+#[test] fn jit_objparam() { run_diff("jit_objparam"); }
 #[test] fn comparable_clamp_range() { run_diff("comparable_clamp_range"); }
 #[test] fn float_precision() { run_diff("float_precision"); }
 #[test] fn compact_filter_map() { run_diff("compact_filter_map"); }
@@ -1174,6 +1175,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn file_open_write() { run_diff("file_open_write"); }
 #[test] fn file_gets_separator() { run_diff("file_gets_separator"); }
 #[test] fn file_write_handle_read() { run_diff("file_write_handle_read"); }
+#[test] fn file_readlines_foreach() { run_diff("file_readlines_foreach"); }
 #[test] fn file_write_bytecount() { run_diff("file_write_bytecount"); }
 #[test] fn enumerable_module() { run_diff("enumerable_module"); }
 #[test] fn super_block_literal() { run_diff("super_block_literal"); }

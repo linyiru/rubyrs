@@ -755,6 +755,12 @@ pub(crate) struct Vm {
     /// swallow the wrong-arity ArgumentError. Only `jit_obj_call` (argc=0) reads this.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_zeroarg: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// OBJECT-param specialization of a 1-arg method (`def weigh(node); node.value*2;
+    /// end` called with an Object arg): the param binds as a `*const Value` receiver
+    /// pointer (ADR 0034 Step 1, param-receiver). Kept separate from `jit_native` (Int
+    /// param) since the ABI differs (pointer vs Int value). Keyed by proto.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_objparam: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
     /// FLOAT-param specialization of a 1-arg method (`def scale(n); n*1.5; end`
     /// called with a Float arg): the param binds as Float, the i64 arg carries f64
     /// bits. Leaf methods only (no cross-calls — those decline). Keyed by proto,
@@ -2037,6 +2043,8 @@ impl Vm {
             jit_native: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_zeroarg: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_objparam: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_fparam: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]

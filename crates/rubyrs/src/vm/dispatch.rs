@@ -15818,6 +15818,35 @@ impl Vm {
                     }
                 }
             }
+            // OBJECT arg -> the obj-param specialization (ADR 0034 Step 1, param-recv):
+            // the param binds as a `*const Value` so the body can call methods on it
+            // (`def weigh(node); node.value*2; end`). We pass a pointer to the arg Value
+            // on the operand stack — valid for the native call's duration (the compiled
+            // method is GC-free and doesn't touch the interpreter stack). A deopt (e.g.
+            // an unmodelled op, or an obj-call class miss) falls through to the frame.
+            if matches!(self.stack.last(), Some(Value::Object(_))) {
+                if !self.jit_native_objparam.contains_key(&proto_idx) {
+                    let compiled = self.compile_native_objparam(proto_idx);
+                    self.jit_native_objparam.insert(proto_idx, compiled);
+                }
+                if let Some(Some(np)) = self.jit_native_objparam.get(&proto_idx) {
+                    let is_array = np.returns_array.get();
+                    let is_float = np.returns_float.get();
+                    let vm_ptr = self as *const crate::vm::Vm;
+                    let top = self.stack.len() - 1;
+                    let arg_ptr = &self.stack[top] as *const Value as i64;
+                    if let Some(r) = np.call(vm_ptr, &self_val, arg_ptr) {
+                        self.stack[top] = if is_array {
+                            Value::Array(crate::value::ObjId(r as u32))
+                        } else if is_float {
+                            Value::Float(f64::from_bits(r as u64))
+                        } else {
+                            Value::Int(r)
+                        };
+                        return Ok(true);
+                    }
+                }
+            }
         }
         self.check_frames()?;
         let n_locals = fixed.n_locals as usize;
@@ -16204,6 +16233,7 @@ impl Vm {
             false, // methods never have a Float element param
             false, // ...and the accumulator/result float-ness mirrors it
             allow_zero_arg,
+            false, // general method compile is not the obj-param variant
         );
         if let (Some(np), false) = (
             &compiled,
@@ -16237,6 +16267,35 @@ impl Vm {
             true,
             true, // fparam: Float element; result-Float allowed via is_method too
             false, // 1-arg fparam method — no 0-arg
+            false, // fparam, not obj-param
+        )
+    }
+
+    /// Compile the OBJECT-param specialization of a 1-arg method (`def weigh(node);
+    /// node.value * 2; end`, ADR 0034 Step 1, param-receiver): the param binds as
+    /// `Kind::Object` (its i64 C-arg is a `*const Value`), so the body can call methods
+    /// on it via the obj-call PIC. The body's own obj-recv calls are plumbed inside
+    /// `compile` (the `jit_obj_call` PIC); cross-calls/getters are empty here (a method
+    /// that also self-recurses with an Object arg needs the cross-call ABI — deferred).
+    #[cfg(feature = "jit-native")]
+    fn compile_native_objparam(&mut self, proto_idx: usize) -> Option<crate::jit_native::NativeProto> {
+        let self_name = self.protos[proto_idx].name.clone();
+        let self_name_id = self.interner.intern(&self_name);
+        let callees = crate::intern::FxHashMap::default();
+        let getters = crate::intern::FxHashMap::default();
+        let syms = self.jit_syms();
+        crate::jit_native::compile(
+            &self.protos[proto_idx],
+            self_name_id,
+            &callees,
+            &callees, // empty float callees
+            &getters,
+            &syms,
+            None,
+            false, // Int element (n/a for a method)
+            false,
+            false, // 1-arg
+            true,  // obj-param: the param is an Object receiver pointer
         )
     }
 
@@ -16674,6 +16733,7 @@ impl Vm {
             false, // Int element
             true,  // ...but Float accumulator/result
             false, // block (allow_zero_arg ignored)
+            false, // not an obj-param method
         )
     }
 
@@ -17860,6 +17920,7 @@ impl Vm {
             false,
             false,
             false, // block (allow_zero_arg ignored)
+            false, // not an obj-param method
         )
     }
 
@@ -17890,6 +17951,7 @@ impl Vm {
             true, // float element
             float_acc,
             false, // block (allow_zero_arg ignored)
+            false, // not an obj-param method
         )
     }
 
@@ -17920,6 +17982,7 @@ impl Vm {
             float_elem,
             float_acc,
             false, // block (allow_zero_arg ignored)
+            false, // not an obj-param method
         )
     }
 
@@ -17959,6 +18022,7 @@ impl Vm {
             float_elem,
             float_acc,
             false, // block (allow_zero_arg ignored)
+            false, // not an obj-param method
         )
     }
 
@@ -17994,6 +18058,7 @@ impl Vm {
             false, // element (arg3) is always Int for each_with_index
             float_acc,
             false, // block (allow_zero_arg ignored)
+            false, // not an obj-param method
         )
     }
 
@@ -18029,6 +18094,7 @@ impl Vm {
             float_elem,
             false,
             false, // block (allow_zero_arg ignored)
+            false, // not an obj-param method
         )
     }
 
@@ -18067,6 +18133,7 @@ impl Vm {
             float_elem,
             float_val,
             false, // block (allow_zero_arg ignored)
+            false, // not an obj-param method
         )
     }
 

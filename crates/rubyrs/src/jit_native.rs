@@ -258,6 +258,12 @@ pub(crate) fn compile(
     // `argc==1`-gated and never serve it, so the wrong-arity-swallow hazard that keeps
     // the gate strict elsewhere does not apply. Ignored for blocks (`block.is_some()`).
     allow_zero_arg: bool,
+    // The single method PARAM is an Object (its i64 C-arg is a `*const Value` to the
+    // arg, not an Int value) — so the body can call methods on it (`def weigh(node);
+    // node.value * 2; end`, ADR 0034 Step 1, param-receiver). Binds the param slot as
+    // `Kind::Object`. Only the obj-param dispatch path sets it; method-only, ignored
+    // for blocks. Mutually exclusive with `float_elem`/`allow_zero_arg` in practice.
+    obj_param: bool,
 ) -> Option<NativeProto> {
     // Shape gate (methods only): 0 (iff `allow_zero_arg`) or 1 required positional, no
     // optional/rest/kw. `params.len() == n_required_positional` rejects optionals; the
@@ -392,11 +398,12 @@ pub(crate) fn compile(
             // when it's the `getter` of a fused `@arr[i].getter` (B4); a
             // standalone one hits codegen's catch-all and declines the proto.
             Op::Call(_, 0, _) => {}
-            // The fused `x.method` op — admitted only for the pure unary Int
-            // primitives codegen models (`x.abs`/`x.even?`/…); any other
-            // `LoadLocalCall` hits the catch-all below and declines.
-            Op::LoadLocalCall(_, name, _)
-                if is_int_unary(*name, syms) || is_float_to_int(*name, syms) => {}
+            // The fused `x.method` op. Admitted generally here; codegen lowers it for
+            // the pure unary Int/Float primitives (`x.abs`/`x.even?`/…) OR a 0-arg call
+            // on an Object local/param (`node.value`, ADR 0034 Step 1 — the obj-call
+            // PIC), and DECLINES (catch-all) otherwise. (The pre-pass can't see
+            // `local_kinds`, so the Object case is admitted here and gated in codegen.)
+            Op::LoadLocalCall(_, _, _) => {}
             // `@h[:k]` — `Call([], 1)`, fused with the LoadIvar + LoadSymbol.
             Op::Call(m, 1, _) if *m == syms.bracket => {}
             // `[]` literal + `a << elem` — the array-building shape, where the
@@ -763,6 +770,13 @@ pub(crate) fn compile(
                     local_kinds[arg2_slot as usize] = Kind::Float;
                 }
             }
+        }
+        // Object-param method (ADR 0034 Step 1): the param slot's i64 var holds a
+        // `*const Value` to the Object arg, so mark it `Kind::Object` — a `LoadLocal`
+        // of it pushes the receiver pointer, and `node.method(...)` lowers via the
+        // obj-call PIC. Method-only (block.is_none()); param is at slot 0.
+        if obj_param && block.is_none() {
+            local_kinds[param_slot as usize] = Kind::Object;
         }
         let mut ip = 0usize;
         while ip < n {
@@ -1345,6 +1359,33 @@ pub(crate) fn compile(
                 }
                 // The fused `x.method` op (LoadLocalCall) for the same unary
                 // primitives — load the receiver local, then apply inline.
+                // `local.method` (0-arg) on an Object local/param receiver (obj-param or
+                // obj-local, ADR 0034 Step 1) — the fused `LoadLocal + Call(name, 0)`.
+                // Lower to the obj-call PIC. Checked before the int-unary/float fusions
+                // (those require an Int/Float local, so no overlap).
+                Op::LoadLocalCall(slot, name, _)
+                    if local_kinds[*slot as usize] == Kind::Object =>
+                {
+                    let recv_ptr = fb.use_var(vars[*slot as usize]);
+                    let nm = fb.ins().iconst(types::I32, name.0 as i64);
+                    let cache = Box::new(std::cell::Cell::new((0usize, 0usize)));
+                    let cache_addr =
+                        &*cache as *const std::cell::Cell<(usize, usize)> as i64;
+                    obj_call_caches.push(cache);
+                    let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
+                    let zero = fb.ins().iconst(types::I64, 0);
+                    let argc0 = fb.ins().iconst(types::I64, 0);
+                    let inst = fb.ins().call(
+                        obj_call_ref,
+                        &[vm_param, recv_ptr, zero, nm, cache_const, argc0],
+                    );
+                    let (res, of) = {
+                        let r = fb.inst_results(inst);
+                        (r[0], r[1])
+                    };
+                    acc_ovf(&mut fb, of);
+                    stack.push((res, Kind::Int));
+                }
                 Op::LoadLocalCall(slot, name, _)
                     if is_int_unary(*name, syms) || is_float_to_int(*name, syms) =>
                 {
