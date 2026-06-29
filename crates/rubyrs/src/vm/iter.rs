@@ -1611,6 +1611,14 @@ impl Vm {
                 if let Some(out) = g.vm.try_native_floatmap_loop(block, *id) {
                     return Ok(Some(Value::Array(out)));
                 }
+                // Int-element / Float-output variant (ADR 0034 layer 3d): an Int
+                // array mapped by a Float-producing block (`ints.map { x*1.5 }`) ->
+                // a fresh Float array. Both loops above decline (the Int block won't
+                // compile a Float result; the Float reader deopts on the Int elem).
+                #[cfg(feature = "jit-native")]
+                if let Some(out) = g.vm.try_native_intelem_floatmap_loop(block, *id) {
+                    return Ok(Some(Value::Array(out)));
+                }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;

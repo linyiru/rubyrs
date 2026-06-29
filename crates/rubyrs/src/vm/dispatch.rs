@@ -16469,6 +16469,61 @@ impl Vm {
         }
     }
 
+    /// Int-element / Float-output `map` (ADR 0034 layer 3d): `ints.map { |x| x*1.5 }`
+    /// — an INT array transformed elementwise into a Float array. The Float map loop
+    /// above declines (the Float reader deopts on the Int element); this reads via
+    /// `jit_array_elem_int` and reuses the Int-elem/Float-acc block (Int param, Float
+    /// result). `None` on a non-Int element (deopt) or ineligible block. Same pure-
+    /// block discard-and-redo soundness as the Float map.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_intelem_floatmap_loop(&mut self, block_id: ObjId, in_id: ObjId) -> Option<ObjId> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        if !self.jit_native_block_intelem_fa.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block_intelem_floatacc(proto_idx, param_start as u32, body_start as u32);
+            self.jit_native_block_intelem_fa.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_intelem_fa.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_intelem_floatmap_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_floatmap_loop_inner(block_addr, true);
+            self.jit_native_intelem_floatmap_loop.insert(proto_idx, compiled);
+        }
+        if !matches!(self.jit_native_intelem_floatmap_loop.get(&proto_idx), Some(Some(_))) {
+            return None;
+        }
+        let len = self.heap.array(in_id).len();
+        self.check_alloc().ok()?;
+        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(vec![Value::Nil; len].into()));
+        self.pinned.push(Value::Array(out_id));
+        let self_val = self.heap.block(block_id).self_val.clone();
+        let vm_ptr = self as *const crate::vm::Vm;
+        let ml = self.jit_native_intelem_floatmap_loop.get(&proto_idx).unwrap().as_ref().unwrap();
+        let ok = ml.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
+        self.pinned.pop();
+        if ok {
+            Some(out_id)
+        } else {
+            None
+        }
+    }
+
     /// Whole-loop fast path for `array.count { pred }` (ADR 0034 layer 3): a count
     /// IS a sum of the predicate's truthiness, so this compiles the block in
     /// PREDICATE mode (a `Bool` result becomes i64 0/1) and runs it through the
