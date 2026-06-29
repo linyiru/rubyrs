@@ -675,9 +675,49 @@ Mechanism — **dispatch-time monomorphic specialization**, no runtime compilati
 
 This is the validated answer to "how to break through `do_call`": **not another interpreter cascade tweak
 (frontier exhausted, gap structural) — bypass `do_call` with a native driver + a baked monomorphic class
-guard.** Next within B4: a varying arg (loop index / captured var) instead of a constant; the
-each-accumulator / `map` / `count` analogues; and an N-way inline PIC so a genuinely polymorphic site
-stays native instead of deopting. Also remaining: broadening the value-method JIT surface.
+guard.**
+
+### Step 1 — general explicit-recv calls inside compiled bodies (the OO-dispatch lever)
+
+A re-measurement sharpened the target. The shipped JIT already beats YJIT on recursion (2.8×) and on
+`while`-loops + **self**-call chains *inside a method* (3.8× — `compile()` handles those); the earlier
+"call chains lose to YJIT" was a top-level-`<main>` artifact. The one real gap for OO code is an
+**explicit-recv call to ANOTHER object** (`@h.compute(x)`, recv ≠ self) inside a hot loop: `compile()`
+had no Object-receiver `Call` arm, so the whole method declined (4.5× behind YJIT).
+
+**SHIPPED** — generalize B4's native→native call from array-elements to **any (ivar) receiver**, via a
+**runtime-fill monomorphic PIC**:
+- `@h.compute(i)` (1-arg): jitN 3.35s → 0.33s, **2.4× AHEAD of YJIT** (was 4.5× behind), 16× interp.
+- `@c.val` (0-arg, the canonical attribute/derived shape): jitN 4.30s → 0.28s, **2.1× AHEAD** (was 7×
+  behind), 15× interp.
+
+Mechanism: a new `Kind::Object` (a `*const Value`) is pushed by `LoadIvar` when `ivar_call_receiver` (a
+bounded forward stack-effect walk — receiver and `Call` are not adjacent, the arg expr sits between)
+detects the ivar is a call receiver. The explicit-recv `Call` arm lowers it to `jit_obj_call`: read recv
+class; cache hit → call the cached native addr directly (no `do_call`/frame); empty → resolve + compile
+the callee for that class (`jit_compile_obj_callee`, re-entrant via `&mut *vm` — same pattern as the
+heap-mutating primitives; compile touches `jit_native`/`protos` not `heap`, runs no Ruby) + fill the PIC;
+class miss → deopt. Gated to non-builtin, non-closure, Int-returning callees.
+
+Two soundness results the coverage exposed (both fixed, both fixture-guarded):
+1. **Null-receiver after a deopt.** The method codegen accumulates the deopt flag but does NOT branch
+   (ops compute-and-discard on `ovf` — fine for arithmetic), so a preceding non-Object-ivar deopt leaves
+   a NULL `recv` at `jit_obj_call` — which now null-checks before dereferencing. (Crashed `@int.eql?(o)`
+   to empty output before.)
+2. **Arity-swallow.** A 0-arg callee compiles only via `allow_zero_arg` (threaded through a dedicated
+   `compile_native_for_class_zeroarg`, never the shared gate) AND is cached in a SEPARATE
+   `jit_native_zeroarg` map — so a 0-arg `NativeProto` can never be served at a 1-arg dispatch site
+   (B1 / explicit-recv read `jit_native`), which would swallow the wrong-arity `ArgumentError`
+   (`cell.val(99)` must raise). Caught by the fixture (`:argerr` vs `:no_raise`) before the fix.
+
+diff_cruby GREEN both builds (949); STRESS_GC clean (recv pinned, non-moving heap, GC-free callee);
+`jit_obj_recv_call` fixture covers 1-arg + 0-arg fires, polymorphic deopt, bignum overflow, non-Object-ivar
+deopt, empty, the arity-swallow guard, and implicit-self identity. North-star: `crates/rubyrs/benches/
+jit_oo_dispatch.rb`.
+
+Next within Step 1: a receiver that is a LOCAL or method-param (not just an ivar) — the rubocop AST-walk
+shape `node.send_type?` (poc/rubocop-spike/bench_walk.rb, the ultimate north-star); an N-way PIC so a
+genuinely polymorphic site stays native instead of deopting; a varying arg (loop index / captured var).
 
 ## Risks
 
