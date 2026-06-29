@@ -347,11 +347,39 @@ best-tracking `compile_native_minmax_loop` (strict `<` / `>`, so ties keep the
 first element — CRuby-stable; the empty array is left to the generic walk, which
 yields nil).
 
-A recurring ceiling surfaced here: **method-call keys/predicates** (`.abs`,
-`.even?`, `.positive?`) decline because the block op-gate models only arithmetic +
-comparison. Teaching the gate a few pure unary primitives (`abs`/`even?`/`odd?`/
-`zero?`) would unlock a large fraction of real `min_by`/`count`/`select` blocks —
-the highest-leverage next step before the mutable-capture family.
+### Layer 3b: inline pure unary Int primitives
+
+A recurring ceiling surfaced above: **method-call keys/predicates** (`.abs`,
+`.even?`, `.positive?`) declined because the block op-gate modelled only arithmetic
++ comparison. The gate now lowers six pure unary Int primitives **inline** (no
+call, `emit_int_unary`): `abs` → `Int` (an `i64::MIN` negation overflows → deopt);
+`even?`/`odd?`/`zero?`/`positive?`/`negative?` → `Bool` (an `icmp`, usable as a
+comparison condition or a predicate-block result). Crucially these handle the
+**fused `LoadLocalCall`** op — `x.abs` compiles to `LoadLocalCall(slot, abs, …)`,
+not `LoadLocal + Call`, so without that arm the blocks declined at the gate. Result
+over an all-Int array:
+
+    count { |x| x.even? }   jitN 0.07s vs yjit 0.44s   6.3×
+    sum   { |x| x.abs }     jitN 0.07s vs yjit 0.47s   6.7×
+    min_by { |x| x.abs }    jitN 0.07s vs yjit 0.69s   9.9×
+
+**Two soundness fixes the new coverage exposed** (both latent — the blocks/methods
+previously declined for other reasons):
+
+1. *Block branch-merge.* `x*2 if x.even?` merges an `Int` (the then-value) with a
+   `Nil` (the missing-else) at one block. `block_args` recorded only the first
+   branch's kinds, so the nil branch silently lowered to i64 `0` — `filter_map`
+   then kept it (`[0,4,0,8]` for `[4,8]`). `block_args` now returns `None` on a
+   kind-shape mismatch, declining the proto so the interpreter runs it.
+2. *Value-JIT arity.* `compile_value` matched the plain getter shape
+   `[LoadIvar, Return]` regardless of arity, so a 0-param getter served a
+   *wrong-arity* call (`obj.x(1)` / `send(:x, 1)`) from the 1-arg dispatch hook,
+   swallowing the `ArgumentError`. It now applies `compile`'s shape gate (exactly
+   one required positional). This closed the lone jit-native-specific `diff_cruby`
+   failure — the JIT build is now at exact parity with the interpreter (both green,
+   9 known missing-feature TODOs quarantined as `#[ignore]`).
+
+The mutable-capture family (next) is the remaining ceiling.
 
 ### Deferred (designed): the `each` accumulator
 
