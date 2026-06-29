@@ -626,6 +626,24 @@ impl Heap {
     /// to the universal primitive arms (`nil?` / `==` / `to_s`)
     /// instead of ICE-ing in the user-method lookup; methods with
     /// no universal arm surface NoMethodError (decline-loudly).
+    /// The receiver's class as a raw POINTER (`Rc::as_ptr`), WITHOUT cloning the
+    /// `Rc<Class>` — for hot inline-cache class guards (the JIT's obj-call /
+    /// getter-array / value-is-class primitives), where `try_class_of`'s refcount
+    /// inc+drop per element is pure overhead (only the pointer identity is needed).
+    /// `None` for a non-Object slot (same cases as `try_class_of`).
+    #[inline]
+    pub(crate) fn class_ptr_of(&self, id: ObjId) -> Option<usize> {
+        match self.get(id) {
+            HeapObj::Instance(i) => Some(match &i.singleton_class {
+                Some(sc) => Rc::as_ptr(sc) as usize,
+                None => Rc::as_ptr(&i.class) as usize,
+            }),
+            HeapObj::TypedData(d) => Some(Rc::as_ptr(&d.class) as usize),
+            #[cfg(feature = "_fiber")]
+            HeapObj::Fiber(_) => Some(Rc::as_ptr(&self.fiber_class()) as usize),
+            _ => None,
+        }
+    }
     pub(crate) fn try_class_of(&self, id: ObjId) -> Option<Rc<crate::value::Class>> {
         match self.get(id) {
             HeapObj::Instance(i) => Some(match &i.singleton_class {

@@ -3982,10 +3982,11 @@ pub(crate) unsafe extern "C" fn jit_value_is_class(
             None => return NRet { res: 0, ovf: 1 }, // not a known class const → deopt
         }
     };
-    // The value's exact class pointer. Object: cheap `try_class_of`; else `class_of`.
+    // The value's exact class pointer. Object: cheap clone-free `class_ptr_of`; else
+    // `class_of` (the `&mut` dispatch helper, correct for any builtin-classed value).
     let vclass_ptr = match v {
-        Value::Object(oid) => match unsafe { &*vm }.heap.try_class_of(*oid) {
-            Some(c) => std::rc::Rc::as_ptr(&c) as usize,
+        Value::Object(oid) => match unsafe { &*vm }.heap.class_ptr_of(*oid) {
+            Some(p) => p,
             None => return NRet { res: 0, ovf: 1 },
         },
         _ => {
@@ -4037,19 +4038,23 @@ pub(crate) unsafe extern "C" fn jit_obj_call(
         Value::Object(o) => *o,
         _ => return deopt,
     };
-    let cls = match unsafe { &*vm }.heap.try_class_of(oid) {
-        Some(c) => c,
+    let cls_ptr = match unsafe { &*vm }.heap.class_ptr_of(oid) {
+        Some(p) => p,
         None => return deopt,
     };
-    let cls_ptr = std::rc::Rc::as_ptr(&cls) as usize;
     let (cached_cls, cached_addr) = cache.get();
     let addr = if cached_cls == cls_ptr {
         cached_addr
     } else if cached_cls == 0 {
         // Empty cache: resolve + compile the callee for this receiver class (1-arg),
         // then memoize (class_ptr, addr). Re-entrant compile via &mut *vm — sound per
-        // the safety note (same pattern as the heap-mutating primitives).
+        // the safety note (same pattern as the heap-mutating primitives). The Rc<Class>
+        // (cloned only here, on the cold miss) is needed for `compile_native_for_class`.
         let vmm = unsafe { &mut *vm };
+        let cls = match vmm.heap.try_class_of(oid) {
+            Some(c) => c,
+            None => return deopt,
+        };
         match vmm.jit_compile_obj_callee(crate::intern::SymId(name), &cls, cls_ptr, argc as usize) {
             Some(a) => {
                 cache.set((cls_ptr, a));
@@ -4091,15 +4096,19 @@ pub(crate) unsafe extern "C" fn jit_obj_getter_array(
         Value::Object(o) => *o,
         _ => return deopt,
     };
-    let cls = match vm.heap.try_class_of(oid) {
-        Some(c) => c,
+    let cls_ptr = match vm.heap.class_ptr_of(oid) {
+        Some(p) => p,
         None => return deopt,
     };
-    let cls_ptr = std::rc::Rc::as_ptr(&cls) as usize;
     let (cached_cls, cached_ivar) = cache.get();
     let ivar = if cached_cls == cls_ptr {
         cached_ivar
     } else if cached_cls == 0 {
+        // Cold miss only: clone the Rc<Class> to resolve the getter → ivar.
+        let cls = match vm.heap.try_class_of(oid) {
+            Some(c) => c,
+            None => return deopt,
+        };
         let m = match vm.lookup_method_uncached(&cls, crate::intern::SymId(getter_name)) {
             Some(m) => m,
             None => return deopt,
@@ -4875,8 +4884,8 @@ pub(crate) unsafe extern "C" fn jit_array_elem_obj_guarded(
         Value::Object(oid) => *oid,
         _ => return deopt,
     };
-    match vm.heap.try_class_of(oid) {
-        Some(c) if std::rc::Rc::as_ptr(&c) as usize == expected_cls as usize => NRet {
+    match vm.heap.class_ptr_of(oid) {
+        Some(p) if p == expected_cls as usize => NRet {
             res: elem as *const Value as i64,
             ovf: 0,
         },
