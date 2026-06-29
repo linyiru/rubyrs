@@ -3373,9 +3373,13 @@ fn rational_phase_c4_4_literal_and_pow() {
             "String can't be coerced into Rational",
         ),
         (
+            // CRuby's coerce_failed() inspects a Symbol arg → `:sym`, not
+            // the class name (verified against CRuby 3.4). The String case
+            // above DOES use the class name, since coerce_failed only
+            // inspects Symbol / nil / true / false / Float / special-consts.
             "(1/2r) ** :sym",
             "TypeError",
-            "Symbol can't be coerced into Rational",
+            ":sym can't be coerced into Rational",
         ),
     ] {
         let err = rt.eval(script, "rational_c44_err.rb").unwrap_err();

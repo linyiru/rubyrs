@@ -805,6 +805,10 @@ impl Vm {
                 _ => "Integer",
             };
             let arg_desc = match &other {
+                // CRuby's coerce_failed() inspects Symbol / nil / true /
+                // false / Float / special-consts (so `:sym`, `nil`, `1.5`),
+                // and uses the class name for everything else. Verified
+                // against CRuby 3.4: `1 + :sym` → ":sym can't be coerced".
                 Value::Sym(_) | Value::Nil | Value::Bool(_) => {
                     other.to_inspect(&self.heap, &self.interner)
                 }
@@ -10300,21 +10304,47 @@ impl Vm {
                 None => true,
                 Some(v) => v.is_truthy(),
             };
+            // Fast undefined-path: a single-segment const name that was never
+            // interned can't be defined anywhere — every const_set / class
+            // def / autoload interns the name first — so it's `false` without
+            // walking (and crucially without `resolve_const_path` interning
+            // the fresh name, which would grow the interner on every miss;
+            // see const_defined_misses_do_not_grow_interner). Keyed on the
+            // name CONTENT, not the `split` flag (a String arg sets split=true
+            // even for a bare name); a real `A::B` path still falls through so
+            // an undefined `A` raises rather than returning false. The
+            // uppercase-first guard keeps an INVALID name (e.g. "foo") on the
+            // normal path so it still raises "wrong constant name".
+            if !const_name.contains("::")
+                && const_name.starts_with(|c: char| c.is_ascii_uppercase())
+                && self.interner.get_id(&const_name).is_none()
+            {
+                self.stack.push(Value::Bool(false));
+                return Ok(());
+            }
             if !inherit && !split {
                 let key_str = match cls.effective_name().as_deref() {
                     Some("Object") | None => const_name.clone(),
                     Some(on) => format!("{}::{}", on, const_name),
                 };
-                let key = self.interner.intern(&key_str);
-                let short = self.interner.intern(&const_name);
-                let found = self.classes.contains_key(&key)
-                    || self.constants.contains_key(&key)
-                    || cls.consts.borrow().contains_key(&short)
-                    // A registered-but-unloaded autoload counts as defined
-                    // (CRuby): `const_defined?` reports it true WITHOUT
-                    // triggering the load. zeitwerk's unload + Ruby-compat
-                    // suites rely on this.
-                    || self.autoloads_scoped.contains_key(&key);
+                // Probe with `get_id` (non-growing): a name absent from
+                // the interner was never const_set/registered, so it can't
+                // be defined — and `const_defined?` MISSES must not grow the
+                // interner (resource-cap invariant, see
+                // const_defined_misses_do_not_grow_interner).
+                let key = self.interner.get_id(&key_str);
+                let short = self.interner.get_id(&const_name);
+                let found = key.is_some_and(|k| {
+                    self.classes.contains_key(&k) || self.constants.contains_key(&k)
+                }) || short.is_some_and(|s| cls.consts.borrow().contains_key(&s));
+                // A registered-but-unloaded autoload counts as defined
+                // (CRuby): `const_defined?` reports it true WITHOUT
+                // triggering the load. zeitwerk's unload + Ruby-compat
+                // suites rely on this. (`autoloads_scoped` is wasi-gated —
+                // autoload needs `require`, which traps on wasm32-wasi.)
+                #[cfg(not(target_os = "wasi"))]
+                let found = found
+                    || key.is_some_and(|k| self.autoloads_scoped.contains_key(&k));
                 self.stack.push(Value::Bool(found));
                 return Ok(());
             }
@@ -10327,12 +10357,19 @@ impl Vm {
                     Some("Object") | None => const_name.clone(),
                     Some(on) => format!("{}::{}", on, const_name),
                 };
-                let key = self.interner.intern(&key_str);
-                let short = self.interner.intern(&const_name);
-                let already = self.classes.contains_key(&key)
-                    || self.constants.contains_key(&key)
-                    || cls.consts.borrow().contains_key(&short);
-                if !already && self.autoloads_scoped.contains_key(&key) {
+                // Non-growing probe (see the inherit=false arm above):
+                // const_defined? misses must not grow the interner.
+                let key = self.interner.get_id(&key_str);
+                let short = self.interner.get_id(&const_name);
+                let already = key.is_some_and(|k| {
+                    self.classes.contains_key(&k) || self.constants.contains_key(&k)
+                }) || short.is_some_and(|s| cls.consts.borrow().contains_key(&s));
+                #[cfg(not(target_os = "wasi"))]
+                let scoped_pending =
+                    key.is_some_and(|k| self.autoloads_scoped.contains_key(&k));
+                #[cfg(target_os = "wasi")]
+                let scoped_pending = false;
+                if !already && scoped_pending {
                     self.stack.push(Value::Bool(true));
                     return Ok(());
                 }
@@ -10368,6 +10405,28 @@ impl Vm {
                     msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
                 })),
             };
+            // Single-segment, valid, never-interned name → definitely missing.
+            // Raise the same NameError resolve_const_path would, WITHOUT
+            // interning the fresh name (const_get misses must not grow the
+            // interner; see const_defined_misses_do_not_grow_interner).
+            // `const_missing` still fires. Uppercase-first guard leaves an
+            // invalid name on the normal "wrong constant name" path.
+            if !const_name.contains("::")
+                && const_name.starts_with(|c: char| c.is_ascii_uppercase())
+                && self.interner.get_id(&const_name).is_none()
+            {
+                let cls_clone = cls.clone();
+                if self.try_const_missing(&cls_clone, &const_name)? {
+                    return Ok(());
+                }
+                let missing_qualified = match cls_clone.effective_name().as_deref() {
+                    Some("Object") | None => const_name.clone(),
+                    Some(on) => format!("{}::{}", on, const_name),
+                };
+                return Err(self.trap(RubyError::NameError {
+                    msg: format!("uninitialized constant {}", missing_qualified),
+                }));
+            }
             let cls_clone = cls.clone();
             let outcome = self.resolve_const_path(&cls_clone, &const_name, split, true);
             match outcome {
@@ -10674,7 +10733,9 @@ impl Vm {
                     self.classes.remove(&k);
                     self.constants.remove(&k);
                     self.const_source_locations.remove(&k);
+                    #[cfg(not(target_os = "wasi"))]
                     self.autoloads_scoped.remove(&k);
+                    #[cfg(not(target_os = "wasi"))]
                     self.autoloads_toplevel.remove(&k);
                     self.consumed_autoloads.remove(&k);
                 }
@@ -10700,7 +10761,9 @@ impl Vm {
                     }
                     let mut removed_autoload = false;
                     for k in &keys {
+                        #[cfg(not(target_os = "wasi"))]
                         if self.autoloads_toplevel.remove(k).is_some() { removed_autoload = true; }
+                        #[cfg(not(target_os = "wasi"))]
                         if self.autoloads_scoped.remove(k).is_some() { removed_autoload = true; }
                         // CRuby also lets `remove_const` succeed for a const
                         // whose autoload FIRED but never defined it (the
@@ -22628,9 +22691,12 @@ impl Vm {
                 // namespace whose files shadow core class names. Scoped
                 // to `const_get` so lexical bare-name resolution (where
                 // `String` SHOULD reach `::String`) is unaffected.
-                let suppress_toplevel = prefer_own_autoload
-                    && self.interner.contains(&lookup)
+                #[cfg(not(target_os = "wasi"))]
+                let scoped_pending = self.interner.contains(&lookup)
                     && self.autoloads_scoped.contains_key(&self.interner.intern(&lookup));
+                #[cfg(target_os = "wasi")]
+                let scoped_pending = false;
+                let suppress_toplevel = prefer_own_autoload && scoped_pending;
                 if hit.is_none() && !suppress_toplevel && self.interner.contains(segment) {
                     let tl_qid = self.interner.intern(segment);
                     if let Some(c) = self.classes.get(&tl_qid).cloned() {

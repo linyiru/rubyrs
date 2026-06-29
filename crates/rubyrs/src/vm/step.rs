@@ -91,6 +91,9 @@ fn pattern_has_named_group(src: &str) -> bool {
     false
 }
 
+// Dead when `regex` is off (all callers are regex-gated), but the body
+// stays compilable via the `demote_unnamed` cfg-split below.
+#[cfg_attr(not(feature = "regex"), allow(dead_code))]
 pub(crate) fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
     // When a pattern contains ANY named capture group, Ruby/Onigmo
     // demotes every UNNAMED `(…)` group to non-capturing — only the
@@ -2005,6 +2008,10 @@ impl Vm {
                 // (ActiveModel::Validations::Callbacks). This is exactly AR's
                 // `include Callbacks` at base.rb. Innermost-first, matching
                 // the phase-1 order.
+                // `fire_pending_autoload` is wasi-gated (needs `require`,
+                // which traps on wasm32-wasi), so this autoload-firing
+                // phase is skipped entirely on wasi.
+                #[cfg(not(target_os = "wasi"))]
                 if found.is_none() {
                     for sym in &chain[..lex_split] {
                         let name_str = self.interner.resolve(*sym).to_string();
@@ -2319,9 +2326,12 @@ impl Vm {
                     // rss `require "English"` then builds method names
                     // from `$POSTMATCH` (`alias_method "#{$POSTMATCH}?",
                     // name` in install_get_attribute).
-                    if self.loaded_stdlib_stubs.contains("English")
-                        || self.loaded_stdlib_stubs.contains("english")
-                    {
+                    #[cfg(not(target_os = "wasi"))]
+                    let english = self.loaded_stdlib_stubs.contains("English")
+                        || self.loaded_stdlib_stubs.contains("english");
+                    #[cfg(target_os = "wasi")]
+                    let english = false;
+                    if english {
                         match &*resolved {
                             "$MATCH" => std::rc::Rc::from("$&"),
                             "$PREMATCH" => std::rc::Rc::from("$`"),
