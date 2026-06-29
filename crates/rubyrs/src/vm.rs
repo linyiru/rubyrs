@@ -749,6 +749,12 @@ pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// ZERO-arg method NativeProtos compiled for the `jit_obj_call` PIC path (ADR 0034
+    /// Step 1). Kept SEPARATE from `jit_native` so a 0-arg proto can NEVER be served at
+    /// a 1-arg dispatch site (B1 / explicit-recv look up `jit_native`), which would
+    /// swallow the wrong-arity ArgumentError. Only `jit_obj_call` (argc=0) reads this.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_zeroarg: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
     /// FLOAT-param specialization of a 1-arg method (`def scale(n); n*1.5; end`
     /// called with a Float arg): the param binds as Float, the i64 arg carries f64
     /// bits. Leaf methods only (no cross-calls — those decline). Keyed by proto,
@@ -2029,6 +2035,8 @@ impl Vm {
         Vm {
             #[cfg(feature = "jit-native")]
             jit_native: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_zeroarg: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_fparam: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]

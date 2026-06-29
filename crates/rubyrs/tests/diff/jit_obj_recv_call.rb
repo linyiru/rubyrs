@@ -58,3 +58,38 @@ def U.default(x, y = self)
 end
 p U.default(U)
 p U.default(42)
+
+# --- 0-arg explicit-recv calls `@c.val` (the canonical attribute/derived shape) ---
+class Cell
+  def initialize(v); @v = v; end
+  def val; @v * 3 + 1; end           # 0-arg, real arithmetic
+end
+class Agg
+  def initialize(c); @c = c; end
+  def run(n)
+    s = 0; i = 0
+    while i < n
+      s += @c.val                    # 0-arg explicit-recv on an ivar
+      i += 1
+    end
+    s
+  end
+end
+p Agg.new(Cell.new(9)).run(40)
+p Agg.new(Cell.new(0)).run(40)
+p Agg.new(Cell.new(9)).run(0)        # empty
+
+# 0-arg polymorphic deopt.
+class Cell2 < Cell
+  def val; @v + 1; end
+end
+p Agg.new(Cell2.new(5)).run(40)
+
+# A 0-arg method on a 0-arg method must NOT be served at a wrong-arity call (the
+# arity-swallow guard): `cell.val(99)` raises ArgumentError, never silently runs.
+begin
+  Cell.new(1).val(99)
+  p :no_raise
+rescue ArgumentError
+  p :argerr
+end

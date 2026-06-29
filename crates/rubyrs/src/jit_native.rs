@@ -185,7 +185,9 @@ fn ivar_call_receiver(code: &[Op], ivar_ip: usize, syms: &JitSyms) -> Option<(Sy
                     && *argc <= 1
                     && *name != syms.bracket
                     && *name != syms.lshift
-                    && *name != syms.bracket_set =>
+                    && *name != syms.bracket_set
+                    && *name != syms.length
+                    && *name != syms.size =>
             {
                 return Some((*name, *argc));
             }
@@ -226,16 +228,24 @@ pub(crate) fn compile(
     // accumulator. Existing callers pass `float_acc == float_elem` (behaviour-
     // identical); only the Int-elem/Float-acc sum driver passes (false, true).
     float_acc: bool,
+    // Permit a ZERO-required-positional method (`def val; @a + @b; end`). STRICT
+    // (1-arg only) for every caller EXCEPT the obj-callee path (`jit_compile_obj_callee`,
+    // ADR 0034 Step 1): a 0-arg `NativeProto` is only ever reached via `jit_obj_call`
+    // (a native call site with the correct argc=0) — B1 and explicit-recv are
+    // `argc==1`-gated and never serve it, so the wrong-arity-swallow hazard that keeps
+    // the gate strict elsewhere does not apply. Ignored for blocks (`block.is_some()`).
+    allow_zero_arg: bool,
 ) -> Option<NativeProto> {
-    // Shape gate (methods only): exactly one required positional param. A block's
-    // 1-param eligibility is checked by the caller via its `BlockHandle` fields.
-    if block.is_none()
-        && (proto.n_required_positional != 1
-            || proto.params.len() != 1
-            || proto.rest_param.is_some()
-            || !proto.kw_param_defaults.is_empty())
-    {
-        return None;
+    // Shape gate (methods only): 0 (iff `allow_zero_arg`) or 1 required positional, no
+    // optional/rest/kw. `params.len() == n_required_positional` rejects optionals; the
+    // unused i64 C-arg of a 0-arg method binds harmlessly to slot 0 (all slots are
+    // def_var'd at entry). A block's eligibility is checked by the caller.
+    if block.is_none() {
+        let n = proto.n_required_positional as usize;
+        let arity_ok = (n == 1 || (n == 0 && allow_zero_arg)) && proto.params.len() == n;
+        if !arity_ok || proto.rest_param.is_some() || !proto.kw_param_defaults.is_empty() {
+            return None;
+        }
     }
     let param_slot = block.map(|(p, _, _, _)| p).unwrap_or(0);
     // Predicate mode (count/select/...): a final `Bool` Return materialises as
@@ -465,6 +475,7 @@ pub(crate) fn compile(
     ocsig.params.push(AbiParam::new(types::I64)); // arg
     ocsig.params.push(AbiParam::new(types::I32)); // name sym
     ocsig.params.push(AbiParam::new(ptr_ty)); // cache cell ptr
+    ocsig.params.push(AbiParam::new(types::I64)); // argc (0 or 1)
     ocsig.returns.push(AbiParam::new(types::I64));
     ocsig.returns.push(AbiParam::new(types::I8));
     let ocid = module
@@ -1191,9 +1202,10 @@ pub(crate) fn compile(
                         &*cache as *const std::cell::Cell<(usize, usize)> as i64;
                     obj_call_caches.push(cache);
                     let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
+                    let argc_const = fb.ins().iconst(types::I64, *argc as i64);
                     let inst = fb.ins().call(
                         obj_call_ref,
-                        &[vm_param, recv_ptr, arg, nm, cache_const],
+                        &[vm_param, recv_ptr, arg, nm, cache_const, argc_const],
                     );
                     let (res, of) = {
                         let r = fb.inst_results(inst);
@@ -3550,6 +3562,7 @@ pub(crate) unsafe extern "C" fn jit_obj_call(
     arg: i64,
     name: u32,
     cache: *const std::cell::Cell<(usize, usize)>,
+    argc: i64,
 ) -> NRet {
     let deopt = NRet { res: 0, ovf: 1 };
     // The method codegen accumulates the deopt flag but does NOT branch on it (ops
@@ -3578,7 +3591,7 @@ pub(crate) unsafe extern "C" fn jit_obj_call(
         // then memoize (class_ptr, addr). Re-entrant compile via &mut *vm — sound per
         // the safety note (same pattern as the heap-mutating primitives).
         let vmm = unsafe { &mut *vm };
-        match vmm.jit_compile_obj_callee(crate::intern::SymId(name), &cls, cls_ptr, 1) {
+        match vmm.jit_compile_obj_callee(crate::intern::SymId(name), &cls, cls_ptr, argc as usize) {
             Some(a) => {
                 cache.set((cls_ptr, a));
                 a

@@ -10014,10 +10014,12 @@ impl Vm {
             // NoMethodError on IO, matching CRuby) to the shared
             // dispatch. Sinatra's `enable :inline_templates` does
             // `IO.read(file)` to slurp the app file for `__END__` views.
+            // `readlines`/`foreach` are deliberately NOT here: they live
+            // as IO preamble class methods (delegating to the File
+            // veneer), resolved before this native fallback.
             if cls.name.as_str() == "IO"
                 && matches!(&*name,
-                    "read" | "write" | "binread" | "binwrite"
-                    | "readlines" | "foreach")
+                    "read" | "write" | "binread" | "binwrite")
                 && let Some(v) = self.file_class_dispatch(&name, &args)? {
                     self.stack.push(v);
                     return Ok(());
@@ -16023,11 +16025,25 @@ impl Vm {
             _ => return None,
         }
         let cp = m.proto_idx;
-        if !self.jit_native.contains_key(&cp) {
-            let compiled = self.compile_native_for_class(cp, Some(cls));
-            self.jit_native.insert(cp, compiled);
-        }
-        let (addr, gc, ret_float, ret_array) = match self.jit_native.get(&cp) {
+        // A 0-arg callee uses the zero-arg-permitting compile AND a SEPARATE cache
+        // (`jit_native_zeroarg`), so its NativeProto can never be served at a 1-arg
+        // dispatch site (B1 / explicit-recv read `jit_native`), which would swallow the
+        // wrong-arity ArgumentError. 1-arg callees share `jit_native` (correct to serve
+        // at a 1-arg site). The on-miss compile is re-entrant via `&mut *vm`.
+        let cache = if expect_arity == 0 {
+            if !self.jit_native_zeroarg.contains_key(&cp) {
+                let compiled = self.compile_native_for_class_zeroarg(cp, Some(cls));
+                self.jit_native_zeroarg.insert(cp, compiled);
+            }
+            self.jit_native_zeroarg.get(&cp)
+        } else {
+            if !self.jit_native.contains_key(&cp) {
+                let compiled = self.compile_native_for_class(cp, Some(cls));
+                self.jit_native.insert(cp, compiled);
+            }
+            self.jit_native.get(&cp)
+        };
+        let (addr, gc, ret_float, ret_array) = match cache {
             Some(Some(np)) => (
                 np.addr(),
                 np.guard_class.get(),
@@ -16054,7 +16070,20 @@ impl Vm {
         recv_cls: Option<&std::rc::Rc<crate::value::Class>>,
     ) -> Option<crate::jit_native::NativeProto> {
         let mut visited = crate::intern::FxHashSet::default();
-        self.compile_native_for_class_rec(proto_idx, recv_cls, &mut visited)
+        self.compile_native_for_class_rec(proto_idx, recv_cls, &mut visited, false)
+    }
+
+    /// Like [`compile_native_for_class`] but permits a ZERO-arg method (the canonical
+    /// `obj.method` callee for `jit_obj_call`, ADR 0034 Step 1). Only the obj-callee
+    /// path uses this — see `compile`'s `allow_zero_arg` note.
+    #[cfg(feature = "jit-native")]
+    fn compile_native_for_class_zeroarg(
+        &mut self,
+        proto_idx: usize,
+        recv_cls: Option<&std::rc::Rc<crate::value::Class>>,
+    ) -> Option<crate::jit_native::NativeProto> {
+        let mut visited = crate::intern::FxHashSet::default();
+        self.compile_native_for_class_rec(proto_idx, recv_cls, &mut visited, true)
     }
 
     /// Recursive core of [`compile_native_for_class`]. `visited` holds the
@@ -16070,6 +16099,9 @@ impl Vm {
         proto_idx: usize,
         recv_cls: Option<&std::rc::Rc<crate::value::Class>>,
         visited: &mut crate::intern::FxHashSet<usize>,
+        // Allow this (TOP) proto to be 0-arg. Recursive callee compiles below pass
+        // `false` — they are reached via 1-arg `CallNoRecv` cross-calls.
+        allow_zero_arg: bool,
     ) -> Option<crate::jit_native::NativeProto> {
         let self_name = self.protos[proto_idx].name.clone();
         let self_name_id = self.interner.intern(&self_name);
@@ -16125,7 +16157,7 @@ impl Vm {
                     && cm.closure.is_none()
                     && !matches!(self.jit_native.get(&cp), Some(None))
                 {
-                    let variant = self.compile_native_for_class_rec(cp, recv_cls, visited);
+                    let variant = self.compile_native_for_class_rec(cp, recv_cls, visited, false);
                     let addr = variant.as_ref().map(|np| np.addr());
                     self.jit_native.insert(cp, variant);
                     if let Some(a) = addr {
@@ -16171,6 +16203,7 @@ impl Vm {
             None,
             false, // methods never have a Float element param
             false, // ...and the accumulator/result float-ness mirrors it
+            allow_zero_arg,
         );
         if let (Some(np), false) = (
             &compiled,
@@ -16203,6 +16236,7 @@ impl Vm {
             None,
             true,
             true, // fparam: Float element; result-Float allowed via is_method too
+            false, // 1-arg fparam method — no 0-arg
         )
     }
 
@@ -16639,6 +16673,7 @@ impl Vm {
             Some((param_start, body_local_start, false, crate::jit_native::AccKind::None)),
             false, // Int element
             true,  // ...but Float accumulator/result
+            false, // block (allow_zero_arg ignored)
         )
     }
 
@@ -17824,6 +17859,7 @@ impl Vm {
             Some((param_start, body_local_start, predicate, crate::jit_native::AccKind::None)),
             false,
             false,
+            false, // block (allow_zero_arg ignored)
         )
     }
 
@@ -17853,6 +17889,7 @@ impl Vm {
             Some((param_start, body_local_start, predicate, crate::jit_native::AccKind::None)),
             true, // float element
             float_acc,
+            false, // block (allow_zero_arg ignored)
         )
     }
 
@@ -17882,6 +17919,7 @@ impl Vm {
             Some((param_start, body_local_start, false, crate::jit_native::AccKind::Inject)),
             float_elem,
             float_acc,
+            false, // block (allow_zero_arg ignored)
         )
     }
 
@@ -17920,6 +17958,7 @@ impl Vm {
             )),
             float_elem,
             float_acc,
+            false, // block (allow_zero_arg ignored)
         )
     }
 
@@ -17954,6 +17993,7 @@ impl Vm {
             )),
             false, // element (arg3) is always Int for each_with_index
             float_acc,
+            false, // block (allow_zero_arg ignored)
         )
     }
 
@@ -17988,6 +18028,7 @@ impl Vm {
             )),
             float_elem,
             false,
+            false, // block (allow_zero_arg ignored)
         )
     }
 
@@ -18025,6 +18066,7 @@ impl Vm {
             )),
             float_elem,
             float_val,
+            false, // block (allow_zero_arg ignored)
         )
     }
 
