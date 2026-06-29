@@ -178,7 +178,20 @@
 # a few KB across the board). Same uniform-baseline-shift shape as
 # every prior bump in this file; ~2% headroom over the observed
 # peak so future regressions still surface.
-crates/rubyrs/tests/fixtures/fizzbuzz.rb	8400	0	tiny script; wall is sub-100ms noise floor, disabled
+# Uniform RSS bump on 2026-06-29 accepting the JIT-arc's accumulated
+# base-runtime growth (maintainer decision). The previous 8400/8700/9400
+# budgets predate the arc (last set 2026-06-14); observed CI RSS now
+# clusters at 9096-9324 KB (gc_churn 10136) — a uniform ~700-800 KB step,
+# beyond the file's ≤5% noise band. Attribution is diffuse across the
+# ~500-commit arc (more always-on preambles baked via include_str!, the
+# native-JIT codegen surface that compiles even on the jit-off default
+# build via no-op stubs, generational-GC young/old bookkeeping). New
+# budgets (9700 cluster / 10600 gc_churn) leave ~400 KB headroom over the
+# observed CI min so a real future regression still surfaces. This ACCEPTS
+# the growth rather than optimising it — the '~5x lighter than CRuby'
+# headline still holds with margin, but an RSS-reduction pass is worth
+# scheduling as a follow-up.
+crates/rubyrs/tests/fixtures/fizzbuzz.rb	9700	0	tiny script; wall is sub-100ms noise floor, disabled
 # mm_bench WALL bumped 1200 → 1300 on 2026-06-04 — observed
 # CI 1220 ms (+1.7% over) after Track 1 / 2 chain accumulated:
 #   * 0da682b3 (Track 1) — Frame::kw_given_mask: u64, +8 bytes
@@ -224,7 +237,7 @@ crates/rubyrs/tests/fixtures/fizzbuzz.rb	8400	0	tiny script; wall is sub-100ms n
 # frames backing buffer + per-aux boxes where begin/rescue runs) —
 # a ~36 KB page-boundary effect, not a leak. Joins fizzbuzz /
 # hash_mutate at the 8400 tier (same 2026-06-10 rhythm).
-crates/rubyrs/examples/metaprog_bench/mm_bench.rb	8400	1550	2M method_missing dispatch
+crates/rubyrs/examples/metaprog_bench/mm_bench.rb	9700	1550	2M method_missing dispatch
 # dm_bench RSS bumped 6500 → 6700 on 2026-05-27 — the
 # define_method dispatch benchmark crossed 6500 KB at PR #175
 # (ic-stats baseline workloads added) + PR #178 (step-block
@@ -247,7 +260,7 @@ crates/rubyrs/examples/metaprog_bench/mm_bench.rb	8400	1550	2M method_missing di
 # binary lift its startup/alloc RSS a hair over the razor-thin cap.
 # Joins the 8400 cohort (fizzbuzz / mm_bench / hash_mutate); ~2%
 # headroom over the observed peak.
-crates/rubyrs/examples/metaprog_bench/dm_bench.rb	8400	900	2M define_method dispatch (closure-method)
+crates/rubyrs/examples/metaprog_bench/dm_bench.rb	9700	900	2M define_method dispatch (closure-method)
 # static_bench RSS bumped 8200 → 8400 on 2026-06-11 — observed CI
 # 8220 KB (20 KB / 0.24% over) after the merge-sort change
 # (f57031a8). static_bench never sorts; the lift is the wider
@@ -255,7 +268,7 @@ crates/rubyrs/examples/metaprog_bench/dm_bench.rb	8400	900	2M define_method disp
 # ~8.1–8.2 MB across ALL workloads (fizzbuzz read 8212 the same
 # run). Joins the 8400 cohort (fizzbuzz / mm_bench / dm_bench /
 # hash_mutate); ~2% headroom over the observed peak.
-crates/rubyrs/examples/metaprog_bench/static_bench.rb	8400	1150	2M def+ivar (control for the metaprog comparisons)
+crates/rubyrs/examples/metaprog_bench/static_bench.rb	9700	1150	2M def+ivar (control for the metaprog comparisons)
 # Budgets at ~2× local M-series observed wall to absorb CI's
 # ~1.65× ubuntu-latest slowdown plus per-run jitter — same shape
 # as the metaprog rows above (static_bench: local 390ms / CI 650
@@ -268,7 +281,7 @@ crates/rubyrs/examples/metaprog_bench/static_bench.rb	8400	1150	2M def+ivar (con
 # baseline shift). Joins the fizzbuzz/mm/hash_mutate 8400 tier;
 # ~2% headroom over the observed peak so future regressions still
 # surface.
-crates/rubyrs/benches/fizzbuzz_1m.rb	8400	800	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
+crates/rubyrs/benches/fizzbuzz_1m.rb	9700	800	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
 # gc_churn RSS bumped 6500 → 6700 on 2026-05-27 — same
 # direction as dm_bench's per-row bump above. Observed CI
 # RSS 6504 KB (just 4 KB over) after PR #182 / #184 / #186
@@ -301,14 +314,14 @@ crates/rubyrs/benches/fizzbuzz_1m.rb	8400	800	1M fizzbuzz; BinOpInt + IncLocal +
 # workload's baseline uniformly; gc_churn (the highest, alloc-stress
 # peak) crossed at observed 9068 KB. Real preamble cost, not a leak —
 # the other workloads stay well under 8400. ~3.5% headroom.
-crates/rubyrs/benches/gc_churn.rb	9400	400	200k short-lived Array+Hash allocs; stresses mark/sweep
+crates/rubyrs/benches/gc_churn.rb	10600	400	200k short-lived Array+Hash allocs; stresses mark/sweep
 # string_interp RSS bumped 8200 → 8400 on 2026-06-11 — observed CI
 # 8284 KB (84 KB / 1% over) one run after static_bench tripped the
 # same way (8220). The runner image's RSS floor now sits at
 # ~8.1–8.3 MB across ALL workloads; this was the last row below
 # 8400. Joins the 8400 cohort (fizzbuzz / mm_bench / dm_bench /
 # static_bench / fizzbuzz_1m / hash_mutate).
-crates/rubyrs/benches/string_interp.rb	8400	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
+crates/rubyrs/benches/string_interp.rb	9700	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
 # hash_mutate WALL bumped 650 → 730 on 2026-05-27 — 3
 # consecutive master CI runs observed 690-710ms (4-9% over
 # 650 budget). Same pattern on dm_bench (700→780) and
@@ -333,4 +346,4 @@ crates/rubyrs/benches/string_interp.rb	8400	700	200k InterpolatedStr; Op::Interp
 # workloads measured 8048-8112 and still have headroom; only
 # hash_mutate (highest heap peak) crossed. 8700 gives ~290 KB / 3.4%
 # headroom over the observed peak for run-to-run jitter.
-crates/rubyrs/benches/hash_mutate.rb	8700	880	200k Hash[]= overwrites + 1k Hash[] reads
+crates/rubyrs/benches/hash_mutate.rb	9700	880	200k Hash[]= overwrites + 1k Hash[] reads
