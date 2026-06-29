@@ -338,10 +338,20 @@ Bignum seed / `break` / empty / Range / Object-block all match).
 
 `sum` (6.3×), `map` (3.2×), `count` (6.1×), `select`/`reject`/`filter` (4.8×),
 `any?`/`all?`/`none?`/`one?` (5.6×), `find`/`detect` (8.6×), `inject`/`reduce`
-2-param (8.6×) — all over an all-Int array with a comparison/arithmetic block;
-non-Int elements or results, method-call predicates, `break`, and the no-init
-`inject` decline to the generic walk. Four loop shapes (`Sum` / `Map` / `Filter` /
-`Find`) under one `compile_native_loop`, plus the 2-param `compile_native_inject_loop`.
+2-param (8.6×), `min_by`/`max_by` (8.6×) — all over an all-Int array with a
+comparison/arithmetic block; non-Int elements or results, method-call keys/
+predicates (e.g. `.abs`, `.even?`), `break`, and the no-init `inject` decline to
+the generic walk. Four loop shapes (`Sum` / `Map` / `Filter` / `Find`) under one
+`compile_native_loop`, plus the 2-param `compile_native_inject_loop` and the
+best-tracking `compile_native_minmax_loop` (strict `<` / `>`, so ties keep the
+first element — CRuby-stable; the empty array is left to the generic walk, which
+yields nil).
+
+A recurring ceiling surfaced here: **method-call keys/predicates** (`.abs`,
+`.even?`, `.positive?`) decline because the block op-gate models only arithmetic +
+comparison. Teaching the gate a few pure unary primitives (`abs`/`even?`/`odd?`/
+`zero?`) would unlock a large fraction of real `min_by`/`count`/`select` blocks —
+the highest-leverage next step before the mutable-capture family.
 
 ### Deferred (designed): the `each` accumulator
 

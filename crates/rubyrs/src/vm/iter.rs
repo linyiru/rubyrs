@@ -3838,6 +3838,14 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
+                // Whole-loop native fast path (ADR 0034 layer 3): an Int-key block
+                // over an all-Int array folds the best in native code (strict `<`
+                // / `>`, so ties keep the first element — CRuby-stable). A deopt
+                // (non-Int element/key) or an empty array falls through.
+                #[cfg(feature = "jit-native")]
+                if let Some(v) = g.vm.try_native_minmax_loop(block, *id, want_min) {
+                    return Ok(Some(v));
+                }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 if snapshot.is_empty() { return Ok(Some(Value::Nil)); }
                 let pre_frames = g.vm.frames.len();

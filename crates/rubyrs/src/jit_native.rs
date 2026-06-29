@@ -1149,6 +1149,180 @@ pub(crate) fn compile_native_inject_loop(block_addr: usize) -> Option<NativeLoop
     })
 }
 
+/// Compile a native whole-loop `Array#min_by` / `max_by { |x| key }` driver (ADR
+/// 0034 layer 3) around an already-compiled 1-param Int block (the key function).
+/// A fold tracking the best KEY and its ELEMENT in registers — no mutation, so a
+/// mid-loop deopt commits nothing and redo-from-scratch stays sound. The caller
+/// guarantees `len >= 1` (it returns nil for the empty array itself). ABI
+/// `(vm, self, in_objid, _) -> (best_elem, ovf)`; `is_min` picks `<` vs `>`.
+pub(crate) fn compile_native_minmax_loop(block_addr: usize, is_min: bool) -> Option<NativeLoop> {
+    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    builder.symbol("jit_array_len", jit_array_len as *const u8);
+    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
+    builder.symbol("blk", block_addr as *const u8);
+    let mut module = JITModule::new(builder);
+    let ptr_ty = module.target_config().pointer_type();
+    let mut ctx = module.make_context();
+
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(ptr_ty)); // vm
+    sig.params.push(AbiParam::new(ptr_ty)); // self
+    sig.params.push(AbiParam::new(types::I64)); // in objid
+    sig.params.push(AbiParam::new(types::I64)); // unused (ABI parity)
+    sig.returns.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I8));
+    ctx.func.signature = sig.clone();
+    let fid = module.declare_function("minmaxloop", Linkage::Export, &sig).ok()?;
+
+    let mut lensig = module.make_signature();
+    lensig.params.push(AbiParam::new(ptr_ty));
+    lensig.params.push(AbiParam::new(types::I64));
+    lensig.returns.push(AbiParam::new(types::I64));
+    let lenid = module
+        .declare_function("jit_array_len", Linkage::Import, &lensig)
+        .ok()?;
+    let mut elsig = module.make_signature();
+    elsig.params.push(AbiParam::new(ptr_ty));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I8));
+    let elid = module
+        .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
+        .ok()?;
+    let mut blksig = module.make_signature();
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I8));
+    let blkid = module
+        .declare_function("blk", Linkage::Import, &blksig)
+        .ok()?;
+
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let len_ref = module.declare_func_in_func(lenid, fb.func);
+        let el_ref = module.declare_func_in_func(elid, fb.func);
+        let blk_ref = module.declare_func_in_func(blkid, fb.func);
+
+        let entry = fb.create_block();
+        let k0blk = fb.create_block(); // after elem(0): compute its key
+        let head = fb.create_block(); // params: (i, best_key, best_elem)
+        let body = fb.create_block();
+        let cont1 = fb.create_block();
+        let exit = fb.create_block(); // param: (best_elem)
+        let deopt = fb.create_block();
+        fb.append_block_params_for_function_params(entry);
+        fb.append_block_param(head, types::I64); // i
+        fb.append_block_param(head, types::I64); // best_key
+        fb.append_block_param(head, types::I64); // best_elem
+        fb.append_block_param(exit, types::I64); // best_elem
+
+        // entry: x0 = elem(in, 0); ovf? deopt : k0blk(x0)
+        fb.switch_to_block(entry);
+        let (vm_param, self_param, in_objid) = {
+            let p = fb.block_params(entry);
+            (p[0], p[1], p[2])
+        };
+        let zero = fb.ins().iconst(types::I64, 0);
+        let call_len = fb.ins().call(len_ref, &[vm_param, in_objid]);
+        let len = fb.inst_results(call_len)[0];
+        let call_e0 = fb.ins().call(el_ref, &[vm_param, in_objid, zero]);
+        let (x0, ovf0) = {
+            let r = fb.inst_results(call_e0);
+            (r[0], r[1])
+        };
+        // x0 flows into k0blk via a block param.
+        fb.append_block_param(k0blk, types::I64);
+        fb.ins().brif(ovf0, deopt, &[], k0blk, &[x0.into()]);
+
+        // k0blk(x0): k0 = blk(x0); ovf? deopt : head(1, k0, x0)
+        fb.switch_to_block(k0blk);
+        let x0b = fb.block_params(k0blk)[0];
+        let call_k0 = fb.ins().call(blk_ref, &[vm_param, self_param, x0b]);
+        let (k0, ovfk0) = {
+            let r = fb.inst_results(call_k0);
+            (r[0], r[1])
+        };
+        let one0 = fb.ins().iconst(types::I64, 1);
+        let nh0 = fb.create_block();
+        fb.ins().brif(ovfk0, deopt, &[], nh0, &[]);
+        fb.switch_to_block(nh0);
+        fb.ins().jump(head, &[one0.into(), k0.into(), x0b.into()]);
+
+        // head(i, bk, be): i < len ? body : exit(be)
+        fb.switch_to_block(head);
+        let (i, bk, be) = {
+            let p = fb.block_params(head);
+            (p[0], p[1], p[2])
+        };
+        let cond = fb.ins().icmp(IntCC::SignedLessThan, i, len);
+        fb.ins().brif(cond, body, &[], exit, &[be.into()]);
+
+        // body: x = elem(in, i); ovf? deopt : cont1
+        fb.switch_to_block(body);
+        let call_el = fb.ins().call(el_ref, &[vm_param, in_objid, i]);
+        let (x, ovf1) = {
+            let r = fb.inst_results(call_el);
+            (r[0], r[1])
+        };
+        fb.ins().brif(ovf1, deopt, &[], cont1, &[]);
+
+        // cont1: k = blk(x); ovf? deopt : update best by polarity; head(i+1,..)
+        fb.switch_to_block(cont1);
+        let call_blk = fb.ins().call(blk_ref, &[vm_param, self_param, x]);
+        let (k, ovf2) = {
+            let r = fb.inst_results(call_blk);
+            (r[0], r[1])
+        };
+        let nh = fb.create_block();
+        fb.ins().brif(ovf2, deopt, &[], nh, &[]);
+        fb.switch_to_block(nh);
+        // better = is_min ? k < bk : k > bk; select new best key + element.
+        let cc = if is_min {
+            IntCC::SignedLessThan
+        } else {
+            IntCC::SignedGreaterThan
+        };
+        let better = fb.ins().icmp(cc, k, bk);
+        let bk2 = fb.ins().select(better, k, bk);
+        let be2 = fb.ins().select(better, x, be);
+        let one = fb.ins().iconst(types::I64, 1);
+        let i2 = fb.ins().iadd(i, one);
+        fb.ins().jump(head, &[i2.into(), bk2.into(), be2.into()]);
+
+        // exit(be): return (be, 0)
+        fb.switch_to_block(exit);
+        let be_out = fb.block_params(exit)[0];
+        let ok = fb.ins().iconst(types::I8, 0);
+        fb.ins().return_(&[be_out, ok]);
+
+        // deopt: return (0, 1)
+        fb.switch_to_block(deopt);
+        let z = fb.ins().iconst(types::I64, 0);
+        let bad = fb.ins().iconst(types::I8, 1);
+        fb.ins().return_(&[z, bad]);
+
+        fb.seal_all_blocks();
+        fb.finalize();
+    }
+    module.define_function(fid, &mut ctx).ok()?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().ok()?;
+    let code_ptr = module.get_finalized_function(fid);
+    let ptr = unsafe {
+        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+            code_ptr,
+        )
+    };
+    Some(NativeLoop {
+        _module: module,
+        ptr,
+    })
+}
+
 /// Compute the block-call arguments for branching to `block` with the current
 /// operand `stack` live. The FIRST branch to a block fixes its parameter count
 /// + kinds (`kinds_slot`); later branches must arrive with the same shape
