@@ -703,31 +703,50 @@ pub(crate) fn compile(
     })
 }
 
-/// A compiled native whole-loop `Array#sum { block }` driver (ADR 0034 layer 3).
-/// The entire iteration — walk the array, run the block per element, accumulate —
-/// is native, so there is NO per-element Rust `step_block1` / dispatch overhead,
-/// only a tight native call into the already-compiled block. ABI:
-/// `(vm, self, objid, init) -> (sum, ovf)`.
-pub(crate) struct NativeSumLoop {
+/// Which whole-loop driver a `NativeLoop` implements (ADR 0034 layer 3). All
+/// share one fixed skeleton — read the length once, then a native loop that reads
+/// each element, calls the already-compiled block, and acts on the result —
+/// differing only in the per-element action and what the loop returns.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum LoopKind {
+    /// `sum` / `count`: accumulate `acc += r` (overflow → deopt); `arg2` seeds
+    /// `acc`, the result is the final `acc`.
+    Sum,
+    /// `map`: store `out[i] = r` into the pre-sized array `arg2`; result unused.
+    Map,
+    /// `select` (`keep == true`) / `reject` (`keep == false`): push the ELEMENT
+    /// into the reserved array `arg2` when the predicate's polarity matches.
+    Filter { keep: bool },
+}
+
+/// A compiled native whole-loop driver (`sum` / `count` / `map` / `select` /
+/// `reject`, ADR 0034 layer 3). The whole iteration runs native — walk the array,
+/// call the already-compiled block per element (a tight native→native call, no
+/// interpreter re-entry), act on each result — so there is NO per-element Rust
+/// dispatch. ABI: `(vm, self, in_objid, arg2) -> (res, ovf)`, where `arg2` is the
+/// sum seed or the output `ObjId` per `LoopKind`.
+pub(crate) struct NativeLoop {
     _module: JITModule,
     ptr: extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet,
 }
 
-impl NativeSumLoop {
-    /// Sum Array `objid` (must be pinned by the caller) by running the native
-    /// block on each element and accumulating from `init`. `None` = deopt (a
-    /// non-Int element, or i64 overflow at any step) → the caller redoes the sum
-    /// in the interpreter. Sound: a native block is pure, so a deopt that has
-    /// accumulated part-way leaves nothing observable to double on the redo.
+impl NativeLoop {
+    /// Run the driver over the (caller-pinned) Array `in_objid`. `arg2` is the sum
+    /// seed (`Sum`) or the output `ObjId` (`Map` / `Filter`). `Some(res)` ran
+    /// natively (the sum, or 0 for the array-producing kinds); `None` = deopt (a
+    /// non-Int element, non-Int block result, or i64 overflow) → the caller redoes
+    /// via the generic loop. Sound: a native block is pure, so a part-way deopt
+    /// commits nothing observable (`sum` discards a register; `map`/`filter`'s
+    /// partial output array is dropped).
     #[inline]
     pub(crate) fn call(
         &self,
         vm: *const crate::vm::Vm,
         recv: &Value,
-        objid: i64,
-        init: i64,
+        in_objid: i64,
+        arg2: i64,
     ) -> Option<i64> {
-        let r = (self.ptr)(vm, recv as *const Value, objid, init);
+        let r = (self.ptr)(vm, recv as *const Value, in_objid, arg2);
         if r.ovf == 0 {
             Some(r.res)
         } else {
@@ -736,31 +755,34 @@ impl NativeSumLoop {
     }
 }
 
-/// Compile a native whole-loop `Array#sum { block }` driver. `block_addr` is the
-/// machine address of an already-compiled 1-param Int block (`NativeProto::addr`).
-/// The loop is a FIXED template (not data-driven), so this is far simpler than
-/// `compile` — it just wires `jit_array_len` + a per-element `jit_array_elem_int`
-/// + a native call to the block + an overflow-checked accumulate, with a single
-/// `deopt` exit shared by every guard.
-pub(crate) fn compile_native_sum_loop(block_addr: usize) -> Option<NativeSumLoop> {
+/// Compile a native whole-loop driver of `kind` around an already-compiled block
+/// (`block_addr` from `NativeProto::addr`; a PREDICATE block for `Filter`, a value
+/// block for `Sum`/`Map`). A FIXED template (not data-driven): wire `jit_array_len`
+/// + a per-element `jit_array_elem_int` + a native call to the block + the kind's
+/// per-element action, with one shared `deopt` exit. Only the action and the
+/// carried accumulator vary by `kind`; the head always carries `(i, acc)` (the
+/// array-producing kinds leave `acc` at 0).
+pub(crate) fn compile_native_loop(block_addr: usize, kind: LoopKind) -> Option<NativeLoop> {
     let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
     builder.symbol("jit_array_len", jit_array_len as *const u8);
     builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
+    builder.symbol("jit_array_set_int", jit_array_set_int as *const u8);
+    builder.symbol("jit_array_push", jit_array_push as *const u8);
     builder.symbol("blk", block_addr as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
     let mut ctx = module.make_context();
 
-    // Exported driver: (vm, self, objid, init) -> (i64 sum, i8 ovf).
+    // Exported driver: (vm, self, in_objid, arg2) -> (i64 res, i8 ovf).
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(ptr_ty)); // vm
     sig.params.push(AbiParam::new(ptr_ty)); // self (block receiver)
-    sig.params.push(AbiParam::new(types::I64)); // array objid
-    sig.params.push(AbiParam::new(types::I64)); // init seed
+    sig.params.push(AbiParam::new(types::I64)); // in array objid
+    sig.params.push(AbiParam::new(types::I64)); // arg2: sum seed / out objid
     sig.returns.push(AbiParam::new(types::I64));
     sig.returns.push(AbiParam::new(types::I8));
     ctx.func.signature = sig.clone();
-    let fid = module.declare_function("sumloop", Linkage::Export, &sig).ok()?;
+    let fid = module.declare_function("loopdrv", Linkage::Export, &sig).ok()?;
 
     // jit_array_len: (vm, objid) -> i64.
     let mut lensig = module.make_signature();
@@ -780,6 +802,23 @@ pub(crate) fn compile_native_sum_loop(block_addr: usize) -> Option<NativeSumLoop
     let elid = module
         .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
         .ok()?;
+    // jit_array_set_int: (vm, objid, i, val) -> void (Map).
+    let mut setsig = module.make_signature();
+    setsig.params.push(AbiParam::new(ptr_ty));
+    setsig.params.push(AbiParam::new(types::I64));
+    setsig.params.push(AbiParam::new(types::I64));
+    setsig.params.push(AbiParam::new(types::I64));
+    let setid = module
+        .declare_function("jit_array_set_int", Linkage::Import, &setsig)
+        .ok()?;
+    // jit_array_push: (vm, objid, elem) -> void (Filter).
+    let mut pushsig = module.make_signature();
+    pushsig.params.push(AbiParam::new(ptr_ty));
+    pushsig.params.push(AbiParam::new(types::I64));
+    pushsig.params.push(AbiParam::new(types::I64));
+    let pushid = module
+        .declare_function("jit_array_push", Linkage::Import, &pushsig)
+        .ok()?;
     // block: (vm, self, i64) -> (i64, i8) — same ABI as a NativeProto.
     let mut blksig = module.make_signature();
     blksig.params.push(AbiParam::new(ptr_ty));
@@ -796,6 +835,8 @@ pub(crate) fn compile_native_sum_loop(block_addr: usize) -> Option<NativeSumLoop
         let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         let len_ref = module.declare_func_in_func(lenid, fb.func);
         let el_ref = module.declare_func_in_func(elid, fb.func);
+        let set_ref = module.declare_func_in_func(setid, fb.func);
+        let push_ref = module.declare_func_in_func(pushid, fb.func);
         let blk_ref = module.declare_func_in_func(blkid, fb.func);
 
         let entry = fb.create_block();
@@ -810,16 +851,20 @@ pub(crate) fn compile_native_sum_loop(block_addr: usize) -> Option<NativeSumLoop
         fb.append_block_param(head, types::I64); // acc
         fb.append_block_param(exit, types::I64); // acc
 
-        // entry: len = jit_array_len(vm, objid); jump head(0, init)
+        // entry: len = len(in); acc0 = (Sum ? arg2 : 0); jump head(0, acc0)
         fb.switch_to_block(entry);
-        let (vm_param, self_param, objid, init) = {
+        let (vm_param, self_param, in_objid, arg2) = {
             let p = fb.block_params(entry);
             (p[0], p[1], p[2], p[3])
         };
-        let call_len = fb.ins().call(len_ref, &[vm_param, objid]);
+        let call_len = fb.ins().call(len_ref, &[vm_param, in_objid]);
         let len = fb.inst_results(call_len)[0];
         let zero = fb.ins().iconst(types::I64, 0);
-        fb.ins().jump(head, &[zero.into(), init.into()]);
+        let acc0 = match kind {
+            LoopKind::Sum => arg2,
+            _ => zero,
+        };
+        fb.ins().jump(head, &[zero.into(), acc0.into()]);
 
         // head(i, acc): i < len ? body : exit(acc)
         fb.switch_to_block(head);
@@ -830,9 +875,9 @@ pub(crate) fn compile_native_sum_loop(block_addr: usize) -> Option<NativeSumLoop
         let cond = fb.ins().icmp(IntCC::SignedLessThan, i, len);
         fb.ins().brif(cond, body, &[], exit, &[acc.into()]);
 
-        // body: (x, ovf1) = elem_int(vm, objid, i); ovf1 ? deopt : cont1
+        // body: (x, ovf1) = elem_int(vm, in, i); ovf1 ? deopt : cont1
         fb.switch_to_block(body);
-        let call_el = fb.ins().call(el_ref, &[vm_param, objid, i]);
+        let call_el = fb.ins().call(el_ref, &[vm_param, in_objid, i]);
         let (x, ovf1) = {
             let r = fb.inst_results(call_el);
             (r[0], r[1])
@@ -848,21 +893,51 @@ pub(crate) fn compile_native_sum_loop(block_addr: usize) -> Option<NativeSumLoop
         };
         fb.ins().brif(ovf2, deopt, &[], cont2, &[]);
 
-        // cont2: (acc2, ovf3) = acc + r; ovf3 ? deopt : head(i+1, acc2)
+        // cont2: per-kind action, then loop to head(i+1, acc')
         fb.switch_to_block(cont2);
-        let (acc2, ovf3) = fb.ins().sadd_overflow(acc, r);
-        let next_head = fb.create_block();
-        fb.ins().brif(ovf3, deopt, &[], next_head, &[]);
-        fb.switch_to_block(next_head);
         let one = fb.ins().iconst(types::I64, 1);
         let i2 = fb.ins().iadd(i, one);
-        fb.ins().jump(head, &[i2.into(), acc2.into()]);
+        match kind {
+            // Sum/count: overflow-checked accumulate.
+            LoopKind::Sum => {
+                let (acc2, ovf3) = fb.ins().sadd_overflow(acc, r);
+                let nh = fb.create_block();
+                fb.ins().brif(ovf3, deopt, &[], nh, &[]);
+                fb.switch_to_block(nh);
+                fb.ins().jump(head, &[i2.into(), acc2.into()]);
+            }
+            // Map: store the result at the element's index; acc unchanged.
+            LoopKind::Map => {
+                fb.ins().call(set_ref, &[vm_param, arg2, i, r]);
+                fb.ins().jump(head, &[i2.into(), acc.into()]);
+            }
+            // Filter: push the ELEMENT on the kept polarity; acc unchanged.
+            LoopKind::Filter { keep } => {
+                let do_push = fb.create_block();
+                let skip = fb.create_block();
+                let is_true = fb.ins().icmp_imm(IntCC::NotEqual, r, 0);
+                if keep {
+                    fb.ins().brif(is_true, do_push, &[], skip, &[]);
+                } else {
+                    fb.ins().brif(is_true, skip, &[], do_push, &[]);
+                }
+                fb.switch_to_block(do_push);
+                fb.ins().call(push_ref, &[vm_param, arg2, x]);
+                fb.ins().jump(skip, &[]);
+                fb.switch_to_block(skip);
+                fb.ins().jump(head, &[i2.into(), acc.into()]);
+            }
+        }
 
-        // exit(acc): return (acc, 0)
+        // exit(acc): Sum returns acc; array-producing kinds return 0.
         fb.switch_to_block(exit);
         let acc_out = fb.block_params(exit)[0];
         let ok = fb.ins().iconst(types::I8, 0);
-        fb.ins().return_(&[acc_out, ok]);
+        let res = match kind {
+            LoopKind::Sum => acc_out,
+            _ => fb.ins().iconst(types::I64, 0),
+        };
+        fb.ins().return_(&[res, ok]);
 
         // deopt: return (0, 1)
         fb.switch_to_block(deopt);
@@ -882,370 +957,7 @@ pub(crate) fn compile_native_sum_loop(block_addr: usize) -> Option<NativeSumLoop
             code_ptr,
         )
     };
-    Some(NativeSumLoop {
-        _module: module,
-        ptr,
-    })
-}
-
-/// A compiled native whole-loop `Array#map { block }` driver (ADR 0034 layer 3).
-/// Fills a caller-pre-sized result array with the native block's result per
-/// element, entirely in native code. ABI: `(vm, self, in_objid, out_objid) ->
-/// (_, ovf)` — `res` is unused; the result is the (already-rooted) `out` array.
-pub(crate) struct NativeMapLoop {
-    _module: JITModule,
-    ptr: extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet,
-}
-
-impl NativeMapLoop {
-    /// Map Array `in_objid` into the pre-sized, pinned `out_objid` by running the
-    /// native block on each element. `true` = filled natively; `false` = deopt (a
-    /// non-Int element, the block returned non-Int, or i64 overflow) → the caller
-    /// discards `out` and redoes via the generic loop. Sound: the block is pure.
-    #[inline]
-    pub(crate) fn call(
-        &self,
-        vm: *const crate::vm::Vm,
-        recv: &Value,
-        in_objid: i64,
-        out_objid: i64,
-    ) -> bool {
-        let r = (self.ptr)(vm, recv as *const Value, in_objid, out_objid);
-        r.ovf == 0
-    }
-}
-
-/// Compile a native whole-loop `Array#map { block }` driver. Same fixed-template
-/// shape as `compile_native_sum_loop`, but instead of accumulating it writes each
-/// block result into `out` (`jit_array_set_int`) at the element's index; the
-/// caller pre-sizes `out` to the input length so the store never grows the array.
-pub(crate) fn compile_native_map_loop(block_addr: usize) -> Option<NativeMapLoop> {
-    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
-    builder.symbol("jit_array_len", jit_array_len as *const u8);
-    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
-    builder.symbol("jit_array_set_int", jit_array_set_int as *const u8);
-    builder.symbol("blk", block_addr as *const u8);
-    let mut module = JITModule::new(builder);
-    let ptr_ty = module.target_config().pointer_type();
-    let mut ctx = module.make_context();
-
-    // Exported driver: (vm, self, in_objid, out_objid) -> (i64, i8 ovf).
-    let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(ptr_ty)); // vm
-    sig.params.push(AbiParam::new(ptr_ty)); // self
-    sig.params.push(AbiParam::new(types::I64)); // in objid
-    sig.params.push(AbiParam::new(types::I64)); // out objid
-    sig.returns.push(AbiParam::new(types::I64));
-    sig.returns.push(AbiParam::new(types::I8));
-    ctx.func.signature = sig.clone();
-    let fid = module.declare_function("maploop", Linkage::Export, &sig).ok()?;
-
-    let mut lensig = module.make_signature();
-    lensig.params.push(AbiParam::new(ptr_ty));
-    lensig.params.push(AbiParam::new(types::I64));
-    lensig.returns.push(AbiParam::new(types::I64));
-    let lenid = module
-        .declare_function("jit_array_len", Linkage::Import, &lensig)
-        .ok()?;
-    let mut elsig = module.make_signature();
-    elsig.params.push(AbiParam::new(ptr_ty));
-    elsig.params.push(AbiParam::new(types::I64));
-    elsig.params.push(AbiParam::new(types::I64));
-    elsig.returns.push(AbiParam::new(types::I64));
-    elsig.returns.push(AbiParam::new(types::I8));
-    let elid = module
-        .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
-        .ok()?;
-    // jit_array_set_int: (vm, objid, i, val) -> void.
-    let mut setsig = module.make_signature();
-    setsig.params.push(AbiParam::new(ptr_ty));
-    setsig.params.push(AbiParam::new(types::I64));
-    setsig.params.push(AbiParam::new(types::I64));
-    setsig.params.push(AbiParam::new(types::I64));
-    let setid = module
-        .declare_function("jit_array_set_int", Linkage::Import, &setsig)
-        .ok()?;
-    let mut blksig = module.make_signature();
-    blksig.params.push(AbiParam::new(ptr_ty));
-    blksig.params.push(AbiParam::new(ptr_ty));
-    blksig.params.push(AbiParam::new(types::I64));
-    blksig.returns.push(AbiParam::new(types::I64));
-    blksig.returns.push(AbiParam::new(types::I8));
-    let blkid = module
-        .declare_function("blk", Linkage::Import, &blksig)
-        .ok()?;
-
-    let mut fbctx = FunctionBuilderContext::new();
-    {
-        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
-        let len_ref = module.declare_func_in_func(lenid, fb.func);
-        let el_ref = module.declare_func_in_func(elid, fb.func);
-        let set_ref = module.declare_func_in_func(setid, fb.func);
-        let blk_ref = module.declare_func_in_func(blkid, fb.func);
-
-        let entry = fb.create_block();
-        let head = fb.create_block(); // param: (i)
-        let body = fb.create_block();
-        let cont1 = fb.create_block();
-        let exit = fb.create_block();
-        let deopt = fb.create_block();
-        fb.append_block_params_for_function_params(entry);
-        fb.append_block_param(head, types::I64); // i
-
-        // entry: len = jit_array_len(vm, in); jump head(0)
-        fb.switch_to_block(entry);
-        let (vm_param, self_param, in_objid, out_objid) = {
-            let p = fb.block_params(entry);
-            (p[0], p[1], p[2], p[3])
-        };
-        let call_len = fb.ins().call(len_ref, &[vm_param, in_objid]);
-        let len = fb.inst_results(call_len)[0];
-        let zero = fb.ins().iconst(types::I64, 0);
-        fb.ins().jump(head, &[zero.into()]);
-
-        // head(i): i < len ? body : exit
-        fb.switch_to_block(head);
-        let i = fb.block_params(head)[0];
-        let cond = fb.ins().icmp(IntCC::SignedLessThan, i, len);
-        fb.ins().brif(cond, body, &[], exit, &[]);
-
-        // body: (x,ovf1)=elem_int; ovf1? deopt : cont1
-        fb.switch_to_block(body);
-        let call_el = fb.ins().call(el_ref, &[vm_param, in_objid, i]);
-        let (x, ovf1) = {
-            let r = fb.inst_results(call_el);
-            (r[0], r[1])
-        };
-        fb.ins().brif(ovf1, deopt, &[], cont1, &[]);
-
-        // cont1: (r,ovf2)=blk; ovf2? deopt : set out[i]=r; head(i+1)
-        fb.switch_to_block(cont1);
-        let call_blk = fb.ins().call(blk_ref, &[vm_param, self_param, x]);
-        let (r, ovf2) = {
-            let res = fb.inst_results(call_blk);
-            (res[0], res[1])
-        };
-        let cont2 = fb.create_block();
-        fb.ins().brif(ovf2, deopt, &[], cont2, &[]);
-        fb.switch_to_block(cont2);
-        fb.ins().call(set_ref, &[vm_param, out_objid, i, r]);
-        let one = fb.ins().iconst(types::I64, 1);
-        let i2 = fb.ins().iadd(i, one);
-        fb.ins().jump(head, &[i2.into()]);
-
-        // exit: return (0, 0)
-        fb.switch_to_block(exit);
-        let z0 = fb.ins().iconst(types::I64, 0);
-        let ok = fb.ins().iconst(types::I8, 0);
-        fb.ins().return_(&[z0, ok]);
-
-        // deopt: return (0, 1)
-        fb.switch_to_block(deopt);
-        let z = fb.ins().iconst(types::I64, 0);
-        let bad = fb.ins().iconst(types::I8, 1);
-        fb.ins().return_(&[z, bad]);
-
-        fb.seal_all_blocks();
-        fb.finalize();
-    }
-    module.define_function(fid, &mut ctx).ok()?;
-    module.clear_context(&mut ctx);
-    module.finalize_definitions().ok()?;
-    let code_ptr = module.get_finalized_function(fid);
-    let ptr = unsafe {
-        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
-            code_ptr,
-        )
-    };
-    Some(NativeMapLoop {
-        _module: module,
-        ptr,
-    })
-}
-
-/// A compiled native whole-loop `Array#select` / `reject` driver (ADR 0034 layer
-/// 3). Runs a PREDICATE block per element and pushes the matching ELEMENTS into a
-/// caller-pre-reserved result. ABI: `(vm, self, in_objid, out_objid) -> (_, ovf)`.
-pub(crate) struct NativeFilterLoop {
-    _module: JITModule,
-    ptr: extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet,
-}
-
-impl NativeFilterLoop {
-    /// Filter Array `in_objid` into the pre-reserved, pinned `out_objid`. `true` =
-    /// filtered natively; `false` = deopt (non-Int element). Sound: the predicate
-    /// is pure, so the partial `out` is dropped and the filter redone.
-    #[inline]
-    pub(crate) fn call(
-        &self,
-        vm: *const crate::vm::Vm,
-        recv: &Value,
-        in_objid: i64,
-        out_objid: i64,
-    ) -> bool {
-        let r = (self.ptr)(vm, recv as *const Value, in_objid, out_objid);
-        r.ovf == 0
-    }
-}
-
-/// Compile a native whole-loop `select` (`keep_when_true`) / `reject` driver
-/// around an already-compiled PREDICATE block (`block_addr`). Per element: read
-/// it (`jit_array_elem_int`, deopt on non-Int), call the predicate (0/1), and on
-/// the kept polarity push the ELEMENT into `out` (`jit_array_push`). The caller
-/// reserves `out` capacity = input length, so the push never reallocs (no GC, no
-/// move). One shared `deopt` exit on a non-Int element.
-pub(crate) fn compile_native_filter_loop(
-    block_addr: usize,
-    keep_when_true: bool,
-) -> Option<NativeFilterLoop> {
-    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
-    builder.symbol("jit_array_len", jit_array_len as *const u8);
-    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
-    builder.symbol("jit_array_push", jit_array_push as *const u8);
-    builder.symbol("blk", block_addr as *const u8);
-    let mut module = JITModule::new(builder);
-    let ptr_ty = module.target_config().pointer_type();
-    let mut ctx = module.make_context();
-
-    let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(ptr_ty)); // vm
-    sig.params.push(AbiParam::new(ptr_ty)); // self
-    sig.params.push(AbiParam::new(types::I64)); // in objid
-    sig.params.push(AbiParam::new(types::I64)); // out objid
-    sig.returns.push(AbiParam::new(types::I64));
-    sig.returns.push(AbiParam::new(types::I8));
-    ctx.func.signature = sig.clone();
-    let fid = module.declare_function("filterloop", Linkage::Export, &sig).ok()?;
-
-    let mut lensig = module.make_signature();
-    lensig.params.push(AbiParam::new(ptr_ty));
-    lensig.params.push(AbiParam::new(types::I64));
-    lensig.returns.push(AbiParam::new(types::I64));
-    let lenid = module
-        .declare_function("jit_array_len", Linkage::Import, &lensig)
-        .ok()?;
-    let mut elsig = module.make_signature();
-    elsig.params.push(AbiParam::new(ptr_ty));
-    elsig.params.push(AbiParam::new(types::I64));
-    elsig.params.push(AbiParam::new(types::I64));
-    elsig.returns.push(AbiParam::new(types::I64));
-    elsig.returns.push(AbiParam::new(types::I8));
-    let elid = module
-        .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
-        .ok()?;
-    // jit_array_push: (vm, objid, elem) -> void.
-    let mut pushsig = module.make_signature();
-    pushsig.params.push(AbiParam::new(ptr_ty));
-    pushsig.params.push(AbiParam::new(types::I64));
-    pushsig.params.push(AbiParam::new(types::I64));
-    let pushid = module
-        .declare_function("jit_array_push", Linkage::Import, &pushsig)
-        .ok()?;
-    let mut blksig = module.make_signature();
-    blksig.params.push(AbiParam::new(ptr_ty));
-    blksig.params.push(AbiParam::new(ptr_ty));
-    blksig.params.push(AbiParam::new(types::I64));
-    blksig.returns.push(AbiParam::new(types::I64));
-    blksig.returns.push(AbiParam::new(types::I8));
-    let blkid = module
-        .declare_function("blk", Linkage::Import, &blksig)
-        .ok()?;
-
-    let mut fbctx = FunctionBuilderContext::new();
-    {
-        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
-        let len_ref = module.declare_func_in_func(lenid, fb.func);
-        let el_ref = module.declare_func_in_func(elid, fb.func);
-        let push_ref = module.declare_func_in_func(pushid, fb.func);
-        let blk_ref = module.declare_func_in_func(blkid, fb.func);
-
-        let entry = fb.create_block();
-        let head = fb.create_block(); // param: (i)
-        let body = fb.create_block();
-        let cont1 = fb.create_block();
-        let do_push = fb.create_block();
-        let skip = fb.create_block();
-        let exit = fb.create_block();
-        let deopt = fb.create_block();
-        fb.append_block_params_for_function_params(entry);
-        fb.append_block_param(head, types::I64); // i
-
-        fb.switch_to_block(entry);
-        let (vm_param, self_param, in_objid, out_objid) = {
-            let p = fb.block_params(entry);
-            (p[0], p[1], p[2], p[3])
-        };
-        let call_len = fb.ins().call(len_ref, &[vm_param, in_objid]);
-        let len = fb.inst_results(call_len)[0];
-        let zero = fb.ins().iconst(types::I64, 0);
-        fb.ins().jump(head, &[zero.into()]);
-
-        fb.switch_to_block(head);
-        let i = fb.block_params(head)[0];
-        let cond = fb.ins().icmp(IntCC::SignedLessThan, i, len);
-        fb.ins().brif(cond, body, &[], exit, &[]);
-
-        // body: (x,ovf1)=elem; ovf1? deopt : cont1
-        fb.switch_to_block(body);
-        let call_el = fb.ins().call(el_ref, &[vm_param, in_objid, i]);
-        let (x, ovf1) = {
-            let r = fb.inst_results(call_el);
-            (r[0], r[1])
-        };
-        fb.ins().brif(ovf1, deopt, &[], cont1, &[]);
-
-        // cont1: (p,ovf2)=blk; ovf2? deopt : branch on (p!=0) by polarity
-        fb.switch_to_block(cont1);
-        let call_blk = fb.ins().call(blk_ref, &[vm_param, self_param, x]);
-        let (p, ovf2) = {
-            let res = fb.inst_results(call_blk);
-            (res[0], res[1])
-        };
-        let cont2 = fb.create_block();
-        fb.ins().brif(ovf2, deopt, &[], cont2, &[]);
-        fb.switch_to_block(cont2);
-        let is_true = fb.ins().icmp_imm(IntCC::NotEqual, p, 0);
-        // select keeps the truthy element; reject keeps the falsy one.
-        if keep_when_true {
-            fb.ins().brif(is_true, do_push, &[], skip, &[]);
-        } else {
-            fb.ins().brif(is_true, skip, &[], do_push, &[]);
-        }
-
-        // do_push: out << x; fall to skip
-        fb.switch_to_block(do_push);
-        fb.ins().call(push_ref, &[vm_param, out_objid, x]);
-        fb.ins().jump(skip, &[]);
-
-        // skip: i += 1; loop
-        fb.switch_to_block(skip);
-        let one = fb.ins().iconst(types::I64, 1);
-        let i2 = fb.ins().iadd(i, one);
-        fb.ins().jump(head, &[i2.into()]);
-
-        fb.switch_to_block(exit);
-        let z0 = fb.ins().iconst(types::I64, 0);
-        let ok = fb.ins().iconst(types::I8, 0);
-        fb.ins().return_(&[z0, ok]);
-
-        fb.switch_to_block(deopt);
-        let z = fb.ins().iconst(types::I64, 0);
-        let bad = fb.ins().iconst(types::I8, 1);
-        fb.ins().return_(&[z, bad]);
-
-        fb.seal_all_blocks();
-        fb.finalize();
-    }
-    module.define_function(fid, &mut ctx).ok()?;
-    module.clear_context(&mut ctx);
-    module.finalize_definitions().ok()?;
-    let code_ptr = module.get_finalized_function(fid);
-    let ptr = unsafe {
-        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
-            code_ptr,
-        )
-    };
-    Some(NativeFilterLoop {
+    Some(NativeLoop {
         _module: module,
         ptr,
     })

@@ -16074,7 +16074,7 @@ impl Vm {
         // baked address stays valid: jit_native_block entries are insert-once and
         // never replaced for a proto's lifetime, so the block code outlives this.
         if !self.jit_native_sum_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_sum_loop(block_addr);
+            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Sum);
             self.jit_native_sum_loop.insert(proto_idx, compiled);
         }
         let sl = match self.jit_native_sum_loop.get(&proto_idx) {
@@ -16122,7 +16122,7 @@ impl Vm {
             _ => return None,
         };
         if !self.jit_native_map_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_map_loop(block_addr);
+            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Map);
             self.jit_native_map_loop.insert(proto_idx, compiled);
         }
         if !matches!(self.jit_native_map_loop.get(&proto_idx), Some(Some(_))) {
@@ -16140,7 +16140,7 @@ impl Vm {
         let self_val = self.heap.block(block_id).self_val.clone();
         let vm_ptr = self as *const crate::vm::Vm;
         let ml = self.jit_native_map_loop.get(&proto_idx).unwrap().as_ref().unwrap();
-        let ok = ml.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64);
+        let ok = ml.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
         self.pinned.pop();
         if ok {
             Some(out_id)
@@ -16183,7 +16183,7 @@ impl Vm {
             _ => return None,
         };
         if !self.jit_native_count_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_sum_loop(block_addr);
+            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Sum);
             self.jit_native_count_loop.insert(proto_idx, compiled);
         }
         let sl = match self.jit_native_count_loop.get(&proto_idx) {
@@ -16230,7 +16230,7 @@ impl Vm {
         };
         let key = (proto_idx, keep_when_true);
         if !self.jit_native_filter_loop.contains_key(&key) {
-            let compiled = crate::jit_native::compile_native_filter_loop(block_addr, keep_when_true);
+            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Filter { keep: keep_when_true });
             self.jit_native_filter_loop.insert(key, compiled);
         }
         if !matches!(self.jit_native_filter_loop.get(&key), Some(Some(_))) {
@@ -16245,7 +16245,7 @@ impl Vm {
         let self_val = self.heap.block(block_id).self_val.clone();
         let vm_ptr = self as *const crate::vm::Vm;
         let fl = self.jit_native_filter_loop.get(&key).unwrap().as_ref().unwrap();
-        let ok = fl.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64);
+        let ok = fl.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
         self.pinned.pop();
         if ok {
             Some(out_id)
