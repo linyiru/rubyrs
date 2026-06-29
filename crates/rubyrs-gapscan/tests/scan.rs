@@ -141,23 +141,22 @@ fn fixture_exercises_exact_missing_class_set() {
     // Exact set, exact counts. ClassVariableWriteNode landed
     // in the cvar PR; BackReferenceReadNode landed in the
     // $&/$+/$`/$' PR (`ee56021`). ForNode (`for x in […]`) and
-    // ImaginaryNode are the two remaining tripwires — old-
-    // style imperative loop (rubocop flags it) and Complex
-    // arithmetic literal (rare in real code), both unlikely
-    // to land soon. The fixture
+    // ImaginaryNode (Complex literals) have since landed too, so the
+    // only tripwire this fixture still exercises is
+    // AliasGlobalVariableNode (`alias $x $y` — global aliasing, rare
+    // in real code, unlikely to land soon). The fixture
     // `tests/fixtures/missing_features.rb` still includes the
     // `$&` example for documentation purposes, but that line
     // now counts as a Supported BackReferenceReadNode in the
     // histogram (drops out of the Missing set below).
     let expected: std::collections::BTreeSet<&str> =
-        ["ImaginaryNode", "AliasGlobalVariableNode"]
+        ["AliasGlobalVariableNode"]
             .into_iter()
             .collect();
     assert_eq!(names, expected, "Missing-class set drifted");
-    for cls in ["ImaginaryNode", "AliasGlobalVariableNode"] {
-        let count = report.histogram.get(cls).map(|s| s.count).unwrap_or(0);
-        assert_eq!(count, 1, "{cls} count");
-    }
+    let cls = "AliasGlobalVariableNode";
+    let count = report.histogram.get(cls).map(|s| s.count).unwrap_or(0);
+    assert_eq!(count, 1, "{cls} count");
     // Sanity: at least one Supported node from the body (DefNode,
     // IntegerNode, etc.) — the test isn't trivially "everything missing".
     assert!(report.supported_total() > 0);
@@ -184,24 +183,24 @@ fn json_roundtrip_preserves_essentials() {
 
 #[test]
 fn diff_detects_closed_and_new_gaps() {
-    // Synthetic before/after: before has ImaginaryNode missing,
-    // after does not — closed gap. After introduces ForNode —
-    // new gap.
+    // Synthetic before/after: before has a Missing probe node,
+    // after does not — closed gap. After introduces a different
+    // Missing node — new gap.
     //
-    // History of this fixture's "closed gap" probe:
-    //   - Originally ClassVariableWriteNode (cvar PR closed it).
-    //   - Then BackReferenceReadNode (`ee56021` $&/$+/$`/$'
-    //     closed it).
-    //   - Now ImaginaryNode (still Missing — Complex literal
-    //     arithmetic is well below the rubyrs subset boundary).
+    // History of this test's "closed gap" probe (each retired as
+    // rubyrs gained support for it):
+    //   - ClassVariableWriteNode (cvar PR closed it).
+    //   - BackReferenceReadNode (`ee56021` $&/$+/$`/$' closed it).
+    //   - ImaginaryNode (the Complex arc closed it).
+    //   - Now BlockLocalVariableNode (`{ |a; b| }` block-locals —
+    //     still Missing, well below the rubyrs subset boundary).
     //
-    // ForNode stays as the "new gap" probe — still Missing, will
-    // be for a while (old-imperative `for x in […]` is rubocop-
-    // flagged in production Ruby).
+    // AliasGlobalVariableNode is the "new gap" probe — still Missing
+    // (`alias $x $y`, rare in real code).
     let mut before = Report::default();
     before.total_nodes = 10;
     before.histogram.insert(
-        "ImaginaryNode".to_string(),
+        "BlockLocalVariableNode".to_string(),
         rubyrs_gapscan::NodeStat {
             count: 5,
             ..Default::default()
@@ -235,7 +234,7 @@ fn diff_detects_closed_and_new_gaps() {
     let d = diff(&before, &after);
     assert_eq!(d.supported_delta, 5);
     assert_eq!(d.missing_delta, -3);
-    assert_eq!(d.closed_missing_classes, vec![("ImaginaryNode".to_string(), 5)]);
+    assert_eq!(d.closed_missing_classes, vec![("BlockLocalVariableNode".to_string(), 5)]);
     assert_eq!(d.new_missing_classes, vec![("AliasGlobalVariableNode".to_string(), 2)]);
 }
 
