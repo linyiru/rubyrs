@@ -715,8 +715,17 @@ diff_cruby GREEN both builds (949); STRESS_GC clean (recv pinned, non-moving hea
 deopt, empty, the arity-swallow guard, and implicit-self identity. North-star: `crates/rubyrs/benches/
 jit_oo_dispatch.rb`.
 
-Next within Step 1: a receiver that is a LOCAL or method-param (not just an ivar) — the rubocop AST-walk
-shape `node.send_type?` (poc/rubocop-spike/bench_walk.rb, the ultimate north-star); an N-way PIC so a
+**LOCAL receivers — SHIPPED.** `x = @h; … x.compute(i)` (an ivar cached in a local, then called): jitN
+0.36s vs YJIT 0.75s = **2.1× AHEAD**, 15× interp. `StoreLocal` now carries a `Kind::Object` pointer and
+`LoadIvar` loads `@h` as a pointer when it is stored to a local later used as a receiver
+(`local_is_obj_receiver`). Sound: a compiled method never writes ivars (StoreIvar isn't modelled → it
+declines), so the ivar table never reallocs and the stored pointer cannot dangle across the loop. This is
+the substrate for param receivers (params are local slots).
+
+Next within Step 1: a method/block-PARAM receiver (needs the Object-arg ABI: pass the arg as a `*const
+Value` + a dispatch path routing Object args to the variant) — the rubocop AST-walk shape
+`node.send_type?` (poc/rubocop-spike/bench_walk.rb, the ultimate north-star, which ALSO needs value-type
+support: symbol keys, Hash[sym], Bool-as-control-flow); an N-way PIC (+ Object branch-merge) so a
 genuinely polymorphic site stays native instead of deopting; a varying arg (loop index / captured var).
 
 ## Risks
