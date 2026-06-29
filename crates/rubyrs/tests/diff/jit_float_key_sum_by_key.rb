@@ -31,3 +31,31 @@ p [].each_with_object(Hash.new(0)) { |x, k| k[x.to_f] += 1 }
 # Larger, first-appearance key order preserved.
 f = (0...30).map { |i| (i % 5).to_f + 0.5 }
 p f.each_with_object(Hash.new(0)) { |x, k| k[x] += 1 }
+
+# --- Float VALUE (a Float accumulator per key, Hash.new(0.0)) ---
+
+# Int key, Float value: sum prices by category id.
+items = [[1, 1.5], [2, 2.0], [1, 0.5], [3, 4.25], [2, 1.0]]
+p items.each_with_object(Hash.new(0.0)) { |(c, pr), h| h[c] += pr }
+
+# Int element, Float increment.
+g = [1, 2, 1, 3, 2, 1]
+p g.each_with_object(Hash.new(0.0)) { |x, h| h[x] += 1.5 }
+
+# Float key AND Float value.
+fk = [1.5, 2.5, 1.5, 3.0, 2.5]
+p fk.each_with_object(Hash.new(0.0)) { |x, h| h[x] += x }
+
+# Float element, Int key (floor), Float value.
+ge = [1.2, 1.8, 2.5, 1.1, 2.9]
+p ge.each_with_object(Hash.new(0.0)) { |x, h| h[x.floor] += x }
+
+# Int->Float coercion: Float accumulator, Int increment (0.0 + 1).
+b = [5, 5, 6, 5]
+p b.each_with_object(Hash.new(0.0)) { |x, h| h[x] += 1 }
+
+# Float value, -0.0/0.0 key collapse.
+p [0.0, -0.0, 0.0].each_with_object(Hash.new(0.0)) { |x, h| h[x] += 2.5 }
+
+# Empty, Float accumulator.
+p [].each_with_object(Hash.new(0.0)) { |x, h| h[x] += 1.0 }

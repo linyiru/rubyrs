@@ -17839,7 +17839,10 @@ impl Vm {
 
     /// Compile a Hash-accumulator block `{ |x, h| h[k] += v }` (AccKind::EachObjHash):
     /// the `memo` 2nd param binds to a scratch Hash (`HashObjId`) the block reads/writes
-    /// via the Hash-accum `[]`/`[]=` codegen. `float_elem` marks the element Float.
+    /// via the Hash-accum `[]`/`[]=` codegen. `float_elem` marks the element Float;
+    /// `float_val` marks the Hash VALUE (the per-key accumulator) Float — passed to
+    /// `compile` as `float_acc`, since the accumulator IS the Hash value here. Key kind
+    /// (Int vs Float) is picked per-op by the codegen from the operand stack.
     #[cfg(feature = "jit-native")]
     fn compile_native_block_eachobj_hash(
         &mut self,
@@ -17847,6 +17850,7 @@ impl Vm {
         param_start: u32,
         body_local_start: u32,
         float_elem: bool,
+        float_val: bool,
     ) -> Option<crate::jit_native::NativeProto> {
         let dummy = self.interner.intern("\u{0}block\u{0}");
         let callees = crate::intern::FxHashMap::default();
@@ -17866,7 +17870,7 @@ impl Vm {
                 crate::jit_native::AccKind::EachObjHash,
             )),
             float_elem,
-            false,
+            float_val,
         )
     }
 
@@ -17975,29 +17979,36 @@ impl Vm {
     }
 
     /// Hash-accumulator `each_with_object` (ADR 0034 layer 3f): `arr.each_with_object(
-    /// Hash.new(0)) { |x, h| h[k] += v }` — sum-by-key. The block reads `h[k]` (Int,
-    /// default 0) and writes `h[k] = h[k] + v` via the Hash-accum codegen; `k` and `v`
-    /// are Int (an Int element key directly, or a Float element's `x.floor` etc.).
-    /// `float_elem` selects the element reader.
+    /// Hash.new(0)) { |x, h| h[k] += v }` — sum-by-key. The block reads `h[k]` (default
+    /// 0 / 0.0) and writes `h[k] = h[k] + v` via the Hash-accum codegen. The KEY is Int
+    /// (an element directly, or a Float element's `x.floor`) or Float (a Float element /
+    /// `x * f`). The VALUE/accumulator is Int (`Hash.new(0)`) or Float (`Hash.new(0.0)`,
+    /// `float_val`). `float_elem` selects the element reader.
     ///
     /// Soundness gates (write-back-on-success): the memo must be a fresh, EMPTY Hash
-    /// with a scalar default of exactly `Int(0)` and NO default block — so missing-key
-    /// reads are 0 (what the native get assumes) and the post-loop merge into the memo
-    /// is a conflict-free move. The block accumulates into a fresh SCRATCH Hash; only on
-    /// full success are its pairs appended to the real memo, so a mid-loop deopt leaves
-    /// the memo untouched for the generic redo. `None` on any gate miss / deopt.
+    /// with a scalar default of exactly `Int(0)` or `Float(+0.0)` and NO default block —
+    /// so missing-key reads are 0 / 0.0 (what the native get assumes) and the post-loop
+    /// merge into the memo is a conflict-free move. The block accumulates into a fresh
+    /// SCRATCH Hash; only on full success are its pairs appended to the real memo, so a
+    /// mid-loop deopt leaves the memo untouched for the generic redo. `None` on any gate
+    /// miss / deopt.
     #[cfg(feature = "jit-native")]
     pub(crate) fn try_native_eachobjhash_loop(&mut self, block_id: ObjId, array_id: ObjId, memo_id: ObjId, float_elem: bool) -> Option<()> {
         if !self.jit_native_on {
             return None;
         }
-        // The real memo must be an empty Hash.new(0): scalar default Int(0), no block.
-        if !self.heap.hash(memo_id).is_empty()
-            || self.heap.hash_default_block(memo_id).is_some()
-            || !matches!(self.heap.hash_default_value(memo_id), Some(Value::Int(0)))
-        {
+        // The real memo must be a fresh, empty Hash with NO default block and a scalar
+        // default of exactly Int(0) (Int accumulator) or Float +0.0 (Float accumulator).
+        // The default kind picks `float_val`: the native get seeds missing keys with the
+        // matching zero, and the merge preserves the default.
+        if !self.heap.hash(memo_id).is_empty() || self.heap.hash_default_block(memo_id).is_some() {
             return None;
         }
+        let float_val = match self.heap.hash_default_value(memo_id) {
+            Some(Value::Int(0)) => false,
+            Some(Value::Float(f)) if f.to_bits() == 0 => true, // positive zero only
+            _ => return None,
+        };
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
@@ -18010,10 +18021,10 @@ impl Vm {
         {
             return None;
         }
-        let key = (proto_idx, float_elem);
+        let key = (proto_idx, float_elem, float_val);
         if !self.jit_native_block_eachobjhash.contains_key(&key) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_eachobj_hash(proto_idx, param_start as u32, body_start as u32, float_elem);
+            let compiled = self.compile_native_block_eachobj_hash(proto_idx, param_start as u32, body_start as u32, float_elem, float_val);
             self.jit_native_block_eachobjhash.insert(key, compiled);
         }
         let block_addr = match self.jit_native_block_eachobjhash.get(&key) {
@@ -18030,9 +18041,9 @@ impl Vm {
         };
         let vm_ptr = self as *const crate::vm::Vm;
         let scratch_objid = el.call(vm_ptr, &self_val, array_id.0 as i64, 0)?;
-        // Success: move the scratch's (Int key, Int value) pairs into the empty real
-        // memo. Pairs hold only immediates, and clone + extend run no `heap.alloc`, so
-        // no GC between the loop's return and the commit. The memo's Int(0) default is
+        // Success: move the scratch's pairs (Int/Float key, Int/Float value — all
+        // immediates) into the empty real memo. clone + extend run no `heap.alloc`, so
+        // no GC between the loop's return and the commit. The memo's scalar default is
         // preserved (only its `pairs` are populated). Keys are unique by construction.
         let scratch_id = crate::value::ObjId(scratch_objid as u32);
         let pairs: Vec<(Value, Value)> = self.heap.hash(scratch_id).clone();

@@ -368,6 +368,10 @@ pub(crate) fn compile(
     builder.symbol("jit_hash_accum_set_int", jit_hash_accum_set_int as *const u8);
     builder.symbol("jit_hash_accum_get_floatkey", jit_hash_accum_get_floatkey as *const u8);
     builder.symbol("jit_hash_accum_set_floatkey", jit_hash_accum_set_floatkey as *const u8);
+    builder.symbol("jit_hash_accum_get_intkey_floatval", jit_hash_accum_get_intkey_floatval as *const u8);
+    builder.symbol("jit_hash_accum_set_intkey_floatval", jit_hash_accum_set_intkey_floatval as *const u8);
+    builder.symbol("jit_hash_accum_get_floatkey_floatval", jit_hash_accum_get_floatkey_floatval as *const u8);
+    builder.symbol("jit_hash_accum_set_floatkey_floatval", jit_hash_accum_set_floatkey_floatval as *const u8);
     builder.symbol("jit_arr_elem_attr_int", jit_arr_elem_attr_int as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
@@ -474,6 +478,20 @@ pub(crate) fn compile(
     let hsfkid = module
         .declare_function("jit_hash_accum_set_floatkey", Linkage::Import, &hssig)
         .ok()?;
+    // Float-VALUE accum primitives (`h[k] += float_v`, Float accumulator per key): same
+    // C shapes (value passed/returned as f64 BITS via the i64 ABI), one pair per key type.
+    let hgfvid = module
+        .declare_function("jit_hash_accum_get_intkey_floatval", Linkage::Import, &hgsig)
+        .ok()?;
+    let hsfvid = module
+        .declare_function("jit_hash_accum_set_intkey_floatval", Linkage::Import, &hssig)
+        .ok()?;
+    let hgfkfvid = module
+        .declare_function("jit_hash_accum_get_floatkey_floatval", Linkage::Import, &hgsig)
+        .ok()?;
+    let hsfkfvid = module
+        .declare_function("jit_hash_accum_set_floatkey_floatval", Linkage::Import, &hssig)
+        .ok()?;
     // `jit_arr_elem_attr_int`: (vm, recv, arr_name:i32, index:i64, getter:i32,
     // cache:ptr) -> (i64, i8).
     let mut aesig = module.make_signature();
@@ -535,6 +553,10 @@ pub(crate) fn compile(
         let hashset_accum_ref = module.declare_func_in_func(hsid, fb.func);
         let hashget_accum_fk_ref = module.declare_func_in_func(hgfkid, fb.func);
         let hashset_accum_fk_ref = module.declare_func_in_func(hsfkid, fb.func);
+        let hashget_accum_fv_ref = module.declare_func_in_func(hgfvid, fb.func);
+        let hashset_accum_fv_ref = module.declare_func_in_func(hsfvid, fb.func);
+        let hashget_accum_fkfv_ref = module.declare_func_in_func(hgfkfvid, fb.func);
+        let hashset_accum_fkfv_ref = module.declare_func_in_func(hsfkfvid, fb.func);
         let arrelem_ref = module.declare_func_in_func(aeid, fb.func);
         // FuncRefs for each external callee.
         let mut callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
@@ -972,54 +994,79 @@ pub(crate) fn compile(
                     stack.push((arr, Kind::ArrayObjId));
                 }
                 // Hash-accumulator read `h[key]` (`h[k] += v`): the receiver is the
-                // scratch Hash memo (HashObjId). Reads the Int value (default 0); a
-                // present non-Int value deopts. The key is an Int (exact match) or a
-                // Float (its f64 bits, matched by the eql? Float arm in the floatkey
-                // primitive — `pure Float-key sum-by-key`).
+                // scratch Hash memo (HashObjId). Two independent axes pick the primitive:
+                //   KEY    — Int (exact match) or Float (f64 bits, eql? Float-arm match).
+                //   VALUE  — Int (default 0) or Float (`float_acc`: default 0.0, f64 bits
+                //            returned, then bitcast to F64 on the stack). The accumulator
+                //            kind IS `float_acc` here, so `Hash.new(0)` vs `Hash.new(0.0)`.
+                // A present value of the wrong type deopts (`ovf`).
                 Op::Call(m, 1, _) if *m == syms.bracket => {
                     let (key, kk) = stack.pop()?;
                     let (recv, rk) = stack.pop()?;
                     if rk != Kind::HashObjId {
                         return None;
                     }
-                    let inst = match kk {
-                        Kind::Int => fb.ins().call(hashget_accum_ref, &[vm_param, recv, key]),
-                        Kind::Float => {
-                            let bits = fb.ins().bitcast(types::I64, MemFlagsData::new(), key);
-                            fb.ins().call(hashget_accum_fk_ref, &[vm_param, recv, bits])
-                        }
+                    let keyarg = match kk {
+                        Kind::Int => key,
+                        Kind::Float => fb.ins().bitcast(types::I64, MemFlagsData::new(), key),
                         _ => return None,
                     };
+                    let getref = match (kk, float_acc) {
+                        (Kind::Int, false) => hashget_accum_ref,
+                        (Kind::Float, false) => hashget_accum_fk_ref,
+                        (Kind::Int, true) => hashget_accum_fv_ref,
+                        (Kind::Float, true) => hashget_accum_fkfv_ref,
+                        _ => return None,
+                    };
+                    let inst = fb.ins().call(getref, &[vm_param, recv, keyarg]);
                     let (res, of) = {
                         let r = fb.inst_results(inst);
                         (r[0], r[1])
                     };
                     acc_ovf(&mut fb, of);
-                    stack.push((res, Kind::Int));
+                    if float_acc {
+                        // The value bits → an F64 on the operand stack (the `+= v` and the
+                        // write both treat it as Float). No accumulator overflow for Float.
+                        let f = fb.ins().bitcast(types::F64, MemFlagsData::new(), res);
+                        stack.push((f, Kind::Float));
+                    } else {
+                        stack.push((res, Kind::Int));
+                    }
                 }
                 // Hash-accumulator write `h[key] = val` (emitted as `CallAset`): receiver
-                // the scratch Hash, val an Int. `[]=` evaluates to its RHS, so the new
-                // value stays on the stack (the loop discards the block's return anyway).
-                // The key is an Int (exact match) or a Float (f64 bits, eql? Float-arm
-                // match in the floatkey setter) — the read above picked the same kind.
+                // the scratch Hash. `[]=` evaluates to its RHS, so the new value stays on
+                // the stack (the loop discards the block's return anyway). Same two axes as
+                // the read: KEY Int/Float, VALUE Int or Float (`float_acc`, passed as f64
+                // bits). The value kind on the stack must match `float_acc` (the read fixed
+                // it, and the `+= v` keeps it via numeric coercion).
                 Op::CallAset(m, 2, _) if *m == syms.bracket_set => {
                     let (val, vk) = stack.pop()?;
                     let (key, kk) = stack.pop()?;
                     let (recv, rk) = stack.pop()?;
-                    if rk != Kind::HashObjId || vk != Kind::Int {
+                    let val_ok = if float_acc { vk == Kind::Float } else { vk == Kind::Int };
+                    if rk != Kind::HashObjId || !val_ok {
                         return None;
                     }
-                    match kk {
-                        Kind::Int => {
-                            fb.ins().call(hashset_accum_ref, &[vm_param, recv, key, val]);
-                        }
-                        Kind::Float => {
-                            let bits = fb.ins().bitcast(types::I64, MemFlagsData::new(), key);
-                            fb.ins().call(hashset_accum_fk_ref, &[vm_param, recv, bits, val]);
-                        }
+                    let keyarg = match kk {
+                        Kind::Int => key,
+                        Kind::Float => fb.ins().bitcast(types::I64, MemFlagsData::new(), key),
                         _ => return None,
-                    }
-                    stack.push((val, Kind::Int));
+                    };
+                    // A Float value travels as its f64 bits through the i64 ABI.
+                    let valarg = if float_acc {
+                        fb.ins().bitcast(types::I64, MemFlagsData::new(), val)
+                    } else {
+                        val
+                    };
+                    let setref = match (kk, float_acc) {
+                        (Kind::Int, false) => hashset_accum_ref,
+                        (Kind::Float, false) => hashset_accum_fk_ref,
+                        (Kind::Int, true) => hashset_accum_fv_ref,
+                        (Kind::Float, true) => hashset_accum_fkfv_ref,
+                        _ => return None,
+                    };
+                    fb.ins().call(setref, &[vm_param, recv, keyarg, valarg]);
+                    stack.push((val, vk));
                 }
                 // 0-arg bare call to a self attribute reader (`amount`) → inline
                 // the ivar read on the receiver (B4): one native call to
@@ -3345,6 +3392,123 @@ pub(crate) unsafe extern "C" fn jit_hash_accum_set_floatkey(
     match pos {
         Some(p) => vm.heap.hash_mut(hid)[p].1 = Value::Int(val),
         None => vm.heap.hash_mut(hid).push((Value::Float(key_f), Value::Int(val))),
+    }
+}
+
+/// eql?-style match of a stored Hash key `k` against a Float key whose f64 bits are
+/// `key_bits` — replicates `Value::ruby_eql`'s Float arm (NaN by bits so distinct NaNs
+/// never collide; every other Float by `==`, so -0.0 and 0.0 share a bucket). Shared by
+/// the Float-key accum primitives.
+#[inline]
+fn float_key_hit(k: &Value, key_bits: i64) -> bool {
+    match k {
+        Value::Float(a) => {
+            let key_f = f64::from_bits(key_bits as u64);
+            if a.is_nan() && key_f.is_nan() {
+                a.to_bits() == key_bits as u64
+            } else {
+                *a == key_f
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Float-VALUE Hash-accumulator read (`h[k]` inside `h[k] += float_v`): the Float value
+/// (its f64 BITS) stored at Int `key` in scratch Hash `hash_objid`, or **0.0** (bits 0)
+/// if absent (the `Hash.new(0.0)` default — verified by the caller). `ovf=1` only if a
+/// present value is non-Float. The companion of [`jit_hash_accum_get_int`] for a Float
+/// accumulator per Hash key (sum-by-key with Float sums).
+///
+/// # Safety
+/// `vm` valid; `hash_objid` a live pinned scratch Hash.
+pub(crate) unsafe extern "C" fn jit_hash_accum_get_intkey_floatval(
+    vm: *const crate::vm::Vm,
+    hash_objid: i64,
+    key: i64,
+) -> NRet {
+    let vm = unsafe { &*vm };
+    let hid = crate::value::ObjId(hash_objid as u32);
+    for (k, v) in vm.heap.hash(hid).iter() {
+        if matches!(k, Value::Int(n) if *n == key) {
+            return match v {
+                Value::Float(f) => NRet { res: f.to_bits() as i64, ovf: 0 },
+                _ => NRet { res: 0, ovf: 1 },
+            };
+        }
+    }
+    NRet { res: 0, ovf: 0 } // 0.0 bits
+}
+
+/// Float-VALUE Hash-accumulator write (`h[k] = float_v`): store `Value::Float` (from the
+/// f64 `val` BITS) at Int `key` in scratch Hash `hash_objid`, updating in place or
+/// appending (first-appearance order). Companion of [`jit_hash_accum_set_int`].
+///
+/// # Safety
+/// `vm` valid; `hash_objid` a live pinned scratch Hash.
+pub(crate) unsafe extern "C" fn jit_hash_accum_set_intkey_floatval(
+    vm: *mut crate::vm::Vm,
+    hash_objid: i64,
+    key: i64,
+    val: i64,
+) {
+    let vm = unsafe { &mut *vm };
+    let hid = crate::value::ObjId(hash_objid as u32);
+    let fv = Value::Float(f64::from_bits(val as u64));
+    let pos = vm
+        .heap
+        .hash(hid)
+        .iter()
+        .position(|(k, _)| matches!(k, Value::Int(n) if *n == key));
+    match pos {
+        Some(p) => vm.heap.hash_mut(hid)[p].1 = fv,
+        None => vm.heap.hash_mut(hid).push((Value::Int(key), fv)),
+    }
+}
+
+/// Float-KEY + Float-VALUE Hash-accumulator read (`h[k] += float_v` with a Float `k`):
+/// the Float value (f64 BITS) at Float `key` (f64 bits), default **0.0** if absent. Key
+/// match via [`float_key_hit`] (eql? Float arm); `ovf=1` on a present non-Float value.
+///
+/// # Safety
+/// `vm` valid; `hash_objid` a live pinned scratch Hash.
+pub(crate) unsafe extern "C" fn jit_hash_accum_get_floatkey_floatval(
+    vm: *const crate::vm::Vm,
+    hash_objid: i64,
+    key: i64,
+) -> NRet {
+    let vm = unsafe { &*vm };
+    let hid = crate::value::ObjId(hash_objid as u32);
+    for (k, v) in vm.heap.hash(hid).iter() {
+        if float_key_hit(k, key) {
+            return match v {
+                Value::Float(f) => NRet { res: f.to_bits() as i64, ovf: 0 },
+                _ => NRet { res: 0, ovf: 1 },
+            };
+        }
+    }
+    NRet { res: 0, ovf: 0 } // 0.0 bits
+}
+
+/// Float-KEY + Float-VALUE Hash-accumulator write (`h[k] = float_v`, Float `k`): store
+/// `Value::Float` at the eql?-matched Float `key`, else append. Float keys stay unique
+/// under eql?, so the post-loop merge into the empty real memo is conflict-free.
+///
+/// # Safety
+/// `vm` valid; `hash_objid` a live pinned scratch Hash.
+pub(crate) unsafe extern "C" fn jit_hash_accum_set_floatkey_floatval(
+    vm: *mut crate::vm::Vm,
+    hash_objid: i64,
+    key: i64,
+    val: i64,
+) {
+    let vm = unsafe { &mut *vm };
+    let hid = crate::value::ObjId(hash_objid as u32);
+    let fv = Value::Float(f64::from_bits(val as u64));
+    let pos = vm.heap.hash(hid).iter().position(|(k, _)| float_key_hit(k, key));
+    match pos {
+        Some(p) => vm.heap.hash_mut(hid)[p].1 = fv,
+        None => vm.heap.hash_mut(hid).push((Value::Float(f64::from_bits(key as u64)), fv)),
     }
 }
 
