@@ -722,11 +722,19 @@ jit_oo_dispatch.rb`.
 declines), so the ivar table never reallocs and the stored pointer cannot dangle across the loop. This is
 the substrate for param receivers (params are local slots).
 
-Next within Step 1: a method/block-PARAM receiver (needs the Object-arg ABI: pass the arg as a `*const
-Value` + a dispatch path routing Object args to the variant) — the rubocop AST-walk shape
-`node.send_type?` (poc/rubocop-spike/bench_walk.rb, the ultimate north-star, which ALSO needs value-type
-support: symbol keys, Hash[sym], Bool-as-control-flow); an N-way PIC (+ Object branch-merge) so a
-genuinely polymorphic site stays native instead of deopting; a varying arg (loop index / captured var).
+**PARAM receiver — layer 1a SHIPPED (foundation, not yet a YJIT win).** Validation corrected a handoff
+that framed the rubocop gap as "purely value-op coverage": the FIRST wall is the Object-arg ABI, not
+value-ops. `bench_treesum` fires only because it is all-ivar-recv + all-int; a 1-Object-param method does
+not fire (B1 only routes Int args). Layer 1a (commit 424a281d): a 1-arg method called with an Object arg
+compiles a `compile_native_objparam` variant (param binds `Kind::Object`, i64 C-arg = `*const Value`);
+B1 invokes it with a pointer to the arg on the operand stack; `LoadLocalCall` (`node.value`) lowers via
+the obj-call PIC. It FIRES (~1.6× interp) but is dispatch-bound on a leaf-in-interpreted-loop (4.3× behind
+YJIT) — committed as foundation. The YJIT-beating win is **layer 1b**: a compiled caller cross-calling with
+the Object arg so param-receiver RECURSION (`walk(node)`→`walk(child)`) goes fully native like ivar-recv
+treesum. The recursion arg comes from `kids[i]` (Array#[] returning an Object), so 1b interleaves with the
+value-ops — the real layered climb to a firing `bench_walk` (poc/rubocop-spike/, the ultimate north-star,
+which additionally needs symbol keys / Hash[sym] / Bool-as-control-flow). Also remaining: an N-way PIC
+(+ Object branch-merge) for polymorphic sites; a varying call arg.
 
 ## Risks
 
