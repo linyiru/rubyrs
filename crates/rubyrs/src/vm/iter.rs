@@ -1560,6 +1560,14 @@ impl Vm {
                 {
                     return Ok(Some(Value::Float(f64::from_bits(bits as u64))));
                 }
+                // Float-element / Int-result variant (ADR 0034 layer 3d): a Float
+                // array reduced to an Integer via a per-element Float->Int conversion
+                // (`floats.sum { x.floor }`). All loops above decline (Int reader
+                // deopts on Float / Float-result block rejects the Int conversion).
+                #[cfg(feature = "jit-native")]
+                if let Some(s) = g.vm.try_native_floatint_sum_loop(block, id, init) {
+                    return Ok(Some(Value::Int(s)));
+                }
                 let pre_frames = g.vm.frames.len();
                 let mut acc: Value = Value::Int(init);
                 let mut early = None;

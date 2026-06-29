@@ -303,7 +303,8 @@ pub(crate) fn compile(
             // The fused `x.method` op — admitted only for the pure unary Int
             // primitives codegen models (`x.abs`/`x.even?`/…); any other
             // `LoadLocalCall` hits the catch-all below and declines.
-            Op::LoadLocalCall(_, name, _) if is_int_unary(*name, syms) => {}
+            Op::LoadLocalCall(_, name, _)
+                if is_int_unary(*name, syms) || is_float_to_int(*name, syms) => {}
             // `@h[:k]` — `Call([], 1)`, fused with the LoadIvar + LoadSymbol.
             Op::Call(m, 1, _) if *m == syms.bracket => {}
             // `[]` literal + `a << elem` — the array-building shape, where the
@@ -966,20 +967,28 @@ pub(crate) fn compile(
                 }
                 // Pure unary Int primitive on the stack top (`x.abs`, `x.even?`,
                 // …) — lowered inline, no call (see `emit_int_unary`).
-                Op::Call(name, 0, _) if is_int_unary(*name, syms) => {
+                Op::Call(name, 0, _)
+                    if is_int_unary(*name, syms) || is_float_to_int(*name, syms) =>
+                {
                     let (v, k) = stack.pop()?;
                     match k {
-                        Kind::Int => {
+                        Kind::Int if is_int_unary(*name, syms) => {
                             let r = emit_int_unary(&mut fb, ovf_var, *name, syms, v)?;
                             stack.push(r);
                         }
+                        // floor/ceil/to_i/truncate/round on an Int is the identity.
+                        Kind::Int => stack.push((v, Kind::Int)),
                         // Float `.abs` -> fabs (the common min_by distance key
                         // `(x - t).abs`); the sign predicates -> ordered fcmp against
-                        // 0.0 (Bool, NaN-false like the comparison ops). Other unary
-                        // primitives on a Float decline.
+                        // 0.0 (Bool); the conversions -> fcvt_to_sint (Int). Other
+                        // unary primitives on a Float decline.
                         Kind::Float if *name == syms.abs => {
                             let r = fb.ins().fabs(v);
                             stack.push((r, Kind::Float));
+                        }
+                        Kind::Float if is_float_to_int(*name, syms) => {
+                            let r = emit_float_to_int(&mut fb, ovf_var, *name, syms, v)?;
+                            stack.push((r, Kind::Int));
                         }
                         Kind::Float if emit_float_predicate(&mut fb, *name, syms, v, &mut stack) => {}
                         _ => return None,
@@ -987,13 +996,16 @@ pub(crate) fn compile(
                 }
                 // The fused `x.method` op (LoadLocalCall) for the same unary
                 // primitives — load the receiver local, then apply inline.
-                Op::LoadLocalCall(slot, name, _) if is_int_unary(*name, syms) => {
+                Op::LoadLocalCall(slot, name, _)
+                    if is_int_unary(*name, syms) || is_float_to_int(*name, syms) =>
+                {
                     let raw = fb.use_var(vars[*slot as usize]);
                     match local_kinds[*slot as usize] {
-                        Kind::Int => {
+                        Kind::Int if is_int_unary(*name, syms) => {
                             let r = emit_int_unary(&mut fb, ovf_var, *name, syms, raw)?;
                             stack.push(r);
                         }
+                        Kind::Int => stack.push((raw, Kind::Int)), // conversion on Int = identity
                         // A Float local's var holds the f64 BITS — materialise the
                         // F64 before the float op (unlike Call(abs,0), whose operand
                         // is already an F64 on the stack).
@@ -1001,6 +1013,11 @@ pub(crate) fn compile(
                             let v = fb.ins().bitcast(types::F64, MemFlagsData::new(), raw);
                             let r = fb.ins().fabs(v);
                             stack.push((r, Kind::Float));
+                        }
+                        Kind::Float if is_float_to_int(*name, syms) => {
+                            let v = fb.ins().bitcast(types::F64, MemFlagsData::new(), raw);
+                            let r = emit_float_to_int(&mut fb, ovf_var, *name, syms, v)?;
+                            stack.push((r, Kind::Int));
                         }
                         Kind::Float => {
                             let v = fb.ins().bitcast(types::F64, MemFlagsData::new(), raw);
@@ -2682,6 +2699,57 @@ fn emit_float_predicate(
     true
 }
 
+fn is_float_to_int(name: SymId, syms: &JitSyms) -> bool {
+    name == syms.floor
+        || name == syms.ceil
+        || name == syms.to_i
+        || name == syms.truncate
+        || name == syms.round
+}
+
+/// Float -> Int conversion (`x.floor`/`ceil`/`to_i`/`truncate`/`round`) on an F64
+/// `x`, producing an i64. `round` is Ruby half-AWAY-from-zero (`trunc(x +
+/// copysign(0.5, x))`), NOT cranelift `nearest` (half-even). A branchless RANGE
+/// GUARD sets `ovf_var` when the integral value is out of i64 range or NaN/Inf (Ruby
+/// returns a bignum / raises there) so the caller deopts to the generic path; the
+/// converted value is forced to 0.0 in that case to keep `fcvt_to_sint` from trapping.
+fn emit_float_to_int(
+    fb: &mut FunctionBuilder,
+    ovf_var: Variable,
+    name: SymId,
+    syms: &JitSyms,
+    x: ClValue,
+) -> Option<ClValue> {
+    // Adjust to the integral F64 the op rounds to; `fcvt_to_sint` then truncates
+    // toward zero (exact for the already-integral floor/ceil/round results).
+    let adj = if name == syms.to_i || name == syms.truncate {
+        x
+    } else if name == syms.floor {
+        fb.ins().floor(x)
+    } else if name == syms.ceil {
+        fb.ins().ceil(x)
+    } else if name == syms.round {
+        let half = fb.ins().f64const(0.5);
+        let signed_half = fb.ins().fcopysign(half, x);
+        fb.ins().fadd(x, signed_half)
+    } else {
+        return None;
+    };
+    // In range iff -2^63 <= adj < 2^63 (ordered fcmp -> NaN/Inf fail -> deopt).
+    let lo = fb.ins().f64const(-9223372036854775808.0); // -2^63
+    let hi = fb.ins().f64const(9223372036854775808.0); // 2^63
+    let ge = fb.ins().fcmp(FloatCC::GreaterThanOrEqual, adj, lo);
+    let lt = fb.ins().fcmp(FloatCC::LessThan, adj, hi);
+    let ok = fb.ins().band(ge, lt);
+    let bad = fb.ins().bxor_imm(ok, 1);
+    let cur = fb.use_var(ovf_var);
+    let nv = fb.ins().bor(cur, bad);
+    fb.def_var(ovf_var, nv);
+    let zero = fb.ins().f64const(0.0);
+    let safe = fb.ins().select(ok, adj, zero);
+    Some(fb.ins().fcvt_to_sint(types::I64, safe))
+}
+
 fn emit_binop_float(
     fb: &mut FunctionBuilder,
     k: BinOpKind,
@@ -2899,6 +2967,13 @@ pub(crate) struct JitSyms {
     pub zero_p: SymId,
     pub positive_p: SymId,
     pub negative_p: SymId,
+    // Float -> Int conversions (a Float receiver -> `fcvt_to_sint` with a range-guard
+    // deopt; an Int receiver -> identity). `round` is Ruby half-away-from-zero.
+    pub floor: SymId,
+    pub ceil: SymId,
+    pub to_i: SymId,
+    pub truncate: SymId,
+    pub round: SymId,
 }
 
 /// Native primitive: allocate a fresh empty Array, return its `ObjId` as i64.

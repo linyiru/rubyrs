@@ -16046,18 +16046,7 @@ impl Vm {
                 getters.insert(name, ivar);
             }
         }
-        let syms = crate::jit_native::JitSyms {
-            length: self.interner.intern("length"),
-            size: self.interner.intern("size"),
-            bracket: self.interner.intern("[]"),
-            lshift: self.interner.intern("<<"),
-            abs: self.interner.intern("abs"),
-            even_p: self.interner.intern("even?"),
-            odd_p: self.interner.intern("odd?"),
-            zero_p: self.interner.intern("zero?"),
-            positive_p: self.interner.intern("positive?"),
-            negative_p: self.interner.intern("negative?"),
-        };
+        let syms = self.jit_syms();
         let compiled = crate::jit_native::compile(
             &self.protos[proto_idx],
             self_name_id,
@@ -16089,18 +16078,7 @@ impl Vm {
         let self_name_id = self.interner.intern(&self_name);
         let callees = crate::intern::FxHashMap::default();
         let getters = crate::intern::FxHashMap::default();
-        let syms = crate::jit_native::JitSyms {
-            length: self.interner.intern("length"),
-            size: self.interner.intern("size"),
-            bracket: self.interner.intern("[]"),
-            lshift: self.interner.intern("<<"),
-            abs: self.interner.intern("abs"),
-            even_p: self.interner.intern("even?"),
-            odd_p: self.interner.intern("odd?"),
-            zero_p: self.interner.intern("zero?"),
-            positive_p: self.interner.intern("positive?"),
-            negative_p: self.interner.intern("negative?"),
-        };
+        let syms = self.jit_syms();
         crate::jit_native::compile(
             &self.protos[proto_idx],
             self_name_id,
@@ -16238,7 +16216,7 @@ impl Vm {
         }
         if !self.jit_native_block_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false);
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false, true);
             self.jit_native_block_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_float.get(&proto_idx) {
@@ -16255,6 +16233,52 @@ impl Vm {
         };
         let vm_ptr = self as *const crate::vm::Vm;
         sl.call(vm_ptr, &self_val, array_id.0 as i64, init_bits)
+    }
+
+    /// Float-element / Int-result `sum` (ADR 0034 layer 3d): `floats.sum { |x|
+    /// x.floor }` / `x.to_i` — a Float array reduced to an Integer via a per-element
+    /// Float->Int conversion. The block compiles with a Float element but an INT
+    /// result (`float_acc = false`); the loop is the int-accumulator `LoopKind::Sum`
+    /// (the count driver's loop) with a FLOAT element reader. Result is an Integer,
+    /// so — unlike the all-Float sum — the empty case needs no decline (init stays
+    /// Int). The Float sum above declines first (its Float-result block rejects the
+    /// Int conversion result). Returns the i64 sum.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_floatint_sum_loop(&mut self, block_id: ObjId, array_id: ObjId, init: i64) -> Option<i64> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        if !self.jit_native_block_floatint.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false, false);
+            self.jit_native_block_floatint.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_floatint.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_floatint_sum_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Sum);
+            self.jit_native_floatint_sum_loop.insert(proto_idx, compiled);
+        }
+        let sl = match self.jit_native_floatint_sum_loop.get(&proto_idx) {
+            Some(Some(sl)) => sl,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        sl.call(vm_ptr, &self_val, array_id.0 as i64, init)
     }
 
     /// Whole-loop fast path for `ints.sum { |x| <f64 expr in x> }` (ADR 0034 layer
@@ -16326,18 +16350,7 @@ impl Vm {
         let dummy = self.interner.intern("\u{0}block\u{0}");
         let callees = crate::intern::FxHashMap::default();
         let getters = crate::intern::FxHashMap::default();
-        let syms = crate::jit_native::JitSyms {
-            length: self.interner.intern("length"),
-            size: self.interner.intern("size"),
-            bracket: self.interner.intern("[]"),
-            lshift: self.interner.intern("<<"),
-            abs: self.interner.intern("abs"),
-            even_p: self.interner.intern("even?"),
-            odd_p: self.interner.intern("odd?"),
-            zero_p: self.interner.intern("zero?"),
-            positive_p: self.interner.intern("positive?"),
-            negative_p: self.interner.intern("negative?"),
-        };
+        let syms = self.jit_syms();
         crate::jit_native::compile(
             &self.protos[proto_idx],
             dummy,
@@ -16439,7 +16452,7 @@ impl Vm {
         }
         if !self.jit_native_block_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false);
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false, true);
             self.jit_native_block_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_float.get(&proto_idx) {
@@ -16710,7 +16723,7 @@ impl Vm {
         }
         if !self.jit_native_block_pred_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, true);
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, true, true);
             self.jit_native_block_pred_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_pred_float.get(&proto_idx) {
@@ -16751,7 +16764,7 @@ impl Vm {
         }
         if !self.jit_native_block_pred_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, true);
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, true, true);
             self.jit_native_block_pred_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_pred_float.get(&proto_idx) {
@@ -16803,7 +16816,7 @@ impl Vm {
         }
         if !self.jit_native_block_pred_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, true);
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, true, true);
             self.jit_native_block_pred_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_pred_float.get(&proto_idx) {
@@ -17414,7 +17427,7 @@ impl Vm {
         }
         if !self.jit_native_block_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false);
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false, true);
             self.jit_native_block_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_float.get(&proto_idx) {
@@ -17483,6 +17496,29 @@ impl Vm {
         ml.call(vm_ptr, &self_val, array_id.0 as i64, 0).map(Value::Int)
     }
 
+    /// Build the `JitSyms` table the native codegen recognises (interns each name
+    /// once). Centralised so all the block/method compile helpers share one source.
+    #[cfg(feature = "jit-native")]
+    fn jit_syms(&mut self) -> crate::jit_native::JitSyms {
+        crate::jit_native::JitSyms {
+            length: self.interner.intern("length"),
+            size: self.interner.intern("size"),
+            bracket: self.interner.intern("[]"),
+            lshift: self.interner.intern("<<"),
+            abs: self.interner.intern("abs"),
+            even_p: self.interner.intern("even?"),
+            odd_p: self.interner.intern("odd?"),
+            zero_p: self.interner.intern("zero?"),
+            positive_p: self.interner.intern("positive?"),
+            negative_p: self.interner.intern("negative?"),
+            floor: self.interner.intern("floor"),
+            ceil: self.interner.intern("ceil"),
+            to_i: self.interner.intern("to_i"),
+            truncate: self.interner.intern("truncate"),
+            round: self.interner.intern("round"),
+        }
+    }
+
     /// Compile a 1-param block proto to native (B5). The arg binds to the block's
     /// `param_start`; reads of captured outer slots decline (see `compile`).
     /// Blocks with method calls are not modelled yet, so callees/getters are
@@ -17498,18 +17534,7 @@ impl Vm {
         let dummy = self.interner.intern("\u{0}block\u{0}"); // never names a real call
         let callees = crate::intern::FxHashMap::default();
         let getters = crate::intern::FxHashMap::default();
-        let syms = crate::jit_native::JitSyms {
-            length: self.interner.intern("length"),
-            size: self.interner.intern("size"),
-            bracket: self.interner.intern("[]"),
-            lshift: self.interner.intern("<<"),
-            abs: self.interner.intern("abs"),
-            even_p: self.interner.intern("even?"),
-            odd_p: self.interner.intern("odd?"),
-            zero_p: self.interner.intern("zero?"),
-            positive_p: self.interner.intern("positive?"),
-            negative_p: self.interner.intern("negative?"),
-        };
+        let syms = self.jit_syms();
         crate::jit_native::compile(
             &self.protos[proto_idx],
             dummy,
@@ -17533,22 +17558,12 @@ impl Vm {
         param_start: u32,
         body_local_start: u32,
         predicate: bool,
+        float_acc: bool,
     ) -> Option<crate::jit_native::NativeProto> {
         let dummy = self.interner.intern("\u{0}block\u{0}");
         let callees = crate::intern::FxHashMap::default();
         let getters = crate::intern::FxHashMap::default();
-        let syms = crate::jit_native::JitSyms {
-            length: self.interner.intern("length"),
-            size: self.interner.intern("size"),
-            bracket: self.interner.intern("[]"),
-            lshift: self.interner.intern("<<"),
-            abs: self.interner.intern("abs"),
-            even_p: self.interner.intern("even?"),
-            odd_p: self.interner.intern("odd?"),
-            zero_p: self.interner.intern("zero?"),
-            positive_p: self.interner.intern("positive?"),
-            negative_p: self.interner.intern("negative?"),
-        };
+        let syms = self.jit_syms();
         crate::jit_native::compile(
             &self.protos[proto_idx],
             dummy,
@@ -17558,7 +17573,7 @@ impl Vm {
             &syms,
             Some((param_start, body_local_start, predicate, crate::jit_native::AccKind::None)),
             true, // float element
-            true, // float accumulator/result
+            float_acc,
         )
     }
 
@@ -17577,18 +17592,7 @@ impl Vm {
         let dummy = self.interner.intern("\u{0}block\u{0}");
         let callees = crate::intern::FxHashMap::default();
         let getters = crate::intern::FxHashMap::default();
-        let syms = crate::jit_native::JitSyms {
-            length: self.interner.intern("length"),
-            size: self.interner.intern("size"),
-            bracket: self.interner.intern("[]"),
-            lshift: self.interner.intern("<<"),
-            abs: self.interner.intern("abs"),
-            even_p: self.interner.intern("even?"),
-            odd_p: self.interner.intern("odd?"),
-            zero_p: self.interner.intern("zero?"),
-            positive_p: self.interner.intern("positive?"),
-            negative_p: self.interner.intern("negative?"),
-        };
+        let syms = self.jit_syms();
         crate::jit_native::compile(
             &self.protos[proto_idx],
             dummy,
@@ -17621,18 +17625,7 @@ impl Vm {
         let dummy = self.interner.intern("\u{0}block\u{0}");
         let callees = crate::intern::FxHashMap::default();
         let getters = crate::intern::FxHashMap::default();
-        let syms = crate::jit_native::JitSyms {
-            length: self.interner.intern("length"),
-            size: self.interner.intern("size"),
-            bracket: self.interner.intern("[]"),
-            lshift: self.interner.intern("<<"),
-            abs: self.interner.intern("abs"),
-            even_p: self.interner.intern("even?"),
-            odd_p: self.interner.intern("odd?"),
-            zero_p: self.interner.intern("zero?"),
-            positive_p: self.interner.intern("positive?"),
-            negative_p: self.interner.intern("negative?"),
-        };
+        let syms = self.jit_syms();
         crate::jit_native::compile(
             &self.protos[proto_idx],
             dummy,
@@ -17666,18 +17659,7 @@ impl Vm {
         let dummy = self.interner.intern("\u{0}block\u{0}");
         let callees = crate::intern::FxHashMap::default();
         let getters = crate::intern::FxHashMap::default();
-        let syms = crate::jit_native::JitSyms {
-            length: self.interner.intern("length"),
-            size: self.interner.intern("size"),
-            bracket: self.interner.intern("[]"),
-            lshift: self.interner.intern("<<"),
-            abs: self.interner.intern("abs"),
-            even_p: self.interner.intern("even?"),
-            odd_p: self.interner.intern("odd?"),
-            zero_p: self.interner.intern("zero?"),
-            positive_p: self.interner.intern("positive?"),
-            negative_p: self.interner.intern("negative?"),
-        };
+        let syms = self.jit_syms();
         crate::jit_native::compile(
             &self.protos[proto_idx],
             dummy,
@@ -17710,18 +17692,7 @@ impl Vm {
         let dummy = self.interner.intern("\u{0}block\u{0}");
         let callees = crate::intern::FxHashMap::default();
         let getters = crate::intern::FxHashMap::default();
-        let syms = crate::jit_native::JitSyms {
-            length: self.interner.intern("length"),
-            size: self.interner.intern("size"),
-            bracket: self.interner.intern("[]"),
-            lshift: self.interner.intern("<<"),
-            abs: self.interner.intern("abs"),
-            even_p: self.interner.intern("even?"),
-            odd_p: self.interner.intern("odd?"),
-            zero_p: self.interner.intern("zero?"),
-            positive_p: self.interner.intern("positive?"),
-            negative_p: self.interner.intern("negative?"),
-        };
+        let syms = self.jit_syms();
         crate::jit_native::compile(
             &self.protos[proto_idx],
             dummy,
