@@ -1,6 +1,10 @@
 # ADR 0034 — JIT-first: a full method JIT to surpass CRuby + YJIT
 
-Status: **Accepted (strategy)** — supersedes the standalone framing of ADR 0033
+## Status
+
+**Accepted (strategy)** (2026-06) — supersedes the standalone framing of
+[ADR 0033](0033-lean-vm-core.md), and reverses the "no JIT" decision of
+[ADR 0002](0002-bytecode-vm-not-jit.md).
 
 ## Context
 

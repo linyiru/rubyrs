@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted (2026-05).
+Accepted (2026-05). **Superseded on the JIT question by
+[ADR 0034](0034-jit-first-surpass-yjit.md) (2026-06)** — the "no JIT for
+the foreseeable future" decision was reversed after PoCs showed a native
+Cranelift JIT beats CRuby + YJIT (see ADR [0030](0030-jit-tier.md) /
+[0032](0032-jit-native-surpass.md) / [0034](0034-jit-first-surpass-yjit.md)).
+The bytecode-VM design itself still stands: it is the always-correct tier-0
+interpreter the JIT deopts to.
 
 ## Context
 

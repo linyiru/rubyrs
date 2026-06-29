@@ -79,3 +79,8 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0027 — `_sqlite` battery — single-conn rusqlite wrapper + Sequel-lite DSL](0027-battery-sqlite.md)
 - [0028 — `_socket` battery — blocking std::net TCP backing pure-Ruby Net::HTTP](0028-battery-socket.md)
 - [0029 — `_openssl` battery — rustls TLS-client slice for Net::HTTP https](0029-battery-openssl.md)
+- [0030 — Closure-threading JIT tier (PoC)](0030-jit-tier.md)
+- [0031 — `do_call` dispatch-core optimization](0031-dispatch-core.md)
+- [0032 — Native (Cranelift) JIT — surpassing CRuby](0032-jit-native-surpass.md)
+- [0033 — Lean VM core (superseded by 0034)](0033-lean-vm-core.md)
+- [0034 — JIT-first: a full method JIT to surpass CRuby + YJIT](0034-jit-first-surpass-yjit.md)
