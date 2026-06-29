@@ -224,6 +224,13 @@ impl Vm {
         if self.fiber_yield_pending.is_some() {
             return Ok(BlockStep::Value(Value::Nil));
         }
+        // B5: run a pure-int 1-param block as native code, skipping the
+        // interpreter frame + dispatch entirely. Falls through on any
+        // ineligibility or deopt.
+        #[cfg(feature = "jit-native")]
+        if let Some(r) = self.try_native_block1(block, &arg) {
+            return Ok(BlockStep::Value(Value::Int(r)));
+        }
         self.invoke_block1(block, arg)?;
         self.dispatch_until(pre_frames)?;
         if self.method_return.is_some() {
@@ -268,6 +275,57 @@ impl Vm {
     /// On `break val` (caught via `self.break_signaled`) returns `val`
     /// to match CRuby's "break value short-circuits the enumerator".
     pub(crate) fn iter_array_filter(&mut self, id: ObjId, mode: IterMode, block: ObjId) -> Result<Value, Trap> {
+        // Whole-loop native fast path (ADR 0034 layer 3). A comparison predicate
+        // over an all-Int array runs in native code; placed before the snapshot
+        // clone so the fast path skips it. A deopt (non-comparison predicate /
+        // non-Int element) falls through to the generic walk. Pin in+block across
+        // the alloc inside.
+        #[cfg(feature = "jit-native")]
+        match mode {
+            // select/reject: a native filter loop producing the result array.
+            IterMode::Select | IterMode::Reject => {
+                let keep = matches!(mode, IterMode::Select);
+                self.pinned.push(Value::Array(id));
+                self.pinned.push(Value::Block(block));
+                let out = self.try_native_filter_loop(block, id, keep);
+                self.pinned.truncate(self.pinned.len() - 2);
+                if let Some(out) = out {
+                    return Ok(Value::Array(out));
+                }
+            }
+            // any?/all?/none?/one?: a PURE predicate has no side effects, so the
+            // early-exit forms are observationally equal to a full count of the
+            // matches — compute the count natively and compare. (Empty array:
+            // count 0 gives all?/none? true, any?/one? false — matching CRuby.)
+            IterMode::Any | IterMode::All | IterMode::NoneM | IterMode::One => {
+                self.pinned.push(Value::Array(id));
+                self.pinned.push(Value::Block(block));
+                let cnt = self.try_native_count_loop(block, id);
+                self.pinned.truncate(self.pinned.len() - 2);
+                if let Some(c) = cnt {
+                    let len = self.heap.array(id).len() as i64;
+                    let res = match mode {
+                        IterMode::Any => c > 0,
+                        IterMode::All => c == len,
+                        IterMode::NoneM => c == 0,
+                        IterMode::One => c == 1,
+                        _ => unreachable!(),
+                    };
+                    return Ok(Value::Bool(res));
+                }
+            }
+            // find/detect: the first matching element, or nil. (The no-ifnone
+            // forms route here; find(ifnone) has its own arm.)
+            IterMode::Find => {
+                self.pinned.push(Value::Array(id));
+                self.pinned.push(Value::Block(block));
+                let found = self.try_native_find_loop(block, id);
+                self.pinned.truncate(self.pinned.len() - 2);
+                if let Some(found) = found {
+                    return Ok(found.unwrap_or(Value::Nil));
+                }
+            }
+        }
         let snapshot: Vec<Value> = self.heap.array(id).clone();
         let mut g = PinGuard::new(self);
         g.pin(Value::Array(id));
@@ -1424,10 +1482,83 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Array(*id)))
             }
+            // `arr.sum { |x| expr }` — sum the block return values (B5). A native
+            // Rust driver: the user block runs per element via `step_block1`
+            // (which calls a native-compiled block directly when possible),
+            // accumulating with no intermediate Array. Mirrors Hash#sum's
+            // Int/Bignum accumulation; a non-Int/Bignum result returns `None` to
+            // fall back to the Ruby `Enumerable#sum` (before any block side
+            // effect matters for the pure transforms this targets). Replaces the
+            // preamble path `each { |*x| memo += yield(*x) }`, whose accumulator
+            // block (capture + splat + re-yield) can never go native.
+            (Value::Array(id), "sum", []) | (Value::Array(id), "sum", [Value::Int(_)]) => {
+                let id = *id;
+                let init: i64 = match args { [Value::Int(n)] => *n, _ => 0 };
+                let kind = crate::bytecode::BinOpKind::Add;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(id));
+                g.pin(Value::Block(block));
+                // Whole-loop native fast path (ADR 0034 layer 3): if the block is
+                // a native-compilable Int function and every element is an Int,
+                // the entire sum runs in native code (no per-element interpreter
+                // re-entry). A deopt (non-Int element / overflow) returns None and
+                // we fall through to the generic loop below, which redoes the sum
+                // from `init` — sound because a native block is pure.
+                #[cfg(feature = "jit-native")]
+                if let Some(s) = g.vm.try_native_sum_loop(block, id, init) {
+                    return Ok(Some(Value::Int(s)));
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut acc: Value = Value::Int(init);
+                let mut early = None;
+                let mut i = 0usize;
+                loop {
+                    // Re-check length each step — a block could mutate the array
+                    // (bounds-safe in-place read, like the no-block Array#sum).
+                    if i >= g.vm.heap.array(id).len() {
+                        break;
+                    }
+                    let elem = g.vm.heap.array(id)[i].clone();
+                    let acc_heap = acc.is_gc_heap_ref();
+                    if acc_heap { g.vm.pinned.push(acc.clone()); }
+                    let step = g.vm.step_block1(block, elem, pre_frames);
+                    if acc_heap { g.vm.pinned.pop(); }
+                    let r = match step? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    match (&acc, &r) {
+                        (Value::Int(x), Value::Int(y)) => {
+                            acc = g.vm.apply_int_promote(kind, *x, *y)?;
+                        }
+                        _ => {
+                            #[cfg(feature = "bignum")]
+                            if let Some(next) = g.vm.try_bigint_binop(kind, &acc, &r)? {
+                                acc = next;
+                                i += 1;
+                                continue;
+                            }
+                            return Ok(None);
+                        }
+                    }
+                    i += 1;
+                }
+                Some(early.unwrap_or(acc))
+            }
             (Value::Array(id), "map", []) | (Value::Array(id), "collect", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
+                // Whole-loop native fast path (ADR 0034 layer 3): an Int-function
+                // block over an all-Int array fills a pre-sized result in native
+                // code. A deopt (non-Int element / block result / overflow)
+                // returns None and we fall through to the generic loop — sound
+                // because a native block is pure (the partial result is dropped).
+                #[cfg(feature = "jit-native")]
+                if let Some(out) = g.vm.try_native_map_loop(block, *id) {
+                    return Ok(Some(Value::Array(out)));
+                }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
@@ -4071,10 +4202,21 @@ impl Vm {
                 // Pilot migration. The `init` variant shares the
                 // accumulator pattern with the no-arg form above
                 // — different only in the initial-acc source.
-                let snapshot: Vec<Value> = self.heap.array(*id).clone();
+                let id = *id;
                 let mut g = PinGuard::new(self);
-                g.pin(Value::Array(*id));
+                g.pin(Value::Array(id));
                 g.pin(Value::Block(block));
+                // Whole-loop native fast path (ADR 0034 layer 3): a 2-param Int
+                // block threading an Int accumulator over an all-Int array folds
+                // in native code. A deopt (non-Int element / block result /
+                // overflow) falls through to the generic loop.
+                #[cfg(feature = "jit-native")]
+                if let Value::Int(n) = init {
+                    if let Some(acc) = g.vm.try_native_inject_loop(block, id, *n) {
+                        return Ok(Some(Value::Int(acc)));
+                    }
+                }
+                let snapshot: Vec<Value> = g.vm.heap.array(id).clone();
                 let pre_frames = g.vm.frames.len();
                 let mut acc = init.clone();
                 let mut early = None;
@@ -4088,10 +4230,18 @@ impl Vm {
                 Some(early.unwrap_or(acc))
             }
             (Value::Array(id), "count", []) => {
-                let snapshot: Vec<Value> = self.heap.array(*id).clone();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
+                // Whole-loop native fast path (ADR 0034 layer 3): a comparison
+                // predicate over an all-Int array counts in native code (the sum
+                // loop accumulating the predicate's 0/1). A deopt (non-comparison
+                // predicate / non-Int element) falls through to the generic loop.
+                #[cfg(feature = "jit-native")]
+                if let Some(n) = g.vm.try_native_count_loop(block, *id) {
+                    return Ok(Some(Value::Int(n)));
+                }
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 let pre_frames = g.vm.frames.len();
                 let mut n: i64 = 0;
                 let mut early = None;

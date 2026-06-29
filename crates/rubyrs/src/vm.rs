@@ -761,6 +761,45 @@ pub(crate) struct Vm {
         crate::intern::FxHashMap<(usize, usize), Option<crate::jit_native::NativeProto>>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_value: crate::intern::FxHashMap<usize, Option<crate::jit_native::ValueProto>>,
+    /// Native-compiled 1-param BLOCKS, keyed by block proto_idx (B5). A Rust
+    /// iterator driver (`step_block1`) calls the native block instead of
+    /// re-entering the interpreter when the block is a pure int function of its
+    /// param. `Some(None)` = declined (not native-compilable).
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_block: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// Per block-proto cache of compiled whole-loop `Array#sum { block }` drivers
+    /// (ADR 0034 layer 3): the full iteration runs native, calling the native
+    /// block per element with no per-element interpreter re-entry.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_sum_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    /// Per block-proto cache of compiled whole-loop `Array#map { block }` drivers
+    /// (ADR 0034 layer 3): the full map runs native, filling a pre-sized result.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_map_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    /// Predicate-mode compilation of a block proto (a `Bool` result materialised
+    /// as i64 0/1), keyed separately from the value-mode `jit_native_block` since
+    /// the two compile the same proto differently. Used by count/select/...
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_block_pred: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// Per block-proto cache of whole-loop `Array#count { pred }` drivers — a sum
+    /// loop accumulating the predicate block's 0/1 results.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_count_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    /// Per-(block proto, keep-polarity) cache of whole-loop `select` / `reject`
+    /// drivers — a predicate loop pushing the matching elements. `true` = select
+    /// (keep truthy), `false` = reject (keep falsy).
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_filter_loop: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeLoop>>,
+    /// Per block-proto cache of whole-loop `find` / `detect` drivers — a predicate
+    /// loop that pushes the first match into a capacity-1 array and early-exits.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_find_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    /// 2-param block compilation (inject/reduce `|acc, x|`), cached separately.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_block2: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// Per block-proto cache of whole-loop `inject` / `reduce` drivers.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_inject_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_on: bool,
     pub(crate) interner: Interner,
@@ -1847,6 +1886,24 @@ impl Vm {
             jit_native_poly: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_value: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_block: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_sum_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_map_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_block_pred: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_count_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_filter_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_find_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_block2: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_inject_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_on: std::env::var_os("RUBYRS_JIT_NATIVE").is_some(),
             protos,

@@ -39,6 +39,11 @@ pub(crate) struct NativeProto {
     /// When true the i64 result is an Array `ObjId` — the dispatch boxes it to
     /// `Value::Array` instead of `Value::Int`.
     pub(crate) returns_array: std::cell::Cell<bool>,
+    /// Monomorphic inline caches for `@arr[i].getter` sites (B4). Each holds
+    /// `(element_class_ptr, ivar_sym)`; their stable heap addresses are baked
+    /// into the native code as constants, so the `Box`es must outlive the code —
+    /// they're owned here and dropped with the proto (and its module).
+    _caches: Vec<Box<std::cell::Cell<(usize, u32)>>>,
 }
 
 impl NativeProto {
@@ -85,19 +90,71 @@ enum Kind {
 /// "compilation scope" step: a method's whole call tree can run native (like
 /// `fib`), not just the leaf. Polymorphism (an overriding subclass) is guarded
 /// only by `method_gen` invalidation for now.
+/// `getters` maps the name of a 0-arg call (on `self`) that resolves to a simple
+/// int-returning attribute reader (`def amount; @amount; end`) to that reader's
+/// ivar SymId. Such a call is lowered to an INLINE ivar read on the receiver —
+/// no frame, no dispatch (B4, ADR 0034). Sound because the reader is a pure read
+/// with no side effects, so a deopt that re-runs the whole method is behaviour-
+/// preserving.
+/// `block` is `Some((param_slot, body_local_start))` when compiling a 1-param
+/// BLOCK rather than a method (B5): the single arg binds to `param_slot` (not
+/// local 0) in the block's shared-locals layout, and any access to a captured
+/// OUTER slot (`< body_local_start`, other than the param) declines — so only a
+/// pure function of the param + the block's own temporaries compiles. `None` =
+/// a normal method (param at slot 0, the method shape-gate applies).
 pub(crate) fn compile(
     proto: &Proto,
     self_name_id: SymId,
     callees: &FxHashMap<SymId, usize>,
+    getters: &FxHashMap<SymId, SymId>,
     syms: &JitSyms,
+    block: Option<(u32, u32, bool, bool)>,
 ) -> Option<NativeProto> {
-    // Shape gate: exactly one required positional param, nothing fancy.
-    if proto.n_required_positional != 1
-        || proto.params.len() != 1
-        || proto.rest_param.is_some()
-        || !proto.kw_param_defaults.is_empty()
+    // Shape gate (methods only): exactly one required positional param. A block's
+    // 1-param eligibility is checked by the caller via its `BlockHandle` fields.
+    if block.is_none()
+        && (proto.n_required_positional != 1
+            || proto.params.len() != 1
+            || proto.rest_param.is_some()
+            || !proto.kw_param_defaults.is_empty())
     {
         return None;
+    }
+    let param_slot = block.map(|(p, _, _, _)| p).unwrap_or(0);
+    // Predicate mode (count/select/...): a final `Bool` Return materialises as
+    // i64 0/1 instead of declining. Only meaningful for blocks; methods (None)
+    // are never predicate.
+    let predicate = block.map(|(_, _, p, _)| p).unwrap_or(false);
+    // Two-param block (inject/reduce: `|acc, x|`): the second param binds to
+    // `param_slot + 1`, so both slots are params, not captures.
+    let two_param = block.map(|(_, _, _, t)| t).unwrap_or(false);
+    let is_param = |s: u32| s == param_slot || (two_param && s == param_slot + 1);
+    // For a block, reject reads/writes of captured outer slots (closure state):
+    // a slot below the body-local start that isn't a param. Methods (None)
+    // impose no such restriction.
+    if let Some((_, body_start, _, _)) = block {
+        for op in &proto.code {
+            let slot = match op {
+                Op::LoadLocal(s) | Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
+                    Some(*s)
+                }
+                Op::BinOpLocalLocal(_, a, b) => {
+                    if ((*a as u32) < body_start && !is_param(*a as u32))
+                        || ((*b as u32) < body_start && !is_param(*b as u32))
+                    {
+                        return None;
+                    }
+                    None
+                }
+                _ => None,
+            };
+            if let Some(s) = slot
+                && (s as u32) < body_start
+                && !is_param(s as u32)
+            {
+                return None;
+            }
+        }
     }
     let code = &proto.code;
     // Op gate: every op must be one we model. Collect the distinct external
@@ -121,19 +178,10 @@ pub(crate) fn compile(
             // Key push for a fused `@h[:k]`; standalone use rejected in codegen.
             | Op::LoadSymbol(_)
             | Op::LoadNil => {}
-            Op::BinOp(k) | Op::BinOpLocalLocal(k, _, _) | Op::BinOpInt(k, _) => match k {
-                BinOpKind::Add
-                | BinOpKind::Sub
-                | BinOpKind::Mul
-                | BinOpKind::Lt
-                | BinOpKind::Le
-                | BinOpKind::Gt
-                | BinOpKind::Ge
-                | BinOpKind::Eq
-                | BinOpKind::Ne => {}
-                // Div/Mod need floor-semantics + div-by-zero deopt — not modelled yet.
-                _ => return None,
-            },
+            // All BinOpKinds are modelled in `emit_binop`. Div/Mod emit Ruby
+            // floored semantics with a branchless deopt on b==0 and the
+            // `i64::MIN / -1` overflow (both fall back to the interpreter).
+            Op::BinOp(_) | Op::BinOpLocalLocal(_, _, _) | Op::BinOpInt(_, _) => {}
             // Self-recursive 1-arg call (`fib(n-1)`) → native self-call.
             Op::CallNoRecv(name, 1, _) if *name == self_name_id => {}
             // Call to another already-compiled 1-arg method → native call.
@@ -142,9 +190,15 @@ pub(crate) fn compile(
                     used_callees.push(*name);
                 }
             }
+            // Bare 0-arg call to a self attribute reader (`amount` → `@amount`)
+            // → inlined ivar read on the receiver (B4). No callee import needed.
+            Op::CallNoRecv(name, 0, _) if getters.contains_key(name) => {}
             // `@arr.length` / `@arr.size` — fused with the preceding LoadIvar in
             // codegen; a standalone one (no LoadIvar before) is rejected there.
-            Op::Call(m, 0, _) if *m == syms.length || *m == syms.size => {}
+            // Any other 0-arg call is admitted here but only LOWERED by codegen
+            // when it's the `getter` of a fused `@arr[i].getter` (B4); a
+            // standalone one hits codegen's catch-all and declines the proto.
+            Op::Call(_, 0, _) => {}
             // `@h[:k]` — `Call([], 1)`, fused with the LoadIvar + LoadSymbol.
             Op::Call(m, 1, _) if *m == syms.bracket => {}
             // `[]` literal + `a << elem` — the array-building shape, where the
@@ -184,13 +238,17 @@ pub(crate) fn compile(
     builder.symbol("jit_ivar_array_get_int", jit_ivar_array_get_int as *const u8);
     builder.symbol("jit_array_new", jit_array_new as *const u8);
     builder.symbol("jit_array_push", jit_array_push as *const u8);
+    builder.symbol("jit_arr_elem_attr_int", jit_arr_elem_attr_int as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
     let mut ctx = module.make_context();
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(ptr_ty)); // vm
     sig.params.push(AbiParam::new(ptr_ty)); // self (receiver)
-    sig.params.push(AbiParam::new(types::I64)); // the i64 arg
+    sig.params.push(AbiParam::new(types::I64)); // the i64 arg (acc, for a 2-param block)
+    if two_param {
+        sig.params.push(AbiParam::new(types::I64)); // 2nd arg (the element)
+    }
     sig.returns.push(AbiParam::new(types::I64));
     sig.returns.push(AbiParam::new(types::I8));
     ctx.func.signature = sig.clone();
@@ -246,6 +304,20 @@ pub(crate) fn compile(
     let apid = module
         .declare_function("jit_array_push", Linkage::Import, &apsig)
         .ok()?;
+    // `jit_arr_elem_attr_int`: (vm, recv, arr_name:i32, index:i64, getter:i32,
+    // cache:ptr) -> (i64, i8).
+    let mut aesig = module.make_signature();
+    aesig.params.push(AbiParam::new(ptr_ty));
+    aesig.params.push(AbiParam::new(ptr_ty));
+    aesig.params.push(AbiParam::new(types::I32));
+    aesig.params.push(AbiParam::new(types::I64));
+    aesig.params.push(AbiParam::new(types::I32));
+    aesig.params.push(AbiParam::new(ptr_ty));
+    aesig.returns.push(AbiParam::new(types::I64));
+    aesig.returns.push(AbiParam::new(types::I8));
+    let aeid = module
+        .declare_function("jit_arr_elem_attr_int", Linkage::Import, &aesig)
+        .ok()?;
     // Each callee imports with the same `(vm, self, i64) -> (i64, i8)` signature.
     let mut callee_fids: FxHashMap<SymId, cranelift_module::FuncId> = FxHashMap::default();
     for cid in &used_callees {
@@ -257,6 +329,9 @@ pub(crate) fn compile(
     let mut fbctx = FunctionBuilderContext::new();
     // Set inside the codegen block when the returned value is an array ObjId.
     let mut returns_array = false;
+    // Inline-cache cells for `@arr[i].getter` sites (B4); their addresses are
+    // baked into the code, so they're moved into the NativeProto to outlive it.
+    let mut caches: Vec<Box<std::cell::Cell<(usize, u32)>>> = Vec::new();
     {
         let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         // A reference to THIS function, for compiling self-recursive calls
@@ -268,6 +343,7 @@ pub(crate) fn compile(
         let arrget_ref = module.declare_func_in_func(agid, fb.func);
         let arrnew_ref = module.declare_func_in_func(anid, fb.func);
         let arrpush_ref = module.declare_func_in_func(apid, fb.func);
+        let arrelem_ref = module.declare_func_in_func(aeid, fb.func);
         // FuncRefs for each external callee.
         let mut callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
         for (cid, cfid) in &callee_fids {
@@ -285,15 +361,25 @@ pub(crate) fn compile(
         let entry = fb.create_block();
         fb.append_block_params_for_function_params(entry);
         fb.switch_to_block(entry);
-        // Params: [0]=vm, [1]=self (receiver), [2]=the i64 arg.
+        // Params: [0]=vm, [1]=self (receiver), [2]=the i64 arg, and for a 2-param
+        // block (inject) [3]=the 2nd arg (element).
         let vm_param = fb.block_params(entry)[0];
         let self_param = fb.block_params(entry)[1];
         let param = fb.block_params(entry)[2];
+        let param2 = if two_param {
+            Some(fb.block_params(entry)[3])
+        } else {
+            None
+        };
         let nloc = proto.n_locals as usize;
         let vars: Vec<Variable> = (0..nloc).map(|_| fb.declare_var(types::I64)).collect();
+        // The args bind to `param_slot` (and `param_slot + 1` for a 2-param
+        // block); every other local inits to 0.
         for (i, v) in vars.iter().enumerate() {
-            if i == 0 {
+            if i == param_slot as usize {
                 fb.def_var(*v, param);
+            } else if two_param && i == param_slot as usize + 1 {
+                fb.def_var(*v, param2.unwrap());
             } else {
                 let z = fb.ins().iconst(types::I64, 0);
                 fb.def_var(*v, z);
@@ -351,6 +437,43 @@ pub(crate) fn compile(
                 // otherwise read an Int ivar. A non-matching heap shape sets ovf
                 // → deopt. The fused Call op is skipped (`ip += 1`).
                 Op::LoadIvar(s) => {
+                    // `@arr[local].getter` (B4) → LoadIvar, LoadLocal, Call([],1),
+                    // Call(getter,0). Fused into one inline-cached primitive:
+                    // array-get + element-class PIC + int attribute read. The
+                    // index local must be Int.
+                    let arr_elem_attr = match (code.get(ip + 1), code.get(ip + 2), code.get(ip + 3))
+                    {
+                        (
+                            Some(Op::LoadLocal(slot)),
+                            Some(Op::Call(b, 1, _)),
+                            Some(Op::Call(g, 0, _)),
+                        ) if *b == syms.bracket && local_kinds[*slot as usize] == Kind::Int => {
+                            Some((*slot, *g))
+                        }
+                        _ => None,
+                    };
+                    if let Some((slot, getter)) = arr_elem_attr {
+                        let name = fb.ins().iconst(types::I32, s.0 as i64);
+                        let index = fb.use_var(vars[slot as usize]);
+                        let gname = fb.ins().iconst(types::I32, getter.0 as i64);
+                        let cache = Box::new(std::cell::Cell::new((0usize, 0u32)));
+                        let cache_addr =
+                            &*cache as *const std::cell::Cell<(usize, u32)> as i64;
+                        caches.push(cache);
+                        let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
+                        let inst = fb.ins().call(
+                            arrelem_ref,
+                            &[vm_param, self_param, name, index, gname, cache_const],
+                        );
+                        let (res, of) = {
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
+                        };
+                        acc_ovf(&mut fb, of);
+                        stack.push((res, Kind::Int));
+                        ip += 4; // consume LoadIvar + LoadLocal + Call([]) + Call(getter)
+                        continue;
+                    }
                     // `@h[:k]` → LoadIvar, LoadSymbol(k), Call([], 1).
                     let hash_key = match (code.get(ip + 1), code.get(ip + 2)) {
                         (Some(Op::LoadSymbol(k)), Some(Op::Call(m, 1, _)))
@@ -490,9 +613,32 @@ pub(crate) fn compile(
                 }
                 Op::Return => {
                     let (v, k) = stack.pop()?;
-                    if k == Kind::ArrayObjId {
-                        returns_array = true;
-                    }
+                    let v = if predicate {
+                        // A predicate block (count/select/any?/...) returns the
+                        // result's TRUTHINESS as i64 0/1. Only a `Bool` (an `icmp`
+                        // result) is sound to lower this way — zero-extend it. A
+                        // non-Bool result (e.g. `count { |x| x }`, where every Int
+                        // is truthy) must NOT be returned as its raw value — that
+                        // would be summed, not counted; decline so the interpreter
+                        // applies real truthiness.
+                        match k {
+                            Kind::Bool => fb.ins().uextend(types::I64, v),
+                            _ => return None,
+                        }
+                    } else {
+                        // Value mode: only an Int or an Array result boxes
+                        // correctly at the boundary. A Bool/Nil result must NOT be
+                        // returned as a raw i64 (`{ |x| x > 5 }` is true/false, not
+                        // 1/0) — decline so the interpreter types it.
+                        match k {
+                            Kind::Int => v,
+                            Kind::ArrayObjId => {
+                                returns_array = true;
+                                v
+                            }
+                            Kind::Bool | Kind::Nil => return None,
+                        }
+                    };
                     let ov = fb.use_var(ovf_var);
                     fb.ins().return_(&[v, ov]);
                     cur_open = false;
@@ -513,6 +659,20 @@ pub(crate) fn compile(
                     }
                     fb.ins().call(arrpush_ref, &[vm_param, arr, elem]);
                     stack.push((arr, Kind::ArrayObjId));
+                }
+                // 0-arg bare call to a self attribute reader (`amount`) → inline
+                // the ivar read on the receiver (B4): one native call to
+                // `jit_ivar_get_int`, no frame/dispatch. A non-Int ivar deopts.
+                Op::CallNoRecv(name, 0, _) if getters.contains_key(name) => {
+                    let ivar = getters[name];
+                    let nm = fb.ins().iconst(types::I32, ivar.0 as i64);
+                    let inst = fb.ins().call(ivar_ref, &[vm_param, self_param, nm]);
+                    let (res, of) = {
+                        let r = fb.inst_results(inst);
+                        (r[0], r[1])
+                    };
+                    acc_ovf(&mut fb, of);
+                    stack.push((res, Kind::Int));
                 }
                 // 1-arg no-recv call: pop the i64 arg, emit a native call to
                 // this function (self-recursion) OR another compiled method,
@@ -563,6 +723,429 @@ pub(crate) fn compile(
         ptr,
         guard_class: std::cell::Cell::new(0),
         returns_array: std::cell::Cell::new(returns_array),
+        _caches: caches,
+    })
+}
+
+/// Which whole-loop driver a `NativeLoop` implements (ADR 0034 layer 3). All
+/// share one fixed skeleton — read the length once, then a native loop that reads
+/// each element, calls the already-compiled block, and acts on the result —
+/// differing only in the per-element action and what the loop returns.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum LoopKind {
+    /// `sum` / `count`: accumulate `acc += r` (overflow → deopt); `arg2` seeds
+    /// `acc`, the result is the final `acc`.
+    Sum,
+    /// `map`: store `out[i] = r` into the pre-sized array `arg2`; result unused.
+    Map,
+    /// `select` (`keep == true`) / `reject` (`keep == false`): push the ELEMENT
+    /// into the reserved array `arg2` when the predicate's polarity matches.
+    Filter { keep: bool },
+    /// `find` / `detect`: push the FIRST matching element into the (capacity-1)
+    /// array `arg2` and early-return; the caller reads `arg2[0]` or treats an
+    /// empty `arg2` as "not found". A predicate block, like `Filter`.
+    Find,
+}
+
+/// A compiled native whole-loop driver (`sum` / `count` / `map` / `select` /
+/// `reject`, ADR 0034 layer 3). The whole iteration runs native — walk the array,
+/// call the already-compiled block per element (a tight native→native call, no
+/// interpreter re-entry), act on each result — so there is NO per-element Rust
+/// dispatch. ABI: `(vm, self, in_objid, arg2) -> (res, ovf)`, where `arg2` is the
+/// sum seed or the output `ObjId` per `LoopKind`.
+pub(crate) struct NativeLoop {
+    _module: JITModule,
+    ptr: extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet,
+}
+
+impl NativeLoop {
+    /// Run the driver over the (caller-pinned) Array `in_objid`. `arg2` is the sum
+    /// seed (`Sum`) or the output `ObjId` (`Map` / `Filter`). `Some(res)` ran
+    /// natively (the sum, or 0 for the array-producing kinds); `None` = deopt (a
+    /// non-Int element, non-Int block result, or i64 overflow) → the caller redoes
+    /// via the generic loop. Sound: a native block is pure, so a part-way deopt
+    /// commits nothing observable (`sum` discards a register; `map`/`filter`'s
+    /// partial output array is dropped).
+    #[inline]
+    pub(crate) fn call(
+        &self,
+        vm: *const crate::vm::Vm,
+        recv: &Value,
+        in_objid: i64,
+        arg2: i64,
+    ) -> Option<i64> {
+        let r = (self.ptr)(vm, recv as *const Value, in_objid, arg2);
+        if r.ovf == 0 {
+            Some(r.res)
+        } else {
+            None
+        }
+    }
+}
+
+/// Compile a native whole-loop driver of `kind` around an already-compiled block
+/// (`block_addr` from `NativeProto::addr`; a PREDICATE block for `Filter`, a value
+/// block for `Sum`/`Map`). A FIXED template (not data-driven): wire `jit_array_len`
+/// + a per-element `jit_array_elem_int` + a native call to the block + the kind's
+/// per-element action, with one shared `deopt` exit. Only the action and the
+/// carried accumulator vary by `kind`; the head always carries `(i, acc)` (the
+/// array-producing kinds leave `acc` at 0).
+pub(crate) fn compile_native_loop(block_addr: usize, kind: LoopKind) -> Option<NativeLoop> {
+    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    builder.symbol("jit_array_len", jit_array_len as *const u8);
+    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
+    builder.symbol("jit_array_set_int", jit_array_set_int as *const u8);
+    builder.symbol("jit_array_push", jit_array_push as *const u8);
+    builder.symbol("blk", block_addr as *const u8);
+    let mut module = JITModule::new(builder);
+    let ptr_ty = module.target_config().pointer_type();
+    let mut ctx = module.make_context();
+
+    // Exported driver: (vm, self, in_objid, arg2) -> (i64 res, i8 ovf).
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(ptr_ty)); // vm
+    sig.params.push(AbiParam::new(ptr_ty)); // self (block receiver)
+    sig.params.push(AbiParam::new(types::I64)); // in array objid
+    sig.params.push(AbiParam::new(types::I64)); // arg2: sum seed / out objid
+    sig.returns.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I8));
+    ctx.func.signature = sig.clone();
+    let fid = module.declare_function("loopdrv", Linkage::Export, &sig).ok()?;
+
+    // jit_array_len: (vm, objid) -> i64.
+    let mut lensig = module.make_signature();
+    lensig.params.push(AbiParam::new(ptr_ty));
+    lensig.params.push(AbiParam::new(types::I64));
+    lensig.returns.push(AbiParam::new(types::I64));
+    let lenid = module
+        .declare_function("jit_array_len", Linkage::Import, &lensig)
+        .ok()?;
+    // jit_array_elem_int: (vm, objid, i) -> (i64, i8).
+    let mut elsig = module.make_signature();
+    elsig.params.push(AbiParam::new(ptr_ty));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I8));
+    let elid = module
+        .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
+        .ok()?;
+    // jit_array_set_int: (vm, objid, i, val) -> void (Map).
+    let mut setsig = module.make_signature();
+    setsig.params.push(AbiParam::new(ptr_ty));
+    setsig.params.push(AbiParam::new(types::I64));
+    setsig.params.push(AbiParam::new(types::I64));
+    setsig.params.push(AbiParam::new(types::I64));
+    let setid = module
+        .declare_function("jit_array_set_int", Linkage::Import, &setsig)
+        .ok()?;
+    // jit_array_push: (vm, objid, elem) -> void (Filter).
+    let mut pushsig = module.make_signature();
+    pushsig.params.push(AbiParam::new(ptr_ty));
+    pushsig.params.push(AbiParam::new(types::I64));
+    pushsig.params.push(AbiParam::new(types::I64));
+    let pushid = module
+        .declare_function("jit_array_push", Linkage::Import, &pushsig)
+        .ok()?;
+    // block: (vm, self, i64) -> (i64, i8) — same ABI as a NativeProto.
+    let mut blksig = module.make_signature();
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I8));
+    let blkid = module
+        .declare_function("blk", Linkage::Import, &blksig)
+        .ok()?;
+
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let len_ref = module.declare_func_in_func(lenid, fb.func);
+        let el_ref = module.declare_func_in_func(elid, fb.func);
+        let set_ref = module.declare_func_in_func(setid, fb.func);
+        let push_ref = module.declare_func_in_func(pushid, fb.func);
+        let blk_ref = module.declare_func_in_func(blkid, fb.func);
+
+        let entry = fb.create_block();
+        let head = fb.create_block(); // params: (i, acc)
+        let body = fb.create_block();
+        let cont1 = fb.create_block();
+        let cont2 = fb.create_block();
+        let exit = fb.create_block(); // param: (acc)
+        let deopt = fb.create_block();
+        fb.append_block_params_for_function_params(entry);
+        fb.append_block_param(head, types::I64); // i
+        fb.append_block_param(head, types::I64); // acc
+        fb.append_block_param(exit, types::I64); // acc
+
+        // entry: len = len(in); acc0 = (Sum ? arg2 : 0); jump head(0, acc0)
+        fb.switch_to_block(entry);
+        let (vm_param, self_param, in_objid, arg2) = {
+            let p = fb.block_params(entry);
+            (p[0], p[1], p[2], p[3])
+        };
+        let call_len = fb.ins().call(len_ref, &[vm_param, in_objid]);
+        let len = fb.inst_results(call_len)[0];
+        let zero = fb.ins().iconst(types::I64, 0);
+        let acc0 = match kind {
+            LoopKind::Sum => arg2,
+            _ => zero,
+        };
+        fb.ins().jump(head, &[zero.into(), acc0.into()]);
+
+        // head(i, acc): i < len ? body : exit(acc)
+        fb.switch_to_block(head);
+        let (i, acc) = {
+            let p = fb.block_params(head);
+            (p[0], p[1])
+        };
+        let cond = fb.ins().icmp(IntCC::SignedLessThan, i, len);
+        fb.ins().brif(cond, body, &[], exit, &[acc.into()]);
+
+        // body: (x, ovf1) = elem_int(vm, in, i); ovf1 ? deopt : cont1
+        fb.switch_to_block(body);
+        let call_el = fb.ins().call(el_ref, &[vm_param, in_objid, i]);
+        let (x, ovf1) = {
+            let r = fb.inst_results(call_el);
+            (r[0], r[1])
+        };
+        fb.ins().brif(ovf1, deopt, &[], cont1, &[]);
+
+        // cont1: (r, ovf2) = blk(vm, self, x); ovf2 ? deopt : cont2
+        fb.switch_to_block(cont1);
+        let call_blk = fb.ins().call(blk_ref, &[vm_param, self_param, x]);
+        let (r, ovf2) = {
+            let res = fb.inst_results(call_blk);
+            (res[0], res[1])
+        };
+        fb.ins().brif(ovf2, deopt, &[], cont2, &[]);
+
+        // cont2: per-kind action, then loop to head(i+1, acc')
+        fb.switch_to_block(cont2);
+        let one = fb.ins().iconst(types::I64, 1);
+        let i2 = fb.ins().iadd(i, one);
+        match kind {
+            // Sum/count: overflow-checked accumulate.
+            LoopKind::Sum => {
+                let (acc2, ovf3) = fb.ins().sadd_overflow(acc, r);
+                let nh = fb.create_block();
+                fb.ins().brif(ovf3, deopt, &[], nh, &[]);
+                fb.switch_to_block(nh);
+                fb.ins().jump(head, &[i2.into(), acc2.into()]);
+            }
+            // Map: store the result at the element's index; acc unchanged.
+            LoopKind::Map => {
+                fb.ins().call(set_ref, &[vm_param, arg2, i, r]);
+                fb.ins().jump(head, &[i2.into(), acc.into()]);
+            }
+            // Filter: push the ELEMENT on the kept polarity; acc unchanged.
+            LoopKind::Filter { keep } => {
+                let do_push = fb.create_block();
+                let skip = fb.create_block();
+                let is_true = fb.ins().icmp_imm(IntCC::NotEqual, r, 0);
+                if keep {
+                    fb.ins().brif(is_true, do_push, &[], skip, &[]);
+                } else {
+                    fb.ins().brif(is_true, skip, &[], do_push, &[]);
+                }
+                fb.switch_to_block(do_push);
+                fb.ins().call(push_ref, &[vm_param, arg2, x]);
+                fb.ins().jump(skip, &[]);
+                fb.switch_to_block(skip);
+                fb.ins().jump(head, &[i2.into(), acc.into()]);
+            }
+            // Find: on the first match push the element and early-exit; otherwise
+            // continue. `exit` with an empty `arg2` means "not found".
+            LoopKind::Find => {
+                let do_push = fb.create_block();
+                let cont = fb.create_block();
+                let is_true = fb.ins().icmp_imm(IntCC::NotEqual, r, 0);
+                fb.ins().brif(is_true, do_push, &[], cont, &[]);
+                fb.switch_to_block(do_push);
+                fb.ins().call(push_ref, &[vm_param, arg2, x]);
+                fb.ins().jump(exit, &[acc.into()]);
+                fb.switch_to_block(cont);
+                fb.ins().jump(head, &[i2.into(), acc.into()]);
+            }
+        }
+
+        // exit(acc): Sum returns acc; array-producing kinds return 0.
+        fb.switch_to_block(exit);
+        let acc_out = fb.block_params(exit)[0];
+        let ok = fb.ins().iconst(types::I8, 0);
+        let res = match kind {
+            LoopKind::Sum => acc_out,
+            _ => fb.ins().iconst(types::I64, 0),
+        };
+        fb.ins().return_(&[res, ok]);
+
+        // deopt: return (0, 1)
+        fb.switch_to_block(deopt);
+        let z = fb.ins().iconst(types::I64, 0);
+        let bad = fb.ins().iconst(types::I8, 1);
+        fb.ins().return_(&[z, bad]);
+
+        fb.seal_all_blocks();
+        fb.finalize();
+    }
+    module.define_function(fid, &mut ctx).ok()?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().ok()?;
+    let code_ptr = module.get_finalized_function(fid);
+    let ptr = unsafe {
+        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+            code_ptr,
+        )
+    };
+    Some(NativeLoop {
+        _module: module,
+        ptr,
+    })
+}
+
+/// Compile a native whole-loop `Array#inject` / `reduce { |acc, x| .. }` driver
+/// (ADR 0034 layer 3) around an already-compiled 2-param Int block (`block_addr`).
+/// The block threads the accumulator: `acc = blk(acc, elem)` per element, no
+/// capture. ABI `(vm, self, in_objid, init) -> (acc, ovf)`. A non-Int element or
+/// any overflow inside the block deopts (the block returns the new acc directly,
+/// so the loop just chains it). Returned as a `NativeLoop` (`call` gives the final
+/// acc as `Some`, or `None` on deopt → the caller redoes the generic inject).
+pub(crate) fn compile_native_inject_loop(block_addr: usize) -> Option<NativeLoop> {
+    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    builder.symbol("jit_array_len", jit_array_len as *const u8);
+    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
+    builder.symbol("blk", block_addr as *const u8);
+    let mut module = JITModule::new(builder);
+    let ptr_ty = module.target_config().pointer_type();
+    let mut ctx = module.make_context();
+
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(ptr_ty)); // vm
+    sig.params.push(AbiParam::new(ptr_ty)); // self
+    sig.params.push(AbiParam::new(types::I64)); // in objid
+    sig.params.push(AbiParam::new(types::I64)); // init
+    sig.returns.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I8));
+    ctx.func.signature = sig.clone();
+    let fid = module.declare_function("injectloop", Linkage::Export, &sig).ok()?;
+
+    let mut lensig = module.make_signature();
+    lensig.params.push(AbiParam::new(ptr_ty));
+    lensig.params.push(AbiParam::new(types::I64));
+    lensig.returns.push(AbiParam::new(types::I64));
+    let lenid = module
+        .declare_function("jit_array_len", Linkage::Import, &lensig)
+        .ok()?;
+    let mut elsig = module.make_signature();
+    elsig.params.push(AbiParam::new(ptr_ty));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I8));
+    let elid = module
+        .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
+        .ok()?;
+    // 2-param block: (vm, self, acc, elem) -> (new_acc, ovf).
+    let mut blksig = module.make_signature();
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(types::I64));
+    blksig.params.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I8));
+    let blkid = module
+        .declare_function("blk", Linkage::Import, &blksig)
+        .ok()?;
+
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let len_ref = module.declare_func_in_func(lenid, fb.func);
+        let el_ref = module.declare_func_in_func(elid, fb.func);
+        let blk_ref = module.declare_func_in_func(blkid, fb.func);
+
+        let entry = fb.create_block();
+        let head = fb.create_block(); // params: (i, acc)
+        let body = fb.create_block();
+        let cont1 = fb.create_block();
+        let exit = fb.create_block(); // param: (acc)
+        let deopt = fb.create_block();
+        fb.append_block_params_for_function_params(entry);
+        fb.append_block_param(head, types::I64);
+        fb.append_block_param(head, types::I64);
+        fb.append_block_param(exit, types::I64);
+
+        // entry: len = len(in); jump head(0, init)
+        fb.switch_to_block(entry);
+        let (vm_param, self_param, in_objid, init) = {
+            let p = fb.block_params(entry);
+            (p[0], p[1], p[2], p[3])
+        };
+        let call_len = fb.ins().call(len_ref, &[vm_param, in_objid]);
+        let len = fb.inst_results(call_len)[0];
+        let zero = fb.ins().iconst(types::I64, 0);
+        fb.ins().jump(head, &[zero.into(), init.into()]);
+
+        // head(i, acc): i < len ? body : exit(acc)
+        fb.switch_to_block(head);
+        let (i, acc) = {
+            let p = fb.block_params(head);
+            (p[0], p[1])
+        };
+        let cond = fb.ins().icmp(IntCC::SignedLessThan, i, len);
+        fb.ins().brif(cond, body, &[], exit, &[acc.into()]);
+
+        // body: (x, ovf1) = elem(in, i); ovf1 ? deopt : cont1
+        fb.switch_to_block(body);
+        let call_el = fb.ins().call(el_ref, &[vm_param, in_objid, i]);
+        let (x, ovf1) = {
+            let r = fb.inst_results(call_el);
+            (r[0], r[1])
+        };
+        fb.ins().brif(ovf1, deopt, &[], cont1, &[]);
+
+        // cont1: (acc2, ovf2) = blk(vm, self, acc, x); ovf2 ? deopt : head(i+1, acc2)
+        fb.switch_to_block(cont1);
+        let call_blk = fb.ins().call(blk_ref, &[vm_param, self_param, acc, x]);
+        let (acc2, ovf2) = {
+            let res = fb.inst_results(call_blk);
+            (res[0], res[1])
+        };
+        let nh = fb.create_block();
+        fb.ins().brif(ovf2, deopt, &[], nh, &[]);
+        fb.switch_to_block(nh);
+        let one = fb.ins().iconst(types::I64, 1);
+        let i2 = fb.ins().iadd(i, one);
+        fb.ins().jump(head, &[i2.into(), acc2.into()]);
+
+        // exit(acc): return (acc, 0)
+        fb.switch_to_block(exit);
+        let acc_out = fb.block_params(exit)[0];
+        let ok = fb.ins().iconst(types::I8, 0);
+        fb.ins().return_(&[acc_out, ok]);
+
+        // deopt: return (0, 1)
+        fb.switch_to_block(deopt);
+        let z = fb.ins().iconst(types::I64, 0);
+        let bad = fb.ins().iconst(types::I8, 1);
+        fb.ins().return_(&[z, bad]);
+
+        fb.seal_all_blocks();
+        fb.finalize();
+    }
+    module.define_function(fid, &mut ctx).ok()?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().ok()?;
+    let code_ptr = module.get_finalized_function(fid);
+    let ptr = unsafe {
+        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+            code_ptr,
+        )
+    };
+    Some(NativeLoop {
+        _module: module,
+        ptr,
     })
 }
 
@@ -605,6 +1188,40 @@ fn emit_binop(
     if let Some(cond) = cc(k) {
         let r = fb.ins().icmp(cond, a, b);
         stack.push((r, Kind::Bool));
+        return;
+    }
+    // Div/Mod: Ruby floored division (remainder takes the divisor's sign),
+    // mirroring `floor_div_i64`/`floor_mod_i64`. Deopt (ovf=1) on `b == 0` and
+    // the lone overflow case `i64::MIN / -1`; the divisor is guarded to 1 in
+    // those cases so Cranelift's trapping `sdiv`/`srem` never fire (the result
+    // is discarded by the caller on deopt). Branchless via `select`.
+    if matches!(k, BinOpKind::Div | BinOpKind::Mod) {
+        let zero = fb.ins().iconst(types::I64, 0);
+        let neg1 = fb.ins().iconst(types::I64, -1);
+        let one = fb.ins().iconst(types::I64, 1);
+        let min = fb.ins().iconst(types::I64, i64::MIN);
+        let is_zero = fb.ins().icmp(IntCC::Equal, b, zero);
+        let a_min = fb.ins().icmp(IntCC::Equal, a, min);
+        let b_neg1 = fb.ins().icmp(IntCC::Equal, b, neg1);
+        let ovf_case = fb.ins().band(a_min, b_neg1);
+        let deopt = fb.ins().bor(is_zero, ovf_case);
+        let safe_b = fb.ins().select(deopt, one, b);
+        let q = fb.ins().sdiv(a, safe_b);
+        let r = fb.ins().srem(a, safe_b);
+        // need_adj = (r != 0) && ((r ^ safe_b) < 0)  — signs of r and b differ.
+        let r_ne0 = fb.ins().icmp(IntCC::NotEqual, r, zero);
+        let rxorb = fb.ins().bxor(r, safe_b);
+        let signs_differ = fb.ins().icmp(IntCC::SignedLessThan, rxorb, zero);
+        let need_adj = fb.ins().band(r_ne0, signs_differ);
+        let q_adj = fb.ins().iadd_imm(q, -1);
+        let r_adj = fb.ins().iadd(r, safe_b);
+        let q_final = fb.ins().select(need_adj, q_adj, q);
+        let r_final = fb.ins().select(need_adj, r_adj, r);
+        let res = if matches!(k, BinOpKind::Div) { q_final } else { r_final };
+        let cur = fb.use_var(ovf_var);
+        let nv = fb.ins().bor(cur, deopt);
+        fb.def_var(ovf_var, nv);
+        stack.push((res, Kind::Int));
         return;
     }
     let (res, of) = match k {
@@ -750,6 +1367,55 @@ pub(crate) unsafe extern "C" fn jit_array_push(vm: *mut crate::vm::Vm, objid: i6
     vm.heap.array_mut(id).push(Value::Int(elem));
 }
 
+/// Native primitive: length of Array `objid` as i64. Read once at the top of a
+/// whole-loop driver (`compile_native_sum_loop`); the loop is GC-free so the
+/// length stays valid for the duration.
+///
+/// # Safety
+/// `vm` valid; `objid` a live Array (pinned by the caller across the loop).
+pub(crate) unsafe extern "C" fn jit_array_len(vm: *const crate::vm::Vm, objid: i64) -> i64 {
+    let vm = unsafe { &*vm };
+    vm.heap.array(crate::value::ObjId(objid as u32)).len() as i64
+}
+
+/// Native primitive: `Array objid[i]` as i64 if it is an `Int`, else deopt
+/// (`ovf=1`). The whole-loop driver keeps `0 <= i < len`, but `get` is used (not
+/// raw index) so an out-of-range `i` deopts rather than panics.
+///
+/// # Safety
+/// `vm` valid; `objid` a live pinned Array.
+pub(crate) unsafe extern "C" fn jit_array_elem_int(
+    vm: *const crate::vm::Vm,
+    objid: i64,
+    i: i64,
+) -> NRet {
+    let vm = unsafe { &*vm };
+    let arr = vm.heap.array(crate::value::ObjId(objid as u32));
+    match arr.get(i as usize) {
+        Some(Value::Int(n)) => NRet { res: *n, ovf: 0 },
+        _ => NRet { res: 0, ovf: 1 },
+    }
+}
+
+/// Native primitive: store `Value::Int(val)` at `Array objid[i]`. Used by the
+/// whole-loop `map` driver to fill a result array that the caller pre-sized to
+/// the input length (so this never grows/reallocs — no GC, no element move).
+///
+/// # Safety
+/// `vm` valid; `objid` a live pinned Array with `len > i >= 0`.
+pub(crate) unsafe extern "C" fn jit_array_set_int(
+    vm: *mut crate::vm::Vm,
+    objid: i64,
+    i: i64,
+    val: i64,
+) {
+    let vm = unsafe { &mut *vm };
+    let arr = vm.heap.array_mut(crate::value::ObjId(objid as u32));
+    if let Some(slot) = arr.get_mut(i as usize) {
+        *slot = Value::Int(val);
+    }
+}
+
 /// Native primitive: `recv.@name[:key]` where the ivar is a Hash with a Symbol
 /// key whose value is an Int — returns it as i64, else deopt. The AR
 /// `@attributes[:col]` shape (an integer attribute read in a loop).
@@ -838,6 +1504,96 @@ pub(crate) unsafe extern "C" fn jit_ivar_array_get_int(
     match res {
         Some(n) => NRet { res: n, ovf: 0 },
         None => NRet { res: 0, ovf: 1 },
+    }
+}
+
+/// Native primitive (B4): `recv.@arr[index].getter`, where `getter` is a simple
+/// int attribute reader on the element. The AR aggregation shape — iterate a
+/// collection ivar and read an integer attribute off each element.
+///
+/// A MONOMORPHIC inline cache `cache` holds `(element_class_ptr, ivar_sym)`. On
+/// a class hit it reads the cached ivar; on an empty cache it fills it (resolve
+/// `getter` → `getter_ivar` on the element's class); on a class MISS (a
+/// different element class — megamorphic) it deopts, so the interpreter runs
+/// that iteration. Also deopts (ovf=1) on: a non-Array ivar, an out-of-bounds or
+/// non-Object element, a `getter` that isn't a simple reader, or a non-Int
+/// attribute. Every deopt re-runs the whole (pure) driver in the interpreter, so
+/// behaviour is preserved.
+///
+/// # Safety
+/// `vm`, `recv`, `cache` must be valid for the call.
+pub(crate) unsafe extern "C" fn jit_arr_elem_attr_int(
+    vm: *const crate::vm::Vm,
+    recv: *const Value,
+    arr_name: u32,
+    index: i64,
+    getter_name: u32,
+    cache: *const std::cell::Cell<(usize, u32)>,
+) -> NRet {
+    let deopt = NRet { res: 0, ovf: 1 };
+    let vm = unsafe { &*vm };
+    let recv = unsafe { &*recv };
+    let cache = unsafe { &*cache };
+    let arr_name_id = crate::intern::SymId(arr_name);
+    // recv.@arr — must be an Array ivar.
+    let arr_id = {
+        let iv = match recv {
+            Value::Object(oid) => match vm.heap.get(*oid) {
+                crate::heap::HeapObj::Instance(inst) => inst.ivars.get(&arr_name_id).cloned(),
+                _ => None,
+            },
+            Value::Class(cls) => cls.ivars.borrow().get(&arr_name_id).cloned(),
+            _ => None,
+        };
+        match iv {
+            Some(Value::Array(aid)) => aid,
+            _ => return deopt,
+        }
+    };
+    // element at index (Ruby negative wrap; out of bounds → deopt).
+    let elem_oid = {
+        let arr = vm.heap.array(arr_id);
+        let i = if index < 0 { arr.len() as i64 + index } else { index };
+        if i < 0 || i as usize >= arr.len() {
+            return deopt;
+        }
+        match &arr[i as usize] {
+            Value::Object(eoid) => *eoid,
+            _ => return deopt,
+        }
+    };
+    let ecls = match vm.heap.try_class_of(elem_oid) {
+        Some(c) => c,
+        None => return deopt,
+    };
+    let ecls_ptr = std::rc::Rc::as_ptr(&ecls) as usize;
+    // Inline cache: hit → cached ivar; empty → fill; class miss → deopt.
+    let (cls_ptr, cached_ivar) = cache.get();
+    let ivar = if cls_ptr == ecls_ptr {
+        cached_ivar
+    } else if cls_ptr == 0 {
+        let m = match vm.lookup_method_uncached(&ecls, crate::intern::SymId(getter_name)) {
+            Some(m) => m,
+            None => return deopt,
+        };
+        let iv = match vm.protos[m.proto_idx].getter_ivar {
+            Some(iv) => iv,
+            None => return deopt, // not a simple reader → interpreter
+        };
+        cache.set((ecls_ptr, iv.0));
+        iv.0
+    } else {
+        return deopt; // megamorphic site → interpreter
+    };
+    // element.@ivar — must be an Int.
+    match vm.heap.get(elem_oid) {
+        crate::heap::HeapObj::Instance(inst) => {
+            match inst.ivars.get(&crate::intern::SymId(ivar)) {
+                Some(Value::Int(n)) => NRet { res: *n, ovf: 0 },
+                _ => deopt,
+            }
+        }
+        _ => deopt,
     }
 }
 
