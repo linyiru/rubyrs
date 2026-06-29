@@ -1426,15 +1426,34 @@ impl Vm {
                     ("tally", []) => {
                         let snapshot: Vec<Value> = self.heap.array(id).clone();
                         let mut pairs: Vec<(Value, Value)> = Vec::new();
+                        // `ruby_hash(key) -> positions in pairs` for O(1)-amortised
+                        // lookup. The old linear `position` scan was O(n*distinct) —
+                        // fine for the realistic few-distinct-key tally, pathological
+                        // (O(n^2)) for many distinct keys (6.7x slower than YJIT).
+                        // Built Rust-local; `pairs` keeps first-appearance order; the
+                        // single Hash alloc stays at the end (GC-safe, no mid-loop
+                        // heap.alloc). Pairs with `ruby_eql` (CRuby Hash-key
+                        // semantics: `1` and `1.0` are distinct keys), the same
+                        // hash/eq used by `Hash#[]` — also a correctness fix over the
+                        // prior `ruby_eq` (which merged `1` and `1.0`).
+                        let mut index: crate::intern::FxHashMap<u64, Vec<usize>> =
+                            Default::default();
                         for v in snapshot {
-                            let pos = pairs.iter()
-                                .position(|(k, _)| k.ruby_eq(&v, &self.heap));
+                            let kh = v.ruby_hash(&self.heap);
+                            let pos = index.get(&kh).and_then(|cands| {
+                                cands
+                                    .iter()
+                                    .copied()
+                                    .find(|&i| pairs[i].0.ruby_eql(&v, &self.heap))
+                            });
                             if let Some(p) = pos {
                                 if let Value::Int(n) = pairs[p].1 {
                                     pairs[p].1 = Value::Int(n + 1);
                                 }
                             } else {
+                                let i = pairs.len();
                                 pairs.push((v, Value::Int(1)));
+                                index.entry(kh).or_default().push(i);
                             }
                         }
                         self.maybe_gc();
