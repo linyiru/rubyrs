@@ -583,15 +583,18 @@ needed.
 Float sign predicates `positive?`/`negative?`/`zero?` are now modelled too (ordered fcmp
 against 0.0 → Bool), so `floats.count { x.positive? }` etc. beat YJIT (6.06×).
 
-Next frontier — **Float→Int conversions** (`floats.sum { x.floor }` 3.8× SLOWER,
-`map { x.round }` 2.8×, `sum { x.to_i }` 4.1×): the reverse asymmetry (Float element, Int
-result). The Float-reader/Int-accumulator sum loop already exists (`compile_native_floatloop`
-with `LoopKind::Sum` — the count driver uses it), so sum is tractable; it needs the
-conversion unary ops (`floor`/`ceil`/`to_i`/`truncate` via `fcvt_to_sint`; `round` is Ruby
-half-away-from-zero = `fcvt(x + copysign(0.5,x))`, NOT cranelift `nearest`=half-even), each
-with a branchless range-guard deopt (|x|≥2^63 / NaN / Inf → bignum in Ruby). Then map (a
-Float-reader/Int-output loop), each_with_object Float, Float-keyed Hash drivers, and
-broadening the value-method JIT surface.
+Float→Int conversions now ship too — `floor`/`ceil`/`to_i`/`truncate`/`round` (the reverse
+asymmetry: Float element, Int result). They lower to `fcvt_to_sint` after the op's integral
+rounding (`round` is Ruby half-away-from-zero = `fcvt(x + copysign(0.5,x))`, NOT cranelift
+`nearest`=half-even), each with a branchless range-guard deopt (out-of-i64-range / NaN / Inf
+→ generic, where Ruby gives a bignum / raises). The key reuse: the Float-reader/Int-acc sum
+loop already existed (`compile_native_floatloop` + `LoopKind::Sum`, the count driver's), and
+the generic `LoopKind::Map` already stores Ints, so the only new piece was a Float-elem/
+Int-result block. `floats.sum { x.floor }` 6.21× / `{ x.to_i }` 5.74× / `{ x.round }` 6.53×;
+the map fires + is parity-correct (alloc-bound, so it tracks the 3.10× float→float map).
+
+Next frontier: each_with_object Float, Float-keyed Hash drivers (group_by/tally/sum-by-key),
+and broadening the value-method JIT surface.
 
 ## Risks
 
