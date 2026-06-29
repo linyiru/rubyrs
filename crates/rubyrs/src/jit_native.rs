@@ -895,6 +895,18 @@ pub(crate) fn compile(
                         }
                         _ => None,
                     };
+                    // `@arr[i]` (VARIABLE Int index) → LoadIvar, LoadLocal(i), Call([],1).
+                    // The `@arr[local].getter` fusion above already consumed the form WITH
+                    // a trailing getter, so here the index local feeds a bare element read
+                    // (Int element; OOB / non-Int deopts via `jit_ivar_array_get_int`).
+                    let arr_idx_var = match (code.get(ip + 1), code.get(ip + 2)) {
+                        (Some(Op::LoadLocal(slot)), Some(Op::Call(m, 1, _)))
+                            if *m == syms.bracket && local_kinds[*slot as usize] == Kind::Int =>
+                        {
+                            Some(*slot)
+                        }
+                        _ => None,
+                    };
                     let name = fb.ins().iconst(types::I32, s.0 as i64);
                     if let Some(k) = hash_key {
                         let key = fb.ins().iconst(types::I32, k.0 as i64);
@@ -918,6 +930,17 @@ pub(crate) fn compile(
                         acc_ovf(&mut fb, of);
                         stack.push((res, Kind::Int));
                         ip += 2; // consume LoadConstInt + Call
+                    } else if let Some(slot) = arr_idx_var {
+                        let index = fb.use_var(vars[slot as usize]);
+                        let inst =
+                            fb.ins().call(arrget_ref, &[vm_param, self_param, name, index]);
+                        let (res, of) = {
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
+                        };
+                        acc_ovf(&mut fb, of);
+                        stack.push((res, Kind::Int));
+                        ip += 2; // consume LoadLocal + Call
                     } else {
                         // `@arr.length`/`.size` → arraylen; else a plain Int ivar.
                         let fuse_len = matches!(
