@@ -275,21 +275,46 @@ impl Vm {
     /// On `break val` (caught via `self.break_signaled`) returns `val`
     /// to match CRuby's "break value short-circuits the enumerator".
     pub(crate) fn iter_array_filter(&mut self, id: ObjId, mode: IterMode, block: ObjId) -> Result<Value, Trap> {
-        // Whole-loop native fast path (ADR 0034 layer 3) for select/reject: a
-        // comparison predicate over an all-Int array filters in native code.
-        // Placed before the snapshot clone so the fast path skips it. A deopt
-        // (non-comparison predicate / non-Int element) falls through to the
-        // generic walk below. Pin in+block across the result alloc inside.
+        // Whole-loop native fast path (ADR 0034 layer 3). A comparison predicate
+        // over an all-Int array runs in native code; placed before the snapshot
+        // clone so the fast path skips it. A deopt (non-comparison predicate /
+        // non-Int element) falls through to the generic walk. Pin in+block across
+        // the alloc inside.
         #[cfg(feature = "jit-native")]
-        if let IterMode::Select | IterMode::Reject = mode {
-            let keep = matches!(mode, IterMode::Select);
-            self.pinned.push(Value::Array(id));
-            self.pinned.push(Value::Block(block));
-            let out = self.try_native_filter_loop(block, id, keep);
-            self.pinned.truncate(self.pinned.len() - 2);
-            if let Some(out) = out {
-                return Ok(Value::Array(out));
+        match mode {
+            // select/reject: a native filter loop producing the result array.
+            IterMode::Select | IterMode::Reject => {
+                let keep = matches!(mode, IterMode::Select);
+                self.pinned.push(Value::Array(id));
+                self.pinned.push(Value::Block(block));
+                let out = self.try_native_filter_loop(block, id, keep);
+                self.pinned.truncate(self.pinned.len() - 2);
+                if let Some(out) = out {
+                    return Ok(Value::Array(out));
+                }
             }
+            // any?/all?/none?/one?: a PURE predicate has no side effects, so the
+            // early-exit forms are observationally equal to a full count of the
+            // matches — compute the count natively and compare. (Empty array:
+            // count 0 gives all?/none? true, any?/one? false — matching CRuby.)
+            IterMode::Any | IterMode::All | IterMode::NoneM | IterMode::One => {
+                self.pinned.push(Value::Array(id));
+                self.pinned.push(Value::Block(block));
+                let cnt = self.try_native_count_loop(block, id);
+                self.pinned.truncate(self.pinned.len() - 2);
+                if let Some(c) = cnt {
+                    let len = self.heap.array(id).len() as i64;
+                    let res = match mode {
+                        IterMode::Any => c > 0,
+                        IterMode::All => c == len,
+                        IterMode::NoneM => c == 0,
+                        IterMode::One => c == 1,
+                        _ => unreachable!(),
+                    };
+                    return Ok(Value::Bool(res));
+                }
+            }
+            IterMode::Find => {} // returns the matching element — not yet native
         }
         let snapshot: Vec<Value> = self.heap.array(id).clone();
         let mut g = PinGuard::new(self);

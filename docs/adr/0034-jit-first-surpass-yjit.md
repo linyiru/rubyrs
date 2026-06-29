@@ -280,11 +280,23 @@ part-way deopt doubles nothing on redo).
 | `arr.count { x > 500 }`      | 1.17s | **0.07s** | 0.43s | **6.1×** |
 | `arr.select { x > 700 }`     | 1.22s | **0.10s** | 0.48s | **4.8×** |
 
+| `arr.any? + all?`            | 2.33s | **0.14s** | 0.78s | **5.6×** |
+
 `select` / `reject` / `filter` reuse predicate-mode blocks with a third loop
-shape (`compile_native_filter_loop`): per element, run the predicate and on the
-kept polarity push the *element* into a result the caller reserves to the input
-length (so the native push never reallocs — no GC, no move). Order is preserved;
-a non-comparison predicate (`x.odd?`) or `break` declines to the generic walk.
+shape (the `Filter` kind): per element, run the predicate and on the kept polarity
+push the *element* into a result the caller reserves to the input length (so the
+native push never reallocs — no GC, no move). Order is preserved; a non-comparison
+predicate (`x.odd?`) or `break` declines to the generic walk.
+
+`any?` / `all?` / `none?` / `one?` need no new codegen: a PURE predicate has no
+side effects, so the early-exit forms are observationally equal to a full count of
+the matches. They run the native count loop and compare (`any? = c>0`,
+`all? = c==len`, `none? = c==0`, `one? = c==1`); empty arrays fall out correctly
+(c=0). Predicate mode is tightened to lower **only** a `Bool` result to 0/1 — a
+non-Bool truthy result (`count { |x| x }`, every Int truthy) declines to the
+generic walk rather than summing raw values. The three loop compilers were then
+unified into one `compile_native_loop(block_addr, kind)` (`Sum` / `Map` /
+`Filter`), so a new driver is a match arm, not a 150-line copy.
 
 `count` reuses the sum loop unchanged: a count IS a sum of the predicate's
 truthiness. The new piece is **predicate-mode block compilation** — a final `Bool`

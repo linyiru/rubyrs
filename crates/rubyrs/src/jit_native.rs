@@ -598,22 +598,31 @@ pub(crate) fn compile(
                 }
                 Op::Return => {
                     let (v, k) = stack.pop()?;
-                    // Only an Int or an Array result boxes correctly at the
-                    // boundary. A Bool/Nil result must NOT be returned as a raw
-                    // i64 — a block `{ |x| x > 5 }` returns true/false, not 1/0,
-                    // and a Bool-returning method would mis-box too. Decline so
-                    // the interpreter produces the correctly-typed value — UNLESS
-                    // this is a predicate block (count/select/...), where the
-                    // caller wants the truthiness as i64 0/1 (a `Bool` is an i8
-                    // from `icmp`; zero-extend it).
-                    let v = match k {
-                        Kind::Int => v,
-                        Kind::ArrayObjId => {
-                            returns_array = true;
-                            v
+                    let v = if predicate {
+                        // A predicate block (count/select/any?/...) returns the
+                        // result's TRUTHINESS as i64 0/1. Only a `Bool` (an `icmp`
+                        // result) is sound to lower this way — zero-extend it. A
+                        // non-Bool result (e.g. `count { |x| x }`, where every Int
+                        // is truthy) must NOT be returned as its raw value — that
+                        // would be summed, not counted; decline so the interpreter
+                        // applies real truthiness.
+                        match k {
+                            Kind::Bool => fb.ins().uextend(types::I64, v),
+                            _ => return None,
                         }
-                        Kind::Bool if predicate => fb.ins().uextend(types::I64, v),
-                        Kind::Bool | Kind::Nil => return None,
+                    } else {
+                        // Value mode: only an Int or an Array result boxes
+                        // correctly at the boundary. A Bool/Nil result must NOT be
+                        // returned as a raw i64 (`{ |x| x > 5 }` is true/false, not
+                        // 1/0) — decline so the interpreter types it.
+                        match k {
+                            Kind::Int => v,
+                            Kind::ArrayObjId => {
+                                returns_array = true;
+                                v
+                            }
+                            Kind::Bool | Kind::Nil => return None,
+                        }
                     };
                     let ov = fb.use_var(ovf_var);
                     fb.ins().return_(&[v, ov]);
