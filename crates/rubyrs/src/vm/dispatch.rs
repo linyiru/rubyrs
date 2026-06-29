@@ -22330,6 +22330,8 @@ impl Vm {
     /// `.rb` files, which routes to the builtin (the alias forwarder
     /// is name `zeitwerk_original_require`, not `require`, so there is
     /// no re-entry here).
+    // Only reached from wasi-gated autoload paths (`require` traps on wasi).
+    #[cfg_attr(target_os = "wasi", allow(dead_code))]
     pub(crate) fn invoke_require_for_autoload(&mut self, path: Value) -> Result<Value, Trap> {
         let require_id = self.interner.intern("require");
         let main = self.main_object();

@@ -2071,6 +2071,9 @@ impl Vm {
                             // resolved class (which walks ITS ancestry too —
                             // `Entity::NAME` → XMLTokens::NAME via include).
                             let head_id = self.interner.intern(head);
+                            // `mut` is used only on non-wasi, where the
+                            // autoload-fire block below reassigns head_cls.
+                            #[cfg_attr(target_os = "wasi", allow(unused_mut))]
                             let mut head_cls = match self.const_via_ancestors(&cref, head_id) {
                                 Some(Value::Class(c)) => Some(c),
                                 _ => None,

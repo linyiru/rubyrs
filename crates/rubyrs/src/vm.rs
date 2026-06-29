@@ -1044,6 +1044,9 @@ pub(crate) struct Vm {
     /// any autoload registered for it (`autoload?` returns nil afterward).
     /// Populated at autoload-registration time (one canonicalize there, none in
     /// the require hot path); consulted O(1) when a require completes.
+    // Read/written only by autoload registration + require completion, both
+    // wasi-gated (no `require` on wasm32-wasi), so it's dead on that target.
+    #[cfg_attr(target_os = "wasi", allow(dead_code))]
     pub(crate) autoload_paths: std::collections::HashMap<std::path::PathBuf, Vec<SymId>>,
     /// Per-call-site inline-cache counter. Each compiled `Op::Call`
     /// gets a unique u16 slot id; the Vm side allocates
