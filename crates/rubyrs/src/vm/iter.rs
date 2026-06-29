@@ -3419,6 +3419,16 @@ impl Vm {
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
                 g.pin(seed.clone());
+                // Native whole-loop each_with_object (`memo << f(x)` over an all-Int
+                // array into an Array memo): builds into a scratch, appends to memo
+                // on full success, returns memo. Declines (None) -> generic walk; a
+                // part-way deopt leaves memo untouched, so the redo is sound.
+                #[cfg(feature = "jit-native")]
+                if let Value::Array(memo_id) = seed
+                    && g.vm.try_native_eachobj_loop(block, *id, *memo_id).is_some()
+                {
+                    return Ok(Some(seed.clone()));
+                }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 for v in &snapshot {
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }

@@ -16644,6 +16644,101 @@ impl Vm {
         )
     }
 
+    /// Compile an `each_with_object` block `{ |x, memo| memo << f(x) }` (element at
+    /// `param_start`, `memo` the 2nd param at `param_start + 1`). `memo` is bound to
+    /// a scratch Array (`ArrayObjId`) the block pushes into via `<<`; any use of
+    /// `memo` other than `<<` (a read, another method) declines in `compile`.
+    #[cfg(feature = "jit-native")]
+    fn compile_native_block_eachobj(
+        &mut self,
+        proto_idx: usize,
+        param_start: u32,
+        body_local_start: u32,
+    ) -> Option<crate::jit_native::NativeProto> {
+        let dummy = self.interner.intern("\u{0}block\u{0}");
+        let callees = crate::intern::FxHashMap::default();
+        let getters = crate::intern::FxHashMap::default();
+        let syms = crate::jit_native::JitSyms {
+            length: self.interner.intern("length"),
+            size: self.interner.intern("size"),
+            bracket: self.interner.intern("[]"),
+            lshift: self.interner.intern("<<"),
+            abs: self.interner.intern("abs"),
+            even_p: self.interner.intern("even?"),
+            odd_p: self.interner.intern("odd?"),
+            zero_p: self.interner.intern("zero?"),
+            positive_p: self.interner.intern("positive?"),
+            negative_p: self.interner.intern("negative?"),
+        };
+        crate::jit_native::compile(
+            &self.protos[proto_idx],
+            dummy,
+            &callees,
+            &getters,
+            &syms,
+            Some((
+                param_start,
+                body_local_start,
+                false,
+                crate::jit_native::AccKind::EachObj,
+            )),
+        )
+    }
+
+    /// Whole-loop fast path for `arr.each_with_object(memo) { |x, memo| memo << f(x)
+    /// }` over an all-Int array building into an Array `memo` (ADR 0034 layer 3c).
+    /// The native loop pushes `f(x)` into a fresh SCRATCH array; on full success the
+    /// scratch is appended to the real `memo` and `Some(())` returned. Any deopt
+    /// (non-Int element/result, overflow) discards the scratch and returns `None` —
+    /// the real `memo` is untouched, so the caller redoes the whole each_with_object
+    /// generically (write-back-on-success). The caller must have pinned the array +
+    /// `memo`. `memo_id` must be an Array.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_eachobj_loop(&mut self, block_id: ObjId, array_id: ObjId, memo_id: ObjId) -> Option<()> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        // Exactly two params (elem, memo), no rest/kw/block-param.
+        if n_params != 2
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        if !self.jit_native_block_eachobj.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block_eachobj(proto_idx, param_start as u32, body_start as u32);
+            self.jit_native_block_eachobj.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_eachobj.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_eachobj_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_eachobj_loop(block_addr);
+            self.jit_native_eachobj_loop.insert(proto_idx, compiled);
+        }
+        let el = match self.jit_native_eachobj_loop.get(&proto_idx) {
+            Some(Some(el)) => el,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        let scratch_objid = el.call(vm_ptr, &self_val, array_id.0 as i64, 0)?;
+        // Native run completed: append the scratch's elements onto the real memo.
+        // Both are live heap Arrays; the clone + extend do not call `heap.alloc`,
+        // so no GC runs between the loop's return and the commit.
+        let scratch_id = crate::value::ObjId(scratch_objid as u32);
+        let elems: Vec<Value> = self.heap.array(scratch_id).clone();
+        self.heap.array_mut(memo_id).extend(elems);
+        Some(())
+    }
+
     pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {
         // GC rooting for the pre-frame window: receiver, args, and
         // the block arrive as Rust locals (popped off the operand

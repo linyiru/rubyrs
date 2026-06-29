@@ -427,10 +427,22 @@ reusable for the rest of the family):
    chain) declines to the generic walk. The now-green baseline caught the missing
    gate as a real regression (`block_locals_share`) on the first run.
 
-Remaining capture family (use the same two gates): `each_with_object` (captured
-object + `<<`/`[]=`), `tally`/`group_by` (captured Hash mutation), `each_with_index`
-(adds an index counter). `each_with_object` is the natural next step — same
-write-back-on-success shape over a captured Array/Hash instead of an Int acc.
+**each_with_object — SHIPPED**, 4.7× YJIT (jitN 0.03s vs 0.14s). `arr.each_with_object([])
+{ |x, memo| memo << f(x) }` over an all-Int array building an Array. The `memo` param
+binds to a fresh SCRATCH array (kind `ArrayObjId`) the block pushes into via the
+existing `<<` codegen; `compile_native_eachobj_loop` allocates the scratch, threads
+it through every block call, returns its ObjId; the driver appends scratch onto the
+real `memo` on success. Gate #1 again: a deopt discards the scratch, the real memo is
+untouched, redo generic — verified `big*4` overflow mid-loop → correct bignum, no
+stray scratch element. (`memo` is a real param here, so no capture-path gate #2 is
+needed; non-`<<` use of `memo` declines in `compile`.) The block spec now models the
+accumulator/element binding as explicit per-`AccKind` `arg2_slot`/`arg3_slot` — which
+also fixed a latent `Inject` binding regression the each-accumulator refactor had
+introduced (inject was silently declining to generic; back to 9.9× YJIT).
+
+Remaining capture family (same two gates): `tally`/`group_by` (captured Hash
+mutation — needs a `jit_hash_*` set primitive + Hash scratch), `each_with_index`
+(adds an index counter alongside the accumulator).
 
 ## Risks
 
