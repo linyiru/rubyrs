@@ -2115,9 +2115,24 @@ pub(crate) fn compile_native_floatsum_loop_inner(
 /// success. A non-Float element deopts -> the caller discards `out` and redoes the
 /// map generically (the native block is pure).
 pub(crate) fn compile_native_floatmap_loop(block_addr: usize) -> Option<NativeLoop> {
+    compile_native_floatmap_loop_inner(block_addr, false)
+}
+
+/// `int_elem`: read elements as Int (the block takes an Int param, produces a Float
+/// — `ints.map { |x| x * 1.5 }`); else read as Float. The output is a Float array
+/// either way (`jit_array_set_float`), so only the element reader symbol differs.
+pub(crate) fn compile_native_floatmap_loop_inner(
+    block_addr: usize,
+    int_elem: bool,
+) -> Option<NativeLoop> {
     let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    let (elem_name, elem_fn): (&str, *const u8) = if int_elem {
+        ("jit_array_elem_int", jit_array_elem_int as *const u8)
+    } else {
+        ("jit_array_elem_float", jit_array_elem_float as *const u8)
+    };
     builder.symbol("jit_array_len", jit_array_len as *const u8);
-    builder.symbol("jit_array_elem_float", jit_array_elem_float as *const u8);
+    builder.symbol(elem_name, elem_fn);
     builder.symbol("jit_array_set_float", jit_array_set_float as *const u8);
     builder.symbol("blk", block_addr as *const u8);
     let mut module = JITModule::new(builder);
@@ -2148,7 +2163,7 @@ pub(crate) fn compile_native_floatmap_loop(block_addr: usize) -> Option<NativeLo
     elsig.returns.push(AbiParam::new(types::I64));
     elsig.returns.push(AbiParam::new(types::I8));
     let elid = module
-        .declare_function("jit_array_elem_float", Linkage::Import, &elsig)
+        .declare_function(elem_name, Linkage::Import, &elsig)
         .ok()?;
     let mut setsig = module.make_signature();
     setsig.params.push(AbiParam::new(ptr_ty));
