@@ -145,9 +145,13 @@ fn require_satisfied_by_pre_registered_module_no_ops() {
     // Exercises three angles in one driver:
     //   1. snake_to_camel match (`module Rack` satisfies
     //      `require "rack"`)
-    //   2. subpath match (`require "rack/show_exceptions"` is
-    //      also satisfied because the first segment maps to
-    //      the same already-defined `Rack`)
+    //   2. a multi-segment subpath (`require "rack/show_exceptions"`)
+    //      is NOT satisfied by a bare `module Rack` — it names a
+    //      specific sub-file, so it raises LoadError, matching CRuby
+    //      and the concurrent-ruby fallback contract in
+    //      `require_satisfied_by_existing_constant` (`segs.len() > 1`
+    //      bails). Only a single-segment require lenient-matches a
+    //      same-named constant.
     //   3. case-insensitive fallback for non-conventional
     //      capitalization (`class IPAddr` satisfies
     //      `require "ipaddr"` — `snake_to_camel_case("ipaddr")`
@@ -165,7 +169,12 @@ class IPAddr; end
 
 r1 = require "rack"
 r2 = require "rack"
-r3 = require "rack/show_exceptions"
+r3 = begin
+  require "rack/show_exceptions"
+  "loaded-unexpectedly"
+rescue LoadError
+  "LoadError"
+end
 r4 = require "ipaddr"
 
 begin
@@ -198,7 +207,7 @@ puts reject
     let expected = "\
 rack-first=true
 rack-second=false
-rack-subpath=true
+rack-subpath=LoadError
 ipaddr-canonical=true
 errored: LoadError: cannot load such file -- definitely_not_a_real_module_xyz_abc_999
 ";
@@ -242,7 +251,15 @@ fn require_satisfied_by_all_caps_constant() {
 module FOO; end
 
 r1 = require "foo"
-r2 = require "foo/subpath"
+# A multi-segment subpath is NOT satisfied by a bare `module FOO` — it
+# names a sub-file, so it raises LoadError (CRuby-faithful; see the
+# `segs.len() > 1` bail in require_satisfied_by_existing_constant).
+r2 = begin
+  require "foo/subpath"
+  "loaded-unexpectedly"
+rescue LoadError
+  "LoadError"
+end
 
 puts "foo-allcaps=#{r1}"
 puts "foo-subpath=#{r2}"
@@ -262,7 +279,7 @@ puts "foo-subpath=#{r2}"
         stdout, stderr
     );
     assert_eq!(
-        stdout, "foo-allcaps=true\nfoo-subpath=true\n",
+        stdout, "foo-allcaps=true\nfoo-subpath=LoadError\n",
         "all-caps fallback mismatch.\nfull stdout:\n{}\nstderr:\n{}",
         stdout, stderr,
     );
