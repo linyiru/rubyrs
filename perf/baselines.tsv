@@ -347,3 +347,11 @@ crates/rubyrs/benches/string_interp.rb	9700	700	200k InterpolatedStr; Op::Interp
 # hash_mutate (highest heap peak) crossed. 8700 gives ~290 KB / 3.4%
 # headroom over the observed peak for run-to-run jitter.
 crates/rubyrs/benches/hash_mutate.rb	9700	880	200k Hash[]= overwrites + 1k Hash[] reads
+# boot — base/startup RSS isolation (added 2026-06-29). Boot RSS is the
+# FLOOR of all workloads (no per-workload churn), so its budget sits
+# below the workload cluster: observed workload min was ~9096 (static_bench)
+# pre-bump, and boot <= that. 9500 leaves ~400 KB headroom and is tighter
+# than the 9700 cluster, so accumulated base-runtime growth trips THIS row
+# first. Calibrated by reasoning (CI is the oracle) — tighten once the first
+# CI run reports the actual Linux boot RSS. wall=0: boot is sub-100ms.
+crates/rubyrs/benches/boot.rb	9500	0	boot: Runtime::new + near-empty eval — isolates base/startup RSS (see the .rb header)
