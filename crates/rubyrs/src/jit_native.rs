@@ -546,15 +546,27 @@ pub(crate) fn compile(
         if let Some(m) = memo_slot {
             local_kinds[m as usize] = Kind::ArrayObjId;
         }
-        // Float-element driver: the float value slot(s)' i64 vars hold f64 bits;
-        // mark them Float so `LoadLocal` bitcasts to F64. For a value block (None)
-        // arg2 IS the element. For an each-accumulator (EachAcc) arg2 is the captured
-        // accumulator and arg3 is the element — BOTH float, so mark both.
-        if float_elem {
-            local_kinds[arg2_slot as usize] = Kind::Float;
-            if matches!(acc_kind, AccKind::EachAcc { .. }) {
-                if let Some(s) = arg3_slot {
-                    local_kinds[s as usize] = Kind::Float;
+        // Float slots: a float local's i64 var holds f64 bits; mark it Float so
+        // `LoadLocal` bitcasts to F64. The ELEMENT slot is Float per `float_elem`,
+        // the ACCUMULATOR slot per `float_acc` — decoupled so an Int element can
+        // thread a Float accumulator (`ints.each { |x| t += x*1.5 }`). For Inject /
+        // EachAcc / EachWithIndex arg2 is the accumulator and arg3 the element; for
+        // a value block (None) / EachObj arg2 IS the element. (Existing callers pass
+        // float_acc == float_elem ⇒ identical to the old single-flag behaviour.)
+        match acc_kind {
+            AccKind::Inject | AccKind::EachAcc { .. } | AccKind::EachWithIndex { .. } => {
+                if float_acc {
+                    local_kinds[arg2_slot as usize] = Kind::Float;
+                }
+                if float_elem {
+                    if let Some(s) = arg3_slot {
+                        local_kinds[s as usize] = Kind::Float;
+                    }
+                }
+            }
+            AccKind::None | AccKind::EachObj => {
+                if float_elem {
+                    local_kinds[arg2_slot as usize] = Kind::Float;
                 }
             }
         }
