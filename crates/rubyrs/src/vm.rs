@@ -887,6 +887,10 @@ pub(crate) struct Vm {
     /// Float variant of `jit_native_minmax_loop` (Float element + Float key).
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_floatminmax_loop: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeLoop>>,
+    /// Int-element / Float-KEY min_by/max_by loop (`ints.min_by { |x| x*1.5 }`):
+    /// Int element returned, Float key compared. Keyed by (block proto, is_min).
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_intelem_floatminmax_loop: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeLoop>>,
     /// Float PREDICATE block compilation (param Float, returns Bool via fcmp), for
     /// Float `count`/`select`/`reject`/`find`. Separate from Int `jit_native_block_pred`.
     #[cfg(feature = "jit-native")]
@@ -2047,6 +2051,8 @@ impl Vm {
             jit_native_minmax_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_floatminmax_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_intelem_floatminmax_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_block_pred_float: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]

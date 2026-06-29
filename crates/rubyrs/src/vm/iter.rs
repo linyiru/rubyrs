@@ -3939,6 +3939,13 @@ impl Vm {
                 if let Some(v) = g.vm.try_native_floatminmax_loop(block, *id, want_min) {
                     return Ok(Some(v));
                 }
+                // Int-element / Float-KEY variant (ADR 0034 layer 3d): an Int array
+                // compared by a Float key (`ints.min_by { |x| x*1.5 }`). Both above
+                // decline (Float key result / Int element deopt).
+                #[cfg(feature = "jit-native")]
+                if let Some(v) = g.vm.try_native_intelem_floatminmax_loop(block, *id, want_min) {
+                    return Ok(Some(v));
+                }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 if snapshot.is_empty() { return Ok(Some(Value::Nil)); }
                 let pre_frames = g.vm.frames.len();

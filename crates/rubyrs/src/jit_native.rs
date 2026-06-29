@@ -2284,7 +2284,7 @@ pub(crate) fn compile_native_floatmap_loop_inner(
 /// guarantees `len >= 1` (it returns nil for the empty array itself). ABI
 /// `(vm, self, in_objid, _) -> (best_elem, ovf)`; `is_min` picks `<` vs `>`.
 pub(crate) fn compile_native_minmax_loop(block_addr: usize, is_min: bool) -> Option<NativeLoop> {
-    compile_native_minmax_loop_inner(block_addr, is_min, false)
+    compile_native_minmax_loop_inner(block_addr, is_min, false, false)
 }
 
 /// Float variant: the ELEMENT and the block's KEY are Floats (f64 bits). Keys are
@@ -2292,13 +2292,22 @@ pub(crate) fn compile_native_minmax_loop(block_addr: usize, is_min: bool) -> Opt
 /// so CRuby's "comparison failed" raise happens on the generic path. The best
 /// element threads as f64 bits; the driver boxes `Value::Float`.
 pub(crate) fn compile_native_floatminmax_loop(block_addr: usize, is_min: bool) -> Option<NativeLoop> {
-    compile_native_minmax_loop_inner(block_addr, is_min, true)
+    compile_native_minmax_loop_inner(block_addr, is_min, true, true)
+}
+
+/// Int-element / Float-KEY min_by/max_by (`ints.min_by { |x| x*1.5 }`): the element
+/// reads as an Int (and is returned as one), but the comparison KEY the block
+/// produces is a Float (ordered fcmp + NaN-deopt). Decouples element-kind from
+/// key-kind — the element threads as opaque i64 either way.
+pub(crate) fn compile_native_intelem_floatminmax_loop(block_addr: usize, is_min: bool) -> Option<NativeLoop> {
+    compile_native_minmax_loop_inner(block_addr, is_min, false, true)
 }
 
 fn compile_native_minmax_loop_inner(
     block_addr: usize,
     is_min: bool,
     float_elem: bool,
+    float_key: bool,
 ) -> Option<NativeLoop> {
     let (elem_name, elem_fn): (&str, *const u8) = if float_elem {
         ("jit_array_elem_float", jit_array_elem_float as *const u8)
@@ -2401,7 +2410,7 @@ fn compile_native_minmax_loop_inner(
         fb.switch_to_block(nh0);
         // Seed key NaN -> deopt too (else the NaN element would seed `best` and
         // never be displaced, masking CRuby's "comparison failed" raise).
-        if float_elem {
+        if float_key {
             let k0f = fb.ins().bitcast(types::F64, MemFlagsData::new(), k0);
             let is_nan0 = fb.ins().fcmp(FloatCC::Unordered, k0f, k0f);
             let seedok = fb.create_block();
@@ -2439,7 +2448,7 @@ fn compile_native_minmax_loop_inner(
         fb.ins().brif(ovf2, deopt, &[], nh, &[]);
         fb.switch_to_block(nh);
         // better = is_min ? k < bk : k > bk; select new best key + element.
-        let better = if float_elem {
+        let better = if float_key {
             // NaN key -> deopt (CRuby raises "comparison failed"; the generic
             // path reproduces that). Then ordered fcmp on the bitcast keys.
             let kf = fb.ins().bitcast(types::F64, MemFlagsData::new(), k);

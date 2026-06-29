@@ -17435,6 +17435,54 @@ impl Vm {
             .map(|bits| Value::Float(f64::from_bits(bits as u64)))
     }
 
+    /// Int-element / Float-KEY `min_by`/`max_by` (ADR 0034 layer 3d): `ints.min_by
+    /// { |x| x * 1.5 }` — an Int array compared by a Float key. The Int min/max
+    /// declines (Float block result), the Float min/max deopts (Int element). Reuses
+    /// the Int-elem/Float-acc value block (jit_native_block_intelem_fa) as the key
+    /// function; the loop reads Int elements but compares Float keys (ordered fcmp,
+    /// NaN-deopt). Returns the best `Value::Int` element. Empty declines (-> nil).
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_intelem_floatminmax_loop(&mut self, block_id: ObjId, array_id: ObjId, is_min: bool) -> Option<Value> {
+        if !self.jit_native_on {
+            return None;
+        }
+        if self.heap.array(array_id).is_empty() {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        if !self.jit_native_block_intelem_fa.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block_intelem_floatacc(proto_idx, param_start as u32, body_start as u32);
+            self.jit_native_block_intelem_fa.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_intelem_fa.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        let key = (proto_idx, is_min);
+        if !self.jit_native_intelem_floatminmax_loop.contains_key(&key) {
+            let compiled = crate::jit_native::compile_native_intelem_floatminmax_loop(block_addr, is_min);
+            self.jit_native_intelem_floatminmax_loop.insert(key, compiled);
+        }
+        let ml = match self.jit_native_intelem_floatminmax_loop.get(&key) {
+            Some(Some(ml)) => ml,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        ml.call(vm_ptr, &self_val, array_id.0 as i64, 0).map(Value::Int)
+    }
+
     /// Compile a 1-param block proto to native (B5). The arg binds to the block's
     /// `param_start`; reads of captured outer slots decline (see `compile`).
     /// Blocks with method calls are not modelled yet, so callees/getters are
