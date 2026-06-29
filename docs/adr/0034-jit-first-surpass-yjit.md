@@ -593,8 +593,15 @@ the generic `LoopKind::Map` already stores Ints, so the only new piece was a Flo
 Int-result block. `floats.sum { x.floor }` 6.21× / `{ x.to_i }` 5.74× / `{ x.round }` 6.53×;
 the map fires + is parity-correct (alloc-bound, so it tracks the 3.10× float→float map).
 
-Next frontier: each_with_object Float, Float-keyed Hash drivers (group_by/tally/sum-by-key),
-and broadening the value-method JIT surface.
+The capture/Hash family is Float-extended too: `floats.group_by { x.floor }` (Float element /
+Int key — Int keys keep bucket match exact and avoid the -0.0/NaN Float-key `eql?` subtleties)
+and `floats.each_with_object(memo) { |x, m| m << f(x) }` (the block `<<` now pushes either an
+Int or a Float). Both reuse the float→int block + a Float-element reader swap in their loop
+builders. `floats.tally` needs no driver — blockless, the interpreter path already beats YJIT
+(1.22×) and is parity-correct for Floats.
+
+Next frontier: pure Float-KEY Hash drivers (keyed on the Float itself, needs `eql?`-exact
+bucket match), and broadening the value-method JIT surface.
 
 ## Risks
 
