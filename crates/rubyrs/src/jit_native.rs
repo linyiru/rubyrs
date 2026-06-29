@@ -124,6 +124,11 @@ pub(crate) enum AccKind {
     /// the block pushes into via `<<`. The block's return is discarded; the loop
     /// returns the scratch ObjId.
     EachObj,
+    /// `each_with_index { |x, i| total += f(x, i) }`: `(vm, self, acc, elem, idx)`.
+    /// Like `EachAcc` but the block has a 2nd param — the iteration index — bound
+    /// to a 3rd i64 C-arg. Element is `param_slot`, index `param_slot + 1`, the
+    /// accumulator a CAPTURED slot; the new acc is that slot's value after the body.
+    EachWithIndex { acc_slot: u32 },
 }
 
 pub(crate) fn compile(
@@ -156,26 +161,35 @@ pub(crate) fn compile(
     let acc_kind = block.map(|(_, _, _, a)| a).unwrap_or(AccKind::None);
     // Which local slot each C-ABI arg binds to. `arg2` is the 3rd C param, `arg3`
     // (2-param only) the 4th — the driver loop decides what it passes there:
-    //   Inject   blk(vm,self,acc,elem)  -> arg2=acc(param_slot), arg3=elem(slot+1)
-    //   EachAcc  blk(vm,self,acc,elem)  -> arg2=captured acc, arg3=elem(param_slot)
-    //   EachObj  blk(vm,self,elem,memo) -> arg2=elem(param_slot), arg3=memo(slot+1)
-    let (arg2_slot, arg3_slot): (u32, Option<u32>) = match acc_kind {
-        AccKind::None => (param_slot, None),
-        AccKind::Inject => (param_slot, Some(param_slot + 1)),
-        AccKind::EachAcc { acc_slot } => (acc_slot, Some(param_slot)),
-        AccKind::EachObj => (param_slot, Some(param_slot + 1)),
+    //   Inject    blk(vm,self,acc,elem)     -> arg2=acc(slot), arg3=elem(slot+1)
+    //   EachAcc   blk(vm,self,acc,elem)     -> arg2=captured acc, arg3=elem(slot)
+    //   EachObj   blk(vm,self,elem,memo)    -> arg2=elem(slot), arg3=memo(slot+1)
+    //   EachIndex blk(vm,self,acc,elem,idx) -> arg2=captured acc, arg3=elem(slot),
+    //                                          arg4=index(slot+1)
+    let (arg2_slot, arg3_slot, arg4_slot): (u32, Option<u32>, Option<u32>) = match acc_kind {
+        AccKind::None => (param_slot, None, None),
+        AccKind::Inject => (param_slot, Some(param_slot + 1), None),
+        AccKind::EachAcc { acc_slot } => (acc_slot, Some(param_slot), None),
+        AccKind::EachObj => (param_slot, Some(param_slot + 1), None),
+        AccKind::EachWithIndex { acc_slot } => {
+            (acc_slot, Some(param_slot), Some(param_slot + 1))
+        }
     };
     let two_param = arg3_slot.is_some();
-    // each-accumulator: `Return` yields the captured accumulator (arg2_slot)'s
-    // value, not the block's (discarded) return.
-    let acc_from_slot = matches!(acc_kind, AccKind::EachAcc { .. });
+    let three_param = arg4_slot.is_some();
+    // each-accumulator / each_with_index: `Return` yields the captured accumulator
+    // (arg2_slot)'s value, not the block's (discarded) return.
+    let acc_from_slot = matches!(
+        acc_kind,
+        AccKind::EachAcc { .. } | AccKind::EachWithIndex { .. }
+    );
     // each_with_object: the `memo` arg (arg3_slot) is an Array the block pushes to
     // via `<<`, so it carries the `ArrayObjId` kind, not `Int`.
     let memo_slot = match acc_kind {
         AccKind::EachObj => arg3_slot,
         _ => None,
     };
-    let is_param = |s: u32| s == arg2_slot || arg3_slot == Some(s);
+    let is_param = |s: u32| s == arg2_slot || arg3_slot == Some(s) || arg4_slot == Some(s);
     // For a block, reject reads/writes of captured outer slots (closure state):
     // a slot below the body-local start that isn't a param. Methods (None)
     // impose no such restriction.
@@ -300,6 +314,9 @@ pub(crate) fn compile(
     if two_param {
         sig.params.push(AbiParam::new(types::I64)); // 2nd arg (the element)
     }
+    if three_param {
+        sig.params.push(AbiParam::new(types::I64)); // 3rd arg (each_with_index's index)
+    }
     sig.returns.push(AbiParam::new(types::I64));
     sig.returns.push(AbiParam::new(types::I8));
     ctx.func.signature = sig.clone();
@@ -422,16 +439,23 @@ pub(crate) fn compile(
         } else {
             None
         };
+        let param3 = if three_param {
+            Some(fb.block_params(entry)[4])
+        } else {
+            None
+        };
         let nloc = proto.n_locals as usize;
         let vars: Vec<Variable> = (0..nloc).map(|_| fb.declare_var(types::I64)).collect();
-        // Bind the C args to their slots: arg[2] (`param`) -> `arg2_slot`, and (in
-        // 2-param mode) arg[3] (`param2`) -> `arg3_slot`. Every other local 0.
+        // Bind the C args to their slots: arg[2] (`param`) -> `arg2_slot`, arg[3]
+        // (`param2`) -> `arg3_slot`, arg[4] (`param3`) -> `arg4_slot`. Else 0.
         for (i, v) in vars.iter().enumerate() {
             let iu = i as u32;
             if iu == arg2_slot {
                 fb.def_var(*v, param);
             } else if arg3_slot == Some(iu) {
                 fb.def_var(*v, param2.unwrap());
+            } else if arg4_slot == Some(iu) {
+                fb.def_var(*v, param3.unwrap());
             } else {
                 let z = fb.ins().iconst(types::I64, 0);
                 fb.def_var(*v, z);
@@ -1530,6 +1554,152 @@ pub(crate) fn compile_native_groupby_loop(block_addr: usize) -> Option<NativeLoo
         let hash_out = fb.block_params(exit)[0];
         let ok = fb.ins().iconst(types::I8, 0);
         fb.ins().return_(&[hash_out, ok]);
+
+        // deopt: return (0, 1)
+        fb.switch_to_block(deopt);
+        let z = fb.ins().iconst(types::I64, 0);
+        let bad = fb.ins().iconst(types::I8, 1);
+        fb.ins().return_(&[z, bad]);
+
+        fb.seal_all_blocks();
+        fb.finalize();
+    }
+    module.define_function(fid, &mut ctx).ok()?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().ok()?;
+    let code_ptr = module.get_finalized_function(fid);
+    let ptr = unsafe {
+        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+            code_ptr,
+        )
+    };
+    Some(NativeLoop {
+        _module: module,
+        ptr,
+    })
+}
+
+/// Compile a native whole-loop `Array#each_with_index { |x, i| total += f(x, i) }`
+/// driver (ADR 0034 layer 3c) around an already-compiled 3-input block (acc, elem,
+/// index). Like the inject loop, but the block also receives the loop index `i`:
+/// `acc = blk(vm, self, acc, elem, i)` per element. ABI `(vm, self, in_objid, init)
+/// -> (acc, ovf)`. A non-Int element or any overflow deopts; the caller writes the
+/// accumulator back to its captured slot only on full success (write-back-on-success,
+/// like the each-accumulator).
+pub(crate) fn compile_native_eachidx_loop(block_addr: usize) -> Option<NativeLoop> {
+    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    builder.symbol("jit_array_len", jit_array_len as *const u8);
+    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
+    builder.symbol("blk", block_addr as *const u8);
+    let mut module = JITModule::new(builder);
+    let ptr_ty = module.target_config().pointer_type();
+    let mut ctx = module.make_context();
+
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(ptr_ty)); // vm
+    sig.params.push(AbiParam::new(ptr_ty)); // self
+    sig.params.push(AbiParam::new(types::I64)); // in objid
+    sig.params.push(AbiParam::new(types::I64)); // init (acc seed)
+    sig.returns.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I8));
+    ctx.func.signature = sig.clone();
+    let fid = module.declare_function("eachidxloop", Linkage::Export, &sig).ok()?;
+
+    let mut lensig = module.make_signature();
+    lensig.params.push(AbiParam::new(ptr_ty));
+    lensig.params.push(AbiParam::new(types::I64));
+    lensig.returns.push(AbiParam::new(types::I64));
+    let lenid = module
+        .declare_function("jit_array_len", Linkage::Import, &lensig)
+        .ok()?;
+    let mut elsig = module.make_signature();
+    elsig.params.push(AbiParam::new(ptr_ty));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I8));
+    let elid = module
+        .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
+        .ok()?;
+    // 3-input block: (vm, self, acc, elem, idx) -> (new_acc, ovf).
+    let mut blksig = module.make_signature();
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(types::I64));
+    blksig.params.push(AbiParam::new(types::I64));
+    blksig.params.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I8));
+    let blkid = module
+        .declare_function("blk", Linkage::Import, &blksig)
+        .ok()?;
+
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let len_ref = module.declare_func_in_func(lenid, fb.func);
+        let el_ref = module.declare_func_in_func(elid, fb.func);
+        let blk_ref = module.declare_func_in_func(blkid, fb.func);
+
+        let entry = fb.create_block();
+        let head = fb.create_block(); // params: (i, acc)
+        let body = fb.create_block();
+        let cont1 = fb.create_block();
+        let exit = fb.create_block(); // param: (acc)
+        let deopt = fb.create_block();
+        fb.append_block_params_for_function_params(entry);
+        fb.append_block_param(head, types::I64);
+        fb.append_block_param(head, types::I64);
+        fb.append_block_param(exit, types::I64);
+
+        // entry: len = len(in); jump head(0, init)
+        fb.switch_to_block(entry);
+        let (vm_param, self_param, in_objid, init) = {
+            let p = fb.block_params(entry);
+            (p[0], p[1], p[2], p[3])
+        };
+        let call_len = fb.ins().call(len_ref, &[vm_param, in_objid]);
+        let len = fb.inst_results(call_len)[0];
+        let zero = fb.ins().iconst(types::I64, 0);
+        fb.ins().jump(head, &[zero.into(), init.into()]);
+
+        // head(i, acc): i < len ? body : exit(acc)
+        fb.switch_to_block(head);
+        let (i, acc) = {
+            let p = fb.block_params(head);
+            (p[0], p[1])
+        };
+        let cond = fb.ins().icmp(IntCC::SignedLessThan, i, len);
+        fb.ins().brif(cond, body, &[], exit, &[acc.into()]);
+
+        // body: (x, ovf1) = elem(in, i); ovf1 ? deopt : cont1
+        fb.switch_to_block(body);
+        let call_el = fb.ins().call(el_ref, &[vm_param, in_objid, i]);
+        let (x, ovf1) = {
+            let r = fb.inst_results(call_el);
+            (r[0], r[1])
+        };
+        fb.ins().brif(ovf1, deopt, &[], cont1, &[]);
+
+        // cont1: (acc2, ovf2) = blk(vm, self, acc, x, i); ovf2 ? deopt : head(i+1, acc2)
+        fb.switch_to_block(cont1);
+        let call_blk = fb.ins().call(blk_ref, &[vm_param, self_param, acc, x, i]);
+        let (acc2, ovf2) = {
+            let res = fb.inst_results(call_blk);
+            (res[0], res[1])
+        };
+        let nh = fb.create_block();
+        fb.ins().brif(ovf2, deopt, &[], nh, &[]);
+        fb.switch_to_block(nh);
+        let one = fb.ins().iconst(types::I64, 1);
+        let i2 = fb.ins().iadd(i, one);
+        fb.ins().jump(head, &[i2.into(), acc2.into()]);
+
+        // exit(acc): return (acc, 0)
+        fb.switch_to_block(exit);
+        let acc_out = fb.block_params(exit)[0];
+        let ok = fb.ins().iconst(types::I8, 0);
+        fb.ins().return_(&[acc_out, ok]);
 
         // deopt: return (0, 1)
         fb.switch_to_block(deopt);

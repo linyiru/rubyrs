@@ -3367,6 +3367,14 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
+                // Native whole-loop each_with_index-accumulator (`total += f(x, i)`
+                // over an all-Int array): updates the captured slot, returns the
+                // receiver. Declines (None) -> generic walk; a part-way deopt
+                // commits nothing, so the fallback re-runs soundly.
+                #[cfg(feature = "jit-native")]
+                if g.vm.try_native_eachidx_loop(block, *id).is_some() {
+                    return Ok(Some(Value::Array(*id)));
+                }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;

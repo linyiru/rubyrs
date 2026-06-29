@@ -819,6 +819,13 @@ pub(crate) struct Vm {
     /// block is shared with `jit_native_block`).
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_groupby_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    /// `each_with_index`-accumulator block compilation (`{ |x, i| total += f(x, i)
+    /// }`, acc bound to a captured slot, index as a 3rd block arg).
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_block_eachidx: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// Per block-proto cache of whole-loop `each_with_index`-accumulator drivers.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_eachidx_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
     /// Per-(block proto, is_min) cache of whole-loop `min_by` / `max_by` drivers —
     /// a fold tracking the best key + its element (the value-mode block is the key
     /// function, shared with `jit_native_block`).
@@ -1938,6 +1945,10 @@ impl Vm {
             jit_native_eachobj_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_groupby_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_block_eachidx: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_eachidx_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_minmax_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]

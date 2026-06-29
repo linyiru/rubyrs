@@ -16478,6 +16478,100 @@ impl Vm {
         Some(())
     }
 
+    /// Whole-loop fast path for the `each_with_index`-accumulator shape
+    /// `total = …; arr.each_with_index { |x, i| total += f(x, i) }` (ADR 0034 layer
+    /// 3c). Identical to `try_native_each_acc_loop` but the block has a 2nd param —
+    /// the iteration index — passed as a 3rd block arg. Same two soundness gates:
+    /// write-back-on-success (commit the captured accumulator only on full native
+    /// completion) and share-direct-only. The caller must have pinned `array_id`.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_eachidx_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<()> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot, captured, captured_is_method_scope) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot, bh.captured.clone(), bh.captured_is_method_scope)
+        };
+        // Exactly two params (element, index), no rest/kw/block-param.
+        if n_params != 2
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        // Same share-direct gate as the each-accumulator (see there): the captured
+        // write-back is sound only on the share-direct frame path.
+        if !captured_is_method_scope
+            || self.protos[proto_idx].creates_block
+            || self.block_is_reentrant(proto_idx, &captured)
+        {
+            return None;
+        }
+        // Single captured WRITTEN accumulator slot — excluding BOTH params (the
+        // element at `param_start` and the index at `param_start + 1`).
+        let body_start = self.protos[proto_idx].block_body_local_start as u32;
+        let p_elem = param_start as u32;
+        let p_idx = param_start as u32 + 1;
+        let mut cap: Vec<u32> = Vec::new();
+        let mut written: Option<u32> = None;
+        for op in &self.protos[proto_idx].code {
+            use crate::bytecode::Op;
+            let mut note = |s: u16, w: bool, cap: &mut Vec<u32>, written: &mut Option<u32>| {
+                let s = s as u32;
+                if s < body_start && s != p_elem && s != p_idx {
+                    if !cap.contains(&s) {
+                        cap.push(s);
+                    }
+                    if w {
+                        *written = Some(s);
+                    }
+                }
+            };
+            match op {
+                Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) => note(*s, true, &mut cap, &mut written),
+                Op::LoadLocal(s) => note(*s, false, &mut cap, &mut written),
+                Op::BinOpLocalLocal(_, a, b) => {
+                    note(*a, false, &mut cap, &mut written);
+                    note(*b, false, &mut cap, &mut written);
+                }
+                _ => {}
+            }
+        }
+        if cap.len() != 1 || written != Some(cap[0]) {
+            return None;
+        }
+        let acc_slot = cap[0];
+        let init = match captured.borrow().get(acc_slot as usize) {
+            Some(Value::Int(n)) => *n,
+            _ => return None,
+        };
+        if !self.jit_native_block_eachidx.contains_key(&proto_idx) {
+            let compiled = self.compile_native_block_eachidx(proto_idx, param_start as u32, body_start, acc_slot);
+            self.jit_native_block_eachidx.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_eachidx.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_eachidx_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_eachidx_loop(block_addr);
+            self.jit_native_eachidx_loop.insert(proto_idx, compiled);
+        }
+        let il = match self.jit_native_eachidx_loop.get(&proto_idx) {
+            Some(Some(il)) => il,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        let acc_out = il.call(vm_ptr, &self_val, array_id.0 as i64, init)?;
+        if let Some(slot) = captured.borrow_mut().get_mut(acc_slot as usize) {
+            *slot = Value::Int(acc_out);
+        }
+        Some(())
+    }
+
     /// Whole-loop fast path for `array.min_by` / `max_by { |x| key }` (ADR 0034
     /// layer 3): a fold tracking the best key + its element. `Some(elem)` ran
     /// natively; `None` falls back to the generic loop (non-Int element / key, an
@@ -16640,6 +16734,47 @@ impl Vm {
                 body_local_start,
                 false,
                 crate::jit_native::AccKind::EachAcc { acc_slot },
+            )),
+        )
+    }
+
+    /// Compile an `each_with_index`-accumulator block `{ |x, i| total += f(x, i) }`
+    /// (element at `param_start`, index at `param_start + 1`, `acc_slot` the captured
+    /// accumulator). The index binds to a 3rd block arg.
+    #[cfg(feature = "jit-native")]
+    fn compile_native_block_eachidx(
+        &mut self,
+        proto_idx: usize,
+        param_start: u32,
+        body_local_start: u32,
+        acc_slot: u32,
+    ) -> Option<crate::jit_native::NativeProto> {
+        let dummy = self.interner.intern("\u{0}block\u{0}");
+        let callees = crate::intern::FxHashMap::default();
+        let getters = crate::intern::FxHashMap::default();
+        let syms = crate::jit_native::JitSyms {
+            length: self.interner.intern("length"),
+            size: self.interner.intern("size"),
+            bracket: self.interner.intern("[]"),
+            lshift: self.interner.intern("<<"),
+            abs: self.interner.intern("abs"),
+            even_p: self.interner.intern("even?"),
+            odd_p: self.interner.intern("odd?"),
+            zero_p: self.interner.intern("zero?"),
+            positive_p: self.interner.intern("positive?"),
+            negative_p: self.interner.intern("negative?"),
+        };
+        crate::jit_native::compile(
+            &self.protos[proto_idx],
+            dummy,
+            &callees,
+            &getters,
+            &syms,
+            Some((
+                param_start,
+                body_local_start,
+                false,
+                crate::jit_native::AccKind::EachWithIndex { acc_slot },
             )),
         )
     }
