@@ -455,10 +455,19 @@ already a native Rust loop — there is no per-element interpreter dispatch to r
 A reminder that the JIT win is *block-dispatch elimination*; a blockless reducer
 that's already native Rust gains nothing.
 
-Remaining: `each_with_index` with a captured accumulator (`{ |x, i| total += f(x, i)
-}`) — extends the each-accumulator with the loop index as a 2nd block param (a 3rd
-i64 block arg). The lower-frequency member; the high-value capture shapes are now
-covered.
+**each_with_index — SHIPPED** (the last capture member), 9.4× YJIT (jitN 0.07s vs
+0.66s). `total = …; arr.each_with_index { |x, i| total += f(x, i) }`. Like the
+each-accumulator, but the block has a 2nd param (the index), passed as a 3rd i64 block
+arg — `compile`'s block spec now carries explicit `arg2/arg3/arg4` slot binding +
+`AccKind::EachWithIndex`; `compile_native_eachidx_loop` threads the accumulator and
+passes `i`. Same two gates (write-back-on-success + share-direct-only).
+
+**The capture family is complete**: each-accumulator (6.1×), each_with_object (4.7×),
+group_by (6.3×), each_with_index (9.4×) — all over an all-Int array, all on the two
+reusable soundness gates. `tally` was the one evaluated-and-skipped member (no block);
+its real cost (an O(n²) generic build) was fixed in the interpreter instead (now 2–4×
+YJIT). Next frontier (per the list below): lifting the all-Int restriction
+(Float-element loops) and `map`→`sum`/`reduce` fusion.
 
 ## Risks
 
