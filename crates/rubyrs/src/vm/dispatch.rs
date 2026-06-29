@@ -17747,6 +17747,7 @@ impl Vm {
         proto_idx: usize,
         param_start: u32,
         body_local_start: u32,
+        float_elem: bool,
     ) -> Option<crate::jit_native::NativeProto> {
         let dummy = self.interner.intern("\u{0}block\u{0}");
         let callees = crate::intern::FxHashMap::default();
@@ -17765,7 +17766,7 @@ impl Vm {
                 false,
                 crate::jit_native::AccKind::EachObj,
             )),
-            false,
+            float_elem,
             false,
         )
     }
@@ -17798,7 +17799,7 @@ impl Vm {
         }
         if !self.jit_native_block_eachobj.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_eachobj(proto_idx, param_start as u32, body_start as u32);
+            let compiled = self.compile_native_block_eachobj(proto_idx, param_start as u32, body_start as u32, false);
             self.jit_native_block_eachobj.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_eachobj.get(&proto_idx) {
@@ -17818,6 +17819,56 @@ impl Vm {
         // Native run completed: append the scratch's elements onto the real memo.
         // Both are live heap Arrays; the clone + extend do not call `heap.alloc`,
         // so no GC runs between the loop's return and the commit.
+        let scratch_id = crate::value::ObjId(scratch_objid as u32);
+        let elems: Vec<Value> = self.heap.array(scratch_id).clone();
+        self.heap.array_mut(memo_id).extend(elems);
+        Some(())
+    }
+
+    /// Float-element `each_with_object` (ADR 0034 layer 3e): `floats.each_with_object(memo)
+    /// { |x, m| m << f(x) }` over a Float array building into an Array memo. Mirrors
+    /// [`try_native_eachobj_loop`] but reads Floats (`compile_native_eachobj_loop_float`)
+    /// and the block compiles with a Float element; its `<<` pushes whatever `f(x)`
+    /// produces (Int or Float — the `<<` codegen handles both). The Int loop above
+    /// declines first (its Int reader deopts on the Float element). Same write-back-on-
+    /// success: a deopt discards the scratch and the real memo (untouched) is redone
+    /// generically.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_float_eachobj_loop(&mut self, block_id: ObjId, array_id: ObjId, memo_id: ObjId) -> Option<()> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 2
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        if !self.jit_native_block_eachobj_f.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block_eachobj(proto_idx, param_start as u32, body_start as u32, true);
+            self.jit_native_block_eachobj_f.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_eachobj_f.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_eachobj_loop_f.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_eachobj_loop_float(block_addr);
+            self.jit_native_eachobj_loop_f.insert(proto_idx, compiled);
+        }
+        let el = match self.jit_native_eachobj_loop_f.get(&proto_idx) {
+            Some(Some(el)) => el,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        let scratch_objid = el.call(vm_ptr, &self_val, array_id.0 as i64, 0)?;
         let scratch_id = crate::value::ObjId(scratch_objid as u32);
         let elems: Vec<Value> = self.heap.array(scratch_id).clone();
         self.heap.array_mut(memo_id).extend(elems);
