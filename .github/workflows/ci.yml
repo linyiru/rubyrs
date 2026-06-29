@@ -70,10 +70,10 @@ jobs:
         # keeps it there. Build / test already enforce -D warnings
         # at compile time via RUSTFLAGS, but neither runs clippy
         # itself, so the lints would silently regress without this.
-        run: cargo clippy --release --all-targets --workspace -- -D warnings
+        run: cargo clippy --release --all-targets --workspace --locked -- -D warnings
 
       - name: Build
-        run: cargo build --release --verbose
+        run: cargo build --release --locked --verbose
 
       - name: Run tests
         # Includes integration tests cext_hello + cext_bcrypt, which
@@ -86,10 +86,10 @@ jobs:
         # end through rubyrs and asserts byte-identical output.
         # Failure here means a regression in the cext FFI, not just
         # the language.
-        run: cargo test --release --verbose
+        run: cargo test --release --locked --verbose
 
       - name: Run tests (STRESS_GC=1)
-        run: cargo test --release --verbose
+        run: cargo test --release --locked --verbose
         env:
           STRESS_GC: "1"
 
@@ -280,7 +280,7 @@ jobs:
         # check rather than a build to keep the step under a few
         # seconds — the breakdown workflow exercises the full
         # `cargo build --features trace-startup` path properly.
-        run: cargo check --release --target wasm32-wasip1 --no-default-features --features trace-startup -p rubyrs
+        run: cargo check --release --locked --target wasm32-wasip1 --no-default-features --features trace-startup -p rubyrs
 
   windows-stack-smoke:
     name: Windows debug stack smoke (issue #356)
@@ -328,7 +328,30 @@ jobs:
         # Runtime::with_config + eval completed without overflowing the
         # Windows main-thread stack; a stack overflow aborts with a
         # non-zero code and fails the job.
-        run: cargo run -p rubyrs --example preamble_stack_smoke --no-default-features --features std-sink
+        run: cargo run --locked -p rubyrs --example preamble_stack_smoke --no-default-features --features std-sink
+
+  lockfile:
+    name: Lockfile in sync
+    runs-on: ubuntu-latest
+    # Sister gate to cargo-deny: deny.toml scans Cargo.lock, but the build
+    # steps must also be pinned to it or CI can go green against a dep set
+    # the committed lock never described. Every cargo build/test/publish in
+    # the workflows now passes `--locked`; this job is the belt-and-braces
+    # check that the lock itself satisfies all 13 manifests, so a manifest
+    # change that forgot to regenerate + commit Cargo.lock fails loudly here
+    # instead of resolving up silently on a cache-miss runner.
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: ./.github/actions/setup-rust-toolchain
+
+      - name: Assert Cargo.lock satisfies every manifest
+        # `--locked` makes cargo refuse to mutate Cargo.lock; if any
+        # Cargo.toml drifted from the lock this exits non-zero.
+        run: cargo metadata --locked --format-version 1 > /dev/null
 
   panic-budget:
     name: Panic budget (per-file ratchet)
@@ -347,8 +370,14 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
+          # FAIL-CLOSED (2026-06-29): files with an explicit budget
+          # below keep it; every OTHER crates/rubyrs/src/*.rs defaults
+          # to 0 via the sweep at the end. `checked` lets that sweep
+          # skip the files already listed here.
+          checked=" "
           check() {
             local file="$1" budget="$2"
+            checked="$checked$file "
             # Strip lines from the first `#[cfg(test)]` onward —
             # in-tree unit tests routinely call `.unwrap()` /
             # `.expect(...)` / `panic!(...)` for fixture assertions,
@@ -508,7 +537,7 @@ jobs:
           # Bumped 59 → 60 on 2026-06-12 (same day): the String
           # per-instance eigenclass gate adds the twin stack-shape
           # ICE expect ("ICE: str-singleton recv").
-          check crates/rubyrs/src/vm/dispatch.rs     60
+          check crates/rubyrs/src/vm/dispatch.rs     76
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /
@@ -557,7 +586,7 @@ jobs:
           # `Op::JumpIfKwArgGiven` handler adds one ICE-class
           # `.expect("ICE: JumpIfKwArgGiven no frame")`, mirroring
           # the existing JumpIfArgGiven handler's pattern.
-          check crates/rubyrs/src/vm/step.rs         87
+          check crates/rubyrs/src/vm/step.rs         88
           # Bumped 10 → 14 (+4) by PR #178 (step-block iter
           # refactor extracting Select/Reject accumulator logic).
           # Each accumulator path adds one `acc_id.unwrap()` —
@@ -571,7 +600,7 @@ jobs:
           # `step_block` gains one `frames.last().expect("ICE: ...")`
           # in the per-invocation-locals path. ICE-class invariant
           # on frame stack; not user-reachable.
-          check crates/rubyrs/src/vm/iter.rs         16
+          check crates/rubyrs/src/vm/iter.rs         17
           check crates/rubyrs/src/vm/cext.rs          6
           # Bumped 3 → 10 by PR #78 (break/next through ensure).
           # The proper unwinder needs frame/rescue-stack invariant
@@ -661,7 +690,7 @@ jobs:
           # `hash_obj_mut` and `ensure_hash_index` carry the same
           # `panic!("ICE: heap slot is not a Hash")` slot-type assert
           # as the existing `hash` / `hash_mut` accessors.
-          check crates/rubyrs/src/heap.rs            26
+          check crates/rubyrs/src/heap.rs            28
           # Bumped 3 → 6 by master commits a5d61f1 / cc89211 / 92feabb
           # (multi-write assignment, splat receive, op-assignment forms)
           # which added new ICE-class panics in ast::tr for partially-
@@ -771,7 +800,7 @@ jobs:
           # Bumped 27 → 28 on 2026-06-12: preamble/math.rb chunk
           # (Math over __rubyrs_math) adds the same standard
           # load-tail `.expect`.
-          check crates/rubyrs/src/lib.rs       28
+          check crates/rubyrs/src/lib.rs       34
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
           # never went down, just up here. See docs/PANIC_AUDIT.md.
@@ -799,7 +828,37 @@ jobs:
           # computed-default kwargs (mirrors the `u64`
           # `Frame::kw_given_mask` width). Programmer-error
           # invariant — no real signature comes near the cap.
-          check crates/rubyrs/src/compiler.rs  10
+          check crates/rubyrs/src/compiler.rs  14
+          # ---- Previously-unguarded files (added 2026-06-29, fail-
+          # closed conversion). Budgets are the current HEAD count — a
+          # ratchet catch-up, NOT a claim every site is ICE-class.
+          # Audit these and convert user-reachable ones to Trap, then
+          # ratchet down. See docs/PANIC_AUDIT.md.
+          check crates/rubyrs/src/value.rs            2
+          check crates/rubyrs/src/http_server.rs      5
+          check crates/rubyrs/src/sqlite.rs           4
+          check crates/rubyrs/src/jit_native.rs       6
+          check crates/rubyrs/src/bcrypt.rs           3
+          check crates/rubyrs/src/oj.rs               1
+          check crates/rubyrs/src/openssl.rs          1
+          check crates/rubyrs/src/regex_engine.rs     1
+          check crates/rubyrs/src/sass.rs             1
+          check crates/rubyrs/src/socket.rs           1
+          check crates/rubyrs/src/yaml_native.rs      1
+          check crates/rubyrs/src/vm/fiber.rs         1
+          # ---- Fail-closed sweep: every other crates/rubyrs/src/*.rs
+          # is held at budget 0, so a new file (or a new panic site in a
+          # file that has none today) fails this gate until someone adds
+          # a reviewed budget line above. Replaces the old allowlist,
+          # which silently ignored ~37 of ~59 source files.
+          tmp_src_files="$(mktemp)"
+          find crates/rubyrs/src -name '*.rs' | sort > "$tmp_src_files"
+          while IFS= read -r f; do
+            case "$checked" in
+              *" $f "*) continue ;;
+            esac
+            check "$f" 0
+          done < "$tmp_src_files"
           exit "$fail"
 
   perf-budget:
@@ -827,7 +886,7 @@ jobs:
         # Release-mode is required — the baselines were measured
         # against optimised builds. Debug builds would blow every
         # RSS budget and tell us nothing useful.
-        run: cargo build --release -p rubyrs
+        run: cargo build --release --locked -p rubyrs
 
       - name: Check peak-RSS budgets
         # Runs each workload in perf/baselines.tsv three times,
@@ -876,7 +935,7 @@ jobs:
         # parity-side fix and a perf-side fix can't accidentally
         # be measuring different binaries.
         run: |
-          cargo build --release -p rubyrs \
+          cargo build --release --locked -p rubyrs \
             --features default,stdlib,_http_server,_fiber,_json_native
 
       - name: Check JSON bench per-iter budgets
@@ -1031,7 +1090,7 @@ jobs:
         # (under tests/), which exercise embed-API surfaces the unit
         # tests miss. STRESS_GC stays OFF here — coverage doesn't care
         # about GC pressure, and the extra runtime cost is wasted.
-        run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --all-targets --locked --lcov --output-path lcov.info
 
       - name: Ratchet per-file coverage
         # Compares parsed LCOV against crates/rubyrs/coverage_baseline.json.
@@ -1303,7 +1362,7 @@ jobs:
         # features (cext, regex, bignum) come from
         # `--features default`.
         run: |
-          cargo test --release \
+          cargo test --release --locked \
             --features default,stdlib,_http_server,_fiber,_json_native,_sqlite \
             --test diff_framework \
             -- --nocapture
@@ -1318,7 +1377,7 @@ jobs:
         # canon against the pinned `activesupport` installed above;
         # `json_roundtrip` diffs the JSON canon against CRuby's stdlib.
         run: |
-          cargo test --release \
+          cargo test --release --locked \
             --features default,stdlib,_http_server,_fiber,_json_native,_sqlite \
             --test diff_cruby \
             -- --nocapture
@@ -1343,7 +1402,7 @@ jobs:
         # framework fixtures rely on the same dispatch routines
         # so any STRESS_GC bug surfaces here first anyway.
         run: |
-          cargo test --release \
+          cargo test --release --locked \
             --features default,stdlib,_http_server,_fiber,_json_native,_sqlite \
             --test diff_cruby \
             -- --nocapture

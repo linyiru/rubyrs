@@ -1,10 +1,23 @@
 # Roadmap
 
-The roadmap is opinionated, not exhaustive. We work on what moves rubyrs
-closest to its niche: **a fast-starting, memory-frugal, Rust-implemented
-Ruby subset for embedded / WASM / edge use cases**. Anything that doesn't
-serve that bar (e.g. JIT performance for long-running servers) is
-explicitly out of scope — see [SUBSET.md](SUBSET.md).
+> **⚠️ Strategy update (2026-06): scope has deliberately expanded; this
+> roadmap is being rewritten.** The fast-cold-start embed / WASM runtime
+> remains the core, but on top of it the project now also pursues (a) a
+> native Cranelift **JIT** aimed at surpassing CRuby + YJIT on framework
+> dispatch and (b) **real-gem compatibility** via the blessed-gem menu.
+> See ADRs [0030](adr/0030-jit-tier.md) / [0032](adr/0032-jit-native-surpass.md) /
+> [0034](adr/0034-jit-first-surpass-yjit.md) (JIT) and
+> [0026](adr/0026-omakase-blessed-gem-menu.md) (gem menu) for the current
+> direction. The "Near / Medium / Long term" and "scope that has changed"
+> sections below predate this pivot and are partly superseded — read them
+> against those ADRs and [SUBSET.md](SUBSET.md).
+
+The roadmap is opinionated, not exhaustive. The core niche remains **a
+fast-starting, memory-frugal, Rust-implemented Ruby for embedded / WASM /
+edge use cases** — and as of the 2026-06 pivot the project also targets
+peak throughput (a native JIT, ADR 0034) and real-gem compatibility (ADR
+0026) built on top of that core. See [SUBSET.md](SUBSET.md) for the
+authoritative language-surface boundary.
 
 ## Quality bar: ruby/spec
 
@@ -200,15 +213,18 @@ In rough order of ROI for the embedding / DSL use case:
 
 ## Metaprogramming: known unknowns
 
+> **Update (2026-06): much of this has since shipped.** `method_missing`,
+> `define_method`, `instance_eval` / `class_eval`, singleton classes, and
+> `send` now work — see [SUBSET.md](SUBSET.md) (the authoritative
+> language-surface doc) and ADR [0010](adr/0010-metaprogramming-poc.md).
+> The analysis below is kept for the design rationale that drove it.
+
 Many real Ruby libraries lean heavily on metaprogramming —
 `method_missing`, `define_method`, `instance_eval`, `send` with
 non-literal symbols, `class_eval`, `Module.new { ... }`,
-`ObjectSpace`. rubyrs supports **none** of these today, and
-[SUBSET.md](SUBSET.md) currently lists most as "explicitly out of
-scope". That language is too strong for our actual position — it's
-"out of scope *for v1*", not "we will never look at this". This
-section records what we do plan to do, eventually, and why we
-haven't yet.
+`ObjectSpace`. Several of these have since landed (see the update
+above); this section records the original analysis of what to build,
+in what order, and why — not the current support level.
 
 ### Why rubyrs doesn't have it yet
 
@@ -271,12 +287,27 @@ We'd start on (5) only after a concrete user need — most likely
 that's worth the complexity budget". Until then, the position is
 "document, don't build".
 
-## Not on the roadmap (explicitly)
+## Scope that has changed (was "not on the roadmap")
 
-- Running Rails, Sinatra, or any meaningful gem
-- A full JIT or AOT compiler
-- `Fiber`, `Thread`, `Ractor`
-- Reading `Gemfile`, `require`, gem ecosystem integration
+Earlier versions of this roadmap listed the items below as explicit
+non-goals. **The strategy has since evolved — we now pursue them** (see
+the strategy banner at the top):
 
-These are good things; CRuby is good at them. rubyrs is good at something
-else.
+- **A native JIT** — shipped as the opt-in `jit-native` Cranelift backend
+  (deopts to the interpreter on any non-fast shape). ADRs
+  [0030](adr/0030-jit-tier.md) / [0032](adr/0032-jit-native-surpass.md) /
+  [0034](adr/0034-jit-first-surpass-yjit.md). *(An AOT compiler stays out
+  of scope.)*
+- **Running Sinatra / framework gems** — the blessed-gem menu (ADR
+  [0026](adr/0026-omakase-blessed-gem-menu.md)) targets Rack / Sinatra /
+  ActiveSupport-class gems at CRuby parity. *(Rails / ActiveRecord is a
+  longer-horizon stretch goal, not yet a parity commitment.)*
+- **`require` + `$LOAD_PATH`** — shipped. **`Fiber`** — shipped (Ruby API
+  over the `_fiber` battery).
+- **Gem ecosystem integration** — partial, via vendored/blessed gems on
+  the menu.
+
+Still genuinely out of scope: arbitrary `bundle install` from
+rubygems.org, `Thread` / `Ractor` parallelism (the VM is single-threaded),
+an AOT compiler, and runtime `eval` of arbitrary strings on the WASM /
+embed deployment path. CRuby is good at those; rubyrs is aimed elsewhere.

@@ -20,6 +20,34 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+> Backfill in progress: the post-0.2.0 JIT arc landed across ~500 commits
+> without per-PR changelog entries. The headlines are captured below from
+> their ADRs; finer-grained entries are still being reconstructed.
+
+### Added
+
+- **Native JIT (`jit-native`, opt-in)** — a Cranelift method/loop JIT that
+  deopts to the always-correct interpreter on any non-fast shape; covers
+  integer methods, recursive calls, and Int/Float `Enumerable` drivers
+  (`sum` / `map` / `select` / `find` / `group_by` / `each_with_object` / …).
+  Off by default. (ADR [0030](docs/adr/0030-jit-tier.md),
+  [0032](docs/adr/0032-jit-native-surpass.md),
+  [0034](docs/adr/0034-jit-first-surpass-yjit.md))
+- **`Fiber`** — `Fiber.new` / `#resume` / `Fiber.yield` / `#alive?` over the
+  `_fiber` battery.
+
+### Changed
+
+- **Generational mark-sweep GC** — young/old regions with minor/major
+  collections and a write barrier, replacing the flat mark-sweep
+  (substantially less collection churn on object-heavy workloads).
+
+### Internal
+
+- **Dispatch-core fast paths** — primitive / index / `Proc#call` fast paths
+  that bypass the method-name cascade on hot framework dispatch. (ADR
+  [0031](docs/adr/0031-dispatch-core.md))
+
 ## [0.2.0] - 2026-06-14
 
 ### Release highlights

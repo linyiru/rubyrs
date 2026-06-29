@@ -9,8 +9,16 @@ For *why* the project is the way it is, read [docs/](docs/) — especially
 
 Check [docs/SUBSET.md](docs/SUBSET.md) and
 [docs/ROADMAP.md](docs/ROADMAP.md) to see if your idea is in scope.
-rubyrs is **not** trying to be a full Ruby. Some changes (running Rails,
-implementing a JIT, supporting C extensions) are explicit non-goals.
+rubyrs is **not** trying to be a full Ruby, but the scope has grown well
+beyond the original subset. A native JIT (ADRs
+[0030](docs/adr/0030-jit-tier.md) / [0032](docs/adr/0032-jit-native-surpass.md) /
+[0034](docs/adr/0034-jit-first-surpass-yjit.md)), the C-extension ABI (the
+`cext` *default* feature), and the blessed-gem compatibility menu (ADR
+[0026](docs/adr/0026-omakase-blessed-gem-menu.md), targeting Rack / Sinatra /
+ActiveSupport-class gems) are all active areas — not non-goals. Genuinely
+out of scope: `Thread` / `Ractor` parallelism, an AOT compiler, arbitrary
+`bundle install` from rubygems.org, and runtime `eval` of arbitrary strings
+on the WASM / embed path.
 
 For anything bigger than a small bug fix or a missing built-in, open an
 issue first to align on scope.
