@@ -779,6 +779,14 @@ pub(crate) struct Vm {
     /// block per element with no per-element interpreter re-entry.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_sum_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    /// B4 (ADR 0034) — `objs.sum { |o| o.method(CONST) }` whole-loop object-method
+    /// dispatch drivers, keyed by `(block_proto, element_class_ptr, callee_proto)`.
+    /// The callee's native address + class guard + const arg are baked in, so the
+    /// key carries the callee proto: a method redefinition (new proto) recompiles
+    /// instead of calling a stale address.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_objmethod_sum_loop:
+        crate::intern::FxHashMap<(usize, usize, usize), Option<crate::jit_native::NativeLoop>>,
     /// Per block-proto cache of compiled whole-loop `Array#map { block }` drivers
     /// (ADR 0034 layer 3): the full map runs native, filling a pre-sized result.
     #[cfg(feature = "jit-native")]
@@ -2031,6 +2039,8 @@ impl Vm {
             jit_native_block: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_sum_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_objmethod_sum_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_map_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]

@@ -1537,6 +1537,172 @@ fn compile_native_loop_inner(
     })
 }
 
+/// B4 (ADR 0034): whole-loop native driver for `objs.sum { |o| o.method(CONST) }`
+/// over an Array of MONOMORPHIC user Objects — the breakthrough for object-method
+/// dispatch (the disp_fixed/disp_variadic shapes that otherwise re-enter `do_call`
+/// per element). The receiver class (`class_ptr`), the callee's compiled native
+/// address (`method_addr`, a `NativeProto`), and the constant Int argument
+/// (`arg_const`) are baked in at dispatch time — resolved from the array's first
+/// element — so each iteration is: read + class-guard the element
+/// (`jit_array_elem_obj_guarded`), a native->native method call (NO interpreter
+/// re-entry, NO `do_call`), and an overflow-checked accumulate. A class miss /
+/// non-Object element / method-internal deopt / i64 overflow takes the shared
+/// `deopt` exit, and the caller redoes the sum generically — sound because a
+/// compiled method is pure (the op-gate admits no side effect), so a part-way
+/// deopt commits nothing observable.
+///
+/// ABI `(vm, self, in_objid, seed) -> (sum, ovf)` — reuses `NativeLoop`. `self`
+/// (the sum receiver) is unused; the per-element receiver is the array element.
+pub(crate) fn compile_native_objmethod_sum_loop(
+    method_addr: usize,
+    class_ptr: usize,
+    arg_const: i64,
+) -> Option<NativeLoop> {
+    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    builder.symbol("jit_array_len", jit_array_len as *const u8);
+    builder.symbol(
+        "jit_array_elem_obj_guarded",
+        jit_array_elem_obj_guarded as *const u8,
+    );
+    builder.symbol("method", method_addr as *const u8);
+    let mut module = JITModule::new(builder);
+    let ptr_ty = module.target_config().pointer_type();
+    let mut ctx = module.make_context();
+
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(ptr_ty)); // vm
+    sig.params.push(AbiParam::new(ptr_ty)); // self (sum receiver, unused)
+    sig.params.push(AbiParam::new(types::I64)); // in array objid
+    sig.params.push(AbiParam::new(types::I64)); // seed
+    sig.returns.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I8));
+    ctx.func.signature = sig.clone();
+    let fid = module.declare_function("objmsum", Linkage::Export, &sig).ok()?;
+
+    let mut lensig = module.make_signature();
+    lensig.params.push(AbiParam::new(ptr_ty));
+    lensig.params.push(AbiParam::new(types::I64));
+    lensig.returns.push(AbiParam::new(types::I64));
+    let lenid = module
+        .declare_function("jit_array_len", Linkage::Import, &lensig)
+        .ok()?;
+    // jit_array_elem_obj_guarded: (vm, objid, i, cls) -> (i64 elem_ptr, i8 ovf).
+    let mut elsig = module.make_signature();
+    elsig.params.push(AbiParam::new(ptr_ty));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I8));
+    let elid = module
+        .declare_function("jit_array_elem_obj_guarded", Linkage::Import, &elsig)
+        .ok()?;
+    // method: (vm, self:ptr, i64 arg) -> (i64, i8) — a NativeProto's ABI.
+    let mut msig = module.make_signature();
+    msig.params.push(AbiParam::new(ptr_ty));
+    msig.params.push(AbiParam::new(ptr_ty));
+    msig.params.push(AbiParam::new(types::I64));
+    msig.returns.push(AbiParam::new(types::I64));
+    msig.returns.push(AbiParam::new(types::I8));
+    let mid = module
+        .declare_function("method", Linkage::Import, &msig)
+        .ok()?;
+
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let len_ref = module.declare_func_in_func(lenid, fb.func);
+        let el_ref = module.declare_func_in_func(elid, fb.func);
+        let m_ref = module.declare_func_in_func(mid, fb.func);
+
+        let entry = fb.create_block();
+        let head = fb.create_block();
+        let body = fb.create_block();
+        let cont1 = fb.create_block();
+        let cont2 = fb.create_block();
+        let exit = fb.create_block();
+        let deopt = fb.create_block();
+        fb.append_block_params_for_function_params(entry);
+        fb.append_block_param(head, types::I64); // i
+        fb.append_block_param(head, types::I64); // acc
+        fb.append_block_param(exit, types::I64); // acc
+
+        fb.switch_to_block(entry);
+        let (vm_param, in_objid, seed) = {
+            let p = fb.block_params(entry);
+            (p[0], p[2], p[3])
+        };
+        let call_len = fb.ins().call(len_ref, &[vm_param, in_objid]);
+        let len = fb.inst_results(call_len)[0];
+        let zero = fb.ins().iconst(types::I64, 0);
+        fb.ins().jump(head, &[zero.into(), seed.into()]);
+
+        fb.switch_to_block(head);
+        let (i, acc) = {
+            let p = fb.block_params(head);
+            (p[0], p[1])
+        };
+        let cond = fb.ins().icmp(IntCC::SignedLessThan, i, len);
+        fb.ins().brif(cond, body, &[], exit, &[acc.into()]);
+
+        // body: (eptr, ovf1) = elem_obj_guarded(vm, in, i, class_ptr)
+        fb.switch_to_block(body);
+        let clsc = fb.ins().iconst(types::I64, class_ptr as i64);
+        let call_el = fb.ins().call(el_ref, &[vm_param, in_objid, i, clsc]);
+        let (eptr, ovf1) = {
+            let r = fb.inst_results(call_el);
+            (r[0], r[1])
+        };
+        fb.ins().brif(ovf1, deopt, &[], cont1, &[]);
+
+        // cont1: (r, ovf2) = method(vm, eptr, arg_const)
+        fb.switch_to_block(cont1);
+        let argc = fb.ins().iconst(types::I64, arg_const);
+        let call_m = fb.ins().call(m_ref, &[vm_param, eptr, argc]);
+        let (r, ovf2) = {
+            let res = fb.inst_results(call_m);
+            (res[0], res[1])
+        };
+        fb.ins().brif(ovf2, deopt, &[], cont2, &[]);
+
+        // cont2: acc = acc + r (overflow-checked); loop to head(i+1, acc)
+        fb.switch_to_block(cont2);
+        let one = fb.ins().iconst(types::I64, 1);
+        let i2 = fb.ins().iadd(i, one);
+        let (acc2, ovf3) = fb.ins().sadd_overflow(acc, r);
+        let nh = fb.create_block();
+        fb.ins().brif(ovf3, deopt, &[], nh, &[]);
+        fb.switch_to_block(nh);
+        fb.ins().jump(head, &[i2.into(), acc2.into()]);
+
+        fb.switch_to_block(exit);
+        let acc_out = fb.block_params(exit)[0];
+        let ok = fb.ins().iconst(types::I8, 0);
+        fb.ins().return_(&[acc_out, ok]);
+
+        fb.switch_to_block(deopt);
+        let z = fb.ins().iconst(types::I64, 0);
+        let bad = fb.ins().iconst(types::I8, 1);
+        fb.ins().return_(&[z, bad]);
+
+        fb.seal_all_blocks();
+        fb.finalize();
+    }
+    module.define_function(fid, &mut ctx).ok()?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().ok()?;
+    let code_ptr = module.get_finalized_function(fid);
+    let ptr = unsafe {
+        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+            code_ptr,
+        )
+    };
+    Some(NativeLoop {
+        _module: module,
+        ptr,
+    })
+}
+
 /// Compile a native whole-loop `Array#inject` / `reduce { |acc, x| .. }` driver
 /// (ADR 0034 layer 3) around an already-compiled 2-param Int block (`block_addr`).
 /// The block threads the accumulator: `acc = blk(acc, elem)` per element, no
@@ -3908,6 +4074,46 @@ pub(crate) unsafe extern "C" fn jit_arr_elem_attr_int(
                 _ => deopt,
             }
         }
+        _ => deopt,
+    }
+}
+
+/// B4 object-method dispatch primitive (ADR 0034): read `arr[i]`, require it to be
+/// a `Value::Object` whose class pointer == `expected_cls` (the monomorphic guard
+/// baked into the loop at dispatch time), and return a pointer to the element
+/// `Value` — its stable address INSIDE the array's backing `Vec` — as i64 in `res`.
+/// That pointer is the receiver for the immediately-following native method call
+/// (the compiled method's `*const Value` self). Any deopt (out of bounds,
+/// non-Object, class mismatch / megamorphic site) sets `ovf=1`, so the whole pure
+/// loop falls back to the interpreter, which handles the polymorphic tail.
+///
+/// # Safety
+/// `vm` valid; `arr_objid` a live pinned Array. The returned pointer is valid only
+/// until the next heap mutation/alloc — the loop is GC-free and never mutates the
+/// array, and the method call runs before control returns here, so the element's
+/// address does not move while it is live.
+pub(crate) unsafe extern "C" fn jit_array_elem_obj_guarded(
+    vm: *const crate::vm::Vm,
+    arr_objid: i64,
+    i: i64,
+    expected_cls: i64,
+) -> NRet {
+    let deopt = NRet { res: 0, ovf: 1 };
+    let vm = unsafe { &*vm };
+    let arr = vm.heap.array(crate::value::ObjId(arr_objid as u32));
+    let elem = match arr.get(i as usize) {
+        Some(v) => v,
+        None => return deopt,
+    };
+    let oid = match elem {
+        Value::Object(oid) => *oid,
+        _ => return deopt,
+    };
+    match vm.heap.try_class_of(oid) {
+        Some(c) if std::rc::Rc::as_ptr(&c) as usize == expected_cls as usize => NRet {
+            res: elem as *const Value as i64,
+            ovf: 0,
+        },
         _ => deopt,
     }
 }

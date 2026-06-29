@@ -1568,6 +1568,15 @@ impl Vm {
                 if let Some(s) = g.vm.try_native_floatint_sum_loop(block, id, init) {
                     return Ok(Some(Value::Int(s)));
                 }
+                // B4 object-method dispatch (ADR 0034): `objs.sum { |o| o.method(c) }`
+                // over a monomorphic Object array — the whole loop runs native with a
+                // direct native->native method call (no per-element `do_call`). All the
+                // Int/Float element loops above decline first (the element is an Object,
+                // not an Int/Float). A class miss / method deopt / overflow → generic.
+                #[cfg(feature = "jit-native")]
+                if let Some(s) = g.vm.try_native_objmethod_sum_loop(block, id, init) {
+                    return Ok(Some(Value::Int(s)));
+                }
                 let pre_frames = g.vm.frames.len();
                 let mut acc: Value = Value::Int(init);
                 let mut early = None;

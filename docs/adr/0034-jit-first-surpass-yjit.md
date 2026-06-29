@@ -644,8 +644,40 @@ the block-compile + cache key `(proto, float_elem, float_val)`. Int→Float coer
 STRESS_GC clean; diff_cruby GREEN both builds; the `jit_float_key_sum_by_key` fixture covers all combos.
 
 The common Array + Hash Enumerable/aggregation surface is now broadly covered for Int and Float across
-elements, keys, AND values. Remaining: broadening the value-method JIT surface, and the larger lever —
-the base `do_call` dispatch cascade (ADR 0031), which the JIT only bypasses where it fires.
+elements, keys, AND values.
+
+### Layer 3g — B4 object-method dispatch: the do_call breakthrough (beats YJIT 3×, CRuby 4.8×)
+
+The lever that finally cracks **`do_call`**. Fresh re-measurement (2026-06-29) confirmed the interpreter
+dispatch floor is structural: even an *already-fast-pathed* fixed-arity object-method call is 2.5× CRuby,
+and a variadic one 5×; the ADR-0031 binder frontier is exhausted; and the JIT did **not** fire on these
+shapes (an object-method call *inside* a driver loop re-enters `do_call` per element). That is exactly B4.
+
+**`objs.sum { |o| o.method(CONST) }` over a monomorphic Object array now compiles to a whole-loop native
+driver — 3.0× YJIT (jitN 0.24s vs 0.72s), 4.8× CRuby (1.15s), 22× interp (5.34s).** The framework-dispatch
+PoC predicted 4× YJIT (an idealized upper bound); the first real B4 driver hits 3× on a 1-arg-method shape.
+
+Mechanism — **dispatch-time monomorphic specialization**, no runtime compilation in the loop:
+- The array's FIRST element fixes the receiver class. The callee is resolved (`lookup_method_uncached`,
+  method_gen-correct) and compiled for that class (`compile_native_for_class`, the existing B1 method JIT),
+  and its native address + the class pointer + the constant Int arg are baked into a specialized loop.
+- Per element: `jit_array_elem_obj_guarded` reads the element, requires `Value::Object` with the baked
+  class (deopt otherwise), and returns a pointer to the element `Value` inside the array's backing Vec —
+  the receiver for a **direct native→native call** to the compiled method (NO `do_call`, no frame, no
+  dispatch). Overflow-checked accumulate; one shared `deopt` exit.
+- Soundness: a compiled method is pure (the op-gate admits no side effect), so a part-way deopt commits
+  nothing → the caller redoes the sum generically. A class miss / non-Object element / method-internal
+  deopt / i64 overflow all deopt. The loop cache key is `(block_proto, class_ptr, callee_proto)` so a
+  method redefinition (new proto) recompiles rather than calling a stale address. The element pointer is
+  valid across the call: the array is pinned, the heap is non-moving, and the GC-free pure method does not
+  realloc the array. STRESS_GC clean; diff_cruby GREEN both builds (947); `jit_objmethod_sum` fixture
+  covers the polymorphic-deopt, bignum-overflow-deopt, non-Object-deopt, empty, and explicit-seed shapes.
+
+This is the validated answer to "how to break through `do_call`": **not another interpreter cascade tweak
+(frontier exhausted, gap structural) — bypass `do_call` with a native driver + a baked monomorphic class
+guard.** Next within B4: a varying arg (loop index / captured var) instead of a constant; the
+each-accumulator / `map` / `count` analogues; and an N-way inline PIC so a genuinely polymorphic site
+stays native instead of deopting. Also remaining: broadening the value-method JIT surface.
 
 ## Risks
 

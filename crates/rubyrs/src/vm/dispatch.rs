@@ -16250,6 +16250,111 @@ impl Vm {
         sl.call(vm_ptr, &self_val, array_id.0 as i64, init)
     }
 
+    /// B4 (ADR 0034) — the object-method-dispatch breakthrough. Whole-loop native
+    /// driver for `objs.sum { |o| o.method(CONST) }` over an Array of MONOMORPHIC
+    /// user Objects: the shape that otherwise re-enters `do_call` per element (2.5–5×
+    /// CRuby). The loop reads + class-guards each element and calls the callee's
+    /// COMPILED native code directly (native->native, no `do_call`), accumulating.
+    ///
+    /// Monomorphic specialization at dispatch time: the array's FIRST element fixes
+    /// the receiver class; the callee is resolved (method_gen-correct, via
+    /// `lookup_method_uncached`) + compiled for that class, and its address + the
+    /// class pointer + the constant arg are baked into the loop. Any element of a
+    /// different class / a non-Object / a method-internal deopt / i64 overflow takes
+    /// the loop's `deopt` exit and the caller redoes the sum generically (sound: a
+    /// compiled method is pure, so a part-way deopt commits nothing). The loop cache
+    /// key includes the callee proto so a method redefinition (new proto) recompiles
+    /// rather than calling a stale address. `None` = decline -> generic loop.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_objmethod_sum_loop(&mut self, block_id: ObjId, array_id: ObjId, init: i64) -> Option<i64> {
+        use crate::bytecode::Op;
+        if !self.jit_native_on {
+            return None;
+        }
+        let (block_proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[block_proto_idx].block_kw_params.is_empty()
+            || self.protos[block_proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        // Recognize the block body `{ |o| o.NAME(CONST) }`:
+        //   LoadLocal(param) ; LoadConstInt(c) ; Call(NAME, 1, _) [ ; Return ]
+        let (name_id, arg_const) = {
+            let code = &self.protos[block_proto_idx].code;
+            let body: &[Op] = match code.last() {
+                Some(Op::Return) => &code[..code.len() - 1],
+                _ => &code[..],
+            };
+            match body {
+                [Op::LoadLocal(p), Op::LoadConstInt(c), Op::Call(name, 1, _)]
+                    if *p == param_start =>
+                {
+                    (*name, *c)
+                }
+                _ => return None,
+            }
+        };
+        // Peek the array: empty declines (let the generic loop type the result); the
+        // first element fixes the monomorphic receiver class.
+        let ecls = {
+            let arr = self.heap.array(array_id);
+            let oid = match arr.first() {
+                Some(Value::Object(oid)) => *oid,
+                _ => return None,
+            };
+            self.heap.try_class_of(oid)?
+        };
+        let class_ptr = std::rc::Rc::as_ptr(&ecls) as usize;
+        // Resolve NAME on that class: a user, fixed-arity (1 required), non-closure,
+        // non-builtin method (so it can compile to a NativeProto).
+        let m = self.lookup_method_uncached(&ecls, name_id)?;
+        if m.closure.is_some() || m.builtin.is_some() {
+            return None;
+        }
+        match m.fixed_arity {
+            Some(f) if f.required as usize == 1 => {}
+            _ => return None,
+        }
+        let callee_proto = m.proto_idx;
+        // Compile the callee for this class (reuse the B1 per-proto cache).
+        if !self.jit_native.contains_key(&callee_proto) {
+            let compiled = self.compile_native_for_class(callee_proto, Some(&ecls));
+            self.jit_native.insert(callee_proto, compiled);
+        }
+        let (method_addr, gc) = match self.jit_native.get(&callee_proto) {
+            Some(Some(np)) => (np.addr(), np.guard_class.get()),
+            _ => return None,
+        };
+        // The cached callee must be valid for THIS class (no baked cross-call to a
+        // different receiver class). guard_class 0 = class-agnostic (no cross-calls).
+        if gc != 0 && gc != class_ptr {
+            return None;
+        }
+        // Specialized whole-loop driver, keyed by (block, class, callee proto) so a
+        // method redefinition (new proto) recompiles rather than reusing a stale addr.
+        let key = (block_proto_idx, class_ptr, callee_proto);
+        if !self.jit_native_objmethod_sum_loop.contains_key(&key) {
+            let compiled = crate::jit_native::compile_native_objmethod_sum_loop(
+                method_addr, class_ptr, arg_const,
+            );
+            self.jit_native_objmethod_sum_loop.insert(key, compiled);
+        }
+        let sl = match self.jit_native_objmethod_sum_loop.get(&key) {
+            Some(Some(sl)) => sl,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        // `self`/recv is unused by the driver (the per-element receiver is the array
+        // element); pass Nil as a placeholder.
+        sl.call(vm_ptr, &Value::Nil, array_id.0 as i64, init)
+    }
+
     /// Whole-loop fast path for `array.sum(init) { |x| f(x) }` over an all-FLOAT
     /// array (ADR 0034 layer 3d — first Float driver). The block's element +
     /// result are f64 BITS in the i64 ABI; the loop `fadd`-accumulates. `init_bits`
