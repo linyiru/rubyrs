@@ -1614,6 +1614,20 @@ impl Vm {
                                     }
                                     acc = g.vm.apply_int_promote(kind, *x, *y)?;
                                 }
+                                // Float fold (`floats.reduce(:+)`): the +,-,*,/ ops
+                                // promote to f64 (IEEE — div-by-0 is ±Inf, no raise).
+                                // Mixed Int/Float coerces the Int side. Other ops
+                                // (`**`, `%`) decline to the generic Enumerable path.
+                                (Value::Float(_), Value::Int(_) | Value::Float(_))
+                                | (Value::Int(_), Value::Float(_)) => {
+                                    let x = match &acc { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => unreachable!() };
+                                    let y = match v { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => unreachable!() };
+                                    use crate::bytecode::BinOpKind::*;
+                                    acc = Value::Float(match kind {
+                                        Add => x + y, Sub => x - y, Mul => x * y, Div => x / y,
+                                        _ => return Ok(None),
+                                    });
+                                }
                                 _ => {
                                     #[cfg(feature = "bignum")]
                                     if let Some(next) = g.vm.try_bigint_binop(kind, &acc, v)? {
@@ -1650,6 +1664,20 @@ impl Vm {
                                         }));
                                     }
                                     acc = g.vm.apply_int_promote(kind, *x, *y)?;
+                                }
+                                // Float fold (`floats.reduce(:+)`): the +,-,*,/ ops
+                                // promote to f64 (IEEE — div-by-0 is ±Inf, no raise).
+                                // Mixed Int/Float coerces the Int side. Other ops
+                                // (`**`, `%`) decline to the generic Enumerable path.
+                                (Value::Float(_), Value::Int(_) | Value::Float(_))
+                                | (Value::Int(_), Value::Float(_)) => {
+                                    let x = match &acc { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => unreachable!() };
+                                    let y = match v { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => unreachable!() };
+                                    use crate::bytecode::BinOpKind::*;
+                                    acc = Value::Float(match kind {
+                                        Add => x + y, Sub => x - y, Mul => x * y, Div => x / y,
+                                        _ => return Ok(None),
+                                    });
                                 }
                                 _ => {
                                     #[cfg(feature = "bignum")]

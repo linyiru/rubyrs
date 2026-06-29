@@ -149,6 +149,12 @@ pub(crate) fn compile(
     proto: &Proto,
     self_name_id: SymId,
     callees: &FxHashMap<SymId, usize>,
+    // FLOAT cross-call addresses: a callee's fparam (float-param) machine address,
+    // used when a `CallNoRecv(name, 1)` in this body passes a Float arg. The callee
+    // takes f64 bits (i64 ABI) and returns f64 bits — the caller bitcasts at the
+    // boundary. Empty for blocks + leaf methods. This is what lets a compiled method
+    // INLINE a float-arg call (`run` -> `poly(k*0.5)`) instead of paying dispatch.
+    float_callees: &FxHashMap<SymId, usize>,
     getters: &FxHashMap<SymId, SymId>,
     syms: &JitSyms,
     block: Option<(u32, u32, bool, AccKind)>,
@@ -156,6 +162,12 @@ pub(crate) fn compile(
     // valid for a 1-param value block (Float-element drivers like `sum`); the
     // param binds as `Kind::Float`. `false` for every Int driver + all methods.
     float_elem: bool,
+    // The accumulator / value-result is a Float (independent of the element kind).
+    // Decoupled from `float_elem` so an INT-element block whose body produces a
+    // Float (`ints.sum { |x| x * 1.5 }`) can return f64 bits into a Float
+    // accumulator. Existing callers pass `float_acc == float_elem` (behaviour-
+    // identical); only the Int-elem/Float-acc sum driver passes (false, true).
+    float_acc: bool,
 ) -> Option<NativeProto> {
     // Shape gate (methods only): exactly one required positional param. A block's
     // 1-param eligibility is checked by the caller via its `BlockHandle` fields.
@@ -239,6 +251,7 @@ pub(crate) fn compile(
     // Op gate: every op must be one we model. Collect the distinct external
     // callees actually used, so only those get a JIT symbol + import.
     let mut used_callees: Vec<SymId> = Vec::new();
+    let mut used_float_callees: Vec<SymId> = Vec::new();
     for op in code {
         match op {
             Op::LoadConstInt(_)
@@ -264,10 +277,18 @@ pub(crate) fn compile(
             Op::BinOp(_) | Op::BinOpLocalLocal(_, _, _) | Op::BinOpInt(_, _) => {}
             // Self-recursive 1-arg call (`fib(n-1)`) → native self-call.
             Op::CallNoRecv(name, 1, _) if *name == self_name_id => {}
-            // Call to another already-compiled 1-arg method → native call.
-            Op::CallNoRecv(name, 1, _) if callees.contains_key(name) => {
-                if !used_callees.contains(name) {
+            // Call to another already-compiled 1-arg method → native call. A name
+            // may be in BOTH maps (called with an Int arg at one site, Float at
+            // another); register whichever symbols the maps offer — the codegen
+            // picks the right one by the arg's kind at each site.
+            Op::CallNoRecv(name, 1, _)
+                if callees.contains_key(name) || float_callees.contains_key(name) =>
+            {
+                if callees.contains_key(name) && !used_callees.contains(name) {
                     used_callees.push(*name);
+                }
+                if float_callees.contains_key(name) && !used_float_callees.contains(name) {
+                    used_float_callees.push(*name);
                 }
             }
             // Bare 0-arg call to a self attribute reader (`amount` → `@amount`)
@@ -314,6 +335,10 @@ pub(crate) fn compile(
     // Register each used callee's machine address as a symbol the JIT links.
     for cid in &used_callees {
         builder.symbol(format!("c{}", cid.0), callees[cid] as *const u8);
+    }
+    // Float cross-call callees get a distinct `cf{cid}` symbol (the fparam address).
+    for cid in &used_float_callees {
+        builder.symbol(format!("cf{}", cid.0), float_callees[cid] as *const u8);
     }
     // Value primitives callable from the body.
     builder.symbol("jit_ivar_get_int", jit_ivar_get_int as *const u8);
@@ -413,6 +438,15 @@ pub(crate) fn compile(
             .ok()?;
         callee_fids.insert(*cid, cfid);
     }
+    // Float cross-call callees share the same `(vm, self, i64) -> (i64, i8)` ABI —
+    // only the i64s' meaning (f64 bits) differs, handled at the call boundary.
+    let mut float_callee_fids: FxHashMap<SymId, cranelift_module::FuncId> = FxHashMap::default();
+    for cid in &used_float_callees {
+        let cfid = module
+            .declare_function(&format!("cf{}", cid.0), Linkage::Import, &sig)
+            .ok()?;
+        float_callee_fids.insert(*cid, cfid);
+    }
     let mut fbctx = FunctionBuilderContext::new();
     // Set inside the codegen block when the returned value is an array ObjId.
     let mut returns_array = false;
@@ -443,6 +477,10 @@ pub(crate) fn compile(
         let mut callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
         for (cid, cfid) in &callee_fids {
             callee_refs.insert(*cid, module.declare_func_in_func(*cfid, fb.func));
+        }
+        let mut float_callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
+        for (cid, cfid) in &float_callee_fids {
+            float_callee_refs.insert(*cid, module.declare_func_in_func(*cfid, fb.func));
         }
 
         // Cranelift block per leader ip; a final `done` for the post-Return tail.
@@ -806,11 +844,11 @@ pub(crate) fn compile(
                         // path. Without this, a non-Float-returning block over a Float
                         // array silently corrupts (Int 5 -> 5.0e-323).
                         match k {
-                            Kind::Int if !float_elem => {
+                            Kind::Int if !float_acc => {
                                 m_nonfloat_ret = true;
                                 v
                             }
-                            Kind::ArrayObjId if !float_elem => {
+                            Kind::ArrayObjId if !float_acc => {
                                 returns_array = true;
                                 m_nonfloat_ret = true;
                                 v
@@ -818,7 +856,7 @@ pub(crate) fn compile(
                             // Return the f64 result's BITS. A Float DRIVER's loop
                             // bitcasts back; a METHOD's dispatch boxes Value::Float
                             // (returns_float). Both want the bits here.
-                            Kind::Float if float_elem || is_method => {
+                            Kind::Float if float_acc || is_method => {
                                 m_float_ret = true;
                                 fb.ins().bitcast(types::I64, MemFlagsData::new(), v)
                             }
@@ -865,27 +903,54 @@ pub(crate) fn compile(
                 // push the result, OR the callee's overflow flag into ours (so a
                 // deep overflow deopts the whole tree).
                 Op::CallNoRecv(name, 1, _)
-                    if *name == self_name_id || callee_refs.contains_key(name) =>
+                    if *name == self_name_id
+                        || callee_refs.contains_key(name)
+                        || float_callee_refs.contains_key(name) =>
                 {
-                    let fref = if *name == self_name_id {
-                        self_ref
-                    } else {
-                        callee_refs[name]
-                    };
                     let (arg, ka) = stack.pop()?;
-                    if ka != Kind::Int {
-                        return None;
+                    // Pick the specialization by the arg's kind: an Int arg calls the
+                    // Int version (self-recursion or `c{cid}`); a Float arg the fparam
+                    // version (`cf{cid}`), passing/returning f64 BITS through the i64
+                    // ABI. A Float arg with no fparam callee (non-leaf, or a Float
+                    // self-call) declines.
+                    match ka {
+                        Kind::Int => {
+                            let fref = if *name == self_name_id {
+                                self_ref
+                            } else if let Some(r) = callee_refs.get(name) {
+                                *r
+                            } else {
+                                return None; // Int arg but only a float callee exists
+                            };
+                            let inst = fb.ins().call(fref, &[vm_param, self_param, arg]);
+                            let (res, ovf) = {
+                                let r = fb.inst_results(inst);
+                                (r[0], r[1])
+                            };
+                            let cur = fb.use_var(ovf_var);
+                            let nv = fb.ins().bor(cur, ovf);
+                            fb.def_var(ovf_var, nv);
+                            stack.push((res, Kind::Int));
+                        }
+                        Kind::Float => {
+                            let Some(fref) = float_callee_refs.get(name).copied() else {
+                                return None; // no float specialization for this callee
+                            };
+                            // Pass the f64 bits; the callee returns f64 bits.
+                            let bits = fb.ins().bitcast(types::I64, MemFlagsData::new(), arg);
+                            let inst = fb.ins().call(fref, &[vm_param, self_param, bits]);
+                            let (res, ovf) = {
+                                let r = fb.inst_results(inst);
+                                (r[0], r[1])
+                            };
+                            let cur = fb.use_var(ovf_var);
+                            let nv = fb.ins().bor(cur, ovf);
+                            fb.def_var(ovf_var, nv);
+                            let f = fb.ins().bitcast(types::F64, MemFlagsData::new(), res);
+                            stack.push((f, Kind::Float));
+                        }
+                        _ => return None,
                     }
-                    // Forward vm + self so the callee can touch the heap too.
-                    let inst = fb.ins().call(fref, &[vm_param, self_param, arg]);
-                    let (res, ovf) = {
-                        let r = fb.inst_results(inst);
-                        (r[0], r[1])
-                    };
-                    let cur = fb.use_var(ovf_var);
-                    let nv = fb.ins().bor(cur, ovf);
-                    fb.def_var(ovf_var, nv);
-                    stack.push((res, Kind::Int));
                 }
                 // Pure unary Int primitive on the stack top (`x.abs`, `x.even?`,
                 // …) — lowered inline, no call (see `emit_int_unary`).
@@ -1884,9 +1949,25 @@ pub(crate) fn compile_native_eachidx_loop(block_addr: usize) -> Option<NativeLoo
 /// f64 bits) and boxes the result as `Value::Float(f64::from_bits(res))`. A non-Float
 /// element deopts → the caller redoes the generic sum.
 pub(crate) fn compile_native_floatsum_loop(block_addr: usize) -> Option<NativeLoop> {
+    compile_native_floatsum_loop_inner(block_addr, false)
+}
+
+/// `int_elem`: read elements as Int (the block takes an Int param, produces a Float
+/// — `ints.sum { |x| x * 1.5 }`); else read as Float (`floats.sum { ... }`). Either
+/// way the accumulator is f64 and the block returns f64 BITS, so only the element
+/// reader symbol differs.
+pub(crate) fn compile_native_floatsum_loop_inner(
+    block_addr: usize,
+    int_elem: bool,
+) -> Option<NativeLoop> {
     let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    let (elem_name, elem_fn): (&str, *const u8) = if int_elem {
+        ("jit_array_elem_int", jit_array_elem_int as *const u8)
+    } else {
+        ("jit_array_elem_float", jit_array_elem_float as *const u8)
+    };
     builder.symbol("jit_array_len", jit_array_len as *const u8);
-    builder.symbol("jit_array_elem_float", jit_array_elem_float as *const u8);
+    builder.symbol(elem_name, elem_fn);
     builder.symbol("blk", block_addr as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
@@ -1913,10 +1994,10 @@ pub(crate) fn compile_native_floatsum_loop(block_addr: usize) -> Option<NativeLo
     elsig.params.push(AbiParam::new(ptr_ty));
     elsig.params.push(AbiParam::new(types::I64));
     elsig.params.push(AbiParam::new(types::I64));
-    elsig.returns.push(AbiParam::new(types::I64)); // f64 bits
+    elsig.returns.push(AbiParam::new(types::I64)); // f64 bits (or int value if int_elem)
     elsig.returns.push(AbiParam::new(types::I8));
     let elid = module
-        .declare_function("jit_array_elem_float", Linkage::Import, &elsig)
+        .declare_function(elem_name, Linkage::Import, &elsig)
         .ok()?;
     // 1-param value block: (vm, self, elem_bits) -> (result_bits, ovf).
     let mut blksig = module.make_signature();
