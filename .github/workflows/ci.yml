@@ -70,10 +70,10 @@ jobs:
         # keeps it there. Build / test already enforce -D warnings
         # at compile time via RUSTFLAGS, but neither runs clippy
         # itself, so the lints would silently regress without this.
-        run: cargo clippy --release --all-targets --workspace -- -D warnings
+        run: cargo clippy --release --all-targets --workspace --locked -- -D warnings
 
       - name: Build
-        run: cargo build --release --verbose
+        run: cargo build --release --locked --verbose
 
       - name: Run tests
         # Includes integration tests cext_hello + cext_bcrypt, which
@@ -86,10 +86,10 @@ jobs:
         # end through rubyrs and asserts byte-identical output.
         # Failure here means a regression in the cext FFI, not just
         # the language.
-        run: cargo test --release --verbose
+        run: cargo test --release --locked --verbose
 
       - name: Run tests (STRESS_GC=1)
-        run: cargo test --release --verbose
+        run: cargo test --release --locked --verbose
         env:
           STRESS_GC: "1"
 
@@ -280,7 +280,7 @@ jobs:
         # check rather than a build to keep the step under a few
         # seconds — the breakdown workflow exercises the full
         # `cargo build --features trace-startup` path properly.
-        run: cargo check --release --target wasm32-wasip1 --no-default-features --features trace-startup -p rubyrs
+        run: cargo check --release --locked --target wasm32-wasip1 --no-default-features --features trace-startup -p rubyrs
 
   windows-stack-smoke:
     name: Windows debug stack smoke (issue #356)
@@ -328,7 +328,30 @@ jobs:
         # Runtime::with_config + eval completed without overflowing the
         # Windows main-thread stack; a stack overflow aborts with a
         # non-zero code and fails the job.
-        run: cargo run -p rubyrs --example preamble_stack_smoke --no-default-features --features std-sink
+        run: cargo run --locked -p rubyrs --example preamble_stack_smoke --no-default-features --features std-sink
+
+  lockfile:
+    name: Lockfile in sync
+    runs-on: ubuntu-latest
+    # Sister gate to cargo-deny: deny.toml scans Cargo.lock, but the build
+    # steps must also be pinned to it or CI can go green against a dep set
+    # the committed lock never described. Every cargo build/test/publish in
+    # the workflows now passes `--locked`; this job is the belt-and-braces
+    # check that the lock itself satisfies all 13 manifests, so a manifest
+    # change that forgot to regenerate + commit Cargo.lock fails loudly here
+    # instead of resolving up silently on a cache-miss runner.
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: ./.github/actions/setup-rust-toolchain
+
+      - name: Assert Cargo.lock satisfies every manifest
+        # `--locked` makes cargo refuse to mutate Cargo.lock; if any
+        # Cargo.toml drifted from the lock this exits non-zero.
+        run: cargo metadata --locked --format-version 1 > /dev/null
 
   panic-budget:
     name: Panic budget (per-file ratchet)
@@ -827,7 +850,7 @@ jobs:
         # Release-mode is required — the baselines were measured
         # against optimised builds. Debug builds would blow every
         # RSS budget and tell us nothing useful.
-        run: cargo build --release -p rubyrs
+        run: cargo build --release --locked -p rubyrs
 
       - name: Check peak-RSS budgets
         # Runs each workload in perf/baselines.tsv three times,
@@ -876,7 +899,7 @@ jobs:
         # parity-side fix and a perf-side fix can't accidentally
         # be measuring different binaries.
         run: |
-          cargo build --release -p rubyrs \
+          cargo build --release --locked -p rubyrs \
             --features default,stdlib,_http_server,_fiber,_json_native
 
       - name: Check JSON bench per-iter budgets
@@ -1031,7 +1054,7 @@ jobs:
         # (under tests/), which exercise embed-API surfaces the unit
         # tests miss. STRESS_GC stays OFF here — coverage doesn't care
         # about GC pressure, and the extra runtime cost is wasted.
-        run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --all-targets --locked --lcov --output-path lcov.info
 
       - name: Ratchet per-file coverage
         # Compares parsed LCOV against crates/rubyrs/coverage_baseline.json.
@@ -1303,7 +1326,7 @@ jobs:
         # features (cext, regex, bignum) come from
         # `--features default`.
         run: |
-          cargo test --release \
+          cargo test --release --locked \
             --features default,stdlib,_http_server,_fiber,_json_native,_sqlite \
             --test diff_framework \
             -- --nocapture
@@ -1318,7 +1341,7 @@ jobs:
         # canon against the pinned `activesupport` installed above;
         # `json_roundtrip` diffs the JSON canon against CRuby's stdlib.
         run: |
-          cargo test --release \
+          cargo test --release --locked \
             --features default,stdlib,_http_server,_fiber,_json_native,_sqlite \
             --test diff_cruby \
             -- --nocapture
@@ -1343,7 +1366,7 @@ jobs:
         # framework fixtures rely on the same dispatch routines
         # so any STRESS_GC bug surfaces here first anyway.
         run: |
-          cargo test --release \
+          cargo test --release --locked \
             --features default,stdlib,_http_server,_fiber,_json_native,_sqlite \
             --test diff_cruby \
             -- --nocapture
