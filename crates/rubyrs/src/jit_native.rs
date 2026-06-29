@@ -293,6 +293,12 @@ pub(crate) fn compile(
     // boundary. Empty for blocks + leaf methods. This is what lets a compiled method
     // INLINE a float-arg call (`run` -> `poly(k*0.5)`) instead of paying dispatch.
     float_callees: &FxHashMap<SymId, usize>,
+    // OBJECT-arg cross-call addresses (ADR 0034 Step 1, "1a"): a no_recv callee's
+    // OBJ-PARAM variant machine address, used when a `CallNoRecv(name, 1)` in this body
+    // passes an Object arg (`run` -> `weigh(@h)`). The callee takes a `*const Value`
+    // receiver-pointer arg. Also tells `LoadIvar`/`LoadLocal` to load the arg as a
+    // pointer (`Kind::Object`) rather than an Int. Empty for blocks + leaf methods.
+    obj_param_callees: &FxHashMap<SymId, usize>,
     getters: &FxHashMap<SymId, SymId>,
     syms: &JitSyms,
     block: Option<(u32, u32, bool, AccKind)>,
@@ -405,6 +411,7 @@ pub(crate) fn compile(
     // callees actually used, so only those get a JIT symbol + import.
     let mut used_callees: Vec<SymId> = Vec::new();
     let mut used_float_callees: Vec<SymId> = Vec::new();
+    let mut used_obj_param_callees: Vec<SymId> = Vec::new();
     for op in code {
         match op {
             Op::LoadConstInt(_)
@@ -438,13 +445,18 @@ pub(crate) fn compile(
             // another); register whichever symbols the maps offer — the codegen
             // picks the right one by the arg's kind at each site.
             Op::CallNoRecv(name, 1, _)
-                if callees.contains_key(name) || float_callees.contains_key(name) =>
+                if callees.contains_key(name)
+                    || float_callees.contains_key(name)
+                    || obj_param_callees.contains_key(name) =>
             {
                 if callees.contains_key(name) && !used_callees.contains(name) {
                     used_callees.push(*name);
                 }
                 if float_callees.contains_key(name) && !used_float_callees.contains(name) {
                     used_float_callees.push(*name);
+                }
+                if obj_param_callees.contains_key(name) && !used_obj_param_callees.contains(name) {
+                    used_obj_param_callees.push(*name);
                 }
             }
             // Bare 0-arg call to a self attribute reader (`amount` → `@amount`)
@@ -505,6 +517,10 @@ pub(crate) fn compile(
     // Float cross-call callees get a distinct `cf{cid}` symbol (the fparam address).
     for cid in &used_float_callees {
         builder.symbol(format!("cf{}", cid.0), float_callees[cid] as *const u8);
+    }
+    // Object-arg cross-call callees get a `co{cid}` symbol (the obj-param variant addr).
+    for cid in &used_obj_param_callees {
+        builder.symbol(format!("co{}", cid.0), obj_param_callees[cid] as *const u8);
     }
     // Value primitives callable from the body.
     builder.symbol("jit_ivar_get_int", jit_ivar_get_int as *const u8);
@@ -736,6 +752,15 @@ pub(crate) fn compile(
             .ok()?;
         float_callee_fids.insert(*cid, cfid);
     }
+    // Obj-param cross-call callees share the same `(vm, self, i64) -> (i64, i8)` ABI;
+    // the i64 arg carries a `*const Value` receiver pointer.
+    let mut obj_param_callee_fids: FxHashMap<SymId, cranelift_module::FuncId> = FxHashMap::default();
+    for cid in &used_obj_param_callees {
+        let cfid = module
+            .declare_function(&format!("co{}", cid.0), Linkage::Import, &sig)
+            .ok()?;
+        obj_param_callee_fids.insert(*cid, cfid);
+    }
     let mut fbctx = FunctionBuilderContext::new();
     // Set inside the codegen block when the returned value is an array ObjId.
     let mut returns_array = false;
@@ -789,6 +814,10 @@ pub(crate) fn compile(
         let mut float_callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
         for (cid, cfid) in &float_callee_fids {
             float_callee_refs.insert(*cid, module.declare_func_in_func(*cfid, fb.func));
+        }
+        let mut obj_param_callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
+        for (cid, cfid) in &obj_param_callee_fids {
+            obj_param_callee_refs.insert(*cid, module.declare_func_in_func(*cfid, fb.func));
         }
 
         // Cranelift block per leader ip; a final `done` for the post-Return tail.
@@ -934,7 +963,11 @@ pub(crate) fn compile(
                     // never bracket/lshift/length, so no overlap).
                     let recv_use = ivar_call_receiver(code, ip, syms).is_some()
                         || matches!(code.get(ip + 1),
-                            Some(Op::StoreLocal(slot)) if local_is_obj_receiver(code, *slot, ip + 2, syms));
+                            Some(Op::StoreLocal(slot)) if local_is_obj_receiver(code, *slot, ip + 2, syms))
+                        // `@h` passed as the Object arg of an obj-param no_recv call
+                        // (`weigh(@h)`, "1a") — load it as a receiver pointer.
+                        || matches!(code.get(ip + 1),
+                            Some(Op::CallNoRecv(name, 1, _)) if obj_param_callees.contains_key(name));
                     if recv_use {
                         let name = fb.ins().iconst(types::I32, s.0 as i64);
                         let inst = fb.ins().call(ivar_obj_ref, &[vm_param, self_param, name]);
@@ -1445,7 +1478,8 @@ pub(crate) fn compile(
                 Op::CallNoRecv(name, 1, _)
                     if *name == self_name_id
                         || callee_refs.contains_key(name)
-                        || float_callee_refs.contains_key(name) =>
+                        || float_callee_refs.contains_key(name)
+                        || obj_param_callee_refs.contains_key(name) =>
                 {
                     let (arg, ka) = stack.pop()?;
                     // Pick the specialization by the arg's kind: an Int arg calls the
@@ -1489,16 +1523,22 @@ pub(crate) fn compile(
                             let f = fb.ins().bitcast(types::F64, MemFlagsData::new(), res);
                             stack.push((f, Kind::Float));
                         }
-                        // Object-arg SELF-recursion (`walk(x)`, ADR 0034 Step 1, piece 4):
-                        // call self (the obj-param variant being compiled) with the
-                        // element pointer; the recursion's receiver is this method's self.
-                        // Only self-recursion — a non-self callee's obj-param variant
-                        // isn't baked into `callee_refs` (Int variants). Result is Int.
+                        // Object-arg call (`walk(x)` self-recursion — piece 4; or
+                        // `weigh(@h)` a non-self obj-param callee — "1a"): call the
+                        // obj-param variant with the receiver pointer (i64 arg). Self
+                        // uses `self_ref` (the variant being compiled); a non-self callee
+                        // uses its baked `co{cid}` ref. The recursion's/callee's receiver
+                        // is this method's self (a top-level def is a private Object
+                        // method → caller's self). Result is Int.
                         Kind::Object => {
-                            if *name != self_name_id {
-                                return None;
-                            }
-                            let inst = fb.ins().call(self_ref, &[vm_param, self_param, arg]);
+                            let fref = if *name == self_name_id {
+                                self_ref
+                            } else if let Some(r) = obj_param_callee_refs.get(name) {
+                                *r
+                            } else {
+                                return None; // Object arg but no obj-param variant baked
+                            };
+                            let inst = fb.ins().call(fref, &[vm_param, self_param, arg]);
                             let (res, ovf) = {
                                 let r = fb.inst_results(inst);
                                 (r[0], r[1])

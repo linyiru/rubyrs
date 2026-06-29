@@ -16147,6 +16147,12 @@ impl Vm {
         // float-arg call site inline the callee's fparam version instead of dispatch.
         let mut float_callees: crate::intern::FxHashMap<crate::intern::SymId, usize> =
             Default::default();
+        // OBJ-PARAM specialization addresses ("1a"): a callee that takes an Object arg
+        // and calls methods on it (`weigh(node)`). Lets `weigh(@h)` inline a native
+        // call instead of dispatch. A non-obj-param callee's variant declines (its
+        // param-as-Object body fails) and stays absent.
+        let mut obj_param_callees: crate::intern::FxHashMap<crate::intern::SymId, usize> =
+            Default::default();
         if !call_names.is_empty() {
             visited.insert(proto_idx);
             for name in call_names {
@@ -16171,6 +16177,14 @@ impl Vm {
                     }
                     if let Some(Some(np)) = self.jit_native_fparam.get(&cp) {
                         float_callees.insert(name, np.addr());
+                    }
+                    // Obj-param variant (leaf-only): for an Object-arg call site.
+                    if !self.jit_native_objparam.contains_key(&cp) {
+                        let v = self.compile_native_objparam(cp);
+                        self.jit_native_objparam.insert(cp, v);
+                    }
+                    if let Some(Some(np)) = self.jit_native_objparam.get(&cp) {
+                        obj_param_callees.insert(name, np.addr());
                     }
                 }
                 // Already compiled → bake its address directly.
@@ -16227,6 +16241,7 @@ impl Vm {
             self_name_id,
             &callees,
             &float_callees,
+            &obj_param_callees,
             &getters,
             &syms,
             None,
@@ -16261,6 +16276,7 @@ impl Vm {
             self_name_id,
             &callees,
             &callees, // empty float callees (helpers + leaf fparam have none)
+            &callees, // empty obj-param callees
             &getters,
             &syms,
             None,
@@ -16289,6 +16305,7 @@ impl Vm {
             self_name_id,
             &callees,
             &callees, // empty float callees
+            &callees, // empty obj-param callees
             &getters,
             &syms,
             None,
@@ -16727,6 +16744,7 @@ impl Vm {
             dummy,
             &callees,
             &callees, // empty float callees
+            &callees, // empty obj-param callees
             &getters,
             &syms,
             Some((param_start, body_local_start, false, crate::jit_native::AccKind::None)),
@@ -17915,6 +17933,7 @@ impl Vm {
             dummy,
             &callees,
             &callees, // empty float callees (helpers + leaf fparam have none)
+            &callees, // empty obj-param callees
             &getters,
             &syms,
             Some((param_start, body_local_start, predicate, crate::jit_native::AccKind::None)),
@@ -17946,6 +17965,7 @@ impl Vm {
             dummy,
             &callees,
             &callees, // empty float callees (helpers + leaf fparam have none)
+            &callees, // empty obj-param callees
             &getters,
             &syms,
             Some((param_start, body_local_start, predicate, crate::jit_native::AccKind::None)),
@@ -17977,6 +17997,7 @@ impl Vm {
             dummy,
             &callees,
             &callees, // empty float callees (helpers + leaf fparam have none)
+            &callees, // empty obj-param callees
             &getters,
             &syms,
             Some((param_start, body_local_start, false, crate::jit_native::AccKind::Inject)),
@@ -18012,6 +18033,7 @@ impl Vm {
             dummy,
             &callees,
             &callees, // empty float callees (helpers + leaf fparam have none)
+            &callees, // empty obj-param callees
             &getters,
             &syms,
             Some((
@@ -18048,6 +18070,7 @@ impl Vm {
             dummy,
             &callees,
             &callees, // empty float callees (helpers + leaf fparam have none)
+            &callees, // empty obj-param callees
             &getters,
             &syms,
             Some((
@@ -18084,6 +18107,7 @@ impl Vm {
             dummy,
             &callees,
             &callees, // empty float callees (helpers + leaf fparam have none)
+            &callees, // empty obj-param callees
             &getters,
             &syms,
             Some((
@@ -18123,6 +18147,7 @@ impl Vm {
             dummy,
             &callees,
             &callees,
+            &callees, // empty obj-param callees
             &getters,
             &syms,
             Some((
