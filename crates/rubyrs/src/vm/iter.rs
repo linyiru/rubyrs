@@ -3521,6 +3521,16 @@ impl Vm {
                 {
                     return Ok(Some(seed.clone()));
                 }
+                // Hash-accumulator sum-by-key (ADR 0034 layer 3f): `each_with_object(
+                // Hash.new(0)) { |x, h| h[k] += v }`. Try Int-element then Float-element
+                // readers (the wrong reader deopts on the first element).
+                #[cfg(feature = "jit-native")]
+                if let Value::Hash(memo_id) = seed
+                    && (g.vm.try_native_eachobjhash_loop(block, *id, *memo_id, false).is_some()
+                        || g.vm.try_native_eachobjhash_loop(block, *id, *memo_id, true).is_some())
+                {
+                    return Ok(Some(seed.clone()));
+                }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 for v in &snapshot {
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }
