@@ -199,6 +199,10 @@ pub(crate) fn compile(
             // when it's the `getter` of a fused `@arr[i].getter` (B4); a
             // standalone one hits codegen's catch-all and declines the proto.
             Op::Call(_, 0, _) => {}
+            // The fused `x.method` op — admitted only for the pure unary Int
+            // primitives codegen models (`x.abs`/`x.even?`/…); any other
+            // `LoadLocalCall` hits the catch-all below and declines.
+            Op::LoadLocalCall(_, name, _) if is_int_unary(*name, syms) => {}
             // `@h[:k]` — `Call([], 1)`, fused with the LoadIvar + LoadSymbol.
             Op::Call(m, 1, _) if *m == syms.bracket => {}
             // `[]` literal + `a << elem` — the array-building shape, where the
@@ -408,7 +412,7 @@ pub(crate) fn compile(
                 // fall-through edge, then re-materialise it from this block's
                 // parameters.
                 if cur_open {
-                    let args = block_args(&mut fb, b, &mut block_kinds[ip], &stack);
+                    let args = block_args(&mut fb, b, &mut block_kinds[ip], &stack)?;
                     fb.ins().jump(b, &args);
                 }
                 fb.switch_to_block(b);
@@ -591,7 +595,7 @@ pub(crate) fn compile(
                 Op::Jump(off) => {
                     let t = (ip as i64 + 1 + *off as i64) as usize;
                     let tb = blocks[t].unwrap();
-                    let args = block_args(&mut fb, tb, &mut block_kinds[t], &stack);
+                    let args = block_args(&mut fb, tb, &mut block_kinds[t], &stack)?;
                     fb.ins().jump(tb, &args);
                     cur_open = false;
                 }
@@ -605,8 +609,8 @@ pub(crate) fn compile(
                     let target = blocks[t].unwrap();
                     // The stack remaining after popping `cond` flows to BOTH
                     // successors (same depth/kinds).
-                    let fall_args = block_args(&mut fb, fall, &mut block_kinds[ip + 1], &stack);
-                    let target_args = block_args(&mut fb, target, &mut block_kinds[t], &stack);
+                    let fall_args = block_args(&mut fb, fall, &mut block_kinds[ip + 1], &stack)?;
+                    let target_args = block_args(&mut fb, target, &mut block_kinds[t], &stack)?;
                     // brif: non-zero (true) -> fall-through, zero (false) -> target.
                     fb.ins().brif(cond, fall, &fall_args, target, &target_args);
                     cur_open = false;
@@ -700,6 +704,26 @@ pub(crate) fn compile(
                     let nv = fb.ins().bor(cur, ovf);
                     fb.def_var(ovf_var, nv);
                     stack.push((res, Kind::Int));
+                }
+                // Pure unary Int primitive on the stack top (`x.abs`, `x.even?`,
+                // …) — lowered inline, no call (see `emit_int_unary`).
+                Op::Call(name, 0, _) if is_int_unary(*name, syms) => {
+                    let (v, k) = stack.pop()?;
+                    if k != Kind::Int {
+                        return None;
+                    }
+                    let r = emit_int_unary(&mut fb, ovf_var, *name, syms, v)?;
+                    stack.push(r);
+                }
+                // The fused `x.method` op (LoadLocalCall) for the same unary
+                // primitives — load the receiver local, then apply inline.
+                Op::LoadLocalCall(slot, name, _) if is_int_unary(*name, syms) => {
+                    if local_kinds[*slot as usize] != Kind::Int {
+                        return None;
+                    }
+                    let v = fb.use_var(vars[*slot as usize]);
+                    let r = emit_int_unary(&mut fb, ovf_var, *name, syms, v)?;
+                    stack.push(r);
                 }
                 Op::EnterLoop | Op::ExitLoop => {} // interpreter loop-stack bookkeeping; no native state
                 _ => return None,
@@ -1324,22 +1348,83 @@ pub(crate) fn compile_native_minmax_loop(block_addr: usize, is_min: bool) -> Opt
 }
 
 /// Compute the block-call arguments for branching to `block` with the current
-/// operand `stack` live. The FIRST branch to a block fixes its parameter count
-/// + kinds (`kinds_slot`); later branches must arrive with the same shape
-/// (true for structured bytecode). Returns the SSA values to pass as args.
+/// operand `stack` live. The FIRST branch fixes the block's parameter count +
+/// kinds (`kinds_slot`); a LATER branch that arrives with a DIFFERENT kind shape
+/// returns `None` to decline the whole proto. This matters because not all merges
+/// are uniform: `x*2 if x.even?` merges an `Int` (the then-value) with a `Nil`
+/// (the missing-else value) at one block — lowering both to a single i64 param
+/// would silently treat the `nil` branch as `0`, so we must decline instead.
 fn block_args(
     fb: &mut FunctionBuilder,
     block: Block,
     kinds_slot: &mut Option<Vec<Kind>>,
     stack: &[(ClValue, Kind)],
-) -> Vec<BlockArg> {
-    if kinds_slot.is_none() {
-        for _ in stack {
-            fb.append_block_param(block, types::I64);
+) -> Option<Vec<BlockArg>> {
+    match kinds_slot {
+        None => {
+            for _ in stack {
+                fb.append_block_param(block, types::I64);
+            }
+            *kinds_slot = Some(stack.iter().map(|(_, k)| *k).collect());
         }
-        *kinds_slot = Some(stack.iter().map(|(_, k)| *k).collect());
+        Some(prev) => {
+            if prev.len() != stack.len() || prev.iter().zip(stack).any(|(p, (_, k))| p != k) {
+                return None;
+            }
+        }
     }
-    stack.iter().map(|(v, _)| (*v).into()).collect()
+    Some(stack.iter().map(|(v, _)| (*v).into()).collect())
+}
+
+/// Is `name` a pure unary Int primitive the JIT lowers inline (no call)?
+fn is_int_unary(name: SymId, syms: &JitSyms) -> bool {
+    name == syms.abs
+        || name == syms.even_p
+        || name == syms.odd_p
+        || name == syms.zero_p
+        || name == syms.positive_p
+        || name == syms.negative_p
+}
+
+/// Lower a pure unary Int primitive on `v` to inline Cranelift IR. `abs` is an
+/// `Int` (its `i64::MIN` negation overflows → deopt via `ovf_var`); the predicates
+/// are `Bool` (an `icmp` result), usable as a comparison condition or a
+/// predicate-block result. Returns `None` for an unrecognised name.
+fn emit_int_unary(
+    fb: &mut FunctionBuilder,
+    ovf_var: Variable,
+    name: SymId,
+    syms: &JitSyms,
+    v: ClValue,
+) -> Option<(ClValue, Kind)> {
+    if name == syms.abs {
+        let zero = fb.ins().iconst(types::I64, 0);
+        let (neg, of) = fb.ins().ssub_overflow(zero, v);
+        let cur = fb.use_var(ovf_var);
+        let nv = fb.ins().bor(cur, of);
+        fb.def_var(ovf_var, nv);
+        let isneg = fb.ins().icmp_imm(IntCC::SignedLessThan, v, 0);
+        Some((fb.ins().select(isneg, neg, v), Kind::Int))
+    } else if name == syms.even_p || name == syms.odd_p {
+        let bit = fb.ins().band_imm(v, 1);
+        let cc = if name == syms.even_p {
+            IntCC::Equal
+        } else {
+            IntCC::NotEqual
+        };
+        Some((fb.ins().icmp_imm(cc, bit, 0), Kind::Bool))
+    } else if name == syms.zero_p || name == syms.positive_p || name == syms.negative_p {
+        let cc = if name == syms.zero_p {
+            IntCC::Equal
+        } else if name == syms.positive_p {
+            IntCC::SignedGreaterThan
+        } else {
+            IntCC::SignedLessThan
+        };
+        Some((fb.ins().icmp_imm(cc, v, 0), Kind::Bool))
+    } else {
+        None
+    }
 }
 
 fn emit_binop(
@@ -1514,6 +1599,14 @@ pub(crate) struct JitSyms {
     pub size: SymId,
     pub bracket: SymId,
     pub lshift: SymId,
+    // Pure unary Int primitives — lowered inline so a block like `{ |x| x.even? }`
+    // or a key `{ |x| x.abs }` compiles instead of declining on the method call.
+    pub abs: SymId,
+    pub even_p: SymId,
+    pub odd_p: SymId,
+    pub zero_p: SymId,
+    pub positive_p: SymId,
+    pub negative_p: SymId,
 }
 
 /// Native primitive: allocate a fresh empty Array, return its `ObjId` as i64.

@@ -15975,6 +15975,12 @@ impl Vm {
             size: self.interner.intern("size"),
             bracket: self.interner.intern("[]"),
             lshift: self.interner.intern("<<"),
+            abs: self.interner.intern("abs"),
+            even_p: self.interner.intern("even?"),
+            odd_p: self.interner.intern("odd?"),
+            zero_p: self.interner.intern("zero?"),
+            positive_p: self.interner.intern("positive?"),
+            negative_p: self.interner.intern("negative?"),
         };
         let compiled = crate::jit_native::compile(
             &self.protos[proto_idx],
@@ -16426,6 +16432,12 @@ impl Vm {
             size: self.interner.intern("size"),
             bracket: self.interner.intern("[]"),
             lshift: self.interner.intern("<<"),
+            abs: self.interner.intern("abs"),
+            even_p: self.interner.intern("even?"),
+            odd_p: self.interner.intern("odd?"),
+            zero_p: self.interner.intern("zero?"),
+            positive_p: self.interner.intern("positive?"),
+            negative_p: self.interner.intern("negative?"),
         };
         crate::jit_native::compile(
             &self.protos[proto_idx],
@@ -16455,6 +16467,12 @@ impl Vm {
             size: self.interner.intern("size"),
             bracket: self.interner.intern("[]"),
             lshift: self.interner.intern("<<"),
+            abs: self.interner.intern("abs"),
+            even_p: self.interner.intern("even?"),
+            odd_p: self.interner.intern("odd?"),
+            zero_p: self.interner.intern("zero?"),
+            positive_p: self.interner.intern("positive?"),
+            negative_p: self.interner.intern("negative?"),
         };
         crate::jit_native::compile(
             &self.protos[proto_idx],
