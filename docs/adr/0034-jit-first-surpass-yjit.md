@@ -403,14 +403,34 @@ would double them. Two sound designs exist:
    sound, and it reuses `compile_native_inject_loop`. Needs reliable bytecode
    pattern recognition (and there is no bytecode-dump tool yet to verify it).
 
-Deferred deliberately: it is the only mutable-capture driver (categorically
-riskier soundness), it is semantically `sum`/`inject` — both shipped at 6–8× YJIT,
-so the win is already reachable by writing `.sum { }` / `.inject` — and rushing
-capture-mutation codegen would trade the stability this layer has held. Design
-recorded above; pick approach 2 (lower risk, reuses the inject loop) when resumed.
+### Layer 3c: each-accumulator — SHIPPED (approach 2)
 
-Next beyond `each`: `each_with_index` / `each_with_object` (2-param, no capture),
-`map`-to-`sum` fusion, and lifting the all-Int restriction (Float element loops).
+`arr.each { |x| total += x }` now compiles, **6.1× YJIT** (jitN 0.07s vs 0.43s).
+Approach 2 as designed: an each-accumulator IS `inject` with the accumulator bound
+to a CAPTURED slot. `compile`'s block spec gained an `AccKind` enum
+(`None`/`Inject`/`EachAcc{acc_slot}`) saying where the accumulator vs element bind
+on the C ABI; the new acc is the captured slot's variable *after* the body (not the
+block's discarded return), so `total += x; total*2` can't corrupt it.
+`try_native_each_acc_loop` finds the single written captured slot, seeds from it,
+runs `compile_native_inject_loop`, writes back. **Two soundness gates** (both now
+reusable for the rest of the family):
+
+1. *Deopt = write-back-only-on-success.* The slot is committed once, on full native
+   completion. Any deopt (non-Int element/result, overflow) commits nothing → the
+   seed is intact → the caller redoes the whole `each` generically. Verified:
+   `3×2^62` overflows mid-loop → correct bignum, no double-count.
+2. *Share-direct-only.* Fires only when the block takes the share-direct frame path
+   (`captured_is_method_scope && !creates_block && !reentrant` — exactly
+   `block_frame_locals`' condition), so a direct `captured[slot]` write is the live
+   scope. The COPY path (nested `[[1,2]].each { |p| p.each { |n| total += n } }`,
+   where `captured` is an enclosing block's per-invocation copy with a write-back
+   chain) declines to the generic walk. The now-green baseline caught the missing
+   gate as a real regression (`block_locals_share`) on the first run.
+
+Remaining capture family (use the same two gates): `each_with_object` (captured
+object + `<<`/`[]=`), `tally`/`group_by` (captured Hash mutation), `each_with_index`
+(adds an index counter). `each_with_object` is the natural next step — same
+write-back-on-success shape over a captured Array/Hash instead of an Int acc.
 
 ## Risks
 
