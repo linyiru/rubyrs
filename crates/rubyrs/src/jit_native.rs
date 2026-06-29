@@ -197,6 +197,37 @@ fn local_is_obj_receiver(code: &[Op], slot: u16, from_ip: usize, syms: &JitSyms)
     false
 }
 
+/// True if local `slot` is, after `from_ip`, loaded and used as an ARRAY (`.length`/
+/// `.size`/`[i]`) before being reassigned — so an obj-call result stored into it
+/// (`kids = node.children`) should be an `ArrayObjId` (ADR 0034 Step 1, piece 1).
+fn local_is_array(code: &[Op], slot: u16, from_ip: usize, syms: &JitSyms) -> bool {
+    let mut j = from_ip;
+    while j < code.len() {
+        match &code[j] {
+            // `kids.length`/`.size` is fused to LoadLocalCall(slot, length|size); a
+            // `kids[i]` is LoadLocal(slot), Call(bracket, 1) (1-arg, not fused).
+            Op::LoadLocalCall(s, name, _)
+                if *s == slot && (*name == syms.length || *name == syms.size) =>
+            {
+                return true;
+            }
+            Op::LoadLocal(s) if *s == slot => {
+                if let Some(Op::Call(m, 1, _)) = code.get(j + 1) {
+                    if *m == syms.bracket {
+                        return true;
+                    }
+                }
+            }
+            Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) if *s == slot => {
+                return false;
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    false
+}
+
 fn ivar_call_receiver(code: &[Op], ivar_ip: usize, syms: &JitSyms) -> Option<(SymId, u8)> {
     let mut h: i32 = 0; // height of operand-stack values ABOVE the ivar
     let mut j = ivar_ip + 1;
@@ -452,12 +483,15 @@ pub(crate) fn compile(
     builder.symbol("jit_ivar_get_int", jit_ivar_get_int as *const u8);
     builder.symbol("jit_ivar_obj_ptr", jit_ivar_obj_ptr as *const u8);
     builder.symbol("jit_obj_call", jit_obj_call as *const u8);
+    builder.symbol("jit_obj_getter_array", jit_obj_getter_array as *const u8);
     builder.symbol("jit_ivar_len", jit_ivar_len as *const u8);
     builder.symbol("jit_ivar_hash_get_int", jit_ivar_hash_get_int as *const u8);
     builder.symbol("jit_ivar_array_get_int", jit_ivar_array_get_int as *const u8);
     builder.symbol("jit_array_new", jit_array_new as *const u8);
     builder.symbol("jit_array_push", jit_array_push as *const u8);
     builder.symbol("jit_array_push_float", jit_array_push_float as *const u8);
+    builder.symbol("jit_array_len", jit_array_len as *const u8);
+    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
     builder.symbol("jit_hash_accum_get_int", jit_hash_accum_get_int as *const u8);
     builder.symbol("jit_hash_accum_set_int", jit_hash_accum_set_int as *const u8);
     builder.symbol("jit_hash_accum_get_floatkey", jit_hash_accum_get_floatkey as *const u8);
@@ -510,6 +544,35 @@ pub(crate) fn compile(
     ocsig.returns.push(AbiParam::new(types::I8));
     let ocid = module
         .declare_function("jit_obj_call", Linkage::Import, &ocsig)
+        .ok()?;
+    // `jit_array_len`: (vm, objid:i64) -> i64. For `local_arr.length` on a stack array.
+    let mut alensig = module.make_signature();
+    alensig.params.push(AbiParam::new(ptr_ty));
+    alensig.params.push(AbiParam::new(types::I64));
+    alensig.returns.push(AbiParam::new(types::I64));
+    let alenid = module
+        .declare_function("jit_array_len", Linkage::Import, &alensig)
+        .ok()?;
+    // `jit_array_elem_int`: (vm, objid:i64, i:i64) -> (i64, i8). For `local_arr[i]`.
+    let mut aeisig = module.make_signature();
+    aeisig.params.push(AbiParam::new(ptr_ty));
+    aeisig.params.push(AbiParam::new(types::I64));
+    aeisig.params.push(AbiParam::new(types::I64));
+    aeisig.returns.push(AbiParam::new(types::I64));
+    aeisig.returns.push(AbiParam::new(types::I8));
+    let aeiid = module
+        .declare_function("jit_array_elem_int", Linkage::Import, &aeisig)
+        .ok()?;
+    // `jit_obj_getter_array`: (vm, recv:ptr, getter:i32, cache:ptr) -> (objid, i8).
+    let mut ogasig = module.make_signature();
+    ogasig.params.push(AbiParam::new(ptr_ty)); // vm
+    ogasig.params.push(AbiParam::new(ptr_ty)); // recv ptr
+    ogasig.params.push(AbiParam::new(types::I32)); // getter sym
+    ogasig.params.push(AbiParam::new(ptr_ty)); // cache cell ptr
+    ogasig.returns.push(AbiParam::new(types::I64));
+    ogasig.returns.push(AbiParam::new(types::I8));
+    let ogaid = module
+        .declare_function("jit_obj_getter_array", Linkage::Import, &ogasig)
         .ok()?;
     // `jit_ivar_len` shares the same `(vm, self, name:i32) -> (i64, i8)` sig.
     let alid = module
@@ -659,6 +722,9 @@ pub(crate) fn compile(
         let ivar_ref = module.declare_func_in_func(ivid, fb.func);
         let ivar_obj_ref = module.declare_func_in_func(ivobjid, fb.func);
         let obj_call_ref = module.declare_func_in_func(ocid, fb.func);
+        let obj_getter_arr_ref = module.declare_func_in_func(ogaid, fb.func);
+        let arr_len_ref = module.declare_func_in_func(alenid, fb.func);
+        let arr_elem_int_ref = module.declare_func_in_func(aeiid, fb.func);
         let arraylen_ref = module.declare_func_in_func(alid, fb.func);
         let hashget_ref = module.declare_func_in_func(hgid, fb.func);
         let arrget_ref = module.declare_func_in_func(agid, fb.func);
@@ -1167,6 +1233,18 @@ pub(crate) fn compile(
                     }
                     stack.push((arr, Kind::ArrayObjId));
                 }
+                // `arr.length` / `arr.size` on a stack ArrayObjId (a local Array, e.g.
+                // `kids.length` from `kids = node.children`) → native length (ADR 0034
+                // Step 1, piece 2). The ivar `@arr.length` form is fused at `LoadIvar`.
+                Op::Call(m, 0, _)
+                    if (*m == syms.length || *m == syms.size)
+                        && stack.last().map(|(_, k)| *k) == Some(Kind::ArrayObjId) =>
+                {
+                    let (arr, _) = stack.pop()?;
+                    let inst = fb.ins().call(arr_len_ref, &[vm_param, arr]);
+                    let len = fb.inst_results(inst)[0];
+                    stack.push((len, Kind::Int));
+                }
                 // Hash-accumulator read `h[key]` (`h[k] += v`): the receiver is the
                 // scratch Hash memo (HashObjId). Two independent axes pick the primitive:
                 //   KEY    — Int (exact match) or Float (f64 bits, eql? Float-arm match).
@@ -1177,6 +1255,23 @@ pub(crate) fn compile(
                 Op::Call(m, 1, _) if *m == syms.bracket => {
                     let (key, kk) = stack.pop()?;
                     let (recv, rk) = stack.pop()?;
+                    // `arr[i]` on a stack ArrayObjId (a local Array, e.g. `kids[i]` from
+                    // `kids = node.children`), Int index → native element read (Int
+                    // element; OOB / non-Int deopts). ADR 0034 Step 1, piece 2.
+                    if rk == Kind::ArrayObjId {
+                        if kk != Kind::Int {
+                            return None;
+                        }
+                        let inst = fb.ins().call(arr_elem_int_ref, &[vm_param, recv, key]);
+                        let (res, of) = {
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
+                        };
+                        acc_ovf(&mut fb, of);
+                        stack.push((res, Kind::Int));
+                        ip += 1;
+                        continue;
+                    }
                     if rk != Kind::HashObjId {
                         return None;
                     }
@@ -1386,28 +1481,62 @@ pub(crate) fn compile(
                 // obj-local, ADR 0034 Step 1) — the fused `LoadLocal + Call(name, 0)`.
                 // Lower to the obj-call PIC. Checked before the int-unary/float fusions
                 // (those require an Int/Float local, so no overlap).
+                // `arr.length` / `arr.size` on a local ArrayObjId — the FUSED form
+                // (LoadLocalCall). The bare-stack form is handled by the Call arm above.
+                Op::LoadLocalCall(slot, name, _)
+                    if local_kinds[*slot as usize] == Kind::ArrayObjId
+                        && (*name == syms.length || *name == syms.size) =>
+                {
+                    let arr = fb.use_var(vars[*slot as usize]);
+                    let inst = fb.ins().call(arr_len_ref, &[vm_param, arr]);
+                    let len = fb.inst_results(inst)[0];
+                    stack.push((len, Kind::Int));
+                }
                 Op::LoadLocalCall(slot, name, _)
                     if local_kinds[*slot as usize] == Kind::Object =>
                 {
                     let recv_ptr = fb.use_var(vars[*slot as usize]);
                     let nm = fb.ins().iconst(types::I32, name.0 as i64);
-                    let cache = Box::new(std::cell::Cell::new((0usize, 0usize)));
-                    let cache_addr =
-                        &*cache as *const std::cell::Cell<(usize, usize)> as i64;
-                    obj_call_caches.push(cache);
-                    let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
-                    let zero = fb.ins().iconst(types::I64, 0);
-                    let argc0 = fb.ins().iconst(types::I64, 0);
-                    let inst = fb.ins().call(
-                        obj_call_ref,
-                        &[vm_param, recv_ptr, zero, nm, cache_const, argc0],
-                    );
-                    let (res, of) = {
-                        let r = fb.inst_results(inst);
-                        (r[0], r[1])
-                    };
-                    acc_ovf(&mut fb, of);
-                    stack.push((res, Kind::Int));
+                    // `node.children` whose result is stored to a local used as an Array
+                    // → an Array-returning getter call (`jit_obj_getter_array`), pushing
+                    // `ArrayObjId` (ADR 0034 Step 1, piece 1). Else the Int obj-call PIC.
+                    let arr_result = matches!(code.get(ip + 1),
+                        Some(Op::StoreLocal(dst)) if local_is_array(code, *dst, ip + 2, syms));
+                    if arr_result {
+                        let cache = Box::new(std::cell::Cell::new((0usize, 0u32)));
+                        let cache_addr =
+                            &*cache as *const std::cell::Cell<(usize, u32)> as i64;
+                        caches.push(cache);
+                        let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
+                        let inst = fb.ins().call(
+                            obj_getter_arr_ref,
+                            &[vm_param, recv_ptr, nm, cache_const],
+                        );
+                        let (res, of) = {
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
+                        };
+                        acc_ovf(&mut fb, of);
+                        stack.push((res, Kind::ArrayObjId));
+                    } else {
+                        let cache = Box::new(std::cell::Cell::new((0usize, 0usize)));
+                        let cache_addr =
+                            &*cache as *const std::cell::Cell<(usize, usize)> as i64;
+                        obj_call_caches.push(cache);
+                        let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
+                        let zero = fb.ins().iconst(types::I64, 0);
+                        let argc0 = fb.ins().iconst(types::I64, 0);
+                        let inst = fb.ins().call(
+                            obj_call_ref,
+                            &[vm_param, recv_ptr, zero, nm, cache_const, argc0],
+                        );
+                        let (res, of) = {
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
+                        };
+                        acc_ovf(&mut fb, of);
+                        stack.push((res, Kind::Int));
+                    }
                 }
                 Op::LoadLocalCall(slot, name, _)
                     if is_int_unary(*name, syms) || is_float_to_int(*name, syms) =>
@@ -3700,6 +3829,65 @@ pub(crate) unsafe extern "C" fn jit_obj_call(
     let f: extern "C" fn(*const crate::vm::Vm, *const Value, i64) -> NRet =
         unsafe { std::mem::transmute(addr) };
     f(vm as *const crate::vm::Vm, recv, arg)
+}
+
+/// B4-generalized (ADR 0034 Step 1): `recv.getter` where `getter` is a simple attribute
+/// reader and the ivar holds an ARRAY (`node.children`) — returns the Array `ObjId` in
+/// `res`. A class-keyed inline cache resolves `getter` → its `getter_ivar` once. Unlike
+/// `jit_obj_call`, this needs NO native compile (the getter is inlined to an ivar read),
+/// so it takes `*const Vm`. `ovf=1` (deopt) if recv isn't an Object, `getter` isn't a
+/// simple reader, the cache class-misses (megamorphic), or the ivar isn't an Array.
+///
+/// # Safety
+/// `vm`, `recv` valid; `cache` a live `(class_ptr, ivar_sym)` cell baked into the code.
+pub(crate) unsafe extern "C" fn jit_obj_getter_array(
+    vm: *const crate::vm::Vm,
+    recv: *const Value,
+    getter_name: u32,
+    cache: *const std::cell::Cell<(usize, u32)>,
+) -> NRet {
+    let deopt = NRet { res: 0, ovf: 1 };
+    if recv.is_null() {
+        return deopt;
+    }
+    let vm = unsafe { &*vm };
+    let recv = unsafe { &*recv };
+    let cache = unsafe { &*cache };
+    let oid = match recv {
+        Value::Object(o) => *o,
+        _ => return deopt,
+    };
+    let cls = match vm.heap.try_class_of(oid) {
+        Some(c) => c,
+        None => return deopt,
+    };
+    let cls_ptr = std::rc::Rc::as_ptr(&cls) as usize;
+    let (cached_cls, cached_ivar) = cache.get();
+    let ivar = if cached_cls == cls_ptr {
+        cached_ivar
+    } else if cached_cls == 0 {
+        let m = match vm.lookup_method_uncached(&cls, crate::intern::SymId(getter_name)) {
+            Some(m) => m,
+            None => return deopt,
+        };
+        let iv = match vm.protos[m.proto_idx].getter_ivar {
+            Some(iv) => iv,
+            None => return deopt, // not a simple reader → interpreter
+        };
+        cache.set((cls_ptr, iv.0));
+        iv.0
+    } else {
+        return deopt; // megamorphic
+    };
+    match vm.heap.get(oid) {
+        crate::heap::HeapObj::Instance(inst) => {
+            match inst.ivars.get(&crate::intern::SymId(ivar)) {
+                Some(Value::Array(aid)) => NRet { res: aid.0 as i64, ovf: 0 },
+                _ => deopt,
+            }
+        }
+        _ => deopt,
+    }
 }
 
 /// Method-name syms the JIT recognises for value-primitive fusion (e.g. fusing
