@@ -866,6 +866,10 @@ pub(crate) struct Vm {
     /// `jit_native_block_floatint` block; the loop reads Float, stores Int.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_floatint_map_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    /// Float-element / Int-key `group_by` (`floats.group_by { x.floor }`): shares the
+    /// `jit_native_block_floatint` key block; the loop buckets Floats under Int keys.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_floatint_groupby_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
     /// Per block-proto cache of the Int-element/Float-output `map` loop driver
     /// (`ints.map { |x| x*1.5 }`). Shares the `jit_native_block_intelem_fa` block.
     #[cfg(feature = "jit-native")]
@@ -2051,6 +2055,8 @@ impl Vm {
             jit_native_floatint_sum_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_floatint_map_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_floatint_groupby_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_intelem_floatmap_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
