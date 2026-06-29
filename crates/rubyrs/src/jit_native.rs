@@ -1730,7 +1730,7 @@ fn compile_native_eachobj_loop_inner(block_addr: usize, float_elem: bool) -> Opt
 /// returned Hash is fresh (not user-visible until success), so this is sound
 /// (write-back-on-success).
 pub(crate) fn compile_native_groupby_loop(block_addr: usize) -> Option<NativeLoop> {
-    compile_native_groupby_loop_inner(block_addr, false)
+    compile_native_groupby_loop_inner(block_addr, false, false)
 }
 
 /// Float-element / Int-key variant (`floats.group_by { |x| x.floor }`): reads each
@@ -1739,16 +1739,29 @@ pub(crate) fn compile_native_groupby_loop(block_addr: usize) -> Option<NativeLoo
 /// Int-result block (`jit_native_block_floatint`); a non-Float element or an out-of-
 /// range conversion key deopts (discard-and-redo, same as the Int loop).
 pub(crate) fn compile_native_floatint_groupby_loop(block_addr: usize) -> Option<NativeLoop> {
-    compile_native_groupby_loop_inner(block_addr, true)
+    compile_native_groupby_loop_inner(block_addr, true, false)
 }
 
-fn compile_native_groupby_loop_inner(block_addr: usize, float_elem: bool) -> Option<NativeLoop> {
+/// Float-element / Float-key variant (`floats.group_by { |x| x * 2.0 }`): the block
+/// returns a Float key (the shared `jit_native_block_float`), and `jit_group_push_floatkey`
+/// buckets the original Float under it with CRuby Float-key `eql?` semantics.
+pub(crate) fn compile_native_floatkey_groupby_loop(block_addr: usize) -> Option<NativeLoop> {
+    compile_native_groupby_loop_inner(block_addr, true, true)
+}
+
+fn compile_native_groupby_loop_inner(
+    block_addr: usize,
+    float_elem: bool,
+    float_key: bool,
+) -> Option<NativeLoop> {
     let (elem_name, elem_fn): (&str, *const u8) = if float_elem {
         ("jit_array_elem_float", jit_array_elem_float as *const u8)
     } else {
         ("jit_array_elem_int", jit_array_elem_int as *const u8)
     };
-    let (push_name, push_fn): (&str, *const u8) = if float_elem {
+    let (push_name, push_fn): (&str, *const u8) = if float_key {
+        ("jit_group_push_floatkey", jit_group_push_floatkey as *const u8)
+    } else if float_elem {
         ("jit_group_push_floatelem", jit_group_push_floatelem as *const u8)
     } else {
         ("jit_group_push", jit_group_push as *const u8)
@@ -3161,6 +3174,53 @@ pub(crate) unsafe extern "C" fn jit_group_push_floatelem(
             vm.heap
                 .hash_mut(hid)
                 .push((Value::Int(key), Value::Array(new_arr)));
+            new_arr
+        }
+    };
+    vm.heap
+        .array_mut(arr_id)
+        .push(Value::Float(f64::from_bits(elem as u64)));
+}
+
+/// Like [`jit_group_push`] but BOTH the bucket KEY and the grouped ELEMENT are Floats
+/// (their f64 bits in `key`/`elem`) — for `floats.group_by { |x| x * 2.0 }` and other
+/// Float-keyed groupings. The bucket match replicates `Value::ruby_eql`'s Float arm
+/// exactly (NaN compares by bits so distinct-NaN keys never collide; every other Float
+/// by `==`, so -0.0 and 0.0 share a bucket — matching CRuby Hash-key semantics).
+///
+/// # Safety
+/// `vm` valid; `hash_objid` a live pinned result Hash; buckets are always Arrays.
+pub(crate) unsafe extern "C" fn jit_group_push_floatkey(
+    vm: *mut crate::vm::Vm,
+    hash_objid: i64,
+    key: i64,
+    elem: i64,
+) {
+    let vm = unsafe { &mut *vm };
+    let hid = crate::value::ObjId(hash_objid as u32);
+    let key_f = f64::from_bits(key as u64);
+    let pos = vm.heap.hash(hid).iter().position(|(k, _)| match k {
+        Value::Float(a) => {
+            if a.is_nan() && key_f.is_nan() {
+                a.to_bits() == key as u64
+            } else {
+                *a == key_f
+            }
+        }
+        _ => false,
+    });
+    let arr_id = match pos {
+        Some(p) => match vm.heap.hash(hid)[p].1 {
+            Value::Array(a) => a,
+            _ => return,
+        },
+        None => {
+            let new_arr = vm
+                .heap
+                .alloc(crate::heap::HeapObj::Array(Vec::<Value>::new().into()));
+            vm.heap
+                .hash_mut(hid)
+                .push((Value::Float(key_f), Value::Array(new_arr)));
             new_arr
         }
     };

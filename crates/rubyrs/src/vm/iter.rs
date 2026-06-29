@@ -4019,6 +4019,13 @@ impl Vm {
                 if let Some(h) = g.vm.try_native_floatint_groupby_loop(block, *id) {
                     return Ok(Some(h));
                 }
+                // Float-element / Float-key variant (ADR 0034 layer 3e): a Float array
+                // bucketed by a Float key (`floats.group_by { x * 2.0 }`). The Int-key
+                // loops above decline (Int reader / Int-result block reject the Float key).
+                #[cfg(feature = "jit-native")]
+                if let Some(h) = g.vm.try_native_floatkey_groupby_loop(block, *id) {
+                    return Ok(Some(h));
+                }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 // Defensive pin of every heap-slot element. Without
                 // this, a block that mutates the receiver mid-
