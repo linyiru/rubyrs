@@ -466,8 +466,35 @@ passes `i`. Same two gates (write-back-on-success + share-direct-only).
 group_by (6.3×), each_with_index (9.4×) — all over an all-Int array, all on the two
 reusable soundness gates. `tally` was the one evaluated-and-skipped member (no block);
 its real cost (an O(n²) generic build) was fixed in the interpreter instead (now 2–4×
-YJIT). Next frontier (per the list below): lifting the all-Int restriction
-(Float-element loops) and `map`→`sum`/`reduce` fusion.
+YJIT).
+
+### Layer 3d: lifting the all-Int restriction — Float `sum` — SHIPPED
+
+`floats.sum { |x| <pure f64 expr> }` over an all-Float array now compiles to one
+native loop — **6.75× YJIT** (jitN 0.08s vs 0.54s; before, **14× SLOWER** than YJIT:
+the Int `sum` driver declined on the Float elements, so the block ran interpreted
+per element). The first Float-element driver.
+
+The lever that kept this cheap: Float values flow through the **existing uniform
+i64 ABI by bit-pattern**, so no driver/ABI was duplicated and the Int paths are
+provably untouched. A Float local's i64 var holds the f64 *bits*; `LoadLocal`
+bitcasts I64→F64, `StoreLocal`/`Return` bitcasts F64→I64. New: `Kind::Float`,
+`emit_binop_float` (fadd/fsub/fmul/fdiv — IEEE, no overflow; comparisons + `%`
+decline), `LoadConstFloat`, a `float_elem` compile flag binding the 1-param
+element as Float, `jit_array_elem_float` (deopt on non-Float), and
+`compile_native_floatsum_loop` (F64 accumulator). **Mixed Int/Float declines** (no
+coercion yet: `{ |x| x * 2 }` over Floats falls to generic; `{ |x| x * 2.0 }`
+goes native). The driver **declines on an empty array** so CRuby's bare-init type
+holds (`[].sum{}` → Integer `0`, not `0.0`).
+
+Re-benchmarked the shared codegen after the change: Int sum/inject/each-acc all
+still 0.07s (no regression). Parity (transform/identity/int-seed/mixed-deopt/
+empty/+Inf/−0.0/÷0) + STRESS_GC clean + diff_cruby GREEN both builds. cranelift
+0.133 note: `bitcast` takes `MemFlagsData::new()` (0.133 split `MemFlags` into an
+interned handle + the `MemFlagsData` payload).
+
+Next frontier: extend Float to `map`/`each`-accumulator/`min_by`, Int↔Float
+coercion (mixed arithmetic), and `map`→`sum`/`reduce` fusion.
 
 ## Risks
 

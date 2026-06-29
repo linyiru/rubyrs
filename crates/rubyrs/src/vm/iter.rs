@@ -1517,6 +1517,18 @@ impl Vm {
                 if let Some(s) = g.vm.try_native_sum_loop(block, id, init) {
                     return Ok(Some(Value::Int(s)));
                 }
+                // Float-element variant (ADR 0034 layer 3d): if the array is all
+                // Float and the block does pure f64 work, sum natively in f64. The
+                // Int loop above declines first (a float block has mixed Int/Float
+                // or deopts on the Float element), then this runs. Seed = init as
+                // f64; result boxes Value::Float. A non-Float element deopts (None)
+                // -> the generic loop below redoes the sum (a native block is pure).
+                #[cfg(feature = "jit-native")]
+                if let Some(bits) =
+                    g.vm.try_native_floatsum_loop(block, id, (init as f64).to_bits() as i64)
+                {
+                    return Ok(Some(Value::Float(f64::from_bits(bits as u64))));
+                }
                 let pre_frames = g.vm.frames.len();
                 let mut acc: Value = Value::Int(init);
                 let mut early = None;
