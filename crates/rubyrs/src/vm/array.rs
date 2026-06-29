@@ -1466,8 +1466,12 @@ impl Vm {
                         let n = a.iter().filter(|x| x.ruby_eq(needle, &self.heap)).count();
                         Some(Value::Int(n as i64))
                     }
-                    ("sum", []) | ("sum", [Value::Int(_)]) => {
-                        let init = match args { [Value::Int(n)] => *n, _ => 0 };
+                    ("sum", []) | ("sum", [Value::Int(_)]) | ("sum", [Value::Float(_)]) => {
+                        let init = match args {
+                            [Value::Float(f)] => Value::Float(*f),
+                            [Value::Int(n)] => Value::Int(*n),
+                            _ => Value::Int(0),
+                        };
                         // PinGuard the receiver Array for the whole
                         // loop: each apply_int_promote / try_bigint_binop
                         // call takes &mut self and may trigger
@@ -1481,7 +1485,7 @@ impl Vm {
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Array(id));
                         let kind = crate::bytecode::BinOpKind::Add;
-                        let mut acc: Value = Value::Int(init);
+                        let mut acc: Value = init;
                         let len = g.vm.heap.array(id).len();
                         for i in 0..len {
                             let v = g.vm.heap.array(id)[i].clone();
@@ -1489,6 +1493,15 @@ impl Vm {
                                 (Value::Int(x), Value::Int(y)) => {
                                     acc = g.vm.apply_int_promote(kind, *x, *y)?;
                                 }
+                                // Float accumulation in native Rust. Once any Float
+                                // (acc or element) appears, the result is Float and
+                                // stays Float — matching CRuby's Integer->Float
+                                // promotion. Without this, the first Float element
+                                // falls through to the interpreted Enumerable#sum
+                                // preamble — pathologically slow on big Float arrays.
+                                (Value::Float(x), Value::Float(y)) => acc = Value::Float(x + y),
+                                (Value::Float(x), Value::Int(y)) => acc = Value::Float(x + *y as f64),
+                                (Value::Int(x), Value::Float(y)) => acc = Value::Float(*x as f64 + y),
                                 _ => {
                                     // Either acc or v (or both) is
                                     // BigInt — try_bigint_binop handles
