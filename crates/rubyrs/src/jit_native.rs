@@ -1965,6 +1965,19 @@ pub(crate) fn compile_value(
     ivg_sym: crate::intern::SymId,
     bracket_sym: crate::intern::SymId,
 ) -> Option<ValueProto> {
+    // Same shape gate as `compile`: the value-JIT ABI passes exactly one arg, so
+    // the method must take exactly one required positional. Without this, a
+    // 0-param getter (`def x; @x; end`, body `[LoadIvar, Return]`) compiles here
+    // and the 1-arg dispatch hook serves a WRONG-arity call (`obj.x(1)`) from it,
+    // swallowing the ArgumentError the interpreter must raise. The plain getter
+    // is served at argc==0 by the `getter_ivar` fast path — never through here.
+    if proto.n_required_positional != 1
+        || proto.params.len() != 1
+        || proto.rest_param.is_some()
+        || !proto.kw_param_defaults.is_empty()
+    {
+        return None;
+    }
     let pat = match proto.code.as_slice() {
         [Op::LoadIvar(s), Op::Return] => ValuePat::IvarGet { sym: *s, read_arg0: false },
         [Op::LoadLocal(0), Op::LoadSymbol(s), Op::Call(name, 1, _), Op::Return]

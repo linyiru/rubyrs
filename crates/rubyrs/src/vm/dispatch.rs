@@ -15203,8 +15203,16 @@ impl Vm {
         // JIT'd method called in a loop pays only a cache lookup + the native
         // call, not the full interpreter invocation machinery. Methods not yet
         // compiled (but eligible) route to the hook once, to compile.
+        //
+        // Gate on the arity ACTUALLY matching `argc`: this block runs before the
+        // arity check below, so serving/routing a wrong-arity call (e.g. a 0-arg
+        // getter invoked as `obj.x(1)`) here would swallow the ArgumentError the
+        // interpreter must raise. A mismatch falls through to that check.
         #[cfg(feature = "jit-native")]
-        if self.jit_native_on {
+        if self.jit_native_on
+            && m.fixed_arity
+                .is_some_and(|f| f.required as usize == argc)
+        {
             let pidx = m.proto_idx;
             let vm_ptr = self as *const crate::vm::Vm;
             if argc == 1 {
