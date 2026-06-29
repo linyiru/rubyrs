@@ -1413,6 +1413,13 @@ impl Vm {
                 if g.vm.try_native_each_acc_loop(block, *id).is_some() {
                     return Ok(Some(Value::Array(*id)));
                 }
+                // Float each-accumulator (`total += f(x)` over an all-Float array,
+                // total a Float). Tries after the Int each-acc declines on a Float
+                // accumulator (ADR 0034 layer 3d).
+                #[cfg(feature = "jit-native")]
+                if g.vm.try_native_floateach_acc_loop(block, *id).is_some() {
+                    return Ok(Some(Value::Array(*id)));
+                }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
@@ -1578,6 +1585,13 @@ impl Vm {
                 // because a native block is pure (the partial result is dropped).
                 #[cfg(feature = "jit-native")]
                 if let Some(out) = g.vm.try_native_map_loop(block, *id) {
+                    return Ok(Some(Value::Array(out)));
+                }
+                // Float-element variant (ADR 0034 layer 3d): all-Float array + a
+                // pure-f64 block -> a fresh Float array, natively. The Int loop
+                // declines first (mixed Int/Float or a Float-element deopt).
+                #[cfg(feature = "jit-native")]
+                if let Some(out) = g.vm.try_native_floatmap_loop(block, *id) {
                     return Ok(Some(Value::Array(out)));
                 }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
@@ -3883,6 +3897,12 @@ impl Vm {
                 // (non-Int element/key) or an empty array falls through.
                 #[cfg(feature = "jit-native")]
                 if let Some(v) = g.vm.try_native_minmax_loop(block, *id, want_min) {
+                    return Ok(Some(v));
+                }
+                // Float variant: all-Float array + pure-f64 key block (ADR 0034
+                // layer 3d). Tries after the Int min/max declines on Float elements.
+                #[cfg(feature = "jit-native")]
+                if let Some(v) = g.vm.try_native_floatminmax_loop(block, *id, want_min) {
                     return Ok(Some(v));
                 }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();

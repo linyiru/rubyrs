@@ -827,17 +827,30 @@ pub(crate) struct Vm {
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_eachidx_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
     /// Float-element value-block compilation (the element param binds as `Float`),
-    /// for the Float-element drivers (`sum`). Cached separately from the Int blocks.
+    /// for the Float-element drivers (`sum`/`map`). Cached separately from the Int blocks.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_block_float: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
     /// Per block-proto cache of whole-loop Float `sum` drivers.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_floatsum_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    /// Per block-proto cache of whole-loop Float `map` drivers (Float in -> Float out).
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_floatmap_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    /// Float each-accumulator block compilation (`{ |x| total += f(x) }`, both the
+    /// captured acc and the element Float). Separate from the Int `jit_native_block_acc`.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_block_acc_float: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// Per block-proto cache of whole-loop Float each-accumulator drivers.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_floateach_acc_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
     /// Per-(block proto, is_min) cache of whole-loop `min_by` / `max_by` drivers —
     /// a fold tracking the best key + its element (the value-mode block is the key
     /// function, shared with `jit_native_block`).
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_minmax_loop: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeLoop>>,
+    /// Float variant of `jit_native_minmax_loop` (Float element + Float key).
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_floatminmax_loop: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeLoop>>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_on: bool,
     pub(crate) interner: Interner,
@@ -1961,7 +1974,15 @@ impl Vm {
             #[cfg(feature = "jit-native")]
             jit_native_floatsum_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
+            jit_native_floatmap_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_block_acc_float: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_floateach_acc_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
             jit_native_minmax_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_floatminmax_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_on: std::env::var_os("RUBYRS_JIT_NATIVE").is_some(),
             protos,
