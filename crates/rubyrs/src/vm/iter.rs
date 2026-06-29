@@ -3899,6 +3899,14 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
+                // Native whole-loop group_by (all-Int array, Int key block): builds
+                // the result Hash natively, bucketing each element. Declines (None)
+                // -> generic walk; the native Hash is fresh, so a part-way deopt
+                // just discards it (sound).
+                #[cfg(feature = "jit-native")]
+                if let Some(h) = g.vm.try_native_groupby_loop(block, *id) {
+                    return Ok(Some(h));
+                }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 // Defensive pin of every heap-slot element. Without
                 // this, a block that mutates the receiver mid-

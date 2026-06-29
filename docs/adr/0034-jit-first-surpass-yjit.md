@@ -440,9 +440,25 @@ accumulator/element binding as explicit per-`AccKind` `arg2_slot`/`arg3_slot` �
 also fixed a latent `Inject` binding regression the each-accumulator refactor had
 introduced (inject was silently declining to generic; back to 9.9× YJIT).
 
-Remaining capture family (same two gates): `tally`/`group_by` (captured Hash
-mutation — needs a `jit_hash_*` set primitive + Hash scratch), `each_with_index`
-(adds an index counter alongside the accumulator).
+**group_by — SHIPPED**, 6.3× YJIT (jitN 0.03s vs 0.19s). `arr.group_by { |x| key }`
+over an all-Int array with an Int key. `compile_native_groupby_loop` allocates a
+fresh result Hash (`jit_hash_new`), runs the value-mode key block per element
+(shared with the sum/map/min_by block cache), and buckets each element under its key
+via `jit_group_push` (find-or-create the bucket Array, first-appearance order =
+CRuby). Both primitives are GC-free, so the in-flight Hash + buckets stay live across
+the loop. Gate #1: the Hash is fresh / never user-visible until success, so a deopt
+(non-Int element or key) discards it — no partial Hash escapes; no capture, so gate
+#2 is moot.
+
+**tally — SKIPPED** (evaluated): it takes no block, so the generic `Array#tally` is
+already a native Rust loop — there is no per-element interpreter dispatch to remove.
+A reminder that the JIT win is *block-dispatch elimination*; a blockless reducer
+that's already native Rust gains nothing.
+
+Remaining: `each_with_index` with a captured accumulator (`{ |x, i| total += f(x, i)
+}`) — extends the each-accumulator with the loop index as a 2nd block param (a 3rd
+i64 block arg). The lower-frequency member; the high-value capture shapes are now
+covered.
 
 ## Risks
 
