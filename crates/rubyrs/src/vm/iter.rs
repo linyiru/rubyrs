@@ -1431,6 +1431,60 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Array(*id)))
             }
+            // `arr.sum { |x| expr }` — sum the block return values (B5). A native
+            // Rust driver: the user block runs per element via `step_block1`
+            // (which calls a native-compiled block directly when possible),
+            // accumulating with no intermediate Array. Mirrors Hash#sum's
+            // Int/Bignum accumulation; a non-Int/Bignum result returns `None` to
+            // fall back to the Ruby `Enumerable#sum` (before any block side
+            // effect matters for the pure transforms this targets). Replaces the
+            // preamble path `each { |*x| memo += yield(*x) }`, whose accumulator
+            // block (capture + splat + re-yield) can never go native.
+            (Value::Array(id), "sum", []) | (Value::Array(id), "sum", [Value::Int(_)]) => {
+                let id = *id;
+                let init: i64 = match args { [Value::Int(n)] => *n, _ => 0 };
+                let kind = crate::bytecode::BinOpKind::Add;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(id));
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut acc: Value = Value::Int(init);
+                let mut early = None;
+                let mut i = 0usize;
+                loop {
+                    // Re-check length each step — a block could mutate the array
+                    // (bounds-safe in-place read, like the no-block Array#sum).
+                    if i >= g.vm.heap.array(id).len() {
+                        break;
+                    }
+                    let elem = g.vm.heap.array(id)[i].clone();
+                    let acc_heap = acc.is_gc_heap_ref();
+                    if acc_heap { g.vm.pinned.push(acc.clone()); }
+                    let step = g.vm.step_block1(block, elem, pre_frames);
+                    if acc_heap { g.vm.pinned.pop(); }
+                    let r = match step? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    match (&acc, &r) {
+                        (Value::Int(x), Value::Int(y)) => {
+                            acc = g.vm.apply_int_promote(kind, *x, *y)?;
+                        }
+                        _ => {
+                            #[cfg(feature = "bignum")]
+                            if let Some(next) = g.vm.try_bigint_binop(kind, &acc, &r)? {
+                                acc = next;
+                                i += 1;
+                                continue;
+                            }
+                            return Ok(None);
+                        }
+                    }
+                    i += 1;
+                }
+                Some(early.unwrap_or(acc))
+            }
             (Value::Array(id), "map", []) | (Value::Array(id), "collect", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));

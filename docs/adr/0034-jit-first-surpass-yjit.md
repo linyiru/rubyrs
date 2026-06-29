@@ -230,11 +230,27 @@ A `Return` kind-gate was added: a Bool/Nil result now declines (a block
 `comparison_failed_message` jit quirk.
 
 Measured (`(0...1000).map { |x| x*x }.sum`, 20k iters): **0.42s vs YJIT 0.73s —
-1.7×**. Correctness verified vs CRuby: a capturing block, a block with a method
-call, and a Float-returning block all fall back to the interpreter; a block
-reading a self ivar runs native; STRESS_GC clean; diff_cruby drops to 10 failures
-(one fewer — the fixed quirk). Next: Object-param blocks (`rows.map { |r|
-r.amount }`) reusing B4's getter/PIC, then capture reads and block-local arrays.
+1.7×**; `arr.sum { |x| x*x }`: **0.34s vs YJIT 0.45s — 1.3×**. Correctness verified
+vs CRuby: a capturing block, a block with a method call, and a Float-returning
+block all fall back to the interpreter; a block reading a self ivar runs native;
+STRESS_GC clean; diff_cruby drops to 10 failures (one fewer — the fixed quirk).
+
+**Step 2 (Object-param blocks) — investigated, NOT shipped.** `rows.sum { |r|
+r.amount }` was made to compile (a `Kind::Object` param + an inline-PIC attribute
+read on it). It is correct on every edge (megamorphic, Float, non-Object → all
+match CRuby), but it **does not beat — and slightly regresses — the
+interpreter** (1.47s vs 1.38s): the interpreter's frame-free getter fast path is
+already cheap, so the per-element native-block bookkeeping (block-handle read,
+cache lookup) costs more than it saves. Per the gate discipline ("beat YJIT or
+stop"), it was reverted. The native-block win stays where the block body is real
+work (Int arithmetic), not a single getter.
+
+The chase surfaced a separate, ungated win, shipped independently: a native Rust
+`Array#sum`-with-block driver replacing the preamble's
+`each { |*x| memo += yield(*x) }` (whose accumulator block — capture + splat +
+re-yield — can never go native). **`rows.sum { |r| r.amount }`: 6.97s → 1.38s,
+~5×**, on every build. Next B5: capture reads + block-local arrays, and larger
+block bodies where native pays off.
 
 ## Risks
 
