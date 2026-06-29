@@ -93,3 +93,21 @@ begin
 rescue ArgumentError
   p :argerr
 end
+
+# --- LOCAL receiver: `x = @h; x.compute(i)` (the ivar cached in a local, then called).
+# The ivar loads as an Object pointer INTO the local; the pointer stays valid across
+# the loop (a compiled method never writes ivars). Step toward param receivers.
+class Loc
+  def initialize(h); @h = h; end
+  def run(n)
+    x = @h
+    s = 0; i = 0
+    while i < n
+      s += x.compute(i % 10)
+      i += 1
+    end
+    s
+  end
+end
+p Loc.new(Helper.new(7)).run(40)
+p Loc.new(Helper2.new(1)).run(40)   # polymorphic-via-local deopt

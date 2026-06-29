@@ -174,6 +174,29 @@ pub(crate) enum AccKind {
 /// bails (`None`) on any op it can't model or if the ivar is consumed by something
 /// other than a `Call` receiver. Bounded scan; `argc` limited to {0, 1} (the shapes
 /// lowered today). Excludes bracket/lshift/`[]=` (those have their own fused arms).
+/// True if local `slot` is, somewhere after `from_ip`, loaded and used as a method-call
+/// receiver (`LoadLocal(slot)` whose value `ivar_call_receiver` flags) BEFORE being
+/// reassigned. Lets `x = @h; … x.compute(i)` load `@h` as an Object pointer into `x`
+/// (ADR 0034 Step 1, local-receiver extension). Sound across the loop: a compiled
+/// method never writes ivars (would decline), so the pointer never dangles.
+fn local_is_obj_receiver(code: &[Op], slot: u16, from_ip: usize, syms: &JitSyms) -> bool {
+    let mut j = from_ip;
+    while j < code.len() {
+        match &code[j] {
+            Op::LoadLocal(s) if *s == slot && ivar_call_receiver(code, j, syms).is_some() => {
+                return true;
+            }
+            // Reassigned before any receiver use → not an obj-receiver local.
+            Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) if *s == slot => {
+                return false;
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    false
+}
+
 fn ivar_call_receiver(code: &[Op], ivar_ip: usize, syms: &JitSyms) -> Option<(SymId, u8)> {
     let mut h: i32 = 0; // height of operand-stack values ABOVE the ivar
     let mut j = ivar_ip + 1;
@@ -782,12 +805,16 @@ pub(crate) fn compile(
                 // → deopt. The fused Call op is skipped (`ip += 1`).
                 Op::LoadIvar(s) => {
                     // `@h.method(args)` (ADR 0034 Step 1): when this ivar's value is
-                    // consumed as a method-call RECEIVER, load it as a `*const Value`
-                    // (Object kind) instead of an Int — the explicit-recv `Call` arm
-                    // emits the native→native PIC call on it. A non-Object ivar deopts
-                    // (sound: pure read). Checked before the Int/array/hash fusions
-                    // (its method name is never bracket/lshift/length, so no overlap).
-                    if ivar_call_receiver(code, ip, syms).is_some() {
+                    // consumed as a method-call RECEIVER — directly, or via a local it's
+                    // stored into (`x = @h; … x.compute`) — load it as a `*const Value`
+                    // (Object kind) instead of an Int. The explicit-recv `Call` arm emits
+                    // the native→native PIC call. A non-Object ivar deopts (sound: pure
+                    // read). Checked before the Int/array/hash fusions (its method name is
+                    // never bracket/lshift/length, so no overlap).
+                    let recv_use = ivar_call_receiver(code, ip, syms).is_some()
+                        || matches!(code.get(ip + 1),
+                            Some(Op::StoreLocal(slot)) if local_is_obj_receiver(code, *slot, ip + 2, syms));
+                    if recv_use {
                         let name = fb.ins().iconst(types::I32, s.0 as i64);
                         let inst = fb.ins().call(ivar_obj_ref, &[vm_param, self_param, name]);
                         let (ptr, of) = {
@@ -918,7 +945,13 @@ pub(crate) fn compile(
                 Op::StoreLocal(s) => {
                     let (v, k) = stack.pop()?;
                     match k {
-                        Kind::Int | Kind::ArrayObjId => {
+                        // Int / array-objid / an obj-call RECEIVER pointer (`x = @h`,
+                        // ADR 0034 Step 1) store the i64 directly. The pointer stays
+                        // valid for the method's duration: a compiled method never
+                        // writes ivars (StoreIvar isn't modelled → it would decline), so
+                        // the ivar table never reallocs, and the heap is non-moving + GC
+                        // never runs mid-method. So a local can carry it across the loop.
+                        Kind::Int | Kind::ArrayObjId | Kind::Object => {
                             local_kinds[*s as usize] = k;
                             fb.def_var(vars[*s as usize], v);
                         }
@@ -928,9 +961,8 @@ pub(crate) fn compile(
                             local_kinds[*s as usize] = Kind::Float;
                             fb.def_var(vars[*s as usize], bits);
                         }
-                // Reassigning the Hash memo (or storing a Bool/Nil), or stashing an
-                // obj-call receiver pointer into a local, isn't modelled.
-                Kind::Bool | Kind::Nil | Kind::HashObjId | Kind::Object => return None,
+                        // Reassigning the Hash memo / storing a Bool/Nil isn't modelled.
+                        Kind::Bool | Kind::Nil | Kind::HashObjId => return None,
                     }
                 }
                 Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
