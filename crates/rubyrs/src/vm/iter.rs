@@ -4323,6 +4323,26 @@ impl Vm {
                         return Ok(Some(Value::Int(acc)));
                     }
                 }
+                // Float-accumulator inject (ADR 0034 layer 3d): a numeric init + a
+                // Float-producing block folds in f64. Tries after the Int loop
+                // declines (Float block result). Float elements first, then Int
+                // elements (the Float reader deopts on an Int elem). Empty declines
+                // in the driver so the generic path returns the bare init unchanged.
+                #[cfg(feature = "jit-native")]
+                if let Value::Int(_) | Value::Float(_) = init {
+                    let init_bits = match init {
+                        Value::Int(n) => (*n as f64).to_bits() as i64,
+                        Value::Float(f) => f.to_bits() as i64,
+                        _ => unreachable!(),
+                    };
+                    if let Some(bits) = g
+                        .vm
+                        .try_native_floatinject_loop(block, id, init_bits, false)
+                        .or_else(|| g.vm.try_native_floatinject_loop(block, id, init_bits, true))
+                    {
+                        return Ok(Some(Value::Float(f64::from_bits(bits as u64))));
+                    }
+                }
                 let snapshot: Vec<Value> = g.vm.heap.array(id).clone();
                 let pre_frames = g.vm.frames.len();
                 let mut acc = init.clone();

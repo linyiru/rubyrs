@@ -16858,7 +16858,7 @@ impl Vm {
         }
         if !self.jit_native_block2.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block2(proto_idx, param_start as u32, body_start as u32);
+            let compiled = self.compile_native_block2(proto_idx, param_start as u32, body_start as u32, false, false);
             self.jit_native_block2.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block2.get(&proto_idx) {
@@ -16875,6 +16875,69 @@ impl Vm {
         };
         let vm_ptr = self as *const crate::vm::Vm;
         il.call(vm_ptr, &self_val, array_id.0 as i64, init)
+    }
+
+    /// Float-accumulator `inject(init) { |s, x| <f64 expr> }` (ADR 0034 layer 3d):
+    /// a 2-param inject folding into a Float accumulator. `int_elem` picks the
+    /// element kind — `false` = Float elements (`floats.inject(0.0){...}`), `true` =
+    /// Int elements (`ints.inject(0.0){...}`). The acc threads as opaque f64 bits;
+    /// the block compiles with (float_elem = !int_elem, float_acc = true) and returns
+    /// f64 bits. Empty DECLINES — the generic inject returns the bare init unchanged
+    /// (an Int init must stay Int, a Float init Float), which the native f64 path
+    /// can't reproduce. Returns the accumulator's f64 bits.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_floatinject_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+        init_bits: i64,
+        int_elem: bool,
+    ) -> Option<i64> {
+        if !self.jit_native_on {
+            return None;
+        }
+        if self.heap.array(array_id).is_empty() {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 2
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        let key = (proto_idx, int_elem);
+        if !self.jit_native_block2_finject.contains_key(&key) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            // float_elem marks the ELEMENT (arg3) Float -> only for Float elements;
+            // float_acc marks the ACCUMULATOR (arg2) Float -> always here.
+            let compiled = self.compile_native_block2(proto_idx, param_start as u32, body_start as u32, !int_elem, true);
+            self.jit_native_block2_finject.insert(key, compiled);
+        }
+        let block_addr = match self.jit_native_block2_finject.get(&key) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_finject_loop.contains_key(&key) {
+            // int_elem -> int element reader; else float reader. The acc is opaque bits.
+            let compiled = if int_elem {
+                crate::jit_native::compile_native_inject_loop(block_addr)
+            } else {
+                crate::jit_native::compile_native_floatinject_loop(block_addr)
+            };
+            self.jit_native_finject_loop.insert(key, compiled);
+        }
+        let il = match self.jit_native_finject_loop.get(&key) {
+            Some(Some(il)) => il,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        il.call(vm_ptr, &self_val, array_id.0 as i64, init_bits)
     }
 
     /// Whole-loop fast path for the `each`-accumulator shape
@@ -17450,6 +17513,8 @@ impl Vm {
         proto_idx: usize,
         param_start: u32,
         body_local_start: u32,
+        float_elem: bool,
+        float_acc: bool,
     ) -> Option<crate::jit_native::NativeProto> {
         let dummy = self.interner.intern("\u{0}block\u{0}");
         let callees = crate::intern::FxHashMap::default();
@@ -17474,8 +17539,8 @@ impl Vm {
             &getters,
             &syms,
             Some((param_start, body_local_start, false, crate::jit_native::AccKind::Inject)),
-            false,
-            false,
+            float_elem,
+            float_acc,
         )
     }
 
