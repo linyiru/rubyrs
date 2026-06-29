@@ -785,6 +785,11 @@ pub(crate) struct Vm {
     /// loop accumulating the predicate block's 0/1 results.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_count_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeSumLoop>>,
+    /// Per-(block proto, keep-polarity) cache of whole-loop `select` / `reject`
+    /// drivers — a predicate loop pushing the matching elements. `true` = select
+    /// (keep truthy), `false` = reject (keep falsy).
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_filter_loop: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeFilterLoop>>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_on: bool,
     pub(crate) interner: Interner,
@@ -1881,6 +1886,8 @@ impl Vm {
             jit_native_block_pred: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_count_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_filter_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_on: std::env::var_os("RUBYRS_JIT_NATIVE").is_some(),
             protos,

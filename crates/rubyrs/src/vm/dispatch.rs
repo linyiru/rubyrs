@@ -16194,6 +16194,66 @@ impl Vm {
         sl.call(vm_ptr, &self_val, array_id.0 as i64, 0)
     }
 
+    /// Whole-loop fast path for `array.select { pred }` (`keep_when_true`) /
+    /// `reject` (ADR 0034 layer 3): a PREDICATE loop that pushes the matching
+    /// elements into a result reserved to the input length (so the native push
+    /// never reallocs — no GC, no element move). `Some(out)` ran natively; `None`
+    /// falls back to the generic loop (non-comparison predicate, or a deopt on a
+    /// non-Int element). The caller must have pinned `in_id` + the block. Sound:
+    /// the predicate is pure, so a part-way deopt's partial `out` is discarded.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_filter_loop(&mut self, block_id: ObjId, in_id: ObjId, keep_when_true: bool) -> Option<ObjId> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        // Predicate-mode block (shared with count's cache).
+        if !self.jit_native_block_pred.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, true);
+            self.jit_native_block_pred.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_pred.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        let key = (proto_idx, keep_when_true);
+        if !self.jit_native_filter_loop.contains_key(&key) {
+            let compiled = crate::jit_native::compile_native_filter_loop(block_addr, keep_when_true);
+            self.jit_native_filter_loop.insert(key, compiled);
+        }
+        if !matches!(self.jit_native_filter_loop.get(&key), Some(Some(_))) {
+            return None;
+        }
+        // Reserve out capacity = input length so the native push never reallocs.
+        let len = self.heap.array(in_id).len();
+        self.check_alloc().ok()?;
+        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::with_capacity(len).into()));
+        self.pinned.push(Value::Array(out_id));
+        // self_val is safe to read now: no allocation before the native call.
+        let self_val = self.heap.block(block_id).self_val.clone();
+        let vm_ptr = self as *const crate::vm::Vm;
+        let fl = self.jit_native_filter_loop.get(&key).unwrap().as_ref().unwrap();
+        let ok = fl.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64);
+        self.pinned.pop();
+        if ok {
+            Some(out_id)
+        } else {
+            None
+        }
+    }
+
     /// Compile a 1-param block proto to native (B5). The arg binds to the block's
     /// `param_start`; reads of captured outer slots decline (see `compile`).
     /// Blocks with method calls are not modelled yet, so callees/getters are

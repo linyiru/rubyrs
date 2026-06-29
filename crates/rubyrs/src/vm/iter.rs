@@ -275,6 +275,22 @@ impl Vm {
     /// On `break val` (caught via `self.break_signaled`) returns `val`
     /// to match CRuby's "break value short-circuits the enumerator".
     pub(crate) fn iter_array_filter(&mut self, id: ObjId, mode: IterMode, block: ObjId) -> Result<Value, Trap> {
+        // Whole-loop native fast path (ADR 0034 layer 3) for select/reject: a
+        // comparison predicate over an all-Int array filters in native code.
+        // Placed before the snapshot clone so the fast path skips it. A deopt
+        // (non-comparison predicate / non-Int element) falls through to the
+        // generic walk below. Pin in+block across the result alloc inside.
+        #[cfg(feature = "jit-native")]
+        if let IterMode::Select | IterMode::Reject = mode {
+            let keep = matches!(mode, IterMode::Select);
+            self.pinned.push(Value::Array(id));
+            self.pinned.push(Value::Block(block));
+            let out = self.try_native_filter_loop(block, id, keep);
+            self.pinned.truncate(self.pinned.len() - 2);
+            if let Some(out) = out {
+                return Ok(Value::Array(out));
+            }
+        }
         let snapshot: Vec<Value> = self.heap.array(id).clone();
         let mut g = PinGuard::new(self);
         g.pin(Value::Array(id));

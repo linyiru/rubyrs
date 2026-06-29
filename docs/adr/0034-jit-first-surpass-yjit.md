@@ -278,6 +278,13 @@ part-way deopt doubles nothing on redo).
 | `arr.sum { x*x + x*2 + 1 }`  | 1.88s | **0.08s** | 0.46s | **5.75×** |
 | `arr.map { x*x + 1 }`        | 1.34s | **0.17s** | 0.55s | **3.2×** |
 | `arr.count { x > 500 }`      | 1.17s | **0.07s** | 0.43s | **6.1×** |
+| `arr.select { x > 700 }`     | 1.22s | **0.10s** | 0.48s | **4.8×** |
+
+`select` / `reject` / `filter` reuse predicate-mode blocks with a third loop
+shape (`compile_native_filter_loop`): per element, run the predicate and on the
+kept polarity push the *element* into a result the caller reserves to the input
+length (so the native push never reallocs — no GC, no move). Order is preserved;
+a non-comparison predicate (`x.odd?`) or `break` declines to the generic walk.
 
 `count` reuses the sum loop unchanged: a count IS a sum of the predicate's
 truthiness. The new piece is **predicate-mode block compilation** — a final `Bool`
