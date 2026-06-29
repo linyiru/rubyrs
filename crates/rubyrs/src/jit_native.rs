@@ -348,6 +348,7 @@ pub(crate) fn compile(
     builder.symbol("jit_ivar_array_get_int", jit_ivar_array_get_int as *const u8);
     builder.symbol("jit_array_new", jit_array_new as *const u8);
     builder.symbol("jit_array_push", jit_array_push as *const u8);
+    builder.symbol("jit_array_push_float", jit_array_push_float as *const u8);
     builder.symbol("jit_arr_elem_attr_int", jit_arr_elem_attr_int as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
@@ -417,6 +418,14 @@ pub(crate) fn compile(
     let apid = module
         .declare_function("jit_array_push", Linkage::Import, &apsig)
         .ok()?;
+    // `jit_array_push_float`: (vm, objid:i64, bits:i64) -> void (Float `memo << f(x)`).
+    let mut apfsig = module.make_signature();
+    apfsig.params.push(AbiParam::new(ptr_ty));
+    apfsig.params.push(AbiParam::new(types::I64));
+    apfsig.params.push(AbiParam::new(types::I64));
+    let apfid = module
+        .declare_function("jit_array_push_float", Linkage::Import, &apfsig)
+        .ok()?;
     // `jit_arr_elem_attr_int`: (vm, recv, arr_name:i32, index:i64, getter:i32,
     // cache:ptr) -> (i64, i8).
     let mut aesig = module.make_signature();
@@ -473,6 +482,7 @@ pub(crate) fn compile(
         let arrget_ref = module.declare_func_in_func(agid, fb.func);
         let arrnew_ref = module.declare_func_in_func(anid, fb.func);
         let arrpush_ref = module.declare_func_in_func(apid, fb.func);
+        let arrpushf_ref = module.declare_func_in_func(apfid, fb.func);
         let arrelem_ref = module.declare_func_in_func(aeid, fb.func);
         // FuncRefs for each external callee.
         let mut callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
@@ -891,10 +901,21 @@ pub(crate) fn compile(
                 Op::Call(m, 1, _) if *m == syms.lshift => {
                     let (elem, ek) = stack.pop()?;
                     let (arr, ak) = stack.pop()?;
-                    if ek != Kind::Int || ak != Kind::ArrayObjId {
+                    if ak != Kind::ArrayObjId {
                         return None;
                     }
-                    fb.ins().call(arrpush_ref, &[vm_param, arr, elem]);
+                    match ek {
+                        Kind::Int => {
+                            fb.ins().call(arrpush_ref, &[vm_param, arr, elem]);
+                        }
+                        // Float `memo << f(x)`: push the f64 bits via the Float pusher
+                        // (the operand stack holds an F64; bitcast to its i64 bits).
+                        Kind::Float => {
+                            let bits = fb.ins().bitcast(types::I64, MemFlagsData::new(), elem);
+                            fb.ins().call(arrpushf_ref, &[vm_param, arr, bits]);
+                        }
+                        _ => return None,
+                    }
                     stack.push((arr, Kind::ArrayObjId));
                 }
                 // 0-arg bare call to a self attribute reader (`amount`) → inline
@@ -1538,10 +1559,27 @@ fn compile_native_inject_loop_inner(block_addr: usize, float_elem: bool) -> Opti
 /// generic `each_with_object` over the REAL memo (untouched here), so the partial
 /// scratch pushes never reach the user's object — write-back-on-success.
 pub(crate) fn compile_native_eachobj_loop(block_addr: usize) -> Option<NativeLoop> {
+    compile_native_eachobj_loop_inner(block_addr, false)
+}
+
+/// Float-element variant (`floats.each_with_object(memo) { |x, m| m << f(x) }`): reads
+/// each element via `jit_array_elem_float`. The block's `<<` pushes Int OR Float per
+/// its result kind (the `<<` codegen handles both), so the scratch holds whatever
+/// `f(x)` produced; the write-back appends it to the real memo unchanged.
+pub(crate) fn compile_native_eachobj_loop_float(block_addr: usize) -> Option<NativeLoop> {
+    compile_native_eachobj_loop_inner(block_addr, true)
+}
+
+fn compile_native_eachobj_loop_inner(block_addr: usize, float_elem: bool) -> Option<NativeLoop> {
+    let (elem_name, elem_fn): (&str, *const u8) = if float_elem {
+        ("jit_array_elem_float", jit_array_elem_float as *const u8)
+    } else {
+        ("jit_array_elem_int", jit_array_elem_int as *const u8)
+    };
     let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
     builder.symbol("jit_array_new", jit_array_new as *const u8);
     builder.symbol("jit_array_len", jit_array_len as *const u8);
-    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
+    builder.symbol(elem_name, elem_fn);
     builder.symbol("blk", block_addr as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
@@ -1577,7 +1615,7 @@ pub(crate) fn compile_native_eachobj_loop(block_addr: usize) -> Option<NativeLoo
     elsig.returns.push(AbiParam::new(types::I64));
     elsig.returns.push(AbiParam::new(types::I8));
     let elid = module
-        .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
+        .declare_function(elem_name, Linkage::Import, &elsig)
         .ok()?;
     // 2-param block: (vm, self, elem, memo) -> (ignored, ovf). The block pushes
     // f(elem) onto `memo` (the scratch array) itself.

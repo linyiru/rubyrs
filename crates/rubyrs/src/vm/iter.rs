@@ -3512,6 +3512,15 @@ impl Vm {
                 {
                     return Ok(Some(seed.clone()));
                 }
+                // Float-element variant (ADR 0034 layer 3e): `floats.each_with_object(m)
+                // { |x, m| m << f(x) }`. The Int loop above declines (Int reader deopts
+                // on the Float element).
+                #[cfg(feature = "jit-native")]
+                if let Value::Array(memo_id) = seed
+                    && g.vm.try_native_float_eachobj_loop(block, *id, *memo_id).is_some()
+                {
+                    return Ok(Some(seed.clone()));
+                }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 for v in &snapshot {
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }
