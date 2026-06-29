@@ -92,6 +92,9 @@ pub extern "C" fn carmine_lex(
 /// `p` must be a pointer previously returned by `carmine_lex` (or null), and
 /// must not be used after this call.
 #[unsafe(no_mangle)]
+// C-ABI free function: the raw-pointer deref is the documented `# Safety`
+// contract above, and callers are C, not Rust.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn carmine_free(p: *mut c_char) {
     if !p.is_null() {
         // SAFETY: reclaims the CString this library allocated in carmine_lex.

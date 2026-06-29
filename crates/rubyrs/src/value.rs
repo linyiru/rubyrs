@@ -940,6 +940,7 @@ impl IvarTable {
     pub(crate) fn contains_key(&self, k: &crate::intern::SymId) -> bool {
         self.0.iter().any(|(n, _)| n == k)
     }
+    #[allow(dead_code)] // symmetric with is_empty(); kept for API completeness
     pub(crate) fn len(&self) -> usize {
         self.0.len()
     }

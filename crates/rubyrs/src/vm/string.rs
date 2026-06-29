@@ -4935,10 +4935,11 @@ pub(crate) fn base64_decode(input: &[u8]) -> Vec<u8> {
 ///   - `=` padding anywhere but the trailing 1-2 chars of the last group,
 ///   - non-canonical encodings whose pre-padding leftover bits aren't 0
 ///     (e.g. `"YW=="`, where 4 stray bits would be dropped).
+///
 /// Matches CRuby's `m0` exactly — the base64 stdlib gem's
 /// `strict_decode64` / `urlsafe_decode64` rely on this strictness.
 pub(crate) fn base64_decode_strict(input: &[u8]) -> Option<Vec<u8>> {
-    if input.len() % 4 != 0 {
+    if !input.len().is_multiple_of(4) {
         return None;
     }
     let mut rev = [255u8; 256];

@@ -1682,7 +1682,7 @@ impl Vm {
                     && scope.singleton_target.borrow().is_some()
                 {
                     let short = self.interner.resolve(name_id);
-                    let short = short.rsplit("::").next().unwrap_or(&short).to_string();
+                    let short = short.rsplit("::").next().unwrap_or(short).to_string();
                     let short_id = self.interner.intern(&short);
                     scope.consts.borrow_mut().insert(short_id, v.clone());
                 }
@@ -3111,13 +3111,13 @@ impl Vm {
                             // `super` (block-carrying → this path) must land
                             // here. Twin of the plain-super lifecycle no-op
                             // in super_call_with_lifecycle_noop.
-                            (hook, Some(Value::Class(_)))
-                                if matches!(hook,
-                                    "included" | "extended" | "prepended" | "inherited"
-                                    | "method_added" | "method_removed" | "method_undefined"
-                                    | "singleton_method_added" | "singleton_method_removed"
-                                    | "singleton_method_undefined" | "const_added") =>
-                            {
+                            (
+                                "included" | "extended" | "prepended" | "inherited"
+                                | "method_added" | "method_removed" | "method_undefined"
+                                | "singleton_method_added" | "singleton_method_removed"
+                                | "singleton_method_undefined" | "const_added",
+                                Some(Value::Class(_)),
+                            ) => {
                                 self.stack.push(Value::Nil);
                             }
                             (_, cur) => {
@@ -4803,7 +4803,7 @@ impl Vm {
                     && scope.singleton_target.borrow().is_some()
                 {
                     let short = self.interner.resolve(name_id);
-                    let short = short.rsplit("::").next().unwrap_or(&short).to_string();
+                    let short = short.rsplit("::").next().unwrap_or(short).to_string();
                     let short_id = self.interner.intern(&short);
                     scope.consts.borrow_mut().insert(short_id, Value::Class(cls.clone()));
                     self.bump_const_gen();

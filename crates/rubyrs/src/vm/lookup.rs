@@ -1650,6 +1650,7 @@ impl super::Vm {
             return class_is_a(child, ancestor);
         }
         thread_local! {
+            #[allow(clippy::type_complexity)]
             static CACHE: std::cell::RefCell<
                 crate::intern::FxHashMap<
                     usize,
@@ -1695,6 +1696,7 @@ impl super::Vm {
     /// a `Weak<Class>`+`ptr_eq` guard against freed-anonymous-class ptr reuse.
     pub(crate) fn ancestors_cached(&self, cls: &Rc<Class>) -> Rc<Vec<Rc<Class>>> {
         thread_local! {
+            #[allow(clippy::type_complexity)]
             static MRO_CACHE: std::cell::RefCell<
                 crate::intern::FxHashMap<
                     usize,
@@ -2534,6 +2536,7 @@ impl Vm {
         self.super_builtin_class_new_with_block(cls, args, None)
     }
 
+    // allow: doc-orientation — the `def self.new` mention describes Ruby's Class#new, not the same-file `fn new`
     /// `super_builtin_class_new` that also forwards a block to
     /// `initialize` — `Class#new` passes its block through to
     /// `initialize`. Backs the `super(*a, &b)` (ApplySuperBlock) shape

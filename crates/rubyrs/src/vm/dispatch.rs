@@ -308,6 +308,7 @@ impl Vm {
     ///     `10 ** -ndigits` (`0` → the nearest whole number).
     ///   - `ndigits > 0`  → a **Rational** rounded to that many
     ///     decimal places.
+    ///
     /// `half` only affects `round` (tie-breaking); the other ops
     /// ignore it. The receiver's canonical form (`den > 0`, coprime)
     /// is assumed.
@@ -7612,6 +7613,7 @@ impl Vm {
         }
         #[cfg(not(feature = "jit-native"))]
         #[inline]
+        #[allow(dead_code)] // mirror of the jit-native variant; its callers are feature-gated too
         fn jit_should_route(&self, _proto_idx: usize, _argc: usize) -> bool { false }
 
         pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
@@ -19094,11 +19096,10 @@ impl Vm {
                     locals[param_start as usize + i] = a;
                 }
             }
-            if let Some((slot, val)) = rest_binding {
-                if slot < locals.len() {
+            if let Some((slot, val)) = rest_binding
+                && slot < locals.len() {
                     locals[slot] = val;
                 }
-            }
         }
         if as_class_body {
             // class_eval: re-use the class-body machinery so

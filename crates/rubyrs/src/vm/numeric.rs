@@ -1474,6 +1474,7 @@ pub(crate) fn numeric_call(
 ///   - Stepping off an infinity inward saturates to ±MAX; stepping
 ///     further outward stays at the infinity.
 ///   - ±0.0 both step to the smallest subnormal of the step's sign.
+///
 /// Implemented via the bit representation so it's independent of the
 /// toolchain's `f64::next_up` availability.
 fn float_adjacent(f: f64, up: bool) -> f64 {

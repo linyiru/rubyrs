@@ -1236,14 +1236,13 @@ fn compile_call_arm(
     if has_recv && !kwargs_trailing && args.is_empty() && name == "sum" {
         let map_id = interner.intern("map");
         let collect_id = interner.intern("collect");
-        if let Some(&Op::CallBlock(m, 0, _)) = b.code.last() {
-            if m == map_id || m == collect_id {
+        if let Some(&Op::CallBlock(m, 0, _)) = b.code.last()
+            && (m == map_id || m == collect_id) {
                 if let Some(Op::CallBlock(mm, _, _)) = b.code.last_mut() {
                     *mm = name_id; // map/collect -> sum, keeping the block + cache slot
                 }
                 return;
             }
-        }
     }
     emit_method_call(b, name_id, argc, has_recv, false, kwargs_trailing, cc);
 }

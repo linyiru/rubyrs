@@ -931,7 +931,7 @@ impl Vm {
                     .lexical_owner_of_top()
                     .map(|idx| self.frames[idx].block_arg.is_some())
                     .unwrap_or(false);
-                return Some(Ok(if has_block { Value::new_str("yield") } else { Value::Nil }));
+                Some(Ok(if has_block { Value::new_str("yield") } else { Value::Nil }))
             }
             "__defined_super?" => {
                 // `defined?(super)` — "super" iff the enclosing method
@@ -955,7 +955,7 @@ impl Vm {
                     Some(nid) => self.super_lookup(nid).is_ok(),
                     None => false,
                 };
-                return Some(Ok(if has { Value::new_str("super") } else { Value::Nil }));
+                Some(Ok(if has { Value::new_str("super") } else { Value::Nil }))
             }
             "__defined_ivar?" => {
                 if let Some(Value::Sym(sid)) = args.first() {
@@ -1722,7 +1722,7 @@ impl Vm {
                 match &args[0] {
                     Value::Hash(_) => Some(Ok(args[0].clone())),
                     Value::Nil => {
-                        self.maybe_gc();
+                        self.maybe_gc(); // allow: gc-rooting — empty Hash holds no Value; args[0] (Nil) is not used across the alloc
                         if let Err(t) = self.check_alloc() { return Some(Err(t)); }
                         let id = self.heap.alloc(crate::heap::HeapObj::Hash(
                             crate::heap::HashObj::with_pairs(Vec::new()),
@@ -2718,10 +2718,10 @@ impl Vm {
                 #[cfg(not(feature = "_encoding_full"))]
                 {
                     let _ = (text, form);
-                    return Some(Err(self.trap(RubyError::HostException {
+                    Some(Err(self.trap(RubyError::HostException {
                         class_name: "NotImplementedError".to_string(),
                         message: "String#unicode_normalize: non-ASCII input is not supported in this build (enable _encoding_full)".to_string(),
-                    })));
+                    })))
                 }
             }
             "__rubyrs_unicode_normalized_p" => {
@@ -2750,10 +2750,10 @@ impl Vm {
                 #[cfg(not(feature = "_encoding_full"))]
                 {
                     let _ = (text, form);
-                    return Some(Err(self.trap(RubyError::HostException {
+                    Some(Err(self.trap(RubyError::HostException {
                         class_name: "NotImplementedError".to_string(),
                         message: "String#unicode_normalized?: non-ASCII input is not supported in this build (enable _encoding_full)".to_string(),
-                    })));
+                    })))
                 }
             }
             "__rubyrs_grapheme_split" => {
@@ -2778,10 +2778,10 @@ impl Vm {
                 #[cfg(not(feature = "_encoding_full"))]
                 {
                     let _ = text;
-                    return Some(Err(self.trap(RubyError::HostException {
+                    Some(Err(self.trap(RubyError::HostException {
                         class_name: "NotImplementedError".to_string(),
                         message: "String#each_grapheme_cluster: non-ASCII input is not supported in this build (enable _encoding_full)".to_string(),
-                    })));
+                    })))
                 }
             }
             "__rubyrs_marshal_load_binary" => {
@@ -4869,6 +4869,7 @@ impl Vm {
         Ok((prog, vec![], vec![], source.to_string()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn eval_string_full(
         &mut self,
         source: &str,
@@ -6626,11 +6627,10 @@ impl MarshalWriter {
                     // mirrors the class name so the bytes match CRuby (the
                     // reader maps a nil :mesg back to the class name, so
                     // round-trips stay correct either way).
-                    if let Value::Str(s) = &msg {
-                        if *s.content.borrow() == *cname.as_bytes() {
+                    if let Value::Str(s) = &msg
+                        && *s.content.borrow() == *cname.as_bytes() {
                             msg = Value::Nil;
                         }
-                    }
                     let bt = ivars.iter().find(|(k, _)| *k == bt_ivar)
                         .map(|(_, v)| v.clone()).unwrap_or(Value::Nil);
                     ivars.retain(|(k, _)| *k != msg_ivar && *k != bt_ivar && *k != cause_ivar);
