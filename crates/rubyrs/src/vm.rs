@@ -749,6 +749,13 @@ pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// FLOAT-param specialization of a 1-arg method (`def scale(n); n*1.5; end`
+    /// called with a Float arg): the param binds as Float, the i64 arg carries f64
+    /// bits. Leaf methods only (no cross-calls — those decline). Keyed by proto,
+    /// parallel to `jit_native`, so a method called with both Int and Float args
+    /// gets both specializations and dispatch picks by the arg's runtime type.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_fparam: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
     /// Polymorphic inline cache (ADR 0034): a cross-call-bearing method
     /// (`guard_class != 0`) compiled for its FIRST receiver class lives in
     /// `jit_native`; subsequent receiver classes get their own variant here,
@@ -1945,6 +1952,8 @@ impl Vm {
         Vm {
             #[cfg(feature = "jit-native")]
             jit_native: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_fparam: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_poly: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]

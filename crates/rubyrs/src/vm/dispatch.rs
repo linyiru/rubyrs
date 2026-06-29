@@ -15252,6 +15252,30 @@ impl Vm {
                         }
                     }
                 }
+                // Float arg -> the float-param specialization (leaf methods only).
+                if let Value::Float(f) = &self.stack[recv_idx + 1] {
+                    let f = *f;
+                    if !self.jit_native_fparam.contains_key(&pidx) {
+                        let compiled = self.compile_native_fparam(pidx);
+                        self.jit_native_fparam.insert(pidx, compiled);
+                    }
+                    if let Some(Some(np)) = self.jit_native_fparam.get(&pidx) {
+                        let is_array = np.returns_array.get();
+                        let is_float = np.returns_float.get();
+                        let vm_ptr = self as *const crate::vm::Vm;
+                        if let Some(r) = np.call(vm_ptr, &self.stack[recv_idx], f.to_bits() as i64) {
+                            self.stack[recv_idx] = if is_array {
+                                Value::Array(crate::value::ObjId(r as u32))
+                            } else if is_float {
+                                Value::Float(f64::from_bits(r as u64))
+                            } else {
+                                Value::Int(r)
+                            };
+                            self.stack.truncate(recv_idx + 1);
+                            return Ok(true);
+                        }
+                    }
+                }
             }
             // Not yet compiled but eligible → route to the hook to compile it.
             if self.jit_should_route(pidx, argc) {
@@ -15704,6 +15728,29 @@ impl Vm {
                     }
                 }
             }
+            // Float arg -> the float-param specialization (leaf methods only).
+            if let Some(&Value::Float(f)) = self.stack.last() {
+                if !self.jit_native_fparam.contains_key(&proto_idx) {
+                    let compiled = self.compile_native_fparam(proto_idx);
+                    self.jit_native_fparam.insert(proto_idx, compiled);
+                }
+                if let Some(Some(np)) = self.jit_native_fparam.get(&proto_idx) {
+                    let is_array = np.returns_array.get();
+                    let is_float = np.returns_float.get();
+                    let vm_ptr = self as *const crate::vm::Vm;
+                    if let Some(r) = np.call(vm_ptr, &self_val, f.to_bits() as i64) {
+                        let top = self.stack.len() - 1;
+                        self.stack[top] = if is_array {
+                            Value::Array(crate::value::ObjId(r as u32))
+                        } else if is_float {
+                            Value::Float(f64::from_bits(r as u64))
+                        } else {
+                            Value::Int(r)
+                        };
+                        return Ok(true);
+                    }
+                }
+            }
         }
         self.check_frames()?;
         let n_locals = fixed.n_locals as usize;
@@ -15921,6 +15968,10 @@ impl Vm {
             })
             .collect();
         let mut callees: crate::intern::FxHashMap<crate::intern::SymId, usize> = Default::default();
+        // FLOAT specialization addresses for the same callees (leaf-only). Lets a
+        // float-arg call site inline the callee's fparam version instead of dispatch.
+        let mut float_callees: crate::intern::FxHashMap<crate::intern::SymId, usize> =
+            Default::default();
         if !call_names.is_empty() {
             visited.insert(proto_idx);
             for name in call_names {
@@ -15936,6 +15987,17 @@ impl Vm {
                     .or_else(|| self.toplevel_methods.get(&name).cloned());
                 let Some(cm) = cm else { continue };
                 let cp = cm.proto_idx;
+                // Float specialization (leaf-only) of this callee, for float-arg call
+                // sites in the body. Independent of the Int resolution below.
+                if cm.closure.is_none() {
+                    if !self.jit_native_fparam.contains_key(&cp) {
+                        let v = self.compile_native_fparam(cp);
+                        self.jit_native_fparam.insert(cp, v);
+                    }
+                    if let Some(Some(np)) = self.jit_native_fparam.get(&cp) {
+                        float_callees.insert(name, np.addr());
+                    }
+                }
                 // Already compiled → bake its address directly.
                 if let Some(Some(np)) = self.jit_native.get(&cp) {
                     callees.insert(name, np.addr());
@@ -16000,17 +16062,54 @@ impl Vm {
             &self.protos[proto_idx],
             self_name_id,
             &callees,
+            &float_callees,
             &getters,
             &syms,
             None,
             false, // methods never have a Float element param
         );
-        if let (Some(np), false) = (&compiled, callees.is_empty() && getters.is_empty()) {
+        if let (Some(np), false) = (
+            &compiled,
+            callees.is_empty() && float_callees.is_empty() && getters.is_empty(),
+        ) {
             if let Some(cls) = recv_cls {
                 np.guard_class.set(std::rc::Rc::as_ptr(cls) as usize);
             }
         }
         compiled
+    }
+
+    /// Compile the FLOAT-param specialization of a 1-arg method (leaf only; empty
+    /// callees/getters so any cross-call/getter declines). The param binds as Float
+    /// (i64 arg carries f64 bits); the result boxes per `returns_float` at the call.
+    #[cfg(feature = "jit-native")]
+    fn compile_native_fparam(&mut self, proto_idx: usize) -> Option<crate::jit_native::NativeProto> {
+        let self_name = self.protos[proto_idx].name.clone();
+        let self_name_id = self.interner.intern(&self_name);
+        let callees = crate::intern::FxHashMap::default();
+        let getters = crate::intern::FxHashMap::default();
+        let syms = crate::jit_native::JitSyms {
+            length: self.interner.intern("length"),
+            size: self.interner.intern("size"),
+            bracket: self.interner.intern("[]"),
+            lshift: self.interner.intern("<<"),
+            abs: self.interner.intern("abs"),
+            even_p: self.interner.intern("even?"),
+            odd_p: self.interner.intern("odd?"),
+            zero_p: self.interner.intern("zero?"),
+            positive_p: self.interner.intern("positive?"),
+            negative_p: self.interner.intern("negative?"),
+        };
+        crate::jit_native::compile(
+            &self.protos[proto_idx],
+            self_name_id,
+            &callees,
+            &callees, // empty float callees (helpers + leaf fparam have none)
+            &getters,
+            &syms,
+            None,
+            true,
+        )
     }
 
     /// Fast path for a Rust iterator driver (`step_block1`): run a 1-param block
@@ -17051,6 +17150,7 @@ impl Vm {
             &self.protos[proto_idx],
             dummy,
             &callees,
+            &callees, // empty float callees (helpers + leaf fparam have none)
             &getters,
             &syms,
             Some((param_start, body_local_start, predicate, crate::jit_native::AccKind::None)),
@@ -17088,6 +17188,7 @@ impl Vm {
             &self.protos[proto_idx],
             dummy,
             &callees,
+            &callees, // empty float callees (helpers + leaf fparam have none)
             &getters,
             &syms,
             Some((param_start, body_local_start, predicate, crate::jit_native::AccKind::None)),
@@ -17124,6 +17225,7 @@ impl Vm {
             &self.protos[proto_idx],
             dummy,
             &callees,
+            &callees, // empty float callees (helpers + leaf fparam have none)
             &getters,
             &syms,
             Some((param_start, body_local_start, false, crate::jit_native::AccKind::Inject)),
@@ -17165,6 +17267,7 @@ impl Vm {
             &self.protos[proto_idx],
             dummy,
             &callees,
+            &callees, // empty float callees (helpers + leaf fparam have none)
             &getters,
             &syms,
             Some((
@@ -17207,6 +17310,7 @@ impl Vm {
             &self.protos[proto_idx],
             dummy,
             &callees,
+            &callees, // empty float callees (helpers + leaf fparam have none)
             &getters,
             &syms,
             Some((
@@ -17249,6 +17353,7 @@ impl Vm {
             &self.protos[proto_idx],
             dummy,
             &callees,
+            &callees, // empty float callees (helpers + leaf fparam have none)
             &getters,
             &syms,
             Some((
@@ -17499,16 +17604,40 @@ impl Vm {
                 }
             };
             if let Some(Some(r)) = native {
-                let is_array = matches!(
-                    self.jit_native.get(&proto_idx),
-                    Some(Some(np)) if np.returns_array.get()
-                );
+                let (is_array, is_float) = match self.jit_native.get(&proto_idx) {
+                    Some(Some(np)) => (np.returns_array.get(), np.returns_float.get()),
+                    _ => (false, false),
+                };
                 self.stack.push(if is_array {
                     Value::Array(crate::value::ObjId(r as u32))
+                } else if is_float {
+                    Value::Float(f64::from_bits(r as u64))
                 } else {
                     Value::Int(r)
                 });
                 return Ok(());
+            }
+            // Float arg -> the float-param specialization (leaf methods only).
+            if let Some(&Value::Float(f)) = args.first() {
+                if !self.jit_native_fparam.contains_key(&proto_idx) {
+                    let compiled = self.compile_native_fparam(proto_idx);
+                    self.jit_native_fparam.insert(proto_idx, compiled);
+                }
+                if let Some(Some(np)) = self.jit_native_fparam.get(&proto_idx) {
+                    let is_array = np.returns_array.get();
+                    let is_float = np.returns_float.get();
+                    let vm_ptr = self as *const crate::vm::Vm;
+                    if let Some(r) = np.call(vm_ptr, &self_val, f.to_bits() as i64) {
+                        self.stack.push(if is_array {
+                            Value::Array(crate::value::ObjId(r as u32))
+                        } else if is_float {
+                            Value::Float(f64::from_bits(r as u64))
+                        } else {
+                            Value::Int(r)
+                        });
+                        return Ok(());
+                    }
+                }
             }
             // Value-method path (D Layer 3, the AR-shaped win): if the integer
             // JIT rejected this 1-arg method, try the value JIT — the
