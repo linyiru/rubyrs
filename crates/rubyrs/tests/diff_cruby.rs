@@ -1031,6 +1031,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn array_tally() { run_diff("array_tally"); }
 #[test] fn jit_float_key_sum_by_key() { run_diff("jit_float_key_sum_by_key"); }
 #[test] fn jit_objmethod_sum() { run_diff("jit_objmethod_sum"); }
+#[test] fn jit_obj_recv_call() { run_diff("jit_obj_recv_call"); }
 #[test] fn comparable_clamp_range() { run_diff("comparable_clamp_range"); }
 #[test] fn float_precision() { run_diff("float_precision"); }
 #[test] fn compact_filter_map() { run_diff("compact_filter_map"); }

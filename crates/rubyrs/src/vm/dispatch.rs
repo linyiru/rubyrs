@@ -15998,6 +15998,55 @@ impl Vm {
     /// the compiled `NativeProto` (caller decides where to cache it — the
     /// monomorphic `jit_native` slot or a `jit_native_poly` PIC variant). Pure
     /// extraction of the former inline hook logic; behaviour-identical.
+    /// Resolve + compile a callee for a native→native object-method PIC fill
+    /// (`jit_obj_call`, ADR 0034 Step 1). `name` on `cls` must be a user, non-closure,
+    /// non-builtin method of exactly `expect_arity` required positionals, compilable to
+    /// a `NativeProto` valid for this class (`guard_class` 0 or == `cls_ptr`). Returns
+    /// its native code address, or `None` (decline → the call site deopts to the
+    /// interpreter). Reuses the B1 per-proto `jit_native` cache, so a redefinition
+    /// (new proto) recompiles. Called re-entrantly from the JIT primitive via `&mut
+    /// *vm` (see `jit_obj_call`'s safety note).
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn jit_compile_obj_callee(
+        &mut self,
+        name: crate::intern::SymId,
+        cls: &std::rc::Rc<crate::value::Class>,
+        cls_ptr: usize,
+        expect_arity: usize,
+    ) -> Option<usize> {
+        let m = self.lookup_method_uncached(cls, name)?;
+        if m.closure.is_some() || m.builtin.is_some() {
+            return None;
+        }
+        match m.fixed_arity {
+            Some(f) if f.required as usize == expect_arity => {}
+            _ => return None,
+        }
+        let cp = m.proto_idx;
+        if !self.jit_native.contains_key(&cp) {
+            let compiled = self.compile_native_for_class(cp, Some(cls));
+            self.jit_native.insert(cp, compiled);
+        }
+        let (addr, gc, ret_float, ret_array) = match self.jit_native.get(&cp) {
+            Some(Some(np)) => (
+                np.addr(),
+                np.guard_class.get(),
+                np.returns_float.get(),
+                np.returns_array.get(),
+            ),
+            _ => return None,
+        };
+        if gc != 0 && gc != cls_ptr {
+            return None;
+        }
+        // The obj-call site materializes the result as an Int; a Float/Array-returning
+        // callee would mis-box, so decline (→ deopt → interpreter).
+        if ret_float || ret_array {
+            return None;
+        }
+        Some(addr)
+    }
+
     #[cfg(feature = "jit-native")]
     fn compile_native_for_class(
         &mut self,

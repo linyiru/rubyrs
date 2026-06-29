@@ -51,6 +51,11 @@ pub(crate) struct NativeProto {
     /// into the native code as constants, so the `Box`es must outlive the code —
     /// they're owned here and dropped with the proto (and its module).
     _caches: Vec<Box<std::cell::Cell<(usize, u32)>>>,
+    /// Monomorphic inline caches for explicit-recv object-method call sites
+    /// (`@h.method(args)`, ADR 0034 Step 1). Each holds `(receiver_class_ptr,
+    /// callee_native_addr)`, filled at runtime on first call by `jit_obj_call`; their
+    /// addresses are baked into the code, so the `Box`es outlive it here.
+    _obj_call_caches: Vec<Box<std::cell::Cell<(usize, usize)>>>,
 }
 
 impl NativeProto {
@@ -100,6 +105,12 @@ enum Kind {
     /// are untouched. Only pure Float<->Float arithmetic is modelled (mixed
     /// Int/Float declines: no coercion yet).
     Float,
+    /// A `*const Value` pointing at a receiver Object (an `@ivar` that holds a
+    /// `Value::Object`), produced by `LoadIvar` when the ivar's value is consumed
+    /// as the receiver of a method call (`@h.compute(x)`). Consumed only by the
+    /// explicit-recv `Call` arm, which emits a native→native PIC call on it (Step 1
+    /// of the JIT generalization — the OO-dispatch lever). Any other use declines.
+    Object,
 }
 
 /// Compile an eligible `Proto` to native code, or `None` to keep interpreting.
@@ -154,6 +165,42 @@ pub(crate) enum AccKind {
     /// to a 3rd i64 C-arg. Element is `param_slot`, index `param_slot + 1`, the
     /// accumulator a CAPTURED slot; the new acc is that slot's value after the body.
     EachWithIndex { acc_slot: u32 },
+}
+
+/// If the `LoadIvar` at `code[ivar_ip]` produces a value consumed as the RECEIVER of a
+/// later `Call(name, argc)` — the `@h.method(args)` shape (ADR 0034 Step 1) — return
+/// `(name, argc)`. Walks forward tracking the operand-stack height of values pushed
+/// ABOVE the ivar, using a conservative stack-effect model of the arg-expression ops;
+/// bails (`None`) on any op it can't model or if the ivar is consumed by something
+/// other than a `Call` receiver. Bounded scan; `argc` limited to {0, 1} (the shapes
+/// lowered today). Excludes bracket/lshift/`[]=` (those have their own fused arms).
+fn ivar_call_receiver(code: &[Op], ivar_ip: usize, syms: &JitSyms) -> Option<(SymId, u8)> {
+    let mut h: i32 = 0; // height of operand-stack values ABOVE the ivar
+    let mut j = ivar_ip + 1;
+    let end = (ivar_ip + 9).min(code.len());
+    while j < end {
+        match &code[j] {
+            Op::Call(name, argc, _)
+                if (*argc as i32) == h
+                    && *argc <= 1
+                    && *name != syms.bracket
+                    && *name != syms.lshift
+                    && *name != syms.bracket_set =>
+            {
+                return Some((*name, *argc));
+            }
+            Op::LoadLocal(_) | Op::LoadConstInt(_) | Op::LoadConstFloat(_) => h += 1,
+            Op::BinOpInt(_, _) => {}          // pop 1, push 1
+            Op::BinOp(_) => h -= 1,           // pop 2, push 1
+            Op::BinOpLocalLocal(_, _, _) => h += 1,
+            _ => return None,
+        }
+        if h < 0 {
+            return None; // ivar consumed by a non-Call op
+        }
+        j += 1;
+    }
+    None
 }
 
 pub(crate) fn compile(
@@ -326,6 +373,11 @@ pub(crate) fn compile(
             // `h[k] = v` — the Hash-accumulator setter, emitted as `CallAset` (codegen
             // requires a HashObjId receiver; any other receiver declines in codegen).
             Op::CallAset(m, 2, _) if *m == syms.bracket_set => {}
+            // Explicit-recv 1-arg call `recv.method(arg)` (ADR 0034 Step 1): admitted
+            // here; codegen lowers it to a native→native PIC call ONLY when the receiver
+            // is an Object (an `@ivar`), else declines. (0-arg `recv.method` rides the
+            // `Op::Call(_, 0, _)` arm above.)
+            Op::Call(_, 1, _) => {}
             _ => return None,
         }
     }
@@ -358,6 +410,8 @@ pub(crate) fn compile(
     }
     // Value primitives callable from the body.
     builder.symbol("jit_ivar_get_int", jit_ivar_get_int as *const u8);
+    builder.symbol("jit_ivar_obj_ptr", jit_ivar_obj_ptr as *const u8);
+    builder.symbol("jit_obj_call", jit_obj_call as *const u8);
     builder.symbol("jit_ivar_len", jit_ivar_len as *const u8);
     builder.symbol("jit_ivar_hash_get_int", jit_ivar_hash_get_int as *const u8);
     builder.symbol("jit_ivar_array_get_int", jit_ivar_array_get_int as *const u8);
@@ -399,6 +453,22 @@ pub(crate) fn compile(
     ivsig.returns.push(AbiParam::new(types::I8));
     let ivid = module
         .declare_function("jit_ivar_get_int", Linkage::Import, &ivsig)
+        .ok()?;
+    // `jit_ivar_obj_ptr` shares the same `(vm, self, name:i32) -> (ptr, i8)` shape.
+    let ivobjid = module
+        .declare_function("jit_ivar_obj_ptr", Linkage::Import, &ivsig)
+        .ok()?;
+    // `jit_obj_call`: (vm, recv:ptr, arg:i64, name:i32, cache:ptr) -> (i64, i8).
+    let mut ocsig = module.make_signature();
+    ocsig.params.push(AbiParam::new(ptr_ty)); // vm
+    ocsig.params.push(AbiParam::new(ptr_ty)); // recv ptr
+    ocsig.params.push(AbiParam::new(types::I64)); // arg
+    ocsig.params.push(AbiParam::new(types::I32)); // name sym
+    ocsig.params.push(AbiParam::new(ptr_ty)); // cache cell ptr
+    ocsig.returns.push(AbiParam::new(types::I64));
+    ocsig.returns.push(AbiParam::new(types::I8));
+    let ocid = module
+        .declare_function("jit_obj_call", Linkage::Import, &ocsig)
         .ok()?;
     // `jit_ivar_len` shares the same `(vm, self, name:i32) -> (i64, i8)` sig.
     let alid = module
@@ -537,12 +607,17 @@ pub(crate) fn compile(
     // Inline-cache cells for `@arr[i].getter` sites (B4); their addresses are
     // baked into the code, so they're moved into the NativeProto to outlive it.
     let mut caches: Vec<Box<std::cell::Cell<(usize, u32)>>> = Vec::new();
+    // Inline-cache cells for explicit-recv obj-method call sites (`@h.method(args)`,
+    // ADR 0034 Step 1); `(class_ptr, callee_addr)`, runtime-filled, baked into the code.
+    let mut obj_call_caches: Vec<Box<std::cell::Cell<(usize, usize)>>> = Vec::new();
     {
         let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         // A reference to THIS function, for compiling self-recursive calls
         // (`fib(n-1)` → a native call back into the same code).
         let self_ref = module.declare_func_in_func(fid, fb.func);
         let ivar_ref = module.declare_func_in_func(ivid, fb.func);
+        let ivar_obj_ref = module.declare_func_in_func(ivobjid, fb.func);
+        let obj_call_ref = module.declare_func_in_func(ocid, fb.func);
         let arraylen_ref = module.declare_func_in_func(alid, fb.func);
         let hashget_ref = module.declare_func_in_func(hgid, fb.func);
         let arrget_ref = module.declare_func_in_func(agid, fb.func);
@@ -695,6 +770,24 @@ pub(crate) fn compile(
                 // otherwise read an Int ivar. A non-matching heap shape sets ovf
                 // → deopt. The fused Call op is skipped (`ip += 1`).
                 Op::LoadIvar(s) => {
+                    // `@h.method(args)` (ADR 0034 Step 1): when this ivar's value is
+                    // consumed as a method-call RECEIVER, load it as a `*const Value`
+                    // (Object kind) instead of an Int — the explicit-recv `Call` arm
+                    // emits the native→native PIC call on it. A non-Object ivar deopts
+                    // (sound: pure read). Checked before the Int/array/hash fusions
+                    // (its method name is never bracket/lshift/length, so no overlap).
+                    if ivar_call_receiver(code, ip, syms).is_some() {
+                        let name = fb.ins().iconst(types::I32, s.0 as i64);
+                        let inst = fb.ins().call(ivar_obj_ref, &[vm_param, self_param, name]);
+                        let (ptr, of) = {
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
+                        };
+                        acc_ovf(&mut fb, of);
+                        stack.push((ptr, Kind::Object));
+                        ip += 1;
+                        continue;
+                    }
                     // `@arr[local].getter` (B4) → LoadIvar, LoadLocal, Call([],1),
                     // Call(getter,0). Fused into one inline-cached primitive:
                     // array-get + element-class PIC + int attribute read. The
@@ -824,8 +917,9 @@ pub(crate) fn compile(
                             local_kinds[*s as usize] = Kind::Float;
                             fb.def_var(vars[*s as usize], bits);
                         }
-                        // Reassigning the Hash memo (or storing a Bool/Nil) isn't modelled.
-                        Kind::Bool | Kind::Nil | Kind::HashObjId => return None,
+                // Reassigning the Hash memo (or storing a Bool/Nil), or stashing an
+                // obj-call receiver pointer into a local, isn't modelled.
+                Kind::Bool | Kind::Nil | Kind::HashObjId | Kind::Object => return None,
                     }
                 }
                 Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
@@ -1068,6 +1162,46 @@ pub(crate) fn compile(
                     fb.ins().call(setref, &[vm_param, recv, keyarg, valarg]);
                     stack.push((val, vk));
                 }
+                // Explicit-recv method call `recv.name(arg)` on an Object receiver (an
+                // `@ivar` loaded as a pointer above) — the OO-dispatch lever (ADR 0034
+                // Step 1). Lowered to `jit_obj_call`: a monomorphic runtime-fill PIC
+                // (class-guard + direct native→native call), no `do_call`, no frame.
+                // argc 0 or 1 (Int arg). A non-Object receiver / non-Int arg declines.
+                // The result is materialised as Int (the callee is gated to Int returns).
+                Op::Call(name, argc, _)
+                    if *argc <= 1
+                        && stack
+                            .get(stack.len().wrapping_sub(*argc as usize + 1))
+                            .map(|(_, k)| *k)
+                            == Some(Kind::Object) =>
+                {
+                    let arg = if *argc == 1 {
+                        let (a, ka) = stack.pop()?;
+                        if ka != Kind::Int {
+                            return None;
+                        }
+                        a
+                    } else {
+                        fb.ins().iconst(types::I64, 0)
+                    };
+                    let (recv_ptr, _) = stack.pop()?; // Kind::Object pointer
+                    let nm = fb.ins().iconst(types::I32, name.0 as i64);
+                    let cache = Box::new(std::cell::Cell::new((0usize, 0usize)));
+                    let cache_addr =
+                        &*cache as *const std::cell::Cell<(usize, usize)> as i64;
+                    obj_call_caches.push(cache);
+                    let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
+                    let inst = fb.ins().call(
+                        obj_call_ref,
+                        &[vm_param, recv_ptr, arg, nm, cache_const],
+                    );
+                    let (res, of) = {
+                        let r = fb.inst_results(inst);
+                        (r[0], r[1])
+                    };
+                    acc_ovf(&mut fb, of);
+                    stack.push((res, Kind::Int));
+                }
                 // 0-arg bare call to a self attribute reader (`amount`) → inline
                 // the ivar read on the receiver (B4): one native call to
                 // `jit_ivar_get_int`, no frame/dispatch. A non-Int ivar deopts.
@@ -1230,6 +1364,7 @@ pub(crate) fn compile(
         returns_array: std::cell::Cell::new(returns_array),
         returns_float: std::cell::Cell::new(returns_float),
         _caches: caches,
+        _obj_call_caches: obj_call_caches,
     })
 }
 
@@ -3358,6 +3493,104 @@ pub(crate) unsafe extern "C" fn jit_ivar_get_int(
         Some(n) => NRet { res: n, ovf: 0 },
         None => NRet { res: 0, ovf: 1 }, // missing or non-Int → deopt to the interpreter
     }
+}
+
+/// B4-generalized (ADR 0034, Step 1): return a pointer to the receiver `Value` held
+/// in `recv.@name`, when that ivar is a `Value::Object` — the receiver for a native→
+/// native method call (`@h.compute(x)`). `res` is the `*const Value` (into the
+/// instance's ivar table); `ovf=1` (deopt) if the ivar is absent or not an Object.
+///
+/// # Safety
+/// `vm`, `recv` valid. The returned pointer is valid only until the next heap
+/// mutation/alloc — the compiled body consumes it in the immediately-following
+/// `jit_obj_call` (a GC-free, non-mutating method) so the ivar slot does not move.
+pub(crate) unsafe extern "C" fn jit_ivar_obj_ptr(
+    vm: *const crate::vm::Vm,
+    recv: *const Value,
+    name: u32,
+) -> NRet {
+    let vm = unsafe { &*vm };
+    let recv = unsafe { &*recv };
+    let name_id = crate::intern::SymId(name);
+    let p: Option<*const Value> = match recv {
+        Value::Object(oid) => match vm.heap.get(*oid) {
+            crate::heap::HeapObj::Instance(inst) => match inst.ivars.get(&name_id) {
+                Some(v @ Value::Object(_)) => Some(v as *const Value),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    };
+    match p {
+        Some(ptr) => NRet { res: ptr as i64, ovf: 0 },
+        None => NRet { res: 0, ovf: 1 },
+    }
+}
+
+/// B4-generalized (ADR 0034, Step 1): the OO-dispatch lever. A native→native method
+/// call `recv.name(arg)` from inside a compiled body, via a monomorphic runtime-fill
+/// inline cache. `recv` points at the receiver Object `Value`; `cache` holds
+/// `(class_ptr, method_addr)`. Hit (recv class == cached) → call the cached native
+/// method directly (no `do_call`, no frame). Empty cache → resolve `name` on the recv
+/// class, compile it for that class (`jit_compile_obj_callee`), fill the cache, call.
+/// Class miss (a 2nd class at a monomorphic site) → `ovf=1` deopt → the whole pure
+/// body re-runs interpreted (which handles the polymorphic tail). `arg` is the single
+/// Int argument (the 1-arg shape; ignored by a 0-arg callee).
+///
+/// # Safety
+/// `vm` valid; called from native code invoked by the interpreter (whose `&mut self`
+/// is dormant as a raw ptr), so reconstructing `&mut *vm` for the on-miss compile is
+/// the same pattern as the heap-mutating primitives (`jit_array_new` &c.). The compile
+/// touches `jit_native`/`protos`, NOT `heap`, so `recv` stays valid; it runs no Ruby,
+/// so there is no re-entrancy into this primitive.
+pub(crate) unsafe extern "C" fn jit_obj_call(
+    vm: *mut crate::vm::Vm,
+    recv: *const Value,
+    arg: i64,
+    name: u32,
+    cache: *const std::cell::Cell<(usize, usize)>,
+) -> NRet {
+    let deopt = NRet { res: 0, ovf: 1 };
+    // The method codegen accumulates the deopt flag but does NOT branch on it (ops
+    // compute-and-discard on ovf — safe for arithmetic). So a preceding
+    // `jit_ivar_obj_ptr` deopt (non-Object ivar) leaves a NULL `recv` here; we must
+    // not dereference it. A valid receiver pointer is never null.
+    if recv.is_null() {
+        return deopt;
+    }
+    let cache = unsafe { &*cache };
+    let recv_ref = unsafe { &*recv };
+    let oid = match recv_ref {
+        Value::Object(o) => *o,
+        _ => return deopt,
+    };
+    let cls = match unsafe { &*vm }.heap.try_class_of(oid) {
+        Some(c) => c,
+        None => return deopt,
+    };
+    let cls_ptr = std::rc::Rc::as_ptr(&cls) as usize;
+    let (cached_cls, cached_addr) = cache.get();
+    let addr = if cached_cls == cls_ptr {
+        cached_addr
+    } else if cached_cls == 0 {
+        // Empty cache: resolve + compile the callee for this receiver class (1-arg),
+        // then memoize (class_ptr, addr). Re-entrant compile via &mut *vm — sound per
+        // the safety note (same pattern as the heap-mutating primitives).
+        let vmm = unsafe { &mut *vm };
+        match vmm.jit_compile_obj_callee(crate::intern::SymId(name), &cls, cls_ptr, 1) {
+            Some(a) => {
+                cache.set((cls_ptr, a));
+                a
+            }
+            None => return deopt,
+        }
+    } else {
+        return deopt; // megamorphic at a monomorphic site → interpreter
+    };
+    let f: extern "C" fn(*const crate::vm::Vm, *const Value, i64) -> NRet =
+        unsafe { std::mem::transmute(addr) };
+    f(vm as *const crate::vm::Vm, recv, arg)
 }
 
 /// Method-name syms the JIT recognises for value-primitive fusion (e.g. fusing
