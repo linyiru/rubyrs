@@ -699,36 +699,41 @@ pub(crate) fn compile(
                 Op::BinOp(k) => {
                     let (b, kb) = stack.pop()?;
                     let (a, ka) = stack.pop()?;
-                    if ka == Kind::Float && kb == Kind::Float {
-                        emit_binop_float(&mut fb, *k, a, b, &mut stack)?;
-                    } else if ka == Kind::Int && kb == Kind::Int {
-                        emit_binop(&mut fb, *k, a, b, &mut stack, ovf_var);
-                    } else {
-                        return None; // mixed Int/Float: no coercion modelled yet
-                    }
+                    emit_numeric_binop(&mut fb, *k, a, ka, b, kb, &mut stack, ovf_var)?;
                 }
                 Op::BinOpLocalLocal(k, a_slot, b_slot) => {
                     let ka = local_kinds[*a_slot as usize];
                     let kb = local_kinds[*b_slot as usize];
                     let a_raw = fb.use_var(vars[*a_slot as usize]);
                     let b_raw = fb.use_var(vars[*b_slot as usize]);
-                    if ka == Kind::Float && kb == Kind::Float {
-                        let a = fb.ins().bitcast(types::F64, MemFlagsData::new(), a_raw);
-                        let b = fb.ins().bitcast(types::F64, MemFlagsData::new(), b_raw);
-                        emit_binop_float(&mut fb, *k, a, b, &mut stack)?;
-                    } else if ka == Kind::Int && kb == Kind::Int {
-                        emit_binop(&mut fb, *k, a_raw, b_raw, &mut stack, ovf_var);
+                    // A Float local's var holds f64 BITS — materialise the F64 before
+                    // the numeric op (an Int local's var is the i64 value as-is).
+                    let a = if ka == Kind::Float {
+                        fb.ins().bitcast(types::F64, MemFlagsData::new(), a_raw)
                     } else {
-                        return None;
-                    }
+                        a_raw
+                    };
+                    let b = if kb == Kind::Float {
+                        fb.ins().bitcast(types::F64, MemFlagsData::new(), b_raw)
+                    } else {
+                        b_raw
+                    };
+                    emit_numeric_binop(&mut fb, *k, a, ka, b, kb, &mut stack, ovf_var)?;
                 }
                 Op::BinOpInt(k, imm) => {
                     let (a, ka) = stack.pop()?;
-                    if ka != Kind::Int {
-                        return None; // `float <op> int_imm` is mixed — no coercion yet
+                    match ka {
+                        Kind::Int => {
+                            let b = fb.ins().iconst(types::I64, *imm);
+                            emit_binop(&mut fb, *k, a, b, &mut stack, ovf_var);
+                        }
+                        // `float <op> int_imm` — coerce the immediate to f64 directly.
+                        Kind::Float => {
+                            let b = fb.ins().f64const(*imm as f64);
+                            emit_binop_float(&mut fb, *k, a, b, &mut stack)?;
+                        }
+                        _ => return None,
                     }
-                    let b = fb.ins().iconst(types::I64, *imm);
-                    emit_binop(&mut fb, *k, a, b, &mut stack, ovf_var);
                 }
                 Op::Jump(off) => {
                     let t = (ip as i64 + 1 + *off as i64) as usize;
@@ -780,16 +785,25 @@ pub(crate) fn compile(
                         // correctly at the boundary. A Bool/Nil result must NOT be
                         // returned as a raw i64 (`{ |x| x > 5 }` is true/false, not
                         // 1/0) — decline so the interpreter types it.
+                        // The result KIND must match what the consuming loop expects:
+                        // a Float driver (`float_elem`) needs a Float result, an Int
+                        // driver an Int/Array. A mismatch (e.g. `floats.sum { |x| 5 }`
+                        // — an Int result into the f64 accumulator) would reinterpret
+                        // the bits as the wrong type, so it DECLINES to the generic
+                        // path. Without this, a non-Float-returning block over a Float
+                        // array silently corrupts (Int 5 -> 5.0e-323).
                         match k {
-                            Kind::Int => v,
-                            Kind::ArrayObjId => {
+                            Kind::Int if !float_elem => v,
+                            Kind::ArrayObjId if !float_elem => {
                                 returns_array = true;
                                 v
                             }
                             // Return the f64 result's BITS; the Float driver loop
                             // bitcasts back and boxes `Value::Float`.
-                            Kind::Float => fb.ins().bitcast(types::I64, MemFlagsData::new(), v),
-                            Kind::Bool | Kind::Nil => return None,
+                            Kind::Float if float_elem => {
+                                fb.ins().bitcast(types::I64, MemFlagsData::new(), v)
+                            }
+                            _ => return None,
                         }
                     };
                     let ov = fb.use_var(ovf_var);
@@ -2403,6 +2417,47 @@ fn emit_int_unary(
 /// Float comparisons + `%` (fmod) decline (`None`) — not needed by `sum`/`map`,
 /// and float comparison would need careful NaN ordering. The Int `emit_binop`
 /// stays the exclusive Int path; this never runs for Int operands.
+/// Lower a numeric binary op with Int<->Float coercion (Ruby semantics: any Float
+/// operand promotes the other). `a`/`b` are materialised values whose kinds are
+/// `ka`/`kb` (a Float operand is already an F64, an Int operand an i64). Int+Int
+/// stays the overflow-checked Int path; if EITHER side is Float, the Int side is
+/// `fcvt_from_sint`-coerced to F64 and the float op runs. A non-numeric operand
+/// (Bool/Nil/Array) declines. This is what lets `floats.sum { |x| x * 2 }` (Float
+/// element, Int literal) go native.
+fn emit_numeric_binop(
+    fb: &mut FunctionBuilder,
+    k: BinOpKind,
+    a: ClValue,
+    ka: Kind,
+    b: ClValue,
+    kb: Kind,
+    stack: &mut Vec<(ClValue, Kind)>,
+    ovf_var: Variable,
+) -> Option<()> {
+    match (ka, kb) {
+        (Kind::Int, Kind::Int) => {
+            emit_binop(fb, k, a, b, stack, ovf_var);
+            Some(())
+        }
+        (ka, kb)
+            if matches!(ka, Kind::Int | Kind::Float) && matches!(kb, Kind::Int | Kind::Float) =>
+        {
+            let af = if ka == Kind::Int {
+                fb.ins().fcvt_from_sint(types::F64, a)
+            } else {
+                a
+            };
+            let bf = if kb == Kind::Int {
+                fb.ins().fcvt_from_sint(types::F64, b)
+            } else {
+                b
+            };
+            emit_binop_float(fb, k, af, bf, stack)
+        }
+        _ => None,
+    }
+}
+
 fn emit_binop_float(
     fb: &mut FunctionBuilder,
     k: BinOpKind,
