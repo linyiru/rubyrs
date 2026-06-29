@@ -608,8 +608,27 @@ Hash-accumulator "sum-by-key" now ships too: `arr.each_with_object(Hash.new(0)) 
 merges into the real memo only on success, gated to an empty `Hash.new(0)` (others decline). Both
 Int and Float arrays drive it.
 
-The common Array + Hash Enumerable/aggregation surface is now broadly covered for Int and Float.
-Remaining: pure Float-key sum-by-key, and broadening the value-method JIT surface.
+**Pure Float-KEY sum-by-key — SHIPPED**, 2.18× YJIT (jitN 0.60s vs 1.31s; 5.7× over interp).
+`arr.each_with_object(Hash.new(0)) { |x, h| h[float_key] += int }` now compiles with a FLOAT bucket
+key — the Float element used directly (`h[x] += 1`), or an Int element promoted (`h[x * 1.5] += 1`).
+The `[]`/`[]=` block codegen branches on the key kind: an Int key keeps the exact-match Int-accum
+primitives; a Float key bitcasts to its f64 bits and calls two new primitives
+(`jit_hash_accum_get_floatkey` / `_set_floatkey`) whose bucket match **replicates `Value::ruby_eql`'s
+Float arm** (NaN by bits — distinct NaNs never collide — every other Float by `==`, so -0.0 and 0.0
+share a bucket), identical to the already-shipped `jit_group_push_floatkey`. The VALUE stays Int
+(sum/count-by-key); no driver/dispatch/cache change was needed (key kind is per-op from the operand
+stack, fixed per proto, so the existing `(proto_idx, float_elem)` cache key suffices). The margin is
+smaller than the ~6× block-elimination drivers because both rubyrs and YJIT pay the per-element Hash
+probe (the accum is an O(distinct-keys) linear scan); the JIT win here is only the eliminated block
+dispatch. Parity vs CRuby (count, non-1 increment, Int→Float key, -0.0/0.0 bucket collapse, distinct
+NaN, empty, first-appearance order) on interpreter == JIT; STRESS_GC clean (the scratch Hash is the
+sole alloc, held live across the GC-free loop); diff_cruby GREEN both builds + a dedicated
+`jit_float_key_sum_by_key` fixture.
+
+The common Array + Hash Enumerable/aggregation surface is now broadly covered for Int and Float
+(elements, keys, and values). Remaining: Float-VALUE sum-by-key (a Float accumulator per Hash key,
+needing the value-result decouple the Float drivers already have), and broadening the value-method
+JIT surface.
 
 ## Risks
 
