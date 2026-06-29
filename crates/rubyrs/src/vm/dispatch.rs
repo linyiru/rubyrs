@@ -17872,6 +17872,54 @@ impl Vm {
         Some(Value::Hash(crate::value::ObjId(hash_objid as u32)))
     }
 
+    /// Float-element / Int-key `group_by` (ADR 0034 layer 3e): `floats.group_by { |x|
+    /// x.floor }` — a Float array bucketed by a Float->Int conversion key. Reuses the
+    /// Float-elem/Int-result block (shared with float->int sum/map) and a group_by loop
+    /// whose element reader is Float and whose bucket push (`jit_group_push_floatelem`)
+    /// stores the original Float under the Int key. The Int-element loop above declines
+    /// first (its Int reader deopts on the Float element). `None` (non-Float element /
+    /// out-of-range conversion key / ineligible block) discards the fresh Hash and
+    /// redoes the generic group_by (write-back-on-success).
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_floatint_groupby_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<Value> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        // Float-elem / Int-result key block (shared with float->int sum/map).
+        if !self.jit_native_block_floatint.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false, false);
+            self.jit_native_block_floatint.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_floatint.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_floatint_groupby_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_floatint_groupby_loop(block_addr);
+            self.jit_native_floatint_groupby_loop.insert(proto_idx, compiled);
+        }
+        let gl = match self.jit_native_floatint_groupby_loop.get(&proto_idx) {
+            Some(Some(gl)) => gl,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        let hash_objid = gl.call(vm_ptr, &self_val, array_id.0 as i64, 0)?;
+        Some(Value::Hash(crate::value::ObjId(hash_objid as u32)))
+    }
+
     pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {
         // GC rooting for the pre-frame window: receiver, args, and
         // the block arrive as Rust locals (popped off the operand

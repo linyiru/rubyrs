@@ -1692,11 +1692,34 @@ pub(crate) fn compile_native_eachobj_loop(block_addr: usize) -> Option<NativeLoo
 /// returned Hash is fresh (not user-visible until success), so this is sound
 /// (write-back-on-success).
 pub(crate) fn compile_native_groupby_loop(block_addr: usize) -> Option<NativeLoop> {
+    compile_native_groupby_loop_inner(block_addr, false)
+}
+
+/// Float-element / Int-key variant (`floats.group_by { |x| x.floor }`): reads each
+/// element via `jit_array_elem_float` and buckets the original Float under the block's
+/// Int key via `jit_group_push_floatelem`. The key block is the shared Float-elem/
+/// Int-result block (`jit_native_block_floatint`); a non-Float element or an out-of-
+/// range conversion key deopts (discard-and-redo, same as the Int loop).
+pub(crate) fn compile_native_floatint_groupby_loop(block_addr: usize) -> Option<NativeLoop> {
+    compile_native_groupby_loop_inner(block_addr, true)
+}
+
+fn compile_native_groupby_loop_inner(block_addr: usize, float_elem: bool) -> Option<NativeLoop> {
+    let (elem_name, elem_fn): (&str, *const u8) = if float_elem {
+        ("jit_array_elem_float", jit_array_elem_float as *const u8)
+    } else {
+        ("jit_array_elem_int", jit_array_elem_int as *const u8)
+    };
+    let (push_name, push_fn): (&str, *const u8) = if float_elem {
+        ("jit_group_push_floatelem", jit_group_push_floatelem as *const u8)
+    } else {
+        ("jit_group_push", jit_group_push as *const u8)
+    };
     let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
     builder.symbol("jit_hash_new", jit_hash_new as *const u8);
-    builder.symbol("jit_group_push", jit_group_push as *const u8);
+    builder.symbol(push_name, push_fn);
     builder.symbol("jit_array_len", jit_array_len as *const u8);
-    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
+    builder.symbol(elem_name, elem_fn);
     builder.symbol("blk", block_addr as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
@@ -1724,7 +1747,7 @@ pub(crate) fn compile_native_groupby_loop(block_addr: usize) -> Option<NativeLoo
     pushsig.params.push(AbiParam::new(types::I64));
     pushsig.params.push(AbiParam::new(types::I64));
     let pushid = module
-        .declare_function("jit_group_push", Linkage::Import, &pushsig)
+        .declare_function(push_name, Linkage::Import, &pushsig)
         .ok()?;
     let mut lensig = module.make_signature();
     lensig.params.push(AbiParam::new(ptr_ty));
@@ -1740,7 +1763,7 @@ pub(crate) fn compile_native_groupby_loop(block_addr: usize) -> Option<NativeLoo
     elsig.returns.push(AbiParam::new(types::I64));
     elsig.returns.push(AbiParam::new(types::I8));
     let elid = module
-        .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
+        .declare_function(elem_name, Linkage::Import, &elsig)
         .ok()?;
     // 1-param value block: (vm, self, x) -> (key, ovf).
     let mut blksig = module.make_signature();
@@ -3065,6 +3088,47 @@ pub(crate) unsafe extern "C" fn jit_group_push(
         }
     };
     vm.heap.array_mut(arr_id).push(Value::Int(elem));
+}
+
+/// Like [`jit_group_push`] but the bucketed ELEMENT is a Float (`elem` carries its
+/// f64 bits) while the KEY stays an Int — for `floats.group_by { |x| x.floor }` and
+/// friends, where the key is a Float->Int conversion but the grouped values are the
+/// original Floats. Int keys keep the bucket match exact (no -0.0/NaN Float-key
+/// subtlety; that variant is deferred).
+///
+/// # Safety
+/// `vm` valid; `hash_objid` a live pinned result Hash; buckets are always Arrays.
+pub(crate) unsafe extern "C" fn jit_group_push_floatelem(
+    vm: *mut crate::vm::Vm,
+    hash_objid: i64,
+    key: i64,
+    elem: i64,
+) {
+    let vm = unsafe { &mut *vm };
+    let hid = crate::value::ObjId(hash_objid as u32);
+    let pos = vm
+        .heap
+        .hash(hid)
+        .iter()
+        .position(|(k, _)| matches!(k, Value::Int(n) if *n == key));
+    let arr_id = match pos {
+        Some(p) => match vm.heap.hash(hid)[p].1 {
+            Value::Array(a) => a,
+            _ => return,
+        },
+        None => {
+            let new_arr = vm
+                .heap
+                .alloc(crate::heap::HeapObj::Array(Vec::<Value>::new().into()));
+            vm.heap
+                .hash_mut(hid)
+                .push((Value::Int(key), Value::Array(new_arr)));
+            new_arr
+        }
+    };
+    vm.heap
+        .array_mut(arr_id)
+        .push(Value::Float(f64::from_bits(elem as u64)));
 }
 
 /// Native primitive: length of Array `objid` as i64. Read once at the top of a
