@@ -4168,10 +4168,18 @@ impl Vm {
                 Some(early.unwrap_or(acc))
             }
             (Value::Array(id), "count", []) => {
-                let snapshot: Vec<Value> = self.heap.array(*id).clone();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
+                // Whole-loop native fast path (ADR 0034 layer 3): a comparison
+                // predicate over an all-Int array counts in native code (the sum
+                // loop accumulating the predicate's 0/1). A deopt (non-comparison
+                // predicate / non-Int element) falls through to the generic loop.
+                #[cfg(feature = "jit-native")]
+                if let Some(n) = g.vm.try_native_count_loop(block, *id) {
+                    return Ok(Some(Value::Int(n)));
+                }
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 let pre_frames = g.vm.frames.len();
                 let mut n: i64 = 0;
                 let mut early = None;

@@ -108,7 +108,7 @@ pub(crate) fn compile(
     callees: &FxHashMap<SymId, usize>,
     getters: &FxHashMap<SymId, SymId>,
     syms: &JitSyms,
-    block: Option<(u32, u32)>,
+    block: Option<(u32, u32, bool)>,
 ) -> Option<NativeProto> {
     // Shape gate (methods only): exactly one required positional param. A block's
     // 1-param eligibility is checked by the caller via its `BlockHandle` fields.
@@ -120,11 +120,15 @@ pub(crate) fn compile(
     {
         return None;
     }
-    let param_slot = block.map(|(p, _)| p).unwrap_or(0);
+    let param_slot = block.map(|(p, _, _)| p).unwrap_or(0);
+    // Predicate mode (count/select/...): a final `Bool` Return materialises as
+    // i64 0/1 instead of declining. Only meaningful for blocks; methods (None)
+    // are never predicate.
+    let predicate = block.map(|(_, _, p)| p).unwrap_or(false);
     // For a block, reject reads/writes of captured outer slots (closure state):
     // a slot below the body-local start that isn't the param. Methods (None)
     // impose no such restriction.
-    if let Some((_, body_start)) = block {
+    if let Some((_, body_start, _)) = block {
         for op in &proto.code {
             let slot = match op {
                 Op::LoadLocal(s) | Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
@@ -598,12 +602,19 @@ pub(crate) fn compile(
                     // boundary. A Bool/Nil result must NOT be returned as a raw
                     // i64 — a block `{ |x| x > 5 }` returns true/false, not 1/0,
                     // and a Bool-returning method would mis-box too. Decline so
-                    // the interpreter produces the correctly-typed value.
-                    match k {
-                        Kind::Int => {}
-                        Kind::ArrayObjId => returns_array = true,
+                    // the interpreter produces the correctly-typed value — UNLESS
+                    // this is a predicate block (count/select/...), where the
+                    // caller wants the truthiness as i64 0/1 (a `Bool` is an i8
+                    // from `icmp`; zero-extend it).
+                    let v = match k {
+                        Kind::Int => v,
+                        Kind::ArrayObjId => {
+                            returns_array = true;
+                            v
+                        }
+                        Kind::Bool if predicate => fb.ins().uextend(types::I64, v),
                         Kind::Bool | Kind::Nil => return None,
-                    }
+                    };
                     let ov = fb.use_var(ovf_var);
                     fb.ins().return_(&[v, ov]);
                     cur_open = false;

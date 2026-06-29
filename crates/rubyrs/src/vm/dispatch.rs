@@ -16024,7 +16024,7 @@ impl Vm {
         }
         if !self.jit_native_block.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32);
+            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, false);
             self.jit_native_block.insert(proto_idx, compiled);
         }
         let np = match self.jit_native_block.get(&proto_idx) {
@@ -16063,7 +16063,7 @@ impl Vm {
         // Compile the block (shared with try_native_block1's per-proto cache).
         if !self.jit_native_block.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32);
+            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, false);
             self.jit_native_block.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block.get(&proto_idx) {
@@ -16114,7 +16114,7 @@ impl Vm {
         }
         if !self.jit_native_block.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32);
+            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, false);
             self.jit_native_block.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block.get(&proto_idx) {
@@ -16149,6 +16149,51 @@ impl Vm {
         }
     }
 
+    /// Whole-loop fast path for `array.count { pred }` (ADR 0034 layer 3): a count
+    /// IS a sum of the predicate's truthiness, so this compiles the block in
+    /// PREDICATE mode (a `Bool` result becomes i64 0/1) and runs it through the
+    /// same native sum loop, seeded at 0. `Some(count)` ran natively; `None` falls
+    /// back to the generic loop (non-comparison predicate — e.g. `x.even?` — or a
+    /// deopt on a non-Int element). The caller must have pinned `array_id`.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_count_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<i64> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        // Predicate-mode compilation, cached separately from the value-mode block.
+        if !self.jit_native_block_pred.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, true);
+            self.jit_native_block_pred.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_pred.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_count_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_sum_loop(block_addr);
+            self.jit_native_count_loop.insert(proto_idx, compiled);
+        }
+        let sl = match self.jit_native_count_loop.get(&proto_idx) {
+            Some(Some(sl)) => sl,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        sl.call(vm_ptr, &self_val, array_id.0 as i64, 0)
+    }
+
     /// Compile a 1-param block proto to native (B5). The arg binds to the block's
     /// `param_start`; reads of captured outer slots decline (see `compile`).
     /// Blocks with method calls are not modelled yet, so callees/getters are
@@ -16159,6 +16204,7 @@ impl Vm {
         proto_idx: usize,
         param_start: u32,
         body_local_start: u32,
+        predicate: bool,
     ) -> Option<crate::jit_native::NativeProto> {
         let dummy = self.interner.intern("\u{0}block\u{0}"); // never names a real call
         let callees = crate::intern::FxHashMap::default();
@@ -16175,7 +16221,7 @@ impl Vm {
             &callees,
             &getters,
             &syms,
-            Some((param_start, body_local_start)),
+            Some((param_start, body_local_start, predicate)),
         )
     }
 

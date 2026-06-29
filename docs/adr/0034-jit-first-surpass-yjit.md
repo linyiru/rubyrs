@@ -277,6 +277,14 @@ part-way deopt doubles nothing on redo).
 | `arr.sum { x*x }`            | 1.12s | **0.07s** | 0.44s | **6.3×** |
 | `arr.sum { x*x + x*2 + 1 }`  | 1.88s | **0.08s** | 0.46s | **5.75×** |
 | `arr.map { x*x + 1 }`        | 1.34s | **0.17s** | 0.55s | **3.2×** |
+| `arr.count { x > 500 }`      | 1.17s | **0.07s** | 0.43s | **6.1×** |
+
+`count` reuses the sum loop unchanged: a count IS a sum of the predicate's
+truthiness. The new piece is **predicate-mode block compilation** — a final `Bool`
+Return (an `icmp` result) materialises as i64 0/1 instead of declining — which
+unlocks the whole predicate family (count / select / reject / find / any? / all?
+/ none?). A non-comparison predicate (`x.even?`, a method call) still declines to
+the generic loop. Alloc-free, so it matches `sum`'s 6× margin.
 
 `map` extends the template: the caller pre-sizes the result to the input length
 (so the native store never reallocs — no GC, no element move mid-loop), reads
