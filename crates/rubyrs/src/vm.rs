@@ -807,6 +807,13 @@ pub(crate) struct Vm {
     /// Per block-proto cache of whole-loop `inject` / `reduce` drivers.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_inject_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    /// Float-accumulator 2-param `inject(init){|s,x| ...}` block + loop, keyed by
+    /// (block proto, int_elem): `false` = Float elements, `true` = Int elements. The
+    /// accumulator is always a Float (opaque bits); only the element reader differs.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_block2_finject: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeProto>>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_finject_loop: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeLoop>>,
     /// `each`-accumulator block compilation (`{ |x| total += x }`, acc bound to a
     /// captured slot), cached separately from the 1-/2-param block caches.
     #[cfg(feature = "jit-native")]
@@ -1996,6 +2003,10 @@ impl Vm {
             jit_native_block2: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_inject_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_block2_finject: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_finject_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_block_acc: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
