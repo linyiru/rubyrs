@@ -41,6 +41,11 @@ pub(crate) struct NativeProto {
     /// When true the i64 result is an Array `ObjId` — the dispatch boxes it to
     /// `Value::Array` instead of `Value::Int`.
     pub(crate) returns_array: std::cell::Cell<bool>,
+    /// When true the i64 result is f64 BITS — the dispatch boxes it to
+    /// `Value::Float`. Set for a METHOD whose body produces a Float (e.g.
+    /// `def scale(n); n * 1.5; end`); a method that mixes Float and non-Float
+    /// returns declines to compile (the box kind would be ambiguous).
+    pub(crate) returns_float: std::cell::Cell<bool>,
     /// Monomorphic inline caches for `@arr[i].getter` sites (B4). Each holds
     /// `(element_class_ptr, ivar_sym)`; their stable heap addresses are baked
     /// into the native code as constants, so the `Box`es must outlive the code —
@@ -411,6 +416,14 @@ pub(crate) fn compile(
     let mut fbctx = FunctionBuilderContext::new();
     // Set inside the codegen block when the returned value is an array ObjId.
     let mut returns_array = false;
+    // METHOD (block.is_none()) Float-return tracking: a method may produce a Float
+    // result (`def scale(n); n*1.5; end`), boxed Value::Float by dispatch. Mixing
+    // Float and non-Float (Int/Array) value returns makes the box kind ambiguous —
+    // decline. (Block drivers can't mix: the Int/Float Return rules already force a
+    // single kind per driver.)
+    let is_method = block.is_none();
+    let mut m_float_ret = false;
+    let mut m_nonfloat_ret = false;
     // Inline-cache cells for `@arr[i].getter` sites (B4); their addresses are
     // baked into the code, so they're moved into the NativeProto to outlive it.
     let mut caches: Vec<Box<std::cell::Cell<(usize, u32)>>> = Vec::new();
@@ -793,14 +806,20 @@ pub(crate) fn compile(
                         // path. Without this, a non-Float-returning block over a Float
                         // array silently corrupts (Int 5 -> 5.0e-323).
                         match k {
-                            Kind::Int if !float_elem => v,
-                            Kind::ArrayObjId if !float_elem => {
-                                returns_array = true;
+                            Kind::Int if !float_elem => {
+                                m_nonfloat_ret = true;
                                 v
                             }
-                            // Return the f64 result's BITS; the Float driver loop
-                            // bitcasts back and boxes `Value::Float`.
-                            Kind::Float if float_elem => {
+                            Kind::ArrayObjId if !float_elem => {
+                                returns_array = true;
+                                m_nonfloat_ret = true;
+                                v
+                            }
+                            // Return the f64 result's BITS. A Float DRIVER's loop
+                            // bitcasts back; a METHOD's dispatch boxes Value::Float
+                            // (returns_float). Both want the bits here.
+                            Kind::Float if float_elem || is_method => {
+                                m_float_ret = true;
                                 fb.ins().bitcast(types::I64, MemFlagsData::new(), v)
                             }
                             _ => return None,
@@ -896,6 +915,13 @@ pub(crate) fn compile(
         fb.seal_all_blocks();
         fb.finalize();
     }
+    // A method that returns BOTH a Float and a non-Float (Int/Array) on different
+    // paths has an ambiguous box kind — decline. (Only reachable for methods; block
+    // drivers force a single return kind, so m_nonfloat/m_float can't both be set.)
+    let returns_float = m_float_ret;
+    if returns_float && m_nonfloat_ret {
+        return None;
+    }
     module.define_function(fid, &mut ctx).ok()?;
     module.clear_context(&mut ctx);
     module.finalize_definitions().ok()?;
@@ -910,6 +936,7 @@ pub(crate) fn compile(
         ptr,
         guard_class: std::cell::Cell::new(0),
         returns_array: std::cell::Cell::new(returns_array),
+        returns_float: std::cell::Cell::new(returns_float),
         _caches: caches,
     })
 }
@@ -978,11 +1005,38 @@ impl NativeLoop {
 /// carried accumulator vary by `kind`; the head always carries `(i, acc)` (the
 /// array-producing kinds leave `acc` at 0).
 pub(crate) fn compile_native_loop(block_addr: usize, kind: LoopKind) -> Option<NativeLoop> {
+    compile_native_loop_inner(block_addr, kind, false)
+}
+
+/// Float-element variant: reads each element via `jit_array_elem_float` and (for
+/// `Filter`/`Find`) pushes the matching element via `jit_array_push_float`. Used by
+/// the Float `count`/`select`/`reject`/`find` drivers; the block is a FLOAT predicate
+/// (param Float, returns Bool from an `fcmp`). `Sum`-kind (count) sums 0/1 as int —
+/// element type doesn't matter there beyond the read.
+pub(crate) fn compile_native_floatloop(block_addr: usize, kind: LoopKind) -> Option<NativeLoop> {
+    compile_native_loop_inner(block_addr, kind, true)
+}
+
+fn compile_native_loop_inner(
+    block_addr: usize,
+    kind: LoopKind,
+    float_elem: bool,
+) -> Option<NativeLoop> {
+    let (elem_name, elem_fn): (&str, *const u8) = if float_elem {
+        ("jit_array_elem_float", jit_array_elem_float as *const u8)
+    } else {
+        ("jit_array_elem_int", jit_array_elem_int as *const u8)
+    };
+    let (push_name, push_fn): (&str, *const u8) = if float_elem {
+        ("jit_array_push_float", jit_array_push_float as *const u8)
+    } else {
+        ("jit_array_push", jit_array_push as *const u8)
+    };
     let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
     builder.symbol("jit_array_len", jit_array_len as *const u8);
-    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
+    builder.symbol(elem_name, elem_fn);
     builder.symbol("jit_array_set_int", jit_array_set_int as *const u8);
-    builder.symbol("jit_array_push", jit_array_push as *const u8);
+    builder.symbol(push_name, push_fn);
     builder.symbol("blk", block_addr as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
@@ -1007,7 +1061,7 @@ pub(crate) fn compile_native_loop(block_addr: usize, kind: LoopKind) -> Option<N
     let lenid = module
         .declare_function("jit_array_len", Linkage::Import, &lensig)
         .ok()?;
-    // jit_array_elem_int: (vm, objid, i) -> (i64, i8).
+    // element reader: (vm, objid, i) -> (i64, i8). Int or Float per `float_elem`.
     let mut elsig = module.make_signature();
     elsig.params.push(AbiParam::new(ptr_ty));
     elsig.params.push(AbiParam::new(types::I64));
@@ -1015,7 +1069,7 @@ pub(crate) fn compile_native_loop(block_addr: usize, kind: LoopKind) -> Option<N
     elsig.returns.push(AbiParam::new(types::I64));
     elsig.returns.push(AbiParam::new(types::I8));
     let elid = module
-        .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
+        .declare_function(elem_name, Linkage::Import, &elsig)
         .ok()?;
     // jit_array_set_int: (vm, objid, i, val) -> void (Map).
     let mut setsig = module.make_signature();
@@ -1026,13 +1080,13 @@ pub(crate) fn compile_native_loop(block_addr: usize, kind: LoopKind) -> Option<N
     let setid = module
         .declare_function("jit_array_set_int", Linkage::Import, &setsig)
         .ok()?;
-    // jit_array_push: (vm, objid, elem) -> void (Filter).
+    // element push: (vm, objid, elem) -> void (Filter/Find). Int or Float.
     let mut pushsig = module.make_signature();
     pushsig.params.push(AbiParam::new(ptr_ty));
     pushsig.params.push(AbiParam::new(types::I64));
     pushsig.params.push(AbiParam::new(types::I64));
     let pushid = module
-        .declare_function("jit_array_push", Linkage::Import, &pushsig)
+        .declare_function(push_name, Linkage::Import, &pushsig)
         .ok()?;
     // block: (vm, self, i64) -> (i64, i8) — same ABI as a NativeProto.
     let mut blksig = module.make_signature();
@@ -2465,12 +2519,31 @@ fn emit_binop_float(
     b: ClValue,
     stack: &mut Vec<(ClValue, Kind)>,
 ) -> Option<()> {
+    // Comparisons -> Bool. The ORDERED variants (LessThan/.../Equal) are false when
+    // either operand is NaN, and NotEqual is true for NaN — exactly Ruby's float
+    // comparison semantics (`NaN < x`, `NaN == x` are false; `NaN != x` is true). So
+    // a Float predicate (`select`/`count { |x| x > 2.0 }`) needs no NaN special-case
+    // (unlike `min_by`, which must RAISE on a NaN key).
+    let fcc = match k {
+        BinOpKind::Lt => Some(FloatCC::LessThan),
+        BinOpKind::Le => Some(FloatCC::LessThanOrEqual),
+        BinOpKind::Gt => Some(FloatCC::GreaterThan),
+        BinOpKind::Ge => Some(FloatCC::GreaterThanOrEqual),
+        BinOpKind::Eq => Some(FloatCC::Equal),
+        BinOpKind::Ne => Some(FloatCC::NotEqual),
+        _ => None,
+    };
+    if let Some(cc) = fcc {
+        let r = fb.ins().fcmp(cc, a, b);
+        stack.push((r, Kind::Bool));
+        return Some(());
+    }
     let r = match k {
         BinOpKind::Add => fb.ins().fadd(a, b),
         BinOpKind::Sub => fb.ins().fsub(a, b),
         BinOpKind::Mul => fb.ins().fmul(a, b),
         BinOpKind::Div => fb.ins().fdiv(a, b),
-        _ => return None,
+        _ => return None, // `%` (fmod) needs a libcall — decline
     };
     stack.push((r, Kind::Float));
     Some(())
@@ -2681,6 +2754,18 @@ pub(crate) unsafe extern "C" fn jit_array_push(vm: *mut crate::vm::Vm, objid: i6
     let vm = unsafe { &mut *vm };
     let id = crate::value::ObjId(objid as u32);
     vm.heap.array_mut(id).push(Value::Int(elem));
+}
+
+/// Native primitive: push `Value::Float(f64::from_bits(bits))` onto `Array objid`.
+/// The Float `select`/`reject`/`find` drivers push the matching float ELEMENT (its
+/// f64 bits in the i64 ABI). Caller reserved capacity, so no realloc — GC-free.
+///
+/// # Safety
+/// `vm` valid; `objid` a live pinned Array with reserved capacity.
+pub(crate) unsafe extern "C" fn jit_array_push_float(vm: *mut crate::vm::Vm, objid: i64, bits: i64) {
+    let vm = unsafe { &mut *vm };
+    let id = crate::value::ObjId(objid as u32);
+    vm.heap.array_mut(id).push(Value::Float(f64::from_bits(bits as u64)));
 }
 
 /// Native primitive: allocate a fresh empty Hash, return its ObjId as i64. Used by

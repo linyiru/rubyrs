@@ -851,6 +851,18 @@ pub(crate) struct Vm {
     /// Float variant of `jit_native_minmax_loop` (Float element + Float key).
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_floatminmax_loop: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeLoop>>,
+    /// Float PREDICATE block compilation (param Float, returns Bool via fcmp), for
+    /// Float `count`/`select`/`reject`/`find`. Separate from Int `jit_native_block_pred`.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_block_pred_float: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// Per block-proto caches of whole-loop Float count/find drivers + the
+    /// (proto, keep)-keyed Float filter (select/reject) driver.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_floatcount_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_floatfilter_loop: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeLoop>>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_floatfind_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_on: bool,
     pub(crate) interner: Interner,
@@ -1983,6 +1995,14 @@ impl Vm {
             jit_native_minmax_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_floatminmax_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_block_pred_float: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_floatcount_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_floatfilter_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_floatfind_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_on: std::env::var_os("RUBYRS_JIT_NATIVE").is_some(),
             protos,

@@ -1222,6 +1222,29 @@ fn compile_call_arm(
     if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
     for a in args { compile_expr(b, a, protos, interner, cc); }
     let argc = args.len() as u8;
+    // map->sum fusion: `recv.map { b }.sum` is exactly `recv.sum { b }` for any
+    // Enumerable — same per-element block calls, same order, seeded 0 — but with no
+    // intermediate Array (one pass, one fewer allocation). If this is a 0-arg,
+    // no-kwargs `sum` whose receiver just compiled to `CallBlock(map|collect, 0, c)`,
+    // rewrite that op IN PLACE to `CallBlock(sum, 0, c)` and skip emitting the sum
+    // call. Emit-time + in-place => no instruction indices shift, so every jump
+    // offset stays valid (unlike a post-hoc removal). Assumes standard Enumerable
+    // semantics for map/sum — the same assumption rubyrs's native Array arms already
+    // make; a receiver that overrides `map` to violate the Enumerable contract is
+    // out of scope. Stack-equivalent: CallBlock(map) and CallBlock(sum) both pop
+    // [recv, block] and push one result.
+    if has_recv && !kwargs_trailing && args.is_empty() && name == "sum" {
+        let map_id = interner.intern("map");
+        let collect_id = interner.intern("collect");
+        if let Some(&Op::CallBlock(m, 0, _)) = b.code.last() {
+            if m == map_id || m == collect_id {
+                if let Some(Op::CallBlock(mm, _, _)) = b.code.last_mut() {
+                    *mm = name_id; // map/collect -> sum, keeping the block + cache slot
+                }
+                return;
+            }
+        }
+    }
     emit_method_call(b, name_id, argc, has_recv, false, kwargs_trailing, cc);
 }
 

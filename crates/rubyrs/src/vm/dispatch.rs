@@ -15235,11 +15235,14 @@ impl Vm {
                     let gc = np.guard_class.get();
                     let class_ok = gc == 0 || gc == std::rc::Rc::as_ptr(&cls) as usize;
                     let is_array = np.returns_array.get();
+                    let is_float = np.returns_float.get();
                     if class_ok {
                         if let Some(x) = crate::jit_native::as_int(&self.stack[recv_idx + 1]) {
                             if let Some(r) = np.call(vm_ptr, &self.stack[recv_idx], x) {
                                 self.stack[recv_idx] = if is_array {
                                     Value::Array(crate::value::ObjId(r as u32))
+                                } else if is_float {
+                                    Value::Float(f64::from_bits(r as u64))
                                 } else {
                                     Value::Int(r)
                                 };
@@ -15686,11 +15689,14 @@ impl Vm {
                     })
                 {
                     let is_array = np.returns_array.get();
+                    let is_float = np.returns_float.get();
                     let vm_ptr = self as *const crate::vm::Vm;
                     if let Some(r) = np.call(vm_ptr, &self_val, x) {
                         let top = self.stack.len() - 1;
                         self.stack[top] = if is_array {
                             Value::Array(crate::value::ObjId(r as u32))
+                        } else if is_float {
+                            Value::Float(f64::from_bits(r as u64))
                         } else {
                             Value::Int(r)
                         };
@@ -16131,7 +16137,7 @@ impl Vm {
         }
         if !self.jit_native_block_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32);
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false);
             self.jit_native_block_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_float.get(&proto_idx) {
@@ -16238,7 +16244,7 @@ impl Vm {
         }
         if !self.jit_native_block_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32);
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false);
             self.jit_native_block_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_float.get(&proto_idx) {
@@ -16421,6 +16427,152 @@ impl Vm {
         let self_val = self.heap.block(block_id).self_val.clone();
         let vm_ptr = self as *const crate::vm::Vm;
         let fl = self.jit_native_find_loop.get(&proto_idx).unwrap().as_ref().unwrap();
+        let ran = fl.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
+        let found = if ran {
+            Some(self.heap.array(out_id).first().cloned())
+        } else {
+            None
+        };
+        self.pinned.pop();
+        found
+    }
+
+    /// Float `count { |x| <float predicate> }` (ADR 0034 layer 3d): a FLOAT predicate
+    /// block (param Float, returns Bool via ordered fcmp) over an all-Float array,
+    /// counted through the int-sum-of-truthiness loop. Fires after the Int count
+    /// declines on Float elements. `Some(count)` ran natively.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_floatcount_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<i64> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        if !self.jit_native_block_pred_float.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, true);
+            self.jit_native_block_pred_float.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_pred_float.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_floatcount_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Sum);
+            self.jit_native_floatcount_loop.insert(proto_idx, compiled);
+        }
+        let sl = match self.jit_native_floatcount_loop.get(&proto_idx) {
+            Some(Some(sl)) => sl,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        sl.call(vm_ptr, &self_val, array_id.0 as i64, 0)
+    }
+
+    /// Float `select`/`reject { |x| <float predicate> }` (ADR 0034 layer 3d): pushes
+    /// the matching FLOAT elements into a reserved result via `jit_array_push_float`.
+    /// Fires after the Int filter declines. `Some(out)` ran natively.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_floatfilter_loop(&mut self, block_id: ObjId, in_id: ObjId, keep_when_true: bool) -> Option<ObjId> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        if !self.jit_native_block_pred_float.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, true);
+            self.jit_native_block_pred_float.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_pred_float.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        let key = (proto_idx, keep_when_true);
+        if !self.jit_native_floatfilter_loop.contains_key(&key) {
+            let compiled = crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Filter { keep: keep_when_true });
+            self.jit_native_floatfilter_loop.insert(key, compiled);
+        }
+        if !matches!(self.jit_native_floatfilter_loop.get(&key), Some(Some(_))) {
+            return None;
+        }
+        let len = self.heap.array(in_id).len();
+        self.check_alloc().ok()?;
+        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::with_capacity(len).into()));
+        self.pinned.push(Value::Array(out_id));
+        let self_val = self.heap.block(block_id).self_val.clone();
+        let vm_ptr = self as *const crate::vm::Vm;
+        let fl = self.jit_native_floatfilter_loop.get(&key).unwrap().as_ref().unwrap();
+        let ok = fl.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
+        self.pinned.pop();
+        if ok {
+            Some(out_id)
+        } else {
+            None
+        }
+    }
+
+    /// Float `find`/`detect { |x| <float predicate> }` (ADR 0034 layer 3d): early-exit
+    /// on the first matching Float element. Fires after the Int find declines.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_floatfind_loop(&mut self, block_id: ObjId, in_id: ObjId) -> Option<Option<Value>> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        if !self.jit_native_block_pred_float.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, true);
+            self.jit_native_block_pred_float.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_pred_float.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_floatfind_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Find);
+            self.jit_native_floatfind_loop.insert(proto_idx, compiled);
+        }
+        if !matches!(self.jit_native_floatfind_loop.get(&proto_idx), Some(Some(_))) {
+            return None;
+        }
+        self.check_alloc().ok()?;
+        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::with_capacity(1).into()));
+        self.pinned.push(Value::Array(out_id));
+        let self_val = self.heap.block(block_id).self_val.clone();
+        let vm_ptr = self as *const crate::vm::Vm;
+        let fl = self.jit_native_floatfind_loop.get(&proto_idx).unwrap().as_ref().unwrap();
         let ran = fl.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
         let found = if ran {
             Some(self.heap.array(out_id).first().cloned())
@@ -16847,7 +16999,7 @@ impl Vm {
         }
         if !self.jit_native_block_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32);
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false);
             self.jit_native_block_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_float.get(&proto_idx) {
@@ -16915,6 +17067,7 @@ impl Vm {
         proto_idx: usize,
         param_start: u32,
         body_local_start: u32,
+        predicate: bool,
     ) -> Option<crate::jit_native::NativeProto> {
         let dummy = self.interner.intern("\u{0}block\u{0}");
         let callees = crate::intern::FxHashMap::default();
@@ -16937,7 +17090,7 @@ impl Vm {
             &callees,
             &getters,
             &syms,
-            Some((param_start, body_local_start, false, crate::jit_native::AccKind::None)),
+            Some((param_start, body_local_start, predicate, crate::jit_native::AccKind::None)),
             true, // float element
         )
     }

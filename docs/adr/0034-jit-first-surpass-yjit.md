@@ -517,8 +517,32 @@ returns a non-Float (`floats.sum { |x| 5 }`) was reinterpreting Int bits as f64 
 garbage; it now declines to generic. Coercion made the symmetric Int-driver case
 reachable too; both directions are now guarded.
 
-Next frontier: Float `select`/`reject`/`count` (predicate fcmp), `map`→`sum`/`reduce`
-fusion, and method-body Float returns (currently decline).
+**Float predicates — `select`/`reject`/`count`/`find` — SHIPPED.** count 7.0×,
+select 4.46×, find 11.2× YJIT (any?/all?/none?/one? ride the count path). The block
+is a float comparison (`x > 2.0`): `emit_binop_float` lowers comparisons to ORDERED
+`fcmp` (+ `NotEqual`), which match Ruby's float NaN semantics WITHOUT a special case
+(`NaN < x`/`NaN == x` false, `NaN != x` true). `compile_native_loop` is parameterised
+on the element reader + push fn; select/reject/find push the float element via
+`jit_array_push_float`. Mixed coercion works in predicates too (`x * 2 > 3`).
+
+**`map { b }.sum` fusion — SHIPPED.** A compile-time, in-place peephole: `recv.map
+{ b }.sum` (Enumerable) rewrites `CallBlock(map, 0)` → `CallBlock(sum, 0)` and drops
+the sum call — one pass, no intermediate Array. Emit-time + in-place ⇒ no index/jump
+shifts. `floats.map { x*2 }.sum`: 0.3s → 0.08s (8.0× YJIT).
+
+**Blockless `Array#sum` Float fix (interpreter, both builds).** Surfaced while
+profiling the above: `floats.sum` (no block) only fast-pathed Int+Int and fell to the
+interpreted `Enumerable#sum` preamble on the first Float — 14.7s → 0.08s (**184×**).
+Native f64 accumulation (Int→Float promotion). Like the tally fix, an algorithmic win
+independent of the JIT.
+
+**Method-body Float returns — SHIPPED.** A method producing a Float (`def scale(n);
+n*1.5; end`) compiles native and boxes `Value::Float` (new `returns_float` flag);
+9.36× YJIT. A method mixing Float and non-Float returns declines (ambiguous box kind).
+Method ARGS stay Int-only (the dispatch guard) — Float params are the next step.
+
+Next frontier: Float method PARAMS, `map`→`reduce(:+)` fusion, multi-dimension fusion
+(`select{}.map{}.sum`), and broadening the value-method JIT surface.
 
 ## Risks
 
