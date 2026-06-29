@@ -41,6 +41,11 @@ pub(crate) struct NativeProto {
     /// When true the i64 result is an Array `ObjId` — the dispatch boxes it to
     /// `Value::Array` instead of `Value::Int`.
     pub(crate) returns_array: std::cell::Cell<bool>,
+    /// When true the i64 result is f64 BITS — the dispatch boxes it to
+    /// `Value::Float`. Set for a METHOD whose body produces a Float (e.g.
+    /// `def scale(n); n * 1.5; end`); a method that mixes Float and non-Float
+    /// returns declines to compile (the box kind would be ambiguous).
+    pub(crate) returns_float: std::cell::Cell<bool>,
     /// Monomorphic inline caches for `@arr[i].getter` sites (B4). Each holds
     /// `(element_class_ptr, ivar_sym)`; their stable heap addresses are baked
     /// into the native code as constants, so the `Box`es must outlive the code —
@@ -411,6 +416,14 @@ pub(crate) fn compile(
     let mut fbctx = FunctionBuilderContext::new();
     // Set inside the codegen block when the returned value is an array ObjId.
     let mut returns_array = false;
+    // METHOD (block.is_none()) Float-return tracking: a method may produce a Float
+    // result (`def scale(n); n*1.5; end`), boxed Value::Float by dispatch. Mixing
+    // Float and non-Float (Int/Array) value returns makes the box kind ambiguous —
+    // decline. (Block drivers can't mix: the Int/Float Return rules already force a
+    // single kind per driver.)
+    let is_method = block.is_none();
+    let mut m_float_ret = false;
+    let mut m_nonfloat_ret = false;
     // Inline-cache cells for `@arr[i].getter` sites (B4); their addresses are
     // baked into the code, so they're moved into the NativeProto to outlive it.
     let mut caches: Vec<Box<std::cell::Cell<(usize, u32)>>> = Vec::new();
@@ -793,14 +806,20 @@ pub(crate) fn compile(
                         // path. Without this, a non-Float-returning block over a Float
                         // array silently corrupts (Int 5 -> 5.0e-323).
                         match k {
-                            Kind::Int if !float_elem => v,
-                            Kind::ArrayObjId if !float_elem => {
-                                returns_array = true;
+                            Kind::Int if !float_elem => {
+                                m_nonfloat_ret = true;
                                 v
                             }
-                            // Return the f64 result's BITS; the Float driver loop
-                            // bitcasts back and boxes `Value::Float`.
-                            Kind::Float if float_elem => {
+                            Kind::ArrayObjId if !float_elem => {
+                                returns_array = true;
+                                m_nonfloat_ret = true;
+                                v
+                            }
+                            // Return the f64 result's BITS. A Float DRIVER's loop
+                            // bitcasts back; a METHOD's dispatch boxes Value::Float
+                            // (returns_float). Both want the bits here.
+                            Kind::Float if float_elem || is_method => {
+                                m_float_ret = true;
                                 fb.ins().bitcast(types::I64, MemFlagsData::new(), v)
                             }
                             _ => return None,
@@ -896,6 +915,13 @@ pub(crate) fn compile(
         fb.seal_all_blocks();
         fb.finalize();
     }
+    // A method that returns BOTH a Float and a non-Float (Int/Array) on different
+    // paths has an ambiguous box kind — decline. (Only reachable for methods; block
+    // drivers force a single return kind, so m_nonfloat/m_float can't both be set.)
+    let returns_float = m_float_ret;
+    if returns_float && m_nonfloat_ret {
+        return None;
+    }
     module.define_function(fid, &mut ctx).ok()?;
     module.clear_context(&mut ctx);
     module.finalize_definitions().ok()?;
@@ -910,6 +936,7 @@ pub(crate) fn compile(
         ptr,
         guard_class: std::cell::Cell::new(0),
         returns_array: std::cell::Cell::new(returns_array),
+        returns_float: std::cell::Cell::new(returns_float),
         _caches: caches,
     })
 }

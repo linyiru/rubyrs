@@ -15235,11 +15235,14 @@ impl Vm {
                     let gc = np.guard_class.get();
                     let class_ok = gc == 0 || gc == std::rc::Rc::as_ptr(&cls) as usize;
                     let is_array = np.returns_array.get();
+                    let is_float = np.returns_float.get();
                     if class_ok {
                         if let Some(x) = crate::jit_native::as_int(&self.stack[recv_idx + 1]) {
                             if let Some(r) = np.call(vm_ptr, &self.stack[recv_idx], x) {
                                 self.stack[recv_idx] = if is_array {
                                     Value::Array(crate::value::ObjId(r as u32))
+                                } else if is_float {
+                                    Value::Float(f64::from_bits(r as u64))
                                 } else {
                                     Value::Int(r)
                                 };
@@ -15686,11 +15689,14 @@ impl Vm {
                     })
                 {
                     let is_array = np.returns_array.get();
+                    let is_float = np.returns_float.get();
                     let vm_ptr = self as *const crate::vm::Vm;
                     if let Some(r) = np.call(vm_ptr, &self_val, x) {
                         let top = self.stack.len() - 1;
                         self.stack[top] = if is_array {
                             Value::Array(crate::value::ObjId(r as u32))
+                        } else if is_float {
+                            Value::Float(f64::from_bits(r as u64))
                         } else {
                             Value::Int(r)
                         };
