@@ -9,7 +9,9 @@
 //! interpreter — so the JIT can never change a result, only its speed.
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, AbiParam, Block, BlockArg, FuncRef, InstBuilder, Value as ClValue};
+use cranelift_codegen::ir::{
+    types, AbiParam, Block, BlockArg, FuncRef, InstBuilder, MemFlagsData, Value as ClValue,
+};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
@@ -80,6 +82,13 @@ enum Kind {
     /// because the JIT primitives never call `maybe_gc`, so no collection runs
     /// during the method (the array is rooted by the caller's stack on return).
     ArrayObjId,
+    /// A Cranelift `F64` value (an actual float, not its bits) on the operand
+    /// stack. Float LOCALS still live in `I64` vars holding the f64 BITS — a
+    /// `LoadLocal` of a Float local bitcasts I64->F64, a `StoreLocal`/`Return`
+    /// bitcasts F64->I64 — so the whole ABI stays uniformly i64 and the Int paths
+    /// are untouched. Only pure Float<->Float arithmetic is modelled (mixed
+    /// Int/Float declines: no coercion yet).
+    Float,
 }
 
 /// Compile an eligible `Proto` to native code, or `None` to keep interpreting.
@@ -138,6 +147,10 @@ pub(crate) fn compile(
     getters: &FxHashMap<SymId, SymId>,
     syms: &JitSyms,
     block: Option<(u32, u32, bool, AccKind)>,
+    // The iteration element is a Float (its i64 C-arg holds the f64 bits). Only
+    // valid for a 1-param value block (Float-element drivers like `sum`); the
+    // param binds as `Kind::Float`. `false` for every Int driver + all methods.
+    float_elem: bool,
 ) -> Option<NativeProto> {
     // Shape gate (methods only): exactly one required positional param. A block's
     // 1-param eligibility is checked by the caller via its `BlockHandle` fields.
@@ -224,6 +237,7 @@ pub(crate) fn compile(
     for op in code {
         match op {
             Op::LoadConstInt(_)
+            | Op::LoadConstFloat(_)
             | Op::LoadLocal(_)
             | Op::StoreLocal(_)
             | Op::IncLocal(_)
@@ -481,6 +495,11 @@ pub(crate) fn compile(
         if let Some(m) = memo_slot {
             local_kinds[m as usize] = Kind::ArrayObjId;
         }
+        // Float-element driver: the element param's i64 var holds f64 bits; mark it
+        // Float so `LoadLocal` bitcasts to F64. (1-param value block only.)
+        if float_elem {
+            local_kinds[arg2_slot as usize] = Kind::Float;
+        }
         let mut ip = 0usize;
         while ip < n {
             if let Some(b) = blocks[ip] {
@@ -511,6 +530,10 @@ pub(crate) fn compile(
                 Op::LoadConstInt(i) => {
                     let v = fb.ins().iconst(types::I64, *i);
                     stack.push((v, Kind::Int));
+                }
+                Op::LoadConstFloat(f) => {
+                    let v = fb.ins().f64const(*f);
+                    stack.push((v, Kind::Float));
                 }
                 // Read an ivar via a native primitive (value-touching, AR shape).
                 // `@arr.length`/`@arr.size` fuses into one Array-length call;
@@ -622,16 +645,32 @@ pub(crate) fn compile(
                     stack.push((v, Kind::Nil));
                 }
                 Op::LoadLocal(s) => {
-                    let v = fb.use_var(vars[*s as usize]);
-                    stack.push((v, local_kinds[*s as usize]));
+                    let raw = fb.use_var(vars[*s as usize]);
+                    let k = local_kinds[*s as usize];
+                    // A Float local's var holds the f64 BITS (I64); materialise the
+                    // actual F64 for the operand stack.
+                    if k == Kind::Float {
+                        let f = fb.ins().bitcast(types::F64, MemFlagsData::new(), raw);
+                        stack.push((f, Kind::Float));
+                    } else {
+                        stack.push((raw, k));
+                    }
                 }
                 Op::StoreLocal(s) => {
                     let (v, k) = stack.pop()?;
-                    if k != Kind::Int && k != Kind::ArrayObjId {
-                        return None;
+                    match k {
+                        Kind::Int | Kind::ArrayObjId => {
+                            local_kinds[*s as usize] = k;
+                            fb.def_var(vars[*s as usize], v);
+                        }
+                        // Store the f64 BITS into the I64 var.
+                        Kind::Float => {
+                            let bits = fb.ins().bitcast(types::I64, MemFlagsData::new(), v);
+                            local_kinds[*s as usize] = Kind::Float;
+                            fb.def_var(vars[*s as usize], bits);
+                        }
+                        Kind::Bool | Kind::Nil => return None,
                     }
-                    local_kinds[*s as usize] = k;
-                    fb.def_var(vars[*s as usize], v);
                 }
                 Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
                     let cur = fb.use_var(vars[*s as usize]);
@@ -653,18 +692,34 @@ pub(crate) fn compile(
                 Op::BinOp(k) => {
                     let (b, kb) = stack.pop()?;
                     let (a, ka) = stack.pop()?;
-                    if ka != Kind::Int || kb != Kind::Int {
-                        return None;
+                    if ka == Kind::Float && kb == Kind::Float {
+                        emit_binop_float(&mut fb, *k, a, b, &mut stack)?;
+                    } else if ka == Kind::Int && kb == Kind::Int {
+                        emit_binop(&mut fb, *k, a, b, &mut stack, ovf_var);
+                    } else {
+                        return None; // mixed Int/Float: no coercion modelled yet
                     }
-                    emit_binop(&mut fb, *k, a, b, &mut stack, ovf_var);
                 }
                 Op::BinOpLocalLocal(k, a_slot, b_slot) => {
-                    let a = fb.use_var(vars[*a_slot as usize]);
-                    let b = fb.use_var(vars[*b_slot as usize]);
-                    emit_binop(&mut fb, *k, a, b, &mut stack, ovf_var);
+                    let ka = local_kinds[*a_slot as usize];
+                    let kb = local_kinds[*b_slot as usize];
+                    let a_raw = fb.use_var(vars[*a_slot as usize]);
+                    let b_raw = fb.use_var(vars[*b_slot as usize]);
+                    if ka == Kind::Float && kb == Kind::Float {
+                        let a = fb.ins().bitcast(types::F64, MemFlagsData::new(), a_raw);
+                        let b = fb.ins().bitcast(types::F64, MemFlagsData::new(), b_raw);
+                        emit_binop_float(&mut fb, *k, a, b, &mut stack)?;
+                    } else if ka == Kind::Int && kb == Kind::Int {
+                        emit_binop(&mut fb, *k, a_raw, b_raw, &mut stack, ovf_var);
+                    } else {
+                        return None;
+                    }
                 }
                 Op::BinOpInt(k, imm) => {
-                    let (a, _) = stack.pop()?;
+                    let (a, ka) = stack.pop()?;
+                    if ka != Kind::Int {
+                        return None; // `float <op> int_imm` is mixed — no coercion yet
+                    }
                     let b = fb.ins().iconst(types::I64, *imm);
                     emit_binop(&mut fb, *k, a, b, &mut stack, ovf_var);
                 }
@@ -724,6 +779,9 @@ pub(crate) fn compile(
                                 returns_array = true;
                                 v
                             }
+                            // Return the f64 result's BITS; the Float driver loop
+                            // bitcasts back and boxes `Value::Float`.
+                            Kind::Float => fb.ins().bitcast(types::I64, MemFlagsData::new(), v),
                             Kind::Bool | Kind::Nil => return None,
                         }
                     };
@@ -1725,6 +1783,156 @@ pub(crate) fn compile_native_eachidx_loop(block_addr: usize) -> Option<NativeLoo
     })
 }
 
+/// Compile a native whole-loop `Array#sum { |x| f(x) }` driver over an all-FLOAT
+/// array (ADR 0034 layer 3d — first Float driver). The block is a 1-param value
+/// block whose element + result are f64 BITS in the i64 ABI; the loop reads each
+/// element via `jit_array_elem_float` (deopt on non-Float), runs the block, and
+/// `fadd`-accumulates (no overflow — IEEE). ABI `(vm, self, in_objid, init_bits)
+/// -> (sum_bits, ovf)`; the caller seeds `init_bits` (the `sum(init)` argument's
+/// f64 bits) and boxes the result as `Value::Float(f64::from_bits(res))`. A non-Float
+/// element deopts → the caller redoes the generic sum.
+pub(crate) fn compile_native_floatsum_loop(block_addr: usize) -> Option<NativeLoop> {
+    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    builder.symbol("jit_array_len", jit_array_len as *const u8);
+    builder.symbol("jit_array_elem_float", jit_array_elem_float as *const u8);
+    builder.symbol("blk", block_addr as *const u8);
+    let mut module = JITModule::new(builder);
+    let ptr_ty = module.target_config().pointer_type();
+    let mut ctx = module.make_context();
+
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(ptr_ty)); // vm
+    sig.params.push(AbiParam::new(ptr_ty)); // self
+    sig.params.push(AbiParam::new(types::I64)); // in objid
+    sig.params.push(AbiParam::new(types::I64)); // init (f64 bits)
+    sig.returns.push(AbiParam::new(types::I64)); // sum (f64 bits)
+    sig.returns.push(AbiParam::new(types::I8));
+    ctx.func.signature = sig.clone();
+    let fid = module.declare_function("floatsumloop", Linkage::Export, &sig).ok()?;
+
+    let mut lensig = module.make_signature();
+    lensig.params.push(AbiParam::new(ptr_ty));
+    lensig.params.push(AbiParam::new(types::I64));
+    lensig.returns.push(AbiParam::new(types::I64));
+    let lenid = module
+        .declare_function("jit_array_len", Linkage::Import, &lensig)
+        .ok()?;
+    let mut elsig = module.make_signature();
+    elsig.params.push(AbiParam::new(ptr_ty));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I64)); // f64 bits
+    elsig.returns.push(AbiParam::new(types::I8));
+    let elid = module
+        .declare_function("jit_array_elem_float", Linkage::Import, &elsig)
+        .ok()?;
+    // 1-param value block: (vm, self, elem_bits) -> (result_bits, ovf).
+    let mut blksig = module.make_signature();
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I8));
+    let blkid = module
+        .declare_function("blk", Linkage::Import, &blksig)
+        .ok()?;
+
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let len_ref = module.declare_func_in_func(lenid, fb.func);
+        let el_ref = module.declare_func_in_func(elid, fb.func);
+        let blk_ref = module.declare_func_in_func(blkid, fb.func);
+
+        let entry = fb.create_block();
+        let head = fb.create_block(); // params: (i: I64, acc: F64)
+        let body = fb.create_block();
+        let cont1 = fb.create_block();
+        let exit = fb.create_block(); // param: (acc: F64)
+        let deopt = fb.create_block();
+        fb.append_block_params_for_function_params(entry);
+        fb.append_block_param(head, types::I64);
+        fb.append_block_param(head, types::F64);
+        fb.append_block_param(exit, types::F64);
+
+        // entry: len = len(in); acc0 = bitcast(init_bits); jump head(0, acc0)
+        fb.switch_to_block(entry);
+        let (vm_param, self_param, in_objid, init_bits) = {
+            let p = fb.block_params(entry);
+            (p[0], p[1], p[2], p[3])
+        };
+        let call_len = fb.ins().call(len_ref, &[vm_param, in_objid]);
+        let len = fb.inst_results(call_len)[0];
+        let acc0 = fb.ins().bitcast(types::F64, MemFlagsData::new(), init_bits);
+        let zero = fb.ins().iconst(types::I64, 0);
+        fb.ins().jump(head, &[zero.into(), acc0.into()]);
+
+        // head(i, acc): i < len ? body : exit(acc)
+        fb.switch_to_block(head);
+        let (i, acc) = {
+            let p = fb.block_params(head);
+            (p[0], p[1])
+        };
+        let cond = fb.ins().icmp(IntCC::SignedLessThan, i, len);
+        fb.ins().brif(cond, body, &[], exit, &[acc.into()]);
+
+        // body: (xbits, ovf1) = elem_float(in, i); ovf1 ? deopt : cont1
+        fb.switch_to_block(body);
+        let call_el = fb.ins().call(el_ref, &[vm_param, in_objid, i]);
+        let (xbits, ovf1) = {
+            let r = fb.inst_results(call_el);
+            (r[0], r[1])
+        };
+        fb.ins().brif(ovf1, deopt, &[], cont1, &[]);
+
+        // cont1: (rbits, ovf2) = blk(vm, self, xbits); ovf2 ? deopt :
+        //        acc2 = acc + bitcast(rbits); head(i+1, acc2)
+        fb.switch_to_block(cont1);
+        let call_blk = fb.ins().call(blk_ref, &[vm_param, self_param, xbits]);
+        let (rbits, ovf2) = {
+            let r = fb.inst_results(call_blk);
+            (r[0], r[1])
+        };
+        let nh = fb.create_block();
+        fb.ins().brif(ovf2, deopt, &[], nh, &[]);
+        fb.switch_to_block(nh);
+        let rf = fb.ins().bitcast(types::F64, MemFlagsData::new(), rbits);
+        let acc2 = fb.ins().fadd(acc, rf);
+        let one = fb.ins().iconst(types::I64, 1);
+        let i2 = fb.ins().iadd(i, one);
+        fb.ins().jump(head, &[i2.into(), acc2.into()]);
+
+        // exit(acc): return (bitcast(acc), 0)
+        fb.switch_to_block(exit);
+        let acc_out = fb.block_params(exit)[0];
+        let bits = fb.ins().bitcast(types::I64, MemFlagsData::new(), acc_out);
+        let ok = fb.ins().iconst(types::I8, 0);
+        fb.ins().return_(&[bits, ok]);
+
+        // deopt: return (0, 1)
+        fb.switch_to_block(deopt);
+        let z = fb.ins().iconst(types::I64, 0);
+        let bad = fb.ins().iconst(types::I8, 1);
+        fb.ins().return_(&[z, bad]);
+
+        fb.seal_all_blocks();
+        fb.finalize();
+    }
+    module.define_function(fid, &mut ctx).ok()?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().ok()?;
+    let code_ptr = module.get_finalized_function(fid);
+    let ptr = unsafe {
+        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+            code_ptr,
+        )
+    };
+    Some(NativeLoop {
+        _module: module,
+        ptr,
+    })
+}
+
 /// Compile a native whole-loop `Array#min_by` / `max_by { |x| key }` driver (ADR
 /// 0034 layer 3) around an already-compiled 1-param Int block (the key function).
 /// A fold tracking the best KEY and its ELEMENT in registers — no mutation, so a
@@ -1977,6 +2185,29 @@ fn emit_int_unary(
     } else {
         None
     }
+}
+
+/// Lower a Float<->Float binary op (`a`, `b` are F64). Only the four arithmetic
+/// ops are modelled (no overflow — IEEE saturates to ±inf); pushes a `Float`.
+/// Float comparisons + `%` (fmod) decline (`None`) — not needed by `sum`/`map`,
+/// and float comparison would need careful NaN ordering. The Int `emit_binop`
+/// stays the exclusive Int path; this never runs for Int operands.
+fn emit_binop_float(
+    fb: &mut FunctionBuilder,
+    k: BinOpKind,
+    a: ClValue,
+    b: ClValue,
+    stack: &mut Vec<(ClValue, Kind)>,
+) -> Option<()> {
+    let r = match k {
+        BinOpKind::Add => fb.ins().fadd(a, b),
+        BinOpKind::Sub => fb.ins().fsub(a, b),
+        BinOpKind::Mul => fb.ins().fmul(a, b),
+        BinOpKind::Div => fb.ins().fdiv(a, b),
+        _ => return None,
+    };
+    stack.push((r, Kind::Float));
+    Some(())
 }
 
 fn emit_binop(
@@ -2266,6 +2497,29 @@ pub(crate) unsafe extern "C" fn jit_array_elem_int(
     let arr = vm.heap.array(crate::value::ObjId(objid as u32));
     match arr.get(i as usize) {
         Some(Value::Int(n)) => NRet { res: *n, ovf: 0 },
+        _ => NRet { res: 0, ovf: 1 },
+    }
+}
+
+/// Native primitive: `Array objid[i]` as f64 BITS (`f64::to_bits` in `res`) if it
+/// is a `Float`, else deopt (`ovf=1`). The Float-element drivers (`sum`) read the
+/// element this way; a non-Float element (Int, etc.) deopts to the generic walk
+/// rather than silently coercing.
+///
+/// # Safety
+/// `vm` valid; `objid` a live pinned Array.
+pub(crate) unsafe extern "C" fn jit_array_elem_float(
+    vm: *const crate::vm::Vm,
+    objid: i64,
+    i: i64,
+) -> NRet {
+    let vm = unsafe { &*vm };
+    let arr = vm.heap.array(crate::value::ObjId(objid as u32));
+    match arr.get(i as usize) {
+        Some(Value::Float(f)) => NRet {
+            res: f.to_bits() as i64,
+            ovf: 0,
+        },
         _ => NRet { res: 0, ovf: 1 },
     }
 }

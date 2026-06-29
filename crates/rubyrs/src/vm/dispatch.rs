@@ -15997,6 +15997,7 @@ impl Vm {
             &getters,
             &syms,
             None,
+            false, // methods never have a Float element param
         );
         if let (Some(np), false) = (&compiled, callees.is_empty() && getters.is_empty()) {
             if let Some(cls) = recv_cls {
@@ -16097,6 +16098,56 @@ impl Vm {
         };
         let vm_ptr = self as *const crate::vm::Vm;
         sl.call(vm_ptr, &self_val, array_id.0 as i64, init)
+    }
+
+    /// Whole-loop fast path for `array.sum(init) { |x| f(x) }` over an all-FLOAT
+    /// array (ADR 0034 layer 3d — first Float driver). The block's element +
+    /// result are f64 BITS in the i64 ABI; the loop `fadd`-accumulates. `init_bits`
+    /// is the seed's f64 bits; returns `Some(sum_bits)` (box `Value::Float`) or
+    /// `None` (non-Float element, ineligible block) -> generic sum. Caller pins the
+    /// array + block.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_floatsum_loop(&mut self, block_id: ObjId, array_id: ObjId, init_bits: i64) -> Option<i64> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        // Empty array: CRuby returns the bare init (Integer `0` for `sum`), NOT a
+        // Float — no element was added so no coercion happens. The Float loop would
+        // hand back `0.0`; decline so the generic sum returns the Integer init.
+        if self.heap.array(array_id).is_empty() {
+            return None;
+        }
+        if !self.jit_native_block_float.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32);
+            self.jit_native_block_float.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_float.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_floatsum_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_floatsum_loop(block_addr);
+            self.jit_native_floatsum_loop.insert(proto_idx, compiled);
+        }
+        let sl = match self.jit_native_floatsum_loop.get(&proto_idx) {
+            Some(Some(sl)) => sl,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        sl.call(vm_ptr, &self_val, array_id.0 as i64, init_bits)
     }
 
     /// Whole-loop fast path for `array.map { block }` (ADR 0034 layer 3): fill a
@@ -16656,6 +16707,43 @@ impl Vm {
             &getters,
             &syms,
             Some((param_start, body_local_start, predicate, crate::jit_native::AccKind::None)),
+            false,
+        )
+    }
+
+    /// Compile a 1-param value block whose element is a FLOAT (`float_elem = true`):
+    /// the param binds as `Kind::Float`, so the block does f64 arithmetic. Used by
+    /// the Float `sum` driver. Pure Float<->Float only (mixed Int/Float declines).
+    #[cfg(feature = "jit-native")]
+    fn compile_native_block_float(
+        &mut self,
+        proto_idx: usize,
+        param_start: u32,
+        body_local_start: u32,
+    ) -> Option<crate::jit_native::NativeProto> {
+        let dummy = self.interner.intern("\u{0}block\u{0}");
+        let callees = crate::intern::FxHashMap::default();
+        let getters = crate::intern::FxHashMap::default();
+        let syms = crate::jit_native::JitSyms {
+            length: self.interner.intern("length"),
+            size: self.interner.intern("size"),
+            bracket: self.interner.intern("[]"),
+            lshift: self.interner.intern("<<"),
+            abs: self.interner.intern("abs"),
+            even_p: self.interner.intern("even?"),
+            odd_p: self.interner.intern("odd?"),
+            zero_p: self.interner.intern("zero?"),
+            positive_p: self.interner.intern("positive?"),
+            negative_p: self.interner.intern("negative?"),
+        };
+        crate::jit_native::compile(
+            &self.protos[proto_idx],
+            dummy,
+            &callees,
+            &getters,
+            &syms,
+            Some((param_start, body_local_start, false, crate::jit_native::AccKind::None)),
+            true, // float element
         )
     }
 
@@ -16691,6 +16779,7 @@ impl Vm {
             &getters,
             &syms,
             Some((param_start, body_local_start, false, crate::jit_native::AccKind::Inject)),
+            false,
         )
     }
 
@@ -16735,6 +16824,7 @@ impl Vm {
                 false,
                 crate::jit_native::AccKind::EachAcc { acc_slot },
             )),
+            false,
         )
     }
 
@@ -16776,6 +16866,7 @@ impl Vm {
                 false,
                 crate::jit_native::AccKind::EachWithIndex { acc_slot },
             )),
+            false,
         )
     }
 
@@ -16817,6 +16908,7 @@ impl Vm {
                 false,
                 crate::jit_native::AccKind::EachObj,
             )),
+            false,
         )
     }
 
