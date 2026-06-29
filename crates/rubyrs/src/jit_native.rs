@@ -921,7 +921,8 @@ pub(crate) fn compile(
                 // fall-through edge, then re-materialise it from this block's
                 // parameters.
                 if cur_open {
-                    let args = block_args(&mut fb, b, &mut block_kinds[ip], &stack)?;
+                    let discard = matches!(code.get(ip), Some(Op::Pop));
+                    let args = block_args(&mut fb, b, &mut block_kinds[ip], &stack, discard)?;
                     fb.ins().jump(b, &args);
                 }
                 fb.switch_to_block(b);
@@ -1201,7 +1202,8 @@ pub(crate) fn compile(
                 Op::Jump(off) => {
                     let t = (ip as i64 + 1 + *off as i64) as usize;
                     let tb = blocks[t].unwrap();
-                    let args = block_args(&mut fb, tb, &mut block_kinds[t], &stack)?;
+                    let discard = matches!(code.get(t), Some(Op::Pop));
+                    let args = block_args(&mut fb, tb, &mut block_kinds[t], &stack, discard)?;
                     fb.ins().jump(tb, &args);
                     cur_open = false;
                 }
@@ -1215,8 +1217,10 @@ pub(crate) fn compile(
                     let target = blocks[t].unwrap();
                     // The stack remaining after popping `cond` flows to BOTH
                     // successors (same depth/kinds).
-                    let fall_args = block_args(&mut fb, fall, &mut block_kinds[ip + 1], &stack)?;
-                    let target_args = block_args(&mut fb, target, &mut block_kinds[t], &stack)?;
+                    let fall_discard = matches!(code.get(ip + 1), Some(Op::Pop));
+                    let target_discard = matches!(code.get(t), Some(Op::Pop));
+                    let fall_args = block_args(&mut fb, fall, &mut block_kinds[ip + 1], &stack, fall_discard)?;
+                    let target_args = block_args(&mut fb, target, &mut block_kinds[t], &stack, target_discard)?;
                     // brif: non-zero (true) -> fall-through, zero (false) -> target.
                     fb.ins().brif(cond, fall, &fall_args, target, &target_args);
                     cur_open = false;
@@ -3481,6 +3485,12 @@ fn block_args(
     block: Block,
     kinds_slot: &mut Option<Vec<Kind>>,
     stack: &[(ClValue, Kind)],
+    // The target block immediately discards its stack top (its first op is `Pop`). Then
+    // a kind MISMATCH in the top slot is harmless — it's the `expr if cond` statement
+    // shape, where the then-path's value (Int) and the else-path's `nil` merge and are
+    // popped (ADR 0034 Step 1, piece 5). A USED value still requires an exact match, so
+    // `(x if c) + 1` (nil + 1 must raise, not compute garbage) still declines.
+    discard_top: bool,
 ) -> Option<Vec<BlockArg>> {
     match kinds_slot {
         None => {
@@ -3490,8 +3500,14 @@ fn block_args(
             *kinds_slot = Some(stack.iter().map(|(_, k)| *k).collect());
         }
         Some(prev) => {
-            if prev.len() != stack.len() || prev.iter().zip(stack).any(|(p, (_, k))| p != k) {
+            if prev.len() != stack.len() {
                 return None;
+            }
+            let last = stack.len().wrapping_sub(1);
+            for (i, (p, (_, k))) in prev.iter().zip(stack).enumerate() {
+                if p != k && !(discard_top && i == last) {
+                    return None;
+                }
             }
         }
     }
