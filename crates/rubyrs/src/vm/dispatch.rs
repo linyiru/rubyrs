@@ -15203,8 +15203,16 @@ impl Vm {
         // JIT'd method called in a loop pays only a cache lookup + the native
         // call, not the full interpreter invocation machinery. Methods not yet
         // compiled (but eligible) route to the hook once, to compile.
+        //
+        // Gate on the arity ACTUALLY matching `argc`: this block runs before the
+        // arity check below, so serving/routing a wrong-arity call (e.g. a 0-arg
+        // getter invoked as `obj.x(1)`) here would swallow the ArgumentError the
+        // interpreter must raise. A mismatch falls through to that check.
         #[cfg(feature = "jit-native")]
-        if self.jit_native_on {
+        if self.jit_native_on
+            && m.fixed_arity
+                .is_some_and(|f| f.required as usize == argc)
+        {
             let pidx = m.proto_idx;
             let vm_ptr = self as *const crate::vm::Vm;
             if argc == 1 {
@@ -15975,6 +15983,12 @@ impl Vm {
             size: self.interner.intern("size"),
             bracket: self.interner.intern("[]"),
             lshift: self.interner.intern("<<"),
+            abs: self.interner.intern("abs"),
+            even_p: self.interner.intern("even?"),
+            odd_p: self.interner.intern("odd?"),
+            zero_p: self.interner.intern("zero?"),
+            positive_p: self.interner.intern("positive?"),
+            negative_p: self.interner.intern("negative?"),
         };
         let compiled = crate::jit_native::compile(
             &self.protos[proto_idx],
@@ -16356,6 +16370,56 @@ impl Vm {
         il.call(vm_ptr, &self_val, array_id.0 as i64, init)
     }
 
+    /// Whole-loop fast path for `array.min_by` / `max_by { |x| key }` (ADR 0034
+    /// layer 3): a fold tracking the best key + its element. `Some(elem)` ran
+    /// natively; `None` falls back to the generic loop (non-Int element / key, an
+    /// empty array — the generic returns nil — or an ineligible block). The caller
+    /// must have pinned `array_id`. `is_min` picks min vs max.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_minmax_loop(&mut self, block_id: ObjId, array_id: ObjId, is_min: bool) -> Option<Value> {
+        if !self.jit_native_on {
+            return None;
+        }
+        // The native loop assumes len >= 1 (it seeds the best from element 0);
+        // leave the empty array to the generic walk, which yields nil.
+        if self.heap.array(array_id).is_empty() {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        // Value-mode key block (shared with sum/map's cache).
+        if !self.jit_native_block.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, false);
+            self.jit_native_block.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        let key = (proto_idx, is_min);
+        if !self.jit_native_minmax_loop.contains_key(&key) {
+            let compiled = crate::jit_native::compile_native_minmax_loop(block_addr, is_min);
+            self.jit_native_minmax_loop.insert(key, compiled);
+        }
+        let ml = match self.jit_native_minmax_loop.get(&key) {
+            Some(Some(ml)) => ml,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        ml.call(vm_ptr, &self_val, array_id.0 as i64, 0).map(Value::Int)
+    }
+
     /// Compile a 1-param block proto to native (B5). The arg binds to the block's
     /// `param_start`; reads of captured outer slots decline (see `compile`).
     /// Blocks with method calls are not modelled yet, so callees/getters are
@@ -16376,6 +16440,12 @@ impl Vm {
             size: self.interner.intern("size"),
             bracket: self.interner.intern("[]"),
             lshift: self.interner.intern("<<"),
+            abs: self.interner.intern("abs"),
+            even_p: self.interner.intern("even?"),
+            odd_p: self.interner.intern("odd?"),
+            zero_p: self.interner.intern("zero?"),
+            positive_p: self.interner.intern("positive?"),
+            negative_p: self.interner.intern("negative?"),
         };
         crate::jit_native::compile(
             &self.protos[proto_idx],
@@ -16405,6 +16475,12 @@ impl Vm {
             size: self.interner.intern("size"),
             bracket: self.interner.intern("[]"),
             lshift: self.interner.intern("<<"),
+            abs: self.interner.intern("abs"),
+            even_p: self.interner.intern("even?"),
+            odd_p: self.interner.intern("odd?"),
+            zero_p: self.interner.intern("zero?"),
+            positive_p: self.interner.intern("positive?"),
+            negative_p: self.interner.intern("negative?"),
         };
         crate::jit_native::compile(
             &self.protos[proto_idx],
