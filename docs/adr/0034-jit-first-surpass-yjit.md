@@ -629,10 +629,23 @@ NaN, empty, first-appearance order) on interpreter == JIT; STRESS_GC clean (the 
 sole alloc, held live across the GC-free loop); diff_cruby GREEN both builds + a dedicated
 `jit_float_key_sum_by_key` fixture.
 
-The common Array + Hash Enumerable/aggregation surface is now broadly covered for Int and Float
-(elements, keys, and values). Remaining: Float-VALUE sum-by-key (a Float accumulator per Hash key,
-needing the value-result decouple the Float drivers already have), and broadening the value-method
-JIT surface.
+**Float-VALUE sum-by-key — SHIPPED**, 2.17× YJIT (jitN 0.63s vs 1.37s; 6× over interp). A Float
+accumulator per Hash key: `arr.each_with_object(Hash.new(0.0)) { |x, h| h[k] += float_v }` — e.g.
+summing prices by category (`items.each_with_object(Hash.new(0.0)) { |it, h| h[it.cat] += it.price }`).
+The Hash-accum codegen now decouples **two axes**: the KEY (Int exact-match vs Float eql?-match, picked
+per-op from the operand stack) and the VALUE/accumulator (Int vs Float, driven by `float_acc` —
+repurposed for `EachObjHash` since the Hash value IS the accumulator). The `[]`/`[]=` ops select one
+of four primitives by `(key_kind, float_acc)`; a Float value travels as its f64 bits through the i64
+ABI (default 0.0, bitcast to F64 on the operand stack so the `+= v` and the write treat it as Float).
+The dispatch gate accepts `Hash.new(0)` (Int) or `Hash.new(+0.0)` (Float) and threads `float_val` into
+the block-compile + cache key `(proto, float_elem, float_val)`. Int→Float coercion makes `h[k] += 1`
+(Int literal) into a Float accumulator work via the existing `emit_numeric_binop`. Parity vs CRuby
+(Int/Float key × Int/Float increment, floor-key, coercion, -0.0/0.0 collapse, empty) on interp == JIT;
+STRESS_GC clean; diff_cruby GREEN both builds; the `jit_float_key_sum_by_key` fixture covers all combos.
+
+The common Array + Hash Enumerable/aggregation surface is now broadly covered for Int and Float across
+elements, keys, AND values. Remaining: broadening the value-method JIT surface, and the larger lever —
+the base `do_call` dispatch cascade (ADR 0031), which the JIT only bypasses where it fires.
 
 ## Risks
 
