@@ -968,21 +968,35 @@ pub(crate) fn compile(
                 // …) — lowered inline, no call (see `emit_int_unary`).
                 Op::Call(name, 0, _) if is_int_unary(*name, syms) => {
                     let (v, k) = stack.pop()?;
-                    if k != Kind::Int {
-                        return None;
+                    match k {
+                        Kind::Int => {
+                            let r = emit_int_unary(&mut fb, ovf_var, *name, syms, v)?;
+                            stack.push(r);
+                        }
+                        // Float `.abs` -> fabs (the common min_by distance key
+                        // `(x - t).abs`). Other unary primitives on a Float decline.
+                        Kind::Float if *name == syms.abs => {
+                            let r = fb.ins().fabs(v);
+                            stack.push((r, Kind::Float));
+                        }
+                        _ => return None,
                     }
-                    let r = emit_int_unary(&mut fb, ovf_var, *name, syms, v)?;
-                    stack.push(r);
                 }
                 // The fused `x.method` op (LoadLocalCall) for the same unary
                 // primitives — load the receiver local, then apply inline.
                 Op::LoadLocalCall(slot, name, _) if is_int_unary(*name, syms) => {
-                    if local_kinds[*slot as usize] != Kind::Int {
-                        return None;
-                    }
                     let v = fb.use_var(vars[*slot as usize]);
-                    let r = emit_int_unary(&mut fb, ovf_var, *name, syms, v)?;
-                    stack.push(r);
+                    match local_kinds[*slot as usize] {
+                        Kind::Int => {
+                            let r = emit_int_unary(&mut fb, ovf_var, *name, syms, v)?;
+                            stack.push(r);
+                        }
+                        Kind::Float if *name == syms.abs => {
+                            let r = fb.ins().fabs(v);
+                            stack.push((r, Kind::Float));
+                        }
+                        _ => return None,
+                    }
                 }
                 Op::EnterLoop | Op::ExitLoop => {} // interpreter loop-stack bookkeeping; no native state
                 _ => return None,
