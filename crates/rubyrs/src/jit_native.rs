@@ -1388,6 +1388,173 @@ pub(crate) fn compile_native_eachobj_loop(block_addr: usize) -> Option<NativeLoo
     })
 }
 
+/// Compile a native whole-loop `Array#group_by { |x| key }` driver (ADR 0034 layer
+/// 3c) around an already-compiled 1-param value block (the key function, returning
+/// an Int key). Allocates a fresh result Hash, and per element pushes the element
+/// into the bucket for `block(x)` via `jit_group_push`. ABI `(vm, self, in_objid, _)
+/// -> (hash_objid, ovf)`. A non-Int element or non-Int key deopts (`ovf=1`); the
+/// caller then DISCARDS the partial Hash and redoes the generic `group_by` — the
+/// returned Hash is fresh (not user-visible until success), so this is sound
+/// (write-back-on-success).
+pub(crate) fn compile_native_groupby_loop(block_addr: usize) -> Option<NativeLoop> {
+    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    builder.symbol("jit_hash_new", jit_hash_new as *const u8);
+    builder.symbol("jit_group_push", jit_group_push as *const u8);
+    builder.symbol("jit_array_len", jit_array_len as *const u8);
+    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
+    builder.symbol("blk", block_addr as *const u8);
+    let mut module = JITModule::new(builder);
+    let ptr_ty = module.target_config().pointer_type();
+    let mut ctx = module.make_context();
+
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(ptr_ty)); // vm
+    sig.params.push(AbiParam::new(ptr_ty)); // self
+    sig.params.push(AbiParam::new(types::I64)); // in objid
+    sig.params.push(AbiParam::new(types::I64)); // unused (ABI parity)
+    sig.returns.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I8));
+    ctx.func.signature = sig.clone();
+    let fid = module.declare_function("groupbyloop", Linkage::Export, &sig).ok()?;
+
+    let mut newsig = module.make_signature();
+    newsig.params.push(AbiParam::new(ptr_ty));
+    newsig.returns.push(AbiParam::new(types::I64));
+    let newid = module
+        .declare_function("jit_hash_new", Linkage::Import, &newsig)
+        .ok()?;
+    let mut pushsig = module.make_signature();
+    pushsig.params.push(AbiParam::new(ptr_ty));
+    pushsig.params.push(AbiParam::new(types::I64));
+    pushsig.params.push(AbiParam::new(types::I64));
+    pushsig.params.push(AbiParam::new(types::I64));
+    let pushid = module
+        .declare_function("jit_group_push", Linkage::Import, &pushsig)
+        .ok()?;
+    let mut lensig = module.make_signature();
+    lensig.params.push(AbiParam::new(ptr_ty));
+    lensig.params.push(AbiParam::new(types::I64));
+    lensig.returns.push(AbiParam::new(types::I64));
+    let lenid = module
+        .declare_function("jit_array_len", Linkage::Import, &lensig)
+        .ok()?;
+    let mut elsig = module.make_signature();
+    elsig.params.push(AbiParam::new(ptr_ty));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I8));
+    let elid = module
+        .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
+        .ok()?;
+    // 1-param value block: (vm, self, x) -> (key, ovf).
+    let mut blksig = module.make_signature();
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I8));
+    let blkid = module
+        .declare_function("blk", Linkage::Import, &blksig)
+        .ok()?;
+
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let new_ref = module.declare_func_in_func(newid, fb.func);
+        let push_ref = module.declare_func_in_func(pushid, fb.func);
+        let len_ref = module.declare_func_in_func(lenid, fb.func);
+        let el_ref = module.declare_func_in_func(elid, fb.func);
+        let blk_ref = module.declare_func_in_func(blkid, fb.func);
+
+        let entry = fb.create_block();
+        let head = fb.create_block(); // params: (i, hash)
+        let body = fb.create_block();
+        let cont1 = fb.create_block();
+        let exit = fb.create_block(); // param: (hash)
+        let deopt = fb.create_block();
+        fb.append_block_params_for_function_params(entry);
+        fb.append_block_param(head, types::I64);
+        fb.append_block_param(head, types::I64);
+        fb.append_block_param(exit, types::I64);
+
+        // entry: hash = new(); len = len(in); jump head(0, hash)
+        fb.switch_to_block(entry);
+        let (vm_param, self_param, in_objid, _unused) = {
+            let p = fb.block_params(entry);
+            (p[0], p[1], p[2], p[3])
+        };
+        let call_new = fb.ins().call(new_ref, &[vm_param]);
+        let hash = fb.inst_results(call_new)[0];
+        let call_len = fb.ins().call(len_ref, &[vm_param, in_objid]);
+        let len = fb.inst_results(call_len)[0];
+        let zero = fb.ins().iconst(types::I64, 0);
+        fb.ins().jump(head, &[zero.into(), hash.into()]);
+
+        // head(i, hash): i < len ? body : exit(hash)
+        fb.switch_to_block(head);
+        let (i, hash_h) = {
+            let p = fb.block_params(head);
+            (p[0], p[1])
+        };
+        let cond = fb.ins().icmp(IntCC::SignedLessThan, i, len);
+        fb.ins().brif(cond, body, &[], exit, &[hash_h.into()]);
+
+        // body: (x, ovf1) = elem(in, i); ovf1 ? deopt : cont1
+        fb.switch_to_block(body);
+        let call_el = fb.ins().call(el_ref, &[vm_param, in_objid, i]);
+        let (x, ovf1) = {
+            let r = fb.inst_results(call_el);
+            (r[0], r[1])
+        };
+        fb.ins().brif(ovf1, deopt, &[], cont1, &[]);
+
+        // cont1: (key, ovf2) = blk(vm, self, x); ovf2 ? deopt :
+        //        group_push(hash, key, x); head(i+1, hash)
+        fb.switch_to_block(cont1);
+        let call_blk = fb.ins().call(blk_ref, &[vm_param, self_param, x]);
+        let (key, ovf2) = {
+            let r = fb.inst_results(call_blk);
+            (r[0], r[1])
+        };
+        let nh = fb.create_block();
+        fb.ins().brif(ovf2, deopt, &[], nh, &[]);
+        fb.switch_to_block(nh);
+        fb.ins().call(push_ref, &[vm_param, hash_h, key, x]);
+        let one = fb.ins().iconst(types::I64, 1);
+        let i2 = fb.ins().iadd(i, one);
+        fb.ins().jump(head, &[i2.into(), hash_h.into()]);
+
+        // exit(hash): return (hash, 0)
+        fb.switch_to_block(exit);
+        let hash_out = fb.block_params(exit)[0];
+        let ok = fb.ins().iconst(types::I8, 0);
+        fb.ins().return_(&[hash_out, ok]);
+
+        // deopt: return (0, 1)
+        fb.switch_to_block(deopt);
+        let z = fb.ins().iconst(types::I64, 0);
+        let bad = fb.ins().iconst(types::I8, 1);
+        fb.ins().return_(&[z, bad]);
+
+        fb.seal_all_blocks();
+        fb.finalize();
+    }
+    module.define_function(fid, &mut ctx).ok()?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().ok()?;
+    let code_ptr = module.get_finalized_function(fid);
+    let ptr = unsafe {
+        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+            code_ptr,
+        )
+    };
+    Some(NativeLoop {
+        _module: module,
+        ptr,
+    })
+}
+
 /// Compile a native whole-loop `Array#min_by` / `max_by { |x| key }` driver (ADR
 /// 0034 layer 3) around an already-compiled 1-param Int block (the key function).
 /// A fold tracking the best KEY and its ELEMENT in registers — no mutation, so a
@@ -1847,6 +2014,60 @@ pub(crate) unsafe extern "C" fn jit_array_push(vm: *mut crate::vm::Vm, objid: i6
     let vm = unsafe { &mut *vm };
     let id = crate::value::ObjId(objid as u32);
     vm.heap.array_mut(id).push(Value::Int(elem));
+}
+
+/// Native primitive: allocate a fresh empty Hash, return its ObjId as i64. Used by
+/// the `group_by` driver to build the result Hash. Like `jit_array_new`, the alloc
+/// does NOT run GC, so the loop stays GC-free.
+///
+/// # Safety
+/// `vm` valid.
+pub(crate) unsafe extern "C" fn jit_hash_new(vm: *mut crate::vm::Vm) -> i64 {
+    let vm = unsafe { &mut *vm };
+    let id = vm
+        .heap
+        .alloc(crate::heap::HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
+    id.0 as i64
+}
+
+/// Native primitive for `group_by`: append `Value::Int(elem)` to the bucket Array
+/// at integer `key` in Hash `hash_objid`, creating the bucket (a fresh Array) on
+/// first sight of the key. First-appearance key order matches CRuby. The scratch
+/// Hash keeps `index == None` (never triggered here), so the linear `position`
+/// scan stays consistent and a later lookup rebuilds the index lazily from `pairs`.
+///
+/// # Safety
+/// `vm` valid; `hash_objid` a live Hash from `jit_hash_new` in the same loop; all
+/// allocations are GC-free, so the in-flight scratch Hash + buckets stay alive.
+pub(crate) unsafe extern "C" fn jit_group_push(
+    vm: *mut crate::vm::Vm,
+    hash_objid: i64,
+    key: i64,
+    elem: i64,
+) {
+    let vm = unsafe { &mut *vm };
+    let hid = crate::value::ObjId(hash_objid as u32);
+    let pos = vm
+        .heap
+        .hash(hid)
+        .iter()
+        .position(|(k, _)| matches!(k, Value::Int(n) if *n == key));
+    let arr_id = match pos {
+        Some(p) => match vm.heap.hash(hid)[p].1 {
+            Value::Array(a) => a,
+            _ => return, // bucket is always an Array; defensive
+        },
+        None => {
+            let new_arr = vm
+                .heap
+                .alloc(crate::heap::HeapObj::Array(Vec::<Value>::new().into()));
+            vm.heap
+                .hash_mut(hid)
+                .push((Value::Int(key), Value::Array(new_arr)));
+            new_arr
+        }
+    };
+    vm.heap.array_mut(arr_id).push(Value::Int(elem));
 }
 
 /// Native primitive: length of Array `objid` as i64. Read once at the top of a
