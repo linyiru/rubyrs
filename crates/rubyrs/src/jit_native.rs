@@ -974,26 +974,39 @@ pub(crate) fn compile(
                             stack.push(r);
                         }
                         // Float `.abs` -> fabs (the common min_by distance key
-                        // `(x - t).abs`). Other unary primitives on a Float decline.
+                        // `(x - t).abs`); the sign predicates -> ordered fcmp against
+                        // 0.0 (Bool, NaN-false like the comparison ops). Other unary
+                        // primitives on a Float decline.
                         Kind::Float if *name == syms.abs => {
                             let r = fb.ins().fabs(v);
                             stack.push((r, Kind::Float));
                         }
+                        Kind::Float if emit_float_predicate(&mut fb, *name, syms, v, &mut stack) => {}
                         _ => return None,
                     }
                 }
                 // The fused `x.method` op (LoadLocalCall) for the same unary
                 // primitives — load the receiver local, then apply inline.
                 Op::LoadLocalCall(slot, name, _) if is_int_unary(*name, syms) => {
-                    let v = fb.use_var(vars[*slot as usize]);
+                    let raw = fb.use_var(vars[*slot as usize]);
                     match local_kinds[*slot as usize] {
                         Kind::Int => {
-                            let r = emit_int_unary(&mut fb, ovf_var, *name, syms, v)?;
+                            let r = emit_int_unary(&mut fb, ovf_var, *name, syms, raw)?;
                             stack.push(r);
                         }
+                        // A Float local's var holds the f64 BITS — materialise the
+                        // F64 before the float op (unlike Call(abs,0), whose operand
+                        // is already an F64 on the stack).
                         Kind::Float if *name == syms.abs => {
+                            let v = fb.ins().bitcast(types::F64, MemFlagsData::new(), raw);
                             let r = fb.ins().fabs(v);
                             stack.push((r, Kind::Float));
+                        }
+                        Kind::Float => {
+                            let v = fb.ins().bitcast(types::F64, MemFlagsData::new(), raw);
+                            if !emit_float_predicate(&mut fb, *name, syms, v, &mut stack) {
+                                return None;
+                            }
                         }
                         _ => return None,
                     }
@@ -2641,6 +2654,32 @@ fn emit_numeric_binop(
         }
         _ => None,
     }
+}
+
+/// Float sign predicates (`x.positive?`/`negative?`/`zero?`) -> ordered fcmp against
+/// 0.0, pushing a Bool. Ordered cc means NaN -> false (NaN is neither positive nor
+/// negative nor zero), matching Ruby. Returns `true` if `name` was a handled
+/// predicate (and pushed a Bool); `false` otherwise (caller declines).
+fn emit_float_predicate(
+    fb: &mut FunctionBuilder,
+    name: SymId,
+    syms: &JitSyms,
+    v: ClValue,
+    stack: &mut Vec<(ClValue, Kind)>,
+) -> bool {
+    let cc = if name == syms.positive_p {
+        FloatCC::GreaterThan
+    } else if name == syms.negative_p {
+        FloatCC::LessThan
+    } else if name == syms.zero_p {
+        FloatCC::Equal
+    } else {
+        return false;
+    };
+    let zero = fb.ins().f64const(0.0);
+    let r = fb.ins().fcmp(cc, v, zero);
+    stack.push((r, Kind::Bool));
+    true
 }
 
 fn emit_binop_float(
