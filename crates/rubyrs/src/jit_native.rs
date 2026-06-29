@@ -102,13 +102,31 @@ enum Kind {
 /// OUTER slot (`< body_local_start`, other than the param) declines — so only a
 /// pure function of the param + the block's own temporaries compiles. `None` =
 /// a normal method (param at slot 0, the method shape-gate applies).
+/// How a block threads an accumulator (the 4th element of `compile`'s `block`
+/// spec). The C ABI gains a 2nd i64 arg for the two accumulator kinds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccKind {
+    /// 1-param block: `(vm, self, elem)`. The sole param binds the element.
+    None,
+    /// `inject`/`reduce` `|acc, x|`: `(vm, self, acc, elem)`. The accumulator is
+    /// the 1st block param (`param_slot`), the element the 2nd; the block's
+    /// RETURN value is the new accumulator.
+    Inject,
+    /// `each` accumulator `{ |x| total += x }`: `(vm, self, acc, elem)`. The
+    /// element is the sole param (`param_slot`); the accumulator is a CAPTURED
+    /// outer slot. The new accumulator is that slot's value AFTER the body (the
+    /// block's own return is discarded by `each`), so a body that stores the acc
+    /// then returns something else can't corrupt it.
+    EachAcc { acc_slot: u32 },
+}
+
 pub(crate) fn compile(
     proto: &Proto,
     self_name_id: SymId,
     callees: &FxHashMap<SymId, usize>,
     getters: &FxHashMap<SymId, SymId>,
     syms: &JitSyms,
-    block: Option<(u32, u32, bool, bool)>,
+    block: Option<(u32, u32, bool, AccKind)>,
 ) -> Option<NativeProto> {
     // Shape gate (methods only): exactly one required positional param. A block's
     // 1-param eligibility is checked by the caller via its `BlockHandle` fields.
@@ -125,10 +143,27 @@ pub(crate) fn compile(
     // i64 0/1 instead of declining. Only meaningful for blocks; methods (None)
     // are never predicate.
     let predicate = block.map(|(_, _, p, _)| p).unwrap_or(false);
-    // Two-param block (inject/reduce: `|acc, x|`): the second param binds to
-    // `param_slot + 1`, so both slots are params, not captures.
-    let two_param = block.map(|(_, _, _, t)| t).unwrap_or(false);
-    let is_param = |s: u32| s == param_slot || (two_param && s == param_slot + 1);
+    // Accumulator layout (see `AccKind`). `two_param` adds a 2nd i64 C-arg;
+    // `acc_slot`/`elem_slot` say where the accumulator and the iteration element
+    // bind — they differ between `inject` (acc is the 1st block param) and an
+    // `each`-accumulator (acc is a CAPTURED slot, element is the only param).
+    let acc_kind = block.map(|(_, _, _, a)| a).unwrap_or(AccKind::None);
+    let two_param = !matches!(acc_kind, AccKind::None);
+    let acc_slot: Option<u32> = match acc_kind {
+        AccKind::None => None,
+        AccKind::Inject => Some(param_slot + 1),
+        AccKind::EachAcc { acc_slot } => Some(acc_slot),
+    };
+    // Where the iteration ELEMENT binds: the 2nd param for inject (`|acc, x|`),
+    // else the sole param.
+    let elem_slot = match acc_kind {
+        AccKind::Inject => param_slot + 1,
+        _ => param_slot,
+    };
+    // each-accumulator: `Return` yields the captured acc slot's value, not the
+    // block's (discarded) return.
+    let acc_from_slot = matches!(acc_kind, AccKind::EachAcc { .. });
+    let is_param = |s: u32| s == elem_slot || acc_slot == Some(s);
     // For a block, reject reads/writes of captured outer slots (closure state):
     // a slot below the body-local start that isn't a param. Methods (None)
     // impose no such restriction.
@@ -377,13 +412,22 @@ pub(crate) fn compile(
         };
         let nloc = proto.n_locals as usize;
         let vars: Vec<Variable> = (0..nloc).map(|_| fb.declare_var(types::I64)).collect();
-        // The args bind to `param_slot` (and `param_slot + 1` for a 2-param
-        // block); every other local inits to 0.
+        // Bind the C args: arg[2] (`param`) is the accumulator in 2-param mode
+        // (`acc_slot`) else the element (`elem_slot`); arg[3] (`param2`, 2-param
+        // only) is the element. Every other local inits to 0.
         for (i, v) in vars.iter().enumerate() {
-            if i == param_slot as usize {
+            let iu = i as u32;
+            if two_param {
+                if acc_slot == Some(iu) {
+                    fb.def_var(*v, param);
+                } else if iu == elem_slot {
+                    fb.def_var(*v, param2.unwrap());
+                } else {
+                    let z = fb.ins().iconst(types::I64, 0);
+                    fb.def_var(*v, z);
+                }
+            } else if iu == elem_slot {
                 fb.def_var(*v, param);
-            } else if two_param && i == param_slot as usize + 1 {
-                fb.def_var(*v, param2.unwrap());
             } else {
                 let z = fb.ins().iconst(types::I64, 0);
                 fb.def_var(*v, z);
@@ -617,7 +661,15 @@ pub(crate) fn compile(
                 }
                 Op::Return => {
                     let (v, k) = stack.pop()?;
-                    let v = if predicate {
+                    let v = if acc_from_slot {
+                        // each-accumulator: the new accumulator is the captured
+                        // acc slot's value AFTER the body — the block's own return
+                        // (`v`/`k`, e.g. the `total += x` expression value) is
+                        // discarded by `each`, so a `total += x; total * 2` body
+                        // can't corrupt the accumulator.
+                        let _ = (v, k);
+                        fb.use_var(vars[acc_slot.unwrap() as usize])
+                    } else if predicate {
                         // A predicate block (count/select/any?/...) returns the
                         // result's TRUTHINESS as i64 0/1. Only a `Bool` (an `icmp`
                         // result) is sound to lower this way — zero-extend it. A

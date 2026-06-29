@@ -16370,6 +16370,114 @@ impl Vm {
         il.call(vm_ptr, &self_val, array_id.0 as i64, init)
     }
 
+    /// Whole-loop fast path for the `each`-accumulator shape
+    /// `total = …; array.each { |x| total += f(x) }` (ADR 0034 layer 3c). The
+    /// block's accumulator is a single CAPTURED outer slot it updates; the loop
+    /// reuses the inject ABI (acc threaded as a 2nd i64 arg).
+    ///
+    /// SOUNDNESS: the captured slot is read ONCE as the seed and written back
+    /// ONLY on full native completion. On any deopt (non-Int element/result,
+    /// overflow) the loop commits nothing and the slot is untouched, so the
+    /// caller redoes the WHOLE `each` generically from the original seed — no
+    /// double-count. `Some(())` ran natively (slot updated); `None` declines.
+    /// The caller must have pinned `array_id`.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_each_acc_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<()> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot, captured, captured_is_method_scope) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot, bh.captured.clone(), bh.captured_is_method_scope)
+        };
+        // Exactly one param (the element), no rest/kw/block-param.
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        // The accumulator write-back goes STRAIGHT to `captured` by slot — sound
+        // ONLY when this block takes the share-direct frame path (its `captured`
+        // IS a live method/toplevel scope, no inner closure leaks the slots, not
+        // re-entrant). The COPY path (e.g. `[[1,2]].each { |p| p.each { |n| total
+        // += n } }`, where `captured` is an enclosing block's per-invocation copy)
+        // propagates through a write-back chain a direct write bypasses — decline
+        // it to the generic walk. Mirrors `block_frame_locals`' condition exactly.
+        if !captured_is_method_scope
+            || self.protos[proto_idx].creates_block
+            || self.block_is_reentrant(proto_idx, &captured)
+        {
+            return None;
+        }
+        // Find the accumulator: the single CAPTURED slot (below the body-local
+        // start, not the element param) the block touches — and it must be
+        // WRITTEN (else it's a read-only capture, not an accumulator). More than
+        // one captured slot, or none written, declines. `compile` re-validates by
+        // rejecting any captured touch other than this `acc_slot`.
+        let body_start = self.protos[proto_idx].block_body_local_start as u32;
+        let elem = param_start as u32;
+        let mut cap: Vec<u32> = Vec::new();
+        let mut written: Option<u32> = None;
+        for op in &self.protos[proto_idx].code {
+            use crate::bytecode::Op;
+            let mut note = |s: u16, w: bool, cap: &mut Vec<u32>, written: &mut Option<u32>| {
+                let s = s as u32;
+                if s < body_start && s != elem {
+                    if !cap.contains(&s) {
+                        cap.push(s);
+                    }
+                    if w {
+                        *written = Some(s);
+                    }
+                }
+            };
+            match op {
+                Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) => note(*s, true, &mut cap, &mut written),
+                Op::LoadLocal(s) => note(*s, false, &mut cap, &mut written),
+                Op::BinOpLocalLocal(_, a, b) => {
+                    note(*a, false, &mut cap, &mut written);
+                    note(*b, false, &mut cap, &mut written);
+                }
+                _ => {}
+            }
+        }
+        if cap.len() != 1 || written != Some(cap[0]) {
+            return None;
+        }
+        let acc_slot = cap[0];
+        // Seed from the captured slot — must currently hold an Int.
+        let init = match captured.borrow().get(acc_slot as usize) {
+            Some(Value::Int(n)) => *n,
+            _ => return None,
+        };
+        if !self.jit_native_block_acc.contains_key(&proto_idx) {
+            let compiled = self.compile_native_block_acc(proto_idx, param_start as u32, body_start, acc_slot);
+            self.jit_native_block_acc.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_acc.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_each_acc_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_inject_loop(block_addr);
+            self.jit_native_each_acc_loop.insert(proto_idx, compiled);
+        }
+        let il = match self.jit_native_each_acc_loop.get(&proto_idx) {
+            Some(Some(il)) => il,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        let acc_out = il.call(vm_ptr, &self_val, array_id.0 as i64, init)?;
+        // Native run completed: commit the accumulator (an Int, no alloc).
+        if let Some(slot) = captured.borrow_mut().get_mut(acc_slot as usize) {
+            *slot = Value::Int(acc_out);
+        }
+        Some(())
+    }
+
     /// Whole-loop fast path for `array.min_by` / `max_by { |x| key }` (ADR 0034
     /// layer 3): a fold tracking the best key + its element. `Some(elem)` ran
     /// natively; `None` falls back to the generic loop (non-Int element / key, an
@@ -16453,7 +16561,7 @@ impl Vm {
             &callees,
             &getters,
             &syms,
-            Some((param_start, body_local_start, predicate, false)),
+            Some((param_start, body_local_start, predicate, crate::jit_native::AccKind::None)),
         )
     }
 
@@ -16488,7 +16596,51 @@ impl Vm {
             &callees,
             &getters,
             &syms,
-            Some((param_start, body_local_start, false, true)),
+            Some((param_start, body_local_start, false, crate::jit_native::AccKind::Inject)),
+        )
+    }
+
+    /// Compile an `each`-accumulator block `{ |x| total += x }` (the element is
+    /// the sole param at `param_start`; `acc_slot` is the captured outer local
+    /// the body updates). Shares the inject ABI/loop — the accumulator threads as
+    /// a 2nd i64 arg — but binds the accumulator to the captured slot and returns
+    /// that slot's post-body value. Declines if any OTHER captured slot is
+    /// touched (the generic `compile` capture gate, with `acc_slot` exempted).
+    #[cfg(feature = "jit-native")]
+    fn compile_native_block_acc(
+        &mut self,
+        proto_idx: usize,
+        param_start: u32,
+        body_local_start: u32,
+        acc_slot: u32,
+    ) -> Option<crate::jit_native::NativeProto> {
+        let dummy = self.interner.intern("\u{0}block\u{0}");
+        let callees = crate::intern::FxHashMap::default();
+        let getters = crate::intern::FxHashMap::default();
+        let syms = crate::jit_native::JitSyms {
+            length: self.interner.intern("length"),
+            size: self.interner.intern("size"),
+            bracket: self.interner.intern("[]"),
+            lshift: self.interner.intern("<<"),
+            abs: self.interner.intern("abs"),
+            even_p: self.interner.intern("even?"),
+            odd_p: self.interner.intern("odd?"),
+            zero_p: self.interner.intern("zero?"),
+            positive_p: self.interner.intern("positive?"),
+            negative_p: self.interner.intern("negative?"),
+        };
+        crate::jit_native::compile(
+            &self.protos[proto_idx],
+            dummy,
+            &callees,
+            &getters,
+            &syms,
+            Some((
+                param_start,
+                body_local_start,
+                false,
+                crate::jit_native::AccKind::EachAcc { acc_slot },
+            )),
         )
     }
 
