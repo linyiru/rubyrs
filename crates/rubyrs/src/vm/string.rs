@@ -3891,11 +3891,13 @@ impl Vm {
                     // `sub` with a lone pattern (no replacement, no block)
                     // is an arity error in CRuby — sub has no Enumerator
                     // form (only the first match is replaced).
+                    #[cfg(feature = "regex")]
                     ("sub", [Value::Regex(_) | Value::Str(_)]) => {
                         return Err(self.trap(RubyError::ArgumentError {
                             msg: "wrong number of arguments (given 1, expected 2)".into(),
                         }));
                     }
+                    #[cfg(feature = "regex")]
                     ("sub" | "gsub" | "sub!" | "gsub!", [Value::Regex(re), Value::Hash(hid)]) => {
                         let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
                             msg: format!(

@@ -100,7 +100,10 @@ pub(crate) fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
     // captured, so rewrite `(` → `(?:` here to match CRuby's group
     // numbering. Computed up front so the scanner only fires the
     // rewrite when there's actually a named group present.
+    #[cfg(feature = "regex")]
     let demote_unnamed = pattern_has_named_group(src);
+    #[cfg(not(feature = "regex"))]
+    let demote_unnamed = false;
     // Fast path: most regexes don't use `\G` and have no named
     // group. Skip the whole scan + allocation in that case.
     if !src.contains("\\G") && !demote_unnamed {
