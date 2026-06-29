@@ -567,9 +567,22 @@ from accumulator-kind: a new `float_acc` param on `compile()` governs the value-
 map.sum peephole fuses `.map{}.sum`→`.sum{}`, select native). Fusing map.reduce(:+)→sum
 is unsound (string concat, empty→nil vs 0, −0.0 seed all differ from sum).
 
-Next frontier (same Int→Float decouple + `int_elem`-reader mechanism): `ints.map
-{ x*1.5 }` and other Int-element/Float-block drivers (map/each-acc), and broadening the
-value-method JIT surface.
+**Int-element / Float-block family — SHIPPED (all beat YJIT).** Every Int-collection
+crunched into a Float now goes native, via one recipe: decouple element-kind
+(`float_elem`, picks the int vs float array reader) from accumulator/result-kind
+(`float_acc`, governs the value-Return + the inject/each-acc accumulator slot); existing
+callers pass `float_acc == float_elem` (behaviour-identical). Drivers: sum 7.0×, map
+2.74×, each-acc 6.86×, inject 11.33× (int-elem) / 8.10× (the previously-missing Float
+2-param inject), each_with_index 13.19×, min_by/max_by 10.79× (a second decouple —
+`float_key` separates the loop's key comparison from its element reader). Float `#abs`
+(fabs) is now modelled in the block JIT (was Int-only), unblocking the canonical
+`min_by { (x-t).abs }` (12.58×) cross-cutting across all Float drivers. Predicates over
+Int elements with a Float comparison (count/select/find) already beat YJIT, no work
+needed.
+
+Next frontier: the remaining Float unary primitives in the block JIT (`zero?`/`positive?`
+/`floor`/`ceil`/`round`/`to_i` still decline), each_with_object Float, Float-keyed Hash
+drivers, and broadening the value-method JIT surface.
 
 ## Risks
 
