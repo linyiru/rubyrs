@@ -1447,6 +1447,16 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(id));
                 g.pin(Value::Block(block));
+                // Whole-loop native fast path (ADR 0034 layer 3): if the block is
+                // a native-compilable Int function and every element is an Int,
+                // the entire sum runs in native code (no per-element interpreter
+                // re-entry). A deopt (non-Int element / overflow) returns None and
+                // we fall through to the generic loop below, which redoes the sum
+                // from `init` — sound because a native block is pure.
+                #[cfg(feature = "jit-native")]
+                if let Some(s) = g.vm.try_native_sum_loop(block, id, init) {
+                    return Ok(Some(Value::Int(s)));
+                }
                 let pre_frames = g.vm.frames.len();
                 let mut acc: Value = Value::Int(init);
                 let mut early = None;

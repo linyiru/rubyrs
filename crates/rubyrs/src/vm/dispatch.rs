@@ -16035,6 +16035,56 @@ impl Vm {
         np.call(vm_ptr, &self_val, x)
     }
 
+    /// Whole-loop fast path for `array.sum { block }` (ADR 0034 layer 3): run the
+    /// ENTIRE sum — iterate, call the block per element, accumulate — as native
+    /// code, with no per-element interpreter re-entry. `Some(sum)` ran natively;
+    /// `None` falls back to the generic Rust loop (ineligible/non-compilable
+    /// block, or a deopt on a non-Int element / i64 overflow). The caller must
+    /// have pinned `array_id` (the native loop reads it GC-free). Sound: a native
+    /// block is pure, so a part-way deopt leaves nothing observable to double when
+    /// the generic loop redoes the sum from `init`.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_sum_loop(&mut self, block_id: ObjId, array_id: ObjId, init: i64) -> Option<i64> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        // Compile the block (shared with try_native_block1's per-proto cache).
+        if !self.jit_native_block.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32);
+            self.jit_native_block.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        // Compile the whole-loop driver around that block's machine address. The
+        // baked address stays valid: jit_native_block entries are insert-once and
+        // never replaced for a proto's lifetime, so the block code outlives this.
+        if !self.jit_native_sum_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_sum_loop(block_addr);
+            self.jit_native_sum_loop.insert(proto_idx, compiled);
+        }
+        let sl = match self.jit_native_sum_loop.get(&proto_idx) {
+            Some(Some(sl)) => sl,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        sl.call(vm_ptr, &self_val, array_id.0 as i64, init)
+    }
+
     /// Compile a 1-param block proto to native (B5). The arg binds to the block's
     /// `param_start`; reads of captured outer slots decline (see `compile`).
     /// Blocks with method calls are not modelled yet, so callees/getters are

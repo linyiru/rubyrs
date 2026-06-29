@@ -249,8 +249,41 @@ The chase surfaced a separate, ungated win, shipped independently: a native Rust
 `Array#sum`-with-block driver replacing the preamble's
 `each { |*x| memo += yield(*x) }` (whose accumulator block — capture + splat +
 re-yield — can never go native). **`rows.sum { |r| r.amount }`: 6.97s → 1.38s,
-~5×**, on every build. Next B5: capture reads + block-local arrays, and larger
-block bodies where native pays off.
+~5×**, on every build.
+
+### Layer 3 turning point: whole-loop native compilation (beats YJIT 6×)
+
+The per-shape data forced a structural conclusion. Native blocks called *per
+element through a Rust iterator driver* (`step_block1`) win only when the block
+body is substantial arithmetic (`sum { x*x }`: 1.3× YJIT) — and **lose** on
+trivial bodies (a single getter, `t += x`, a predicate). Cause: the per-element
+Rust dispatch + block-handle lookup costs more than the body saves, while YJIT
+inlines the entire loop into one tight native function. Measured across capture
+accumulators, 2-param inject, and `each_with_index`, all trivial-body shapes sat
+*at or below* the interpreter under jit-native — the cheap per-block increments
+were exhausted.
+
+The lever is **compiling the whole loop**, not the block alone. `Array#sum
+{ int-block }` now compiles to a single native function (`compile_native_sum_loop`):
+read the length once, then a native loop that reads each element
+(`jit_array_elem_int`, deopt on non-Int), calls the already-compiled native block
+(a tight native→native call, no interpreter re-entry), and accumulates with an
+overflow-checked add — one shared `deopt` exit for non-Int element / i64
+overflow, falling back to the generic loop (sound: a native block is pure, so a
+part-way deopt doubles nothing on redo).
+
+| shape | interp | **jitN** | YJIT | vs YJIT |
+|-------|-------:|---------:|-----:|--------:|
+| `arr.sum { x*x }`            | 1.12s | **0.07s** | 0.44s | **6.3×** |
+| `arr.sum { x*x + x*2 + 1 }`  | 1.88s | **0.08s** | 0.46s | **5.75×** |
+
+This is the first **whole-loop** layer and the empirical turning point: eliminating
+per-element interpreter overhead clears YJIT by ~6×, where per-element native
+blocks could not. STRESS_GC clean (the native loop is alloc-free), diff_cruby
+unchanged (10 jit-native / 9 default), correctness verified vs CRuby (Float /
+Bignum seed / `break` / empty / Range / Object-block all match). Next: the same
+whole-loop treatment for `map` / `each` / `inject` / `reduce`, then a shared
+loop-codegen so any eligible driver+block fuses into one native function.
 
 ## Risks
 
