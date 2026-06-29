@@ -861,6 +861,15 @@ pub(crate) struct Vm {
     /// Per block-proto cache of whole-loop Float each-accumulator drivers.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_floateach_acc_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    /// Int-element / Float-accumulator each-acc block (`ints.each { |x| t += x*1.5 }`):
+    /// Int element param, Float captured accumulator. Distinct from both the Int and
+    /// the Float-element each-acc blocks.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_block_acc_intelem_fa: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// Per block-proto cache of the Int-element/Float-acc each-accumulator loop (int
+    /// element reader, opaque Float-bits accumulator).
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_intelem_floateach_acc_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
     /// Per-(block proto, is_min) cache of whole-loop `min_by` / `max_by` drivers —
     /// a fold tracking the best key + its element (the value-mode block is the key
     /// function, shared with `jit_native_block`).
@@ -2017,6 +2026,10 @@ impl Vm {
             jit_native_block_acc_float: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_floateach_acc_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_block_acc_intelem_fa: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_intelem_floateach_acc_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_minmax_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]

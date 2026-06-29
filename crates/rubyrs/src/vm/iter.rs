@@ -1426,6 +1426,13 @@ impl Vm {
                 if g.vm.try_native_floateach_acc_loop(block, *id).is_some() {
                     return Ok(Some(Value::Array(*id)));
                 }
+                // Int-element / Float-accumulator each-acc (`total += x*1.5` over an
+                // Int array, total a Float). Tries after the float each-acc declines
+                // on the Int element (its float reader deopts) (ADR 0034 layer 3d).
+                #[cfg(feature = "jit-native")]
+                if g.vm.try_native_intelem_floateach_acc_loop(block, *id).is_some() {
+                    return Ok(Some(Value::Array(*id)));
+                }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
