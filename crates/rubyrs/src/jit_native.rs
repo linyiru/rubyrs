@@ -978,11 +978,38 @@ impl NativeLoop {
 /// carried accumulator vary by `kind`; the head always carries `(i, acc)` (the
 /// array-producing kinds leave `acc` at 0).
 pub(crate) fn compile_native_loop(block_addr: usize, kind: LoopKind) -> Option<NativeLoop> {
+    compile_native_loop_inner(block_addr, kind, false)
+}
+
+/// Float-element variant: reads each element via `jit_array_elem_float` and (for
+/// `Filter`/`Find`) pushes the matching element via `jit_array_push_float`. Used by
+/// the Float `count`/`select`/`reject`/`find` drivers; the block is a FLOAT predicate
+/// (param Float, returns Bool from an `fcmp`). `Sum`-kind (count) sums 0/1 as int —
+/// element type doesn't matter there beyond the read.
+pub(crate) fn compile_native_floatloop(block_addr: usize, kind: LoopKind) -> Option<NativeLoop> {
+    compile_native_loop_inner(block_addr, kind, true)
+}
+
+fn compile_native_loop_inner(
+    block_addr: usize,
+    kind: LoopKind,
+    float_elem: bool,
+) -> Option<NativeLoop> {
+    let (elem_name, elem_fn): (&str, *const u8) = if float_elem {
+        ("jit_array_elem_float", jit_array_elem_float as *const u8)
+    } else {
+        ("jit_array_elem_int", jit_array_elem_int as *const u8)
+    };
+    let (push_name, push_fn): (&str, *const u8) = if float_elem {
+        ("jit_array_push_float", jit_array_push_float as *const u8)
+    } else {
+        ("jit_array_push", jit_array_push as *const u8)
+    };
     let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
     builder.symbol("jit_array_len", jit_array_len as *const u8);
-    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
+    builder.symbol(elem_name, elem_fn);
     builder.symbol("jit_array_set_int", jit_array_set_int as *const u8);
-    builder.symbol("jit_array_push", jit_array_push as *const u8);
+    builder.symbol(push_name, push_fn);
     builder.symbol("blk", block_addr as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
@@ -1007,7 +1034,7 @@ pub(crate) fn compile_native_loop(block_addr: usize, kind: LoopKind) -> Option<N
     let lenid = module
         .declare_function("jit_array_len", Linkage::Import, &lensig)
         .ok()?;
-    // jit_array_elem_int: (vm, objid, i) -> (i64, i8).
+    // element reader: (vm, objid, i) -> (i64, i8). Int or Float per `float_elem`.
     let mut elsig = module.make_signature();
     elsig.params.push(AbiParam::new(ptr_ty));
     elsig.params.push(AbiParam::new(types::I64));
@@ -1015,7 +1042,7 @@ pub(crate) fn compile_native_loop(block_addr: usize, kind: LoopKind) -> Option<N
     elsig.returns.push(AbiParam::new(types::I64));
     elsig.returns.push(AbiParam::new(types::I8));
     let elid = module
-        .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
+        .declare_function(elem_name, Linkage::Import, &elsig)
         .ok()?;
     // jit_array_set_int: (vm, objid, i, val) -> void (Map).
     let mut setsig = module.make_signature();
@@ -1026,13 +1053,13 @@ pub(crate) fn compile_native_loop(block_addr: usize, kind: LoopKind) -> Option<N
     let setid = module
         .declare_function("jit_array_set_int", Linkage::Import, &setsig)
         .ok()?;
-    // jit_array_push: (vm, objid, elem) -> void (Filter).
+    // element push: (vm, objid, elem) -> void (Filter/Find). Int or Float.
     let mut pushsig = module.make_signature();
     pushsig.params.push(AbiParam::new(ptr_ty));
     pushsig.params.push(AbiParam::new(types::I64));
     pushsig.params.push(AbiParam::new(types::I64));
     let pushid = module
-        .declare_function("jit_array_push", Linkage::Import, &pushsig)
+        .declare_function(push_name, Linkage::Import, &pushsig)
         .ok()?;
     // block: (vm, self, i64) -> (i64, i8) — same ABI as a NativeProto.
     let mut blksig = module.make_signature();
@@ -2465,12 +2492,31 @@ fn emit_binop_float(
     b: ClValue,
     stack: &mut Vec<(ClValue, Kind)>,
 ) -> Option<()> {
+    // Comparisons -> Bool. The ORDERED variants (LessThan/.../Equal) are false when
+    // either operand is NaN, and NotEqual is true for NaN — exactly Ruby's float
+    // comparison semantics (`NaN < x`, `NaN == x` are false; `NaN != x` is true). So
+    // a Float predicate (`select`/`count { |x| x > 2.0 }`) needs no NaN special-case
+    // (unlike `min_by`, which must RAISE on a NaN key).
+    let fcc = match k {
+        BinOpKind::Lt => Some(FloatCC::LessThan),
+        BinOpKind::Le => Some(FloatCC::LessThanOrEqual),
+        BinOpKind::Gt => Some(FloatCC::GreaterThan),
+        BinOpKind::Ge => Some(FloatCC::GreaterThanOrEqual),
+        BinOpKind::Eq => Some(FloatCC::Equal),
+        BinOpKind::Ne => Some(FloatCC::NotEqual),
+        _ => None,
+    };
+    if let Some(cc) = fcc {
+        let r = fb.ins().fcmp(cc, a, b);
+        stack.push((r, Kind::Bool));
+        return Some(());
+    }
     let r = match k {
         BinOpKind::Add => fb.ins().fadd(a, b),
         BinOpKind::Sub => fb.ins().fsub(a, b),
         BinOpKind::Mul => fb.ins().fmul(a, b),
         BinOpKind::Div => fb.ins().fdiv(a, b),
-        _ => return None,
+        _ => return None, // `%` (fmod) needs a libcall — decline
     };
     stack.push((r, Kind::Float));
     Some(())
@@ -2681,6 +2727,18 @@ pub(crate) unsafe extern "C" fn jit_array_push(vm: *mut crate::vm::Vm, objid: i6
     let vm = unsafe { &mut *vm };
     let id = crate::value::ObjId(objid as u32);
     vm.heap.array_mut(id).push(Value::Int(elem));
+}
+
+/// Native primitive: push `Value::Float(f64::from_bits(bits))` onto `Array objid`.
+/// The Float `select`/`reject`/`find` drivers push the matching float ELEMENT (its
+/// f64 bits in the i64 ABI). Caller reserved capacity, so no realloc — GC-free.
+///
+/// # Safety
+/// `vm` valid; `objid` a live pinned Array with reserved capacity.
+pub(crate) unsafe extern "C" fn jit_array_push_float(vm: *mut crate::vm::Vm, objid: i64, bits: i64) {
+    let vm = unsafe { &mut *vm };
+    let id = crate::value::ObjId(objid as u32);
+    vm.heap.array_mut(id).push(Value::Float(f64::from_bits(bits as u64)));
 }
 
 /// Native primitive: allocate a fresh empty Hash, return its ObjId as i64. Used by

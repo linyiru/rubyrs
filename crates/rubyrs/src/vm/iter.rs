@@ -287,7 +287,9 @@ impl Vm {
                 let keep = matches!(mode, IterMode::Select);
                 self.pinned.push(Value::Array(id));
                 self.pinned.push(Value::Block(block));
-                let out = self.try_native_filter_loop(block, id, keep);
+                let out = self
+                    .try_native_filter_loop(block, id, keep)
+                    .or_else(|| self.try_native_floatfilter_loop(block, id, keep));
                 self.pinned.truncate(self.pinned.len() - 2);
                 if let Some(out) = out {
                     return Ok(Value::Array(out));
@@ -300,7 +302,9 @@ impl Vm {
             IterMode::Any | IterMode::All | IterMode::NoneM | IterMode::One => {
                 self.pinned.push(Value::Array(id));
                 self.pinned.push(Value::Block(block));
-                let cnt = self.try_native_count_loop(block, id);
+                let cnt = self
+                    .try_native_count_loop(block, id)
+                    .or_else(|| self.try_native_floatcount_loop(block, id));
                 self.pinned.truncate(self.pinned.len() - 2);
                 if let Some(c) = cnt {
                     let len = self.heap.array(id).len() as i64;
@@ -319,7 +323,9 @@ impl Vm {
             IterMode::Find => {
                 self.pinned.push(Value::Array(id));
                 self.pinned.push(Value::Block(block));
-                let found = self.try_native_find_loop(block, id);
+                let found = self
+                    .try_native_find_loop(block, id)
+                    .or_else(|| self.try_native_floatfind_loop(block, id));
                 self.pinned.truncate(self.pinned.len() - 2);
                 if let Some(found) = found {
                     return Ok(found.unwrap_or(Value::Nil));
@@ -4313,7 +4319,11 @@ impl Vm {
                 // loop accumulating the predicate's 0/1). A deopt (non-comparison
                 // predicate / non-Int element) falls through to the generic loop.
                 #[cfg(feature = "jit-native")]
-                if let Some(n) = g.vm.try_native_count_loop(block, *id) {
+                if let Some(n) = g
+                    .vm
+                    .try_native_count_loop(block, *id)
+                    .or_else(|| g.vm.try_native_floatcount_loop(block, *id))
+                {
                     return Ok(Some(Value::Int(n)));
                 }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
