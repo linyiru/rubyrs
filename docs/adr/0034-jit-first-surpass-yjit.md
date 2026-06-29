@@ -541,8 +541,35 @@ n*1.5; end`) compiles native and boxes `Value::Float` (new `returns_float` flag)
 9.36× YJIT. A method mixing Float and non-Float returns declines (ambiguous box kind).
 Method ARGS stay Int-only (the dispatch guard) — Float params are the next step.
 
-Next frontier: Float method PARAMS, `map`→`reduce(:+)` fusion, multi-dimension fusion
-(`select{}.map{}.sum`), and broadening the value-method JIT surface.
+**Float method PARAMS via cross-call inlining — SHIPPED.** A 1-arg method called with
+a Float arg goes native; the win is INLINING — a compiled caller inlines a float-param
+callee (`run`→`poly(k*0.5)`) as a native cross-call (`compile()` gains a `float_callees`
+map; a Float-arg `CallNoRecv` calls the `cf{cid}` fparam address, f64 bits through the
+i64 ABI). 10.92× YJIT (interp 6.06s → 0.12s). A dispatch-only fallback covers
+non-inlinable sites (correct, ~2.2× over interp, below YJIT — no dispatch-based call
+beats YJIT, only inlining does).
+
+**Blockless `reduce(:+)`/`inject(:+)` Float fold — SHIPPED (both builds, ~150×).** The
+reduce analog of the blockless-sum fix: only Int×Int fast-pathed, the first Float fell
+to the interpreted `Enumerable#inject` (16.5s → 0.11s). The real bug the "map→reduce(:+)
+fusion" ask surfaced (profile the WHOLE chain).
+
+**Int-element / Float-accumulator `sum` — SHIPPED (7.0× YJIT, ~100× swing).** `ints.sum
+{ |x| x*1.5 }` (Int collection → Float) had no driver (Int loop declines on the Float
+result; Float loop deopts on the Int element) → 14.1× slower. Fix decouples element-kind
+from accumulator-kind: a new `float_acc` param on `compile()` governs the value-result
+(existing callers pass `float_acc == float_elem`, behaviour-identical), and
+`compile_native_floatsum_loop_inner(_, int_elem)` swaps the element reader to
+`jit_array_elem_int`. The broad Int→Float number-crunch prize.
+
+**Fusion asks resolved without new fusion:** `arr.map{}.reduce(:+)` already = 3.46× YJIT
+(native float map + the blockless reduce fix); `select{}.map{}.sum` = 5.19× (the existing
+map.sum peephole fuses `.map{}.sum`→`.sum{}`, select native). Fusing map.reduce(:+)→sum
+is unsound (string concat, empty→nil vs 0, −0.0 seed all differ from sum).
+
+Next frontier (same Int→Float decouple + `int_elem`-reader mechanism): `ints.map
+{ x*1.5 }` and other Int-element/Float-block drivers (map/each-acc), and broadening the
+value-method JIT surface.
 
 ## Risks
 
