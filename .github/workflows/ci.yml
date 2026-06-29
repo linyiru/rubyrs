@@ -888,6 +888,25 @@ jobs:
         # RSS budget and tell us nothing useful.
         run: cargo build --release --locked -p rubyrs
 
+      - name: Binary size (report)
+        # Diagnostic, not (yet) a gate. The 2026-06-29 RSS analysis found
+        # base RSS tracks the rubyrs binary's resident code: the arc's
+        # base-RSS growth was rubyrs's own `.text` going 1.7 -> 2.1 MiB,
+        # not deps / heap / the (cfg-absent) native JIT. Print the release
+        # binary's section sizes every run so code growth is visible in the
+        # log + job summary. The boot.rb row in perf/baselines.tsv already
+        # GATES the symptom (base RSS) via the peak-RSS check below; promote
+        # this to a hard `.text` ratchet once a Linux baseline is captured.
+        run: |
+          if command -v size >/dev/null 2>&1; then
+            size target/release/rubyrs || true
+            tsize=$(size target/release/rubyrs 2>/dev/null | awk 'NR==2{print $1}')
+            echo "::notice title=rubyrs binary .text::release .text = ${tsize:-?} bytes"
+            echo "rubyrs release \`.text\` = ${tsize:-?} bytes" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          else
+            echo "::notice::\`size\` not available; skipping binary-size report"
+          fi
+
       - name: Check peak-RSS budgets
         # Runs each workload in perf/baselines.tsv three times,
         # compares MIN peak-RSS to the row's budget, fails if any
