@@ -580,9 +580,18 @@ callers pass `float_acc == float_elem` (behaviour-identical). Drivers: sum 7.0×
 Int elements with a Float comparison (count/select/find) already beat YJIT, no work
 needed.
 
-Next frontier: the remaining Float unary primitives in the block JIT (`zero?`/`positive?`
-/`floor`/`ceil`/`round`/`to_i` still decline), each_with_object Float, Float-keyed Hash
-drivers, and broadening the value-method JIT surface.
+Float sign predicates `positive?`/`negative?`/`zero?` are now modelled too (ordered fcmp
+against 0.0 → Bool), so `floats.count { x.positive? }` etc. beat YJIT (6.06×).
+
+Next frontier — **Float→Int conversions** (`floats.sum { x.floor }` 3.8× SLOWER,
+`map { x.round }` 2.8×, `sum { x.to_i }` 4.1×): the reverse asymmetry (Float element, Int
+result). The Float-reader/Int-accumulator sum loop already exists (`compile_native_floatloop`
+with `LoopKind::Sum` — the count driver uses it), so sum is tractable; it needs the
+conversion unary ops (`floor`/`ceil`/`to_i`/`truncate` via `fcvt_to_sint`; `round` is Ruby
+half-away-from-zero = `fcvt(x + copysign(0.5,x))`, NOT cranelift `nearest`=half-even), each
+with a branchless range-guard deopt (|x|≥2^63 / NaN / Inf → bignum in Ruby). Then map (a
+Float-reader/Int-output loop), each_with_object Float, Float-keyed Hash drivers, and
+broadening the value-method JIT surface.
 
 ## Risks
 
