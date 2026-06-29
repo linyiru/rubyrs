@@ -4096,18 +4096,25 @@ pub(crate) unsafe extern "C" fn jit_obj_getter_array(
         Value::Object(o) => *o,
         _ => return deopt,
     };
-    let cls_ptr = match vm.heap.class_ptr_of(oid) {
-        Some(p) => p,
-        None => return deopt,
+    // One heap slot fetch: the Instance gives BOTH its class pointer (for the cache
+    // guard) and the ivar value — `class_ptr_of` + the ivar read used to be two
+    // `heap.get(oid)` lookups per node.
+    let inst = match vm.heap.get(oid) {
+        crate::heap::HeapObj::Instance(inst) => inst,
+        _ => return deopt,
+    };
+    let cls_ptr = match &inst.singleton_class {
+        Some(sc) => std::rc::Rc::as_ptr(sc) as usize,
+        None => std::rc::Rc::as_ptr(&inst.class) as usize,
     };
     let (cached_cls, cached_ivar) = cache.get();
     let ivar = if cached_cls == cls_ptr {
         cached_ivar
     } else if cached_cls == 0 {
-        // Cold miss only: clone the Rc<Class> to resolve the getter → ivar.
-        let cls = match vm.heap.try_class_of(oid) {
-            Some(c) => c,
-            None => return deopt,
+        // Cold miss only: resolve the getter → ivar (clone the Rc<Class>).
+        let cls = match &inst.singleton_class {
+            Some(sc) => sc.clone(),
+            None => inst.class.clone(),
         };
         let m = match vm.lookup_method_uncached(&cls, crate::intern::SymId(getter_name)) {
             Some(m) => m,
@@ -4122,13 +4129,8 @@ pub(crate) unsafe extern "C" fn jit_obj_getter_array(
     } else {
         return deopt; // megamorphic
     };
-    match vm.heap.get(oid) {
-        crate::heap::HeapObj::Instance(inst) => {
-            match inst.ivars.get(&crate::intern::SymId(ivar)) {
-                Some(Value::Array(aid)) => NRet { res: aid.0 as i64, ovf: 0 },
-                _ => deopt,
-            }
-        }
+    match inst.ivars.get(&crate::intern::SymId(ivar)) {
+        Some(Value::Array(aid)) => NRet { res: aid.0 as i64, ovf: 0 },
         _ => deopt,
     }
 }
