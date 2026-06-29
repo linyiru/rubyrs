@@ -162,6 +162,12 @@ pub(crate) fn compile(
     // valid for a 1-param value block (Float-element drivers like `sum`); the
     // param binds as `Kind::Float`. `false` for every Int driver + all methods.
     float_elem: bool,
+    // The accumulator / value-result is a Float (independent of the element kind).
+    // Decoupled from `float_elem` so an INT-element block whose body produces a
+    // Float (`ints.sum { |x| x * 1.5 }`) can return f64 bits into a Float
+    // accumulator. Existing callers pass `float_acc == float_elem` (behaviour-
+    // identical); only the Int-elem/Float-acc sum driver passes (false, true).
+    float_acc: bool,
 ) -> Option<NativeProto> {
     // Shape gate (methods only): exactly one required positional param. A block's
     // 1-param eligibility is checked by the caller via its `BlockHandle` fields.
@@ -838,11 +844,11 @@ pub(crate) fn compile(
                         // path. Without this, a non-Float-returning block over a Float
                         // array silently corrupts (Int 5 -> 5.0e-323).
                         match k {
-                            Kind::Int if !float_elem => {
+                            Kind::Int if !float_acc => {
                                 m_nonfloat_ret = true;
                                 v
                             }
-                            Kind::ArrayObjId if !float_elem => {
+                            Kind::ArrayObjId if !float_acc => {
                                 returns_array = true;
                                 m_nonfloat_ret = true;
                                 v
@@ -850,7 +856,7 @@ pub(crate) fn compile(
                             // Return the f64 result's BITS. A Float DRIVER's loop
                             // bitcasts back; a METHOD's dispatch boxes Value::Float
                             // (returns_float). Both want the bits here.
-                            Kind::Float if float_elem || is_method => {
+                            Kind::Float if float_acc || is_method => {
                                 m_float_ret = true;
                                 fb.ins().bitcast(types::I64, MemFlagsData::new(), v)
                             }
@@ -1943,9 +1949,25 @@ pub(crate) fn compile_native_eachidx_loop(block_addr: usize) -> Option<NativeLoo
 /// f64 bits) and boxes the result as `Value::Float(f64::from_bits(res))`. A non-Float
 /// element deopts → the caller redoes the generic sum.
 pub(crate) fn compile_native_floatsum_loop(block_addr: usize) -> Option<NativeLoop> {
+    compile_native_floatsum_loop_inner(block_addr, false)
+}
+
+/// `int_elem`: read elements as Int (the block takes an Int param, produces a Float
+/// — `ints.sum { |x| x * 1.5 }`); else read as Float (`floats.sum { ... }`). Either
+/// way the accumulator is f64 and the block returns f64 BITS, so only the element
+/// reader symbol differs.
+pub(crate) fn compile_native_floatsum_loop_inner(
+    block_addr: usize,
+    int_elem: bool,
+) -> Option<NativeLoop> {
     let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    let (elem_name, elem_fn): (&str, *const u8) = if int_elem {
+        ("jit_array_elem_int", jit_array_elem_int as *const u8)
+    } else {
+        ("jit_array_elem_float", jit_array_elem_float as *const u8)
+    };
     builder.symbol("jit_array_len", jit_array_len as *const u8);
-    builder.symbol("jit_array_elem_float", jit_array_elem_float as *const u8);
+    builder.symbol(elem_name, elem_fn);
     builder.symbol("blk", block_addr as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
@@ -1972,10 +1994,10 @@ pub(crate) fn compile_native_floatsum_loop(block_addr: usize) -> Option<NativeLo
     elsig.params.push(AbiParam::new(ptr_ty));
     elsig.params.push(AbiParam::new(types::I64));
     elsig.params.push(AbiParam::new(types::I64));
-    elsig.returns.push(AbiParam::new(types::I64)); // f64 bits
+    elsig.returns.push(AbiParam::new(types::I64)); // f64 bits (or int value if int_elem)
     elsig.returns.push(AbiParam::new(types::I8));
     let elid = module
-        .declare_function("jit_array_elem_float", Linkage::Import, &elsig)
+        .declare_function(elem_name, Linkage::Import, &elsig)
         .ok()?;
     // 1-param value block: (vm, self, elem_bits) -> (result_bits, ovf).
     let mut blksig = module.make_signature();

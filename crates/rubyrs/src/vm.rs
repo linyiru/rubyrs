@@ -840,6 +840,13 @@ pub(crate) struct Vm {
     /// Per block-proto cache of whole-loop Float `sum` drivers.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_floatsum_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    /// Per block-proto cache for the INT-element/Float-accumulator `sum` block
+    /// (`ints.sum { |x| x * 1.5 }`) — distinct compile from the Float-element block.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_block_intelem_fa: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// Per block-proto cache of the Int-element/Float-acc `sum` loop driver.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_intelem_floatsum_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
     /// Per block-proto cache of whole-loop Float `map` drivers (Float in -> Float out).
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_floatmap_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
@@ -1994,6 +2001,10 @@ impl Vm {
             jit_native_block_float: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_floatsum_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_block_intelem_fa: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_intelem_floatsum_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_floatmap_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]

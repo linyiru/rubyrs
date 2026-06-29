@@ -1542,6 +1542,17 @@ impl Vm {
                 {
                     return Ok(Some(Value::Float(f64::from_bits(bits as u64))));
                 }
+                // Int-element / Float-accumulator variant (ADR 0034 layer 3d): an
+                // INT array with a block producing a Float (`ints.sum { |x| x*1.5 }`).
+                // Both loops above decline (the Int block won't compile a Float
+                // result; the Float loop deopts on the Int element). Seed = init as
+                // f64; result boxes Value::Float. Non-Int element deopts -> generic.
+                #[cfg(feature = "jit-native")]
+                if let Some(bits) =
+                    g.vm.try_native_intelem_floatsum_loop(block, id, (init as f64).to_bits() as i64)
+                {
+                    return Ok(Some(Value::Float(f64::from_bits(bits as u64))));
+                }
                 let pre_frames = g.vm.frames.len();
                 let mut acc: Value = Value::Int(init);
                 let mut early = None;

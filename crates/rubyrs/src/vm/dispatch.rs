@@ -16067,6 +16067,7 @@ impl Vm {
             &syms,
             None,
             false, // methods never have a Float element param
+            false, // ...and the accumulator/result float-ness mirrors it
         );
         if let (Some(np), false) = (
             &compiled,
@@ -16109,6 +16110,7 @@ impl Vm {
             &syms,
             None,
             true,
+            true, // fparam: Float element; result-Float allowed via is_method too
         )
     }
 
@@ -16253,6 +16255,100 @@ impl Vm {
         };
         let vm_ptr = self as *const crate::vm::Vm;
         sl.call(vm_ptr, &self_val, array_id.0 as i64, init_bits)
+    }
+
+    /// Whole-loop fast path for `ints.sum { |x| <f64 expr in x> }` (ADR 0034 layer
+    /// 3d): an INT-element array with a block that produces a Float, summed in an
+    /// f64 accumulator. Distinct from [`try_native_floatsum_loop`] (Float elements)
+    /// — here the element reads as an Int (`jit_array_elem_int`, deopt on non-Int)
+    /// and the block compiles with an Int param but a Float result (`float_acc`),
+    /// the common Int->Float number-crunch (`(1..n).sum { |i| 1.0 / i }`). Returns
+    /// the sum's f64 BITS; the caller boxes Value::Float. Empty declines (CRuby
+    /// returns the bare Integer init). Sound by the same deopt-redo invariant.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_intelem_floatsum_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+        init_bits: i64,
+    ) -> Option<i64> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        // Empty array: CRuby returns the bare Integer init, not a Float — decline.
+        if self.heap.array(array_id).is_empty() {
+            return None;
+        }
+        if !self.jit_native_block_intelem_fa.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block_intelem_floatacc(proto_idx, param_start as u32, body_start as u32);
+            self.jit_native_block_intelem_fa.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_intelem_fa.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_intelem_floatsum_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_floatsum_loop_inner(block_addr, true);
+            self.jit_native_intelem_floatsum_loop.insert(proto_idx, compiled);
+        }
+        let sl = match self.jit_native_intelem_floatsum_loop.get(&proto_idx) {
+            Some(Some(sl)) => sl,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        sl.call(vm_ptr, &self_val, array_id.0 as i64, init_bits)
+    }
+
+    /// Compile a 1-param value block whose element is an INT but whose body produces
+    /// a FLOAT (`float_elem = false`, `float_acc = true`) — for the Int-element
+    /// Float-accumulator sum driver. The Int param coerces to f64 in the body's
+    /// arithmetic (`emit_numeric_binop`), the block returns the f64 bits.
+    #[cfg(feature = "jit-native")]
+    fn compile_native_block_intelem_floatacc(
+        &mut self,
+        proto_idx: usize,
+        param_start: u32,
+        body_local_start: u32,
+    ) -> Option<crate::jit_native::NativeProto> {
+        let dummy = self.interner.intern("\u{0}block\u{0}");
+        let callees = crate::intern::FxHashMap::default();
+        let getters = crate::intern::FxHashMap::default();
+        let syms = crate::jit_native::JitSyms {
+            length: self.interner.intern("length"),
+            size: self.interner.intern("size"),
+            bracket: self.interner.intern("[]"),
+            lshift: self.interner.intern("<<"),
+            abs: self.interner.intern("abs"),
+            even_p: self.interner.intern("even?"),
+            odd_p: self.interner.intern("odd?"),
+            zero_p: self.interner.intern("zero?"),
+            positive_p: self.interner.intern("positive?"),
+            negative_p: self.interner.intern("negative?"),
+        };
+        crate::jit_native::compile(
+            &self.protos[proto_idx],
+            dummy,
+            &callees,
+            &callees, // empty float callees
+            &getters,
+            &syms,
+            Some((param_start, body_local_start, false, crate::jit_native::AccKind::None)),
+            false, // Int element
+            true,  // ...but Float accumulator/result
+        )
     }
 
     /// Whole-loop fast path for `array.map { block }` (ADR 0034 layer 3): fill a
@@ -17155,6 +17251,7 @@ impl Vm {
             &syms,
             Some((param_start, body_local_start, predicate, crate::jit_native::AccKind::None)),
             false,
+            false,
         )
     }
 
@@ -17193,6 +17290,7 @@ impl Vm {
             &syms,
             Some((param_start, body_local_start, predicate, crate::jit_native::AccKind::None)),
             true, // float element
+            true, // float accumulator/result
         )
     }
 
@@ -17229,6 +17327,7 @@ impl Vm {
             &getters,
             &syms,
             Some((param_start, body_local_start, false, crate::jit_native::AccKind::Inject)),
+            false,
             false,
         )
     }
@@ -17277,6 +17376,7 @@ impl Vm {
                 crate::jit_native::AccKind::EachAcc { acc_slot },
             )),
             float_elem,
+            float_elem, // acc float-ness mirrors the element for EachAcc
         )
     }
 
@@ -17320,6 +17420,7 @@ impl Vm {
                 crate::jit_native::AccKind::EachWithIndex { acc_slot },
             )),
             false,
+            false,
         )
     }
 
@@ -17362,6 +17463,7 @@ impl Vm {
                 false,
                 crate::jit_native::AccKind::EachObj,
             )),
+            false,
             false,
         )
     }
