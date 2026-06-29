@@ -8,7 +8,7 @@
 //! arithmetic overflow OR an arg that isn't an `Int` deopts to the
 //! interpreter — so the JIT can never change a result, only its speed.
 
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
     types, AbiParam, Block, BlockArg, FuncRef, InstBuilder, MemFlagsData, Value as ClValue,
 };
@@ -495,10 +495,17 @@ pub(crate) fn compile(
         if let Some(m) = memo_slot {
             local_kinds[m as usize] = Kind::ArrayObjId;
         }
-        // Float-element driver: the element param's i64 var holds f64 bits; mark it
-        // Float so `LoadLocal` bitcasts to F64. (1-param value block only.)
+        // Float-element driver: the float value slot(s)' i64 vars hold f64 bits;
+        // mark them Float so `LoadLocal` bitcasts to F64. For a value block (None)
+        // arg2 IS the element. For an each-accumulator (EachAcc) arg2 is the captured
+        // accumulator and arg3 is the element — BOTH float, so mark both.
         if float_elem {
             local_kinds[arg2_slot as usize] = Kind::Float;
+            if matches!(acc_kind, AccKind::EachAcc { .. }) {
+                if let Some(s) = arg3_slot {
+                    local_kinds[s as usize] = Kind::Float;
+                }
+            }
         }
         let mut ip = 0usize;
         while ip < n {
@@ -692,36 +699,41 @@ pub(crate) fn compile(
                 Op::BinOp(k) => {
                     let (b, kb) = stack.pop()?;
                     let (a, ka) = stack.pop()?;
-                    if ka == Kind::Float && kb == Kind::Float {
-                        emit_binop_float(&mut fb, *k, a, b, &mut stack)?;
-                    } else if ka == Kind::Int && kb == Kind::Int {
-                        emit_binop(&mut fb, *k, a, b, &mut stack, ovf_var);
-                    } else {
-                        return None; // mixed Int/Float: no coercion modelled yet
-                    }
+                    emit_numeric_binop(&mut fb, *k, a, ka, b, kb, &mut stack, ovf_var)?;
                 }
                 Op::BinOpLocalLocal(k, a_slot, b_slot) => {
                     let ka = local_kinds[*a_slot as usize];
                     let kb = local_kinds[*b_slot as usize];
                     let a_raw = fb.use_var(vars[*a_slot as usize]);
                     let b_raw = fb.use_var(vars[*b_slot as usize]);
-                    if ka == Kind::Float && kb == Kind::Float {
-                        let a = fb.ins().bitcast(types::F64, MemFlagsData::new(), a_raw);
-                        let b = fb.ins().bitcast(types::F64, MemFlagsData::new(), b_raw);
-                        emit_binop_float(&mut fb, *k, a, b, &mut stack)?;
-                    } else if ka == Kind::Int && kb == Kind::Int {
-                        emit_binop(&mut fb, *k, a_raw, b_raw, &mut stack, ovf_var);
+                    // A Float local's var holds f64 BITS — materialise the F64 before
+                    // the numeric op (an Int local's var is the i64 value as-is).
+                    let a = if ka == Kind::Float {
+                        fb.ins().bitcast(types::F64, MemFlagsData::new(), a_raw)
                     } else {
-                        return None;
-                    }
+                        a_raw
+                    };
+                    let b = if kb == Kind::Float {
+                        fb.ins().bitcast(types::F64, MemFlagsData::new(), b_raw)
+                    } else {
+                        b_raw
+                    };
+                    emit_numeric_binop(&mut fb, *k, a, ka, b, kb, &mut stack, ovf_var)?;
                 }
                 Op::BinOpInt(k, imm) => {
                     let (a, ka) = stack.pop()?;
-                    if ka != Kind::Int {
-                        return None; // `float <op> int_imm` is mixed — no coercion yet
+                    match ka {
+                        Kind::Int => {
+                            let b = fb.ins().iconst(types::I64, *imm);
+                            emit_binop(&mut fb, *k, a, b, &mut stack, ovf_var);
+                        }
+                        // `float <op> int_imm` — coerce the immediate to f64 directly.
+                        Kind::Float => {
+                            let b = fb.ins().f64const(*imm as f64);
+                            emit_binop_float(&mut fb, *k, a, b, &mut stack)?;
+                        }
+                        _ => return None,
                     }
-                    let b = fb.ins().iconst(types::I64, *imm);
-                    emit_binop(&mut fb, *k, a, b, &mut stack, ovf_var);
                 }
                 Op::Jump(off) => {
                     let t = (ip as i64 + 1 + *off as i64) as usize;
@@ -773,16 +785,25 @@ pub(crate) fn compile(
                         // correctly at the boundary. A Bool/Nil result must NOT be
                         // returned as a raw i64 (`{ |x| x > 5 }` is true/false, not
                         // 1/0) — decline so the interpreter types it.
+                        // The result KIND must match what the consuming loop expects:
+                        // a Float driver (`float_elem`) needs a Float result, an Int
+                        // driver an Int/Array. A mismatch (e.g. `floats.sum { |x| 5 }`
+                        // — an Int result into the f64 accumulator) would reinterpret
+                        // the bits as the wrong type, so it DECLINES to the generic
+                        // path. Without this, a non-Float-returning block over a Float
+                        // array silently corrupts (Int 5 -> 5.0e-323).
                         match k {
-                            Kind::Int => v,
-                            Kind::ArrayObjId => {
+                            Kind::Int if !float_elem => v,
+                            Kind::ArrayObjId if !float_elem => {
                                 returns_array = true;
                                 v
                             }
                             // Return the f64 result's BITS; the Float driver loop
                             // bitcasts back and boxes `Value::Float`.
-                            Kind::Float => fb.ins().bitcast(types::I64, MemFlagsData::new(), v),
-                            Kind::Bool | Kind::Nil => return None,
+                            Kind::Float if float_elem => {
+                                fb.ins().bitcast(types::I64, MemFlagsData::new(), v)
+                            }
+                            _ => return None,
                         }
                     };
                     let ov = fb.use_var(ovf_var);
@@ -1178,9 +1199,26 @@ pub(crate) fn compile_native_loop(block_addr: usize, kind: LoopKind) -> Option<N
 /// so the loop just chains it). Returned as a `NativeLoop` (`call` gives the final
 /// acc as `Some`, or `None` on deopt → the caller redoes the generic inject).
 pub(crate) fn compile_native_inject_loop(block_addr: usize) -> Option<NativeLoop> {
+    compile_native_inject_loop_inner(block_addr, false)
+}
+
+/// Float-element variant of the inject/each-accumulator loop: reads each element
+/// via `jit_array_elem_float` (the accumulator threads as opaque i64 bits — the
+/// loop never interprets it, so f64 bits flow through unchanged). Used by the Float
+/// each-accumulator driver.
+pub(crate) fn compile_native_floatinject_loop(block_addr: usize) -> Option<NativeLoop> {
+    compile_native_inject_loop_inner(block_addr, true)
+}
+
+fn compile_native_inject_loop_inner(block_addr: usize, float_elem: bool) -> Option<NativeLoop> {
+    let (elem_name, elem_fn): (&str, *const u8) = if float_elem {
+        ("jit_array_elem_float", jit_array_elem_float as *const u8)
+    } else {
+        ("jit_array_elem_int", jit_array_elem_int as *const u8)
+    };
     let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
     builder.symbol("jit_array_len", jit_array_len as *const u8);
-    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
+    builder.symbol(elem_name, elem_fn);
     builder.symbol("blk", block_addr as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
@@ -1210,7 +1248,7 @@ pub(crate) fn compile_native_inject_loop(block_addr: usize) -> Option<NativeLoop
     elsig.returns.push(AbiParam::new(types::I64));
     elsig.returns.push(AbiParam::new(types::I8));
     let elid = module
-        .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
+        .declare_function(elem_name, Linkage::Import, &elsig)
         .ok()?;
     // 2-param block: (vm, self, acc, elem) -> (new_acc, ovf).
     let mut blksig = module.make_signature();
@@ -1933,6 +1971,150 @@ pub(crate) fn compile_native_floatsum_loop(block_addr: usize) -> Option<NativeLo
     })
 }
 
+/// Compile a native whole-loop `Array#map { |x| f(x) }` driver over an all-FLOAT
+/// array producing a FLOAT array (ADR 0034 layer 3d). The block's element + result
+/// are f64 BITS in the i64 ABI; the loop reads each element via
+/// `jit_array_elem_float` (deopt on non-Float), runs the block, and stores the
+/// result bits via `jit_array_set_float` into the caller's pre-sized output array.
+/// ABI `(vm, self, in_objid, out_objid) -> (0, ovf)`; the caller returns `out` on
+/// success. A non-Float element deopts -> the caller discards `out` and redoes the
+/// map generically (the native block is pure).
+pub(crate) fn compile_native_floatmap_loop(block_addr: usize) -> Option<NativeLoop> {
+    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    builder.symbol("jit_array_len", jit_array_len as *const u8);
+    builder.symbol("jit_array_elem_float", jit_array_elem_float as *const u8);
+    builder.symbol("jit_array_set_float", jit_array_set_float as *const u8);
+    builder.symbol("blk", block_addr as *const u8);
+    let mut module = JITModule::new(builder);
+    let ptr_ty = module.target_config().pointer_type();
+    let mut ctx = module.make_context();
+
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(ptr_ty)); // vm
+    sig.params.push(AbiParam::new(ptr_ty)); // self
+    sig.params.push(AbiParam::new(types::I64)); // in objid
+    sig.params.push(AbiParam::new(types::I64)); // out objid
+    sig.returns.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I8));
+    ctx.func.signature = sig.clone();
+    let fid = module.declare_function("floatmaploop", Linkage::Export, &sig).ok()?;
+
+    let mut lensig = module.make_signature();
+    lensig.params.push(AbiParam::new(ptr_ty));
+    lensig.params.push(AbiParam::new(types::I64));
+    lensig.returns.push(AbiParam::new(types::I64));
+    let lenid = module
+        .declare_function("jit_array_len", Linkage::Import, &lensig)
+        .ok()?;
+    let mut elsig = module.make_signature();
+    elsig.params.push(AbiParam::new(ptr_ty));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I8));
+    let elid = module
+        .declare_function("jit_array_elem_float", Linkage::Import, &elsig)
+        .ok()?;
+    let mut setsig = module.make_signature();
+    setsig.params.push(AbiParam::new(ptr_ty));
+    setsig.params.push(AbiParam::new(types::I64));
+    setsig.params.push(AbiParam::new(types::I64));
+    setsig.params.push(AbiParam::new(types::I64));
+    let setid = module
+        .declare_function("jit_array_set_float", Linkage::Import, &setsig)
+        .ok()?;
+    let mut blksig = module.make_signature();
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I8));
+    let blkid = module
+        .declare_function("blk", Linkage::Import, &blksig)
+        .ok()?;
+
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let len_ref = module.declare_func_in_func(lenid, fb.func);
+        let el_ref = module.declare_func_in_func(elid, fb.func);
+        let set_ref = module.declare_func_in_func(setid, fb.func);
+        let blk_ref = module.declare_func_in_func(blkid, fb.func);
+
+        let entry = fb.create_block();
+        let head = fb.create_block(); // param: (i: I64)
+        let body = fb.create_block();
+        let cont1 = fb.create_block();
+        let exit = fb.create_block();
+        let deopt = fb.create_block();
+        fb.append_block_params_for_function_params(entry);
+        fb.append_block_param(head, types::I64);
+
+        fb.switch_to_block(entry);
+        let (vm_param, self_param, in_objid, out_objid) = {
+            let p = fb.block_params(entry);
+            (p[0], p[1], p[2], p[3])
+        };
+        let call_len = fb.ins().call(len_ref, &[vm_param, in_objid]);
+        let len = fb.inst_results(call_len)[0];
+        let zero = fb.ins().iconst(types::I64, 0);
+        fb.ins().jump(head, &[zero.into()]);
+
+        fb.switch_to_block(head);
+        let i = fb.block_params(head)[0];
+        let cond = fb.ins().icmp(IntCC::SignedLessThan, i, len);
+        fb.ins().brif(cond, body, &[], exit, &[]);
+
+        fb.switch_to_block(body);
+        let call_el = fb.ins().call(el_ref, &[vm_param, in_objid, i]);
+        let (xbits, ovf1) = {
+            let r = fb.inst_results(call_el);
+            (r[0], r[1])
+        };
+        fb.ins().brif(ovf1, deopt, &[], cont1, &[]);
+
+        fb.switch_to_block(cont1);
+        let call_blk = fb.ins().call(blk_ref, &[vm_param, self_param, xbits]);
+        let (rbits, ovf2) = {
+            let r = fb.inst_results(call_blk);
+            (r[0], r[1])
+        };
+        let nh = fb.create_block();
+        fb.ins().brif(ovf2, deopt, &[], nh, &[]);
+        fb.switch_to_block(nh);
+        fb.ins().call(set_ref, &[vm_param, out_objid, i, rbits]);
+        let one = fb.ins().iconst(types::I64, 1);
+        let i2 = fb.ins().iadd(i, one);
+        fb.ins().jump(head, &[i2.into()]);
+
+        fb.switch_to_block(exit);
+        let z0 = fb.ins().iconst(types::I64, 0);
+        let ok = fb.ins().iconst(types::I8, 0);
+        fb.ins().return_(&[z0, ok]);
+
+        fb.switch_to_block(deopt);
+        let z = fb.ins().iconst(types::I64, 0);
+        let bad = fb.ins().iconst(types::I8, 1);
+        fb.ins().return_(&[z, bad]);
+
+        fb.seal_all_blocks();
+        fb.finalize();
+    }
+    module.define_function(fid, &mut ctx).ok()?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().ok()?;
+    let code_ptr = module.get_finalized_function(fid);
+    let ptr = unsafe {
+        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+            code_ptr,
+        )
+    };
+    Some(NativeLoop {
+        _module: module,
+        ptr,
+    })
+}
+
 /// Compile a native whole-loop `Array#min_by` / `max_by { |x| key }` driver (ADR
 /// 0034 layer 3) around an already-compiled 1-param Int block (the key function).
 /// A fold tracking the best KEY and its ELEMENT in registers — no mutation, so a
@@ -1940,9 +2122,30 @@ pub(crate) fn compile_native_floatsum_loop(block_addr: usize) -> Option<NativeLo
 /// guarantees `len >= 1` (it returns nil for the empty array itself). ABI
 /// `(vm, self, in_objid, _) -> (best_elem, ovf)`; `is_min` picks `<` vs `>`.
 pub(crate) fn compile_native_minmax_loop(block_addr: usize, is_min: bool) -> Option<NativeLoop> {
+    compile_native_minmax_loop_inner(block_addr, is_min, false)
+}
+
+/// Float variant: the ELEMENT and the block's KEY are Floats (f64 bits). Keys are
+/// compared with ordered `fcmp` (after bitcast); a NaN key deopts (`fcmp Unordered`)
+/// so CRuby's "comparison failed" raise happens on the generic path. The best
+/// element threads as f64 bits; the driver boxes `Value::Float`.
+pub(crate) fn compile_native_floatminmax_loop(block_addr: usize, is_min: bool) -> Option<NativeLoop> {
+    compile_native_minmax_loop_inner(block_addr, is_min, true)
+}
+
+fn compile_native_minmax_loop_inner(
+    block_addr: usize,
+    is_min: bool,
+    float_elem: bool,
+) -> Option<NativeLoop> {
+    let (elem_name, elem_fn): (&str, *const u8) = if float_elem {
+        ("jit_array_elem_float", jit_array_elem_float as *const u8)
+    } else {
+        ("jit_array_elem_int", jit_array_elem_int as *const u8)
+    };
     let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
     builder.symbol("jit_array_len", jit_array_len as *const u8);
-    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
+    builder.symbol(elem_name, elem_fn);
     builder.symbol("blk", block_addr as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
@@ -1972,7 +2175,7 @@ pub(crate) fn compile_native_minmax_loop(block_addr: usize, is_min: bool) -> Opt
     elsig.returns.push(AbiParam::new(types::I64));
     elsig.returns.push(AbiParam::new(types::I8));
     let elid = module
-        .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
+        .declare_function(elem_name, Linkage::Import, &elsig)
         .ok()?;
     let mut blksig = module.make_signature();
     blksig.params.push(AbiParam::new(ptr_ty));
@@ -2034,6 +2237,15 @@ pub(crate) fn compile_native_minmax_loop(block_addr: usize, is_min: bool) -> Opt
         let nh0 = fb.create_block();
         fb.ins().brif(ovfk0, deopt, &[], nh0, &[]);
         fb.switch_to_block(nh0);
+        // Seed key NaN -> deopt too (else the NaN element would seed `best` and
+        // never be displaced, masking CRuby's "comparison failed" raise).
+        if float_elem {
+            let k0f = fb.ins().bitcast(types::F64, MemFlagsData::new(), k0);
+            let is_nan0 = fb.ins().fcmp(FloatCC::Unordered, k0f, k0f);
+            let seedok = fb.create_block();
+            fb.ins().brif(is_nan0, deopt, &[], seedok, &[]);
+            fb.switch_to_block(seedok);
+        }
         fb.ins().jump(head, &[one0.into(), k0.into(), x0b.into()]);
 
         // head(i, bk, be): i < len ? body : exit(be)
@@ -2065,12 +2277,25 @@ pub(crate) fn compile_native_minmax_loop(block_addr: usize, is_min: bool) -> Opt
         fb.ins().brif(ovf2, deopt, &[], nh, &[]);
         fb.switch_to_block(nh);
         // better = is_min ? k < bk : k > bk; select new best key + element.
-        let cc = if is_min {
-            IntCC::SignedLessThan
+        let better = if float_elem {
+            // NaN key -> deopt (CRuby raises "comparison failed"; the generic
+            // path reproduces that). Then ordered fcmp on the bitcast keys.
+            let kf = fb.ins().bitcast(types::F64, MemFlagsData::new(), k);
+            let is_nan = fb.ins().fcmp(FloatCC::Unordered, kf, kf);
+            let okb = fb.create_block();
+            fb.ins().brif(is_nan, deopt, &[], okb, &[]);
+            fb.switch_to_block(okb);
+            let bkf = fb.ins().bitcast(types::F64, MemFlagsData::new(), bk);
+            let cc = if is_min { FloatCC::LessThan } else { FloatCC::GreaterThan };
+            fb.ins().fcmp(cc, kf, bkf)
         } else {
-            IntCC::SignedGreaterThan
+            let cc = if is_min {
+                IntCC::SignedLessThan
+            } else {
+                IntCC::SignedGreaterThan
+            };
+            fb.ins().icmp(cc, k, bk)
         };
-        let better = fb.ins().icmp(cc, k, bk);
         let bk2 = fb.ins().select(better, k, bk);
         let be2 = fb.ins().select(better, x, be);
         let one = fb.ins().iconst(types::I64, 1);
@@ -2192,6 +2417,47 @@ fn emit_int_unary(
 /// Float comparisons + `%` (fmod) decline (`None`) — not needed by `sum`/`map`,
 /// and float comparison would need careful NaN ordering. The Int `emit_binop`
 /// stays the exclusive Int path; this never runs for Int operands.
+/// Lower a numeric binary op with Int<->Float coercion (Ruby semantics: any Float
+/// operand promotes the other). `a`/`b` are materialised values whose kinds are
+/// `ka`/`kb` (a Float operand is already an F64, an Int operand an i64). Int+Int
+/// stays the overflow-checked Int path; if EITHER side is Float, the Int side is
+/// `fcvt_from_sint`-coerced to F64 and the float op runs. A non-numeric operand
+/// (Bool/Nil/Array) declines. This is what lets `floats.sum { |x| x * 2 }` (Float
+/// element, Int literal) go native.
+fn emit_numeric_binop(
+    fb: &mut FunctionBuilder,
+    k: BinOpKind,
+    a: ClValue,
+    ka: Kind,
+    b: ClValue,
+    kb: Kind,
+    stack: &mut Vec<(ClValue, Kind)>,
+    ovf_var: Variable,
+) -> Option<()> {
+    match (ka, kb) {
+        (Kind::Int, Kind::Int) => {
+            emit_binop(fb, k, a, b, stack, ovf_var);
+            Some(())
+        }
+        (ka, kb)
+            if matches!(ka, Kind::Int | Kind::Float) && matches!(kb, Kind::Int | Kind::Float) =>
+        {
+            let af = if ka == Kind::Int {
+                fb.ins().fcvt_from_sint(types::F64, a)
+            } else {
+                a
+            };
+            let bf = if kb == Kind::Int {
+                fb.ins().fcvt_from_sint(types::F64, b)
+            } else {
+                b
+            };
+            emit_binop_float(fb, k, af, bf, stack)
+        }
+        _ => None,
+    }
+}
+
 fn emit_binop_float(
     fb: &mut FunctionBuilder,
     k: BinOpKind,
@@ -2540,6 +2806,25 @@ pub(crate) unsafe extern "C" fn jit_array_set_int(
     let arr = vm.heap.array_mut(crate::value::ObjId(objid as u32));
     if let Some(slot) = arr.get_mut(i as usize) {
         *slot = Value::Int(val);
+    }
+}
+
+/// Native primitive: store `Value::Float(f64::from_bits(bits))` at `Array objid[i]`.
+/// The Float `map` driver's per-element write (`bits` is the block's f64 result in
+/// the i64 ABI). Caller pre-sizes the array, so this never grows it — no GC.
+///
+/// # Safety
+/// `vm` valid; `objid` a live pinned Array sized `> i`.
+pub(crate) unsafe extern "C" fn jit_array_set_float(
+    vm: *mut crate::vm::Vm,
+    objid: i64,
+    i: i64,
+    bits: i64,
+) {
+    let vm = unsafe { &mut *vm };
+    let arr = vm.heap.array_mut(crate::value::ObjId(objid as u32));
+    if let Some(slot) = arr.get_mut(i as usize) {
+        *slot = Value::Float(f64::from_bits(bits as u64));
     }
 }
 

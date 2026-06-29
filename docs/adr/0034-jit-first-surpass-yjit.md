@@ -482,10 +482,8 @@ bitcasts I64→F64, `StoreLocal`/`Return` bitcasts F64→I64. New: `Kind::Float`
 `emit_binop_float` (fadd/fsub/fmul/fdiv — IEEE, no overflow; comparisons + `%`
 decline), `LoadConstFloat`, a `float_elem` compile flag binding the 1-param
 element as Float, `jit_array_elem_float` (deopt on non-Float), and
-`compile_native_floatsum_loop` (F64 accumulator). **Mixed Int/Float declines** (no
-coercion yet: `{ |x| x * 2 }` over Floats falls to generic; `{ |x| x * 2.0 }`
-goes native). The driver **declines on an empty array** so CRuby's bare-init type
-holds (`[].sum{}` → Integer `0`, not `0.0`).
+`compile_native_floatsum_loop` (F64 accumulator). The driver **declines on an empty
+array** so CRuby's bare-init type holds (`[].sum{}` → Integer `0`, not `0.0`).
 
 Re-benchmarked the shared codegen after the change: Int sum/inject/each-acc all
 still 0.07s (no regression). Parity (transform/identity/int-seed/mixed-deopt/
@@ -493,8 +491,34 @@ empty/+Inf/−0.0/÷0) + STRESS_GC clean + diff_cruby GREEN both builds. craneli
 0.133 note: `bitcast` takes `MemFlagsData::new()` (0.133 split `MemFlags` into an
 interned handle + the `MemFlagsData` payload).
 
-Next frontier: extend Float to `map`/`each`-accumulator/`min_by`, Int↔Float
-coercion (mixed arithmetic), and `map`→`sum`/`reduce` fusion.
+cranelift 0.133 note: `bitcast` takes `MemFlagsData::new()` (0.133 split `MemFlags`
+into an interned handle + the `MemFlagsData` payload).
+
+**Float drivers extended — `map`, each-accumulator, `min_by`/`max_by` — SHIPPED.**
+All three reuse the bit-pattern-through-i64 mechanism:
+- **map** (Float→Float): 3.10× YJIT. `jit_array_set_float` + `compile_native_floatmap_loop`.
+- **each-accumulator** (`total += f(x)`, Float total): 7.37× YJIT. The inject loop is
+  parameterised on the element reader (`compile_native_floatinject_loop`) — the
+  accumulator threads as opaque i64 bits, so one loop serves Int and Float; `compile`'s
+  `float_elem` marks both the captured acc and the element Float for `EachAcc`.
+- **min_by/max_by** (Float key): 8.75× YJIT. `compile_native_minmax_loop` parameterised
+  on the element reader; keys compare via ordered `fcmp` on the bitcast bits. A **NaN
+  key deopts** (`fcmp Unordered`) so CRuby's "comparison failed" raise reproduces on
+  the generic path instead of a silent wrong answer.
+
+**Int↔Float coercion — SHIPPED.** A numeric binop with mixed Int/Float operands
+coerces the Int to f64 (`fcvt_from_sint`), matching Ruby promotion — so the COMMON
+form `floats.sum { |x| x * 2 }` (bare Int literal) goes native: 6.38× YJIT (was
+interpreted — mixed kinds used to decline). `emit_numeric_binop` centralises the rule.
+
+**Soundness fix (latent, in the shipped floatsum/floatmap):** the value-mode `Return`
+now enforces result-kind = loop-kind via `float_elem`. A Float driver whose block
+returns a non-Float (`floats.sum { |x| 5 }`) was reinterpreting Int bits as f64 →
+garbage; it now declines to generic. Coercion made the symmetric Int-driver case
+reachable too; both directions are now guarded.
+
+Next frontier: Float `select`/`reject`/`count` (predicate fcmp), `map`→`sum`/`reduce`
+fusion, and method-body Float returns (currently decline).
 
 ## Risks
 

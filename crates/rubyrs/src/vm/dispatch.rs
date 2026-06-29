@@ -16214,6 +16214,60 @@ impl Vm {
         }
     }
 
+    /// Whole-loop fast path for `array.map { |x| f(x) }` over an all-FLOAT array
+    /// producing a FLOAT array (ADR 0034 layer 3d). Mirrors `try_native_map_loop`
+    /// but reads/writes Floats via the Float block + `compile_native_floatmap_loop`.
+    /// `Some(out_id)` ran natively; `None` (non-Float element / ineligible block /
+    /// mixed Int-Float-no-coercion) discards the output and falls back to generic map.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_floatmap_loop(&mut self, block_id: ObjId, in_id: ObjId) -> Option<ObjId> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        if !self.jit_native_block_float.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32);
+            self.jit_native_block_float.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_float.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_floatmap_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_floatmap_loop(block_addr);
+            self.jit_native_floatmap_loop.insert(proto_idx, compiled);
+        }
+        if !matches!(self.jit_native_floatmap_loop.get(&proto_idx), Some(Some(_))) {
+            return None;
+        }
+        let len = self.heap.array(in_id).len();
+        self.check_alloc().ok()?;
+        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(vec![Value::Nil; len].into()));
+        self.pinned.push(Value::Array(out_id));
+        let self_val = self.heap.block(block_id).self_val.clone();
+        let vm_ptr = self as *const crate::vm::Vm;
+        let ml = self.jit_native_floatmap_loop.get(&proto_idx).unwrap().as_ref().unwrap();
+        let ok = ml.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
+        self.pinned.pop();
+        if ok {
+            Some(out_id)
+        } else {
+            None
+        }
+    }
+
     /// Whole-loop fast path for `array.count { pred }` (ADR 0034 layer 3): a count
     /// IS a sum of the predicate's truthiness, so this compiles the block in
     /// PREDICATE mode (a `Bool` result becomes i64 0/1) and runs it through the
@@ -16505,7 +16559,7 @@ impl Vm {
             _ => return None,
         };
         if !self.jit_native_block_acc.contains_key(&proto_idx) {
-            let compiled = self.compile_native_block_acc(proto_idx, param_start as u32, body_start, acc_slot);
+            let compiled = self.compile_native_block_acc(proto_idx, param_start as u32, body_start, acc_slot, false);
             self.jit_native_block_acc.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_acc.get(&proto_idx) {
@@ -16525,6 +16579,100 @@ impl Vm {
         // Native run completed: commit the accumulator (an Int, no alloc).
         if let Some(slot) = captured.borrow_mut().get_mut(acc_slot as usize) {
             *slot = Value::Int(acc_out);
+        }
+        Some(())
+    }
+
+    /// Whole-loop fast path for the FLOAT each-accumulator shape `total = <float>;
+    /// floats.each { |x| total += f(x) }` (ADR 0034 layer 3d). Identical to
+    /// `try_native_each_acc_loop` but the captured accumulator AND the element are
+    /// Float: the seed/result thread as f64 bits through the inject loop (which never
+    /// interprets the accumulator), and the block does f64 arithmetic. Fires after
+    /// the Int each-acc declines (the captured slot holds a Float, not an Int). Same
+    /// two soundness gates (share-direct-only + write-back-on-full-success).
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_floateach_acc_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<()> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot, captured, captured_is_method_scope) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot, bh.captured.clone(), bh.captured_is_method_scope)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        // Share-direct-only gate (see try_native_each_acc_loop).
+        if !captured_is_method_scope
+            || self.protos[proto_idx].creates_block
+            || self.block_is_reentrant(proto_idx, &captured)
+        {
+            return None;
+        }
+        // Find the single written captured slot (the accumulator) — identical scan.
+        let body_start = self.protos[proto_idx].block_body_local_start as u32;
+        let elem = param_start as u32;
+        let mut cap: Vec<u32> = Vec::new();
+        let mut written: Option<u32> = None;
+        for op in &self.protos[proto_idx].code {
+            use crate::bytecode::Op;
+            let mut note = |s: u16, w: bool, cap: &mut Vec<u32>, written: &mut Option<u32>| {
+                let s = s as u32;
+                if s < body_start && s != elem {
+                    if !cap.contains(&s) {
+                        cap.push(s);
+                    }
+                    if w {
+                        *written = Some(s);
+                    }
+                }
+            };
+            match op {
+                Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) => note(*s, true, &mut cap, &mut written),
+                Op::LoadLocal(s) => note(*s, false, &mut cap, &mut written),
+                Op::BinOpLocalLocal(_, a, b) => {
+                    note(*a, false, &mut cap, &mut written);
+                    note(*b, false, &mut cap, &mut written);
+                }
+                _ => {}
+            }
+        }
+        if cap.len() != 1 || written != Some(cap[0]) {
+            return None;
+        }
+        let acc_slot = cap[0];
+        // Seed from the captured slot — must currently hold a Float (else the Int
+        // each-acc would have served it). Thread the f64 bits.
+        let init = match captured.borrow().get(acc_slot as usize) {
+            Some(Value::Float(f)) => f.to_bits() as i64,
+            _ => return None,
+        };
+        if !self.jit_native_block_acc_float.contains_key(&proto_idx) {
+            let compiled = self.compile_native_block_acc(proto_idx, param_start as u32, body_start, acc_slot, true);
+            self.jit_native_block_acc_float.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_acc_float.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_floateach_acc_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_floatinject_loop(block_addr);
+            self.jit_native_floateach_acc_loop.insert(proto_idx, compiled);
+        }
+        let il = match self.jit_native_floateach_acc_loop.get(&proto_idx) {
+            Some(Some(il)) => il,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        let acc_out = il.call(vm_ptr, &self_val, array_id.0 as i64, init)?;
+        // Commit the accumulator as a Float (no alloc).
+        if let Some(slot) = captured.borrow_mut().get_mut(acc_slot as usize) {
+            *slot = Value::Float(f64::from_bits(acc_out as u64));
         }
         Some(())
     }
@@ -16673,6 +16821,53 @@ impl Vm {
         ml.call(vm_ptr, &self_val, array_id.0 as i64, 0).map(Value::Int)
     }
 
+    /// Float variant of `try_native_minmax_loop` (ADR 0034 layer 3d): an all-Float
+    /// array with a pure-f64 key block. The element + key thread as f64 bits; keys
+    /// compare with ordered fcmp; a NaN key deopts -> generic (which raises like
+    /// CRuby). Returns `Value::Float(best_elem)`. Fires after the Int min/max declines.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_floatminmax_loop(&mut self, block_id: ObjId, array_id: ObjId, is_min: bool) -> Option<Value> {
+        if !self.jit_native_on {
+            return None;
+        }
+        if self.heap.array(array_id).is_empty() {
+            return None;
+        }
+        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        if !self.jit_native_block_float.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32);
+            self.jit_native_block_float.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_float.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        let key = (proto_idx, is_min);
+        if !self.jit_native_floatminmax_loop.contains_key(&key) {
+            let compiled = crate::jit_native::compile_native_floatminmax_loop(block_addr, is_min);
+            self.jit_native_floatminmax_loop.insert(key, compiled);
+        }
+        let ml = match self.jit_native_floatminmax_loop.get(&key) {
+            Some(Some(ml)) => ml,
+            _ => return None,
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        ml.call(vm_ptr, &self_val, array_id.0 as i64, 0)
+            .map(|bits| Value::Float(f64::from_bits(bits as u64)))
+    }
+
     /// Compile a 1-param block proto to native (B5). The arg binds to the block's
     /// `param_start`; reads of captured outer slots decline (see `compile`).
     /// Blocks with method calls are not modelled yet, so callees/getters are
@@ -16796,6 +16991,7 @@ impl Vm {
         param_start: u32,
         body_local_start: u32,
         acc_slot: u32,
+        float_elem: bool,
     ) -> Option<crate::jit_native::NativeProto> {
         let dummy = self.interner.intern("\u{0}block\u{0}");
         let callees = crate::intern::FxHashMap::default();
@@ -16824,7 +17020,7 @@ impl Vm {
                 false,
                 crate::jit_native::AccKind::EachAcc { acc_slot },
             )),
-            false,
+            float_elem,
         )
     }
 
