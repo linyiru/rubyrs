@@ -228,6 +228,30 @@ fn local_is_array(code: &[Op], slot: u16, from_ip: usize, syms: &JitSyms) -> boo
     false
 }
 
+/// True if local `slot`, after `from_ip`, is used as an Object VALUE — its `.class` is
+/// taken (`x.class == Node`) or it is passed as an arg to a `CallNoRecv` (`walk(x)`) —
+/// before reassignment. So an `arr[i]` element stored into it should be a value POINTER
+/// (`Kind::Object`), not an Int (ADR 0034 Step 1, piece 3).
+fn local_is_obj_value(code: &[Op], slot: u16, from_ip: usize, syms: &JitSyms) -> bool {
+    let mut j = from_ip;
+    while j < code.len() {
+        match &code[j] {
+            Op::LoadLocalCall(s, name, _) if *s == slot && *name == syms.class => return true,
+            Op::LoadLocal(s) if *s == slot => {
+                if matches!(code.get(j + 1), Some(Op::CallNoRecv(_, _, _)) | Some(Op::Call(_, _, _))) {
+                    return true;
+                }
+            }
+            Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) if *s == slot => {
+                return false;
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    false
+}
+
 fn ivar_call_receiver(code: &[Op], ivar_ip: usize, syms: &JitSyms) -> Option<(SymId, u8)> {
     let mut h: i32 = 0; // height of operand-stack values ABOVE the ivar
     let mut j = ivar_ip + 1;
@@ -399,6 +423,9 @@ pub(crate) fn compile(
             | Op::LoadIvar(_)
             // Key push for a fused `@h[:k]`; standalone use rejected in codegen.
             | Op::LoadSymbol(_)
+            // Class constant for a fused `x.class == Const` guard (piece 3); a
+            // standalone LoadConst hits codegen's catch-all and declines.
+            | Op::LoadConst(_)
             | Op::LoadNil => {}
             // All BinOpKinds are modelled in `emit_binop`. Div/Mod emit Ruby
             // floored semantics with a branchless deopt on b==0 and the
@@ -484,6 +511,8 @@ pub(crate) fn compile(
     builder.symbol("jit_ivar_obj_ptr", jit_ivar_obj_ptr as *const u8);
     builder.symbol("jit_obj_call", jit_obj_call as *const u8);
     builder.symbol("jit_obj_getter_array", jit_obj_getter_array as *const u8);
+    builder.symbol("jit_array_elem_ptr", jit_array_elem_ptr as *const u8);
+    builder.symbol("jit_value_is_class", jit_value_is_class as *const u8);
     builder.symbol("jit_ivar_len", jit_ivar_len as *const u8);
     builder.symbol("jit_ivar_hash_get_int", jit_ivar_hash_get_int as *const u8);
     builder.symbol("jit_ivar_array_get_int", jit_ivar_array_get_int as *const u8);
@@ -573,6 +602,16 @@ pub(crate) fn compile(
     ogasig.returns.push(AbiParam::new(types::I8));
     let ogaid = module
         .declare_function("jit_obj_getter_array", Linkage::Import, &ogasig)
+        .ok()?;
+    // `jit_array_elem_ptr`: (vm, objid:i64, i:i64) -> (ptr, i8) — same shape as
+    // `jit_array_elem_int` (`aeisig`).
+    let aepid = module
+        .declare_function("jit_array_elem_ptr", Linkage::Import, &aeisig)
+        .ok()?;
+    // `jit_value_is_class`: (vm, value:ptr, const:i32, cache:ptr) -> (i8 res, i8 ovf) —
+    // same shape as `jit_obj_getter_array` (`ogasig`).
+    let viscid = module
+        .declare_function("jit_value_is_class", Linkage::Import, &ogasig)
         .ok()?;
     // `jit_ivar_len` shares the same `(vm, self, name:i32) -> (i64, i8)` sig.
     let alid = module
@@ -725,6 +764,8 @@ pub(crate) fn compile(
         let obj_getter_arr_ref = module.declare_func_in_func(ogaid, fb.func);
         let arr_len_ref = module.declare_func_in_func(alenid, fb.func);
         let arr_elem_int_ref = module.declare_func_in_func(aeiid, fb.func);
+        let arr_elem_ptr_ref = module.declare_func_in_func(aepid, fb.func);
+        let value_is_class_ref = module.declare_func_in_func(viscid, fb.func);
         let arraylen_ref = module.declare_func_in_func(alid, fb.func);
         let hashget_ref = module.declare_func_in_func(hgid, fb.func);
         let arrget_ref = module.declare_func_in_func(agid, fb.func);
@@ -1256,19 +1297,24 @@ pub(crate) fn compile(
                     let (key, kk) = stack.pop()?;
                     let (recv, rk) = stack.pop()?;
                     // `arr[i]` on a stack ArrayObjId (a local Array, e.g. `kids[i]` from
-                    // `kids = node.children`), Int index → native element read (Int
-                    // element; OOB / non-Int deopts). ADR 0034 Step 1, piece 2.
+                    // `kids = node.children`), Int index. If the element is used as an
+                    // Object VALUE (`x.class` / passed to a call — piece 3), read a
+                    // pointer to it (`Kind::Object`); else a native Int element read
+                    // (piece 2). OOB deopts; a non-Int element deopts (Int path only).
                     if rk == Kind::ArrayObjId {
                         if kk != Kind::Int {
                             return None;
                         }
-                        let inst = fb.ins().call(arr_elem_int_ref, &[vm_param, recv, key]);
+                        let obj_elem = matches!(code.get(ip + 1),
+                            Some(Op::StoreLocal(dst)) if local_is_obj_value(code, *dst, ip + 2, syms));
+                        let prim = if obj_elem { arr_elem_ptr_ref } else { arr_elem_int_ref };
+                        let inst = fb.ins().call(prim, &[vm_param, recv, key]);
                         let (res, of) = {
                             let r = fb.inst_results(inst);
                             (r[0], r[1])
                         };
                         acc_ovf(&mut fb, of);
-                        stack.push((res, Kind::Int));
+                        stack.push((res, if obj_elem { Kind::Object } else { Kind::Int }));
                         ip += 1;
                         continue;
                     }
@@ -1443,6 +1489,25 @@ pub(crate) fn compile(
                             let f = fb.ins().bitcast(types::F64, MemFlagsData::new(), res);
                             stack.push((f, Kind::Float));
                         }
+                        // Object-arg SELF-recursion (`walk(x)`, ADR 0034 Step 1, piece 4):
+                        // call self (the obj-param variant being compiled) with the
+                        // element pointer; the recursion's receiver is this method's self.
+                        // Only self-recursion — a non-self callee's obj-param variant
+                        // isn't baked into `callee_refs` (Int variants). Result is Int.
+                        Kind::Object => {
+                            if *name != self_name_id {
+                                return None;
+                            }
+                            let inst = fb.ins().call(self_ref, &[vm_param, self_param, arg]);
+                            let (res, ovf) = {
+                                let r = fb.inst_results(inst);
+                                (r[0], r[1])
+                            };
+                            let cur = fb.use_var(ovf_var);
+                            let nv = fb.ins().bor(cur, ovf);
+                            fb.def_var(ovf_var, nv);
+                            stack.push((res, Kind::Int));
+                        }
                         _ => return None,
                     }
                 }
@@ -1481,6 +1546,43 @@ pub(crate) fn compile(
                 // obj-local, ADR 0034 Step 1) — the fused `LoadLocal + Call(name, 0)`.
                 // Lower to the obj-call PIC. Checked before the int-unary/float fusions
                 // (those require an Int/Float local, so no overlap).
+                // `x.class == Const` guard (ADR 0034 Step 1, piece 3) on an Object local:
+                // fuse LoadLocalCall(slot, class), LoadConst(C), BinOp(Eq) into one
+                // `jit_value_is_class` (const resolved + cached at runtime), pushing a
+                // Bool. Checked before the obj-call arm (else `class` is treated as a
+                // method call). Must be the EXACT 3-op shape, else fall through.
+                Op::LoadLocalCall(slot, name, _)
+                    if local_kinds[*slot as usize] == Kind::Object
+                        && *name == syms.class
+                        && matches!(code.get(ip + 1), Some(Op::LoadConst(_)))
+                        && matches!(code.get(ip + 2), Some(Op::BinOp(crate::bytecode::BinOpKind::Eq))) =>
+                {
+                    let const_sym = match code.get(ip + 1) {
+                        Some(Op::LoadConst(c)) => c.0,
+                        _ => unreachable!(),
+                    };
+                    let x_ptr = fb.use_var(vars[*slot as usize]);
+                    let csym = fb.ins().iconst(types::I32, const_sym as i64);
+                    let cache = Box::new(std::cell::Cell::new((0usize, 0usize)));
+                    let cache_addr =
+                        &*cache as *const std::cell::Cell<(usize, usize)> as i64;
+                    obj_call_caches.push(cache);
+                    let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
+                    let inst = fb.ins().call(
+                        value_is_class_ref,
+                        &[vm_param, x_ptr, csym, cache_const],
+                    );
+                    let (res, of) = {
+                        let r = fb.inst_results(inst);
+                        (r[0], r[1])
+                    };
+                    acc_ovf(&mut fb, of);
+                    // 0/1 i64 → a Bool (icmp) so it matches comparison conditions.
+                    let b = fb.ins().icmp_imm(IntCC::NotEqual, res, 0);
+                    stack.push((b, Kind::Bool));
+                    ip += 3; // consume LoadLocalCall + LoadConst + BinOp(Eq)
+                    continue;
+                }
                 // `arr.length` / `arr.size` on a local ArrayObjId — the FUSED form
                 // (LoadLocalCall). The bare-stack form is handled by the Call arm above.
                 Op::LoadLocalCall(slot, name, _)
@@ -3765,6 +3867,82 @@ pub(crate) unsafe extern "C" fn jit_ivar_obj_ptr(
     }
 }
 
+/// B4-generalized (ADR 0034 Step 1, piece 3): `arr[i]` returning a pointer to the
+/// element `Value` (ANY kind — Node Object, Symbol, …) in the array's backing Vec, for
+/// a HETEROGENEOUS element used as a value (`x = kids[i]; x.class == Node; walk(x)`).
+/// `ovf=1` on out-of-bounds. The pointer is valid for the immediately-following uses
+/// (the loop is GC-free and does not mutate the array).
+///
+/// # Safety
+/// `vm` valid; `arr_objid` a live pinned Array. Consume the pointer before any alloc.
+pub(crate) unsafe extern "C" fn jit_array_elem_ptr(
+    vm: *const crate::vm::Vm,
+    arr_objid: i64,
+    i: i64,
+) -> NRet {
+    let vm = unsafe { &*vm };
+    let arr = vm.heap.array(crate::value::ObjId(arr_objid as u32));
+    match arr.get(i as usize) {
+        Some(v) => NRet { res: v as *const Value as i64, ovf: 0 },
+        None => NRet { res: 0, ovf: 1 }, // OOB
+    }
+}
+
+/// B4-generalized (ADR 0034 Step 1, piece 3): the `x.class == Const` guard, fused. `res`
+/// is 1 if the value at `value_ptr` has EXACTLY class `const_sym` (a top-level class
+/// constant), else 0; `ovf=1` if the constant isn't a known class (→ deopt; rare/nested
+/// consts). The class pointer is memoized in `cache`. For an Object element the class is
+/// the cheap `try_class_of`; a non-Object element (Symbol/Int) uses `class_of` (the
+/// `&mut` dispatch helper) so the guard stays correct for any value — and a null/garbage
+/// pointer (post-deopt) yields 0, never a deref.
+///
+/// # Safety
+/// `vm` valid; reconstructing `&mut *vm` for `class_of` follows the heap-mutating-
+/// primitive pattern (no live alias during the native call); `class_of` touches caches,
+/// not the array, so `value_ptr` stays valid.
+pub(crate) unsafe extern "C" fn jit_value_is_class(
+    vm: *mut crate::vm::Vm,
+    value_ptr: *const Value,
+    const_sym: u32,
+    cache: *const std::cell::Cell<(usize, usize)>,
+) -> NRet {
+    if value_ptr.is_null() {
+        return NRet { res: 0, ovf: 1 };
+    }
+    let cache = unsafe { &*cache };
+    let v = unsafe { &*value_ptr };
+    // Resolve the constant class pointer once (flat global lookup — no cref).
+    let (cached_sym, cached_ptr) = cache.get();
+    let const_ptr = if cached_sym == const_sym as usize && cached_sym != 0 {
+        cached_ptr
+    } else {
+        let vmref = unsafe { &*vm };
+        match vmref.classes.get(&crate::intern::SymId(const_sym)) {
+            Some(c) => {
+                let p = std::rc::Rc::as_ptr(c) as usize;
+                cache.set((const_sym as usize, p));
+                p
+            }
+            None => return NRet { res: 0, ovf: 1 }, // not a known class const → deopt
+        }
+    };
+    // The value's exact class pointer. Object: cheap `try_class_of`; else `class_of`.
+    let vclass_ptr = match v {
+        Value::Object(oid) => match unsafe { &*vm }.heap.try_class_of(*oid) {
+            Some(c) => std::rc::Rc::as_ptr(&c) as usize,
+            None => return NRet { res: 0, ovf: 1 },
+        },
+        _ => {
+            let vmm = unsafe { &mut *vm };
+            match vmm.class_of(v) {
+                Value::Class(c) => std::rc::Rc::as_ptr(&c) as usize,
+                _ => return NRet { res: 0, ovf: 1 },
+            }
+        }
+    };
+    NRet { res: (vclass_ptr == const_ptr) as i64, ovf: 0 }
+}
+
 /// B4-generalized (ADR 0034, Step 1): the OO-dispatch lever. A native→native method
 /// call `recv.name(arg)` from inside a compiled body, via a monomorphic runtime-fill
 /// inline cache. `recv` points at the receiver Object `Value`; `cache` holds
@@ -3913,6 +4091,8 @@ pub(crate) struct JitSyms {
     pub to_i: SymId,
     pub truncate: SymId,
     pub round: SymId,
+    // `x.class` — for the fused `x.class == Const` guard (ADR 0034 Step 1, piece 3).
+    pub class: SymId,
 }
 
 /// Native primitive: allocate a fresh empty Array, return its `ObjId` as i64.

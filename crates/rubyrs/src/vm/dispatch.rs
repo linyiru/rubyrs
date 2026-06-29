@@ -17890,6 +17890,7 @@ impl Vm {
             to_i: self.interner.intern("to_i"),
             truncate: self.interner.intern("truncate"),
             round: self.interner.intern("round"),
+            class: self.interner.intern("class"),
         }
     }
 
