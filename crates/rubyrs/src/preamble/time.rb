@@ -235,8 +235,11 @@ class Time
     # `YYYY-MM-DD[ HH:MM:SS [zone]]` run and parse that — e.g. a Struct's
     # `"#<struct to_time=2026-06-18 22:45:32 +0000>"` (Sinatra's
     # `time_for` does `Time.parse(value.to_s)` on arbitrary objects).
-    unless s =~ /\A\d{4}-\d{2}-\d{2}/
-      m = s.match(/\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2}(?:\s*[+-]\d{2}:?\d{2}|\s*Z)?)?/)
+    # `Regexp.new` (not `/…/` literals) so this preamble parses in a regex-off
+    # build (ADR 0017 Rule 3); Time.parse then degrades to a runtime error
+    # there instead of an ICE at preamble load.
+    unless s =~ Regexp.new("\\A\\d{4}-\\d{2}-\\d{2}")
+      m = s.match(Regexp.new("\\d{4}-\\d{2}-\\d{2}(?:[ T]\\d{2}:\\d{2}:\\d{2}(?:\\s*[+-]\\d{2}:?\\d{2}|\\s*Z)?)?"))
       raise ArgumentError, "no time information in #{str.inspect}" unless m
       s = m[0]
     end

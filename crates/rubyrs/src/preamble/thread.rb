@@ -104,7 +104,10 @@ module Kernel
       end
     return nil if raw.nil?
     raw.map do |s|
-      m = s.match(/\A(?<path>.*):(?<lineno>\d+):in ['`](?<label>.*)'\z/)
+      # `Regexp.new` (not a `/…/` literal) so this preamble parses in a
+      # regex-off build (ADR 0017 Rule 3); backtrace parsing then degrades
+      # to a runtime error there instead of an ICE at preamble load.
+      m = s.match(Regexp.new("\\A(?<path>.*):(?<lineno>\\d+):in ['`](?<label>.*)'\\z"))
       if m
         Thread::Backtrace::Location.new(m[:path], m[:lineno].to_i, m[:label])
       else

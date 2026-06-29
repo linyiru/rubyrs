@@ -297,11 +297,16 @@ module Kernel
     s = str.strip
     # Forms: "a+bi", "a-bi", "bi", "a". Minimal but covers the
     # common cases; falls back to a real-only Complex.
-    if (m = s.match(/\A([+-]?\d+(?:\.\d+)?)?([+-]\d+(?:\.\d+)?)?i\z/))
+    # Built via `Regexp.new` (not a `/…/` literal) so this preamble still
+    # PARSES in a `--no-default-features` (regex-off) build — a `/…/` literal
+    # is a load-time SyntaxError there (ADR 0017 Rule 3). String parsing then
+    # degrades to a runtime error if regex is absent, instead of crashing the
+    # whole runtime at preamble load (issue: Windows/wasm no-regex smoke).
+    if (m = s.match(Regexp.new("\\A([+-]?\\d+(?:\\.\\d+)?)?([+-]\\d+(?:\\.\\d+)?)?i\\z")))
       real = m[1] ? __num(m[1]) : 0
       imag = m[2] ? __num(m[2]) : (m[1] ? 1 : __num(m[1] || "1"))
       Complex.rectangular(real, imag)
-    elsif s.match?(/\A[+-]?\d+(?:\.\d+)?\z/)
+    elsif s.match?(Regexp.new("\\A[+-]?\\d+(?:\\.\\d+)?\\z"))
       Complex.rectangular(__num(s), 0)
     else
       raise ArgumentError, "invalid value for convert(): #{str.inspect}"
