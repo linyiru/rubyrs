@@ -332,9 +332,47 @@ This is the first **whole-loop** layer and the empirical turning point: eliminat
 per-element interpreter overhead clears YJIT by ~6×, where per-element native
 blocks could not. STRESS_GC clean (the native loop is alloc-free), diff_cruby
 unchanged (10 jit-native / 9 default), correctness verified vs CRuby (Float /
-Bignum seed / `break` / empty / Range / Object-block all match). Next: the same
-whole-loop treatment for `map` / `each` / `inject` / `reduce`, then a shared
-loop-codegen so any eligible driver+block fuses into one native function.
+Bignum seed / `break` / empty / Range / Object-block all match).
+
+### Shipped drivers (this layer)
+
+`sum` (6.3×), `map` (3.2×), `count` (6.1×), `select`/`reject`/`filter` (4.8×),
+`any?`/`all?`/`none?`/`one?` (5.6×), `find`/`detect` (8.6×), `inject`/`reduce`
+2-param (8.6×) — all over an all-Int array with a comparison/arithmetic block;
+non-Int elements or results, method-call predicates, `break`, and the no-init
+`inject` decline to the generic walk. Four loop shapes (`Sum` / `Map` / `Filter` /
+`Find`) under one `compile_native_loop`, plus the 2-param `compile_native_inject_loop`.
+
+### Deferred (designed): the `each` accumulator
+
+`total = 0; arr.each { |x| total += x }` is the one common reader that needs
+**mutable captured state** — the block writes an outer variable. That breaks the
+deopt-redo soundness every other driver relies on: a part-way deopt has already
+committed writes to the real (shared) method scope, so re-running from the start
+would double them. Two sound designs exist:
+
+1. **Continue-from-deopt-index.** The native loop writes captures directly and
+   returns the index it reached; on deopt the caller runs the generic `each` over
+   `arr[reached..]` (the shared scope already holds `0..reached`'s contributions).
+   Sound only with an *element-atomicity* gate: no deopt-able op may follow the
+   first capture write within an element, else continuing re-does a committed
+   write. Requires capture get/set primitives, a `vm`-stashed captured pointer,
+   capture lowering in codegen, and the atomicity pre-pass.
+2. **Inject-with-captured-acc.** Recognise the single-accumulator pattern
+   (`read capture S → pure int work → write capture S`, S the only capture),
+   read `S` once into a register, run the existing inject loop, write `S` back
+   once at the end. A mid-loop deopt has touched nothing → redo-from-scratch is
+   sound, and it reuses `compile_native_inject_loop`. Needs reliable bytecode
+   pattern recognition (and there is no bytecode-dump tool yet to verify it).
+
+Deferred deliberately: it is the only mutable-capture driver (categorically
+riskier soundness), it is semantically `sum`/`inject` — both shipped at 6–8× YJIT,
+so the win is already reachable by writing `.sum { }` / `.inject` — and rushing
+capture-mutation codegen would trade the stability this layer has held. Design
+recorded above; pick approach 2 (lower risk, reuses the inject loop) when resumed.
+
+Next beyond `each`: `each_with_index` / `each_with_object` (2-param, no capture),
+`map`-to-`sum` fusion, and lifting the all-Int restriction (Float element loops).
 
 ## Risks
 
