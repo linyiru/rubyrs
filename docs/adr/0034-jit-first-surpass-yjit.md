@@ -601,9 +601,15 @@ and the result is identical to the interpreter's). `floats.each_with_object(memo
 f(x) }` runs natively (the block `<<` now pushes either an Int or a Float). `floats.tally` needs
 no driver — blockless, the interpreter path already beats YJIT (1.22×) and is parity-correct.
 
-The Float Enumerable surface is now comprehensive. The remaining shapes are bigger new driver
-kinds: Hash-accumulator "sum-by-key" (`each_with_object(Hash.new(0)) { |x, h| h[k] += v }` —
-needs Hash-mutation block codegen) and broadening the value-method JIT surface.
+Hash-accumulator "sum-by-key" now ships too: `arr.each_with_object(Hash.new(0)) { |x, h| h[k]
++= v }` — the first JIT driver compiling in-block Hash read-modify-write. The block JIT models a
+`HashObjId` memo with `[]` (read, Int default 0) and `[]=` (`CallAset`, write) on Int keys/values
+(an Int element, or a Float element's `x.floor`); it accumulates into a fresh scratch Hash and
+merges into the real memo only on success, gated to an empty `Hash.new(0)` (others decline). Both
+Int and Float arrays drive it.
+
+The common Array + Hash Enumerable/aggregation surface is now broadly covered for Int and Float.
+Remaining: pure Float-key sum-by-key, and broadening the value-method JIT surface.
 
 ## Risks
 
