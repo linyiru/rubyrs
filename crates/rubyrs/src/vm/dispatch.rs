@@ -17241,7 +17241,7 @@ impl Vm {
     /// write-back-on-success (commit the captured accumulator only on full native
     /// completion) and share-direct-only. The caller must have pinned `array_id`.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_eachidx_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<()> {
+    pub(crate) fn try_native_eachidx_loop(&mut self, block_id: ObjId, array_id: ObjId, float_acc: bool) -> Option<()> {
         if !self.jit_native_on {
             return None;
         }
@@ -17300,30 +17300,40 @@ impl Vm {
             return None;
         }
         let acc_slot = cap[0];
-        let init = match captured.borrow().get(acc_slot as usize) {
-            Some(Value::Int(n)) => *n,
+        // Seed from the captured slot: a Float when float_acc (`t += x*1.5 + i`,
+        // threading f64 bits), else an Int. The element + index are always Int (the
+        // eachidx loop's int reader); only the ACCUMULATOR kind varies.
+        let init = match (float_acc, captured.borrow().get(acc_slot as usize)) {
+            (true, Some(Value::Float(f))) => f.to_bits() as i64,
+            (false, Some(Value::Int(n))) => *n,
             _ => return None,
         };
-        if !self.jit_native_block_eachidx.contains_key(&proto_idx) {
-            let compiled = self.compile_native_block_eachidx(proto_idx, param_start as u32, body_start, acc_slot);
-            self.jit_native_block_eachidx.insert(proto_idx, compiled);
+        let key = (proto_idx, float_acc);
+        if !self.jit_native_block_eachidx_k.contains_key(&key) {
+            // float_acc=false -> Int acc/element block; true -> Int element, Float acc.
+            let compiled = self.compile_native_block_eachidx(proto_idx, param_start as u32, body_start, acc_slot, float_acc);
+            self.jit_native_block_eachidx_k.insert(key, compiled);
         }
-        let block_addr = match self.jit_native_block_eachidx.get(&proto_idx) {
+        let block_addr = match self.jit_native_block_eachidx_k.get(&key) {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_eachidx_loop.contains_key(&proto_idx) {
+        if !self.jit_native_eachidx_loop_k.contains_key(&key) {
             let compiled = crate::jit_native::compile_native_eachidx_loop(block_addr);
-            self.jit_native_eachidx_loop.insert(proto_idx, compiled);
+            self.jit_native_eachidx_loop_k.insert(key, compiled);
         }
-        let il = match self.jit_native_eachidx_loop.get(&proto_idx) {
+        let il = match self.jit_native_eachidx_loop_k.get(&key) {
             Some(Some(il)) => il,
             _ => return None,
         };
         let vm_ptr = self as *const crate::vm::Vm;
         let acc_out = il.call(vm_ptr, &self_val, array_id.0 as i64, init)?;
         if let Some(slot) = captured.borrow_mut().get_mut(acc_slot as usize) {
-            *slot = Value::Int(acc_out);
+            *slot = if float_acc {
+                Value::Float(f64::from_bits(acc_out as u64))
+            } else {
+                Value::Int(acc_out)
+            };
         }
         Some(())
     }
@@ -17603,6 +17613,7 @@ impl Vm {
         param_start: u32,
         body_local_start: u32,
         acc_slot: u32,
+        float_acc: bool,
     ) -> Option<crate::jit_native::NativeProto> {
         let dummy = self.interner.intern("\u{0}block\u{0}");
         let callees = crate::intern::FxHashMap::default();
@@ -17632,8 +17643,8 @@ impl Vm {
                 false,
                 crate::jit_native::AccKind::EachWithIndex { acc_slot },
             )),
-            false,
-            false,
+            false, // element (arg3) is always Int for each_with_index
+            float_acc,
         )
     }
 

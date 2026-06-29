@@ -3430,7 +3430,9 @@ impl Vm {
                 // receiver. Declines (None) -> generic walk; a part-way deopt
                 // commits nothing, so the fallback re-runs soundly.
                 #[cfg(feature = "jit-native")]
-                if g.vm.try_native_eachidx_loop(block, *id).is_some() {
+                if g.vm.try_native_eachidx_loop(block, *id, false).is_some()
+                    || g.vm.try_native_eachidx_loop(block, *id, true).is_some()
+                {
                     return Ok(Some(Value::Array(*id)));
                 }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();

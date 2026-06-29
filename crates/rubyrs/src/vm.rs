@@ -834,12 +834,14 @@ pub(crate) struct Vm {
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_groupby_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
     /// `each_with_index`-accumulator block compilation (`{ |x, i| total += f(x, i)
-    /// }`, acc bound to a captured slot, index as a 3rd block arg).
+    /// }`, acc bound to a captured slot, index as a 3rd block arg). Keyed by (block
+    /// proto, float_acc): `false` = Int accumulator, `true` = Float accumulator
+    /// (Int element, `t += x*1.5 + i`).
     #[cfg(feature = "jit-native")]
-    pub(crate) jit_native_block_eachidx: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
-    /// Per block-proto cache of whole-loop `each_with_index`-accumulator drivers.
+    pub(crate) jit_native_block_eachidx_k: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeProto>>,
+    /// Per-(block proto, float_acc) cache of whole-loop `each_with_index`-accumulator drivers.
     #[cfg(feature = "jit-native")]
-    pub(crate) jit_native_eachidx_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    pub(crate) jit_native_eachidx_loop_k: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeLoop>>,
     /// Float-element value-block compilation (the element param binds as `Float`),
     /// for the Float-element drivers (`sum`/`map`). Cached separately from the Int blocks.
     #[cfg(feature = "jit-native")]
@@ -2018,9 +2020,9 @@ impl Vm {
             #[cfg(feature = "jit-native")]
             jit_native_groupby_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
-            jit_native_block_eachidx: crate::intern::FxHashMap::default(),
+            jit_native_block_eachidx_k: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
-            jit_native_eachidx_loop: crate::intern::FxHashMap::default(),
+            jit_native_eachidx_loop_k: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_block_float: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
