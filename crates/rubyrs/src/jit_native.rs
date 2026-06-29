@@ -726,6 +726,10 @@ pub(crate) enum LoopKind {
     /// `select` (`keep == true`) / `reject` (`keep == false`): push the ELEMENT
     /// into the reserved array `arg2` when the predicate's polarity matches.
     Filter { keep: bool },
+    /// `find` / `detect`: push the FIRST matching element into the (capacity-1)
+    /// array `arg2` and early-return; the caller reads `arg2[0]` or treats an
+    /// empty `arg2` as "not found". A predicate block, like `Filter`.
+    Find,
 }
 
 /// A compiled native whole-loop driver (`sum` / `count` / `map` / `select` /
@@ -934,6 +938,19 @@ pub(crate) fn compile_native_loop(block_addr: usize, kind: LoopKind) -> Option<N
                 fb.ins().call(push_ref, &[vm_param, arg2, x]);
                 fb.ins().jump(skip, &[]);
                 fb.switch_to_block(skip);
+                fb.ins().jump(head, &[i2.into(), acc.into()]);
+            }
+            // Find: on the first match push the element and early-exit; otherwise
+            // continue. `exit` with an empty `arg2` means "not found".
+            LoopKind::Find => {
+                let do_push = fb.create_block();
+                let cont = fb.create_block();
+                let is_true = fb.ins().icmp_imm(IntCC::NotEqual, r, 0);
+                fb.ins().brif(is_true, do_push, &[], cont, &[]);
+                fb.switch_to_block(do_push);
+                fb.ins().call(push_ref, &[vm_param, arg2, x]);
+                fb.ins().jump(exit, &[acc.into()]);
+                fb.switch_to_block(cont);
                 fb.ins().jump(head, &[i2.into(), acc.into()]);
             }
         }

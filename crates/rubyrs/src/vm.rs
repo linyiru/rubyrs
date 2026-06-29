@@ -790,6 +790,10 @@ pub(crate) struct Vm {
     /// (keep truthy), `false` = reject (keep falsy).
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_filter_loop: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeLoop>>,
+    /// Per block-proto cache of whole-loop `find` / `detect` drivers — a predicate
+    /// loop that pushes the first match into a capacity-1 array and early-exits.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_find_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_on: bool,
     pub(crate) interner: Interner,
@@ -1888,6 +1892,8 @@ impl Vm {
             jit_native_count_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_filter_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_find_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_on: std::env::var_os("RUBYRS_JIT_NATIVE").is_some(),
             protos,

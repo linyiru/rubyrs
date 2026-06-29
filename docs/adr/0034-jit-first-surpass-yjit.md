@@ -281,12 +281,18 @@ part-way deopt doubles nothing on redo).
 | `arr.select { x > 700 }`     | 1.22s | **0.10s** | 0.48s | **4.8×** |
 
 | `arr.any? + all?`            | 2.33s | **0.14s** | 0.78s | **5.6×** |
+| `arr.find { x > 700 }`       | 0.86s | **0.05s** | 0.43s | **8.6×** |
 
 `select` / `reject` / `filter` reuse predicate-mode blocks with a third loop
 shape (the `Filter` kind): per element, run the predicate and on the kept polarity
 push the *element* into a result the caller reserves to the input length (so the
 native push never reallocs — no GC, no move). Order is preserved; a non-comparison
 predicate (`x.odd?`) or `break` declines to the generic walk.
+
+`find` / `detect` add a fourth loop shape (`Find`): a predicate loop that pushes
+the first match into a capacity-1 result and **early-exits**, so it is the fastest
+driver of all (8.6× — it stops at the match rather than walking the whole array).
+The caller reads `arg2[0]` or treats an empty `arg2` as "not found" (→ nil).
 
 `any?` / `all?` / `none?` / `one?` need no new codegen: a PURE predicate has no
 side effects, so the early-exit forms are observationally equal to a full count of

@@ -314,7 +314,17 @@ impl Vm {
                     return Ok(Value::Bool(res));
                 }
             }
-            IterMode::Find => {} // returns the matching element — not yet native
+            // find/detect: the first matching element, or nil. (The no-ifnone
+            // forms route here; find(ifnone) has its own arm.)
+            IterMode::Find => {
+                self.pinned.push(Value::Array(id));
+                self.pinned.push(Value::Block(block));
+                let found = self.try_native_find_loop(block, id);
+                self.pinned.truncate(self.pinned.len() - 2);
+                if let Some(found) = found {
+                    return Ok(found.unwrap_or(Value::Nil));
+                }
+            }
         }
         let snapshot: Vec<Value> = self.heap.array(id).clone();
         let mut g = PinGuard::new(self);

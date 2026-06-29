@@ -16254,6 +16254,64 @@ impl Vm {
         }
     }
 
+    /// Whole-loop fast path for `array.find { pred }` / `detect` (ADR 0034 layer
+    /// 3): a predicate loop that pushes the FIRST match into a capacity-1 array
+    /// and early-exits. Returns `None` to fall back to the generic walk
+    /// (non-comparison predicate / a deopt on a non-Int element); `Some(None)` =
+    /// ran natively, no element matched; `Some(Some(v))` = found `v`. The caller
+    /// must have pinned `in_id` + the block.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_find_loop(&mut self, block_id: ObjId, in_id: ObjId) -> Option<Option<Value>> {
+        if !self.jit_native_on {
+            return None;
+        }
+        let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        // Predicate-mode block (shared with count/select's cache).
+        if !self.jit_native_block_pred.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, true);
+            self.jit_native_block_pred.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block_pred.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_find_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Find);
+            self.jit_native_find_loop.insert(proto_idx, compiled);
+        }
+        if !matches!(self.jit_native_find_loop.get(&proto_idx), Some(Some(_))) {
+            return None;
+        }
+        // A capacity-1 result holds the first match (early-exit), so the push
+        // never reallocs.
+        self.check_alloc().ok()?;
+        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::with_capacity(1).into()));
+        self.pinned.push(Value::Array(out_id));
+        let self_val = self.heap.block(block_id).self_val.clone();
+        let vm_ptr = self as *const crate::vm::Vm;
+        let fl = self.jit_native_find_loop.get(&proto_idx).unwrap().as_ref().unwrap();
+        let ran = fl.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
+        let found = if ran {
+            Some(self.heap.array(out_id).first().cloned())
+        } else {
+            None
+        };
+        self.pinned.pop();
+        found
+    }
+
     /// Compile a 1-param block proto to native (B5). The arg binds to the block's
     /// `param_start`; reads of captured outer slots decline (see `compile`).
     /// Blocks with method calls are not modelled yet, so callees/getters are
