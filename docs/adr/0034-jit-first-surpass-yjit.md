@@ -282,12 +282,21 @@ part-way deopt doubles nothing on redo).
 
 | `arr.any? + all?`            | 2.33s | **0.14s** | 0.78s | **5.6×** |
 | `arr.find { x > 700 }`       | 0.86s | **0.05s** | 0.43s | **8.6×** |
+| `arr.inject(0){ s+x*x }`     | 1.45s | **0.07s** | 0.60s | **8.6×** |
 
 `select` / `reject` / `filter` reuse predicate-mode blocks with a third loop
 shape (the `Filter` kind): per element, run the predicate and on the kept polarity
 push the *element* into a result the caller reserves to the input length (so the
 native push never reallocs — no GC, no move). Order is preserved; a non-comparison
 predicate (`x.odd?`) or `break` declines to the generic walk.
+
+`inject` / `reduce { |acc, x| }` add a 2-param block ABI: `compile` gained a
+`two_param` flag that adds a second i64 arg and binds it to `param_slot + 1` (both
+slots are params, not captures). The accumulator threads through the block's
+return value — no closure state — so `inject(init) { }` over an all-Int array
+folds entirely native (`compile_native_inject_loop`). The no-init form (`acc =
+arr[0]`) and a non-Int init/result stay generic. This unlocks the path to
+`each_with_index` and other 2-param drivers.
 
 `find` / `detect` add a fourth loop shape (`Find`): a predicate loop that pushes
 the first match into a capacity-1 result and **early-exits**, so it is the fastest

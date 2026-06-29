@@ -794,6 +794,12 @@ pub(crate) struct Vm {
     /// loop that pushes the first match into a capacity-1 array and early-exits.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_find_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    /// 2-param block compilation (inject/reduce `|acc, x|`), cached separately.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_block2: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// Per block-proto cache of whole-loop `inject` / `reduce` drivers.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_inject_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_on: bool,
     pub(crate) interner: Interner,
@@ -1894,6 +1900,10 @@ impl Vm {
             jit_native_filter_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_find_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_block2: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_inject_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_on: std::env::var_os("RUBYRS_JIT_NATIVE").is_some(),
             protos,

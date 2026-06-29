@@ -4202,10 +4202,21 @@ impl Vm {
                 // Pilot migration. The `init` variant shares the
                 // accumulator pattern with the no-arg form above
                 // — different only in the initial-acc source.
-                let snapshot: Vec<Value> = self.heap.array(*id).clone();
+                let id = *id;
                 let mut g = PinGuard::new(self);
-                g.pin(Value::Array(*id));
+                g.pin(Value::Array(id));
                 g.pin(Value::Block(block));
+                // Whole-loop native fast path (ADR 0034 layer 3): a 2-param Int
+                // block threading an Int accumulator over an all-Int array folds
+                // in native code. A deopt (non-Int element / block result /
+                // overflow) falls through to the generic loop.
+                #[cfg(feature = "jit-native")]
+                if let Value::Int(n) = init {
+                    if let Some(acc) = g.vm.try_native_inject_loop(block, id, *n) {
+                        return Ok(Some(Value::Int(acc)));
+                    }
+                }
+                let snapshot: Vec<Value> = g.vm.heap.array(id).clone();
                 let pre_frames = g.vm.frames.len();
                 let mut acc = init.clone();
                 let mut early = None;
