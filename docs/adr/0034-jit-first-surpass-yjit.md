@@ -736,6 +736,24 @@ value-ops — the real layered climb to a firing `bench_walk` (poc/rubocop-spike
 which additionally needs symbol keys / Hash[sym] / Bool-as-control-flow). Also remaining: an N-way PIC
 (+ Object branch-merge) for polymorphic sites; a varying call arg.
 
+### Step 1 COMPLETE for the rubocop AST-walk skeleton — bench_decomp BEATS YJIT
+
+Pieces 1–5 + "1a" + two micro-opts land the rubocop-shape recursive Object-tree walk
+(`poc/rubocop-spike/bench_decomp.rb`, the cop-visitor skeleton) as native code that beats YJIT:
+**jitN median 0.500ms vs YJIT median 0.524ms (~5% ahead, tighter distribution), 39× over interp** —
+from DECLINED / 36× behind. The pieces: (1+2) Object-recv getter→Array (`jit_obj_getter_array`) +
+local-array `length`/`[i]`; (3) heterogeneous `kids[i]` element pointer (`jit_array_elem_ptr`) + fused
+`x.class == Const` guard (`jit_value_is_class`, const resolved via the flat `classes` table at runtime);
+(4) Object-arg self-recursion; (5) the `stmt if cond` Int/Nil-merge-discard (`block_args` allows a
+top-slot Nil/X mismatch iff the target block immediately `Pop`s it — sound: a USED merge still requires
+exact match); "1a" the non-self Object-arg cross-call (`weigh(@h)` in a loop, 2.3× YJIT, via an
+`obj_param_callees` map mirroring `float_callees`). Micro-opts past par: `Heap::class_ptr_of` (clone-free
+class guard — `try_class_of` cloned the Rc just for its pointer) + a single `heap.get` in the getter-array
+PIC. diff_cruby GREEN both builds (955), STRESS_GC clean, fixtures jit_obj_{array,tree}_walk /
+jit_obj_arg_crosscall / jit_stmt_if_merge / jit_ivar_array_index / jit_objparam. Remaining rubocop
+frontier: the FULL cop visitor (`bench_walk.rb`) needs the value-type axis (Hash[sym], Bool-as-control
+over symbols); the top-level `<main>`-while-loop driver is still 0-win (needs `<main>` compilation).
+
 ## Risks
 
 - **YJIT-class scope.** A full method JIT with PIC + deopt + broad coverage is a
