@@ -1499,6 +1499,15 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
+                // Whole-loop native fast path (ADR 0034 layer 3): an Int-function
+                // block over an all-Int array fills a pre-sized result in native
+                // code. A deopt (non-Int element / block result / overflow)
+                // returns None and we fall through to the generic loop — sound
+                // because a native block is pure (the partial result is dropped).
+                #[cfg(feature = "jit-native")]
+                if let Some(out) = g.vm.try_native_map_loop(block, *id) {
+                    return Ok(Some(Value::Array(out)));
+                }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;

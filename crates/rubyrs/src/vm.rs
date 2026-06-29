@@ -772,6 +772,10 @@ pub(crate) struct Vm {
     /// block per element with no per-element interpreter re-entry.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_sum_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeSumLoop>>,
+    /// Per block-proto cache of compiled whole-loop `Array#map { block }` drivers
+    /// (ADR 0034 layer 3): the full map runs native, filling a pre-sized result.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_map_loop: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeMapLoop>>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_on: bool,
     pub(crate) interner: Interner,
@@ -1862,6 +1866,8 @@ impl Vm {
             jit_native_block: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_sum_loop: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_map_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_on: std::env::var_os("RUBYRS_JIT_NATIVE").is_some(),
             protos,

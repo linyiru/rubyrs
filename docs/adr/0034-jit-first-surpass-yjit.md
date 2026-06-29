@@ -276,6 +276,15 @@ part-way deopt doubles nothing on redo).
 |-------|-------:|---------:|-----:|--------:|
 | `arr.sum { x*x }`            | 1.12s | **0.07s** | 0.44s | **6.3×** |
 | `arr.sum { x*x + x*2 + 1 }`  | 1.88s | **0.08s** | 0.46s | **5.75×** |
+| `arr.map { x*x + 1 }`        | 1.34s | **0.17s** | 0.55s | **3.2×** |
+
+`map` extends the template: the caller pre-sizes the result to the input length
+(so the native store never reallocs — no GC, no element move mid-loop), reads
+`self_val` only *after* that last allocation (sidestepping a rooting hazard), and
+the loop fills it via `jit_array_set_int`. A non-Int element / non-Int block
+result / overflow deopts and the partial result is dropped for the generic loop.
+The margin is smaller than `sum` (a per-element store + the up-front alloc) but
+still clears YJIT 3.2×.
 
 This is the first **whole-loop** layer and the empirical turning point: eliminating
 per-element interpreter overhead clears YJIT by ~6×, where per-element native

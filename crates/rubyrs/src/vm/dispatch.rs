@@ -16085,6 +16085,70 @@ impl Vm {
         sl.call(vm_ptr, &self_val, array_id.0 as i64, init)
     }
 
+    /// Whole-loop fast path for `array.map { block }` (ADR 0034 layer 3): fill a
+    /// pre-sized result array entirely in native code, no per-element interpreter
+    /// re-entry. `Some(out)` ran natively (an Array `ObjId` of the same length);
+    /// `None` falls back to the generic loop (ineligible/non-Int block, or a
+    /// deopt on a non-Int element / non-Int block result / overflow). The caller
+    /// must have pinned `in_id` + the block. Sound: the block is pure, so a
+    /// part-way deopt's partial `out` is simply discarded and the map redone.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn try_native_map_loop(&mut self, block_id: ObjId, in_id: ObjId) -> Option<ObjId> {
+        if !self.jit_native_on {
+            return None;
+        }
+        // Eligibility — read only proto/param shape here, NOT self_val: the
+        // result alloc below can GC, and self_val (if a heap ref) would need
+        // rooting; reading it AFTER the last alloc sidesteps that entirely.
+        let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+        };
+        if n_params != 1
+            || rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || !self.protos[proto_idx].block_kw_params.is_empty()
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
+            return None;
+        }
+        if !self.jit_native_block.contains_key(&proto_idx) {
+            let body_start = self.protos[proto_idx].block_body_local_start;
+            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32);
+            self.jit_native_block.insert(proto_idx, compiled);
+        }
+        let block_addr = match self.jit_native_block.get(&proto_idx) {
+            Some(Some(np)) => np.addr(),
+            _ => return None,
+        };
+        if !self.jit_native_map_loop.contains_key(&proto_idx) {
+            let compiled = crate::jit_native::compile_native_map_loop(block_addr);
+            self.jit_native_map_loop.insert(proto_idx, compiled);
+        }
+        if !matches!(self.jit_native_map_loop.get(&proto_idx), Some(Some(_))) {
+            return None;
+        }
+        // Pre-size the result to the input length (Nil-filled), so the native
+        // store never grows it (no realloc, no GC, no element move mid-loop).
+        let len = self.heap.array(in_id).len();
+        self.check_alloc().ok()?;
+        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(vec![Value::Nil; len].into()));
+        // Root the fresh result across the native call (defensive — the loop is
+        // alloc-free, but the pin also covers any future change).
+        self.pinned.push(Value::Array(out_id));
+        // self_val is safe to read now: no allocation happens before the call.
+        let self_val = self.heap.block(block_id).self_val.clone();
+        let vm_ptr = self as *const crate::vm::Vm;
+        let ml = self.jit_native_map_loop.get(&proto_idx).unwrap().as_ref().unwrap();
+        let ok = ml.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64);
+        self.pinned.pop();
+        if ok {
+            Some(out_id)
+        } else {
+            None
+        }
+    }
+
     /// Compile a 1-param block proto to native (B5). The arg binds to the block's
     /// `param_start`; reads of captured outer slots decline (see `compile`).
     /// Blocks with method calls are not modelled yet, so callees/getters are
