@@ -835,6 +835,12 @@ pub(crate) struct Vm {
     pub(crate) jit_native_block_eachobj_f: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_eachobj_loop_f: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeLoop>>,
+    /// Hash-accumulator `each_with_object(Hash.new(0)) { |x,h| h[k] += v }` (sum-by-key):
+    /// block + loop caches keyed by `(proto, float_elem)` — the element reader varies.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_block_eachobjhash: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeProto>>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_eachobjhash_loop: crate::intern::FxHashMap<(usize, bool), Option<crate::jit_native::NativeLoop>>,
     /// Per block-proto cache of whole-loop `group_by` drivers (the value-mode key
     /// block is shared with `jit_native_block`).
     #[cfg(feature = "jit-native")]
@@ -2049,6 +2055,10 @@ impl Vm {
             jit_native_block_eachobj_f: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_eachobj_loop_f: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_block_eachobjhash: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_eachobjhash_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_groupby_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]

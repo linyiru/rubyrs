@@ -87,6 +87,12 @@ enum Kind {
     /// because the JIT primitives never call `maybe_gc`, so no collection runs
     /// during the method (the array is rooted by the caller's stack on return).
     ArrayObjId,
+    /// An i64 that is a Hash's `ObjId` — a SCRATCH Hash bound to the `memo` param of
+    /// a `each_with_object(Hash.new(0)) { |x, h| h[k] += v }` accumulator. The block's
+    /// `h[k]` reads an Int (default 0) and `h[k] = ...` writes one, via the Hash-accum
+    /// primitives. Same GC-safety as `ArrayObjId` (primitives never `maybe_gc`; the
+    /// scratch is pinned by the caller).
+    HashObjId,
     /// A Cranelift `F64` value (an actual float, not its bits) on the operand
     /// stack. Float LOCALS still live in `I64` vars holding the f64 BITS — a
     /// `LoadLocal` of a Float local bitcasts I64->F64, a `StoreLocal`/`Return`
@@ -138,6 +144,11 @@ pub(crate) enum AccKind {
     /// the block pushes into via `<<`. The block's return is discarded; the loop
     /// returns the scratch ObjId.
     EachObj,
+    /// `each_with_object(Hash.new(0)) { |x, h| h[k] += v }`: like `EachObj` but the
+    /// `memo` is a SCRATCH Hash (kind `HashObjId`). The block reads `h[k]` (Int, default
+    /// 0) and writes `h[k] = ...` via the Hash-accum primitives; the loop returns the
+    /// scratch Hash ObjId, which the caller merges into the real (empty Hash.new(0)) memo.
+    EachObjHash,
     /// `each_with_index { |x, i| total += f(x, i) }`: `(vm, self, acc, elem, idx)`.
     /// Like `EachAcc` but the block has a 2nd param — the iteration index — bound
     /// to a 3rd i64 C-arg. Element is `param_slot`, index `param_slot + 1`, the
@@ -200,7 +211,7 @@ pub(crate) fn compile(
         AccKind::None => (param_slot, None, None),
         AccKind::Inject => (param_slot, Some(param_slot + 1), None),
         AccKind::EachAcc { acc_slot } => (acc_slot, Some(param_slot), None),
-        AccKind::EachObj => (param_slot, Some(param_slot + 1), None),
+        AccKind::EachObj | AccKind::EachObjHash => (param_slot, Some(param_slot + 1), None),
         AccKind::EachWithIndex { acc_slot } => {
             (acc_slot, Some(param_slot), Some(param_slot + 1))
         }
@@ -215,8 +226,9 @@ pub(crate) fn compile(
     );
     // each_with_object: the `memo` arg (arg3_slot) is an Array the block pushes to
     // via `<<`, so it carries the `ArrayObjId` kind, not `Int`.
-    let memo_slot = match acc_kind {
-        AccKind::EachObj => arg3_slot,
+    let memo_slot: Option<(u32, Kind)> = match acc_kind {
+        AccKind::EachObj => arg3_slot.map(|s| (s, Kind::ArrayObjId)),
+        AccKind::EachObjHash => arg3_slot.map(|s| (s, Kind::HashObjId)),
         _ => None,
     };
     let is_param = |s: u32| s == arg2_slot || arg3_slot == Some(s) || arg4_slot == Some(s);
@@ -311,6 +323,9 @@ pub(crate) fn compile(
             // value-local array is just its Copy `ObjId` (an i64 in codegen).
             Op::NewArray(0) => {}
             Op::Call(m, 1, _) if *m == syms.lshift => {}
+            // `h[k] = v` — the Hash-accumulator setter, emitted as `CallAset` (codegen
+            // requires a HashObjId receiver; any other receiver declines in codegen).
+            Op::CallAset(m, 2, _) if *m == syms.bracket_set => {}
             _ => return None,
         }
     }
@@ -349,6 +364,8 @@ pub(crate) fn compile(
     builder.symbol("jit_array_new", jit_array_new as *const u8);
     builder.symbol("jit_array_push", jit_array_push as *const u8);
     builder.symbol("jit_array_push_float", jit_array_push_float as *const u8);
+    builder.symbol("jit_hash_accum_get_int", jit_hash_accum_get_int as *const u8);
+    builder.symbol("jit_hash_accum_set_int", jit_hash_accum_set_int as *const u8);
     builder.symbol("jit_arr_elem_attr_int", jit_arr_elem_attr_int as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
@@ -426,6 +443,26 @@ pub(crate) fn compile(
     let apfid = module
         .declare_function("jit_array_push_float", Linkage::Import, &apfsig)
         .ok()?;
+    // `jit_hash_accum_get_int`: (vm, hash:i64, key:i64) -> (i64, i8). Hash `h[key]`
+    // with default 0 (for `h[k] += v`); ovf if a present value is non-Int.
+    let mut hgsig = module.make_signature();
+    hgsig.params.push(AbiParam::new(ptr_ty));
+    hgsig.params.push(AbiParam::new(types::I64));
+    hgsig.params.push(AbiParam::new(types::I64));
+    hgsig.returns.push(AbiParam::new(types::I64));
+    hgsig.returns.push(AbiParam::new(types::I8));
+    let hgid = module
+        .declare_function("jit_hash_accum_get_int", Linkage::Import, &hgsig)
+        .ok()?;
+    // `jit_hash_accum_set_int`: (vm, hash:i64, key:i64, val:i64) -> void.
+    let mut hssig = module.make_signature();
+    hssig.params.push(AbiParam::new(ptr_ty));
+    hssig.params.push(AbiParam::new(types::I64));
+    hssig.params.push(AbiParam::new(types::I64));
+    hssig.params.push(AbiParam::new(types::I64));
+    let hsid = module
+        .declare_function("jit_hash_accum_set_int", Linkage::Import, &hssig)
+        .ok()?;
     // `jit_arr_elem_attr_int`: (vm, recv, arr_name:i32, index:i64, getter:i32,
     // cache:ptr) -> (i64, i8).
     let mut aesig = module.make_signature();
@@ -483,6 +520,8 @@ pub(crate) fn compile(
         let arrnew_ref = module.declare_func_in_func(anid, fb.func);
         let arrpush_ref = module.declare_func_in_func(apid, fb.func);
         let arrpushf_ref = module.declare_func_in_func(apfid, fb.func);
+        let hashget_accum_ref = module.declare_func_in_func(hgid, fb.func);
+        let hashset_accum_ref = module.declare_func_in_func(hsid, fb.func);
         let arrelem_ref = module.declare_func_in_func(aeid, fb.func);
         // FuncRefs for each external callee.
         let mut callee_refs: FxHashMap<SymId, FuncRef> = FxHashMap::default();
@@ -554,8 +593,8 @@ pub(crate) fn compile(
         // array-building local stays ArrayObjId across the loop. each_with_object's
         // `memo` param is an Array (the scratch) the block pushes to.
         let mut local_kinds: Vec<Kind> = vec![Kind::Int; nloc];
-        if let Some(m) = memo_slot {
-            local_kinds[m as usize] = Kind::ArrayObjId;
+        if let Some((m, k)) = memo_slot {
+            local_kinds[m as usize] = k;
         }
         // Float slots: a float local's i64 var holds f64 bits; mark it Float so
         // `LoadLocal` bitcasts to F64. The ELEMENT slot is Float per `float_elem`,
@@ -575,7 +614,7 @@ pub(crate) fn compile(
                     }
                 }
             }
-            AccKind::None | AccKind::EachObj => {
+            AccKind::None | AccKind::EachObj | AccKind::EachObjHash => {
                 if float_elem {
                     local_kinds[arg2_slot as usize] = Kind::Float;
                 }
@@ -750,7 +789,8 @@ pub(crate) fn compile(
                             local_kinds[*s as usize] = Kind::Float;
                             fb.def_var(vars[*s as usize], bits);
                         }
-                        Kind::Bool | Kind::Nil => return None,
+                        // Reassigning the Hash memo (or storing a Bool/Nil) isn't modelled.
+                        Kind::Bool | Kind::Nil | Kind::HashObjId => return None,
                     }
                 }
                 Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
@@ -917,6 +957,36 @@ pub(crate) fn compile(
                         _ => return None,
                     }
                     stack.push((arr, Kind::ArrayObjId));
+                }
+                // Hash-accumulator read `h[key]` (`h[k] += v`): the receiver is the
+                // scratch Hash memo (HashObjId), key an Int. Reads the Int value (default
+                // 0); a present non-Int value deopts.
+                Op::Call(m, 1, _) if *m == syms.bracket => {
+                    let (key, kk) = stack.pop()?;
+                    let (recv, rk) = stack.pop()?;
+                    if rk != Kind::HashObjId || kk != Kind::Int {
+                        return None;
+                    }
+                    let inst = fb.ins().call(hashget_accum_ref, &[vm_param, recv, key]);
+                    let (res, of) = {
+                        let r = fb.inst_results(inst);
+                        (r[0], r[1])
+                    };
+                    acc_ovf(&mut fb, of);
+                    stack.push((res, Kind::Int));
+                }
+                // Hash-accumulator write `h[key] = val` (emitted as `CallAset`): receiver
+                // the scratch Hash, key + val Ints. `[]=` evaluates to its RHS, so the new
+                // value stays on the stack (the loop discards the block's return anyway).
+                Op::CallAset(m, 2, _) if *m == syms.bracket_set => {
+                    let (val, vk) = stack.pop()?;
+                    let (key, kk) = stack.pop()?;
+                    let (recv, rk) = stack.pop()?;
+                    if rk != Kind::HashObjId || kk != Kind::Int || vk != Kind::Int {
+                        return None;
+                    }
+                    fb.ins().call(hashset_accum_ref, &[vm_param, recv, key, val]);
+                    stack.push((val, Kind::Int));
                 }
                 // 0-arg bare call to a self attribute reader (`amount`) → inline
                 // the ivar read on the receiver (B4): one native call to
@@ -1559,7 +1629,7 @@ fn compile_native_inject_loop_inner(block_addr: usize, float_elem: bool) -> Opti
 /// generic `each_with_object` over the REAL memo (untouched here), so the partial
 /// scratch pushes never reach the user's object — write-back-on-success.
 pub(crate) fn compile_native_eachobj_loop(block_addr: usize) -> Option<NativeLoop> {
-    compile_native_eachobj_loop_inner(block_addr, false)
+    compile_native_eachobj_loop_inner(block_addr, false, false)
 }
 
 /// Float-element variant (`floats.each_with_object(memo) { |x, m| m << f(x) }`): reads
@@ -1567,17 +1637,35 @@ pub(crate) fn compile_native_eachobj_loop(block_addr: usize) -> Option<NativeLoo
 /// its result kind (the `<<` codegen handles both), so the scratch holds whatever
 /// `f(x)` produced; the write-back appends it to the real memo unchanged.
 pub(crate) fn compile_native_eachobj_loop_float(block_addr: usize) -> Option<NativeLoop> {
-    compile_native_eachobj_loop_inner(block_addr, true)
+    compile_native_eachobj_loop_inner(block_addr, true, false)
 }
 
-fn compile_native_eachobj_loop_inner(block_addr: usize, float_elem: bool) -> Option<NativeLoop> {
+/// Hash-accumulator variant (`arr.each_with_object(Hash.new(0)) { |x, h| h[k] += v }`):
+/// the scratch is a fresh HASH (`jit_hash_new`) the block accumulates into via the
+/// Hash-accum `[]`/`[]=` codegen. `float_elem` selects the element reader. Returns the
+/// scratch Hash ObjId; the caller merges it into the real (empty) memo on success.
+pub(crate) fn compile_native_eachobjhash_loop(block_addr: usize, float_elem: bool) -> Option<NativeLoop> {
+    compile_native_eachobj_loop_inner(block_addr, float_elem, true)
+}
+
+fn compile_native_eachobj_loop_inner(
+    block_addr: usize,
+    float_elem: bool,
+    hash_memo: bool,
+) -> Option<NativeLoop> {
     let (elem_name, elem_fn): (&str, *const u8) = if float_elem {
         ("jit_array_elem_float", jit_array_elem_float as *const u8)
     } else {
         ("jit_array_elem_int", jit_array_elem_int as *const u8)
     };
+    // The scratch the block builds into: a fresh Array (`<<`) or Hash (`h[k] += v`).
+    let (new_name, new_fn): (&str, *const u8) = if hash_memo {
+        ("jit_hash_new", jit_hash_new as *const u8)
+    } else {
+        ("jit_array_new", jit_array_new as *const u8)
+    };
     let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
-    builder.symbol("jit_array_new", jit_array_new as *const u8);
+    builder.symbol(new_name, new_fn);
     builder.symbol("jit_array_len", jit_array_len as *const u8);
     builder.symbol(elem_name, elem_fn);
     builder.symbol("blk", block_addr as *const u8);
@@ -1599,7 +1687,7 @@ fn compile_native_eachobj_loop_inner(block_addr: usize, float_elem: bool) -> Opt
     newsig.params.push(AbiParam::new(ptr_ty));
     newsig.returns.push(AbiParam::new(types::I64));
     let newid = module
-        .declare_function("jit_array_new", Linkage::Import, &newsig)
+        .declare_function(new_name, Linkage::Import, &newsig)
         .ok()?;
     let mut lensig = module.make_signature();
     lensig.params.push(AbiParam::new(ptr_ty));
@@ -3032,6 +3120,7 @@ pub(crate) struct JitSyms {
     pub length: SymId,
     pub size: SymId,
     pub bracket: SymId,
+    pub bracket_set: SymId,
     pub lshift: SymId,
     // Pure unary Int primitives — lowered inline so a block like `{ |x| x.even? }`
     // or a key `{ |x| x.abs }` compiles instead of declining on the method call.
@@ -3099,6 +3188,58 @@ pub(crate) unsafe extern "C" fn jit_hash_new(vm: *mut crate::vm::Vm) -> i64 {
         .heap
         .alloc(crate::heap::HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
     id.0 as i64
+}
+
+/// Hash-accumulator read (`h[key]` inside `h[k] += v`): the Int value stored at Int
+/// `key` in scratch Hash `hash_objid`, or **0** if the key is absent (the accumulator's
+/// `Hash.new(0)` default — verified by the caller). `ovf=1` only if a present value is
+/// non-Int (defensive; the scratch only ever stores Ints). Linear `position` scan like
+/// [`jit_group_push`] — O(distinct-keys) per call, fast for the few-bucket common case.
+///
+/// # Safety
+/// `vm` valid; `hash_objid` a live pinned scratch Hash.
+pub(crate) unsafe extern "C" fn jit_hash_accum_get_int(
+    vm: *const crate::vm::Vm,
+    hash_objid: i64,
+    key: i64,
+) -> NRet {
+    let vm = unsafe { &*vm };
+    let hid = crate::value::ObjId(hash_objid as u32);
+    for (k, v) in vm.heap.hash(hid).iter() {
+        if matches!(k, Value::Int(n) if *n == key) {
+            return match v {
+                Value::Int(m) => NRet { res: *m, ovf: 0 },
+                _ => NRet { res: 0, ovf: 1 },
+            };
+        }
+    }
+    NRet { res: 0, ovf: 0 }
+}
+
+/// Hash-accumulator write (`h[key] = val`): store `Value::Int(val)` at Int `key` in
+/// scratch Hash `hash_objid`, updating in place if the key is present, else appending
+/// (first-appearance order, matching CRuby). `hash_mut` invalidates the lazy key index;
+/// it rebuilds on the next indexed read (the post-loop merge / user access).
+///
+/// # Safety
+/// `vm` valid; `hash_objid` a live pinned scratch Hash.
+pub(crate) unsafe extern "C" fn jit_hash_accum_set_int(
+    vm: *mut crate::vm::Vm,
+    hash_objid: i64,
+    key: i64,
+    val: i64,
+) {
+    let vm = unsafe { &mut *vm };
+    let hid = crate::value::ObjId(hash_objid as u32);
+    let pos = vm
+        .heap
+        .hash(hid)
+        .iter()
+        .position(|(k, _)| matches!(k, Value::Int(n) if *n == key));
+    match pos {
+        Some(p) => vm.heap.hash_mut(hid)[p].1 = Value::Int(val),
+        None => vm.heap.hash_mut(hid).push((Value::Int(key), Value::Int(val))),
+    }
 }
 
 /// Native primitive for `group_by`: append `Value::Int(elem)` to the bucket Array
