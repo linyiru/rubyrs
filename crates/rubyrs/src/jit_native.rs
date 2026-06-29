@@ -118,6 +118,12 @@ pub(crate) enum AccKind {
     /// block's own return is discarded by `each`), so a body that stores the acc
     /// then returns something else can't corrupt it.
     EachAcc { acc_slot: u32 },
+    /// `each_with_object(coll) { |elem, memo| memo << f(elem) }`:
+    /// `(vm, self, elem, memo)`. The element is the 1st param (`param_slot`), the
+    /// `memo` collection the 2nd — bound to a SCRATCH array (kind `ArrayObjId`)
+    /// the block pushes into via `<<`. The block's return is discarded; the loop
+    /// returns the scratch ObjId.
+    EachObj,
 }
 
 pub(crate) fn compile(
@@ -148,22 +154,28 @@ pub(crate) fn compile(
     // bind — they differ between `inject` (acc is the 1st block param) and an
     // `each`-accumulator (acc is a CAPTURED slot, element is the only param).
     let acc_kind = block.map(|(_, _, _, a)| a).unwrap_or(AccKind::None);
-    let two_param = !matches!(acc_kind, AccKind::None);
-    let acc_slot: Option<u32> = match acc_kind {
-        AccKind::None => None,
-        AccKind::Inject => Some(param_slot + 1),
-        AccKind::EachAcc { acc_slot } => Some(acc_slot),
+    // Which local slot each C-ABI arg binds to. `arg2` is the 3rd C param, `arg3`
+    // (2-param only) the 4th — the driver loop decides what it passes there:
+    //   Inject   blk(vm,self,acc,elem)  -> arg2=acc(param_slot), arg3=elem(slot+1)
+    //   EachAcc  blk(vm,self,acc,elem)  -> arg2=captured acc, arg3=elem(param_slot)
+    //   EachObj  blk(vm,self,elem,memo) -> arg2=elem(param_slot), arg3=memo(slot+1)
+    let (arg2_slot, arg3_slot): (u32, Option<u32>) = match acc_kind {
+        AccKind::None => (param_slot, None),
+        AccKind::Inject => (param_slot, Some(param_slot + 1)),
+        AccKind::EachAcc { acc_slot } => (acc_slot, Some(param_slot)),
+        AccKind::EachObj => (param_slot, Some(param_slot + 1)),
     };
-    // Where the iteration ELEMENT binds: the 2nd param for inject (`|acc, x|`),
-    // else the sole param.
-    let elem_slot = match acc_kind {
-        AccKind::Inject => param_slot + 1,
-        _ => param_slot,
-    };
-    // each-accumulator: `Return` yields the captured acc slot's value, not the
-    // block's (discarded) return.
+    let two_param = arg3_slot.is_some();
+    // each-accumulator: `Return` yields the captured accumulator (arg2_slot)'s
+    // value, not the block's (discarded) return.
     let acc_from_slot = matches!(acc_kind, AccKind::EachAcc { .. });
-    let is_param = |s: u32| s == elem_slot || acc_slot == Some(s);
+    // each_with_object: the `memo` arg (arg3_slot) is an Array the block pushes to
+    // via `<<`, so it carries the `ArrayObjId` kind, not `Int`.
+    let memo_slot = match acc_kind {
+        AccKind::EachObj => arg3_slot,
+        _ => None,
+    };
+    let is_param = |s: u32| s == arg2_slot || arg3_slot == Some(s);
     // For a block, reject reads/writes of captured outer slots (closure state):
     // a slot below the body-local start that isn't a param. Methods (None)
     // impose no such restriction.
@@ -412,22 +424,14 @@ pub(crate) fn compile(
         };
         let nloc = proto.n_locals as usize;
         let vars: Vec<Variable> = (0..nloc).map(|_| fb.declare_var(types::I64)).collect();
-        // Bind the C args: arg[2] (`param`) is the accumulator in 2-param mode
-        // (`acc_slot`) else the element (`elem_slot`); arg[3] (`param2`, 2-param
-        // only) is the element. Every other local inits to 0.
+        // Bind the C args to their slots: arg[2] (`param`) -> `arg2_slot`, and (in
+        // 2-param mode) arg[3] (`param2`) -> `arg3_slot`. Every other local 0.
         for (i, v) in vars.iter().enumerate() {
             let iu = i as u32;
-            if two_param {
-                if acc_slot == Some(iu) {
-                    fb.def_var(*v, param);
-                } else if iu == elem_slot {
-                    fb.def_var(*v, param2.unwrap());
-                } else {
-                    let z = fb.ins().iconst(types::I64, 0);
-                    fb.def_var(*v, z);
-                }
-            } else if iu == elem_slot {
+            if iu == arg2_slot {
                 fb.def_var(*v, param);
+            } else if arg3_slot == Some(iu) {
+                fb.def_var(*v, param2.unwrap());
             } else {
                 let z = fb.ins().iconst(types::I64, 0);
                 fb.def_var(*v, z);
@@ -447,8 +451,12 @@ pub(crate) fn compile(
         let mut cur_open = false; // is the current block unterminated?
         let mut block_kinds: Vec<Option<Vec<Kind>>> = vec![None; n + 1];
         // Per-local kind — Int by default (a no-op for non-array methods); an
-        // array-building local stays ArrayObjId across the loop.
+        // array-building local stays ArrayObjId across the loop. each_with_object's
+        // `memo` param is an Array (the scratch) the block pushes to.
         let mut local_kinds: Vec<Kind> = vec![Kind::Int; nloc];
+        if let Some(m) = memo_slot {
+            local_kinds[m as usize] = Kind::ArrayObjId;
+        }
         let mut ip = 0usize;
         while ip < n {
             if let Some(b) = blocks[ip] {
@@ -668,7 +676,7 @@ pub(crate) fn compile(
                         // discarded by `each`, so a `total += x; total * 2` body
                         // can't corrupt the accumulator.
                         let _ = (v, k);
-                        fb.use_var(vars[acc_slot.unwrap() as usize])
+                        fb.use_var(vars[arg2_slot as usize])
                     } else if predicate {
                         // A predicate block (count/select/any?/...) returns the
                         // result's TRUTHINESS as i64 0/1. Only a `Bool` (an `icmp`
@@ -1200,6 +1208,161 @@ pub(crate) fn compile_native_inject_loop(block_addr: usize) -> Option<NativeLoop
         let acc_out = fb.block_params(exit)[0];
         let ok = fb.ins().iconst(types::I8, 0);
         fb.ins().return_(&[acc_out, ok]);
+
+        // deopt: return (0, 1)
+        fb.switch_to_block(deopt);
+        let z = fb.ins().iconst(types::I64, 0);
+        let bad = fb.ins().iconst(types::I8, 1);
+        fb.ins().return_(&[z, bad]);
+
+        fb.seal_all_blocks();
+        fb.finalize();
+    }
+    module.define_function(fid, &mut ctx).ok()?;
+    module.clear_context(&mut ctx);
+    module.finalize_definitions().ok()?;
+    let code_ptr = module.get_finalized_function(fid);
+    let ptr = unsafe {
+        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+            code_ptr,
+        )
+    };
+    Some(NativeLoop {
+        _module: module,
+        ptr,
+    })
+}
+
+/// Compile a native whole-loop `Array#each_with_object(coll) { |x, memo| memo <<
+/// f(x) }` driver (ADR 0034 layer 3c) around an already-compiled 2-param block
+/// whose `memo` param is bound to a SCRATCH array. The loop allocates the scratch
+/// once, threads it as the `memo` arg (constant) to every block call — the block
+/// pushes into it via the normal `<<` codegen — and returns the scratch ObjId.
+/// ABI `(vm, self, in_objid, _) -> (scratch_objid, ovf)`. A non-Int element or any
+/// overflow deopts (`ovf=1`); the caller then DISCARDS scratch and redoes the
+/// generic `each_with_object` over the REAL memo (untouched here), so the partial
+/// scratch pushes never reach the user's object — write-back-on-success.
+pub(crate) fn compile_native_eachobj_loop(block_addr: usize) -> Option<NativeLoop> {
+    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).ok()?;
+    builder.symbol("jit_array_new", jit_array_new as *const u8);
+    builder.symbol("jit_array_len", jit_array_len as *const u8);
+    builder.symbol("jit_array_elem_int", jit_array_elem_int as *const u8);
+    builder.symbol("blk", block_addr as *const u8);
+    let mut module = JITModule::new(builder);
+    let ptr_ty = module.target_config().pointer_type();
+    let mut ctx = module.make_context();
+
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(ptr_ty)); // vm
+    sig.params.push(AbiParam::new(ptr_ty)); // self
+    sig.params.push(AbiParam::new(types::I64)); // in objid
+    sig.params.push(AbiParam::new(types::I64)); // unused (ABI parity)
+    sig.returns.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I8));
+    ctx.func.signature = sig.clone();
+    let fid = module.declare_function("eachobjloop", Linkage::Export, &sig).ok()?;
+
+    let mut newsig = module.make_signature();
+    newsig.params.push(AbiParam::new(ptr_ty));
+    newsig.returns.push(AbiParam::new(types::I64));
+    let newid = module
+        .declare_function("jit_array_new", Linkage::Import, &newsig)
+        .ok()?;
+    let mut lensig = module.make_signature();
+    lensig.params.push(AbiParam::new(ptr_ty));
+    lensig.params.push(AbiParam::new(types::I64));
+    lensig.returns.push(AbiParam::new(types::I64));
+    let lenid = module
+        .declare_function("jit_array_len", Linkage::Import, &lensig)
+        .ok()?;
+    let mut elsig = module.make_signature();
+    elsig.params.push(AbiParam::new(ptr_ty));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.params.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I64));
+    elsig.returns.push(AbiParam::new(types::I8));
+    let elid = module
+        .declare_function("jit_array_elem_int", Linkage::Import, &elsig)
+        .ok()?;
+    // 2-param block: (vm, self, elem, memo) -> (ignored, ovf). The block pushes
+    // f(elem) onto `memo` (the scratch array) itself.
+    let mut blksig = module.make_signature();
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(ptr_ty));
+    blksig.params.push(AbiParam::new(types::I64));
+    blksig.params.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I64));
+    blksig.returns.push(AbiParam::new(types::I8));
+    let blkid = module
+        .declare_function("blk", Linkage::Import, &blksig)
+        .ok()?;
+
+    let mut fbctx = FunctionBuilderContext::new();
+    {
+        let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let new_ref = module.declare_func_in_func(newid, fb.func);
+        let len_ref = module.declare_func_in_func(lenid, fb.func);
+        let el_ref = module.declare_func_in_func(elid, fb.func);
+        let blk_ref = module.declare_func_in_func(blkid, fb.func);
+
+        let entry = fb.create_block();
+        let head = fb.create_block(); // params: (i, scratch)
+        let body = fb.create_block();
+        let cont1 = fb.create_block();
+        let exit = fb.create_block(); // param: (scratch)
+        let deopt = fb.create_block();
+        fb.append_block_params_for_function_params(entry);
+        fb.append_block_param(head, types::I64);
+        fb.append_block_param(head, types::I64);
+        fb.append_block_param(exit, types::I64);
+
+        // entry: scratch = new(); len = len(in); jump head(0, scratch)
+        fb.switch_to_block(entry);
+        let (vm_param, self_param, in_objid, _unused) = {
+            let p = fb.block_params(entry);
+            (p[0], p[1], p[2], p[3])
+        };
+        let call_new = fb.ins().call(new_ref, &[vm_param]);
+        let scratch = fb.inst_results(call_new)[0];
+        let call_len = fb.ins().call(len_ref, &[vm_param, in_objid]);
+        let len = fb.inst_results(call_len)[0];
+        let zero = fb.ins().iconst(types::I64, 0);
+        fb.ins().jump(head, &[zero.into(), scratch.into()]);
+
+        // head(i, scratch): i < len ? body : exit(scratch)
+        fb.switch_to_block(head);
+        let (i, scratch_h) = {
+            let p = fb.block_params(head);
+            (p[0], p[1])
+        };
+        let cond = fb.ins().icmp(IntCC::SignedLessThan, i, len);
+        fb.ins().brif(cond, body, &[], exit, &[scratch_h.into()]);
+
+        // body: (x, ovf1) = elem(in, i); ovf1 ? deopt : cont1
+        fb.switch_to_block(body);
+        let call_el = fb.ins().call(el_ref, &[vm_param, in_objid, i]);
+        let (x, ovf1) = {
+            let r = fb.inst_results(call_el);
+            (r[0], r[1])
+        };
+        fb.ins().brif(ovf1, deopt, &[], cont1, &[]);
+
+        // cont1: (_, ovf2) = blk(vm, self, x, scratch); ovf2 ? deopt : head(i+1, scratch)
+        fb.switch_to_block(cont1);
+        let call_blk = fb.ins().call(blk_ref, &[vm_param, self_param, x, scratch_h]);
+        let ovf2 = fb.inst_results(call_blk)[1];
+        let nh = fb.create_block();
+        fb.ins().brif(ovf2, deopt, &[], nh, &[]);
+        fb.switch_to_block(nh);
+        let one = fb.ins().iconst(types::I64, 1);
+        let i2 = fb.ins().iadd(i, one);
+        fb.ins().jump(head, &[i2.into(), scratch_h.into()]);
+
+        // exit(scratch): return (scratch, 0)
+        fb.switch_to_block(exit);
+        let scratch_out = fb.block_params(exit)[0];
+        let ok = fb.ins().iconst(types::I8, 0);
+        fb.ins().return_(&[scratch_out, ok]);
 
         // deopt: return (0, 1)
         fb.switch_to_block(deopt);
