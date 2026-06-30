@@ -3097,6 +3097,29 @@ impl Vm {
                 };
                 match args {
                 [Value::Str(path)] => {
+                    // ADR 0036: rubyrs can't dlopen the prism C extension (a CRuby-ABI
+                    // `.bundle`), but the prism C library is linked in + exposed via the
+                    // `__rubyrs_prism_serialize_parse*` host fns. When the prism gem's
+                    // prism.rb requires "prism/prism", inject rubyrs's pure-Ruby backend
+                    // (the gem supplies node/parse_result/serialize; we supply native parse)
+                    // so `require "prism"` works + RuboCop's parser_prism engine runs.
+                    // require-once via `loaded_stdlib_stubs`.
+                    {
+                        let p = path.to_string_lossy();
+                        if &*p == "prism/prism" {
+                            if self.loaded_stdlib_stubs.contains(&*p) {
+                                return Some(Ok(Value::Bool(false)));
+                            }
+                            self.loaded_stdlib_stubs.insert(p.to_string());
+                            if let Err(t) = self.compile_and_run_source(
+                                std::path::PathBuf::from("<rubyrs:prism>"),
+                                crate::prism_native::BACKEND_RB.to_string(),
+                            ) {
+                                return Some(Err(t));
+                            }
+                            return Some(Ok(Value::Bool(true)));
+                        }
+                    }
                     #[cfg(not(target_os = "wasi"))]
                     {
                         let path_str = path.to_string_lossy();

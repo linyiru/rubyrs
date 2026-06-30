@@ -49,6 +49,9 @@ mod http_server;
 mod intern;
 #[cfg(feature = "_json_native")]
 mod json_native;
+// ADR 0036 Slice 1: Prism serialize-parse host fns (prism C lib is always linked via
+// `ruby-prism`), so RuboCop's `parser_prism` engine runs without the C extension.
+mod prism_native;
 #[cfg(feature = "stdlib")]
 mod zlib_native;
 #[cfg(feature = "_rouge_native")]
@@ -122,6 +125,10 @@ pub use vm::fiber::register_host_fns as register_fiber_host_fns;
 /// hot paths through serde_json. See [`json_native::register_host_fns`].
 #[cfg(feature = "_json_native")]
 pub use json_native::register_host_fns as register_json_native_host_fns;
+
+/// Register the Prism serialize-parse host fns so RuboCop's `parser_prism` engine can build
+/// its AST natively on rubyrs (ADR 0036 Slice 1). See [`prism_native::register_host_fns`].
+pub use prism_native::register_host_fns as register_prism_native_host_fns;
 /// Register `_rouge_native` host fns (`__rubyrs_rouge_native_table`,
 /// `__rubyrs_rouge_native_lex_html`) onto a `Runtime`. The shim that
 /// rubyrs injects after `require "rouge"` detects the registration via

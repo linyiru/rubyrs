@@ -2021,6 +2021,12 @@ impl Vm {
             // Variadic dispatchers (CRuby: arity -1, params [[:rest]])
             ("send", -1, &[("rest", None)], "<internal:kernel>"),
             ("respond_to?", -1, &[("rest", None)], "<internal:kernel>"),
+            // `warn(*msgs, uplevel:, category:)` — CRuby reports the keyword params
+            // explicitly. rubyrs's native warn accepts them via `*rest`, but reporting them
+            // matters: prism's `polyfill/warn.rb` only prepends its category-adding wrapper
+            // (which calls `super`) when `instance_method(:warn).parameters` shows NO
+            // `:category` — reporting it makes that polyfill correctly skip.
+            ("warn", -1, &[("rest", Some("msgs")), ("key", Some("uplevel")), ("key", Some("category"))], "<internal:kernel>"),
             // `method` / `public_method` — single required arg (the
             // method name); return a (bound) Method. sorbet does
             // `Object.instance_method(:method).bind_call(mod, :new)` to

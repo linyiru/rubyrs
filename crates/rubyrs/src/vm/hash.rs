@@ -1330,25 +1330,72 @@ impl Vm {
                         }
                         Some(Value::Hash(nid))
                     }
-                    ("merge", others)
-                        if others.iter().all(|v| matches!(v, Value::Hash(_))) =>
-                    {
-                        // CRuby 3.0+: `merge` takes ZERO OR MORE hashes,
-                        // applied left-to-right — keys in a later hash
-                        // overwrite earlier ones, key-order appends after
-                        // self's (existing keys retain position). No args
-                        // returns a copy of self. The result inherits the
-                        // RECEIVER's default-block (`h.default_proc`), so
-                        // `Hash.new { |h, k| h[k] = [] }.merge(x)[:y]`
-                        // still auto-vivifies. (Block-form merge lives in
-                        // iter.rs.) dry-types builds BOOLEAN_MAP with
-                        // `EMPTY_HASH.merge(trues, falses)`.
-                        let mut out: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                    ("merge", others) => {
+                        // CRuby 3.0+: `merge` takes ZERO OR MORE hash-like args, applied
+                        // left-to-right — keys in a later arg overwrite earlier ones, key
+                        // order appends after self's (existing keys retain position). No args
+                        // returns a copy of self. The result inherits the RECEIVER's
+                        // default-block (`h.default_proc`) + subclass. A NON-Hash arg is
+                        // coerced via `to_hash` (CRuby behaviour — e.g. RuboCop's `Config`
+                        // responds to `to_hash`, so `default_config.merge(config)` works); an
+                        // arg with no `to_hash` raises TypeError. (Block-form merge lives in
+                        // iter.rs.) dry-types builds BOOLEAN_MAP with `EMPTY_HASH.merge(trues,
+                        // falses)`.
+                        //
+                        // GC rooting: pin the receiver + every arg up front so a mid-merge GC
+                        // — including one inside a re-entrant `to_hash` call — can't sweep
+                        // them (or the pair ObjIds reachable only through them). Pin each
+                        // coerced result too.
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
                         for ov in others {
-                            let Value::Hash(other) = ov else { continue };
-                            let extra: Vec<(Value, Value)> = self.heap.hash(*other).clone();
+                            g.pin(ov.clone());
+                        }
+                        // Resolve each arg to a source hash's pairs (coercing non-Hashes).
+                        let mut sources: Vec<Vec<(Value, Value)>> = Vec::with_capacity(others.len());
+                        for ov in others {
+                            let hid = match ov {
+                                Value::Hash(o) => *o,
+                                other => {
+                                    let to_hash = g.vm.interner.intern("to_hash");
+                                    if !g.vm.responds_to(other, to_hash, false) {
+                                        return Err(g.vm.trap(RubyError::TypeError {
+                                            msg: format!(
+                                                "no implicit conversion of {} into Hash",
+                                                other.type_name()
+                                            ),
+                                        }));
+                                    }
+                                    // Re-entrant `other.to_hash` — `do_call` pushes the
+                                    // frame; `dispatch_until` drives the nested loop to
+                                    // completion (user methods don't run synchronously
+                                    // otherwise), leaving the result on the stack.
+                                    let pre = g.vm.frames.len();
+                                    g.vm.stack.push(other.clone());
+                                    g.vm.do_call(to_hash, 0, false, u32::MAX)?;
+                                    g.vm.dispatch_until(pre)?;
+                                    match g.vm.stack.pop() {
+                                        Some(Value::Hash(h)) => {
+                                            g.pin(Value::Hash(h));
+                                            h
+                                        }
+                                        _ => {
+                                            return Err(g.vm.trap(RubyError::TypeError {
+                                                msg: format!(
+                                                    "can't convert {0} to Hash ({0}#to_hash gives a non-Hash)",
+                                                    other.type_name()
+                                                ),
+                                            }));
+                                        }
+                                    }
+                                }
+                            };
+                            sources.push(g.vm.heap.hash(hid).clone());
+                        }
+                        let mut out: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                        for extra in sources {
                             for (k, v) in extra {
-                                let pos = out.iter().position(|(ek, _)| ek.ruby_eql(&k, &self.heap));
+                                let pos = out.iter().position(|(ek, _)| ek.ruby_eql(&k, &g.vm.heap));
                                 if let Some(p) = pos {
                                     out[p].1 = v;
                                 } else {
@@ -1356,28 +1403,7 @@ impl Vm {
                                 }
                             }
                         }
-                        // GC rooting: snapshot the receiver's default-
-                        // block BEFORE alloc. The receiver `id` arrived
-                        // as a Rust-local ObjId from `do_call`'s recv-
-                        // pop; it isn't on the stack / in a frame /
-                        // pinned, so `maybe_gc` could sweep it AND
-                        // anything reachable only through it (the
-                        // default-block itself). That would leave us
-                        // copying a freed-slot ObjId onto the new
-                        // Hash. Pin both the receiver hash and (when
-                        // present) the default-block across the alloc.
-                        let default_block = self.heap.hash_default_block(id);
-                        let mut g = PinGuard::new(self);
-                        g.pin(Value::Hash(id));
-                        // Pin every source hash too — `out` holds shallow
-                        // clones of their pairs (ObjIds), so nested heap
-                        // children are reachable ONLY through the sources.
-                        // Without this, maybe_gc could sweep them, leaving
-                        // the merged Hash with dangling ObjIds (STRESS_GC
-                        // catches `h.merge({a: [1,2,3]})` in a loop).
-                        for ov in others {
-                            g.pin(ov.clone());
-                        }
+                        let default_block = g.vm.heap.hash_default_block(id);
                         if let Some(bid) = default_block {
                             g.pin(Value::Block(bid));
                         }
@@ -1386,9 +1412,8 @@ impl Vm {
                         if default_block.is_some() {
                             g.vm.heap.hash_set_default_block(nid, default_block);
                         }
-                        // Preserve the receiver's subclass (CRuby: merge
-                        // returns an instance of the receiver's class —
-                        // Sinatra's IndifferentHash#merge stays indifferent).
+                        // Preserve the receiver's subclass (CRuby: merge returns an instance of
+                        // the receiver's class — Sinatra's IndifferentHash#merge stays indifferent).
                         if let Some(tag) = g.vm.heap.hash_class_tag(id) {
                             g.vm.heap.hash_set_class_tag(nid, Some(tag));
                         }

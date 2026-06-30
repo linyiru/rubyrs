@@ -269,6 +269,15 @@ class StringIO
     ch
   end
 
+  # `getbyte` — read one byte (0-255) at the current position and advance, or nil at EOF.
+  # Byte-based like CRuby (the prism deserializer reads its binary blob via getbyte/read).
+  def getbyte
+    return nil if @pos >= @str.bytesize
+    b = @str.getbyte(@pos)
+    @pos += 1
+    b
+  end
+
   # `ungetc(str)` — push characters back so the next read returns them.
   # CRuby inserts them at the current position (the position does not
   # advance), so a later `read` starts with the pushed-back data.

@@ -397,6 +397,10 @@ fn main() {
     // the reference behaviour for non-accelerator builds.
     #[cfg(feature = "_json_native")]
     rubyrs::register_json_native_host_fns(&mut rt);
+    // Prism serialize-parse host fns (ADR 0036 Slice 1): always available — the prism C lib
+    // is unconditionally linked. Lets RuboCop's `parser_prism` engine build its AST natively,
+    // bypassing the slow interpreted whitequark lexer. Inert unless the prism shim calls them.
+    rubyrs::register_prism_native_host_fns(&mut rt);
     // `_rouge_native` accelerator: expose the carmine engine host fns;
     // the require("rouge") hook injects the shim that detects + uses
     // them. Without this registration the shim stays inert.
