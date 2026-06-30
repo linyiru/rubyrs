@@ -286,6 +286,12 @@ pub(crate) struct FrameAux {
     /// here; `super_runtime_name` and `__method__` prefer it.
     /// Lives in the cold aux box so plain frames don't grow.
     pub(crate) invoked_name: Option<crate::intern::SymId>,
+    /// Set on an `instance_eval` / `instance_exec` block frame to its
+    /// receiver. A bare `def name; end` inside such a block defines a
+    /// SINGLETON method on this receiver (CRuby), not a toplevel method —
+    /// `Op::Def` consults this before the class-stack / toplevel fallback.
+    /// `None` on every other frame (lives in the cold aux box).
+    pub(crate) instance_eval_definee: Option<Value>,
     pub(crate) rescues: Vec<RescueHandler>,
     pub(crate) loop_rescue_depths: Vec<usize>,
     pub(crate) loop_stack_depths: Vec<usize>,

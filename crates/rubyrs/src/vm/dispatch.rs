@@ -19878,6 +19878,18 @@ impl Vm {
             block_writeback: None,
             captured_yield_block: None,
         });
+        // `instance_eval`/`instance_exec` (NOT class_eval): a bare `def`
+        // inside the block defines a SINGLETON method on the receiver
+        // (CRuby). Record the receiver so `Op::Def` redirects there.
+        // regexp_parser wires `Subexpression.instance_eval { def terminal?;
+        // false; end }`; without this the def lands on toplevel_methods and
+        // `Subexpression.terminal?` returns the inherited default.
+        if !as_class_body {
+            let recv = self.frames.last().map(|f| f.self_val.clone());
+            if let Some(recv) = recv {
+                self.frames.last_mut().unwrap().aux_mut().instance_eval_definee = Some(recv);
+            }
+        }
         Ok(())
     }
 

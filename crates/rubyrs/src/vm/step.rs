@@ -3790,7 +3790,23 @@ impl Vm {
                 builtin: None,
                 original_name: Some(name_id),
                 });
-                if let Some(cls) = self.class_stack.last() {
+                // `instance_eval { def name; end }` on a Class/Module
+                // receiver installs a SINGLETON (class) method on it, NOT a
+                // toplevel method (CRuby). Takes precedence over the
+                // class-stack fallback — `Foo.instance_eval { def bar }`
+                // targets Foo even inside another class body. (Plain-object
+                // receivers fall through; their singleton class isn't modelled
+                // here.)
+                let ieval_class: Option<Rc<Class>> = self
+                    .frames
+                    .last()
+                    .and_then(|f| f.aux.as_ref())
+                    .and_then(|a| a.instance_eval_definee.as_ref())
+                    .and_then(|v| if let Value::Class(c) = v { Some(c.clone()) } else { None });
+                if let Some(cls) = &ieval_class {
+                    cls.singleton_methods.borrow_mut().insert(name_id, m.clone());
+                }
+                else if let Some(cls) = self.class_stack.last() {
                     cls.install_method(name_id, m.clone());
                     // `module_function` (bare-form) dual-install:
                     // after `M.module_function` in a body, every
@@ -3828,14 +3844,20 @@ impl Vm {
                 // Conservatively invalidate the inline cache — any previous
                 // cache entry could in theory be made stale by this definition.
                 self.method_gen = self.method_gen.wrapping_add(1);
-                // `Module#method_added(name)` — fires after the
-                // install lands. CRuby semantics: Rails / RSpec /
-                // many DSLs use this to auto-wrap freshly-defined
-                // methods. Toplevel defs are skipped today —
-                // CRuby fires `Object.method_added` there, but the
-                // hook needs a Class receiver and toplevel installs
-                // into `toplevel_methods` instead.
-                if let Some(cls) = self.class_stack.last().cloned() {
+                // Lifecycle hook. An instance_eval singleton def fires
+                // `singleton_method_added` on the receiver; a class-body def
+                // fires `method_added`. CRuby semantics: Rails / RSpec / many
+                // DSLs use these to auto-wrap freshly-defined methods.
+                // Toplevel defs are skipped today — CRuby fires
+                // `Object.method_added` there, but the hook needs a Class
+                // receiver and toplevel installs into `toplevel_methods`.
+                if let Some(cls) = &ieval_class {
+                    self.fire_singleton_method_lifecycle_hook(
+                        Value::Class(cls.clone()),
+                        "singleton_method_added",
+                        name_id,
+                    )?;
+                } else if let Some(cls) = self.class_stack.last().cloned() {
                     self.fire_method_lifecycle_hook(&cls, "method_added", name_id)?;
                 }
                 // `def foo` evaluates to the method name Symbol (CRuby) —
