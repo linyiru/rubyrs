@@ -37,22 +37,29 @@ unsafe extern "C" {
     fn pm_serialize_parse_lex(buffer: *mut PmBuffer, source: *const u8, size: usize, data: *const u8);
 }
 
-/// Serialize a parse (or parse+lex) of `src` to the prism wire format. `data == NULL` selects
-/// prism's default options (the documented NULL-options call, prism.h:378) — matching the
-/// target-ruby/filepath defaults is deferred (ADR 0036 Slice 1 note).
-fn serialize(src: &[u8], lex: bool) -> Vec<u8> {
+/// Serialize a parse (or parse+lex) of `src` to the prism wire format. `opts` is prism's
+/// serialized options blob (the `pm_options` wire format, built by the backend's `dump_options`
+/// — filepath/version/partial_script/encoding that RuboCop's `Prism::Translation::Parser`
+/// passes). An empty/absent blob passes `data == NULL`, selecting prism's defaults
+/// (the documented NULL-options call, prism.h:378).
+fn serialize(src: &[u8], opts: Option<&[u8]>, lex: bool) -> Vec<u8> {
     // SAFETY: `pm_buffer_init` initialises the owner; `pm_serialize_parse*` append the blob
-    // into it; we copy the bytes out before `pm_buffer_free` releases them. The buffer never
-    // escapes this call. Single-threaded host-fn scope.
+    // into it; we copy the bytes out before `pm_buffer_free` releases them. `data` (when set)
+    // borrows `opts` for the duration of the call only. The buffer never escapes this call.
+    // Single-threaded host-fn scope.
     unsafe {
         let mut buf = PmBuffer { length: 0, capacity: 0, value: std::ptr::null_mut() };
         if !pm_buffer_init(&mut buf) {
             return Vec::new();
         }
+        let data = match opts {
+            Some(o) if !o.is_empty() => o.as_ptr(),
+            _ => std::ptr::null(),
+        };
         if lex {
-            pm_serialize_parse_lex(&mut buf, src.as_ptr(), src.len(), std::ptr::null());
+            pm_serialize_parse_lex(&mut buf, src.as_ptr(), src.len(), data);
         } else {
-            pm_serialize_parse(&mut buf, src.as_ptr(), src.len(), std::ptr::null());
+            pm_serialize_parse(&mut buf, src.as_ptr(), src.len(), data);
         }
         let vptr = pm_buffer_value(&buf);
         let vlen = pm_buffer_length(&buf);
@@ -66,9 +73,14 @@ fn serialize(src: &[u8], lex: bool) -> Vec<u8> {
     }
 }
 
-fn arg_src(args: &[Value], sig: &str) -> Result<Vec<u8>, Trap> {
+/// `(source)` or `(source, options_blob)` — the optional second arg is the serialized
+/// `pm_options` blob (or `nil` for defaults).
+fn arg_src(args: &[Value], sig: &str) -> Result<(Vec<u8>, Option<Vec<u8>>), Trap> {
     match args {
-        [Value::Str(s)] => Ok(s.content.borrow().clone()),
+        [Value::Str(s)] | [Value::Str(s), Value::Nil] => Ok((s.content.borrow().clone(), None)),
+        [Value::Str(s), Value::Str(o)] => {
+            Ok((s.content.borrow().clone(), Some(o.content.borrow().clone())))
+        }
         _ => Err(Trap {
             err: RubyError::ArgumentError { msg: sig.to_string() },
             backtrace: vec![],
@@ -81,11 +93,11 @@ fn arg_src(args: &[Value], sig: &str) -> Result<Vec<u8>, Trap> {
 /// builds `Prism.parse` / `Prism.parse_lex` on top of them.
 pub fn register_host_fns(rt: &mut crate::Runtime) {
     rt.register_fn("__rubyrs_prism_serialize_parse", |args| {
-        let src = arg_src(args, "__rubyrs_prism_serialize_parse(source: String)")?;
-        Ok(Value::new_str_bytes_binary(serialize(&src, false)))
+        let (src, opts) = arg_src(args, "__rubyrs_prism_serialize_parse(source: String, options: String = nil)")?;
+        Ok(Value::new_str_bytes_binary(serialize(&src, opts.as_deref(), false)))
     });
     rt.register_fn("__rubyrs_prism_serialize_parse_lex", |args| {
-        let src = arg_src(args, "__rubyrs_prism_serialize_parse_lex(source: String)")?;
-        Ok(Value::new_str_bytes_binary(serialize(&src, true)))
+        let (src, opts) = arg_src(args, "__rubyrs_prism_serialize_parse_lex(source: String, options: String = nil)")?;
+        Ok(Value::new_str_bytes_binary(serialize(&src, opts.as_deref(), true)))
     });
 }

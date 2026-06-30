@@ -5,17 +5,17 @@
 # compile path now runs patterns through `preprocess_regex_pattern`
 # which drops `\G` before handing the source to the engine.
 #
-# Trade-off: dropping `\G` makes the regex slightly more
-# permissive than CRuby (a `\G` only matches at the previous
-# match's end, while the rest of the pattern matches anywhere).
-# For real-world consumers — primarily MRI lib/erb/compiler.rb:460
-# (`/\G<%#(.*)%>/` and similar) — the surrounding structural
-# anchors (`<%#`, `%>`) constrain the match to the same locations
-# in practice. This fixture only pins shapes where rubyrs and
-# CRuby agree byte-for-byte; the divergent shapes (e.g. `\G`
-# against a non-zero-offset receiver) are called out inline as
-# comments but NOT asserted — diff_cruby would fail. The impl-
-# site doc in vm/step.rs records the divergence formally.
+# The match-AT-POSITION paths (`String#match`/`match?`/`=~`) DO
+# honour `\G`: they re-anchor the (stripped) pattern to the search
+# position via `CompiledRegex::g_anchored` (see regex_g_anchor_pos.rb
+# for the dedicated fixture). What remains permissive is `scan` /
+# `gsub`, which keep the stripped semantics (a leading `\G` only
+# pins the FIRST match; subsequent matches scan forward instead of
+# requiring contiguity). For real-world consumers — primarily MRI
+# lib/erb/compiler.rb:460 (`/\G<%#(.*)%>/` and similar) — the
+# surrounding structural anchors (`<%#`, `%>`) constrain the match
+# to the same locations in practice, so rubyrs and CRuby agree
+# byte-for-byte. The impl-site doc in vm/step.rs records this.
 
 # --- Pure-`\G` patterns: same behaviour as without `\G` ---
 # When `\G` sits at the start AND the surrounding text doesn't
@@ -35,12 +35,11 @@ puts $~[0]                                       # hello
 # typical use case in real codebases (magic-comment detection,
 # stateful scanners that slice from cursor first).
 puts "data".match?(/\Gdata/)                     # true
-# DOCUMENTED DIVERGENCE: `"  data".match?(/\Gdata/)` returns
-# true in rubyrs (\\G stripped → /data/ matches at offset 2)
-# but false in CRuby (\\G requires position 0). Not pinned here
-# because the fixture is diff_cruby byte-for-byte; see
-# preprocess_regex_pattern in vm/step.rs for the impl-site
-# documentation.
+# Now CONVERGES: `\G` is honoured in match-at-position paths, so the
+# anchor requires position 0 — a leading-whitespace receiver fails in
+# BOTH rubyrs and CRuby (was a documented divergence before the
+# g_anchored fix).
+puts "  data".match?(/\Gdata/)                    # false
 
 # --- ERB-shape probe ---
 # Mirror the lib/erb/compiler.rb:460 pattern shape. The regex
@@ -85,10 +84,10 @@ puts ("9" =~ /[[:digit:]\G]/).inspect           # 0    (digit at offset 0)
 # naïve `out.push(byte as char)` would re-encode each byte as a
 # separate Latin-1 codepoint and corrupt the regex.
 puts ("こんにちは" =~ /こ/).inspect             # 0
-# Note: `"hello こんにちは" =~ /\Gこ/` returns nil in CRuby
-# (\\G requires pos 0) but 6 in rubyrs (\\G stripped → bare
-# /こ/ matches the byte offset). Documented divergence — same
-# shape as the ASCII case earlier; pinned in the comment only.
+# Now CONVERGES: `=~` honours the `\G` anchor (requires pos 0), so a
+# non-zero match offset is nil in BOTH (was a documented divergence —
+# rubyrs used to return the byte offset 6).
+puts ("hello こんにちは" =~ /\Gこ/).inspect       # nil
 puts ("こんにちは" =~ /\Gこ/).inspect            # 0
 puts ("abc" =~ /[こa]/).inspect                  # 0 — class containing こ + a, a matches at 0
 

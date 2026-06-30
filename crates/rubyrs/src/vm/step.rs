@@ -91,6 +91,19 @@ fn pattern_has_named_group(src: &str) -> bool {
     false
 }
 
+/// True when `src` begins with a `\G` anchor (the two chars `\`,`G`).
+/// `preprocess_regex_pattern` strips `\G` so the linear engine can compile,
+/// which loses its "match exactly at the search position" meaning — the
+/// match-at-pos paths recover it by anchoring (see
+/// `CompiledRegex::g_anchored`). Only a LEADING `\G` is the position anchor;
+/// a `\G` elsewhere (or inside a char class) is not, so a plain prefix check
+/// is the faithful detector for the real consumers (rubocop-ast's
+/// `Token#space_after?`/`space_before?` use `source.match(/\G\s/, pos)`).
+#[cfg_attr(not(feature = "regex"), allow(dead_code))]
+pub(crate) fn leading_g_anchor(src: &str) -> bool {
+    src.starts_with("\\G")
+}
+
 // Dead when `regex` is off (all callers are regex-gated), but the body
 // stays compilable via the `demote_unnamed` cfg-split below.
 #[cfg_attr(not(feature = "regex"), allow(dead_code))]
@@ -1353,12 +1366,13 @@ impl Vm {
                     // the regexp's `#source`.
                     let translated = preprocess_regex_pattern(&src);
                     let prefixed = apply_ruby_flags(&translated, flags);
-                    let compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
+                    let mut compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
                         self.trap(RubyError::HostException {
                             class_name: "RegexpError".into(),
                             message: format!("invalid regex /{}/: {}", src, e),
                         })
                     })?;
+                    compiled.set_g_anchored(leading_g_anchor(&src));
                     let rc = Rc::new(compiled);
                     self.regex_cache.insert(key, rc.clone());
                     rc
@@ -1422,12 +1436,13 @@ impl Vm {
                     }
                     let translated = preprocess_regex_pattern(pat);
                     let prefixed = apply_ruby_flags(&translated, flags);
-                    let compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
+                    let mut compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
                         self.trap(RubyError::HostException {
                             class_name: "RegexpError".into(),
                             message: format!("invalid regex /{}/: {}", pat, e),
                         })
                     })?;
+                    compiled.set_g_anchored(leading_g_anchor(pat));
                     let rc = Rc::new(compiled);
                     self.regex_cache.insert(key, rc.clone());
                     Ok(rc)

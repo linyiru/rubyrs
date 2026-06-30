@@ -1017,9 +1017,29 @@ pub(crate) fn string_call(
             // back to the UTF-8 engine when there's no byte engine.
             let matched = if matches!(a.encoding.get(), crate::value::EncodingTag::Binary) {
                 re.is_match_bytes(&a.content.borrow())
-                    .unwrap_or_else(|| a.with_str_lossy(|s| re.is_match(s)))
+                    .unwrap_or_else(|| a.with_str_lossy(|s| re.is_match_from(s)))
             } else {
-                a.with_str_lossy(|s| re.is_match(s))
+                a.with_str_lossy(|s| re.is_match_from(s))
+            };
+            Some(Value::Bool(matched))
+        }
+        // `String#match?(re, pos)` — predicate match starting at char
+        // offset `pos` (negative counts from the end); out-of-range → false.
+        // Honours a `\G` anchor (match exactly at `pos`). No `$~` update.
+        #[cfg(feature = "regex")]
+        (Value::Str(a), "match?", [Value::Regex(re), Value::Int(pos)]) => {
+            let lossy = a.to_string_lossy();
+            let char_len = lossy.chars().count() as i64;
+            let cpos = if *pos < 0 { char_len + *pos } else { *pos };
+            let matched = if cpos < 0 || cpos > char_len {
+                false
+            } else {
+                let byte_off = lossy
+                    .char_indices()
+                    .nth(cpos as usize)
+                    .map(|(b, _)| b)
+                    .unwrap_or(lossy.len());
+                re.is_match_from(&lossy[byte_off..])
             };
             Some(Value::Bool(matched))
         }
@@ -1898,9 +1918,9 @@ pub(crate) fn string_call(
         (Value::Regex(re), "match?", [Value::Str(s)]) => {
             let matched = if matches!(s.encoding.get(), crate::value::EncodingTag::Binary) {
                 re.is_match_bytes(&s.content.borrow())
-                    .unwrap_or_else(|| s.with_str_lossy(|s| re.is_match(s)))
+                    .unwrap_or_else(|| s.with_str_lossy(|s| re.is_match_from(s)))
             } else {
-                s.with_str_lossy(|s| re.is_match(s))
+                s.with_str_lossy(|s| re.is_match_from(s))
             };
             Some(Value::Bool(matched))
         }
@@ -1927,7 +1947,7 @@ pub(crate) fn string_call(
                     .nth(cpos as usize)
                     .map(|(b, _)| b)
                     .unwrap_or(lossy.len());
-                re.is_match(&lossy[byte_off..])
+                re.is_match_from(&lossy[byte_off..])
             };
             Some(Value::Bool(matched))
         }
@@ -5152,6 +5172,41 @@ pub(crate) fn unpack_bytes(input: &[u8], fmt: &str) -> Result<Vec<Value>, String
                     out.push(Value::Int(v));
                 }
             }
+            'D' | 'd' | 'E' | 'G' => {
+                // 64-bit IEEE double. D/d = native-endian, E = little-endian,
+                // G = big-endian (CRuby). prism's `Serialize#load_double`
+                // reads `unpack1("D")` for every Float literal in the parsed
+                // source, so this is on the RuboCop/parser_prism hot path.
+                let take = if n == usize::MAX { (input.len() - i) / 8 } else { n };
+                for _ in 0..take {
+                    if i + 8 > input.len() { out.push(Value::Nil); break; }
+                    let b = [input[i], input[i+1], input[i+2], input[i+3],
+                             input[i+4], input[i+5], input[i+6], input[i+7]];
+                    i += 8;
+                    let v: f64 = match dir {
+                        'E' => f64::from_le_bytes(b),
+                        'G' => f64::from_be_bytes(b),
+                        _   => f64::from_ne_bytes(b), // D / d (native)
+                    };
+                    out.push(Value::Float(v));
+                }
+            }
+            'F' | 'f' | 'e' | 'g' => {
+                // 32-bit IEEE float. F/f = native-endian, e = little-endian,
+                // g = big-endian (CRuby). Widened to Ruby Float (f64).
+                let take = if n == usize::MAX { (input.len() - i) / 4 } else { n };
+                for _ in 0..take {
+                    if i + 4 > input.len() { out.push(Value::Nil); break; }
+                    let b = [input[i], input[i+1], input[i+2], input[i+3]];
+                    i += 4;
+                    let v: f32 = match dir {
+                        'e' => f32::from_le_bytes(b),
+                        'g' => f32::from_be_bytes(b),
+                        _   => f32::from_ne_bytes(b), // F / f (native)
+                    };
+                    out.push(Value::Float(v as f64));
+                }
+            }
             'a' | 'A' | 'Z' => {
                 let take = if n == usize::MAX { input.len() - i } else { n.min(input.len() - i) };
                 let slice = &input[i..i + take];
@@ -5322,6 +5377,46 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
                         'j' => i.to_be_bytes(),
                         'J' => (i as u64).to_be_bytes(),
                         _ => unreachable!(),
+                    };
+                    out.extend_from_slice(&b);
+                }
+            }
+            'D' | 'd' | 'E' | 'G' => {
+                // 64-bit IEEE double (D/d native, E little-endian, G big-
+                // endian). Integers coerce to Float, matching CRuby.
+                let take = if n == usize::MAX { values.len() - vi } else { n };
+                for _ in 0..take {
+                    let v = values.get(vi).cloned().unwrap_or(Value::Float(0.0));
+                    vi += 1;
+                    let f = match v {
+                        Value::Float(f) => f,
+                        Value::Int(n) => n as f64,
+                        _ => return Err("pack: expected Float for D/d/E/G".into()),
+                    };
+                    let b: [u8; 8] = match dir {
+                        'E' => f.to_le_bytes(),
+                        'G' => f.to_be_bytes(),
+                        _   => f.to_ne_bytes(),
+                    };
+                    out.extend_from_slice(&b);
+                }
+            }
+            'F' | 'f' | 'e' | 'g' => {
+                // 32-bit IEEE float (F/f native, e little-endian, g big-
+                // endian). Integers and Floats both coerce to f32.
+                let take = if n == usize::MAX { values.len() - vi } else { n };
+                for _ in 0..take {
+                    let v = values.get(vi).cloned().unwrap_or(Value::Float(0.0));
+                    vi += 1;
+                    let f = match v {
+                        Value::Float(f) => f as f32,
+                        Value::Int(n) => n as f32,
+                        _ => return Err("pack: expected Float for F/f/e/g".into()),
+                    };
+                    let b: [u8; 4] = match dir {
+                        'e' => f.to_le_bytes(),
+                        'g' => f.to_be_bytes(),
+                        _   => f.to_ne_bytes(),
                     };
                     out.extend_from_slice(&b);
                 }

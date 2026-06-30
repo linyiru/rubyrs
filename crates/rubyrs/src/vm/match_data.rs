@@ -243,11 +243,27 @@ impl Vm {
         byte_start: usize,
     ) -> Result<Value, Trap> {
         let tail = &bound[byte_start..];
-        let owned = re.captures_owned(tail).map_err(|e| {
-            self.trap(crate::error::RubyError::RuntimeError {
-                msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
-            })
-        })?;
+        // A `\G`-anchored pattern (stripped at compile time) must match
+        // EXACTLY at the search position — i.e. at the start of `tail`. Use
+        // the anchored engine (`\A(?:…)` over the slice); fall back to the
+        // forward search if no anchored engine could be built. Non-`\G`
+        // patterns keep the forward-search-from-pos semantics CRuby uses.
+        let owned = if re.g_anchored() {
+            match re.captures_owned_str_anchored(tail) {
+                Some(inner) => inner,
+                None => re.captures_owned(tail).map_err(|e| {
+                    self.trap(crate::error::RubyError::RuntimeError {
+                        msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
+                    })
+                })?,
+            }
+        } else {
+            re.captures_owned(tail).map_err(|e| {
+                self.trap(crate::error::RubyError::RuntimeError {
+                    msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
+                })
+            })?
+        };
         match owned {
             None => {
                 self.save_match_scope_on_write();
@@ -330,11 +346,12 @@ impl Vm {
         let coerced: Option<Value> = if let Value::Str(needle) = &args[0] {
             let pat = needle.to_string_lossy();
             let translated = crate::vm::step::preprocess_regex_pattern(&pat);
-            let compiled = crate::regex_engine::compile(&translated).map_err(|e| {
+            let mut compiled = crate::regex_engine::compile(&translated).map_err(|e| {
                 self.trap(RubyError::SyntaxError {
                     msg: format!("invalid regex /{}/: {}", pat, e),
                 })
             })?;
+            compiled.set_g_anchored(crate::vm::step::leading_g_anchor(&pat));
             Some(Value::Regex(std::rc::Rc::new(compiled)))
         } else {
             None

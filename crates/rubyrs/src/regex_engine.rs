@@ -159,6 +159,15 @@ pub struct CompiledRegex {
     /// `duplicate_named_groups`. Empty (the common case) means no dup
     /// names, so the named-capture path is byte-for-byte unchanged.
     dup_named: std::cell::OnceCell<Vec<(String, Vec<usize>)>>,
+    /// True when the ORIGINAL pattern began with a `\G` anchor (which
+    /// `preprocess_regex_pattern` strips so the linear engine can compile).
+    /// `\G` means "match exactly at the search position"; the match-at-pos
+    /// paths (`String#match`/`match?`/`=~` with an offset) re-honour it by
+    /// anchoring to the sliced tail's start. Set post-construction at the
+    /// regex-literal / string-coercion sites (see `set_g_anchored`); the
+    /// non-positional scan/gsub paths IGNORE it (they keep the stripped
+    /// semantics that `regex_g_anchor.rb` pins). Default false.
+    g_anchored: bool,
 }
 
 /// Validates the pattern and constructs a `CompiledRegex` whose
@@ -203,6 +212,7 @@ pub(crate) fn compile_with_flags(
             ruby_flags,
             source: bare_source.into(),
             dup_named: std::cell::OnceCell::new(),
+            g_anchored: false,
         }),
         // Syntax the linear engine rejects (lookaround, backrefs,
         // possessive quantifiers). For LARGE such patterns, DEFER the
@@ -233,6 +243,7 @@ pub(crate) fn compile_with_flags(
                 ruby_flags,
                 source: bare_source.into(),
                 dup_named: std::cell::OnceCell::new(),
+                g_anchored: false,
             })
         }
         Err(syntax_err) => match fancy_regex::Regex::new(&prepared) {
@@ -267,6 +278,7 @@ pub(crate) fn compile_with_flags(
                     source: bare_source.into(),
                     dup_named: std::cell::OnceCell::new(),
                     anchored_fancy_engine: std::cell::OnceCell::new(),
+                    g_anchored: false,
                 })
             }
             Err(fancy_err) => {
@@ -617,6 +629,34 @@ impl CompiledRegex {
     /// source so `#source` never leaks the `(?is)` group.
     pub(crate) fn as_str(&self) -> &str {
         &self.source
+    }
+
+    /// True when the original pattern led with a `\G` anchor (see the field
+    /// doc). The match-at-pos paths anchor on this; scan/gsub ignore it.
+    pub(crate) fn g_anchored(&self) -> bool {
+        self.g_anchored
+    }
+
+    /// Record that the original pattern led with `\G`. Called at the
+    /// regex-literal / `String#match`-coercion compile sites (which still
+    /// hold the un-stripped source) before the regex is shared via `Rc`.
+    pub(crate) fn set_g_anchored(&mut self, v: bool) {
+        self.g_anchored = v;
+    }
+
+    /// Predicate match over `tail` (already sliced to the search position):
+    /// anchored to the start when the pattern led with `\G`, else a forward
+    /// search. The `match?`-family arms use this so a `\G` anchor is honoured
+    /// without the MatchData materialisation `String#match` needs.
+    pub(crate) fn is_match_from(&self, tail: &str) -> bool {
+        if self.g_anchored {
+            match self.captures_owned_str_anchored(tail) {
+                Some(inner) => inner.is_some(),
+                None => self.is_match(tail),
+            }
+        } else {
+            self.is_match(tail)
+        }
     }
 
     /// Ruby flag bitmask (`RB_IGNORECASE | RB_EXTENDED |

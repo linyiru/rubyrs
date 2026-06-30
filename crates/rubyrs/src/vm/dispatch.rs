@@ -6783,12 +6783,13 @@ impl Vm {
         };
         let translated = crate::vm::step::preprocess_regex_pattern(&pat);
         let prefixed = crate::vm::step::apply_ruby_flags(&translated, flags);
-        let compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
+        let mut compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
             self.trap(RubyError::HostException {
                 class_name: "RegexpError".into(),
                 message: format!("invalid regex /{}/: {}", pat, e),
             })
         })?;
+        compiled.set_g_anchored(crate::vm::step::leading_g_anchor(&pat));
         self.stack.push(Value::Regex(Rc::new(compiled)));
         return Ok(ClassOutcome::Handled);
     }
@@ -13356,15 +13357,33 @@ impl Vm {
                     let (owned, byte_offsets) = match bytes_owned {
                         Some(o) => (o, true),
                         None => {
-                            let o = re.captures_owned(&bound).map_err(|e| {
-                                self.trap(RubyError::RuntimeError {
-                                    msg: format!(
-                                        "regex match failed: {} (pattern: /{}/)",
-                                        e,
-                                        re.as_str()
-                                    ),
-                                })
-                            })?;
+                            // A leading `\G` (stripped at compile time) anchors
+                            // the match to position 0 for the no-offset `=~` —
+                            // `"x hello" =~ /\Ghello/` is nil in CRuby, not 2.
+                            let o = if re.g_anchored() {
+                                match re.captures_owned_str_anchored(&bound) {
+                                    Some(inner) => inner,
+                                    None => re.captures_owned(&bound).map_err(|e| {
+                                        self.trap(RubyError::RuntimeError {
+                                            msg: format!(
+                                                "regex match failed: {} (pattern: /{}/)",
+                                                e,
+                                                re.as_str()
+                                            ),
+                                        })
+                                    })?,
+                                }
+                            } else {
+                                re.captures_owned(&bound).map_err(|e| {
+                                    self.trap(RubyError::RuntimeError {
+                                        msg: format!(
+                                            "regex match failed: {} (pattern: /{}/)",
+                                            e,
+                                            re.as_str()
+                                        ),
+                                    })
+                                })?
+                            };
                             (o, false)
                         }
                     };
