@@ -3096,9 +3096,13 @@ RUBYRS = "rubyrs".freeze
         // parity), unlike eagerly evaling the set body here.
         #[cfg(feature = "stdlib")]
         self.eval_inner(
-            "class Array; def to_set; Set.new(self); end; end\n\
-             class Hash;  def to_set; Set.new(to_a); end; end\n\
-             class Range; def to_set; Set.new(to_a); end; end",
+            // Forward `(klass = Set, *args, &block)` like CRuby's
+            // Enumerable#to_set — the block maps each element
+            // (rubocop-ast: `node.children.to_set(&:child)`). The vendored
+            // set.rb overwrites these with identical signatures on require.
+            "class Array; def to_set(klass = Set, *a, &b); klass.new(self, *a, &b); end; end\n\
+             class Hash;  def to_set(klass = Set, *a, &b); klass.new(to_a, *a, &b); end; end\n\
+             class Range; def to_set(klass = Set, *a, &b); klass.new(to_a, *a, &b); end; end",
             "<rubyrs:preamble:to_set-trampoline>",
         )
             .expect("ICE: failed to register to_set trampolines");

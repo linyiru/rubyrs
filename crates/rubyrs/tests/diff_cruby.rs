@@ -1212,6 +1212,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn regex_stacked_quantifier() { run_diff("regex_stacked_quantifier"); }
 #[test] fn regex_g_anchor_pos() { run_diff("regex_g_anchor_pos"); }
 #[test] fn pack_unpack_double() { run_diff("pack_unpack_double"); }
+#[cfg(feature = "stdlib")]
+#[test] fn set_ops_and_string_conv() { run_diff("set_ops_and_string_conv"); }
 #[test] fn range_bsearch() { run_diff("range_bsearch"); }
 #[test] fn const_qualified_nested_scope() { run_diff("const_qualified_nested_scope"); }
 #[test] fn struct_subclass_super() { run_diff("struct_subclass_super"); }

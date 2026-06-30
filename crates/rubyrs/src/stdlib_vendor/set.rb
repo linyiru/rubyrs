@@ -18,10 +18,16 @@ class Set
     new(items)
   end
 
-  def initialize(enum = nil)
+  def initialize(enum = nil, &block)
     @hash = {}
     return if enum.nil?
-    enum.each { |o| add(o) }
+    # CRuby: `Set.new(enum) { |o| ... }` maps each element through the
+    # block before inserting (so `[1,2].to_set(&:to_s)` is {"1","2"}).
+    if block
+      enum.each { |o| add(block.call(o)) }
+    else
+      enum.each { |o| add(o) }
+    end
   end
 
   def add(o)
@@ -57,6 +63,31 @@ class Set
     @hash.key?(o)
   end
   alias_method :member?, :include?
+  # CRuby aliases `Set#===` to `include?` — used as a membership predicate
+  # in `case`/`when` and, crucially, by rubocop-ast's NodePattern compiler,
+  # which lowers a symbol-union selector `{:a :b}` to `SET_CONST === node`.
+  alias_method :===, :include?
+
+  # Identity-comparison + copy semantics (CRuby Set), delegating to the
+  # backing Hash. rubocop-ast's NodePattern uses `Set#compare_by_identity`;
+  # `dup`/`freeze` must NOT share the backing Hash with the original.
+  def compare_by_identity
+    @hash.compare_by_identity
+    self
+  end
+
+  def compare_by_identity?
+    @hash.compare_by_identity?
+  end
+
+  def dup
+    self.class.new(self)
+  end
+
+  def freeze
+    @hash.freeze
+    super
+  end
 
   def size
     @hash.size
@@ -373,8 +404,11 @@ class Set
     to_a.first(*args)
   end
 
-  def to_set
-    self
+  # CRuby `Set#to_set(klass = Set, *args, &block)`: returns self only for
+  # the plain no-arg/no-block Set case; otherwise builds a fresh klass.
+  def to_set(klass = Set, *args, &block)
+    return self if klass == Set && args.empty? && block.nil?
+    klass.new(self, *args, &block)
   end
 
   # `Set#flatten` (Set-specific, not Enumerable): recursively merge
@@ -398,20 +432,23 @@ end
 # Enumerable mixin doesn't propagate methods to includers, so wire
 # the common collections directly. Discovery: P3 Jekyll spike —
 # `cleaner.rb#keep_dirs` does `dirs.to_set`.
+# CRuby's `Enumerable#to_set(klass = Set, *args, &block)` is `klass.new(self,
+# *args, &block)` — the optional block maps each element. rubocop-ast's
+# NodePattern compiler relies on this: `node.children.to_set(&:child)`.
 class Array
-  def to_set
-    Set.new(self)
+  def to_set(klass = Set, *args, &block)
+    klass.new(self, *args, &block)
   end
 end
 
 class Hash
-  def to_set
-    Set.new(to_a)
+  def to_set(klass = Set, *args, &block)
+    klass.new(to_a, *args, &block)
   end
 end
 
 class Range
-  def to_set
-    Set.new(to_a)
+  def to_set(klass = Set, *args, &block)
+    klass.new(to_a, *args, &block)
   end
 end

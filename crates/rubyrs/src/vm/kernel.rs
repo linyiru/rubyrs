@@ -1486,7 +1486,34 @@ impl Vm {
                         msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
                     })));
                 }
-                let s = args[0].to_display(&self.heap, &self.interner);
+                let v = args[0].clone();
+                // CRuby's `String(x)` is `x.to_s` (with a to_str precheck) and
+                // HONOURS overrides + native `to_s` arms. An Object (user
+                // instance, MatchData, …) must dispatch its real `to_s` — the
+                // old `to_display` fast path produced `#<Class:0x..>` and
+                // dropped overrides (rubocop-ast's SurroundingSpace does
+                // `String(token.space_after?)` on a MatchData expecting " ").
+                // A real send reaches native dispatch arms `lookup_method_
+                // uncached` would miss; primitives keep the fast renderer.
+                if let Value::Object(_) = v {
+                    let to_s = self.interner.intern("to_s");
+                    let pre = self.frames.len();
+                    self.stack.push(v);
+                    if let Err(e) = self.do_call(to_s, 0, false, u32::MAX) {
+                        return Some(Err(e));
+                    }
+                    if let Err(e) = self.dispatch_until(pre) {
+                        return Some(Err(e));
+                    }
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    return Some(Ok(match r {
+                        Value::Str(_) => r,
+                        // A non-String `to_s` (misbehaving override) → render
+                        // natively, matching the lenient spirit.
+                        other => Value::new_str(other.to_display(&self.heap, &self.interner)),
+                    }));
+                }
+                let s = v.to_display(&self.heap, &self.interner);
                 Some(Ok(Value::new_str(s)))
             }
             // `Rational(num, den)` / `Rational(num)` — Phase C.1
