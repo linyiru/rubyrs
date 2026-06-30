@@ -920,12 +920,21 @@ fixture `jit_each_cop_walk` (Hash/Symbol/is_a?/`&&`/predicate via `.each`, 2-arg
 (`Kind::ObjectIvar` defers the ivar fetch so `@l.sum(d-1)` emits ONE `jit_ivar_obj_call` —
 fetch ivar + class guard + native call — instead of `jit_ivar_obj_ptr` + `jit_obj_call`):
 0.328ms → 0.30ms (8%, diff_cruby GREEN 957, no regression on the firing benches). But it
-still trails YJIT 0.19ms ~1.6×. The 3 redundant self-`heap.get`s could be cut by caching
-self's `Instance` pointer once per frame (~25%), but the 2 child class-guard `heap.get`s are
-inherent: YJIT reads an object's class from its header in one load, while rubyrs's
-`ObjId → slab slot → HeapObj::Instance` costs an extra indirection per guard. A clear treesum
-surpass therefore needs an object-header class (a heap-representation change) — out of scope
-here; the realistic dispatch shapes (`fib`, the OO north-star, `bench_walk`) already surpass.
+still trails YJIT 0.19ms ~1.6×. **Shipped #2: self-`Instance`-pointer caching** — fetch self's
+`Instance` address once per frame (`jit_self_inst` at entry) so `@v`/`@l`/`@r` read via
+`jit_inst_get_int` / `jit_inst_obj_call` with no per-read `heap.get(self)`. This was predicted
+to be worth ~25%; **it measured only ~4%** (0.30ms → 0.29ms, diff_cruby GREEN 961, STRESS_GC
+clean). The prediction was wrong: the self-`heap.get`s were NOT the bottleneck. With them gone,
+the cost is the native-call dispatch boundary + the 2 child class-guards, where `class_ptr_of`
+does `ObjId → slab slot → HeapObj::Instance` per call — an indirection + two enum matches that
+YJIT does as a single object-header load. **Conclusion: treesum's residual ~1.5× is STRUCTURAL
+— the slab/enum object representation, not a tactical JIT gap.** It is the same 7× dispatch
+floor documented for the interpreter (a heap-representation change — object-header class — is
+the only lever, out of scope here). The self-`Instance` caching is kept as a small general win
+(any multi-self-ivar method) and a net-non-regression (gated off for ivar-free methods like
+`fib`). The realistic dispatch shapes (`fib`, the OO north-star, `bench_walk`, the `.each`
+cop-body walk) already surpass YJIT — treesum is the pathological all-object-access micro that
+maximally exposes the representation cost.
 
 ## Risks
 

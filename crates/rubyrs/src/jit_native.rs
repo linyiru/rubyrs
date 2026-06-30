@@ -744,6 +744,9 @@ pub(crate) fn compile(
     builder.symbol("jit_ivar_obj_ptr", jit_ivar_obj_ptr as *const u8);
     builder.symbol("jit_obj_call", jit_obj_call as *const u8);
     builder.symbol("jit_ivar_obj_call", jit_ivar_obj_call as *const u8);
+    builder.symbol("jit_self_inst", jit_self_inst as *const u8);
+    builder.symbol("jit_inst_get_int", jit_inst_get_int as *const u8);
+    builder.symbol("jit_inst_obj_call", jit_inst_obj_call as *const u8);
     builder.symbol("jit_obj_getter_array", jit_obj_getter_array as *const u8);
     builder.symbol("jit_obj_getter_sym", jit_obj_getter_sym as *const u8);
     builder.symbol("jit_hash_get_symkey", jit_hash_get_symkey as *const u8);
@@ -855,6 +858,39 @@ pub(crate) fn compile(
     iocsig.returns.push(AbiParam::new(types::I8));
     let iocid = module
         .declare_function("jit_ivar_obj_call", Linkage::Import, &iocsig)
+        .ok()?;
+    // `jit_self_inst`: (vm, self:ptr) -> inst_ptr:i64. Fetch self's Instance address once
+    // per frame so repeated self-ivar reads skip the per-read `heap.get(self)`.
+    let mut siisig = module.make_signature();
+    siisig.params.push(AbiParam::new(ptr_ty)); // vm
+    siisig.params.push(AbiParam::new(ptr_ty)); // self ptr
+    siisig.returns.push(AbiParam::new(types::I64)); // *const Instance (0 = not an Object)
+    let siid = module
+        .declare_function("jit_self_inst", Linkage::Import, &siisig)
+        .ok()?;
+    // `jit_inst_get_int`: (inst_ptr:i64, name:i32) -> (i64, i8). Ivar read from a cached ptr.
+    let mut igisig = module.make_signature();
+    igisig.params.push(AbiParam::new(types::I64)); // inst ptr
+    igisig.params.push(AbiParam::new(types::I32)); // name sym
+    igisig.returns.push(AbiParam::new(types::I64));
+    igisig.returns.push(AbiParam::new(types::I8));
+    let igiid = module
+        .declare_function("jit_inst_get_int", Linkage::Import, &igisig)
+        .ok()?;
+    // `jit_inst_obj_call`: (vm, inst_ptr:i64, ivar:i32, arg:i64, name:i32, cache:ptr, argc:i64)
+    // -> (i64, i8). [`jit_ivar_obj_call`] from a cached self-Instance ptr (no `heap.get(self)`).
+    let mut ioc2sig = module.make_signature();
+    ioc2sig.params.push(AbiParam::new(ptr_ty)); // vm
+    ioc2sig.params.push(AbiParam::new(types::I64)); // inst ptr
+    ioc2sig.params.push(AbiParam::new(types::I32)); // ivar sym
+    ioc2sig.params.push(AbiParam::new(types::I64)); // arg
+    ioc2sig.params.push(AbiParam::new(types::I32)); // name sym
+    ioc2sig.params.push(AbiParam::new(ptr_ty)); // cache cell ptr
+    ioc2sig.params.push(AbiParam::new(types::I64)); // argc
+    ioc2sig.returns.push(AbiParam::new(types::I64));
+    ioc2sig.returns.push(AbiParam::new(types::I8));
+    let ioc2id = module
+        .declare_function("jit_inst_obj_call", Linkage::Import, &ioc2sig)
         .ok()?;
     // `jit_array_len`: (vm, objid:i64) -> i64. For `local_arr.length` on a stack array.
     let mut alensig = module.make_signature();
@@ -1092,10 +1128,15 @@ pub(crate) fn compile(
         // A reference to THIS function, for compiling self-recursive calls
         // (`fib(n-1)` → a native call back into the same code).
         let self_ref = module.declare_func_in_func(fid, fb.func);
-        let ivar_ref = module.declare_func_in_func(ivid, fb.func);
+        // Superseded by the self-Instance-cached `jit_inst_get_int` / `jit_inst_obj_call`
+        // below; kept declared (the symbols remain registered) but unused in codegen.
+        let _ivar_ref = module.declare_func_in_func(ivid, fb.func);
         let ivar_obj_ref = module.declare_func_in_func(ivobjid, fb.func);
         let obj_call_ref = module.declare_func_in_func(ocid, fb.func);
-        let ivar_obj_call_ref = module.declare_func_in_func(iocid, fb.func);
+        let _ivar_obj_call_ref = module.declare_func_in_func(iocid, fb.func);
+        let self_inst_ref = module.declare_func_in_func(siid, fb.func);
+        let inst_get_int_ref = module.declare_func_in_func(igiid, fb.func);
+        let inst_obj_call_ref = module.declare_func_in_func(ioc2id, fb.func);
         let obj_getter_arr_ref = module.declare_func_in_func(ogaid, fb.func);
         let obj_getter_sym_ref = module.declare_func_in_func(ogsid, fb.func);
         let obj_call_bool_ref = module.declare_func_in_func(ocbid, fb.func);
@@ -1184,6 +1225,20 @@ pub(crate) fn compile(
         let ovf_var = fb.declare_var(types::I8);
         let z8 = fb.ins().iconst(types::I8, 0);
         fb.def_var(ovf_var, z8);
+        // Cache `self`'s Instance pointer once per frame (only for methods that read a
+        // self-ivar — `fib` etc. pay nothing) so the body's repeated `@v`/`@l`/`@r` reads
+        // skip the per-read `heap.get(self)` slab indirection (bench_treesum). `0` means
+        // self isn't an Object Instance → the inst readers deopt, same as the heap path.
+        let reads_self_ivar = code.iter().any(|op| matches!(op, Op::LoadIvar(_)));
+        let self_inst_var = fb.declare_var(types::I64);
+        if reads_self_ivar {
+            let c = fb.ins().call(self_inst_ref, &[vm_param, self_param]);
+            let r = fb.inst_results(c)[0];
+            fb.def_var(self_inst_var, r);
+        } else {
+            let z = fb.ins().iconst(types::I64, 0);
+            fb.def_var(self_inst_var, z);
+        }
         fb.ins().jump(blocks[0].unwrap(), &[]);
         fb.seal_block(entry);
 
@@ -1475,8 +1530,14 @@ pub(crate) fn compile(
                             code.get(ip + 1),
                             Some(Op::Call(m, 0, _)) if *m == syms.length || *m == syms.size
                         );
-                        let prim = if fuse_len { arraylen_ref } else { ivar_ref };
-                        let inst = fb.ins().call(prim, &[vm_param, self_param, name]);
+                        // Plain Int ivar → read from the cached self-Instance ptr (no
+                        // heap.get); `@arr.length` keeps the heap path (it needs the array).
+                        let inst = if fuse_len {
+                            fb.ins().call(arraylen_ref, &[vm_param, self_param, name])
+                        } else {
+                            let si = fb.use_var(self_inst_var);
+                            fb.ins().call(inst_get_int_ref, &[si, name])
+                        };
                         let (res, of) = {
                             let r = fb.inst_results(inst);
                             (r[0], r[1])
@@ -1938,9 +1999,10 @@ pub(crate) fn compile(
                         // fetches self.@ivar + guards + calls — no separate ptr fetch.
                         Kind::ObjectIvar(iv) => {
                             let ivc = fb.ins().iconst(types::I32, iv as i64);
+                            let si = fb.use_var(self_inst_var);
                             fb.ins().call(
-                                ivar_obj_call_ref,
-                                &[vm_param, self_param, ivc, arg, nm, cache_const, argc_const],
+                                inst_obj_call_ref,
+                                &[vm_param, si, ivc, arg, nm, cache_const, argc_const],
                             )
                         }
                         // Already-materialised Object pointer (local-stored receiver).
@@ -1962,7 +2024,8 @@ pub(crate) fn compile(
                 Op::CallNoRecv(name, 0, _) if getters.contains_key(name) => {
                     let ivar = getters[name];
                     let nm = fb.ins().iconst(types::I32, ivar.0 as i64);
-                    let inst = fb.ins().call(ivar_ref, &[vm_param, self_param, nm]);
+                    let si = fb.use_var(self_inst_var);
+                    let inst = fb.ins().call(inst_get_int_ref, &[si, nm]);
                     let (res, of) = {
                         let r = fb.inst_results(inst);
                         (r[0], r[1])
@@ -4888,6 +4951,98 @@ pub(crate) unsafe extern "C" fn jit_ivar_obj_call(
         _ => return deopt,
     };
     // Same PIC + native call as jit_obj_call, on the fetched receiver.
+    let cache = unsafe { &*cache };
+    let oid = match unsafe { &*recv } {
+        Value::Object(o) => *o,
+        _ => return deopt,
+    };
+    let cls_ptr = match unsafe { &*vm }.heap.class_ptr_of(oid) {
+        Some(p) => p,
+        None => return deopt,
+    };
+    let (cached_cls, cached_addr) = cache.get();
+    let addr = if cached_cls == cls_ptr {
+        cached_addr
+    } else if cached_cls == 0 {
+        let vmm = unsafe { &mut *vm };
+        let cls = match vmm.heap.try_class_of(oid) {
+            Some(c) => c,
+            None => return deopt,
+        };
+        match vmm.jit_compile_obj_callee(crate::intern::SymId(name), &cls, cls_ptr, argc as usize, false) {
+            Some(a) => {
+                cache.set((cls_ptr, a));
+                a
+            }
+            None => return deopt,
+        }
+    } else {
+        return deopt;
+    };
+    let f: extern "C" fn(*const crate::vm::Vm, *const Value, i64) -> NRet =
+        unsafe { std::mem::transmute(addr) };
+    f(vm as *const crate::vm::Vm, recv, arg)
+}
+
+/// Fetch the address of `self`'s `Instance` ONCE per native frame, so the body's repeated
+/// self-ivar reads (`@v`, `@l`, `@r` in `bench_treesum`) share a single `heap.get(self)`
+/// instead of one slab indirection per read. The compiled method calls this at entry and
+/// threads the pointer to [`jit_inst_get_int`] / [`jit_inst_obj_call`]. Returns the raw
+/// `*const Instance` as an `i64`, or `0` if `self` is not an Object Instance (→ those
+/// readers deopt). The pointer is valid for the whole frame: a compiled body is GC-free and
+/// the heap slab never reallocates while it runs, so the Instance address is stable.
+pub(crate) unsafe extern "C" fn jit_self_inst(
+    vm: *const crate::vm::Vm,
+    self_recv: *const Value,
+) -> i64 {
+    if self_recv.is_null() {
+        return 0;
+    }
+    let oid = match unsafe { &*self_recv } {
+        Value::Object(o) => *o,
+        _ => return 0,
+    };
+    match unsafe { &*vm }.heap.get(oid) {
+        crate::heap::HeapObj::Instance(inst) => inst as *const crate::value::Instance as i64,
+        _ => 0,
+    }
+}
+
+/// [`jit_ivar_get_int`] given a precomputed `Instance` pointer (from [`jit_self_inst`]) —
+/// reads an `Int` ivar with no `heap.get`. Deopts on a null pointer (self wasn't an Object)
+/// or a missing / non-Int ivar.
+pub(crate) unsafe extern "C" fn jit_inst_get_int(inst_ptr: i64, name: u32) -> NRet {
+    if inst_ptr == 0 {
+        return NRet { res: 0, ovf: 1 };
+    }
+    let inst = unsafe { &*(inst_ptr as *const crate::value::Instance) };
+    match inst.ivars.get(&crate::intern::SymId(name)) {
+        Some(Value::Int(n)) => NRet { res: *n, ovf: 0 },
+        _ => NRet { res: 0, ovf: 1 },
+    }
+}
+
+/// [`jit_ivar_obj_call`] given a precomputed `Instance` pointer (from [`jit_self_inst`]) —
+/// reads `self.@ivar` (the receiver Object) with no `heap.get(self)`, then runs the same
+/// PIC + native call. Only the receiver's own class guard (`heap.get(@ivar)`) remains.
+pub(crate) unsafe extern "C" fn jit_inst_obj_call(
+    vm: *mut crate::vm::Vm,
+    inst_ptr: i64,
+    ivar: u32,
+    arg: i64,
+    name: u32,
+    cache: *const std::cell::Cell<(usize, usize)>,
+    argc: i64,
+) -> NRet {
+    let deopt = NRet { res: 0, ovf: 1 };
+    if inst_ptr == 0 {
+        return deopt;
+    }
+    let inst = unsafe { &*(inst_ptr as *const crate::value::Instance) };
+    let recv: *const Value = match inst.ivars.get(&crate::intern::SymId(ivar)) {
+        Some(v @ Value::Object(_)) => v as *const Value,
+        _ => return deopt,
+    };
     let cache = unsafe { &*cache };
     let oid = match unsafe { &*recv } {
         Value::Object(o) => *o,
