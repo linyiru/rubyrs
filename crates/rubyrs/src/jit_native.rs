@@ -464,6 +464,169 @@ fn ivar_call_receiver(code: &[Op], ivar_ip: usize, syms: &JitSyms) -> Option<(Sy
     None
 }
 
+/// ADR 0035 Phase 5 — emit an INLINE linear scan of `self`'s ivar array (`base`/`len` from
+/// [`jit_self_ivars`]) for `target_sym`, returning `(pair_addr, found)`: the address of the
+/// matching `IvarPair` and an `i8` `1`/`0`. The loop bound `i < len` reads only initialized
+/// slots (sound — no uninitialized-read coincidence), so no separate bounds check is needed.
+/// On NOT-found, `found == 0` and `pair_addr == base` — a safe address to load from (a real
+/// ivar slot, or the zeroed dummy buffer when self isn't an Object), so a caller that loads
+/// `pair_addr + offset` before checking `found` never faults. Callers turn `!found` into a
+/// deopt (Int read) or branch away from the receiver call (recv read). This replaces the
+/// per-ivar `jit_inst_get_int` / `jit_inst_obj_call` PRIMITIVE CALL with in-method native
+/// code — the boundary the treesum gap was paying (ADR 0035 / the PoC).
+#[cfg(feature = "jit-native")]
+fn emit_ivar_scan(
+    fb: &mut FunctionBuilder,
+    base: ClValue,
+    len: ClValue,
+    target_sym: u32,
+) -> (ClValue, ClValue) {
+    let flags = MemFlagsData::new();
+    let addr_var = fb.declare_var(types::I64);
+    let found_var = fb.declare_var(types::I8);
+    let loop_head = fb.create_block();
+    fb.append_block_param(loop_head, types::I64); // induction i
+    let loop_body = fb.create_block();
+    let loop_cont = fb.create_block();
+    let found = fb.create_block();
+    fb.append_block_param(found, types::I64); // matching pair address
+    let notfound = fb.create_block();
+    let after = fb.create_block();
+    let zero = fb.ins().iconst(types::I64, 0);
+    fb.ins().jump(loop_head, &[zero.into()]);
+    // loop_head: i < len ? body : notfound
+    fb.switch_to_block(loop_head);
+    let i = fb.block_params(loop_head)[0];
+    let cond = fb.ins().icmp(IntCC::UnsignedLessThan, i, len);
+    fb.ins().brif(cond, loop_body, &[], notfound, &[]);
+    // loop_body: load IvarPair.sym at base + i*24; match → found(addr) else loop_cont
+    fb.switch_to_block(loop_body);
+    fb.seal_block(loop_body);
+    let off = fb.ins().imul_imm(i, 24); // sizeof(IvarPair)
+    let addr = fb.ins().iadd(base, off);
+    let sym = fb.ins().load(types::I32, flags, addr, 0); // IvarPair.sym @0
+    let m = fb.ins().icmp_imm(IntCC::Equal, sym, target_sym as i64);
+    fb.ins().brif(m, found, &[addr.into()], loop_cont, &[]);
+    // loop_cont: i += 1; back to head
+    fb.switch_to_block(loop_cont);
+    fb.seal_block(loop_cont);
+    let i1 = fb.ins().iadd_imm(i, 1);
+    fb.ins().jump(loop_head, &[i1.into()]);
+    fb.seal_block(loop_head); // preds: entry + loop_cont, both emitted
+    // found: addr = matching pair, found = 1
+    fb.switch_to_block(found);
+    fb.seal_block(found);
+    let pa = fb.block_params(found)[0];
+    fb.def_var(addr_var, pa);
+    let one = fb.ins().iconst(types::I8, 1);
+    fb.def_var(found_var, one);
+    fb.ins().jump(after, &[]);
+    // notfound: addr = base (safe to load), found = 0
+    fb.switch_to_block(notfound);
+    fb.seal_block(notfound);
+    fb.def_var(addr_var, base);
+    let z8 = fb.ins().iconst(types::I8, 0);
+    fb.def_var(found_var, z8);
+    fb.ins().jump(after, &[]);
+    // after
+    fb.switch_to_block(after);
+    fb.seal_block(after);
+    (fb.use_var(addr_var), fb.use_var(found_var))
+}
+
+/// ADR 0035 Phase 5 — inline read of an `Int` self-ivar: scan for `sym`, then load the i64
+/// payload, accumulating `ovf` (→ deopt) if the ivar is missing (scan miss) OR not an `Int`.
+/// The `Int` tag is `0` (the first `Value` variant — stable across cfg), so a `tag != 0`
+/// check catches a non-Int ivar, matching `jit_inst_get_int`'s deopt. Returns the i64 value
+/// (garbage on miss/non-Int, but the accumulated `ovf` makes the caller deopt + re-run).
+#[cfg(feature = "jit-native")]
+fn emit_ivar_int_read(
+    fb: &mut FunctionBuilder,
+    base: ClValue,
+    len: ClValue,
+    sym: u32,
+    ovf_var: Variable,
+) -> ClValue {
+    let flags = MemFlagsData::new();
+    let (addr, found) = emit_ivar_scan(fb, base, len, sym);
+    let not_found = fb.ins().icmp_imm(IntCC::Equal, found, 0);
+    // IvarPair.val is at +8; a Value's tag (u8) is at offset 0 of the Value, so +8 here.
+    let tag = fb.ins().load(types::I8, flags, addr, 8);
+    let not_int = fb.ins().icmp_imm(IntCC::NotEqual, tag, 0); // Int == tag 0
+    let cur = fb.use_var(ovf_var);
+    let bad = fb.ins().bor(not_found, not_int);
+    let no = fb.ins().bor(cur, bad);
+    fb.def_var(ovf_var, no);
+    // the i64 payload is at +8 (val) +8 (past the Value tag word) = +16
+    fb.ins().load(types::I64, flags, addr, 16)
+}
+
+/// ADR 0035 Phase 3 — the inline class-guard fast path for an obj-call on a materialised
+/// `recv_val` (`*const Value`, Kind::Object). On a PIC cache hit (recv's class == cached),
+/// `call_indirect`s the cached callee directly, skipping `jit_obj_call`'s frame + its
+/// `class_ptr_of`; cold/miss/wrong-class falls to the primitive (compile + cache + deopt).
+/// Returns `(res, ovf)`. Used by both the materialised-recv arm and (Phase 5) the
+/// scan-derived ivar receiver after it has confirmed the value is an Object.
+#[cfg(feature = "jit-native")]
+#[allow(clippy::too_many_arguments)]
+fn emit_inline_guard_call(
+    fb: &mut FunctionBuilder,
+    vm_param: ClValue,
+    recv_val: ClValue,
+    arg: ClValue,
+    nm: ClValue,
+    cache_const: ClValue,
+    argc_const: ClValue,
+    view_addr: i64,
+    ptr_ty: cranelift_codegen::ir::Type,
+    obj_call_ref: FuncRef,
+    obj_callee_sig: cranelift_codegen::ir::SigRef,
+) -> (ClValue, ClValue) {
+    let flags = MemFlagsData::new();
+    // view.class_ptrs (offset 0) → oid = *(recv+4) → cls = class_ptrs[oid] (ADR 0035 Ph1+2).
+    let view = fb.ins().iconst(ptr_ty, view_addr);
+    let base = fb.ins().load(ptr_ty, flags, view, 0);
+    let o32 = fb.ins().load(types::I32, flags, recv_val, 4);
+    let oid = fb.ins().uextend(types::I64, o32);
+    let off = fb.ins().imul_imm(oid, 8);
+    let slot = fb.ins().iadd(base, off);
+    let cls = fb.ins().load(ptr_ty, flags, slot, 0);
+    let cached_cls = fb.ins().load(ptr_ty, flags, cache_const, 0);
+    let cached_addr = fb.ins().load(ptr_ty, flags, cache_const, 8);
+    // hit = cls != 0 && cls == cached_cls.
+    let eq = fb.ins().icmp(IntCC::Equal, cls, cached_cls);
+    let nz = fb.ins().icmp_imm(IntCC::NotEqual, cls, 0);
+    let hit = fb.ins().band(eq, nz);
+    let fast_b = fb.create_block();
+    let slow_b = fb.create_block();
+    let merge_b = fb.create_block();
+    fb.append_block_param(merge_b, types::I64);
+    fb.append_block_param(merge_b, types::I8);
+    fb.ins().brif(hit, fast_b, &[], slow_b, &[]);
+    // fast: direct call to the cached callee.
+    fb.switch_to_block(fast_b);
+    fb.seal_block(fast_b);
+    let fc = fb.ins().call_indirect(obj_callee_sig, cached_addr, &[vm_param, recv_val, arg]);
+    let (fr, fo) = {
+        let r = fb.inst_results(fc);
+        (r[0], r[1])
+    };
+    fb.ins().jump(merge_b, &[fr.into(), fo.into()]);
+    // slow: the primitive (compile/cache/deopt + the call).
+    fb.switch_to_block(slow_b);
+    fb.seal_block(slow_b);
+    let sc = fb.ins().call(obj_call_ref, &[vm_param, recv_val, arg, nm, cache_const, argc_const]);
+    let (sr, so) = {
+        let r = fb.inst_results(sc);
+        (r[0], r[1])
+    };
+    fb.ins().jump(merge_b, &[sr.into(), so.into()]);
+    fb.switch_to_block(merge_b);
+    fb.seal_block(merge_b);
+    let p = fb.block_params(merge_b);
+    (p[0], p[1])
+}
+
 pub(crate) fn compile(
     proto: &Proto,
     self_name_id: SymId,
@@ -767,6 +930,7 @@ pub(crate) fn compile(
     builder.symbol("jit_obj_call", jit_obj_call as *const u8);
     builder.symbol("jit_ivar_obj_call", jit_ivar_obj_call as *const u8);
     builder.symbol("jit_self_inst", jit_self_inst as *const u8);
+    builder.symbol("jit_self_ivars", jit_self_ivars as *const u8);
     builder.symbol("jit_inst_get_int", jit_inst_get_int as *const u8);
     builder.symbol("jit_inst_obj_call", jit_inst_obj_call as *const u8);
     builder.symbol("jit_obj_getter_array", jit_obj_getter_array as *const u8);
@@ -889,6 +1053,16 @@ pub(crate) fn compile(
     siisig.returns.push(AbiParam::new(types::I64)); // *const Instance (0 = not an Object)
     let siid = module
         .declare_function("jit_self_inst", Linkage::Import, &siisig)
+        .ok()?;
+    // `jit_self_ivars`: (vm, self:ptr) -> (base:i64, len:i64). The ivar array for the inline
+    // scan (ADR 0035 Phase 5).
+    let mut sivsig = module.make_signature();
+    sivsig.params.push(AbiParam::new(ptr_ty)); // vm
+    sivsig.params.push(AbiParam::new(ptr_ty)); // self ptr
+    sivsig.returns.push(AbiParam::new(types::I64)); // base (0 = not an Object)
+    sivsig.returns.push(AbiParam::new(types::I64)); // len
+    let sivid = module
+        .declare_function("jit_self_ivars", Linkage::Import, &sivsig)
         .ok()?;
     // `jit_inst_get_int`: (inst_ptr:i64, name:i32) -> (i64, i8). Ivar read from a cached ptr.
     let mut igisig = module.make_signature();
@@ -1168,9 +1342,11 @@ pub(crate) fn compile(
             fb.func.import_signature(s)
         };
         let _ivar_obj_call_ref = module.declare_func_in_func(iocid, fb.func);
-        let self_inst_ref = module.declare_func_in_func(siid, fb.func);
-        let inst_get_int_ref = module.declare_func_in_func(igiid, fb.func);
-        let inst_obj_call_ref = module.declare_func_in_func(ioc2id, fb.func);
+        // Superseded by the inline ivar scan (ADR 0035 Phase 5); kept registered.
+        let _self_inst_ref = module.declare_func_in_func(siid, fb.func);
+        let self_ivars_ref = module.declare_func_in_func(sivid, fb.func);
+        let _inst_get_int_ref = module.declare_func_in_func(igiid, fb.func);
+        let _inst_obj_call_ref = module.declare_func_in_func(ioc2id, fb.func);
         let obj_getter_arr_ref = module.declare_func_in_func(ogaid, fb.func);
         let obj_getter_sym_ref = module.declare_func_in_func(ogsid, fb.func);
         let obj_call_bool_ref = module.declare_func_in_func(ocbid, fb.func);
@@ -1259,19 +1435,25 @@ pub(crate) fn compile(
         let ovf_var = fb.declare_var(types::I8);
         let z8 = fb.ins().iconst(types::I8, 0);
         fb.def_var(ovf_var, z8);
-        // Cache `self`'s Instance pointer once per frame (only for methods that read a
-        // self-ivar — `fib` etc. pay nothing) so the body's repeated `@v`/`@l`/`@r` reads
-        // skip the per-read `heap.get(self)` slab indirection (bench_treesum). `0` means
-        // self isn't an Object Instance → the inst readers deopt, same as the heap path.
+        // ADR 0035 Phase 5 — fetch `self`'s ivar array (base + len) ONCE per frame (only for
+        // methods that read a self-ivar — `fib` etc. pay nothing); the body's `@v`/`@l`/`@r`
+        // reads become inline scans over it (`emit_ivar_scan`) with no per-read primitive
+        // call. `len == 0` (self not an Object) → every scan finds nothing → deopt.
         let reads_self_ivar = code.iter().any(|op| matches!(op, Op::LoadIvar(_)));
-        let self_inst_var = fb.declare_var(types::I64);
+        let self_ivars_base = fb.declare_var(types::I64);
+        let self_ivars_len = fb.declare_var(types::I64);
         if reads_self_ivar {
-            let c = fb.ins().call(self_inst_ref, &[vm_param, self_param]);
-            let r = fb.inst_results(c)[0];
-            fb.def_var(self_inst_var, r);
+            let c = fb.ins().call(self_ivars_ref, &[vm_param, self_param]);
+            let (b, l) = {
+                let r = fb.inst_results(c);
+                (r[0], r[1])
+            };
+            fb.def_var(self_ivars_base, b);
+            fb.def_var(self_ivars_len, l);
         } else {
             let z = fb.ins().iconst(types::I64, 0);
-            fb.def_var(self_inst_var, z);
+            fb.def_var(self_ivars_base, z);
+            fb.def_var(self_ivars_len, z);
         }
         fb.ins().jump(blocks[0].unwrap(), &[]);
         fb.seal_block(entry);
@@ -1564,19 +1746,21 @@ pub(crate) fn compile(
                             code.get(ip + 1),
                             Some(Op::Call(m, 0, _)) if *m == syms.length || *m == syms.size
                         );
-                        // Plain Int ivar → read from the cached self-Instance ptr (no
-                        // heap.get); `@arr.length` keeps the heap path (it needs the array).
-                        let inst = if fuse_len {
-                            fb.ins().call(arraylen_ref, &[vm_param, self_param, name])
+                        // Plain Int ivar → inline scan of the ivar array (ADR 0035 Phase 5),
+                        // no primitive call; `@arr.length` keeps the heap path (needs the array).
+                        let res = if fuse_len {
+                            let inst = fb.ins().call(arraylen_ref, &[vm_param, self_param, name]);
+                            let (r, of) = {
+                                let rr = fb.inst_results(inst);
+                                (rr[0], rr[1])
+                            };
+                            acc_ovf(&mut fb, of);
+                            r
                         } else {
-                            let si = fb.use_var(self_inst_var);
-                            fb.ins().call(inst_get_int_ref, &[si, name])
+                            let base = fb.use_var(self_ivars_base);
+                            let len = fb.use_var(self_ivars_len);
+                            emit_ivar_int_read(&mut fb, base, len, s.0, ovf_var)
                         };
-                        let (res, of) = {
-                            let r = fb.inst_results(inst);
-                            (r[0], r[1])
-                        };
-                        acc_ovf(&mut fb, of);
                         stack.push((res, Kind::Int));
                         if fuse_len {
                             ip += 1;
@@ -2029,82 +2213,65 @@ pub(crate) fn compile(
                     let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
                     let argc_const = fb.ins().iconst(types::I64, *argc as i64);
                     let (res, of) = match recv_kind {
-                        // DEFERRED ivar receiver (`@l.sum(d-1)`): the FUSED primitive
-                        // fetches self.@ivar + guards + calls — no separate ptr fetch.
-                        Kind::ObjectIvar(iv) => {
-                            let ivc = fb.ins().iconst(types::I32, iv as i64);
-                            let si = fb.use_var(self_inst_var);
-                            let inst = fb.ins().call(
-                                inst_obj_call_ref,
-                                &[vm_param, si, ivc, arg, nm, cache_const, argc_const],
-                            );
-                            let r = fb.inst_results(inst);
-                            (r[0], r[1])
-                        }
-                        // Already-materialised Object pointer (local-stored receiver). ADR
-                        // 0035 Phase 3 — inline the class-guard fast path: on a PIC cache hit
-                        // (recv's class == the cached class), call the cached callee directly,
-                        // skipping the `jit_obj_call` primitive frame + its `class_ptr_of`.
-                        // Cold / miss / wrong class falls to the primitive (compile + cache +
-                        // deopt). `view_addr == 0` disables the fast path entirely.
-                        _ if view_addr != 0 => {
+                        // DEFERRED ivar receiver (`@l.sum(d-1)`), ADR 0035 Phase 5: inline-scan
+                        // self's ivar array for the receiver, confirm it's an Object, then run
+                        // the inline class guard + call on it — no `jit_inst_obj_call`
+                        // primitive. On a scan MISS / non-Object the call is SKIPPED (deopt,
+                        // result 0), so a side-effecting callee never double-runs on the
+                        // deopt-redo. Needs the view (always present in jit-native).
+                        Kind::ObjectIvar(iv) if view_addr != 0 => {
                             let flags = MemFlagsData::new();
-                            // view.class_ptrs (offset 0) — the live base of the class table.
-                            let view = fb.ins().iconst(ptr_ty, view_addr);
-                            let base = fb.ins().load(ptr_ty, flags, view, 0);
-                            // oid = *(recv + 4) as u32 (Value::Object payload, ADR 0035 Ph1).
-                            let o32 = fb.ins().load(types::I32, flags, recv_val, 4);
-                            let oid = fb.ins().uextend(types::I64, o32);
-                            // cls = class_ptrs[oid]
-                            let off = fb.ins().imul_imm(oid, 8);
-                            let slot = fb.ins().iadd(base, off);
-                            let cls = fb.ins().load(ptr_ty, flags, slot, 0);
-                            let cached_cls = fb.ins().load(ptr_ty, flags, cache_const, 0);
-                            let cached_addr = fb.ins().load(ptr_ty, flags, cache_const, 8);
-                            // hit = cls != 0 && cls == cached_cls (a 0 cls means recv is not a
-                            // class-bearing Instance → take the slow path, which deopts; a 0
-                            // cached_cls means a cold cache → miss → slow path compiles it).
-                            let eq = fb.ins().icmp(IntCC::Equal, cls, cached_cls);
-                            let nz = fb.ins().icmp_imm(IntCC::NotEqual, cls, 0);
-                            let hit = fb.ins().band(eq, nz);
-                            let fast_b = fb.create_block();
-                            let slow_b = fb.create_block();
+                            let base = fb.use_var(self_ivars_base);
+                            let len = fb.use_var(self_ivars_len);
+                            let (pair_addr, found) = emit_ivar_scan(&mut fb, base, len, iv);
+                            // The receiver is `&IvarPair.val` (the Value at +8). It must be an
+                            // Object; `object_tag` is its `#[repr(u8)]` discriminant (cfg-
+                            // dependent, so computed here at compile time, not baked blindly).
+                            let object_tag = unsafe {
+                                *(&Value::Object(crate::value::ObjId(0)) as *const Value
+                                    as *const u8)
+                            } as i64;
+                            let tag = fb.ins().load(types::I8, flags, pair_addr, 8);
+                            let is_obj = fb.ins().icmp_imm(IntCC::Equal, tag, object_tag);
+                            let ok = fb.ins().band(found, is_obj);
+                            let call_b = fb.create_block();
+                            let deopt_b = fb.create_block();
                             let merge_b = fb.create_block();
                             fb.append_block_param(merge_b, types::I64);
                             fb.append_block_param(merge_b, types::I8);
-                            fb.ins().brif(hit, fast_b, &[], slow_b, &[]);
-                            // fast: direct call to the cached callee, no primitive frame.
-                            fb.switch_to_block(fast_b);
-                            fb.seal_block(fast_b);
-                            let fc = fb.ins().call_indirect(
-                                obj_callee_sig,
-                                cached_addr,
-                                &[vm_param, recv_val, arg],
+                            fb.ins().brif(ok, call_b, &[], deopt_b, &[]);
+                            // call: recv = pair_addr + 8 → inline guard + call.
+                            fb.switch_to_block(call_b);
+                            fb.seal_block(call_b);
+                            let recv_ptr = fb.ins().iadd_imm(pair_addr, 8);
+                            let (cr, co) = emit_inline_guard_call(
+                                &mut fb, vm_param, recv_ptr, arg, nm, cache_const, argc_const,
+                                view_addr, ptr_ty, obj_call_ref, obj_callee_sig,
                             );
-                            let (fr, fo) = {
-                                let r = fb.inst_results(fc);
-                                (r[0], r[1])
-                            };
-                            fb.ins().jump(merge_b, &[fr.into(), fo.into()]);
-                            // slow: the existing primitive (compile/cache/deopt + the call).
-                            fb.switch_to_block(slow_b);
-                            fb.seal_block(slow_b);
-                            let sc = fb.ins().call(
-                                obj_call_ref,
-                                &[vm_param, recv_val, arg, nm, cache_const, argc_const],
-                            );
-                            let (sr, so) = {
-                                let r = fb.inst_results(sc);
-                                (r[0], r[1])
-                            };
-                            fb.ins().jump(merge_b, &[sr.into(), so.into()]);
+                            fb.ins().jump(merge_b, &[cr.into(), co.into()]);
+                            // deopt: missing ivar / non-Object → result 0, ovf 1, no call.
+                            fb.switch_to_block(deopt_b);
+                            fb.seal_block(deopt_b);
+                            let z = fb.ins().iconst(types::I64, 0);
+                            let one = fb.ins().iconst(types::I8, 1);
+                            fb.ins().jump(merge_b, &[z.into(), one.into()]);
                             fb.switch_to_block(merge_b);
                             fb.seal_block(merge_b);
                             let p = fb.block_params(merge_b);
                             (p[0], p[1])
                         }
-                        // Fast path disabled (no view) — the primitive does everything.
+                        // Already-materialised Object pointer (local-stored receiver), ADR 0035
+                        // Phase 3 — inline class-guard fast path.
+                        _ if view_addr != 0 => emit_inline_guard_call(
+                            &mut fb, vm_param, recv_val, arg, nm, cache_const, argc_const,
+                            view_addr, ptr_ty, obj_call_ref, obj_callee_sig,
+                        ),
+                        // Fast path disabled (no view, never in jit-native). An ObjectIvar
+                        // receiver has no materialised recv to fall back on, so decline.
                         _ => {
+                            if matches!(recv_kind, Kind::ObjectIvar(_)) {
+                                return None;
+                            }
                             let inst = fb.ins().call(
                                 obj_call_ref,
                                 &[vm_param, recv_val, arg, nm, cache_const, argc_const],
@@ -2121,14 +2288,9 @@ pub(crate) fn compile(
                 // `jit_ivar_get_int`, no frame/dispatch. A non-Int ivar deopts.
                 Op::CallNoRecv(name, 0, _) if getters.contains_key(name) => {
                     let ivar = getters[name];
-                    let nm = fb.ins().iconst(types::I32, ivar.0 as i64);
-                    let si = fb.use_var(self_inst_var);
-                    let inst = fb.ins().call(inst_get_int_ref, &[si, nm]);
-                    let (res, of) = {
-                        let r = fb.inst_results(inst);
-                        (r[0], r[1])
-                    };
-                    acc_ovf(&mut fb, of);
+                    let base = fb.use_var(self_ivars_base);
+                    let len = fb.use_var(self_ivars_len);
+                    let res = emit_ivar_int_read(&mut fb, base, len, ivar.0, ovf_var);
                     stack.push((res, Kind::Int));
                 }
                 // 2-arg self-recursive call (`walk(child, acc)`, ADR 0034 piece 8):
@@ -5103,6 +5265,47 @@ pub(crate) unsafe extern "C" fn jit_self_inst(
     match unsafe { &*vm }.heap.get(oid) {
         crate::heap::HeapObj::Instance(inst) => inst as *const crate::value::Instance as i64,
         _ => 0,
+    }
+}
+
+/// Two-word return for [`jit_self_ivars`]: the base + length of `self`'s contiguous ivar
+/// array (`IvarPair`s). `#[repr(C)]` so it lands in two registers, matching the JIT's
+/// 2-i64-return signature.
+#[repr(C)]
+pub(crate) struct IvarsRet {
+    base: i64,
+    len: i64,
+}
+
+/// ADR 0035 Phase 5 — fetch `self`'s ivar array (base pointer + length) ONCE per native
+/// frame, so the body's self-ivar reads (`@v`/`@l`/`@r`) become inline scans over that array
+/// with no per-read primitive call. `(0, 0)` if `self` is not an Object Instance (→ the scan,
+/// with `len == 0`, finds nothing and deopts). The base points into the Instance's `SmallVec`
+/// (inline buffer or spilled heap) and is valid for the GC-free duration of the compiled
+/// method — the heap does not move while one runs.
+pub(crate) unsafe extern "C" fn jit_self_ivars(
+    vm: *const crate::vm::Vm,
+    self_recv: *const Value,
+) -> IvarsRet {
+    // A non-Object self yields `len == 0` (the scan finds nothing → deopt) and a base that
+    // points at a small zeroed buffer rather than null — so a not-found read's dummy load
+    // (`base + offset`) touches valid, zeroed memory instead of faulting. (An instance method
+    // always has an Object self, so this is belt-and-suspenders.)
+    static DUMMY: [u8; 64] = [0; 64];
+    let dummy = IvarsRet { base: DUMMY.as_ptr() as i64, len: 0 };
+    if self_recv.is_null() {
+        return dummy;
+    }
+    let oid = match unsafe { &*self_recv } {
+        Value::Object(o) => *o,
+        _ => return dummy,
+    };
+    match unsafe { &*vm }.heap.get(oid) {
+        crate::heap::HeapObj::Instance(inst) => {
+            let (ptr, len) = inst.ivars.as_ptr_len();
+            IvarsRet { base: ptr as i64, len: len as i64 }
+        }
+        _ => dummy,
     }
 }
 

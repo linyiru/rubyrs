@@ -112,7 +112,37 @@ change, inline-small preserved. Contained to IvarTable (its 145 callers untouche
 fully encapsulated). offset/size const-asserts pin it. diff_cruby GREEN both builds (967),
 zero behaviour change.
 
-### Phase 5 — inline ivar reads in codegen (NEXT — treesum surpass)
+### Phase 5 — inline ivar reads in codegen (✅ done; BROAD win, treesum now slab-bound)
+Shipped: `jit_self_ivars(self) -> (base, len)` ONE primitive at entry (the ivar array via
+`as_ptr_len`), then `emit_ivar_scan` — an inline linear scan of `base[0..len]` for the ivar's
+sym — replaces `jit_inst_get_int` (`@v`) and `jit_inst_obj_call` (`@l`/`@r`). For an Int read
+(`emit_ivar_int_read`) the i64 payload is loaded + a `tag != 0` Int check; for a receiver, the
+scan's address feeds the Phase 3b inline guard + `call_indirect`, with the call SKIPPED on a
+scan-miss / non-Object (so a side-effecting callee never double-runs on the deopt-redo). Sound
+by construction: the loop bound `i < len` reads only initialized slots; no slot map needed
+(self-contained). The `_ =>` materialised-recv guard was factored into `emit_inline_guard_call`,
+reused by both arms.
+
+**Result — the BROAD win landed, treesum is now provably slab-bound.** A single-ivar getter in
+a loop (`@x` summed, `poc/jit-spike/bench_getter.rb`): jitN **0.145ms vs YJIT 0.186ms — beats
+YJIT 1.28×** (the inline read is fast; the per-call `jit_self_ivars` slab lookup AMORTIZES over
+the loop). `bench_hammer` (a method's `@b` read now inlines too): 0.50 → 0.47ms. treesum:
+0.29 → **0.258ms vs YJIT 0.187ms** — closed 1.55× → 1.38×, but NOT surpassed. A profile shows
+the only remaining named frame is `jit_self_ivars`: treesum calls it ONCE PER RECURSIVE `sum()`
+(it can't amortize, unlike the getter loop), and that `oid → slab slot → Instance` lookup is
+the structural objects-as-oid cost YJIT pays 0 for (its self is a direct pointer). The
+inline-ivar mechanism is proven fast (getter beats YJIT); **treesum's residual is purely the
+per-call slab lookup.** Correctness: parity interp == JIT == CRuby + STRESS_GC on
+`jit_inline_ivar_read` (treesum shape, REVERSE-order ivars [scan matches by sym], missing-ivar
+deopt); diff_cruby GREEN both builds (967); debug jit-native scan codegen clean (no desync).
+
+**Full treesum surpass needs Phase 6 — objects as direct pointers** (eliminate the `oid → slab`
+indirection so `self` is a pointer and `jit_self_ivars` disappears). That is a far larger
+heap/GC rewrite (every `ObjId` becomes a pointer; the slab, the free list, marking, the
+`class_ptrs`/view tables all change) — its own ADR, deferred. The broad inline-object-access win
+(Phases 3+5: obj-calls and ivar reads beat YJIT) is banked independent of it.
+
+#### Phase 5 original plan (superseded — kept for context)
 Per-node, treesum pays ~6 JIT↔primitive boundaries (`jit_self_inst` + `jit_inst_get_int` for
 `@v` + 2× `jit_inst_obj_call` for `@l`/`@r`, each of which also calls its callee). Plan to
 halve it to 3:
