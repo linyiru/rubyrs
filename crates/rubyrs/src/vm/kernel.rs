@@ -281,6 +281,22 @@ impl Vm {
                 Some(Ok(Value::new_str_bytes_binary(out)))
             }
             #[cfg(feature = "stdlib")]
+            "__zlib_crc32" => {
+                let Some(Value::Str(s)) = args.first() else {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "Zlib crc32: expected String".into(),
+                    })));
+                };
+                // `Zlib.crc32(string, prev_crc = 0)` — the optional second
+                // arg continues a prior checksum.
+                let init = match args.get(1) {
+                    Some(Value::Int(n)) => *n as u32,
+                    _ => 0,
+                };
+                let data = s.content.borrow().to_vec();
+                Some(Ok(Value::Int(crate::zlib_native::crc32(&data, init) as i64)))
+            }
+            #[cfg(feature = "stdlib")]
             "__zlib_gunzip" => {
                 let Some(Value::Str(s)) = args.first() else {
                     return Some(Err(self.trap(RubyError::ArgumentError {
@@ -898,19 +914,26 @@ impl Vm {
                         msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
                     })));
                 }
-                // Resolve the enclosing method LEXICALLY — the same
-                // `find_lexical_owner_frame` walk `yield` uses — not by
-                // the call-stack-nearest method frame. They diverge when
-                // the block runs through a user iterator that itself has
-                // a block: `def helper; yield; end; def m; helper {
-                // block_given? }; end` must report m's block, but the
-                // nearest call-stack method is `helper` (which always has
-                // a block). Matching yield's resolution keeps the two
-                // consistent (and unblocks Enumerable methods that branch
-                // on `block_given?` inside their `each { ... }` driver).
+                // Resolve the SAME block `yield`/`super` resolve: in a
+                // block frame the captured `captured_yield_block`, in a
+                // method frame its own `block_arg` (mirrors lookup.rs's
+                // super dispatch). This must NOT re-walk to a lexical-owner
+                // frame on the stack: a block stored as a Proc and `.call`ed
+                // AFTER its enclosing method returned (RuboCop's `opts.on {
+                // |a| ...; yield a if block_given? }`, run later by
+                // `parse!`) has no owner frame left to walk to, but its
+                // `captured_yield_block` still carries the method's block —
+                // exactly what CRuby's closure reports. The old
+                // `lexical_owner_of_top` walk returned false there (so the
+                // deferred `yield` never fired), even though a bare `yield`
+                // in the same block worked. It also still reports the
+                // enclosing method's block for `def helper; yield; end; def
+                // m; helper { block_given? }` because the block's
+                // `captured_yield_block` is m's block, captured at creation.
                 let has_block = self
-                    .lexical_owner_of_top()
-                    .map(|idx| self.frames[idx].block_arg.is_some())
+                    .frames
+                    .last()
+                    .map(|f| if f.is_block { f.captured_yield_block.is_some() } else { f.block_arg.is_some() })
                     .unwrap_or(false);
                 Some(Ok(Value::Bool(has_block)))
             }
@@ -922,14 +945,17 @@ impl Vm {
             // CRuby: hit returns a String, miss returns nil.
             "__defined_yield?" => {
                 // `defined?(yield)` — "yield" iff the enclosing method
-                // was called with a block, else nil (same lexical-owner
-                // resolution as `block_given?`). sequel's Database.connect
-                // gates `return yield(db)` on `if defined?(yield)`; with
-                // the old catch-all "expression" label it always ran the
-                // yield and raised "no block given".
+                // was called with a block, else nil (same resolution as
+                // `block_given?`: the block frame's captured block, or a
+                // method frame's own block_arg — survives a deferred Proc
+                // whose enclosing method already returned). sequel's
+                // Database.connect gates `return yield(db)` on `if
+                // defined?(yield)`; with the old catch-all "expression"
+                // label it always ran the yield and raised "no block given".
                 let has_block = self
-                    .lexical_owner_of_top()
-                    .map(|idx| self.frames[idx].block_arg.is_some())
+                    .frames
+                    .last()
+                    .map(|f| if f.is_block { f.captured_yield_block.is_some() } else { f.block_arg.is_some() })
                     .unwrap_or(false);
                 Some(Ok(if has_block { Value::new_str("yield") } else { Value::Nil }))
             }
@@ -5274,6 +5300,10 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
         "securerandom" => &[("SecureRandom", true)],
         "json" => &[("JSON", true)],
         "yaml" => &[("YAML", true)],
+        // CRuby exposes `Psych` as a Module (YAML is literally Psych).
+        // The require hook aliases the two constants either way; this
+        // makes a bare `require "psych"` materialise the shell too.
+        "psych" => &[("Psych", true)],
         "date" => &[("Date", false), ("DateTime", false)],
         // CRuby's lib/time.rb does `require 'date'` internally, so
         // `require "time"` makes Date / DateTime resolvable too.

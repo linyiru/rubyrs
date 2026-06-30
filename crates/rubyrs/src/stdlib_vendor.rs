@@ -84,9 +84,31 @@ pub(crate) fn always_on_stub_extras(name: &str) -> Option<&'static str> {
         // Psych::Handler internals (which rubyrs can't satisfy) are
         // bypassed. Discovery: P3 Jekyll spike — jekyll reads
         // front-matter via SafeYAML.load / load_file.
-        "yaml" | "safe_yaml" | "safe_yaml/load" => {
-            Some(include_str!("stdlib_vendor/yaml.rb"))
-        }
+        // The focused loader (yaml.rb) plus the Psych streaming-parser +
+        // node-tree materialization internals (psych.rb) — concatenated
+        // so `Psych::Parser` / `Psych::TreeBuilder` / `Psych::Nodes` /
+        // `Psych::Visitors::ToRuby` / `Psych::ScalarScanner` are defined
+        // alongside `YAML.load`. psych.rb is appended (not prepended): it
+        // reuses `RubyrsYAMLParse`'s helpers, which yaml.rb defines.
+        // Driver: RuboCop's YAMLDuplicationChecker subclasses
+        // Psych::TreeBuilder, and its config_loader materializes the
+        // parsed tree via YAML::ClassLoader::Restricted / ScalarScanner /
+        // Visitors::ToRuby. `require "yaml"` must NOT define `::SafeYAML`.
+        "yaml" | "psych" => Some(concat!(
+            include_str!("stdlib_vendor/yaml.rb"),
+            "\n",
+            include_str!("stdlib_vendor/psych.rb"),
+        )),
+        // `require "safe_yaml"` additionally installs the SafeYAML shim
+        // (jekyll's front-matter reader). Kept off the bare-yaml path so
+        // `defined?(::SafeYAML)` stays false for RuboCop.
+        "safe_yaml" | "safe_yaml/load" => Some(concat!(
+            include_str!("stdlib_vendor/yaml.rb"),
+            "\n",
+            include_str!("stdlib_vendor/psych.rb"),
+            "\n",
+            include_str!("stdlib_vendor/safe_yaml.rb"),
+        )),
         // `logger`: reopen the Logger shell with the severity-level
         // constants + the debug/info/warn/error/add surface (and the
         // format_* helpers subclasses call). Discovery: P3 Jekyll

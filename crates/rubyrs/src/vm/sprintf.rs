@@ -5,18 +5,64 @@
 //! changed.
 
 use crate::error::RubyError;
-use crate::heap::Heap;
+use crate::heap::{Heap, HeapObj};
 use crate::intern::Interner;
 use crate::value::Value;
+
+/// Resolve a `%<name>…` / `%{name}` reference against the single hash
+/// argument (CRuby: named directives take their value from a sole Hash
+/// arg keyed by Symbol or String). A missing key raises `KeyError`
+/// (`key<name> not found` / `key{name} not found`); a non-Hash sole
+/// arg raises ArgumentError "one hash required". Returns a clone so the
+/// caller isn't tied to the heap borrow.
+fn lookup_named_value(
+    name: &str,
+    args: &[Value],
+    heap: &Heap,
+    interner: &Interner,
+    brace: bool,
+) -> Result<Value, RubyError> {
+    let id = match args.first() {
+        Some(Value::Hash(id)) => *id,
+        _ => {
+            return Err(RubyError::ArgumentError {
+                msg: "one hash required".into(),
+            })
+        }
+    };
+    let HeapObj::Hash(h) = heap.get(id) else {
+        return Err(RubyError::ArgumentError {
+            msg: "one hash required".into(),
+        });
+    };
+    for (k, v) in h.pairs.iter() {
+        let hit = match k {
+            Value::Sym(sid) => interner.resolve(*sid).as_ref() == name,
+            Value::Str(s) => s.to_string_lossy() == name,
+            _ => false,
+        };
+        if hit {
+            return Ok(v.clone());
+        }
+    }
+    let msg = if brace {
+        format!("key{{{name}}} not found")
+    } else {
+        format!("key<{name}> not found")
+    };
+    Err(RubyError::KeyError { msg })
+}
 
 /// Minimal printf-style formatter used by `String#%`. Supports the
 /// flag set [- + 0 space #], optional width and precision (decimal
 /// integers or `*` for argument-driven values — a negative `*` width
 /// left-justifies, a negative `*` precision is ignored), and
 /// conversion specifiers d/i, f, s, x, X, o, b, B,
-/// c, p, plus the literal `%%`. Positional (`%1$d`) and named
-/// (`%<name>s`) directives are out of scope; encountering them
-/// raises ArgumentError so the caller can `rescue`.
+/// c, p, plus the literal `%%`. Also supports positional (`%1$d`) and
+/// named references — `%<name>s` (full flags/width/precision/conv on the
+/// named hash value) and the self-contained `%{name}` (the value's
+/// `to_s`). Named directives read the sole hash argument; a missing key
+/// raises KeyError. An unknown conversion char raises ArgumentError.
 pub(crate) fn ruby_sprintf(
     fmt: &str,
     args: &[Value],
@@ -37,6 +83,39 @@ pub(crate) fn ruby_sprintf(
         if c != '%' {
             out.push(c);
             continue;
+        }
+        // `%{name}` — a self-contained directive: substitute the named
+        // hash value rendered as a string (CRuby's `to_s`), no flags /
+        // width / conversion. `"%{x}" % {x: 1}` → "1".
+        if chars.peek() == Some(&'{') {
+            chars.next();
+            let mut name = String::new();
+            for ch in chars.by_ref() {
+                if ch == '}' {
+                    break;
+                }
+                name.push(ch);
+            }
+            let v = lookup_named_value(&name, args, heap, interner, true)?;
+            out.push_str(&v.to_display(heap, interner));
+            continue;
+        }
+        // `%<name>…` — a reference whose value comes from the sole hash
+        // arg; the rest of the directive (flags/width/precision/conv) is
+        // parsed normally below. The name may also appear AFTER the
+        // flags/width/precision (e.g. `%06.2<f>f`); that second position
+        // is handled just before the conversion char is read.
+        let mut named_key: Option<String> = None;
+        if chars.peek() == Some(&'<') {
+            chars.next();
+            let mut name = String::new();
+            for ch in chars.by_ref() {
+                if ch == '>' {
+                    break;
+                }
+                name.push(ch);
+            }
+            named_key = Some(name);
         }
         // Positional argument reference: `%N$…` makes this spec use the
         // N-th (1-based) argument instead of the next sequential one —
@@ -154,6 +233,21 @@ pub(crate) fn ruby_sprintf(
                 precision = Some(p);
             }
         }
+        // Second valid position for a `%<name>` reference: after the
+        // flags/width/precision, immediately before the conversion char
+        // (e.g. `%06.2<f>f`). Only honoured if one wasn't already seen
+        // right after the `%`.
+        if named_key.is_none() && chars.peek() == Some(&'<') {
+            chars.next();
+            let mut name = String::new();
+            for ch in chars.by_ref() {
+                if ch == '>' {
+                    break;
+                }
+                name.push(ch);
+            }
+            named_key = Some(name);
+        }
         let spec = chars.next().ok_or_else(|| RubyError::ArgumentError {
             msg: "malformed format string - %".into(),
         })?;
@@ -161,16 +255,33 @@ pub(crate) fn ruby_sprintf(
             out.push('%');
             continue;
         }
-        // An explicit `%N$` reference selects args[N-1] and does NOT
-        // advance the sequential cursor; otherwise consume the next
-        // sequential argument.
-        let arg_idx = explicit_idx.unwrap_or(idx);
-        let arg = args.get(arg_idx).ok_or_else(|| RubyError::ArgumentError {
-            msg: "too few arguments".into(),
-        })?;
-        if explicit_idx.is_none() {
-            idx += 1;
-        }
+        // Argument selection. A `%<name>` reference pulls from the sole
+        // hash arg (does not advance the sequential cursor). Otherwise an
+        // explicit `%N$` reference selects args[N-1] (also no advance),
+        // and a plain directive consumes the next sequential argument.
+        let named_value: Option<Value> = match &named_key {
+            Some(name) => Some(lookup_named_value(name, args, heap, interner, false)?),
+            None => None,
+        };
+        // `arg_idx` only matters for `%p`'s pre-rendered inspect override
+        // (positional); a named arg has none, so point past the slice.
+        let arg_idx = if named_value.is_some() {
+            usize::MAX
+        } else {
+            explicit_idx.unwrap_or(idx)
+        };
+        let arg: &Value = match &named_value {
+            Some(v) => v,
+            None => {
+                let a = args.get(arg_idx).ok_or_else(|| RubyError::ArgumentError {
+                    msg: "too few arguments".into(),
+                })?;
+                if explicit_idx.is_none() {
+                    idx += 1;
+                }
+                a
+            }
+        };
         let mut body = match spec {
             'd' | 'i' => {
                 // BigInt fast path: render the decimal directly via

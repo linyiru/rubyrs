@@ -274,6 +274,7 @@ const BUILTIN_EXCEPTION_PARENT: &[(&str, &str)] = &[
     ("ZeroDivisionError", "StandardError"),
     ("RangeError", "StandardError"),
     ("FloatDomainError", "RangeError"),
+    ("RegexpError", "StandardError"),
     ("LocalJumpError", "StandardError"),
     ("FrozenError", "RuntimeError"),
     // Deliberately `< Exception`, NOT `< StandardError` — see

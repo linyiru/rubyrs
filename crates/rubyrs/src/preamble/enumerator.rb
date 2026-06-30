@@ -21,10 +21,11 @@ class Enumerator
   #   - `Enumerator.new(size = nil) { |y| y << 1; y.yield(a, b) }` —
   #     generator/yielder block; the optional leading arg is the declared
   #     `size` (returned by #size; nil when not given).
-  #   - `Enumerator.new(obj, meth, args)` — the `enum_for` form (`args`
-  #     is the already-collected Array, passed not splatted to avoid
-  #     local-splat). Distinguished by whether a block was given.
-  def initialize(obj = nil, meth = :each, args = [], &block)
+  #   - `Enumerator.new(obj, meth, args, kwargs)` — the `enum_for` form
+  #     (`args` is the already-collected Array, `kwargs` the captured
+  #     keyword args, both passed not splatted to avoid local-splat).
+  #     Distinguished by whether a block was given.
+  def initialize(obj = nil, meth = :each, args = [], kwargs = {}, &block)
     if block
       @gen = block
       @size = obj # the optional leading `size` arg (nil if absent)
@@ -32,6 +33,7 @@ class Enumerator
       @obj = obj
       @meth = meth
       @args = args
+      @kwargs = kwargs
     end
   end
 
@@ -44,13 +46,13 @@ class Enumerator
     if @gen
       @gen.call(Yielder.new(&block))
       self
+    elsif @kwargs && !@kwargs.empty?
+      # Replay positional + keyword args as captured (the kwarg path —
+      # e.g. Find.find's `enum_for(:find, *paths, ignore_error: true)`).
+      @obj.__send__(@meth, *@args, **@kwargs, &block)
     else
-      case @args.length
-      when 0 then @obj.__send__(@meth, &block)
-      when 1 then @obj.__send__(@meth, @args[0], &block)
-      when 2 then @obj.__send__(@meth, @args[0], @args[1], &block)
-      else        @obj.__send__(@meth, @args[0], @args[1], @args[2], &block)
-      end
+      # Splat replay (no 3-arg cap, no spurious empty `**{}`).
+      @obj.__send__(@meth, *@args, &block)
     end
   end
 
@@ -409,12 +411,18 @@ class Enumerator
 end
 
 module Kernel
-  # `enum_for(:meth = :each, *args)` / `to_enum` — capture a deferred
-  # iteration. Classic guard: `return enum_for(:meth, args) unless
-  # block_given?` at the top of an iterator. `args` is collected via
-  # the rest param and handed to Enumerator as a single Array.
-  def enum_for(meth = :each, *args)
-    Enumerator.new(self, meth, args)
+  # `enum_for(:meth = :each, *args, **kwargs)` / `to_enum` — capture a
+  # deferred iteration. Classic guard: `return enum_for(:meth, args)
+  # unless block_given?` at the top of an iterator. Positional args and
+  # keyword args are captured SEPARATELY and replayed as such when the
+  # enumerator is driven — CRuby flags Kernel#enum_for `ruby2_keywords`
+  # for exactly this. Without splitting them, a trailing kwarg
+  # (`enum_for(:find, *paths, ignore_error: true)` — Find.find's guard)
+  # was absorbed into `*args` as a positional Hash and replayed
+  # positionally, so the re-invoked method saw the options Hash as an
+  # extra positional argument.
+  def enum_for(meth = :each, *args, **kwargs)
+    Enumerator.new(self, meth, args, kwargs)
   end
   alias_method :to_enum, :enum_for
 end

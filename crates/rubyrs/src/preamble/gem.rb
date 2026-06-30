@@ -77,6 +77,17 @@ module Gem
     []
   end
 
+  # The loaded-gem spec registry (name => Gem::Specification). rubyrs
+  # has no gem database — code is reached via explicit `$LOAD_PATH`
+  # entries, not activated gems — so this is empty. RuboCop's plugin
+  # discovery (`Gem.loaded_specs[feature]`) and bug-report machinery
+  # (`Gem.loaded_specs.key?('rubocop')`) both guard the missing-key
+  # case, so an empty Hash degrades cleanly instead of raising
+  # NoMethodError. Mutable + memoised so a caller could register one.
+  def self.loaded_specs
+    @loaded_specs ||= {}
+  end
+
   # Gem install locations. rubyrs has no gem database; derive a best-effort
   # answer from GEM_HOME / GEM_PATH (set by rbenv/bundler) so consumers like
   # ActiveSupport::BacktraceCleaner#add_gem_filter (which only builds a

@@ -1089,6 +1089,49 @@ impl Vm {
                 self.check_alloc()?;
                 Value::Array(self.heap.alloc(HeapObj::Array(arr.into())))
             }
+            // `File.__lstat_raw(path)` — like `__stat_raw` but does NOT
+            // follow symlinks (`File.lstat` / the `Find.find` directory
+            // walk RuboCop's result_cache drives). Same tuple shape; on a
+            // symlink it reports the LINK's metadata (dir?/file? false,
+            // symlink? true) instead of the target's.
+            ("__lstat_raw", [p]) => {
+                self.check_filesystem_io_allowed("File.lstat", None)?;
+                let path = path_arg(p)?;
+                self.check_filesystem_io_allowed("File.lstat", Some(Path::new(&path)))?;
+                let m = std::fs::symlink_metadata(&path)
+                    .map_err(|e| self.trap(io_error(&e, Some(Path::new(&path)))))?;
+                let size = m.len() as i64;
+                let mtime_f = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                #[cfg(unix)]
+                let mode = {
+                    use std::os::unix::fs::PermissionsExt;
+                    (m.permissions().mode() & 0o7777) as i64
+                };
+                #[cfg(not(unix))]
+                let mode: i64 = if m.permissions().readonly() { 0o444 } else { 0o644 };
+                let readable = fs_access(&path, AccessMode::Read);
+                let writable = fs_access(&path, AccessMode::Write);
+                let executable = fs_access(&path, AccessMode::Exec);
+                let arr = vec![
+                    Value::Int(size),
+                    Value::Float(mtime_f),
+                    Value::Bool(m.is_dir()),
+                    Value::Bool(m.is_file()),
+                    Value::Int(mode),
+                    Value::Bool(m.file_type().is_symlink()),
+                    Value::Bool(readable),
+                    Value::Bool(writable),
+                    Value::Bool(executable),
+                ];
+                self.maybe_gc();
+                self.check_alloc()?;
+                Value::Array(self.heap.alloc(HeapObj::Array(arr.into())))
+            }
             // `File.chmod(mode, *paths)` — set permission bits, returns
             // the path count (CRuby). spec_directory chmod-0's a file
             // to assert the 403/unreadable path. Unix mode application.
@@ -1327,7 +1370,13 @@ impl Vm {
                 }
                 Value::new_str(result)
             }
-            ("expand_path", [p]) | ("expand_path", [p, _]) => {
+            // `File.absolute_path(path, base=cwd)` shares expand_path's
+            // body: it is expand_path WITHOUT `~`-expansion, and rubyrs's
+            // expand_path already leaves `~` untouched (see below), so the
+            // two are behaviourally identical here. RuboCop's config
+            // loader calls `File.absolute_path` on every config path.
+            ("expand_path", [p]) | ("expand_path", [p, _])
+            | ("absolute_path", [p]) | ("absolute_path", [p, _]) => {
                 // `File.expand_path(path, base=cwd)`. CRuby
                 // doesn't require the path to exist — it just
                 // resolves relative paths and `..`/`.`

@@ -19,8 +19,22 @@ module Digest
       RubyrsDigest.digest(algorithm_tag, data.to_s)
     end
 
+    # `Digest::SHA1.file(path)` → a digest object seeded with the file's
+    # bytes (chainable: `.hexdigest`). RuboCop's result-cache checksums
+    # each inspected file with `Digest::SHA1.new.file(path)`.
+    def self.file(path)
+      new.file(path)
+    end
+
     def initialize
       @buffer = String.new
+    end
+
+    # `#file(path)` — feed the file's raw bytes into the running digest,
+    # returning self for chaining.
+    def file(path)
+      update(File.binread(path))
+      self
     end
 
     def update(data)

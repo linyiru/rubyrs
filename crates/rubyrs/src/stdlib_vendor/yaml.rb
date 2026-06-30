@@ -71,22 +71,12 @@ end
 Psych::Exception = YAML::Exception unless defined?(Psych::Exception)
 Psych::SyntaxError = YAML::SyntaxError unless defined?(Psych::SyntaxError)
 
-module SafeYAML
-  OPTIONS = {} unless defined?(OPTIONS)
-
-  class << self
-    def load(source, *_args, **_opts)
-      RubyrsYAMLParse.parse_document(source)
-    end
-
-    def load_file(path, *_args, **_opts)
-      # Call the parser directly rather than bare `load` — inside this
-      # singleton method a bare `load` can resolve to Kernel#load (the
-      # file loader) instead of YAML.load.
-      RubyrsYAMLParse.parse_document(File.read(path))
-    end
-  end
-end
+# NOTE: the `SafeYAML` shim lives in safe_yaml.rb, loaded ONLY by
+# `require "safe_yaml"` — NOT here. CRuby's `require "yaml"` never
+# defines `::SafeYAML`, and RuboCop's config_loader treats a defined
+# `::SafeYAML` as "the unmaintained gem is installed" and raises
+# (`yaml_tree_to_hash` rescue). Defining it on every `require "yaml"`
+# polluted that check.
 
 # Implementation namespace kept out of YAML/SafeYAML so reopening
 # those modules elsewhere can't clobber the parser internals.
@@ -147,6 +137,10 @@ module RubyrsYAMLParse
   end
 
   def strip_trailing_comment(line)
+    # Fast path: no `#` means no comment to strip — skip the char scan.
+    # The overwhelming majority of config lines have no comment, and this
+    # runs once per line of a ~6000-line default.yml.
+    return line unless line.include?("#")
     in_single = false
     in_double = false
     i = 0

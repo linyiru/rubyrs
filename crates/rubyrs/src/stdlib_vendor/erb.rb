@@ -108,7 +108,14 @@ class ERB
   # always passes an explicit binding, so this is never reached there;
   # kept so `result`/`run`'s default argument resolves.
   def new_toplevel(vars = nil)
-    b = TOPLEVEL_BINDING
+    # CRuby seeds this from the main script's TOPLEVEL_BINDING (self =
+    # main). rubyrs doesn't expose that constant, so fall back to a
+    # fresh binding here. RuboCop's config_loader does
+    # `ERB.new(yaml).result` with no binding (.rubocop.yml is mostly
+    # plain text, occasionally `<%= ENV[..] %>` / constant reads) — all
+    # of which resolve fine off this binding; only a template calling a
+    # bare main-only method would diverge, which configs never do.
+    b = defined?(TOPLEVEL_BINDING) ? TOPLEVEL_BINDING : binding
     if vars
       vars = vars.select {|v| b.local_variable_defined?(v)}
       unless vars.empty?

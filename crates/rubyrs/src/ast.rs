@@ -1068,6 +1068,26 @@ fn kwsplat_chunk(anchor: &Node<'_>, kwhash: SExpr) -> SExpr {
     })
 }
 
+fn array_call_expr(anchor: &Node<'_>, inner: SExpr) -> SExpr {
+    sp(anchor, Expr::Call {
+        receiver: None,
+        name: "Array".into(),
+        args: vec![inner],
+        kwargs_trailing: false,
+    })
+}
+
+/// Splat value materialization (`*ary`, `return *ary`, `[*ary]`) returns a
+/// fresh mutable Array even when `Array(ary)` itself would return `ary`.
+fn splat_array_expr(anchor: &Node<'_>, inner: SExpr) -> SExpr {
+    sp(anchor, Expr::Call {
+        receiver: Some(Box::new(array_call_expr(anchor, inner))),
+        name: "dup".into(),
+        args: vec![],
+        kwargs_trailing: false,
+    })
+}
+
 // ===== Pattern matching (`case/in`, `expr => pat`, `expr in pat`) =====
 //
 // Desugared entirely at AST translation: each pattern compiles to a
@@ -4300,10 +4320,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         Some(inner) => tr(ctx, &inner),
                         None => sp(span_node, Expr::LVarRead("*".to_string())),
                     };
-                    return Some(Box::new(sp(span_node, Expr::Call {
-                        receiver: None,
-                        name: "Array".into(),
-                        args: vec![inner_expr], kwargs_trailing: false })));
+                    return Some(Box::new(splat_array_expr(span_node, inner_expr)));
                 }
                 Some(Box::new(tr(ctx, only)))
             }
@@ -4343,10 +4360,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             Some(inner) => tr(ctx, &inner),
                             None => sp(span_node, Expr::LVarRead("*".to_string())),
                         };
-                        chunks.push(sp(span_node, Expr::Call {
-                            receiver: None,
-                            name: "Array".into(),
-                            args: vec![inner_expr], kwargs_trailing: false }));
+                        chunks.push(splat_array_expr(span_node, inner_expr));
                     } else if let Some(kh) = n.as_keyword_hash_node() {
                         // Trailing `**h` / `k: v` in a splat arg list
                         // (`yield(*v, **h)`, `return a, *b, **h`): route
@@ -5315,12 +5329,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     // `routes = [*args.pop]` idiom — when `args.pop`
                     // returned a String the routes loop tripped
                     // `String#each`.
-                    chunks.push(sp(node, Expr::Call {
-                        receiver: None,
-                        name: "Array".into(),
-                        args: vec![tr(ctx, &inner)],
-                        kwargs_trailing: false,
-                    }));
+                    chunks.push(splat_array_expr(node, tr(ctx, &inner)));
                 } else {
                 buf.push(tr_elem(ctx, en));
             }
@@ -6003,4 +6012,3 @@ mod tests {
         assert!(errs.is_empty());
     }
 }
-

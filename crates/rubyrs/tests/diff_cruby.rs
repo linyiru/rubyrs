@@ -1211,6 +1211,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn array_bsearch_index() { run_diff("array_bsearch_index"); }
 #[test] fn regex_stacked_quantifier() { run_diff("regex_stacked_quantifier"); }
 #[test] fn range_bsearch() { run_diff("range_bsearch"); }
+#[test] fn const_qualified_nested_scope() { run_diff("const_qualified_nested_scope"); }
+#[test] fn struct_subclass_super() { run_diff("struct_subclass_super"); }
+#[test] fn array_fetch() { run_diff("array_fetch"); }
+#[test] fn regexp_error_standarderror() { run_diff("regexp_error_standarderror"); }
 #[cfg(feature = "stdlib")]
 #[test] fn optparse_csv_yield() { run_diff("optparse_csv_yield"); }
 #[cfg(feature = "stdlib")]
@@ -1953,3 +1957,5 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn singleton_method_yield_capture_gc() { run_diff("singleton_method_yield_capture_gc"); }
 #[test] fn const_defined_autoload() { run_diff("const_defined_autoload"); }
 #[test] fn real_mod_name_bind() { run_diff("real_mod_name_bind"); }
+#[test] fn array_instance_methods_native() { run_diff("array_instance_methods_native"); }
+#[test] fn splat_assignment_dup_frozen_array() { run_diff("splat_assignment_dup_frozen_array"); }

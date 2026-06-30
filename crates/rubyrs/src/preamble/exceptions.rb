@@ -223,6 +223,15 @@ class StopIteration < IndexError
 end
 class ZeroDivisionError < StandardError
 end
+## CRuby's RegexpError — raised by `Regexp.new` on a malformed
+## pattern, and (in rubyrs) when a pattern is valid Ruby/Onigmo but
+## uses a feature the underlying engine can't compile (e.g. duplicate
+## named capture groups with `\k<name>` backrefs). Being a
+## StandardError, ecosystem code that wraps regex use in `rescue
+## StandardError` (RuboCop's per-cop error handler) degrades gracefully
+## instead of crashing.
+class RegexpError < StandardError
+end
 ## CRuby's RangeError — value out of an expected range. Raised
 ## by `Integer#chr` on bytes outside `0..255`,
 ## `Integer#pow(exp, mod)` for negative exponents (the modular

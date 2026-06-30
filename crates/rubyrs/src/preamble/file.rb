@@ -110,6 +110,39 @@ class File
     open(fd_or_path, *args)
   end
 
+  # `File.readlines(path, sep = "\n", chomp: false)` — slurp the file
+  # and return its lines as an Array. File < IO in CRuby, so this is an
+  # IO class method File inherits; the veneer reuses the buffered
+  # `#readlines` instance surface via `File.open`. `chomp: true` strips
+  # the trailing record separator from each line (a common option for
+  # config / fixture readers).
+  def self.readlines(path, sep = "\n", chomp: false)
+    open(path) do |f|
+      lines = f.readlines(sep)
+      next lines unless chomp
+      # No-arg String#chomp also peels "\r\n"/"\r"; use it for the
+      # default separator, an explicit suffix chomp otherwise.
+      sep == "\n" ? lines.map(&:chomp) : lines.map { |l| l.chomp(sep) }
+    end
+  end
+
+  # `File.foreach(path, sep = "\n", chomp: false)` — yield each line
+  # without materializing the whole Array. Without a block it returns an
+  # Enumerator (CRuby), so `File.foreach(path).with_index { ... }` works.
+  def self.foreach(path, sep = "\n", chomp: false)
+    # Blockless: hand back an Enumerator. The buffered veneer reads the
+    # whole file at open anyway, so materialize via #readlines and expose
+    # its #each — sidesteps re-dispatching the `chomp:` kwarg back through
+    # to_enum (which would arrive as a stray positional arg).
+    return readlines(path, sep, chomp: chomp).each unless block_given?
+    open(path) do |f|
+      f.each_line(sep) do |line|
+        yield(chomp ? (sep == "\n" ? line.chomp : line.chomp(sep)) : line)
+      end
+    end
+    nil
+  end
+
   # `File.mtime(path)` — last-modified Time. The epoch seconds come
   # from the native `__mtime_f` primitive (Float, sub-second); Time
   # is a Ruby-level class (preamble/time.rb), so the object is built
@@ -128,6 +161,13 @@ class File
   # Errno::ENOENT from the primitive — Rack turns that into a 404.
   def self.stat(path)
     Stat.new(__stat_raw(path))
+  end
+
+  # `File.lstat(path)` → File::Stat, but does NOT follow symlinks (the
+  # link's own metadata). RuboCop's result_cache drives a `Find.find`
+  # directory walk that lstats each entry to test `directory?`.
+  def self.lstat(path)
+    Stat.new(__lstat_raw(path))
   end
 
   # Buffered metadata snapshot. The native tuple order is fixed by
@@ -389,5 +429,34 @@ class File
     # back a real OS fd; we raise IOError instead. Drives logger's
     # load-time probe to its PathAttr fallback.
     raise IOError, "rubyrs: file descriptors are not available"
+  end
+end
+
+# `FileTest` — the module form of File's query predicates (CRuby ships
+# it as a mixin + module-functions). RuboCop's TargetFinder uses
+# `FileTest.directory?`. Delegates to File: the existence/type queries
+# use the native File predicates (which return false for missing paths,
+# matching CRuby), and the attribute queries read a File::Stat (guarded
+# by `exist?` so a missing path is false, not an ENOENT raise).
+module FileTest
+  module_function
+
+  def exist?(path)       ; File.exist?(path)      ; end
+  def exists?(path)      ; File.exist?(path)      ; end
+  def directory?(path)   ; File.directory?(path)  ; end
+  def file?(path)        ; File.file?(path)       ; end
+  def symlink?(path)     ; File.lstat(path).symlink? ; rescue StandardError ; false ; end
+  def readable?(path)    ; File.exist?(path) && File.stat(path).readable?   ; end
+  def writable?(path)    ; File.exist?(path) && File.stat(path).writable?   ; end
+  def executable?(path)  ; File.exist?(path) && File.stat(path).executable? ; end
+  def zero?(path)        ; File.exist?(path) && File.stat(path).zero?       ; end
+  def empty?(path)       ; zero?(path)             ; end
+
+  def size(path)         ; File.stat(path).size   ; end
+
+  def size?(path)
+    return nil unless File.exist?(path)
+    s = File.stat(path).size
+    s == 0 ? nil : s
   end
 end

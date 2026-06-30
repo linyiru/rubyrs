@@ -672,6 +672,31 @@ impl Vm {
         "transform_values!", "update", "value?", "values", "values_at",
     ];
 
+    /// Array's own native instance methods. Like Hash, most of Array's
+    /// Tier-1 surface lives in dispatch arms rather than the Ruby method
+    /// table, so reflection must append these for `Array.instance_methods`
+    /// and subclasses. RuboCop's `CollectionNode` builds delegators from
+    /// `Array.instance_methods - Object.instance_methods`.
+    pub(crate) const NATIVE_ARRAY_METHODS: &'static [&'static str] = &[
+        "freeze", "frozen?", "length", "size", "push", "<<", "[]", "[]=",
+        "unshift", "prepend", "insert", "shift", "pop", "delete",
+        "reverse_each", "first", "last", "empty?", "include?", "member?",
+        "count", "sum", "min", "max", "sort", "tally", "combination",
+        "permutation", "assoc", "rassoc", "pack", "inject", "reduce",
+        "to_a", "to_ary", "reverse", "uniq", "compact", "flatten", "join",
+        "+", "-", "concat", "replace", "clear", "take", "drop",
+        "find_index", "index", "each", "map", "collect", "select",
+        "filter", "reject", "find", "detect", "any?", "all?", "none?",
+        "each_with_index", "each_index", "sort_by", "min_by", "max_by",
+        "group_by", "each_with_object", "partition", "chunk_while",
+        "slice_when", "bsearch", "take_while", "drop_while", "zip",
+        "sort!", "uniq!", "compact!", "flatten!", "reverse!", "rotate",
+        "rotate!", "map!", "collect!", "sort_by!", "delete_if", "reject!",
+        "keep_if", "select!", "filter!", "flat_map", "collect_concat",
+        "chunk", "filter_map", "each_slice", "each_cons", "cycle",
+        "transpose", "inspect", "dup", "clone",
+    ];
+
     pub(crate) fn universal_arm_name(name: &str) -> bool {
         matches!(name,
             "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?" | "eql?"
@@ -2664,6 +2689,20 @@ impl Vm {
                             // none, so we accept any and no-op —
                             // documented spike divergence.)
                             self.stack.push(Value::Nil);
+                            return Ok(());
+                        }
+                        // `super` from an overridden `initialize_copy` /
+                        // `initialize_clone` / `initialize_dup` → the
+                        // builtin `Object#initialize_copy`, whose job is to
+                        // shallow-copy the source's ivars into self. rubyrs's
+                        // `dup`/`clone` already clone the ivars at the Rust
+                        // level BEFORE invoking the user hook (see
+                        // dispatch.rs dup), so the builtin super is a no-op
+                        // returning the receiver. Forcing case: parser's
+                        // `Source::Map#initialize_copy` does `super; @node =
+                        // nil` while RuboCop copies AST node source maps.
+                        ("initialize_copy" | "initialize_clone" | "initialize_dup", Some(recv)) => {
+                            self.stack.push(recv);
                             return Ok(());
                         }
                         // `super` from an overridden `include` /

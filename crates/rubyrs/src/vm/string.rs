@@ -386,6 +386,25 @@ pub(crate) fn string_call(
         // of gems use to distinguish String from Symbol / Regexp).
         // For our subset it's identical to `to_s` on a real String.
         (Value::Str(a), "to_str", []) => Some(Value::Str(a.clone())),
+        // `String#chr` — returns a one-character string at the beginning of the string.
+        (Value::Str(a), "chr", []) => {
+            if a.encoding.get() == crate::value::EncodingTag::Binary {
+                let bytes = a.content.borrow();
+                if bytes.is_empty() {
+                    Some(Value::new_str(String::new()))
+                } else {
+                    Some(Value::new_str_bytes_binary(vec![bytes[0]]))
+                }
+            } else {
+                let s = a.to_string_lossy();
+                let mut chars = s.chars();
+                if let Some(ch) = chars.next() {
+                    Some(Value::new_str(ch.to_string()))
+                } else {
+                    Some(Value::new_str(String::new()))
+                }
+            }
+        }
         // PR #53 review #1: `length`/`size` return UTF-8 character
         // count (lossy on invalid UTF-8 — non-UTF-8 bytes count as
         // one U+FFFD char each). Matches CRuby's "length on a

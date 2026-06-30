@@ -5491,6 +5491,16 @@ impl Vm {
                     // so the private/protected variants skip this
                     // (gate on the public-allowing `allow`).
                     if allow(Visibility::Public)
+                        && (cls.name == "Array" || class_inherits_named(&cls, "Array"))
+                    {
+                        for nm in Self::NATIVE_ARRAY_METHODS {
+                            let sid = self.interner.intern(nm);
+                            if !sids.contains(&sid) && !dead.contains(&sid) {
+                                sids.push(sid);
+                            }
+                        }
+                    }
+                    if allow(Visibility::Public)
                         && (cls.name == "Hash" || class_inherits_named(&cls, "Hash"))
                     {
                         for nm in Self::NATIVE_HASH_METHODS {
@@ -6774,8 +6784,9 @@ impl Vm {
         let translated = crate::vm::step::preprocess_regex_pattern(&pat);
         let prefixed = crate::vm::step::apply_ruby_flags(&translated, flags);
         let compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
-            self.trap(RubyError::SyntaxError {
-                msg: format!("invalid regex /{}/: {}", pat, e),
+            self.trap(RubyError::HostException {
+                class_name: "RegexpError".into(),
+                message: format!("invalid regex /{}/: {}", pat, e),
             })
         })?;
         self.stack.push(Value::Regex(Rc::new(compiled)));
@@ -6956,8 +6967,9 @@ impl Vm {
         };
         let translated = crate::vm::step::preprocess_regex_pattern(&combined);
         let compiled = crate::regex_engine::compile(&translated).map_err(|e| {
-            self.trap(RubyError::SyntaxError {
-                msg: format!("invalid regex /{}/: {}", combined, e),
+            self.trap(RubyError::HostException {
+                class_name: "RegexpError".into(),
+                message: format!("invalid regex /{}/: {}", combined, e),
             })
         })?;
         self.stack.push(Value::Regex(Rc::new(compiled)));

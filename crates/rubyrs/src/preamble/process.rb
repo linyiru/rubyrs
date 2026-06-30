@@ -79,6 +79,19 @@ class IO
   # semantics — a reader that outpaces the writer sees EOF
   # immediately rather than blocking (documented divergence; the
   # cross-thread streaming shape needs real pipes).
+  # `IO.readlines(path, ...)` / `IO.foreach(path, ...)` — File < IO in
+  # CRuby, so these line readers are IO class methods File inherits.
+  # rubyrs doesn't model File < IO (File.superclass is Object), so
+  # delegate to the File veneer, which owns the buffered read primitive.
+  # Block / Enumerator / sep / `chomp:` semantics all ride along.
+  def self.readlines(path, *args, **opts, &blk)
+    File.readlines(path, *args, **opts, &blk)
+  end
+
+  def self.foreach(path, *args, **opts, &blk)
+    File.foreach(path, *args, **opts, &blk)
+  end
+
   def self.pipe
     state = { buf: +"".b, pos: 0, wclosed: false }
     r = RubyrsPipeReader.new(state)

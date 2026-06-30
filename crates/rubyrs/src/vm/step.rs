@@ -95,6 +95,146 @@ fn pattern_has_named_group(src: &str) -> bool {
 // stays compilable via the `demote_unnamed` cfg-split below.
 #[cfg_attr(not(feature = "regex"), allow(dead_code))]
 pub(crate) fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
+    // Two passes: the `\G`/named-group rewrite (CRuby group-numbering
+    // compatibility), then the stacked-quantifier rewrite (Onigmo
+    // accepts `X{n,m}*`, which both Rust engines reject).
+    let glg = preprocess_regex_glg(src);
+    match rewrite_stacked_quantifiers(glg.as_ref()) {
+        std::borrow::Cow::Borrowed(_) => glg,
+        std::borrow::Cow::Owned(s) => std::borrow::Cow::Owned(s),
+    }
+}
+
+/// Rewrite Ruby "stacked quantifiers" — a count quantifier `{n,m}`
+/// itself followed by another repeat (`*` or another `{…}`) — into a
+/// grouped form the Rust engines accept: `X{n,m}*` → `(?:X{n,m})*`.
+/// Onigmo allows the stacked form (`*` applies to the `{n,m}`-repeated
+/// atom); `regex` and `fancy-regex` reject it ("Target of repeat
+/// operator is invalid"). Driver: RuboCop's `Style/StringLiterals`
+/// `double_quotes_required?` regex `/…\\{2}*…/`.
+///
+/// NOT touched: `{n,m}?` (lazy) and `{n,m}+` (possessive) — those are
+/// quantifier MODIFIERS, not stacked quantifiers, and the engines
+/// handle (or reject) them on their own. Group/char-class atoms before
+/// the quantifier are left as-is (rare; avoids a mis-wrap).
+fn rewrite_stacked_quantifiers(s: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = s.as_bytes();
+    // Fast path: a stacked quantifier always shows up as `}` immediately
+    // followed by `*` or `{`. Most patterns have neither.
+    let has_candidate = bytes
+        .windows(2)
+        .any(|w| w[0] == b'}' && (w[1] == b'*' || w[1] == b'{'));
+    if !has_candidate {
+        return std::borrow::Cow::Borrowed(s);
+    }
+
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len() + 8);
+    let mut in_class = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        // Escapes pass through as a unit (so `\{` never reads as a
+        // quantifier and `\\` is one atom).
+        if c == b'\\' && i + 1 < bytes.len() {
+            out.push(c);
+            out.push(bytes[i + 1]);
+            i += 2;
+            continue;
+        }
+        if c == b'[' && !in_class {
+            in_class = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == b']' && in_class {
+            in_class = false;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == b'{' && !in_class {
+            if let Some(qe) = parse_count_quantifier(bytes, i) {
+                let stacked = matches!(bytes.get(qe), Some(b'*') | Some(b'{'));
+                if stacked && let Some(atom_start) = stackable_atom_start(&out) {
+                    // Wrap [atom .. `}`] in a non-capturing group; the
+                    // trailing `*`/`{` is left to apply to the group.
+                    let mut wrapped: Vec<u8> = Vec::with_capacity(qe - atom_start + 4);
+                    wrapped.extend_from_slice(b"(?:");
+                    wrapped.extend_from_slice(&out[atom_start..]);
+                    wrapped.extend_from_slice(&bytes[i..qe]);
+                    wrapped.push(b')');
+                    out.truncate(atom_start);
+                    out.extend_from_slice(&wrapped);
+                    i = qe;
+                    continue;
+                }
+                // Not stacked (or unwrappable atom): copy the quantifier.
+                out.extend_from_slice(&bytes[i..qe]);
+                i = qe;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    std::borrow::Cow::Owned(
+        String::from_utf8(out).expect("ICE: rewrite_stacked_quantifiers produced invalid UTF-8"),
+    )
+}
+
+/// If `bytes[start] == '{'`, return the index just past the matching
+/// `}` when it forms a count quantifier (`{n}`, `{n,}`, `{n,m}`,
+/// `{,m}` — at least one digit). Otherwise None (a literal `{`).
+fn parse_count_quantifier(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut j = start + 1;
+    let mut saw_digit = false;
+    while j < bytes.len() && bytes[j].is_ascii_digit() {
+        j += 1;
+        saw_digit = true;
+    }
+    if j < bytes.len() && bytes[j] == b',' {
+        j += 1;
+        while j < bytes.len() && bytes[j].is_ascii_digit() {
+            j += 1;
+            saw_digit = true;
+        }
+    }
+    if saw_digit && bytes.get(j) == Some(&b'}') {
+        Some(j + 1)
+    } else {
+        None
+    }
+}
+
+/// The start index, within the already-emitted `out`, of the single
+/// atom a quantifier applies to: an escape (`\X`, when the final char
+/// is escaped) or a lone literal char. Returns None for group/class
+/// closers (`)`/`]`) — those atoms aren't wrapped (rare, avoids
+/// mis-balancing).
+fn stackable_atom_start(out: &[u8]) -> Option<usize> {
+    if out.is_empty() {
+        return None;
+    }
+    let last = out.len() - 1;
+    // Count consecutive backslashes immediately before the last byte;
+    // an odd count means the last byte is escaped (atom = `\X`).
+    let mut bs = 0usize;
+    let mut k = last;
+    while k > 0 && out[k - 1] == b'\\' {
+        bs += 1;
+        k -= 1;
+    }
+    if bs % 2 == 1 {
+        Some(last - 1)
+    } else if out[last] == b')' || out[last] == b']' {
+        None
+    } else {
+        Some(last)
+    }
+}
+
+fn preprocess_regex_glg(src: &str) -> std::borrow::Cow<'_, str> {
     // When a pattern contains ANY named capture group, Ruby/Onigmo
     // demotes every UNNAMED `(…)` group to non-capturing — only the
     // named groups are numbered. So `/(a)(?<x>b)/` matched against
@@ -1214,8 +1354,9 @@ impl Vm {
                     let translated = preprocess_regex_pattern(&src);
                     let prefixed = apply_ruby_flags(&translated, flags);
                     let compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
-                        self.trap(RubyError::SyntaxError {
-                            msg: format!("invalid regex /{}/: {}", src, e),
+                        self.trap(RubyError::HostException {
+                            class_name: "RegexpError".into(),
+                            message: format!("invalid regex /{}/: {}", src, e),
                         })
                     })?;
                     let rc = Rc::new(compiled);
@@ -1282,8 +1423,9 @@ impl Vm {
                     let translated = preprocess_regex_pattern(pat);
                     let prefixed = apply_ruby_flags(&translated, flags);
                     let compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
-                        self.trap(RubyError::SyntaxError {
-                            msg: format!("invalid regex /{}/: {}", pat, e),
+                        self.trap(RubyError::HostException {
+                            class_name: "RegexpError".into(),
+                            message: format!("invalid regex /{}/: {}", pat, e),
                         })
                     })?;
                     let rc = Rc::new(compiled);
@@ -2185,6 +2327,37 @@ impl Vm {
                         found = Some(Value::Class(c));
                     } else if let Some(v) = self.constants.get(bare_sym).cloned() {
                         found = Some(v);
+                    }
+                }
+                // Phase 3.5: a MULTI-SEGMENT bare entry (`A::B::C` written
+                // explicitly, with a top-level head) whose flat global key
+                // missed — resolve the leading segment, then segment-walk
+                // the rest through `resolve_const_path` (ancestor-aware),
+                // mirroring Op::LoadConst's qualified fallback. The flat
+                // (top-level) read path already does this; without it here,
+                // a qualified read from inside a NESTED scope failed when
+                // the final const lives in its owner's per-class consts
+                // table rather than as a global joined key. Forcing case:
+                // `RuboCop::AST::Builder::NODE_MAP` referenced inside
+                // `RuboCop::AST::Node#updated` (NODE_MAP is a const in
+                // Builder, not a global `RuboCop::AST::Builder::NODE_MAP`).
+                if found.is_none()
+                    && let Some(&bare_sym) = chain.last()
+                {
+                    let name_str = self.interner.resolve(bare_sym).to_string();
+                    if let Some((head, rest)) = name_str.split_once("::")
+                        && !head.is_empty()
+                        && self.interner.contains(head)
+                    {
+                        let head_id = self.interner.intern(head);
+                        if let Some(head_cls) = self.classes.get(&head_id).cloned() {
+                            match self.resolve_const_path(&head_cls, rest, true, false) {
+                                crate::vm::dispatch::ConstPathOutcome::Found(v) => found = Some(v),
+                                #[cfg(not(target_os = "wasi"))]
+                                crate::vm::dispatch::ConstPathOutcome::Trap(t) => return Err(t),
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 let v = match found {

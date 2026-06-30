@@ -2565,10 +2565,104 @@ end
 class Symbol
 end
 class Array
+  ## `bsearch_index { |x| ... }` — binary search over a receiver sorted
+  ## w.r.t. the block, returning the matching INDEX (or nil). Two modes,
+  ## selected by the block's return value (CRuby): find-minimum when it
+  ## yields true/false (first index where true), find-any when it yields
+  ## an Integer (0 = hit, <0 = search left, >0 = search right). Defined
+  ## in Ruby (not native) so `Array.method_defined?(:bsearch_index)`
+  ## reports it — parser/source/buffer.rb gates its line-lookup on that.
+  def bsearch_index
+    return to_enum(:bsearch_index) unless block_given?
+    low = 0
+    high = size
+    satisfied = nil
+    while low < high
+      mid = low + (high - low) / 2
+      res = yield(self[mid])
+      case res
+      when true
+        satisfied = mid
+        high = mid
+      when false, nil
+        low = mid + 1
+      when Integer
+        return mid if res == 0
+        if res < 0
+          high = mid
+        else
+          low = mid + 1
+        end
+      else
+        raise TypeError, "wrong argument type #{res.class} (must be numeric, true, false or nil)"
+      end
+    end
+    satisfied
+  end
+  # NOTE: `Array#bsearch` itself is implemented natively (vm/iter.rs);
+  # only `bsearch_index` was missing. Defining it here (in Ruby) also
+  # makes `Array.method_defined?(:bsearch_index)` true, which
+  # parser/source/buffer.rb gates its line lookup on.
+
+  ## `Array#fetch(index)` / `fetch(index, default)` / `fetch(index) {
+  ## |i| ... }` — element at `index` (negative counts from the end);
+  ## out of range raises IndexError unless a default or block is given.
+  ## Driver: parser's `Source::Buffer#source_line` does
+  ## `@lines.fetch(line - 1)` (used by nearly every Layout/Lint cop).
+  def fetch(index, *default)
+    i = index
+    i += size if i < 0
+    if i >= 0 && i < size
+      self[i]
+    elsif block_given?
+      yield(index)
+    elsif !default.empty?
+      default[0]
+    else
+      raise IndexError, "index #{index} outside of array bounds: #{-size}...#{size}"
+    end
+  end
 end
 class Hash
 end
 class Range
+  ## `Range#bsearch { |x| ... }` — binary search over an INTEGER range
+  ## (find-minimum for a boolean block, find-any for an Integer block),
+  ## returning the matching value or nil. Driver: parser's
+  ## tree_rewriter does `(from...size).bsearch { |i| ... }` during
+  ## autocorrection. Only integer endpoints are modelled (Float-range
+  ## bsearch isn't needed here).
+  def bsearch
+    return to_enum(:bsearch) unless block_given?
+    lo = self.begin
+    hi = self.end
+    raise TypeError, "can't do binary search for #{lo.class}" unless lo.is_a?(Integer) || lo.nil?
+    lo = 0 if lo.nil?
+    return nil if hi.nil? # endless range unsupported here
+    hi -= 1 if exclude_end?
+    satisfied = nil
+    while lo <= hi
+      mid = lo + (hi - lo) / 2
+      res = yield(mid)
+      case res
+      when true
+        satisfied = mid
+        hi = mid - 1
+      when false, nil
+        lo = mid + 1
+      when Integer
+        return mid if res == 0
+        if res < 0
+          hi = mid - 1
+        else
+          lo = mid + 1
+        end
+      else
+        raise TypeError, "wrong argument type #{res.class} (must be numeric, true, false or nil)"
+      end
+    end
+    satisfied
+  end
 end
 class TrueClass
 end
@@ -2657,6 +2751,17 @@ end
 ## liquid.rb loads its tag files via a Dir glob of its tags
 ## directory, and Jekyll globs site sources extensively.
 class Dir
+  ## `Dir.home(user = nil)` — the home directory. The no-arg form reads
+  ## $HOME (then $USERPROFILE), raising ArgumentError when neither is
+  ## set, like CRuby. The per-user lookup isn't modelled. RuboCop's
+  ## ConfigFinder#find_user_dotfile resolves ~/.rubocop.yml via this.
+  def self.home(user = nil)
+    raise NotImplementedError, "Dir.home(user) is not supported" unless user.nil?
+    h = ENV["HOME"] || ENV["USERPROFILE"]
+    raise ArgumentError, "couldn't find HOME environment -- expanding `~'" if h.nil? || h.empty?
+    h
+  end
+
   ## `Dir.chdir(path)` / `Dir.chdir(path) { ... }`. The actual cwd
   ## move is the host primitive `Dir.__chdir`; the block form's
   ## save-and-restore bracketing lives here so it reuses Ruby's

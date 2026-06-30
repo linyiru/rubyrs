@@ -101,7 +101,16 @@ class Struct
       end
       a
     end
-    cls.define_method(:initialize) do |*args|
+    # Define the member-assigning initialize on an INCLUDED MODULE, not
+    # on `cls` directly: a block-form `Struct.new(:a) { def initialize;
+    # ...; super; end }` defines the user initialize on `cls`
+    # (class_eval'd below), and bare/explicit `super` must reach this
+    # generated one. With it on `cls` they'd collide (same class) and
+    # super would skip to Object, leaving every member nil. CRuby places
+    # the member assigner on the `Struct` superclass for the same reason.
+    struct_methods_mod = Module.new
+    cls.include(struct_methods_mod)
+    struct_methods_mod.define_method(:initialize) do |*args|
       kw = nil
       k = self.class
       while k && (kw = k.instance_variable_get(:@__struct_kw)).nil?

@@ -61,6 +61,22 @@ pub(crate) fn gzip(data: &[u8], lvl: i64, mtime: u32) -> Vec<u8> {
     e.finish().unwrap_or_default()
 }
 
+/// Standard IEEE CRC-32 (`Zlib.crc32`). `init` continues a prior crc
+/// (`Zlib.crc32(b, Zlib.crc32(a)) == Zlib.crc32(a + b)`); pass 0 for a
+/// fresh checksum. Bitwise (no table) — fine for the small inputs
+/// `Zlib.crc32` is used on (RuboCop's result-cache file digest).
+pub(crate) fn crc32(data: &[u8], init: u32) -> u32 {
+    let mut crc = !init;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
 /// gzip decompress, returning `(bytes, header_mtime)` —
 /// `Zlib::GzipReader#read` + `#mtime`.
 pub(crate) fn gunzip(data: &[u8]) -> Result<(Vec<u8>, u32), String> {

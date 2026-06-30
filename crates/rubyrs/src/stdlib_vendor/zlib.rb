@@ -54,6 +54,13 @@ module Zlib
     __zlib_gunzip(str.to_s.b)[0]
   end
 
+  # `Zlib.crc32(string = "", crc = 0)` — IEEE CRC-32, optionally
+  # continuing a prior checksum. RuboCop's result-cache hashes source
+  # files with it.
+  def crc32(string = "", crc = 0)
+    __zlib_crc32(string.to_s.b, crc)
+  end
+
   # Raw / zlib DEFLATE compressor. `window_bits < 0` selects the raw
   # (headerless) stream rack's `deflate` encoding uses.
   class Deflate
