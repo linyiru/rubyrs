@@ -333,7 +333,16 @@ pub enum Visibility {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ObjId(pub(crate) u32);
 
+// `#[repr(u8)]` pins the in-memory layout (ADR 0035 Phase 1): a `u8` discriminant at offset
+// 0, then each variant's fields at their natural alignment — so an ObjId variant is `{u8
+// tag, u32 oid}` with `oid` at offset 4, while `{u8 tag, i64}` puts its payload at offset 8.
+// `size_of::<Value>() == 16` (the widest variant is `{u8, i64/f64/Rc}` → 8-aligned, 16 bytes).
+// Without a `#[repr]` the offset is compiler-chosen and unstable, so the native JIT cannot
+// read an Object's `oid` with an inline load — it must call a primitive. The asserts below
+// guard the contract the JIT relies on; see `value_layout_contract` for the offset test
+// (`OID_OFFSET == 4`).
 #[derive(Clone, Debug)]
+#[repr(u8)]
 pub enum Value {
     Int(i64),
     /// Arbitrary-precision integer. CRuby unified Fixnum + Bignum
@@ -441,6 +450,12 @@ pub enum Value {
     /// reports it as `Proc` to match CRuby.
     CurriedProc(ObjId),
 }
+
+// ADR 0035 Phase 1 — the layout contract the native JIT will rely on. A change that grows
+// `Value` past 16 bytes, or moves the payload off offset 8, breaks inline object access and
+// must be a deliberate decision (re-derive the JIT's offsets), not a silent regression.
+const _: () = assert!(std::mem::size_of::<Value>() == 16, "Value must stay 16 bytes (ADR 0035)");
+const _: () = assert!(std::mem::align_of::<Value>() == 8, "Value must stay 8-aligned (ADR 0035)");
 
 #[derive(Debug)]
 pub struct BlockHandle {
@@ -1186,5 +1201,48 @@ mod preamble_cache_serde_tests {
         // as "skip storing", never persisting a dangling reference.
         let v = Value::Array(crate::value::ObjId(3));
         assert!(postcard::to_allocvec(&v).is_err());
+    }
+}
+
+#[cfg(test)]
+mod value_layout_contract {
+    //! ADR 0035 Phase 1 — pins the `#[repr(u8)]` layout the native JIT relies on to read an
+    //! Object's `oid` with an inline load instead of a primitive call. If `#[repr(u8)]` ever
+    //! changes or a fatter payload moves the offset, these fail LOUDLY (with the real offset)
+    //! so the JIT's baked offsets can be re-derived deliberately.
+    use super::{ObjId, Value};
+
+    /// `#[repr(u8)]` lays each variant out independently as `{ u8 tag @0, fields… }`, so the
+    /// `u32` `oid` of an ObjId-carrying variant sits at offset 4 (the next 4-aligned slot
+    /// after the tag) — while `i64`/`f64` payloads land at offset 8. The JIT extracts `oid`
+    /// as a `u32` at `OID_OFFSET`, trusting the tracked `Kind` for the variant, so every
+    /// ObjId-carrying variant must agree on it (they do: all are `{u8, u32}`).
+    pub(crate) const OID_OFFSET: usize = 4;
+    /// The discriminant byte (the `#[repr(u8)]` tag) is at offset 0. Its VALUES shift with
+    /// cfg-gated variants (bignum/regex/rational), so a phase that wants an inline tag CHECK
+    /// must read the live value at runtime, not bake a constant — `OID_OFFSET` is what is
+    /// stable. Exposed so `Value::OBJECT_TAG`-style probes can derive it if ever needed.
+    pub(crate) const TAG_OFFSET: usize = 0;
+
+    #[test]
+    fn object_oid_is_at_offset_4() {
+        assert_eq!(std::mem::size_of::<Value>(), 16);
+        assert_eq!(std::mem::align_of::<Value>(), 8);
+        const MAGIC: u32 = 0xCAFE_F00D;
+        // Every ObjId-carrying variant exposes its u32 at the same offset (the JIT extracts
+        // `oid` by offset, trusting the tracked `Kind`). A `{u8 tag, i64}` variant keeps its
+        // payload at offset 8 — checked here so the two offsets can't silently converge.
+        for v in [
+            Value::Object(ObjId(MAGIC)),
+            Value::Array(ObjId(MAGIC)),
+            Value::Hash(ObjId(MAGIC)),
+        ] {
+            let got = unsafe { *((&v as *const Value as *const u8).add(OID_OFFSET) as *const u32) };
+            assert_eq!(got, MAGIC, "ObjId payload not at offset 4 — JIT contract broken");
+        }
+        let iv = Value::Int(0x0123_4567_89AB_CDEF);
+        let got = unsafe { *((&iv as *const Value as *const u8).add(8) as *const i64) };
+        assert_eq!(got, 0x0123_4567_89AB_CDEF, "Int payload not at offset 8");
+        assert_eq!(TAG_OFFSET, 0);
     }
 }
