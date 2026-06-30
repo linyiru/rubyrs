@@ -892,6 +892,28 @@ native code; profile confirms `do_call` negligible = recursion native, hot leave
 same value-primitives). diff_cruby GREEN both builds (958), STRESS_GC clean, fixture
 `jit_each_obj_walk` (heterogeneous children, polymorphic-`Sub`, depth, empty-children).
 
+**Gap A extended — the FULL cop body via `.each` (2-arg) — SHIPPED.** The first `.each` win
+was narrow (a 1-arg simple body). The real rubocop shape is `walk(node, counts)` — a 2-arg
+method whose `.each` block recurses `walk(c, counts)` AND whose body does Hash counting /
+Symbol / `is_a?` / a Bool predicate / `&&`. `bench_walk_blocks.rb` declined (28ms) where the
+`while` form fired (1.27ms). Three fixes:
+1. **Wire the each-rewrite into the 2-arg path** (`compile_native_objparam2`, not just the
+   1-arg `compile_native_objparam`) — the block's `walk(c, counts)` is a 2-arg native self-call.
+2. **`.each` as the method's last expression** — the rewrite no longer requires a trailing
+   `Pop`; it consumes just `[CreateBlock, CallBlock]` and re-pushes the receiver Array (`each`
+   returns its receiver), so a following `Pop` (statement) OR `Return` (the cop body, where
+   `.each` is the last expr) both work.
+3. **Per-kind block-param types** (the general bug): `block_args` declared every basic-block
+   param `i64`, but a Bool is an `i8` (`icmp` result) and a Float an `f64`. The `&&`
+   (`name.is_a?(Symbol) && name.length > 8`) Dups a Bool ACROSS a block edge — the first time
+   a Bool crosses one — tripping the Cranelift verifier (`i8` arg into an `i64` param). Params
+   are now typed per kind (Bool→i8, Float→f64, else i64); the Nil-downgrade is gated on
+   matching types.
+
+`bench_walk_blocks.rb`: **jitN 1.22ms vs YJIT 1.71ms — 1.4× ahead, 20× interp** — identical to
+the `while`-form `bench_walk` (1.22ms). diff_cruby GREEN both builds (960), STRESS_GC clean,
+fixture `jit_each_cop_walk` (Hash/Symbol/is_a?/`&&`/predicate via `.each`, 2-arg recursion, depth).
+
 **Gap B — `treesum` fires but trails YJIT 1.6×.** The double-recursion `@v + @l.sum(d-1) +
 @r.sum(d-1)` is dominated by the per-node `heap.get` slab indirection: 3 self-ivar reads
 (`@v`/`@l`/`@r`) + 2 child class-guards (`@l`/`@r`). **Shipped: an ivar-receiver call FUSION**

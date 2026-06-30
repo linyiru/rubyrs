@@ -1037,6 +1037,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn jit_obj_array_walk() { run_diff("jit_obj_array_walk"); }
 #[test] fn jit_obj_tree_walk() { run_diff("jit_obj_tree_walk"); }
 #[test] fn jit_each_obj_walk() { run_diff("jit_each_obj_walk"); }
+#[test] fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn jit_obj_arg2_walk() { run_diff("jit_obj_arg2_walk"); }
 #[test] fn jit_sym_hash_walk() { run_diff("jit_sym_hash_walk"); }
 #[test] fn jit_obj_arg_crosscall() { run_diff("jit_obj_arg_crosscall"); }
@@ -1201,6 +1202,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn stringscanner_units() { run_diff("stringscanner_units"); }
 #[cfg(feature = "stdlib")]
 #[test] fn yaml_psych_error() { run_diff("yaml_psych_error"); }
+#[test] fn yaml_psych_treebuilder() { run_diff("yaml_psych_treebuilder"); }
 #[cfg(feature = "stdlib")]
 #[test] fn digest_hexdigest() { run_diff("digest_hexdigest"); }
 #[test] fn unpack_base64_strict() { run_diff("unpack_base64_strict"); }

@@ -16469,12 +16469,14 @@ impl Vm {
         let length_sym = self.interner.intern("length");
         let bracket_sym = self.interner.intern("[]");
         let code = &self.protos[proto_idx].code;
-        // Locate `CreateBlock(bp, param_start, 1, MAX, MAX), CallBlock(each, 0, _), Pop`.
+        // Locate `CreateBlock(bp, param_start, 1, MAX, MAX), CallBlock(each, 0, _)`. The op
+        // AFTER the CallBlock is left untouched — `each` returns its receiver (the Array),
+        // so the rewrite re-pushes it, and a following `Pop` (statement form) or `Return`
+        // (the `.each` is the method's last expr — the rubocop cop body) both work.
         let mut cb = None;
-        for i in 0..code.len().saturating_sub(2) {
+        for i in 0..code.len().saturating_sub(1) {
             if let Op::CreateBlock(bp, param_start, 1, u16::MAX, u16::MAX) = code[i]
                 && matches!(code[i + 1], Op::CallBlock(s, 0, _) if s == each_sym)
-                && matches!(code[i + 2], Op::Pop)
             {
                 cb = Some((i, bp as usize, param_start));
                 break;
@@ -16493,7 +16495,7 @@ impl Vm {
         }) {
             return None;
         }
-        // A method jump crossing the splice region [cb, cb+2] is not remapped here →
+        // A method jump crossing the splice region [cb, cb+1] is not remapped here →
         // decline (sound: the original, uncompiled proto runs interpreted).
         for (i, op) in code.iter().enumerate() {
             if let Op::Jump(off) | Op::JumpIfFalse(off) = op {
@@ -16507,10 +16509,10 @@ impl Vm {
         }
         let n = self.protos[proto_idx].n_locals;
         let (t_arr, t_i, t_n) = (n, n + 1, n + 2);
-        // Build the replacement for ops [cb, cb+2] (CreateBlock, CallBlock, Pop). The
-        // receiver Array was produced by the op before `cb` and is on the stack.
+        // Build the replacement for ops [cb, cb+1] (CreateBlock, CallBlock). The receiver
+        // Array was produced by the op before `cb` and is on the stack.
         let body = &bp_code[..bp_code.len() - 1]; // drop the trailing Return
-        let mut loop_ops: Vec<Op> = Vec::with_capacity(body.len() + 12);
+        let mut loop_ops: Vec<Op> = Vec::with_capacity(body.len() + 13);
         loop_ops.push(Op::StoreLocal(t_arr));                       // arr = <recv>
         loop_ops.push(Op::LoadConstInt(0));
         loop_ops.push(Op::StoreLocal(t_i));                         // i = 0
@@ -16533,15 +16535,19 @@ impl Vm {
         // Jump back to head.
         let back_from = loop_ops.len() as i64;
         loop_ops.push(Op::Jump((head - back_from - 1) as i32));
+        // `each` returns its receiver — re-push the Array so the op AFTER the CallBlock
+        // (a `Pop` for the statement form, or `Return` when `.each` is the method's last
+        // expression) consumes it just as it consumed `each`'s result before.
         loop_ops.push(Op::ExitLoop);
-        // Patch the exit JumpIfFalse to land just after ExitLoop.
+        // Patch the exit JumpIfFalse to land just after ExitLoop (before the re-push).
         let after = loop_ops.len() as i64;
         loop_ops[exit_jif] = Op::JumpIfFalse((after - exit_jif as i64 - 1) as i32);
+        loop_ops.push(Op::LoadLocal(t_arr)); // re-push the Array (each's return value)
 
-        // Assemble: [0..cb) + loop_ops + (cb+3..). Remap method jumps OUTSIDE the splice
+        // Assemble: [0..cb) + loop_ops + (cb+2..). Remap method jumps OUTSIDE the splice
         // (their targets shift by the splice delta). Jumps inside the spliced block body
         // are relative + self-contained (untouched).
-        let delta = loop_ops.len() as i64 - 3; // replaced 3 ops with loop_ops.len()
+        let delta = loop_ops.len() as i64 - 2; // replaced 2 ops (CreateBlock, CallBlock)
         let mut out: Vec<Op> = Vec::with_capacity(code.len() + loop_ops.len());
         // Helper: map an OLD method ip to its NEW ip.
         let map_ip = |old: i64| -> i64 {
@@ -16551,7 +16557,7 @@ impl Vm {
             if i == cb {
                 out.extend_from_slice(&loop_ops);
             }
-            if i >= cb && i <= cb + 2 {
+            if i >= cb && i <= cb + 1 {
                 continue; // replaced
             }
             // Remap a method jump whose target moved.
@@ -16589,7 +16595,16 @@ impl Vm {
         let callees = crate::intern::FxHashMap::default();
         let getters = crate::intern::FxHashMap::default();
         let syms = self.jit_syms();
-        crate::jit_native::compile(
+        // ADR 0034 gap A: the full cop body `walk(node, counts) { …; node.children.each
+        // { |c| walk(c, counts) if c.is_a?(Node) } }` — rewrite the each-block into the
+        // while form (the block's 2-arg `walk(c, counts)` recursion lowers to a native
+        // 4-arg self-call, same as the firing `while` form).
+        let rewritten = self.rewrite_each_block(proto_idx);
+        let (code_ovr, nloc_ovr) = match &rewritten {
+            Some((c, n)) => (Some(c.as_slice()), Some(*n)),
+            None => (None, None),
+        };
+        let r = crate::jit_native::compile(
             &self.protos[proto_idx],
             self_name_id,
             &callees,
@@ -16603,8 +16618,9 @@ impl Vm {
             false, // not 0-arg
             false, // not the 1-arg obj-param variant
             true,  // 2-arg method: param0=Object ptr, param1=Int
-            None, None,
-        )
+            code_ovr, nloc_ovr,
+        );
+        r
     }
 
     /// Fast path for a Rust iterator driver (`step_block1`): run a 1-param block

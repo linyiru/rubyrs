@@ -4102,10 +4102,20 @@ fn block_args(
     // `(x if c) + 1` (nil + 1 must raise, not compute garbage) still declines.
     discard_top: bool,
 ) -> Option<Vec<BlockArg>> {
+    // The Cranelift type of a stack value of each kind — a block param MUST match its
+    // argument's type. A Bool is an `i8` (an `icmp` result), a Float an `f64`; everything
+    // else (Int/Symbol/Object/ArrayObjId/HashObjId/Nil) is an `i64`. (Before, every param
+    // was `i64`, so a Bool crossing a block edge — e.g. `a && b`'s Dup'd short-circuit
+    // value — tripped the verifier: `i8` arg into an `i64` param.)
+    let clty = |k: Kind| match k {
+        Kind::Bool => types::I8,
+        Kind::Float => types::F64,
+        _ => types::I64,
+    };
     match kinds_slot {
         None => {
-            for _ in stack {
-                fb.append_block_param(block, types::I64);
+            for (_, k) in stack {
+                fb.append_block_param(block, clty(*k));
             }
             *kinds_slot = Some(stack.iter().map(|(_, k)| *k).collect());
         }
@@ -4124,11 +4134,15 @@ fn block_args(
                 // This is the general `if/elsif/end`-as-statement value merge — the result
                 // (an Int from an assignment, or `nil` from a missing else) threads through
                 // several jump blocks before the final `Pop` (ADR 0034 piece 5, generalized
-                // past the immediate-Pop case `discard_top` handles).
-                if prev[i] == Kind::Nil || *k == Kind::Nil {
+                // past the immediate-Pop case `discard_top` handles). Only sound when both
+                // kinds share a Cranelift type (the param was declared for `prev[i]`) — a
+                // Bool(i8)/Nil(i64) or Float(f64)/Nil mismatch would feed the wrong-typed
+                // arg to the param, so decline.
+                if (prev[i] == Kind::Nil || *k == Kind::Nil) && clty(prev[i]) == clty(*k) {
                     prev[i] = Kind::Nil;
-                } else if discard_top && i == last {
-                    // A non-Nil mismatch at a slot the target immediately `Pop`s — harmless.
+                } else if discard_top && i == last && clty(prev[i]) == clty(*k) {
+                    // A non-Nil mismatch at a slot the target immediately `Pop`s — harmless,
+                    // as long as the types match (the param/arg type is consistent).
                 } else {
                     return None;
                 }
