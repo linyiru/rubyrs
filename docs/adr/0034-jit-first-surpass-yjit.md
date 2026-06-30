@@ -936,6 +936,24 @@ the only lever, out of scope here). The self-`Instance` caching is kept as a sma
 cop-body walk) already surpass YJIT — treesum is the pathological all-object-access micro that
 maximally exposes the representation cost.
 
+**Feasibility PoC of the object-header fix (`poc/jit-spike/treesum_rep.rs`).** Before committing
+to a heap rewrite, an isolated micro runs the treesum recursion over three representations in
+native Rust (both on a contiguous arena, so locality is held constant — only the access pattern
+varies): RepA (slab+enum, every access a non-inlinable primitive call, = pre-caching rubyrs),
+RepA2 (self-`Instance` cached = the shipped state), RepB (object-header: object = pointer, class
+word + fixed ivar offsets, accesses INLINED). Results: RepA2 vs RepA = +4.5% (marginal — it
+reproduces the real ~4% measurement, validating the model's faithfulness); **RepB vs RepA2 =
+6.6× (rustc's ideal-inlining upper bound)**. The transferable figure is the per-node ACCESS
+overhead a header rep removes: **~5.2 ns/node**, which EXCEEDS the real jitN→YJIT gap of
+**3.05 ns/node** (jitN 8.85 vs YJIT 5.80 ns/node). So a header rep would close treesum's gap and
+likely beat YJIT — **feasible and worth it, but the cost is the per-access PRIMITIVE-CALL
+boundary** (the JIT can't inline `slots[oid] → Slot → HeapObj::Instance` into Cranelift, so it
+emits an extern-C call per ivar/class read), not the slab index itself. The real lever is making
+object access INLINABLE — a `#[repr(C)]` object header with known offsets that Cranelift can load
+directly — a deep but well-scoped change (heap rep + GC + every value-op touches the layout). It
+remains out of scope for this ADR; the PoC just proves the lever is real and de-risks the
+investment.
+
 ## Risks
 
 - **YJIT-class scope.** A full method JIT with PIC + deopt + broad coverage is a
