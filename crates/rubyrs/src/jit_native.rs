@@ -26,6 +26,23 @@ pub(crate) struct NRet {
     ovf: u8,
 }
 
+/// ADR 0035 Phase 3 — the JIT-addressable view of the heap's flat side-tables. Held by
+/// `Heap` behind a `Box` so its ADDRESS is stable (the `Vec`s it points at reallocate; this
+/// struct does not move), and the JIT bakes that address once at compile time, then loads
+/// the live base pointer through it at run time. `#[repr(C)]` pins the field offsets the
+/// codegen hard-codes: `class_ptrs` at offset 0, `class_ptrs_len` at offset 8.
+#[repr(C)]
+pub(crate) struct JitObjView {
+    /// Base of `Heap::class_ptrs` — `class_ptrs[oid]` is the object's class pointer (the
+    /// value `class_ptr_of` returns), or 0 for objects with no dispatchable class.
+    pub(crate) class_ptrs: *const usize,
+    /// `class_ptrs.len()` (== `slots.len()`). For an optional debug bounds check.
+    pub(crate) class_ptrs_len: usize,
+}
+// The codegen bakes these offsets; pin them.
+const _: () = assert!(std::mem::offset_of!(JitObjView, class_ptrs) == 0);
+const _: () = assert!(std::mem::offset_of!(JitObjView, class_ptrs_len) == 8);
+
 /// A compiled native 1-param integer method. The convention is
 /// `(vm, self, i64_arg) -> (i64, ovf)`: `vm` + `self` are threaded so the body
 /// can call primitives that touch the heap (e.g. read an `Int` ivar) — unused

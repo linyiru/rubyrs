@@ -515,6 +515,11 @@ pub(crate) struct Heap {
     /// overwritten on the next `alloc` into that slot.
     #[cfg(feature = "jit-native")]
     pub(crate) class_ptrs: Vec<usize>,
+    /// ADR 0035 Phase 3 — the stable-addressed view the native JIT bakes at compile time and
+    /// loads `class_ptrs`'s live base through at run time. Kept in step with `class_ptrs` in
+    /// `alloc` (the `Vec` reallocates; this `Box`'s heap address does not).
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_view: Box<crate::jit_native::JitObjView>,
 }
 
 impl Heap {
@@ -545,7 +550,18 @@ impl Heap {
             fiber_class: None,
             #[cfg(feature = "jit-native")]
             class_ptrs: vec![],
+            #[cfg(feature = "jit-native")]
+            jit_view: Box::new(crate::jit_native::JitObjView {
+                class_ptrs: std::ptr::null(),
+                class_ptrs_len: 0,
+            }),
         }
+    }
+
+    /// ADR 0035 Phase 3 — the stable address of the JIT view, baked into compiled code.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn jit_view_addr(&self) -> i64 {
+        &*self.jit_view as *const crate::jit_native::JitObjView as i64
     }
 
     /// ADR 0035 Phase 2 — the class pointer `class_ptr_of` would return for `obj`, computed
@@ -603,6 +619,11 @@ impl Heap {
         {
             debug_assert_eq!(self.class_ptrs.len(), i as usize);
             self.class_ptrs.push(cls);
+            // The push may have reallocated `class_ptrs` — refresh the baked-address view to
+            // its live base. (The free-list reuse path above writes in place, no realloc, so
+            // the base is unchanged there and needs no refresh.)
+            self.jit_view.class_ptrs = self.class_ptrs.as_ptr();
+            self.jit_view.class_ptrs_len = self.class_ptrs.len();
         }
         ObjId(i)
     }
@@ -2833,6 +2854,28 @@ mod tests {
             assert_eq!(s.content.borrow().len(), 2);
         } else {
             panic!("not a Str");
+        }
+    }
+
+    /// ADR 0035 Phase 3a — the baked-address `JitObjView` must keep pointing at the live
+    /// `class_ptrs` base across reallocations, its `len` must track, and its OWN address must
+    /// stay put (that is the whole point of the `Box`: the JIT bakes it once).
+    #[cfg(feature = "jit-native")]
+    #[test]
+    fn jit_view_tracks_class_ptrs_across_realloc() {
+        let mut heap = Heap::new();
+        let view_addr = heap.jit_view_addr();
+        // Allocate enough to force several Vec growths.
+        for _ in 0..5000 {
+            let _ = heap.alloc(HeapObj::Hash(HashObj::with_pairs(vec![])));
+            assert_eq!(heap.class_ptrs.len(), heap.slots.len(), "table length tracks slots");
+            assert_eq!(
+                heap.jit_view.class_ptrs,
+                heap.class_ptrs.as_ptr(),
+                "view base refreshed to the live class_ptrs after (possible) realloc"
+            );
+            assert_eq!(heap.jit_view.class_ptrs_len, heap.class_ptrs.len(), "view len tracks");
+            assert_eq!(heap.jit_view_addr(), view_addr, "view address is stable (Box)");
         }
     }
 }
