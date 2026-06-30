@@ -495,6 +495,13 @@ pub(crate) fn compile(
     // self-recursive `CallNoRecv(name, 2)` native self-call. Method-only; the result
     // is an Int (the accumulator). Mutually exclusive with `obj_param`/`float_elem`.
     obj_param2: bool,
+    // REWRITTEN bytecode override (ADR 0034 gap A — `.each`-block inlining): when
+    // `Some`, compile THIS code (a `recv.each { block }` lowered into the proven
+    // while-loop form, with the block body spliced) + `n_locals_override` slot count,
+    // instead of `proto.code`/`proto.n_locals`. The proto's arity/param metadata still
+    // applies (the rewrite preserves the method signature). `None` everywhere else.
+    code_override: Option<&[Op]>,
+    n_locals_override: Option<u16>,
 ) -> Option<NativeProto> {
     // Shape gate (methods only): 0 (iff `allow_zero_arg`), 1, or 2 (iff `obj_param2`)
     // required positional, no optional/rest/kw. `params.len() == n_required_positional`
@@ -585,7 +592,7 @@ pub(crate) fn compile(
             }
         }
     }
-    let code = &proto.code;
+    let code: &[Op] = code_override.unwrap_or(&proto.code);
     // Op gate: every op must be one we model. Collect the distinct external
     // callees actually used, so only those get a JIT symbol + import.
     let mut used_callees: Vec<SymId> = Vec::new();
@@ -1157,7 +1164,7 @@ pub(crate) fn compile(
         } else {
             None
         };
-        let nloc = proto.n_locals as usize;
+        let nloc = n_locals_override.map(|n| n as usize).unwrap_or(proto.n_locals as usize);
         let vars: Vec<Variable> = (0..nloc).map(|_| fb.declare_var(types::I64)).collect();
         // Bind the C args to their slots: arg[2] (`param`) -> `arg2_slot`, arg[3]
         // (`param2`) -> `arg3_slot`, arg[4] (`param3`) -> `arg4_slot`. Else 0.

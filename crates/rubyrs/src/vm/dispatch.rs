@@ -7611,9 +7611,18 @@ impl Vm {
             // native call for a 1-op body. The value JIT's win is the 1-arg
             // `instance_variable_get(:lit)` shape — NOT fast-pathed, so native
             // dispatch-elimination pays off.
+            // A compiled OBJECT-param variant (`walk(node)`, ADR 0034) → route to use it.
+            if matches!(self.jit_native_objparam.get(&proto_idx), Some(Some(_))) {
+                return true;
+            }
             let int_dead = matches!(self.jit_native.get(&proto_idx), Some(None));
             let val_dead = matches!(self.jit_value.get(&proto_idx), Some(None));
-            argc == 1 && !(int_dead && val_dead)
+            // The obj-param variant compiles INSIDE B1, so keep routing until it too has
+            // been ruled out — else an Int/value-declined but obj-param-VIABLE method (the
+            // rubocop `.each` AST-walk shape) stopped routing before its obj-param variant
+            // ever compiled, and never fired.
+            let objp_dead = matches!(self.jit_native_objparam.get(&proto_idx), Some(None));
+            argc == 1 && !(int_dead && val_dead && objp_dead)
         }
         #[cfg(not(feature = "jit-native"))]
         #[inline]
@@ -16363,6 +16372,7 @@ impl Vm {
             allow_zero_arg,
             false, // general method compile is not the obj-param variant
             false, // not a 2-arg method
+            None, None,
         );
         if let (Some(np), false) = (
             &compiled,
@@ -16399,6 +16409,7 @@ impl Vm {
             false, // 1-arg fparam method — no 0-arg
             false, // fparam, not obj-param
             false, // not a 2-arg method
+            None, None,
         )
     }
 
@@ -16415,6 +16426,14 @@ impl Vm {
         let callees = crate::intern::FxHashMap::default();
         let getters = crate::intern::FxHashMap::default();
         let syms = self.jit_syms();
+        // ADR 0034 gap A: rewrite a `recv.each { block }` into the proven while-loop
+        // form (the block shares the method frame, so its body compiles like the firing
+        // `while` walk). `None` = no each-block → compile the original code.
+        let rewritten = self.rewrite_each_block(proto_idx);
+        let (code_ovr, nloc_ovr) = match &rewritten {
+            Some((c, n)) => (Some(c.as_slice()), Some(*n)),
+            None => (None, None),
+        };
         crate::jit_native::compile(
             &self.protos[proto_idx],
             self_name_id,
@@ -16429,7 +16448,131 @@ impl Vm {
             false, // 1-arg
             true,  // obj-param: the param is an Object receiver pointer
             false, // not a 2-arg method
+            code_ovr, nloc_ovr,
         )
+    }
+
+    /// ADR 0034 gap A — rewrite `recv.each { |x| body }` (a method's `CreateBlock` +
+    /// `CallBlock(:each, 0)`) into the equivalent native WHILE loop, splicing the block
+    /// body inline. Real RuboCop cops walk via `.each`/`each_child_node`, not `while`;
+    /// only `while` compiled before. The block SHARES the method's frame (its param and
+    /// captured slots ARE method locals), so the spliced body compiles exactly like the
+    /// firing `while` form, with a recursive `self(x)` call native. Returns the rewritten
+    /// code + bumped `n_locals` (3 temp slots: array, index, length), or `None` when the
+    /// proto has no inlinable each-block (compile the original). Conservative: declines
+    /// unless the block is 1-param (no rest/kw/block-param) with a single trailing
+    /// `Return`, and bails on a method jump that crosses the splice.
+    #[cfg(feature = "jit-native")]
+    fn rewrite_each_block(&mut self, proto_idx: usize) -> Option<(Vec<crate::bytecode::Op>, u16)> {
+        use crate::bytecode::Op;
+        let each_sym = self.interner.intern("each");
+        let length_sym = self.interner.intern("length");
+        let bracket_sym = self.interner.intern("[]");
+        let code = &self.protos[proto_idx].code;
+        // Locate `CreateBlock(bp, param_start, 1, MAX, MAX), CallBlock(each, 0, _), Pop`.
+        let mut cb = None;
+        for i in 0..code.len().saturating_sub(2) {
+            if let Op::CreateBlock(bp, param_start, 1, u16::MAX, u16::MAX) = code[i]
+                && matches!(code[i + 1], Op::CallBlock(s, 0, _) if s == each_sym)
+                && matches!(code[i + 2], Op::Pop)
+            {
+                cb = Some((i, bp as usize, param_start));
+                break;
+            }
+        }
+        let (cb, bp, param_start) = cb?;
+        // The block body: require exactly one `Return`, at the last position, and no
+        // nested block ops (those would need their own inlining). Other unmodelled ops
+        // are rejected later by `compile`'s op-gate.
+        let bp_code = &self.protos[bp].code;
+        if bp_code.is_empty() || !matches!(bp_code.last(), Some(Op::Return)) {
+            return None;
+        }
+        if bp_code[..bp_code.len() - 1].iter().any(|op| {
+            matches!(op, Op::Return | Op::CreateBlock(..) | Op::CallBlock(..) | Op::CallNoRecvBlock(..))
+        }) {
+            return None;
+        }
+        // A method jump crossing the splice region [cb, cb+2] is not remapped here →
+        // decline (sound: the original, uncompiled proto runs interpreted).
+        for (i, op) in code.iter().enumerate() {
+            if let Op::Jump(off) | Op::JumpIfFalse(off) = op {
+                let t = (i as i64 + 1 + *off as i64) as usize;
+                let lo = i.min(t);
+                let hi = i.max(t);
+                if lo < cb && hi > cb {
+                    return None;
+                }
+            }
+        }
+        let n = self.protos[proto_idx].n_locals;
+        let (t_arr, t_i, t_n) = (n, n + 1, n + 2);
+        // Build the replacement for ops [cb, cb+2] (CreateBlock, CallBlock, Pop). The
+        // receiver Array was produced by the op before `cb` and is on the stack.
+        let body = &bp_code[..bp_code.len() - 1]; // drop the trailing Return
+        let mut loop_ops: Vec<Op> = Vec::with_capacity(body.len() + 12);
+        loop_ops.push(Op::StoreLocal(t_arr));                       // arr = <recv>
+        loop_ops.push(Op::LoadConstInt(0));
+        loop_ops.push(Op::StoreLocal(t_i));                         // i = 0
+        loop_ops.push(Op::LoadLocalCall(t_arr, length_sym, u16::MAX));
+        loop_ops.push(Op::StoreLocal(t_n));                         // n = arr.length
+        loop_ops.push(Op::EnterLoop);
+        // loop head (index = head_idx within loop_ops):
+        let head = loop_ops.len() as i64;
+        loop_ops.push(Op::BinOpLocalLocal(crate::bytecode::BinOpKind::Lt, t_i, t_n));
+        // JumpIfFalse → past the loop body (patched below).
+        let exit_jif = loop_ops.len();
+        loop_ops.push(Op::JumpIfFalse(0)); // placeholder
+        loop_ops.push(Op::LoadLocal(t_arr));
+        loop_ops.push(Op::LoadLocal(t_i));
+        loop_ops.push(Op::Call(bracket_sym, 1, u16::MAX));
+        loop_ops.push(Op::StoreLocal(param_start));                 // x = arr[i]
+        loop_ops.extend_from_slice(body);                           // spliced block body (relative jumps OK)
+        loop_ops.push(Op::Pop);                                     // discard the block's value
+        loop_ops.push(Op::IncLocalNoPush(t_i));                     // i += 1
+        // Jump back to head.
+        let back_from = loop_ops.len() as i64;
+        loop_ops.push(Op::Jump((head - back_from - 1) as i32));
+        loop_ops.push(Op::ExitLoop);
+        // Patch the exit JumpIfFalse to land just after ExitLoop.
+        let after = loop_ops.len() as i64;
+        loop_ops[exit_jif] = Op::JumpIfFalse((after - exit_jif as i64 - 1) as i32);
+
+        // Assemble: [0..cb) + loop_ops + (cb+3..). Remap method jumps OUTSIDE the splice
+        // (their targets shift by the splice delta). Jumps inside the spliced block body
+        // are relative + self-contained (untouched).
+        let delta = loop_ops.len() as i64 - 3; // replaced 3 ops with loop_ops.len()
+        let mut out: Vec<Op> = Vec::with_capacity(code.len() + loop_ops.len());
+        // Helper: map an OLD method ip to its NEW ip.
+        let map_ip = |old: i64| -> i64 {
+            if (old as usize) <= cb { old } else { old + delta }
+        };
+        for (i, op) in code.iter().enumerate() {
+            if i == cb {
+                out.extend_from_slice(&loop_ops);
+            }
+            if i >= cb && i <= cb + 2 {
+                continue; // replaced
+            }
+            // Remap a method jump whose target moved.
+            let op2 = match op {
+                Op::Jump(off) => {
+                    let t = i as i64 + 1 + *off as i64;
+                    let ni = map_ip(i as i64);
+                    let nt = map_ip(t);
+                    Op::Jump((nt - ni - 1) as i32)
+                }
+                Op::JumpIfFalse(off) => {
+                    let t = i as i64 + 1 + *off as i64;
+                    let ni = map_ip(i as i64);
+                    let nt = map_ip(t);
+                    Op::JumpIfFalse((nt - ni - 1) as i32)
+                }
+                other => other.clone(),
+            };
+            out.push(op2);
+        }
+        Some((out, n + 3))
     }
 
     /// Compile the 2-ARG method specialization (`def walk(node, acc); …;
@@ -16460,6 +16603,7 @@ impl Vm {
             false, // not 0-arg
             false, // not the 1-arg obj-param variant
             true,  // 2-arg method: param0=Object ptr, param1=Int
+            None, None,
         )
     }
 
@@ -16900,6 +17044,7 @@ impl Vm {
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
+            None, None,
         )
     }
 
@@ -18091,6 +18236,7 @@ impl Vm {
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
+            None, None,
         )
     }
 
@@ -18124,6 +18270,7 @@ impl Vm {
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
+            None, None,
         )
     }
 
@@ -18157,6 +18304,7 @@ impl Vm {
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
+            None, None,
         )
     }
 
@@ -18199,6 +18347,7 @@ impl Vm {
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
+            None, None,
         )
     }
 
@@ -18237,6 +18386,7 @@ impl Vm {
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
+            None, None,
         )
     }
 
@@ -18275,6 +18425,7 @@ impl Vm {
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
+            None, None,
         )
     }
 
@@ -18316,6 +18467,7 @@ impl Vm {
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
+            None, None,
         )
     }
 

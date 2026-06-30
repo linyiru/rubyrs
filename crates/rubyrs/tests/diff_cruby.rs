@@ -1036,6 +1036,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn jit_ivar_array_index() { run_diff("jit_ivar_array_index"); }
 #[test] fn jit_obj_array_walk() { run_diff("jit_obj_array_walk"); }
 #[test] fn jit_obj_tree_walk() { run_diff("jit_obj_tree_walk"); }
+#[test] fn jit_each_obj_walk() { run_diff("jit_each_obj_walk"); }
 #[test] fn jit_obj_arg2_walk() { run_diff("jit_obj_arg2_walk"); }
 #[test] fn jit_sym_hash_walk() { run_diff("jit_sym_hash_walk"); }
 #[test] fn jit_obj_arg_crosscall() { run_diff("jit_obj_arg_crosscall"); }

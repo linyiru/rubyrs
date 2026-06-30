@@ -873,19 +873,24 @@ The full rubocop AST-walk (`bench_walk`, all 8 pieces) now runs native and beats
 
 ### Two remaining gaps (2026-06-29)
 
-**Gap A — the `.each`-form walk doesn't fire.** Real rubocop cops use
-`node.children.each { |c| … }` / `each_child_node`, not an explicit `while`. Only the
-`while` form compiles today; the `each` form declines (the method's `CallBlock(each)` op
-isn't modelled) and — worse — is a REGRESSION (jitN 21.5ms vs interp 17.6ms, YJIT 0.79ms):
-the interpreter's `each` re-runs `try_native_each_acc_loop`'s analysis on every call
-(22M×), and the block `{ |x| c += walk(x) if x.class==Node }` compile-declines (the block
-calls `walk`, unmodelled in a block). The fix is to **inline `recv.each { block }` into the
-method's native loop** — the block body IS the `while`-loop body (it shares the frame:
-`c`=captured slot, `x`=param), so inlining makes it compile exactly like the firing `while`
-form, with `walk(x)` a native self-call. The clean route is a bytecode pre-pass rewriting
-the `getter→Array, CreateBlock, CallBlock(each)` shape into the proven while-loop ops
-(splicing the block body, remapping jumps); friction: `Proto` isn't `Clone`, so `compile`
-would take `code`/`n_locals` overrides. A large, well-scoped follow-on.
+**Gap A — the `.each`-form walk — SHIPPED (beats YJIT 1.5×).** Real rubocop cops walk via
+`node.children.each { |c| … }` / `each_child_node`, not `while`. Previously the `each` form
+declined (the method's `CallBlock(each)` op isn't modelled) and was a REGRESSION (jitN
+21.5ms vs interp 17.6ms). Fix: **`rewrite_each_block` rewrites `recv.each { |x| body }` into
+the proven `while`-loop bytecode** before compiling — the block body IS the while-loop body
+(it SHARES the method frame: the accumulator is a captured slot, `x` the param), so the
+spliced ops compile exactly like the firing `while` form, with a recursive `walk(x)` a
+native self-call. The block body is spliced verbatim (its relative jumps are
+self-contained), wrapped in a synthesized index loop (3 temp slots: array/index/length),
+and method jumps crossing the splice are remapped (or it declines). `compile` gained
+`code`/`n_locals` overrides (`Proto` isn't `Clone`). A second fix was needed: `jit_should_route`
+now keeps a 1-arg method routed to B1 until its OBJECT-param variant is also ruled out
+(the obj-param compile lives inside B1; an Int/value-declined-but-obj-param-viable method
+stopped routing before its variant ever compiled). Measured (`poc/rubocop-spike/bench_each_walk.rb`):
+**jitN 0.51ms vs YJIT 0.78ms — 1.5× ahead, 33× interp** — identical to the `while` form (same
+native code; profile confirms `do_call` negligible = recursion native, hot leaves are the
+same value-primitives). diff_cruby GREEN both builds (958), STRESS_GC clean, fixture
+`jit_each_obj_walk` (heterogeneous children, polymorphic-`Sub`, depth, empty-children).
 
 **Gap B — `treesum` fires but trails YJIT 1.6×.** The double-recursion `@v + @l.sum(d-1) +
 @r.sum(d-1)` is dominated by the per-node `heap.get` slab indirection: 3 self-ivar reads
