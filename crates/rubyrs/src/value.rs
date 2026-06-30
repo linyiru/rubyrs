@@ -935,25 +935,41 @@ pub struct Instance {
 /// cross-session thermal drift that made a naive before/after comparison
 /// read it as a regression): C1..C4 construction −56ns, reads −14ns,
 /// consistent across 12 rounds.
+/// One ivar slot: a `(name, value)` pair. ADR 0035 Phase 4 — `#[repr(C)]` (was a bare
+/// tuple, whose field offsets Rust does not pin) so the native JIT can read the contiguous
+/// ivar array (`IvarTable::as_ptr_len`, backed by `SmallVec::as_ptr` — a STABLE public API,
+/// not the SmallVec's internal layout) with inline loads: `sym` at offset 0, `val` at 8,
+/// `stride` 24. Same size as the old tuple, so the Instance/HeapObj size budget is unchanged.
+#[derive(Clone, Debug)]
+#[repr(C)]
+pub(crate) struct IvarPair {
+    pub(crate) sym: crate::intern::SymId,
+    pub(crate) val: Value,
+}
+// The codegen bakes these — pin them.
+const _: () = assert!(std::mem::offset_of!(IvarPair, sym) == 0);
+const _: () = assert!(std::mem::offset_of!(IvarPair, val) == 8);
+const _: () = assert!(std::mem::size_of::<IvarPair>() == 24);
+
 #[derive(Clone, Debug, Default)]
-pub(crate) struct IvarTable(smallvec::SmallVec<[(crate::intern::SymId, Value); 4]>);
+pub(crate) struct IvarTable(smallvec::SmallVec<[IvarPair; 4]>);
 
 impl IvarTable {
     pub(crate) fn get(&self, k: &crate::intern::SymId) -> Option<&Value> {
-        self.0.iter().find(|(n, _)| n == k).map(|(_, val)| val)
+        self.0.iter().find(|p| &p.sym == k).map(|p| &p.val)
     }
     pub(crate) fn insert(&mut self, k: crate::intern::SymId, val: Value) -> Option<Value> {
-        if let Some(slot) = self.0.iter_mut().find(|(n, _)| *n == k) {
-            return Some(std::mem::replace(&mut slot.1, val));
+        if let Some(p) = self.0.iter_mut().find(|p| p.sym == k) {
+            return Some(std::mem::replace(&mut p.val, val));
         }
-        self.0.push((k, val));
+        self.0.push(IvarPair { sym: k, val });
         None
     }
     pub(crate) fn remove(&mut self, k: &crate::intern::SymId) -> Option<Value> {
-        self.0.iter().position(|(n, _)| n == k).map(|i| self.0.remove(i).1)
+        self.0.iter().position(|p| &p.sym == k).map(|i| self.0.remove(i).val)
     }
     pub(crate) fn contains_key(&self, k: &crate::intern::SymId) -> bool {
-        self.0.iter().any(|(n, _)| n == k)
+        self.0.iter().any(|p| &p.sym == k)
     }
     #[allow(dead_code)] // symmetric with is_empty(); kept for API completeness
     pub(crate) fn len(&self) -> usize {
@@ -963,13 +979,22 @@ impl IvarTable {
         self.0.is_empty()
     }
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&crate::intern::SymId, &Value)> {
-        self.0.iter().map(|(k, v)| (k, v))
+        self.0.iter().map(|p| (&p.sym, &p.val))
     }
     pub(crate) fn values(&self) -> impl Iterator<Item = &Value> {
-        self.0.iter().map(|(_, v)| v)
+        self.0.iter().map(|p| &p.val)
     }
     pub(crate) fn keys(&self) -> impl Iterator<Item = &crate::intern::SymId> {
-        self.0.iter().map(|(k, _)| k)
+        self.0.iter().map(|p| &p.sym)
+    }
+    /// ADR 0035 Phase 4 — the contiguous ivar array for the JIT's inline scan: a base
+    /// pointer (via `SmallVec::as_ptr`, valid whether inline or spilled) + the live length.
+    /// The JIT walks `base[0..len]` comparing `sym`, reading `val` at the matching slot — no
+    /// per-ivar primitive call. The pointer is valid for the GC-free duration of a compiled
+    /// method (the heap does not move while one runs).
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn as_ptr_len(&self) -> (*const IvarPair, usize) {
+        (self.0.as_ptr(), self.0.len())
     }
 }
 
