@@ -53,3 +53,13 @@ p walk(build(2, :send), { lit: 100 })
 # nil, so `counts[t] || 0` yields 10 (then +1). The JIT read deopts on the defaulted
 # absence and the interpreter produces the default-based count.
 p walk(build(2, :send), Hash.new(10))
+
+# DEOPT-AFTER-WRITE soundness: seed counts[:lit] at i64::MAX so a DEEP :lit node's
+# `counts[:lit] += 1` OVERFLOWS mid-walk (deopt to Bignum) — AFTER the root/inner nodes
+# have already written :send/:if. The native run mutates a SCRATCH, so on the overflow
+# deopt those writes are discarded and the interpreter re-runs on the untouched seed: the
+# :send/:if counts must NOT double, and :lit must be the exact Bignum.
+deep = Node.new(:send, [Node.new(:if, [leaf, leaf, leaf]), :m, leaf, leaf])
+seeded = { lit: 9223372036854775807 }
+walk(deep, seeded)
+p seeded

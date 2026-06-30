@@ -768,6 +768,14 @@ pub(crate) struct Vm {
     /// Kept separate from the 1-arg maps since the arity/ABI differ. Keyed by proto.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_objparam2: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// A pooled, GC-rooted SCRATCH Hash reused by the 2-arg Hash-param JIT dispatch
+    /// (`walk(node, counts)`, ADR 0034 pieces 2-4). The native walk mutates this scratch
+    /// (a re-seeded clone of the real `counts`) instead of `counts` itself; on full
+    /// success the dispatch moves the scratch's pairs back into `counts`, on a deopt it's
+    /// discarded — so a deopt-after-write can't leak/double-count. Pooled (alloc'd once,
+    /// re-seeded per call) so the common path adds no heap allocation. GC-rooted below.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_hash_scratch: Option<crate::value::ObjId>,
     /// FLOAT-param specialization of a 1-arg method (`def scale(n); n*1.5; end`
     /// called with a Float arg): the param binds as Float, the i64 arg carries f64
     /// bits. Leaf methods only (no cross-calls — those decline). Keyed by proto,
@@ -2054,6 +2062,8 @@ impl Vm {
             jit_native_objparam: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_objparam2: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_hash_scratch: None,
             #[cfg(feature = "jit-native")]
             jit_native_fparam: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]

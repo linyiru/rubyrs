@@ -15868,35 +15868,82 @@ impl Vm {
                     let compiled = self.compile_native_objparam2(proto_idx);
                     self.jit_native_objparam2.insert(proto_idx, compiled);
                 }
-                if let Some(Some(np)) = self.jit_native_objparam2.get(&proto_idx) {
-                    // The compiled proto's param1 kind must match the runtime arg: a
-                    // Hash-param method needs a Hash arg, an Int-param method an Int.
-                    let kind_ok = np.param2_hash.get() == a1_hash;
-                    if kind_ok {
-                        let is_array = np.returns_array.get();
-                        let is_float = np.returns_float.get();
-                        let is_nil = np.returns_nil.get();
-                        let vm_ptr = self as *const crate::vm::Vm;
-                        let a1 = match self.stack[sl - 1] {
-                            Value::Int(n) => n,
-                            Value::Hash(oid) => oid.0 as i64,
+                let kind_ok = self
+                    .jit_native_objparam2
+                    .get(&proto_idx)
+                    .and_then(|o| o.as_ref())
+                    .map(|np| np.param2_hash.get() == a1_hash)
+                    .unwrap_or(false);
+                if kind_ok {
+                    // SOUNDNESS (Hash param): the compiled method MUTATES its Hash param
+                    // (`counts[t] = …`, a side effect), and on a deopt the whole walk
+                    // re-runs interpreted — so the native run's writes must NOT touch the
+                    // real Hash, or a deopt-after-write would double-count. Run against a
+                    // SCRATCH clone; commit it back only on full native success, discard on
+                    // deopt (the interpreter then re-runs on the untouched original). The
+                    // Int param (rung A) is pure (no side effect) → no scratch needed.
+                    let scratch = if a1_hash {
+                        let counts_oid = match self.stack[sl - 1] {
+                            Value::Hash(o) => o,
                             _ => unreachable!(),
                         };
-                        let a0_ptr = &self.stack[sl - 2] as *const Value as i64;
-                        if let Some(r) = np.call2(vm_ptr, &self_val, a0_ptr, a1) {
-                            self.stack.truncate(sl - 2);
-                            self.stack.push(if is_nil {
-                                Value::Nil
-                            } else if is_array {
-                                Value::Array(crate::value::ObjId(r as u32))
-                            } else if is_float {
-                                Value::Float(f64::from_bits(r as u64))
-                            } else {
-                                Value::Int(r)
-                            });
-                            return Ok(true);
+                        // Reuse the pooled scratch Hash (alloc once, ever); re-seed it with
+                        // a clone of `counts`'s current pairs (empty for the common fresh
+                        // `{}`, so no allocation). No per-call heap slot alloc → no GC churn.
+                        let s = match self.jit_hash_scratch {
+                            Some(s) => s,
+                            None => {
+                                let s = self.heap.alloc(crate::heap::HeapObj::Hash(
+                                    crate::heap::HashObj::with_pairs(Vec::new()),
+                                ));
+                                self.jit_hash_scratch = Some(s);
+                                s
+                            }
+                        };
+                        let seed = self.heap.hash(counts_oid).clone();
+                        let ho = self.heap.hash_obj_mut(s);
+                        ho.pairs = seed;
+                        ho.index = None;
+                        Some((counts_oid, s))
+                    } else {
+                        None
+                    };
+                    let np = self.jit_native_objparam2[&proto_idx].as_ref().unwrap();
+                    let is_array = np.returns_array.get();
+                    let is_float = np.returns_float.get();
+                    let is_nil = np.returns_nil.get();
+                    let vm_ptr = self as *const crate::vm::Vm;
+                    let a1 = match (&scratch, &self.stack[sl - 1]) {
+                        (Some((_, s)), _) => s.0 as i64,
+                        (None, Value::Int(n)) => *n,
+                        _ => unreachable!(),
+                    };
+                    let a0_ptr = &self.stack[sl - 2] as *const Value as i64;
+                    let res = np.call2(vm_ptr, &self_val, a0_ptr, a1);
+                    if let Some(r) = res {
+                        // Commit the scratch back into the real Hash by MOVING its pairs
+                        // (no clone): take the scratch's filled pairs, install them in the
+                        // real Hash. The scratch (now empty) becomes garbage.
+                        if let Some((counts_oid, s)) = scratch {
+                            let pairs = std::mem::take(&mut self.heap.hash_obj_mut(s).pairs);
+                            let ho = self.heap.hash_obj_mut(counts_oid);
+                            ho.pairs = pairs;
+                            ho.index = None;
                         }
+                        self.stack.truncate(sl - 2);
+                        self.stack.push(if is_nil {
+                            Value::Nil
+                        } else if is_array {
+                            Value::Array(crate::value::ObjId(r as u32))
+                        } else if is_float {
+                            Value::Float(f64::from_bits(r as u64))
+                        } else {
+                            Value::Int(r)
+                        });
+                        return Ok(true);
                     }
+                    // Deopt: the scratch is discarded (never exposed), the real Hash is
+                    // untouched → fall through to the interpreter, which re-runs cleanly.
                 }
             }
         }
@@ -16096,6 +16143,11 @@ impl Vm {
         cls: &std::rc::Rc<crate::value::Class>,
         cls_ptr: usize,
         expect_arity: usize,
+        // `true` for a Bool predicate call site (`jit_obj_call_bool`, ADR 0034 piece 5):
+        // accept ONLY a `returns_bool` callee (so a non-Bool method can't be served where
+        // the caller will branch on 0/1). `false` (the Int site): accept only a callee
+        // that is NOT Bool/Float/Array (the Int box).
+        want_bool: bool,
     ) -> Option<usize> {
         let m = self.lookup_method_uncached(cls, name)?;
         if m.closure.is_some() || m.builtin.is_some() {
@@ -16124,22 +16176,31 @@ impl Vm {
             }
             self.jit_native.get(&cp)
         };
-        let (addr, gc, ret_float, ret_array) = match cache {
+        let (addr, gc, ret_float, ret_array, ret_bool) = match cache {
             Some(Some(np)) => (
                 np.addr(),
                 np.guard_class.get(),
                 np.returns_float.get(),
                 np.returns_array.get(),
+                np.returns_bool.get(),
             ),
             _ => return None,
         };
         if gc != 0 && gc != cls_ptr {
             return None;
         }
-        // The obj-call site materializes the result as an Int; a Float/Array-returning
-        // callee would mis-box, so decline (→ deopt → interpreter).
-        if ret_float || ret_array {
-            return None;
+        if want_bool {
+            // Bool predicate site: accept only a Bool-returning callee (else branching on
+            // its 0/1 would be wrong — an Int method's 0 is truthy in Ruby).
+            if !ret_bool {
+                return None;
+            }
+        } else {
+            // Int site: a Float/Array/Bool-returning callee would mis-box, so decline
+            // (→ deopt → interpreter).
+            if ret_float || ret_array || ret_bool {
+                return None;
+            }
         }
         Some(addr)
     }
@@ -17996,6 +18057,7 @@ impl Vm {
             truncate: self.interner.intern("truncate"),
             round: self.interner.intern("round"),
             class: self.interner.intern("class"),
+            is_a: self.interner.intern("is_a?"),
         }
     }
 

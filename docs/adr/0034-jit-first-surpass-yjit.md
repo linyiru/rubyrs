@@ -817,12 +817,59 @@ bug fixed en route: `local_is_array`'s `[i]` arm matched the KEY position (`Load
 Call([],1)`) — it now requires the RECEIVER position (`LoadLocal(slot), <key-load>, Call([],1)`),
 so a Symbol hash-key local is no longer misread as an array.
 
-Remaining `bench_walk` pieces (the predicate axis, all consuming a `Kind::Symbol` value, so all
-were gated on piece 4): (5) Bool-returning predicate obj-methods (`send_type?`/`if_type?`) as
-branch conditions; (6) `is_a?(Class)` ancestry (vs the shipped exact `== class`); (7)
-`Symbol#length`. A latent **pre-existing interpreter bug** surfaced while testing: `IncLocal`
-(`x += 1`) WRAPS on i64 overflow instead of promoting to Bignum (`BinOpInt` + `BinOp` promote
-correctly) — orthogonal to this work, noted for a separate fix.
+### `bench_walk` pieces 5 + 6 + 7 — the FULL rubocop cop-visitor FIRES, beats YJIT 1.13×
+
+The predicate axis completes `bench_walk` (`poc/rubocop-spike/bench_walk.rb`, the ultimate
+north-star — the full cop visitor):
+
+- **Piece 5 (Bool predicate obj-methods)** — `node.send_type?` (`@type == :send`) as a
+  `JumpIfFalse` condition. A method whose `Return` is a Bool now compiles (`returns_bool`,
+  the `icmp` 0/1). The obj-call site, when the result feeds a `JumpIfFalse`, calls
+  `jit_obj_call_bool` (a PIC that accepts only a Bool callee) and pushes `Kind::Bool`. The
+  dominant `@ivar == :sym` predicate is **inlined**: at PIC fill the callee bytecode is matched
+  (`[LoadIvar, LoadSymbol, BinOp(Eq), Return]`) and a per-call hit does ONE heap fetch (class
+  guard + ivar) and a compare — no native call. Needs `Kind::Symbol` ivar reads
+  (`jit_ivar_get_sym`) + Symbol `==` (`emit_numeric_binop`).
+- **Piece 6 (`is_a?(Class)` ancestry)** — `name.is_a?(Symbol)` / `c.is_a?(Node)`. Fused
+  `LoadLocal[Object], LoadConst, Call(is_a?, 1)` → `jit_value_is_a` (ancestry via `class_is_a`,
+  vs the exact `== class` guard). A 4-field cache: an Object whose EXACT class is the target
+  short-circuits (no `class_of`/walk); a non-Object value (a Symbol) memoizes the answer by its
+  type tag (its class is fixed) — so the per-kid `c.is_a?(Node)` and per-send `name.is_a?(Symbol)`
+  are O(1) after warmup.
+- **Piece 7 (`Symbol#length`)** — `name.length` on a heterogeneous element pointer →
+  `jit_symbol_length` (deopt if not a Symbol).
+- The heterogeneous `name = children[1]` is read as a pointer (`local_is_obj_value` extended to
+  is_a?/length uses); `node.children[i]` / `node.children.length` chained off the getter yield an
+  Array (`arr_result` extended to the chained `[i]` / `.length` forms); the nested `if/elsif/end`
+  statement value (Int-or-Nil through several jump blocks before a `Pop`) merges via a generalized
+  Nil-downgrade in `block_args` (a "discard poison" the only ops accepting are Pop / further merge).
+
+**Soundness fix (also repairs rung B, shipped buggy):** a compiled `walk` MUTATES its Hash param
+(`counts[t] = …`, a side effect), so a deopt-after-write would leak the native run's writes and
+double-count on the interpreter redo (verified: `{lit: 6, send: 2, if: 2}` vs CRuby `{lit: "x",
+send: 1, if: 1}`). Fix: the Hash-param dispatch runs the native walk against a **pooled, GC-rooted
+SCRATCH** (a re-seeded clone of `counts`), committing its pairs back into `counts` only on full
+native success and discarding on deopt — so the interpreter re-runs on the untouched original. The
+scratch is pooled (alloc'd once) so the common path adds no allocation.
+
+**Perf lever — the hash read-modify-write FUSION.** Profiling the firing walk showed the
+Symbol-keyed Hash `counts[t] = (counts[t] || 0) + 1` (two `heap.get`s + two scans + the `|| 0`
+control flow, per node) was the #1 cost. A compile pre-pass detects the exact r-m-w op range and
+fuses it into ONE `jit_hash_incr_symkey` (one heap access, find-or-insert + add); the leader pass
+excludes the range's interior so the `|| 0`'s internal jump blocks are never emitted. Result:
+
+| | jitN | YJIT | CRuby |
+|-|-----:|-----:|------:|
+| `bench_walk` per_iter | **1.22ms** | 1.39ms | 5.27ms |
+
+**jitN 1.13× ahead of YJIT** (was DECLINED / ~19× behind), 4.3× CRuby, ~22× interp. STRESS_GC
+clean, diff_cruby GREEN both builds (957), fixture `jit_sym_hash_walk` (predicate, is_a?, length,
+pre-seeded, defaulted-hash deopt, and the overflow-deopt-after-write soundness case). A latent
+**pre-existing interpreter bug** surfaced while testing: `IncLocal` (`x += 1`) WRAPS on i64
+overflow instead of promoting to Bignum (`BinOpInt` + `BinOp` promote correctly) — orthogonal,
+noted for a separate fix.
+
+The full rubocop AST-walk (`bench_walk`, all 8 pieces) now runs native and beats YJIT.
 
 ## Risks
 

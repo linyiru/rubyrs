@@ -56,6 +56,12 @@ pub(crate) struct NativeProto {
     /// (`walk(node, counts)` ends with a `while` loop, ADR 0034 pieces 2-4). A method
     /// mixing Nil and a value return declines (ambiguous box kind).
     pub(crate) returns_nil: std::cell::Cell<bool>,
+    /// When true the method returns a Bool (the i64 result is 0/1) — the dispatch boxes
+    /// `Value::Bool`. Set for a predicate (`def send_type?; @type == :send; end`, ADR
+    /// 0034 piece 5). `jit_obj_call_bool` reads this flag to serve a predicate at a
+    /// Bool call site (and reject a non-Bool callee there). Mixing Bool + a value
+    /// return declines (ambiguous box kind).
+    pub(crate) returns_bool: std::cell::Cell<bool>,
     /// For a 2-arg method (`obj_param2`): when true param1 (the 2nd C-arg) is a Hash
     /// `ObjId`, else an Int (ADR 0034 pieces 1+8 / 2-4). Derived from the body (the
     /// param used as a Hash receiver), read by the `argc==2` dispatch arm to decide
@@ -71,6 +77,14 @@ pub(crate) struct NativeProto {
     /// callee_native_addr)`, filled at runtime on first call by `jit_obj_call`; their
     /// addresses are baked into the code, so the `Box`es outlive it here.
     _obj_call_caches: Vec<Box<std::cell::Cell<(usize, usize)>>>,
+    /// Inline caches for Bool-predicate obj-call sites (`node.send_type?`, ADR 0034
+    /// piece 5). `(class_ptr, addr, packed)`: `addr==0` ⇒ an inlined `@ivar == :sym`
+    /// predicate (`packed = ivar<<32 | sym`); else `addr` is a native Bool callee.
+    _bool_caches: Vec<Box<std::cell::Cell<(usize, usize, usize)>>>,
+    /// Inline caches for `is_a?(Const)` sites (`name.is_a?(Symbol)`, ADR 0034 piece 6).
+    /// `(const_sym, const_ptr, tag_memo, result_memo)` — memoizes the answer for a
+    /// non-Object value by its type tag.
+    _value_is_a_caches: Vec<Box<std::cell::Cell<(usize, usize, usize, usize)>>>,
 }
 
 impl NativeProto {
@@ -107,7 +121,7 @@ impl NativeProto {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Kind {
     Int,
     Bool,
@@ -265,16 +279,30 @@ fn local_is_array(code: &[Op], slot: u16, from_ip: usize, syms: &JitSyms) -> boo
 }
 
 /// True if local `slot`, after `from_ip`, is used as an Object VALUE — its `.class` is
-/// taken (`x.class == Node`) or it is passed as an arg to a `CallNoRecv` (`walk(x)`) —
+/// taken (`x.class == Node`), it's passed as an arg to a `CallNoRecv` (`walk(x)`), its
+/// `.is_a?(Const)` is checked, or `.length` taken (`name.length` on a Symbol element) —
 /// before reassignment. So an `arr[i]` element stored into it should be a value POINTER
-/// (`Kind::Object`), not an Int (ADR 0034 Step 1, piece 3).
+/// (`Kind::Object`), not an Int (ADR 0034 Step 1, piece 3; pieces 6-7 add is_a?/length).
 fn local_is_obj_value(code: &[Op], slot: u16, from_ip: usize, syms: &JitSyms) -> bool {
     let mut j = from_ip;
     while j < code.len() {
         match &code[j] {
-            Op::LoadLocalCall(s, name, _) if *s == slot && *name == syms.class => return true,
+            // `x.class` / `x.length` / `x.size` — a method call on the element ⇒ object value.
+            Op::LoadLocalCall(s, name, _)
+                if *s == slot
+                    && (*name == syms.class || *name == syms.length || *name == syms.size) =>
+            {
+                return true;
+            }
             Op::LoadLocal(s) if *s == slot => {
+                // `x.method(arg)` / `walk(x)` (immediate Call), or `x.is_a?(Const)`
+                // (`LoadLocal, LoadConst, Call(_, 1)`).
                 if matches!(code.get(j + 1), Some(Op::CallNoRecv(_, _, _)) | Some(Op::Call(_, _, _))) {
+                    return true;
+                }
+                if matches!(code.get(j + 1), Some(Op::LoadConst(_)))
+                    && matches!(code.get(j + 2), Some(Op::Call(_, 1, _)))
+                {
                     return true;
                 }
             }
@@ -332,6 +360,53 @@ fn local_is_hash(code: &[Op], slot: u16, syms: &JitSyms) -> bool {
         }
     }
     false
+}
+
+/// A fused Symbol-keyed Hash read-modify-write `counts[k] = (counts[k] || default) +
+/// delta` (ADR 0034 pieces 2-4 perf). `key` is the Symbol key source.
+#[derive(Clone, Copy)]
+struct HashIncr {
+    end: usize,      // last ip of the range (the trailing `Pop`)
+    default: i64,    // the `|| <const>` default
+    delta: i64,      // the `+ <const>` increment
+    key: HashIncrKey,
+}
+#[derive(Clone, Copy)]
+enum HashIncrKey {
+    Local(u16),  // `counts[t]` — the key is a Symbol-kind local
+    Sym(SymId),  // `counts[:long_method]` — a literal Symbol
+}
+
+/// Detect the exact `counts[k] = (counts[k] || d) + delta` op sequence at `s` (the Hash
+/// is param1, slot 1). Returns the fused descriptor or `None`. Shape:
+/// `LoadLocal(1), KEY, LoadLocal(1), KEY, Call([],1), Dup, JumpIfFalse(1), Jump(2), Pop,
+///  LoadConstInt(d), BinOpInt(Add,delta), CallAset([]=,2), Pop` — both hash-loads slot 1,
+/// both KEYs identical.
+fn detect_hash_incr(code: &[Op], s: usize, syms: &JitSyms) -> Option<HashIncr> {
+    use crate::bytecode::BinOpKind;
+    if s + 12 >= code.len() {
+        return None;
+    }
+    // Both hash receivers must be local slot 1 (the Hash param).
+    if !matches!(code[s], Op::LoadLocal(1)) || !matches!(code[s + 2], Op::LoadLocal(1)) {
+        return None;
+    }
+    // The two key loads must be identical (same local, or same Symbol literal).
+    let key = match (&code[s + 1], &code[s + 3]) {
+        (Op::LoadLocal(a), Op::LoadLocal(b)) if a == b && *a != 1 => HashIncrKey::Local(*a),
+        (Op::LoadSymbol(a), Op::LoadSymbol(b)) if a == b => HashIncrKey::Sym(*a),
+        _ => return None,
+    };
+    if !matches!(code[s + 4], Op::Call(m, 1, _) if m == syms.bracket) { return None; }
+    if !matches!(code[s + 5], Op::Dup) { return None; }
+    if !matches!(code[s + 6], Op::JumpIfFalse(1)) { return None; }
+    if !matches!(code[s + 7], Op::Jump(2)) { return None; }
+    if !matches!(code[s + 8], Op::Pop) { return None; }
+    let default = match code[s + 9] { Op::LoadConstInt(d) => d, _ => return None };
+    let delta = match code[s + 10] { Op::BinOpInt(BinOpKind::Add, d) => d, _ => return None };
+    if !matches!(code[s + 11], Op::CallAset(m, 2, _) if m == syms.bracket_set) { return None; }
+    if !matches!(code[s + 12], Op::Pop) { return None; }
+    Some(HashIncr { end: s + 12, default, delta, key })
 }
 
 fn ivar_call_receiver(code: &[Op], ivar_ip: usize, syms: &JitSyms) -> Option<(SymId, u8)> {
@@ -592,12 +667,40 @@ pub(crate) fn compile(
         }
     }
 
+    let n = code.len();
+    // FUSION pre-pass (ADR 0034 pieces 2-4 perf): detect each `counts[k] = (counts[k]
+    // || d) + delta` Symbol-keyed read-modify-write and fuse it into ONE
+    // `jit_hash_incr_symkey` (vs a separate get + `|| d` control flow + set). `fused[s]`
+    // holds the descriptor at the range start `s`; `fused_interior[ip]` marks the ops
+    // strictly inside a range so the leader pass skips the `|| d`'s internal jumps —
+    // those blocks are never emitted (the whole range is replaced by the fused call).
+    let mut fused: Vec<Option<HashIncr>> = vec![None; n];
+    let mut fused_interior = vec![false; n];
+    if param1_is_hash {
+        let mut s = 0usize;
+        while s < n {
+            if let Some(hi) = detect_hash_incr(code, s, syms) {
+                let end = hi.end;
+                fused[s] = Some(hi);
+                for ip in (s + 1)..=end {
+                    fused_interior[ip] = true;
+                }
+                s = end + 1;
+            } else {
+                s += 1;
+            }
+        }
+    }
     // Basic-block leaders: ip 0, jump targets, and fall-through after jumps.
     // Jump target = ip + 1 + off (ip is pre-incremented by the dispatch loop).
-    let n = code.len();
     let mut leader = vec![false; n + 1];
     leader[0] = true;
     for (ip, op) in code.iter().enumerate() {
+        // A jump INSIDE a fused range (the `|| d`'s Dup/JumpIfFalse/Jump) is elided —
+        // don't create leaders for it (the range is one fused op).
+        if fused_interior[ip] {
+            continue;
+        }
         if let Op::Jump(off) | Op::JumpIfFalse(off) = op {
             let t = (ip as i64 + 1 + *off as i64) as usize;
             if t <= n {
@@ -630,6 +733,11 @@ pub(crate) fn compile(
     builder.symbol("jit_obj_getter_sym", jit_obj_getter_sym as *const u8);
     builder.symbol("jit_hash_get_symkey", jit_hash_get_symkey as *const u8);
     builder.symbol("jit_hash_set_symkey", jit_hash_set_symkey as *const u8);
+    builder.symbol("jit_hash_incr_symkey", jit_hash_incr_symkey as *const u8);
+    builder.symbol("jit_ivar_get_sym", jit_ivar_get_sym as *const u8);
+    builder.symbol("jit_value_is_a", jit_value_is_a as *const u8);
+    builder.symbol("jit_symbol_length", jit_symbol_length as *const u8);
+    builder.symbol("jit_obj_call_bool", jit_obj_call_bool as *const u8);
     builder.symbol("jit_array_elem_ptr", jit_array_elem_ptr as *const u8);
     builder.symbol("jit_value_is_class", jit_value_is_class as *const u8);
     builder.symbol("jit_ivar_len", jit_ivar_len as *const u8);
@@ -680,6 +788,31 @@ pub(crate) fn compile(
     let ivobjid = module
         .declare_function("jit_ivar_obj_ptr", Linkage::Import, &ivsig)
         .ok()?;
+    // `jit_ivar_get_sym` shares the same `(vm, self, name:i32) -> (symid, i8)` shape.
+    let ivsymid = module
+        .declare_function("jit_ivar_get_sym", Linkage::Import, &ivsig)
+        .ok()?;
+    // `jit_value_is_a`: (vm, value:ptr, const:i32, cache:ptr) -> (i64, i8); the cache
+    // memoizes the target class ptr (piece 6).
+    let mut visasig = module.make_signature();
+    visasig.params.push(AbiParam::new(ptr_ty));
+    visasig.params.push(AbiParam::new(ptr_ty));
+    visasig.params.push(AbiParam::new(types::I32));
+    visasig.params.push(AbiParam::new(ptr_ty));
+    visasig.returns.push(AbiParam::new(types::I64));
+    visasig.returns.push(AbiParam::new(types::I8));
+    let visaid = module
+        .declare_function("jit_value_is_a", Linkage::Import, &visasig)
+        .ok()?;
+    // `jit_symbol_length`: (vm, value:ptr) -> (i64, i8) (piece 7).
+    let mut symlensig = module.make_signature();
+    symlensig.params.push(AbiParam::new(ptr_ty));
+    symlensig.params.push(AbiParam::new(ptr_ty));
+    symlensig.returns.push(AbiParam::new(types::I64));
+    symlensig.returns.push(AbiParam::new(types::I8));
+    let symlenid = module
+        .declare_function("jit_symbol_length", Linkage::Import, &symlensig)
+        .ok()?;
     // `jit_obj_call`: (vm, recv:ptr, arg:i64, name:i32, cache:ptr) -> (i64, i8).
     let mut ocsig = module.make_signature();
     ocsig.params.push(AbiParam::new(ptr_ty)); // vm
@@ -726,6 +859,11 @@ pub(crate) fn compile(
     // shape as `jit_obj_getter_array` (`ogasig`).
     let ogsid = module
         .declare_function("jit_obj_getter_sym", Linkage::Import, &ogasig)
+        .ok()?;
+    // `jit_obj_call_bool`: same `(vm, recv:ptr, name:i32, cache:ptr) -> (0/1, i8)` shape
+    // as `jit_obj_getter_array` (`ogasig`) — a Bool predicate obj-call (piece 5).
+    let ocbid = module
+        .declare_function("jit_obj_call_bool", Linkage::Import, &ogasig)
         .ok()?;
     // `jit_array_elem_ptr`: (vm, objid:i64, i:i64) -> (ptr, i8) — same shape as
     // `jit_array_elem_int` (`aeisig`).
@@ -815,6 +953,18 @@ pub(crate) fn compile(
     let hssymid = module
         .declare_function("jit_hash_set_symkey", Linkage::Import, &hssig)
         .ok()?;
+    // `jit_hash_incr_symkey`: (vm, hash:i64, sym:i64, default:i64, delta:i64) -> (i64, i8).
+    let mut hisig = module.make_signature();
+    hisig.params.push(AbiParam::new(ptr_ty));
+    hisig.params.push(AbiParam::new(types::I64));
+    hisig.params.push(AbiParam::new(types::I64));
+    hisig.params.push(AbiParam::new(types::I64));
+    hisig.params.push(AbiParam::new(types::I64));
+    hisig.returns.push(AbiParam::new(types::I64));
+    hisig.returns.push(AbiParam::new(types::I8));
+    let hisymid = module
+        .declare_function("jit_hash_incr_symkey", Linkage::Import, &hisig)
+        .ok()?;
     // Float-KEY accum primitives (`h[k] += v` with a Float `k`): same shapes as the
     // Int-key pair but the key i64 carries f64 BITS; bucket match replicates
     // `Value::ruby_eql`'s Float arm (see `jit_hash_accum_get_floatkey`). Value Int.
@@ -893,12 +1043,20 @@ pub(crate) fn compile(
     // 0034 pieces 2-4) — boxed `Value::Nil` by dispatch. Mixing Nil + a value return
     // declines (ambiguous box kind), checked alongside m_float/m_nonfloat below.
     let mut m_nil_ret = false;
+    // A METHOD whose `Return` is a Bool (a predicate `@type == :send`, ADR 0034 piece
+    // 5) — boxed `Value::Bool` by dispatch, served at a Bool obj-call site. Mixing
+    // Bool + a value return declines (ambiguous box kind), checked with the others.
+    let mut m_bool_ret = false;
     // Inline-cache cells for `@arr[i].getter` sites (B4); their addresses are
     // baked into the code, so they're moved into the NativeProto to outlive it.
     let mut caches: Vec<Box<std::cell::Cell<(usize, u32)>>> = Vec::new();
     // Inline-cache cells for explicit-recv obj-method call sites (`@h.method(args)`,
     // ADR 0034 Step 1); `(class_ptr, callee_addr)`, runtime-filled, baked into the code.
     let mut obj_call_caches: Vec<Box<std::cell::Cell<(usize, usize)>>> = Vec::new();
+    // Bool-predicate obj-call caches (3-field; ADR 0034 piece 5).
+    let mut bool_caches: Vec<Box<std::cell::Cell<(usize, usize, usize)>>> = Vec::new();
+    // is_a? caches (4-field; ADR 0034 piece 6).
+    let mut value_is_a_caches: Vec<Box<std::cell::Cell<(usize, usize, usize, usize)>>> = Vec::new();
     {
         let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         // A reference to THIS function, for compiling self-recursive calls
@@ -909,8 +1067,13 @@ pub(crate) fn compile(
         let obj_call_ref = module.declare_func_in_func(ocid, fb.func);
         let obj_getter_arr_ref = module.declare_func_in_func(ogaid, fb.func);
         let obj_getter_sym_ref = module.declare_func_in_func(ogsid, fb.func);
+        let obj_call_bool_ref = module.declare_func_in_func(ocbid, fb.func);
         let hashget_symkey_ref = module.declare_func_in_func(hgsymid, fb.func);
         let hashset_symkey_ref = module.declare_func_in_func(hssymid, fb.func);
+        let hashincr_symkey_ref = module.declare_func_in_func(hisymid, fb.func);
+        let ivar_sym_ref = module.declare_func_in_func(ivsymid, fb.func);
+        let value_is_a_ref = module.declare_func_in_func(visaid, fb.func);
+        let symbol_length_ref = module.declare_func_in_func(symlenid, fb.func);
         let arr_len_ref = module.declare_func_in_func(alenid, fb.func);
         let arr_elem_int_ref = module.declare_func_in_func(aeiid, fb.func);
         let arr_elem_ptr_ref = module.declare_func_in_func(aepid, fb.func);
@@ -1074,6 +1237,28 @@ pub(crate) fn compile(
                 let nv = fb.ins().bor(cur, of);
                 fb.def_var(ovf_var, nv);
             };
+            // Fused `counts[k] = (counts[k] || d) + delta` (ADR 0034 pieces 2-4 perf):
+            // one `jit_hash_incr_symkey` call, net-zero stack effect (the r-m-w is a
+            // statement). Replaces the whole 13-op range (get + `|| d` + set + Pop).
+            if let Some(hi) = fused[ip] {
+                let hash = fb.use_var(vars[1]); // the Hash param (slot 1, HashObjId)
+                let key = match hi.key {
+                    HashIncrKey::Local(k) => {
+                        if local_kinds[k as usize] != Kind::Symbol {
+                            return None; // key local isn't a Symbol → decline (sound)
+                        }
+                        fb.use_var(vars[k as usize])
+                    }
+                    HashIncrKey::Sym(s) => fb.ins().iconst(types::I64, s.0 as i64),
+                };
+                let d = fb.ins().iconst(types::I64, hi.default);
+                let delta = fb.ins().iconst(types::I64, hi.delta);
+                let inst = fb.ins().call(hashincr_symkey_ref, &[vm_param, hash, key, d, delta]);
+                let of = fb.inst_results(inst)[1];
+                acc_ovf(&mut fb, of);
+                ip = hi.end + 1;
+                continue;
+            }
             match &code[ip] {
                 Op::LoadConstInt(i) => {
                     let v = fb.ins().iconst(types::I64, *i);
@@ -1083,11 +1268,39 @@ pub(crate) fn compile(
                     let v = fb.ins().f64const(*f);
                     stack.push((v, Kind::Float));
                 }
+                // A standalone Symbol literal (`:send`, `:long_method`) → a `Kind::Symbol`
+                // holding its `SymId.0` (ADR 0034 pieces 4-5). Consumed by Symbol `==`
+                // (predicate bodies) or a Symbol-keyed Hash op (`counts[:long_method]`).
+                // The fused `@h[:k]` form already consumes its LoadSymbol at LoadIvar.
+                Op::LoadSymbol(s) => {
+                    let v = fb.ins().iconst(types::I64, s.0 as i64);
+                    stack.push((v, Kind::Symbol));
+                }
                 // Read an ivar via a native primitive (value-touching, AR shape).
                 // `@arr.length`/`@arr.size` fuses into one Array-length call;
                 // otherwise read an Int ivar. A non-matching heap shape sets ovf
                 // → deopt. The fused Call op is skipped (`ip += 1`).
                 Op::LoadIvar(s) => {
+                    // A Symbol ivar compared to a Symbol literal (`@type == :send`, the
+                    // predicate body of ADR 0034 piece 5): `LoadIvar, LoadSymbol, BinOp(Eq|Ne)`
+                    // → read the ivar as a Symbol (`jit_ivar_get_sym`). A non-Symbol ivar
+                    // deopts. Checked first (its shape can't overlap the receiver/array/hash
+                    // fusions, which never have a LoadSymbol+Eq follower).
+                    let sym_eq = matches!(code.get(ip + 1), Some(Op::LoadSymbol(_)))
+                        && matches!(code.get(ip + 2),
+                            Some(Op::BinOp(crate::bytecode::BinOpKind::Eq | crate::bytecode::BinOpKind::Ne)));
+                    if sym_eq {
+                        let name = fb.ins().iconst(types::I32, s.0 as i64);
+                        let inst = fb.ins().call(ivar_sym_ref, &[vm_param, self_param, name]);
+                        let (res, of) = {
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
+                        };
+                        acc_ovf(&mut fb, of);
+                        stack.push((res, Kind::Symbol));
+                        ip += 1;
+                        continue;
+                    }
                     // `@h.method(args)` (ADR 0034 Step 1): when this ivar's value is
                     // consumed as a method-call RECEIVER — directly, or via a local it's
                     // stored into (`x = @h; … x.compute`) — load it as a `*const Value`
@@ -1240,6 +1453,36 @@ pub(crate) fn compile(
                     // typed, and the kind guards below reject any real use.
                     let v = fb.ins().iconst(types::I64, 0);
                     stack.push((v, Kind::Nil));
+                }
+                // `x.is_a?(Const)` (ADR 0034 piece 6) on an Object local: fuse
+                // `LoadLocal(slot)[Object], LoadConst(C), Call(is_a?, 1)` into one
+                // `jit_value_is_a` (ancestry check), pushing a Bool. Checked before the
+                // plain LoadLocal so the 3-op shape is consumed as a unit.
+                Op::LoadLocal(s)
+                    if local_kinds[*s as usize] == Kind::Object
+                        && matches!(code.get(ip + 1), Some(Op::LoadConst(_)))
+                        && matches!(code.get(ip + 2), Some(Op::Call(m, 1, _)) if *m == syms.is_a) =>
+                {
+                    let const_sym = match code.get(ip + 1) {
+                        Some(Op::LoadConst(c)) => c.0,
+                        _ => unreachable!(),
+                    };
+                    let v_ptr = fb.use_var(vars[*s as usize]);
+                    let csym = fb.ins().iconst(types::I32, const_sym as i64);
+                    let cache = Box::new(std::cell::Cell::new((0usize, 0usize, 0usize, 0usize)));
+                    let cache_addr = &*cache as *const std::cell::Cell<(usize, usize, usize, usize)> as i64;
+                    value_is_a_caches.push(cache);
+                    let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
+                    let inst = fb.ins().call(value_is_a_ref, &[vm_param, v_ptr, csym, cache_const]);
+                    let (res, of) = {
+                        let r = fb.inst_results(inst);
+                        (r[0], r[1])
+                    };
+                    acc_ovf(&mut fb, of);
+                    let b = fb.ins().icmp_imm(IntCC::NotEqual, res, 0);
+                    stack.push((b, Kind::Bool));
+                    ip += 3; // consume LoadLocal + LoadConst + Call(is_a?)
+                    continue;
                 }
                 Op::LoadLocal(s) => {
                     let raw = fb.use_var(vars[*s as usize]);
@@ -1425,6 +1668,13 @@ pub(crate) fn compile(
                                 m_nil_ret = true;
                                 let _ = (v, k);
                                 fb.ins().iconst(types::I64, 0)
+                            }
+                            // A method that returns a Bool predicate (`@type == :send`,
+                            // ADR 0034 piece 5): zero-extend the `icmp` 0/1. Boxed
+                            // Value::Bool by dispatch; served at a Bool obj-call site.
+                            Kind::Bool if is_method => {
+                                m_bool_ret = true;
+                                fb.ins().uextend(types::I64, v)
                             }
                             _ => return None,
                         }
@@ -1852,6 +2102,46 @@ pub(crate) fn compile(
                     let len = fb.inst_results(inst)[0];
                     stack.push((len, Kind::Int));
                 }
+                // `name.length` (ADR 0034 piece 7) on an Object local that is a
+                // heterogeneous array element — the element is a Symbol at runtime, so
+                // lower to `jit_symbol_length` (deopt if not a Symbol). Checked before the
+                // getter/obj-call arms (an Array `.length` is the ArrayObjId arm above; an
+                // Object-kind local with `.length` is the Symbol case).
+                Op::LoadLocalCall(slot, name, _)
+                    if local_kinds[*slot as usize] == Kind::Object
+                        && (*name == syms.length || *name == syms.size) =>
+                {
+                    let v_ptr = fb.use_var(vars[*slot as usize]);
+                    let inst = fb.ins().call(symbol_length_ref, &[vm_param, v_ptr]);
+                    let (res, of) = {
+                        let r = fb.inst_results(inst);
+                        (r[0], r[1])
+                    };
+                    acc_ovf(&mut fb, of);
+                    stack.push((res, Kind::Int));
+                }
+                // `node.send_type?` (ADR 0034 piece 5): a 0-arg Bool predicate obj-call
+                // whose result feeds a `JumpIfFalse` — call `jit_obj_call_bool` (the PIC
+                // accepts only a `returns_bool` callee), pushing a Bool to branch on.
+                Op::LoadLocalCall(slot, name, _)
+                    if local_kinds[*slot as usize] == Kind::Object
+                        && matches!(code.get(ip + 1), Some(Op::JumpIfFalse(_))) =>
+                {
+                    let recv_ptr = fb.use_var(vars[*slot as usize]);
+                    let nm = fb.ins().iconst(types::I32, name.0 as i64);
+                    let cache = Box::new(std::cell::Cell::new((0usize, 0usize, 0usize)));
+                    let cache_addr = &*cache as *const std::cell::Cell<(usize, usize, usize)> as i64;
+                    bool_caches.push(cache);
+                    let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
+                    let inst = fb.ins().call(obj_call_bool_ref, &[vm_param, recv_ptr, nm, cache_const]);
+                    let (res, of) = {
+                        let r = fb.inst_results(inst);
+                        (r[0], r[1])
+                    };
+                    acc_ovf(&mut fb, of);
+                    let b = fb.ins().icmp_imm(IntCC::NotEqual, res, 0);
+                    stack.push((b, Kind::Bool));
+                }
                 Op::LoadLocalCall(slot, name, _)
                     if local_kinds[*slot as usize] == Kind::Object =>
                 {
@@ -1859,9 +2149,17 @@ pub(crate) fn compile(
                     let nm = fb.ins().iconst(types::I32, name.0 as i64);
                     // `node.children` whose result is stored to a local used as an Array
                     // → an Array-returning getter call (`jit_obj_getter_array`), pushing
-                    // `ArrayObjId` (ADR 0034 Step 1, piece 1). Else the Int obj-call PIC.
+                    // `ArrayObjId` (ADR 0034 Step 1, piece 1). Also the CHAINED form
+                    // `node.children.length` (`Call(length|size, 0)` immediately after,
+                    // not stored — `node.children.length >= 3`). Else the Int obj-call PIC.
                     let arr_result = matches!(code.get(ip + 1),
-                        Some(Op::StoreLocal(dst)) if local_is_array(code, *dst, ip + 2, syms));
+                        Some(Op::StoreLocal(dst)) if local_is_array(code, *dst, ip + 2, syms))
+                        || matches!(code.get(ip + 1),
+                            Some(Op::Call(m, 0, _)) if *m == syms.length || *m == syms.size)
+                        // chained `node.children[i]` — key-load then `Call([], 1)`.
+                        || (matches!(code.get(ip + 1),
+                                Some(Op::LoadConstInt(_) | Op::LoadLocal(_) | Op::LoadSymbol(_)))
+                            && matches!(code.get(ip + 2), Some(Op::Call(m, 1, _)) if *m == syms.bracket));
                     // `node.type` whose result is stored to a local used as a Hash KEY
                     // → a Symbol-returning getter (`jit_obj_getter_sym`), pushing
                     // `Kind::Symbol` (ADR 0034 pieces 2-4).
@@ -1964,8 +2262,9 @@ pub(crate) fn compile(
     // drivers force a single return kind, so m_nonfloat/m_float can't both be set.)
     let returns_float = m_float_ret;
     let returns_nil = m_nil_ret;
-    // At most one box kind across all return paths (Float / non-Float Int-or-Array / Nil).
-    let box_kinds = (returns_float as u8) + (m_nonfloat_ret as u8) + (returns_nil as u8);
+    let returns_bool = m_bool_ret;
+    // At most one box kind across all return paths (Float / non-Float Int-or-Array / Nil / Bool).
+    let box_kinds = (returns_float as u8) + (m_nonfloat_ret as u8) + (returns_nil as u8) + (returns_bool as u8);
     if box_kinds > 1 {
         return None;
     }
@@ -1997,9 +2296,12 @@ pub(crate) fn compile(
         returns_array: std::cell::Cell::new(returns_array),
         returns_float: std::cell::Cell::new(returns_float),
         returns_nil: std::cell::Cell::new(returns_nil),
+        returns_bool: std::cell::Cell::new(returns_bool),
         param2_hash: std::cell::Cell::new(param1_is_hash),
         _caches: caches,
         _obj_call_caches: obj_call_caches,
+        _bool_caches: bool_caches,
+        _value_is_a_caches: value_is_a_caches,
     })
 }
 
@@ -3756,8 +4058,22 @@ fn block_args(
                 return None;
             }
             let last = stack.len().wrapping_sub(1);
-            for (i, (p, (_, k))) in prev.iter().zip(stack).enumerate() {
-                if p != k && !(discard_top && i == last) {
+            for (i, (_, k)) in stack.iter().enumerate() {
+                if prev[i] == *k {
+                    continue;
+                }
+                // A merge where either side is Nil → downgrade the slot to `Nil`, a
+                // "discard poison": the only ops that accept a Nil are `Pop` and a further
+                // merge, so a real USE (arithmetic, a call arg) declines on the Nil kind.
+                // This is the general `if/elsif/end`-as-statement value merge — the result
+                // (an Int from an assignment, or `nil` from a missing else) threads through
+                // several jump blocks before the final `Pop` (ADR 0034 piece 5, generalized
+                // past the immediate-Pop case `discard_top` handles).
+                if prev[i] == Kind::Nil || *k == Kind::Nil {
+                    prev[i] = Kind::Nil;
+                } else if discard_top && i == last {
+                    // A non-Nil mismatch at a slot the target immediately `Pop`s — harmless.
+                } else {
                     return None;
                 }
             }
@@ -3840,6 +4156,16 @@ fn emit_numeric_binop(
     ovf_var: Variable,
 ) -> Option<()> {
     match (ka, kb) {
+        // Symbol == / != Symbol (`@type == :send`, ADR 0034 piece 5): compare the two
+        // `SymId.0` i64s — interned, so identity-equal iff value-equal. Pushes a Bool.
+        (Kind::Symbol, Kind::Symbol)
+            if matches!(k, BinOpKind::Eq | BinOpKind::Ne) =>
+        {
+            let cc = if matches!(k, BinOpKind::Eq) { IntCC::Equal } else { IntCC::NotEqual };
+            let r = fb.ins().icmp(cc, a, b);
+            stack.push((r, Kind::Bool));
+            Some(())
+        }
         (Kind::Int, Kind::Int) => {
             emit_binop(fb, k, a, b, stack, ovf_var);
             Some(())
@@ -4142,6 +4468,40 @@ pub(crate) unsafe extern "C" fn jit_ivar_get_int(
     }
 }
 
+/// Native primitive: read `recv`'s ivar `name` and return its `SymId.0` if it's a
+/// `Symbol`, else deopt (`ovf = 1`). The seam for a Bool predicate like
+/// `def send_type?; @type == :send; end` (ADR 0034 piece 5) — the Symbol ivar.
+///
+/// # Safety
+/// `vm`, `recv` must be valid for the call.
+pub(crate) unsafe extern "C" fn jit_ivar_get_sym(
+    vm: *const crate::vm::Vm,
+    recv: *const Value,
+    name: u32,
+) -> NRet {
+    let vm = unsafe { &*vm };
+    let recv = unsafe { &*recv };
+    let name_id = crate::intern::SymId(name);
+    let s = match recv {
+        Value::Object(oid) => match vm.heap.get(*oid) {
+            crate::heap::HeapObj::Instance(inst) => match inst.ivars.get(&name_id) {
+                Some(Value::Sym(s)) => Some(s.0 as i64),
+                _ => None,
+            },
+            _ => None,
+        },
+        Value::Class(cls) => match cls.ivars.borrow().get(&name_id) {
+            Some(Value::Sym(s)) => Some(s.0 as i64),
+            _ => None,
+        },
+        _ => None,
+    };
+    match s {
+        Some(s) => NRet { res: s, ovf: 0 },
+        None => NRet { res: 0, ovf: 1 },
+    }
+}
+
 /// B4-generalized (ADR 0034, Step 1): return a pointer to the receiver `Value` held
 /// in `recv.@name`, when that ivar is a `Value::Object` — the receiver for a native→
 /// native method call (`@h.compute(x)`). `res` is the `*const Value` (into the
@@ -4252,6 +4612,104 @@ pub(crate) unsafe extern "C" fn jit_value_is_class(
     NRet { res: (vclass_ptr == const_ptr) as i64, ovf: 0 }
 }
 
+/// `value.is_a?(Const)` (ADR 0034 piece 6): an ANCESTRY check (vs `jit_value_is_class`'s
+/// exact `== class`). `res` = 1/0 Bool; `ovf=1` (deopt) on a null pointer or an unknown
+/// class const. Resolves the value's class (`class_of`, correct for any value incl. a
+/// Symbol/Int) then walks ancestry via `class_is_a`.
+///
+/// # Safety
+/// `vm` valid; `&mut *vm` for `class_of`/`classes` follows the heap-mutating-primitive
+/// pattern (no live alias during the call); neither touches the array, so `value_ptr` stays valid.
+pub(crate) unsafe extern "C" fn jit_value_is_a(
+    vm: *mut crate::vm::Vm,
+    value_ptr: *const Value,
+    const_sym: u32,
+    cache: *const std::cell::Cell<(usize, usize, usize, usize)>,
+) -> NRet {
+    if value_ptr.is_null() {
+        return NRet { res: 0, ovf: 1 };
+    }
+    let v = unsafe { &*value_ptr };
+    let cache = unsafe { &*cache };
+    // Cache: (const_sym, const_ptr, tag_memo, result_memo). const_sym/ptr resolve the
+    // target class once; tag_memo/result_memo memoize the answer for a NON-Object value
+    // by its type tag (a Symbol/Int/… has one fixed class, so is_a? is constant for it).
+    let (cached_sym, mut const_ptr, tag_memo, result_memo) = cache.get();
+    if !(cached_sym == const_sym as usize && cached_sym != 0) {
+        match unsafe { &*vm }.classes.get(&crate::intern::SymId(const_sym)) {
+            Some(c) => {
+                const_ptr = std::rc::Rc::as_ptr(c) as usize;
+                cache.set((const_sym as usize, const_ptr, 0, 0)); // const changed → drop tag memo
+            }
+            None => return NRet { res: 0, ovf: 1 },
+        }
+    }
+    // Fast path: an Object whose EXACT class is the target — `class_ptr_of` (clone-free),
+    // no `class_of`/ancestry. Covers the common `c.is_a?(Node)` on a Node element.
+    if let Value::Object(oid) = v {
+        if let Some(p) = unsafe { &*vm }.heap.class_ptr_of(*oid) {
+            if p == const_ptr {
+                return NRet { res: 1, ovf: 0 };
+            }
+        }
+    }
+    // Type tag for a NON-Object builtin (its class is fixed, so the result is memoizable).
+    // 0 = an Object (classes vary by instance → never tag-memo).
+    let tag: usize = match v {
+        Value::Object(_) => 0,
+        Value::Sym(_) => 1,
+        Value::Int(_) => 2,
+        Value::Float(_) => 3,
+        Value::Str(_) => 4,
+        Value::Bool(_) => 5,
+        Value::Nil => 6,
+        Value::Array(_) => 7,
+        Value::Hash(_) => 8,
+        _ => 0,
+    };
+    if tag != 0 && tag == tag_memo {
+        return NRet { res: result_memo as i64, ovf: 0 }; // memo hit (same value type)
+    }
+    // Slow path (a subclass Object, or a not-yet-memoized non-Object): the ancestry walk.
+    let vmm = unsafe { &mut *vm };
+    let target = match vmm.classes.get(&crate::intern::SymId(const_sym)) {
+        Some(c) => c.clone(),
+        None => return NRet { res: 0, ovf: 1 },
+    };
+    let vclass = match vmm.class_of(v) {
+        Value::Class(c) => c,
+        _ => return NRet { res: 0, ovf: 1 },
+    };
+    let r = crate::vm::class_is_a(&vclass, &target);
+    if tag != 0 {
+        cache.set((const_sym as usize, const_ptr, tag, r as usize));
+    }
+    NRet { res: r as i64, ovf: 0 }
+}
+
+/// `sym.length` (ADR 0034 piece 7): the character count of a `Symbol`'s name (like
+/// `String#length`). `ovf=1` (deopt) on a null pointer or a non-Symbol value — so a
+/// heterogeneous array element that isn't a Symbol falls to the interpreter.
+///
+/// # Safety
+/// `vm`, `value_ptr` valid.
+pub(crate) unsafe extern "C" fn jit_symbol_length(
+    vm: *const crate::vm::Vm,
+    value_ptr: *const Value,
+) -> NRet {
+    if value_ptr.is_null() {
+        return NRet { res: 0, ovf: 1 };
+    }
+    let vm = unsafe { &*vm };
+    match unsafe { &*value_ptr } {
+        Value::Sym(s) => {
+            let name = vm.interner.resolve(*s);
+            NRet { res: name.chars().count() as i64, ovf: 0 }
+        }
+        _ => NRet { res: 0, ovf: 1 },
+    }
+}
+
 /// B4-generalized (ADR 0034, Step 1): the OO-dispatch lever. A native→native method
 /// call `recv.name(arg)` from inside a compiled body, via a monomorphic runtime-fill
 /// inline cache. `recv` points at the receiver Object `Value`; `cache` holds
@@ -4307,7 +4765,7 @@ pub(crate) unsafe extern "C" fn jit_obj_call(
             Some(c) => c,
             None => return deopt,
         };
-        match vmm.jit_compile_obj_callee(crate::intern::SymId(name), &cls, cls_ptr, argc as usize) {
+        match vmm.jit_compile_obj_callee(crate::intern::SymId(name), &cls, cls_ptr, argc as usize, false) {
             Some(a) => {
                 cache.set((cls_ptr, a));
                 a
@@ -4320,6 +4778,110 @@ pub(crate) unsafe extern "C" fn jit_obj_call(
     let f: extern "C" fn(*const crate::vm::Vm, *const Value, i64) -> NRet =
         unsafe { std::mem::transmute(addr) };
     f(vm as *const crate::vm::Vm, recv, arg)
+}
+
+/// Bool-predicate variant of [`jit_obj_call`] (ADR 0034 piece 5): a 0-arg
+/// `recv.predicate?` (`node.send_type?`) whose result feeds a `JumpIfFalse`.
+///
+/// The dominant predicate shape — `def send_type?; @ivar == :sym; end` — is INLINED:
+/// at PIC fill the callee's bytecode is matched against `[LoadIvar, LoadSymbol,
+/// BinOp(Eq), Return]`, and on a hit the cache stores `(class_ptr, 0, ivar<<32 | sym)`.
+/// A per-call hit then does ONE heap fetch (the Instance) that serves BOTH the class
+/// guard AND the ivar read — no native call, no second lookup. A non-inlinable Bool
+/// predicate falls back to compiling the callee native (`addr != 0`) and calling it.
+/// Class miss / non-Object recv / non-Bool callee all deopt.
+///
+/// Cache layout `(class_ptr, addr, packed)`: `class_ptr==0` empty; `addr==0` ⇒ inlined
+/// predicate (`packed = ivar<<32 | sym`); else `addr` is the native callee.
+///
+/// # Safety
+/// As [`jit_obj_call`]: `vm` valid; the on-miss compile reconstructs `&mut *vm` (touches
+/// `jit_native`/`protos`, not `heap`, runs no Ruby), so `recv` stays valid.
+pub(crate) unsafe extern "C" fn jit_obj_call_bool(
+    vm: *mut crate::vm::Vm,
+    recv: *const Value,
+    name: u32,
+    cache: *const std::cell::Cell<(usize, usize, usize)>,
+) -> NRet {
+    let deopt = NRet { res: 0, ovf: 1 };
+    if recv.is_null() {
+        return deopt;
+    }
+    let cache = unsafe { &*cache };
+    let oid = match unsafe { &*recv } {
+        Value::Object(o) => *o,
+        _ => return deopt,
+    };
+    // One heap fetch: the Instance gives the class pointer (guard) AND, for the inlined
+    // predicate, the ivar — like `jit_obj_getter_sym`.
+    let inst = match unsafe { &*vm }.heap.get(oid) {
+        crate::heap::HeapObj::Instance(inst) => inst,
+        _ => return deopt,
+    };
+    let cls_ptr = match &inst.singleton_class {
+        Some(sc) => std::rc::Rc::as_ptr(sc) as usize,
+        None => std::rc::Rc::as_ptr(&inst.class) as usize,
+    };
+    let (cached_cls, cached_addr, cached_packed) = cache.get();
+    let (addr, packed) = if cached_cls == cls_ptr {
+        (cached_addr, cached_packed)
+    } else if cached_cls == 0 {
+        // Cold fill. First try to recognize a `@ivar == :sym` predicate (no compile).
+        let vmm = unsafe { &mut *vm };
+        let cls = match vmm.heap.try_class_of(oid) {
+            Some(c) => c,
+            None => return deopt,
+        };
+        let m = match vmm.lookup_method_uncached(&cls, crate::intern::SymId(name)) {
+            Some(m) => m,
+            None => return deopt,
+        };
+        if m.closure.is_none() && m.builtin.is_none() {
+            if let Some((iv, s)) = predicate_ivar_eq_sym(&vmm.protos[m.proto_idx].code) {
+                let packed = ((iv as usize) << 32) | (s as usize);
+                cache.set((cls_ptr, 0, packed));
+                (0, packed)
+            } else {
+                // Non-predicate Bool method: compile + call native.
+                match vmm.jit_compile_obj_callee(crate::intern::SymId(name), &cls, cls_ptr, 0, true) {
+                    Some(a) => {
+                        cache.set((cls_ptr, a, 0));
+                        (a, 0)
+                    }
+                    None => return deopt,
+                }
+            }
+        } else {
+            return deopt;
+        }
+    } else {
+        return deopt; // megamorphic at a monomorphic site → interpreter
+    };
+    if addr == 0 {
+        // Inlined predicate: read `recv.@ivar` from the already-fetched Instance and
+        // compare to the target Symbol — no native call.
+        let iv = (packed >> 32) as u32;
+        let target = (packed & 0xffff_ffff) as u32;
+        match inst.ivars.get(&crate::intern::SymId(iv)) {
+            Some(Value::Sym(s)) => NRet { res: (s.0 == target) as i64, ovf: 0 },
+            _ => deopt, // non-Symbol ivar → interpreter (defensive)
+        }
+    } else {
+        let f: extern "C" fn(*const crate::vm::Vm, *const Value, i64) -> NRet =
+            unsafe { std::mem::transmute(addr) };
+        f(vm as *const crate::vm::Vm, recv, 0)
+    }
+}
+
+/// Match a method body that is exactly `@ivar == :sym` (`[LoadIvar(iv), LoadSymbol(s),
+/// BinOp(Eq), Return]`) → `(ivar, sym)`. The inlinable predicate shape (ADR 0034 piece 5).
+fn predicate_ivar_eq_sym(code: &[Op]) -> Option<(u32, u32)> {
+    match code {
+        [Op::LoadIvar(iv), Op::LoadSymbol(s), Op::BinOp(crate::bytecode::BinOpKind::Eq), Op::Return] => {
+            Some((iv.0, s.0))
+        }
+        _ => None,
+    }
 }
 
 /// B4-generalized (ADR 0034 Step 1): `recv.getter` where `getter` is a simple attribute
@@ -4488,6 +5050,58 @@ pub(crate) unsafe extern "C" fn jit_hash_get_symkey(
     }
 }
 
+/// FUSED Symbol-keyed read-modify-write `h[sym] = (h[sym] || default) + delta` (ADR 0034
+/// pieces 2-4 perf): the whole `counts[t] = (counts[t] || 0) + 1` accumulate in ONE heap
+/// access + ONE scan (vs a separate get + set). Present Int `v` → `v + delta`; absent +
+/// no Hash default → `default + delta`; absent + a Hash default, or present non-Int →
+/// `ovf=1` (deopt to the interpreter). Overflow of the `+ delta` also deopts.
+///
+/// # Safety
+/// `vm` valid; `hash_objid` a live Hash slot.
+pub(crate) unsafe extern "C" fn jit_hash_incr_symkey(
+    vm: *mut crate::vm::Vm,
+    hash_objid: i64,
+    symid: i64,
+    default: i64,
+    delta: i64,
+) -> NRet {
+    let vm = unsafe { &mut *vm };
+    let hid = crate::value::ObjId(hash_objid as u32);
+    let sym = symid as u32;
+    let h = match vm.heap.get_mut(hid) {
+        crate::heap::HeapObj::Hash(h) => h,
+        _ => return NRet { res: 0, ovf: 1 },
+    };
+    // Find the key (linear scan, few keys). Compute the new value, then store in place.
+    for (k, v) in h.pairs.iter_mut() {
+        if matches!(k, Value::Sym(s) if s.0 == sym) {
+            let cur = match v {
+                Value::Int(n) => *n,
+                _ => return NRet { res: 0, ovf: 1 }, // present non-Int → interpreter
+            };
+            match cur.checked_add(delta) {
+                Some(nv) => {
+                    *v = Value::Int(nv);
+                    return NRet { res: nv, ovf: 0 };
+                }
+                None => return NRet { res: 0, ovf: 1 }, // i64 overflow → Bignum path
+            }
+        }
+    }
+    // Absent: sound only with no user default (else the interpreter must apply it).
+    if h.default_value.is_some() || h.default_block.is_some() {
+        return NRet { res: 0, ovf: 1 };
+    }
+    match default.checked_add(delta) {
+        Some(nv) => {
+            h.pairs.push((Value::Sym(crate::intern::SymId(sym)), Value::Int(nv)));
+            h.index = None;
+            NRet { res: nv, ovf: 0 }
+        }
+        None => NRet { res: 0, ovf: 1 },
+    }
+}
+
 /// Symbol-keyed Hash write (`counts[t] = val`, ADR 0034 pieces 2-4): store
 /// `Value::Int(val)` at the Symbol key `symid` in Hash `hash_objid` (insert or update,
 /// keeping the index live + insertion order).
@@ -4504,9 +5118,6 @@ pub(crate) unsafe extern "C" fn jit_hash_set_symkey(
     let hid = crate::value::ObjId(hash_objid as u32);
     let sym = symid as u32;
     // Linear find-or-append on `pairs` directly (no index — see `jit_hash_get_symkey`).
-    // If a stale index existed it must be invalidated, since we bypass `hash_insert`'s
-    // index maintenance; the accumulator Hashes this drives never build one, so the
-    // `index = None` reset is just defensive.
     if let crate::heap::HeapObj::Hash(h) = vm.heap.get_mut(hid) {
         if let Some(slot) = h.pairs.iter_mut().find(|(k, _)| matches!(k, Value::Sym(s) if s.0 == sym)) {
             slot.1 = Value::Int(val);
@@ -4542,6 +5153,8 @@ pub(crate) struct JitSyms {
     pub round: SymId,
     // `x.class` — for the fused `x.class == Const` guard (ADR 0034 Step 1, piece 3).
     pub class: SymId,
+    // `x.is_a?(Const)` — the fused ancestry guard (ADR 0034 piece 6).
+    pub is_a: SymId,
 }
 
 /// Native primitive: allocate a fresh empty Array, return its `ObjId` as i64.
