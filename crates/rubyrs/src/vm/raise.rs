@@ -64,7 +64,7 @@ impl Vm {
                 self.stack.push(Value::Class(cls.clone()));
                 let new_id = self.interner.intern("new");
                 let pre = self.frames.len();
-                let built = match self.do_call(new_id, 0, false, u16::MAX)
+                let built = match self.do_call(new_id, 0, false, u32::MAX)
                     .and_then(|()| self.dispatch_until(pre))
                 {
                     Ok(()) => self.stack.pop(),

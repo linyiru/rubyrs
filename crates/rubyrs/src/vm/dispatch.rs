@@ -823,7 +823,7 @@ impl Vm {
         let pre = self.frames.len();
         self.stack.push(other.clone());
         self.stack.push(recv.clone());
-        self.do_call(coerce_id, 1, false, u16::MAX)?;
+        self.do_call(coerce_id, 1, false, u32::MAX)?;
         self.dispatch_until(pre)?;
         let pair = self.stack.pop().unwrap_or(Value::Nil);
         let (a, b) = match &pair {
@@ -848,7 +848,7 @@ impl Vm {
         let pre2 = self.frames.len();
         self.stack.push(a);
         self.stack.push(b);
-        self.do_call(name_id, 1, false, u16::MAX)?;
+        self.do_call(name_id, 1, false, u32::MAX)?;
         self.dispatch_until(pre2)?;
         Ok(Some(()))
     }
@@ -1986,7 +1986,7 @@ impl Vm {
             name_id,
             argc,
             /* no_recv = */ false,
-            /* cache_id = */ u16::MAX,
+            /* cache_id = */ u32::MAX,
         )?;
         Ok(self
             .stack
@@ -3248,7 +3248,7 @@ impl Vm {
         &mut self,
         name: &str,
         name_id: SymId,
-        cache_id: u16,
+        cache_id: u32,
         args: ArgsBuf,
         recv_opt: Option<Value>,
     ) -> SendBypass {
@@ -3308,7 +3308,7 @@ impl Vm {
         for a in args.into_iter().skip(1) {
             self.stack.push(a);
         }
-        SendBypass::Handled(self.do_call(target_sym, new_argc, no_recv_for_recursion, u16::MAX))
+        SendBypass::Handled(self.do_call(target_sym, new_argc, no_recv_for_recursion, u32::MAX))
     }
 
     /// Callable intrinsics — dispatch to the `Method` / `Block` /
@@ -4053,7 +4053,7 @@ impl Vm {
                     self.stack.push(target);
                     for a in args { self.stack.push(a); }
                     self.bypass_visibility_once = true;
-                    self.do_call(bm_name_id, argc, false, u16::MAX)?;
+                    self.do_call(bm_name_id, argc, false, u32::MAX)?;
                 }
             }
             return Ok(CallableOutcome::Handled);
@@ -4144,7 +4144,7 @@ impl Vm {
                     self.stack.push(target);
                     for a in args { self.stack.push(a); }
                     self.bypass_visibility_once = true;
-                    self.do_call(cap_name_id, argc, false, u16::MAX)?;
+                    self.do_call(cap_name_id, argc, false, u32::MAX)?;
                 }
             }
             return Ok(CallableOutcome::Handled);
@@ -4249,7 +4249,7 @@ impl Vm {
                     self.stack.push(underlying);
                     for a in combined { self.stack.push(a); }
                     let call_sym = self.interner.intern("call");
-                    self.do_call(call_sym, argc, false, u16::MAX)?;
+                    self.do_call(call_sym, argc, false, u32::MAX)?;
                     return Ok(CallableOutcome::Handled);
                 }
                 // Same pin-the-underlying pattern as the curry-on-Method
@@ -4874,7 +4874,7 @@ impl Vm {
                 self.do_call(
                     bm_name_id, argc,
                     /* no_recv = */ false,
-                    /* cache_id = */ u16::MAX,
+                    /* cache_id = */ u32::MAX,
                 )?;
                 return Ok(CallableOutcome::Handled);
             }
@@ -6102,7 +6102,7 @@ impl Vm {
         &mut self,
         name: &str,
         name_id: SymId,
-        _cache_id: u16,
+        _cache_id: u32,
         args: ArgsBuf,
         recv: Value,
         force_primitive: bool,
@@ -6160,7 +6160,7 @@ impl Vm {
                 if self.responds_to(&obj, conv_id, false) {
                     // `obj.to_hash` — its result (or TypeError) is the answer.
                     self.stack.push(obj);
-                    self.do_call(conv_id, 0, /*no_recv=*/ false, u16::MAX)?;
+                    self.do_call(conv_id, 0, /*no_recv=*/ false, u32::MAX)?;
                 } else {
                     self.stack.push(Value::Nil);
                 }
@@ -7368,7 +7368,7 @@ impl Vm {
         /// methods (whose `invoke_method` already pops the Hash
         /// when the proto declares kw_params) and for primitives
         /// that genuinely take a positional Hash.
-        pub(crate) fn do_call_kw(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
+        pub(crate) fn do_call_kw(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u32) -> Result<(), Trap> {
             // Empty / nil keyword-splat contributes ZERO arguments,
             // matching CRuby: `f(**{})` and `f(**nil)` pass nothing
             // (and `f(1, **{})` passes just `1`). The kwargs travel
@@ -7629,7 +7629,7 @@ impl Vm {
         #[allow(dead_code)] // mirror of the jit-native variant; its callers are feature-gated too
         fn jit_should_route(&self, _proto_idx: usize, _argc: usize) -> bool { false }
 
-        pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
+        pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u32) -> Result<(), Trap> {
         // Consume `bypass_visibility_once` at the dispatch
         // boundary, before any arm runs. A naive consume-at-the-
         // vis-check would leak the flag whenever the dispatch
@@ -8341,7 +8341,7 @@ impl Vm {
                 let argc = args.len();
                 self.stack.push(self_val.clone());
                 for a in args { self.stack.push(a); }
-                return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
+                return self.do_call(name_id, argc, /*no_recv=*/false, u32::MAX);
             }
             // Bare calls on Class instances inside `class Foo
             // ... end` bodies and `def self.X` singleton methods.
@@ -8416,7 +8416,7 @@ impl Vm {
                 let argc = args.len();
                 self.stack.push(self_val.clone());
                 for a in args { self.stack.push(a); }
-                return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
+                return self.do_call(name_id, argc, /*no_recv=*/false, u32::MAX);
             }
             // 2-arg `define_method` / `define_singleton_method`
             // in a class body — intercept BEFORE the bridge
@@ -8544,7 +8544,7 @@ impl Vm {
                     // consult. Same pattern as send / send_with_
                     // block re-entries (lines ~464 / ~924, plus
                     // the lib.rs sentinel comment at ~77).
-                    return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
+                    return self.do_call(name_id, argc, /*no_recv=*/false, u32::MAX);
                 }
             }
             // (`__dir__` is now handled by the hoisted arm
@@ -9354,7 +9354,7 @@ impl Vm {
                 let argc = args.len();
                 self.stack.push(self_val.clone());
                 for a in args { self.stack.push(a); }
-                return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
+                return self.do_call(name_id, argc, /*no_recv=*/false, u32::MAX);
             }
             // method_missing fallback (PoC #2). For Object self, look
             // up the class chain — if found, hand it the missed name
@@ -13707,7 +13707,7 @@ impl Vm {
             let pre = self.frames.len();
             let clone_id = self.interner.intern("clone");
             self.stack.push(recv.clone());
-            self.do_call(clone_id, 0, false, u16::MAX)?;
+            self.do_call(clone_id, 0, false, u32::MAX)?;
             self.dispatch_until(pre)?;
             let copy = self.stack.pop().unwrap_or(Value::Nil);
             if let Some(frozen) = want {
@@ -15246,7 +15246,7 @@ impl Vm {
         &mut self,
         name_id: SymId,
         argc: usize,
-        cache_id: u16,
+        cache_id: u32,
     ) -> Result<bool, Trap> {
         // Explicit-recv stack layout: [..., recv, a1, ..., aN].
         let recv_idx = match self.stack.len().checked_sub(argc + 1) {
@@ -15467,7 +15467,7 @@ impl Vm {
         &mut self,
         name_id: SymId,
         argc: usize,
-        cache_id: u16,
+        cache_id: u32,
     ) -> Result<bool, Trap> {
         let self_val = match self.frames.last() {
             Some(f) => f.self_val.clone(),
@@ -15517,7 +15517,7 @@ impl Vm {
         &mut self,
         name_id: SymId,
         argc: usize,
-        cache_id: u16,
+        cache_id: u32,
     ) -> Result<bool, Trap> {
         // Block-form layout: [..., recv, block, a1, ..., aN].
         let block_idx = match self.stack.len().checked_sub(argc + 1) {
@@ -15641,7 +15641,7 @@ impl Vm {
         &mut self,
         name_id: SymId,
         argc: usize,
-        cache_id: u16,
+        cache_id: u32,
     ) -> Result<bool, Trap> {
         // Explicit-recv stack layout: [..., recv, a1, ..., aN].
         let recv_idx = match self.stack.len().checked_sub(argc + 1) {
@@ -16514,7 +16514,7 @@ impl Vm {
         loop_ops.push(Op::StoreLocal(t_arr));                       // arr = <recv>
         loop_ops.push(Op::LoadConstInt(0));
         loop_ops.push(Op::StoreLocal(t_i));                         // i = 0
-        loop_ops.push(Op::LoadLocalCall(t_arr, length_sym, u16::MAX));
+        loop_ops.push(Op::LoadLocalCall(t_arr, length_sym, u32::MAX));
         loop_ops.push(Op::StoreLocal(t_n));                         // n = arr.length
         loop_ops.push(Op::EnterLoop);
         // loop head (index = head_idx within loop_ops):
@@ -16525,7 +16525,7 @@ impl Vm {
         loop_ops.push(Op::JumpIfFalse(0)); // placeholder
         loop_ops.push(Op::LoadLocal(t_arr));
         loop_ops.push(Op::LoadLocal(t_i));
-        loop_ops.push(Op::Call(bracket_sym, 1, u16::MAX));
+        loop_ops.push(Op::Call(bracket_sym, 1, u32::MAX));
         loop_ops.push(Op::StoreLocal(param_start));                 // x = arr[i]
         loop_ops.extend_from_slice(body);                           // spliced block body (relative jumps OK)
         loop_ops.push(Op::Pop);                                     // discard the block's value
@@ -18843,10 +18843,10 @@ impl Vm {
             if let Some(bid) = block {
                 self.stack.push(Value::Block(bid));
                 for a in args { self.stack.push(a); }
-                return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
+                return self.do_call_block(name_id, argc, /*no_recv=*/false, u32::MAX);
             } else {
                 for a in args { self.stack.push(a); }
-                return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
+                return self.do_call(name_id, argc, /*no_recv=*/false, u32::MAX);
             }
         }
         // Native-JIT hook (ADR 0030 finding #4, `jit-native` feature): a
@@ -19853,7 +19853,7 @@ impl Vm {
         let to_proc_id = self.interner.intern("to_proc");
         self.stack.push(Value::Sym(sid));
         let pre_frames = self.frames.len();
-        self.do_call(to_proc_id, 0, /*no_recv=*/false, u16::MAX)?;
+        self.do_call(to_proc_id, 0, /*no_recv=*/false, u32::MAX)?;
         self.dispatch_until(pre_frames)?;
         match self.stack.pop() {
             Some(Value::Block(bid)) => Ok(bid),
@@ -19905,7 +19905,7 @@ impl Vm {
                 code: vec![
                     Op::LoadLocal(0),
                     Op::LoadLocal(1),
-                    Op::ApplyCall(call_id, u16::MAX),
+                    Op::ApplyCall(call_id, u32::MAX),
                     Op::Return,
                 ],
                 op_spans: vec![Span::ZERO; 4],
@@ -20014,8 +20014,8 @@ impl Vm {
                     Op::LoadLocal(0),                   // [outer]
                     Op::LoadLocal(1),                   // [outer, inner]
                     Op::LoadLocal(2),                   // [outer, inner, args]
-                    Op::ApplyCall(call_id, u16::MAX),   // [outer, inner_result]
-                    Op::Call(call_id, 1, u16::MAX),     // [outer_result]
+                    Op::ApplyCall(call_id, u32::MAX),   // [outer, inner_result]
+                    Op::Call(call_id, 1, u32::MAX),     // [outer_result]
                     Op::Return,
                 ],
                 op_spans: vec![Span::ZERO; 6],
@@ -20679,7 +20679,7 @@ impl Vm {
 
 
 
-    pub(crate) fn do_call_block(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
+    pub(crate) fn do_call_block(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u32) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
         // Consume `bypass_visibility_once` at the dispatch boundary
         // — same reasoning as `do_call`. `do_call_block` itself
@@ -20922,7 +20922,7 @@ impl Vm {
             self.stack.push(self_val);
             self.stack.push(Value::Block(block));
             for a in args { self.stack.push(a); }
-            return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
+            return self.do_call_block(name_id, argc, /*no_recv=*/false, u32::MAX);
         }
 
         // `proc.call(args, &blk)` — Proc invocation WITH a
@@ -21002,7 +21002,7 @@ impl Vm {
             self.stack.push(bm_recv);
             self.stack.push(Value::Block(block));
             for a in args { self.stack.push(a); }
-            return self.do_call_block(bm_name_id, argc_new, false, u16::MAX);
+            return self.do_call_block(bm_name_id, argc_new, false, u32::MAX);
         }
         // `ubm.bind_call(recv, *args, &block)` — block-form parallel
         // of the no-block bind_call arm in `try_dispatch_callable_intrinsics`
@@ -21965,7 +21965,7 @@ impl Vm {
                     for a in args.into_iter().skip(1) {
                         self.stack.push(a);
                     }
-                    return self.do_call_block(target_sym, new_argc, true, u16::MAX);
+                    return self.do_call_block(target_sym, new_argc, true, u32::MAX);
                 }
             }
             let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
@@ -22021,7 +22021,7 @@ impl Vm {
                 self.stack.push(self_val.clone());
                 self.stack.push(Value::Block(block));
                 for a in args { self.stack.push(a); }
-                return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
+                return self.do_call_block(name_id, argc, /*no_recv=*/false, u32::MAX);
             }
             if let Value::Class(c) = &self_val
                 && let Some(m) = self.lookup_class_singleton_method(c, name_id) {
@@ -22082,7 +22082,7 @@ impl Vm {
                         self.stack.push(self_val.clone());
                         self.stack.push(Value::Block(block));
                         for a in args { self.stack.push(a); }
-                        return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
+                        return self.do_call_block(name_id, argc, /*no_recv=*/false, u32::MAX);
                     }
                     // Route through the blockless `do_call`, NOT
                     // `do_call_block` — CRuby silently discards the
@@ -22102,7 +22102,7 @@ impl Vm {
                     self.stack.push(self_val.clone());
                     for a in args { self.stack.push(a); }
                     let _ = block; // explicitly discarded per CRuby
-                    return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
+                    return self.do_call(name_id, argc, /*no_recv=*/false, u32::MAX);
                 }
             }
             // Bare call WITH a block on a real `nil` receiver inside a
@@ -22143,7 +22143,7 @@ impl Vm {
                 self.stack.push(self_val.clone());
                 self.stack.push(Value::Block(block));
                 for a in args { self.stack.push(a); }
-                return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
+                return self.do_call_block(name_id, argc, /*no_recv=*/false, u32::MAX);
             }
             if let Some(m) = self.toplevel_methods.get(&name_id).cloned() {
                 self.invoke_method_with_block(m, self_val, args, Some(block))?;
@@ -22172,7 +22172,7 @@ impl Vm {
                 self.stack.push(self_val.clone());
                 self.stack.push(Value::Block(block));
                 for a in args { self.stack.push(a); }
-                return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
+                return self.do_call_block(name_id, argc, /*no_recv=*/false, u32::MAX);
             }
             if self.try_method_missing(&self_val, name_id, args, Some(block))? {
                 return Ok(());
@@ -22266,7 +22266,7 @@ impl Vm {
             for a in args.into_iter().skip(1) {
                 self.stack.push(a);
             }
-            return self.do_call_block(target_sym, new_argc, false, u16::MAX);
+            return self.do_call_block(target_sym, new_argc, false, u32::MAX);
         }
 
         // Mirror do_call's Int#+/-/* BigInt-aware intercept so
@@ -23921,7 +23921,7 @@ impl Vm {
                 // dispatch so a later `def keys` override on the same
                 // subclass doesn't capture this forwarder into infinite
                 // recursion — `alias` snapshots the original method.
-                Op::ApplyCallPrimitive(orig_id, u16::MAX),
+                Op::ApplyCallPrimitive(orig_id, u32::MAX),
                 Op::Return,
             ],
             op_spans: vec![Span::ZERO; 4],

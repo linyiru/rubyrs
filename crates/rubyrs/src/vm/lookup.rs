@@ -189,7 +189,7 @@ impl Vm {
     /// was stored. A miss does an uncached walk and inserts at the
     /// `next_way` slot (round-robin eviction).
     #[inline]
-    pub(crate) fn lookup_method_cached(&mut self, cls: &Rc<Class>, name_id: SymId, cache_id: u16) -> Option<Rc<Method>> {
+    pub(crate) fn lookup_method_cached(&mut self, cls: &Rc<Class>, name_id: SymId, cache_id: u32) -> Option<Rc<Method>> {
         let class_ptr = Rc::as_ptr(cls) as usize;
         let idx = cache_id as usize;
         // Fast path: scan ways for a match.
@@ -235,7 +235,7 @@ impl Vm {
         &mut self,
         cls: &Rc<Class>,
         name_id: SymId,
-        cache_id: u16,
+        cache_id: u32,
     ) -> Option<Rc<Method>> {
         let class_ptr = Rc::as_ptr(cls) as usize | 1;
         let idx = cache_id as usize;
@@ -268,7 +268,7 @@ impl Vm {
     pub(crate) fn lookup_toplevel_method_cached(
         &mut self,
         name_id: SymId,
-        cache_id: u16,
+        cache_id: u32,
     ) -> Option<Rc<Method>> {
         // Callers must gate this with `Vm::is_builtin_name` before invoking,
         // because the slot key (`TOPLEVEL_METHOD_CACHE_KEY`) is the only
@@ -317,7 +317,7 @@ impl Vm {
     /// path would silently bypass the IC accounting and the
     /// `hit_rate()` aggregate would systematically under-report
     /// for hot toplevel call sites.
-    pub(crate) fn lookup_toplevel_method_cache_hit(&mut self, cache_id: u16) -> Option<Rc<Method>> {
+    pub(crate) fn lookup_toplevel_method_cache_hit(&mut self, cache_id: u32) -> Option<Rc<Method>> {
         let idx = cache_id as usize;
         if idx >= self.call_caches.len() {
             return None;
@@ -2891,7 +2891,7 @@ impl Vm {
                             for a in args {
                                 self.stack.push(a);
                             }
-                            return self.do_call(target_id, argc, /*no_recv=*/ false, u16::MAX);
+                            return self.do_call(target_id, argc, /*no_recv=*/ false, u32::MAX);
                         }
                         ("===", Some(obj @ Value::Object(_))) => {
                             let same = match (&obj, args.first()) {
@@ -3012,7 +3012,7 @@ impl Vm {
                         let argc = args.len();
                         self.stack.push(sv);
                         for a in args { self.stack.push(a); }
-                        return self.do_call(name_id, argc, false, u16::MAX);
+                        return self.do_call(name_id, argc, false, u32::MAX);
                     }
                 }
                 if is_no_super && !is_lifecycle_hook {

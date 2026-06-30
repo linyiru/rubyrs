@@ -91,7 +91,7 @@ pub(crate) enum Op {
     /// which both diverged on String parts and paid a full dispatch
     /// per part. The u16 is the call-site cache id for the dispatch
     /// path (same slot a Call would carry).
-    InterpToS(u16),
+    InterpToS(u32),
     /// Assignment-syntax dispatch (`recv.attr = v` / `recv[k] = v`):
     /// identical to `Op::Call` EXCEPT the expression result is the
     /// final positional argument (the RHS), never the method's
@@ -101,7 +101,7 @@ pub(crate) enum Op {
     /// replaced, a frame-based user method gets `Frame.swap_return`
     /// (the Class.new mechanism, already a GC root). Emitted by
     /// `Expr::AssignCall`.
-    CallAset(SymId, u8, u16),
+    CallAset(SymId, u8, u32),
     LoadSymbol(SymId),
     LoadNil,
     LoadTrue,
@@ -231,8 +231,8 @@ pub(crate) enum Op {
     /// signature.
     JumpIfKwArgGiven(u16, i32),
     /// Args: name SymId, argc, per-call-site inline-cache slot id.
-    Call(SymId, u8, u16),
-    CallNoRecv(SymId, u8, u16),
+    Call(SymId, u8, u32),
+    CallNoRecv(SymId, u8, u32),
     /// Superinstruction: `LoadLocal(slot); Call(name, 0, cache)` fused —
     /// a ZERO-ARG method call whose receiver is a local variable
     /// (`x.foo`). The single hottest static-adjacent op pair in web
@@ -241,7 +241,7 @@ pub(crate) enum Op {
     /// runs the same dispatch as `Call(name, 0, …)` — one dispatch
     /// instead of two. Emitted at compile time (compile_call_arm), so
     /// jump offsets are naturally correct.
-    LoadLocalCall(u16, SymId, u16),
+    LoadLocalCall(u16, SymId, u32),
     /// Variant of `Call` / `CallNoRecv` for call sites that the
     /// compiler determined have a trailing kwargs hash (i.e. the
     /// last arg originated from a `KeywordHashNode`, the `foo(a: 1)`
@@ -251,16 +251,16 @@ pub(crate) enum Op {
     /// `primitive_call` / user method dispatch so primitive arms
     /// can read keyword arguments instead of having to inspect
     /// the trailing positional Hash heuristically.
-    CallKw(SymId, u8, u16),
-    CallKwNoRecv(SymId, u8, u16),
+    CallKw(SymId, u8, u32),
+    CallKwNoRecv(SymId, u8, u32),
     /// `foo(*args)` — single-splat call. Pops the args Array
     /// (which must be `Value::Array`) and uses its elements as
     /// the positional args. Argc is dynamic. Receiver above
     /// the array on stack for `ApplyCall`; absent for the
     /// `NoRecv` variant. Used by the compiler when call args
     /// contain a SplatNode at the only position.
-    ApplyCall(SymId, u16),
-    ApplyCallNoRecv(SymId, u16),
+    ApplyCall(SymId, u32),
+    ApplyCallNoRecv(SymId, u32),
     /// `foo(*args, **kw)` — splat call carrying the keyword-splat
     /// SEPARATELY from the positional array (unlike `ApplyCall`, which
     /// folds everything into one array and can't tell a kwsplat from a
@@ -270,22 +270,22 @@ pub(crate) enum Op {
     /// passes only `a`, leaving a trailing positional hash positional);
     /// a non-empty one travels as the trailing kwargs arg. Fixes
     /// `f({x:1}, **{})`-shaped forwarding (e.g. generic delegators).
-    ApplyCallKw(SymId, u16),
-    ApplyCallKwNoRecv(SymId, u16),
+    ApplyCallKw(SymId, u32),
+    ApplyCallKwNoRecv(SymId, u32),
     /// `foo(*args, **kw, &blk)` — block + separately-carried keyword
     /// splat. Stack (bottom→top): `[recv?, block, array, kwsplat]`.
     /// Same empty-kwsplat-drop semantics as `ApplyCallKw`, dispatched
     /// through the block path (the popped block installs as the callee's
     /// block).
-    ApplyCallKwBlock(SymId, u16),
-    ApplyCallKwNoRecvBlock(SymId, u16),
+    ApplyCallKwBlock(SymId, u32),
+    ApplyCallKwNoRecvBlock(SymId, u32),
     /// Like `ApplyCall` (with-recv `self.name(*args)`) but forces
     /// PRIMITIVE dispatch — sets `force_primitive_dispatch` so `do_call`
     /// skips a subclass's user override and runs the primitive. Emitted
     /// ONLY as the body of a `<primitive-alias-forwarder>` so an
     /// `alias own_keys keys` of a primitive `keys` snapshots the
     /// primitive instead of late-binding to a later `def keys`.
-    ApplyCallPrimitive(SymId, u16),
+    ApplyCallPrimitive(SymId, u32),
     /// `foo(*args, &block)` — splat + explicit block-arg. Stack
     /// layout (bottom→top): `[recv?, block, array]`. Pops the
     /// args Array and expands its elements as positional args,
@@ -293,8 +293,8 @@ pub(crate) enum Op {
     /// block value installs as the called method's block. Used
     /// by middleware-chain build loops like
     /// `klass.new(inner_app, *args, &block)`.
-    ApplyCallBlock(SymId, u16),
-    ApplyCallNoRecvBlock(SymId, u16),
+    ApplyCallBlock(SymId, u32),
+    ApplyCallNoRecvBlock(SymId, u32),
     /// `super(args...)`. Receiver stays `self` (popped from the
     /// current frame, not the operand stack). Method name and
     /// argc are baked in at compile time. Lookup starts at the
@@ -506,8 +506,8 @@ pub(crate) enum Op {
     /// `->(){}` literal; `lambda { }` flips the bit on its received
     /// block at dispatch time instead.
     CreateLambda(u32, u16, u16, u16, u16),
-    CallBlock(SymId, u8, u16),
-    CallNoRecvBlock(SymId, u8, u16),
+    CallBlock(SymId, u8, u32),
+    CallNoRecvBlock(SymId, u8, u32),
     /// `foo(**kw, &blk)` — block-form call whose trailing arg is a
     /// keyword-splat Hash (the block+kwargs combo). Twin of
     /// `CallKw`/`CallBlock`: an EMPTY/`nil` trailing hash is dropped
@@ -515,8 +515,8 @@ pub(crate) enum Op {
     /// then dispatch proceeds through the block path. Without these
     /// the combo reused `CallBlock`, which passed `**{}` as a
     /// positional → spurious arity errors (Tilt fixed-locals render).
-    CallKwBlock(SymId, u8, u16),
-    CallKwNoRecvBlock(SymId, u8, u16),
+    CallKwBlock(SymId, u8, u32),
+    CallKwNoRecvBlock(SymId, u8, u32),
     Yield(u8),
     /// `yield(*arr)` — like `Yield` but the args come from a popped
     /// Array (dynamic argc), the yield analogue of `Op::ApplyCall`.

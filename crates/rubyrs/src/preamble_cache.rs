@@ -49,7 +49,7 @@ use crate::vm::Vm;
 pub(crate) const STEP_INSTALL_BUILTINS: u32 = u32::MAX;
 
 const MAGIC: &[u8; 4] = b"RBPC";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2; // bumped: cache_id widened u16->u32 (Op format change)
 
 /// Owned (deserialize) shape. `SnapshotRef` below is the borrow
 /// twin used at encode time so `store` doesn't clone the proto

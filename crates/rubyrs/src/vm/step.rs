@@ -1378,7 +1378,7 @@ impl Vm {
                     self.stack.push(cur);
                     self.stack.push(Value::Int(1));
                     let plus_id = self.interner.intern("+");
-                    self.do_call(plus_id, 1, false, u16::MAX)?;
+                    self.do_call(plus_id, 1, false, u32::MAX)?;
                     let v = self.stack.pop().unwrap_or(Value::Nil);
                     self.set_local_top(slot, v);
                 }
@@ -1432,7 +1432,7 @@ impl Vm {
                     self.stack.push(cur);
                     self.stack.push(Value::Int(1));
                     let plus_id = self.interner.intern("+");
-                    self.do_call(plus_id, 1, false, u16::MAX)?;
+                    self.do_call(plus_id, 1, false, u32::MAX)?;
                     let new_val = self.stack.last().expect("ICE: IncLocal slow path no result").clone();
                     self.set_local_top(slot, new_val);
                 }
@@ -1576,7 +1576,7 @@ impl Vm {
                         self.stack.push(cur_v);
                         self.stack.push(Value::Int(1));
                         let plus_id = self.interner.intern("+");
-                        self.do_call(plus_id, 1, false, u16::MAX)?;
+                        self.do_call(plus_id, 1, false, u32::MAX)?;
                         Some(self.stack.pop().unwrap_or(Value::Nil))
                     }
                 };
@@ -1614,7 +1614,7 @@ impl Vm {
                         self.stack.push(cur_v);
                         self.stack.push(Value::Int(1));
                         let plus_id = self.interner.intern("+");
-                        self.do_call(plus_id, 1, false, u16::MAX)?;
+                        self.do_call(plus_id, 1, false, u32::MAX)?;
                         let v = self.stack.last().expect("ICE: IncIvar slow path no result").clone();
                         match &self_val {
                             Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, v.clone()); }
@@ -3028,14 +3028,14 @@ impl Vm {
                                         for a in args {
                                             self.stack.push(a);
                                         }
-                                        self.do_call_block(target_id, argc, /*no_recv=*/ false, u16::MAX)?;
+                                        self.do_call_block(target_id, argc, /*no_recv=*/ false, u32::MAX)?;
                                     }
                                     None => {
                                         self.stack.push(obj);
                                         for a in args {
                                             self.stack.push(a);
                                         }
-                                        self.do_call(target_id, argc, /*no_recv=*/ false, u16::MAX)?;
+                                        self.do_call(target_id, argc, /*no_recv=*/ false, u32::MAX)?;
                                     }
                                 }
                             }
@@ -5330,7 +5330,7 @@ impl Vm {
                     self.stack.push(a);
                     self.stack.push(Value::Int(rhs));
                     let name_id = self.interner.intern(kind.name());
-                    self.do_call(name_id, 1, false, u16::MAX)?;
+                    self.do_call(name_id, 1, false, u32::MAX)?;
                     return Ok(true);
                 }
                 if let Value::Int(x) = a {
@@ -5373,7 +5373,7 @@ impl Vm {
                         self.stack.push(a);
                         self.stack.push(b_val);
                         let name_id = self.interner.intern(kind.name());
-                        self.do_call(name_id, 1, false, u16::MAX)?;
+                        self.do_call(name_id, 1, false, u32::MAX)?;
                     }
                 }
             }
@@ -5392,7 +5392,7 @@ impl Vm {
                     self.stack.push(a);
                     self.stack.push(b);
                     let name_id = self.interner.intern(kind.name());
-                    self.do_call(name_id, 1, false, u16::MAX)?;
+                    self.do_call(name_id, 1, false, u32::MAX)?;
                     return Ok(true);
                 }
                 // A String-SUBCLASS instance (class_tag, e.g. bcrypt's
@@ -5405,7 +5405,7 @@ impl Vm {
                     self.stack.push(a);
                     self.stack.push(b);
                     let name_id = self.interner.intern(kind.name());
-                    self.do_call(name_id, 1, false, u16::MAX)?;
+                    self.do_call(name_id, 1, false, u32::MAX)?;
                     return Ok(true);
                 }
                 if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
@@ -5441,7 +5441,7 @@ impl Vm {
                     self.stack.push(a);
                     self.stack.push(b);
                     let name_id = self.interner.intern(kind.name());
-                    self.do_call(name_id, 1, false, u16::MAX)?;
+                    self.do_call(name_id, 1, false, u32::MAX)?;
                 }
             }
             Op::BinOpLocalLocal(kind, a_slot, b_slot) => {
@@ -5482,7 +5482,7 @@ impl Vm {
                     self.stack.push(a);
                     self.stack.push(b);
                     let name_id = self.interner.intern(kind.name());
-                    self.do_call(name_id, 1, false, u16::MAX)?;
+                    self.do_call(name_id, 1, false, u32::MAX)?;
                     return Ok(true);
                 }
                 // A String-SUBCLASS instance (class_tag, e.g. bcrypt's
@@ -5495,7 +5495,7 @@ impl Vm {
                     self.stack.push(a);
                     self.stack.push(b);
                     let name_id = self.interner.intern(kind.name());
-                    self.do_call(name_id, 1, false, u16::MAX)?;
+                    self.do_call(name_id, 1, false, u32::MAX)?;
                     return Ok(true);
                 }
                 if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
@@ -5532,7 +5532,7 @@ impl Vm {
                     self.stack.push(a);
                     self.stack.push(b);
                     let name_id = self.interner.intern(kind.name());
-                    self.do_call(name_id, 1, false, u16::MAX)?;
+                    self.do_call(name_id, 1, false, u32::MAX)?;
                 }
             }
             Op::Return => {

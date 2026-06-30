@@ -185,21 +185,19 @@ impl Drop for SpanGuard<'_> {
 ///
 /// Allocate the next per-call-site inline-cache id from the global counter `cc`.
 ///
-/// Real ids run `0..=u16::MAX-1` (65535 slots); once exhausted, returns the
-/// `u16::MAX` sentinel — an UNCACHED call site (correct, just slower). This is
-/// load-bearing: `cid` is a `u16`, so a bare `*cc as u16` WRAPS once a program has
-/// >65535 call sites, aliasing distinct call sites onto one inline-cache slot (and
-/// making `u16::MAX` — the "no cache" sentinel `lookup_method_cached` relies on — a
-/// real slot, so every `__send__`/cext uncached call collides too). RuboCop has far
-/// more than 65535 call sites and hit exactly this: `__send__(:_reduce_42, …)` started
-/// dispatching to `emit_atom`. Capping (never wrapping, never incrementing past the
-/// limit so `call_caches` stays ≤ 65535) keeps `u16::MAX` permanently out of bounds.
+/// `cache_id` is a `u32`: real ids run `0..=u32::MAX-1`, and `u32::MAX` is the "no cache"
+/// sentinel `lookup_method_cached` treats as uncached. A `u32` holds ~4 billion call
+/// sites, so no realistic program wraps and EVERY call site stays cached. (History: a
+/// `u16` cid WRAPPED once a program had >65535 call sites — RuboCop — aliasing distinct
+/// call sites onto one inline-cache slot and making the sentinel a real slot, which
+/// cross-wired methods; the `u16` was first capped, leaving sites beyond 65535 uncached,
+/// then widened here so they cache too.)
 #[inline]
-fn alloc_cid(cc: &mut u32) -> u16 {
-    if *cc >= u16::MAX as u32 {
-        u16::MAX
+fn alloc_cid(cc: &mut u32) -> u32 {
+    if *cc >= u32::MAX {
+        u32::MAX
     } else {
-        let id = *cc as u16;
+        let id = *cc;
         *cc += 1;
         id
     }
@@ -2085,7 +2083,7 @@ pub(crate) fn compile_expr(
                         b.emit(Op::NewHash(kw_count as u32));
                         if kwrest.is_some() {
                             let merge_id = interner.intern("merge");
-                            b.emit(Op::Call(merge_id, 1, u16::MAX));
+                            b.emit(Op::Call(merge_id, 1, u32::MAX));
                         }
                         // Append the kwargs Hash to the positional array
                         // (`arr + [hash]`) ONLY when it is non-empty —
@@ -2097,7 +2095,7 @@ pub(crate) fn compile_expr(
                         // Stack here: `[posarr, hash]`.
                         b.emit(Op::Dup);
                         let empty_id = interner.intern("empty?");
-                        b.emit(Op::Call(empty_id, 0, u16::MAX));
+                        b.emit(Op::Call(empty_id, 0, u32::MAX));
                         // JumpIfFalse → non-empty path (condition popped).
                         let jf = b.emit(Op::JumpIfFalse(0));
                         // empty: drop the Hash, leave the positional array.
@@ -2109,7 +2107,7 @@ pub(crate) fn compile_expr(
                         b.patch_jump(jf, b.pos());
                         b.emit(Op::NewArray(1));
                         let plus_id = interner.intern("+");
-                        b.emit(Op::Call(plus_id, 1, u16::MAX));
+                        b.emit(Op::Call(plus_id, 1, u32::MAX));
                         b.patch_jump(j_done, b.pos());
                         if block_present {
                             b.emit(Op::ApplySuperBlock(name_id));
@@ -2167,7 +2165,7 @@ pub(crate) fn compile_expr(
                         if kwrest.is_some() {
                             // `kwrest.merge(named)` → combined kwargs Hash.
                             let merge_id = interner.intern("merge");
-                            b.emit(Op::Call(merge_id, 1, u16::MAX));
+                            b.emit(Op::Call(merge_id, 1, u32::MAX));
                         }
                         b.emit(Op::NewArray((n_pos + 1) as u32));
                         if block_present {
@@ -2681,7 +2679,7 @@ fn emit_super_forward_array(b: &mut ProtoBuilder, interner: &mut Interner, rs: u
     b.emit(Op::NewArray(rs as u32));
     // `+ rest` (already an Array)
     b.emit(Op::LoadLocal(rs));
-    b.emit(Op::Call(plus_id, 1, u16::MAX));
+    b.emit(Op::Call(plus_id, 1, u32::MAX));
 }
 
 /// Same as `compile_proto` but seeds the new proto's `class_path`
@@ -3245,27 +3243,28 @@ pub(crate) fn compile_block(
 mod cid_alloc_tests {
     use super::alloc_cid;
 
-    // Regression: the per-call-site inline-cache id must NEVER wrap (a `*cc as u16`
-    // truncation aliased distinct call sites onto one cache slot once a program had
-    // >65535 call sites — RuboCop — cross-wiring `__send__(:_reduce_42)` to `emit_atom`),
-    // and `u16::MAX` must stay reserved as the "no cache" sentinel (so `call_caches`,
-    // sized to the counter, never makes slot 65535 a real entry).
+    // Regression: the per-call-site inline-cache id must NEVER wrap, and `u32::MAX` stays
+    // the reserved "no cache" sentinel. (History: a `u16` cid wrapped past 65535 call
+    // sites — RuboCop — cross-wiring `__send__(:_reduce_42)` to `emit_atom`. Widened to
+    // `u32` so all ~4 billion possible call sites cache; the cap/sentinel logic still holds.)
     #[test]
     fn alloc_cid_caps_without_wrapping() {
-        // Normal allocation increments.
+        // Normal allocation increments — and sails PAST the old u16 limit (65535) into
+        // real, distinct, cached ids (the point of the u32 widening; before, those wrapped).
         let mut cc: u32 = 0;
         assert_eq!(alloc_cid(&mut cc), 0);
         assert_eq!(alloc_cid(&mut cc), 1);
-        assert_eq!(cc, 2);
+        let mut cc: u32 = 70_000; // well past the old u16 cap
+        assert_eq!(alloc_cid(&mut cc), 70_000); // a real, distinct slot (not wrapped)
+        assert_eq!(cc, 70_001);
 
-        // At the boundary: the last real slot is u16::MAX - 1, then the sentinel,
-        // and the counter never advances past u16::MAX (keeps call_caches ≤ 65535).
-        let mut cc: u32 = (u16::MAX - 1) as u32; // 65534
-        assert_eq!(alloc_cid(&mut cc), u16::MAX - 1); // 65534 — last real slot
-        assert_eq!(cc, u16::MAX as u32); // 65535
-        assert_eq!(alloc_cid(&mut cc), u16::MAX); // exhausted → uncached sentinel
-        assert_eq!(cc, u16::MAX as u32); // does NOT advance/wrap
-        assert_eq!(alloc_cid(&mut cc), u16::MAX); // stays sentinel forever
-        assert_eq!(cc, u16::MAX as u32);
+        // At the u32 boundary: the last real slot is u32::MAX - 1, then the sentinel,
+        // and the counter never advances past u32::MAX.
+        let mut cc: u32 = u32::MAX - 1;
+        assert_eq!(alloc_cid(&mut cc), u32::MAX - 1); // last real slot
+        assert_eq!(cc, u32::MAX);
+        assert_eq!(alloc_cid(&mut cc), u32::MAX); // exhausted → uncached sentinel
+        assert_eq!(cc, u32::MAX); // does NOT advance/wrap
+        assert_eq!(alloc_cid(&mut cc), u32::MAX); // stays sentinel forever
     }
 }

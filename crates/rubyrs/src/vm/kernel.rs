@@ -187,7 +187,7 @@ impl Vm {
             self.stack.push(a.clone());
         }
         let pre = self.frames.len();
-        self.do_call(m_id, args.len(), /*no_recv=*/false, u16::MAX)?;
+        self.do_call(m_id, args.len(), /*no_recv=*/false, u32::MAX)?;
         self.dispatch_until(pre)?;
         Ok(self.stack.pop().unwrap_or(Value::Nil))
     }
@@ -1637,7 +1637,7 @@ impl Vm {
                         let pre = self.frames.len();
                         self.stack.push(recv);
                         let to_a_id = self.interner.intern("to_a");
-                        if let Err(t) = self.do_call(to_a_id, 0, false, u16::MAX) {
+                        if let Err(t) = self.do_call(to_a_id, 0, false, u32::MAX) {
                             return Some(Err(t));
                         }
                         if let Err(t) = self.dispatch_until(pre) { return Some(Err(t)); }
@@ -6313,7 +6313,7 @@ fn marshal_invoke(
         }
         None => 0,
     };
-    vm.do_call(name, argc, false, u16::MAX)?;
+    vm.do_call(name, argc, false, u32::MAX)?;
     vm.dispatch_until(pre)?;
     Ok(vm.stack.pop().unwrap_or(Value::Nil))
 }
