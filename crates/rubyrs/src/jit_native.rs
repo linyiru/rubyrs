@@ -157,6 +157,13 @@ enum Kind {
     /// through `JumpIfFalse` as a never-taken branch. Boxed `Value::Sym` if returned
     /// (not modelled today — methods that produce a Symbol value decline).
     Symbol,
+    /// A self-ivar consumed DIRECTLY as a method-call receiver (`@l.sum(d-1)`), carrying
+    /// the ivar's `SymId.0` — the fetch is DEFERRED to the call site so the explicit-recv
+    /// `Call` arm emits ONE `jit_ivar_obj_call` (fetch ivar + class guard + native call)
+    /// instead of `jit_ivar_obj_ptr` (a separate fetch) + `jit_obj_call`. The dummy
+    /// ClValue on the stack is unused. Only pushed when `ivar_call_receiver` confirms a
+    /// direct-recv call; any other use declines.
+    ObjectIvar(u32),
 }
 
 /// Compile an eligible `Proto` to native code, or `None` to keep interpreting.
@@ -729,6 +736,7 @@ pub(crate) fn compile(
     builder.symbol("jit_ivar_get_int", jit_ivar_get_int as *const u8);
     builder.symbol("jit_ivar_obj_ptr", jit_ivar_obj_ptr as *const u8);
     builder.symbol("jit_obj_call", jit_obj_call as *const u8);
+    builder.symbol("jit_ivar_obj_call", jit_ivar_obj_call as *const u8);
     builder.symbol("jit_obj_getter_array", jit_obj_getter_array as *const u8);
     builder.symbol("jit_obj_getter_sym", jit_obj_getter_sym as *const u8);
     builder.symbol("jit_hash_get_symkey", jit_hash_get_symkey as *const u8);
@@ -825,6 +833,21 @@ pub(crate) fn compile(
     ocsig.returns.push(AbiParam::new(types::I8));
     let ocid = module
         .declare_function("jit_obj_call", Linkage::Import, &ocsig)
+        .ok()?;
+    // `jit_ivar_obj_call`: (vm, self:ptr, ivar:i32, arg:i64, name:i32, cache:ptr, argc:i64)
+    // -> (i64, i8). The fused `@ivar.method(arg)` call (ADR 0034 gap 2).
+    let mut iocsig = module.make_signature();
+    iocsig.params.push(AbiParam::new(ptr_ty)); // vm
+    iocsig.params.push(AbiParam::new(ptr_ty)); // self ptr
+    iocsig.params.push(AbiParam::new(types::I32)); // ivar sym
+    iocsig.params.push(AbiParam::new(types::I64)); // arg
+    iocsig.params.push(AbiParam::new(types::I32)); // name sym
+    iocsig.params.push(AbiParam::new(ptr_ty)); // cache cell ptr
+    iocsig.params.push(AbiParam::new(types::I64)); // argc
+    iocsig.returns.push(AbiParam::new(types::I64));
+    iocsig.returns.push(AbiParam::new(types::I8));
+    let iocid = module
+        .declare_function("jit_ivar_obj_call", Linkage::Import, &iocsig)
         .ok()?;
     // `jit_array_len`: (vm, objid:i64) -> i64. For `local_arr.length` on a stack array.
     let mut alensig = module.make_signature();
@@ -1065,6 +1088,7 @@ pub(crate) fn compile(
         let ivar_ref = module.declare_func_in_func(ivid, fb.func);
         let ivar_obj_ref = module.declare_func_in_func(ivobjid, fb.func);
         let obj_call_ref = module.declare_func_in_func(ocid, fb.func);
+        let ivar_obj_call_ref = module.declare_func_in_func(iocid, fb.func);
         let obj_getter_arr_ref = module.declare_func_in_func(ogaid, fb.func);
         let obj_getter_sym_ref = module.declare_func_in_func(ogsid, fb.func);
         let obj_call_bool_ref = module.declare_func_in_func(ocbid, fb.func);
@@ -1308,8 +1332,18 @@ pub(crate) fn compile(
                     // the native→native PIC call. A non-Object ivar deopts (sound: pure
                     // read). Checked before the Int/array/hash fusions (its method name is
                     // never bracket/lshift/length, so no overlap).
-                    let recv_use = ivar_call_receiver(code, ip, syms).is_some()
-                        || matches!(code.get(ip + 1),
+                    // DIRECT-recv call (`@l.sum(d-1)`): DEFER the fetch — push `ObjectIvar`
+                    // (carrying the ivar sym) and let the `Call` arm emit ONE fused
+                    // `jit_ivar_obj_call` (ADR 0034 gap 2). No `jit_ivar_obj_ptr` here.
+                    if ivar_call_receiver(code, ip, syms).is_some() {
+                        let dummy = fb.ins().iconst(types::I64, 0);
+                        stack.push((dummy, Kind::ObjectIvar(s.0)));
+                        ip += 1;
+                        continue;
+                    }
+                    // The other receiver uses (stored to a local, or passed as an obj-param
+                    // arg) still materialise a pointer via `jit_ivar_obj_ptr`.
+                    let recv_use = matches!(code.get(ip + 1),
                             Some(Op::StoreLocal(slot)) if local_is_obj_receiver(code, *slot, ip + 2, syms))
                         // `@h` passed as the Object arg of an obj-param no_recv call
                         // (`weigh(@h)`, "1a") — load it as a receiver pointer.
@@ -1516,8 +1550,9 @@ pub(crate) fn compile(
                             local_kinds[*s as usize] = Kind::Float;
                             fb.def_var(vars[*s as usize], bits);
                         }
-                        // Reassigning the Hash memo / storing a Bool/Nil isn't modelled.
-                        Kind::Bool | Kind::Nil | Kind::HashObjId => return None,
+                        // Reassigning the Hash memo / storing a Bool/Nil / a deferred
+                        // ivar-receiver isn't modelled (the latter is call-recv only).
+                        Kind::Bool | Kind::Nil | Kind::HashObjId | Kind::ObjectIvar(_) => return None,
                     }
                 }
                 Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
@@ -1867,10 +1902,12 @@ pub(crate) fn compile(
                 // The result is materialised as Int (the callee is gated to Int returns).
                 Op::Call(name, argc, _)
                     if *argc <= 1
-                        && stack
-                            .get(stack.len().wrapping_sub(*argc as usize + 1))
-                            .map(|(_, k)| *k)
-                            == Some(Kind::Object) =>
+                        && matches!(
+                            stack
+                                .get(stack.len().wrapping_sub(*argc as usize + 1))
+                                .map(|(_, k)| *k),
+                            Some(Kind::Object) | Some(Kind::ObjectIvar(_))
+                        ) =>
                 {
                     let arg = if *argc == 1 {
                         let (a, ka) = stack.pop()?;
@@ -1881,7 +1918,7 @@ pub(crate) fn compile(
                     } else {
                         fb.ins().iconst(types::I64, 0)
                     };
-                    let (recv_ptr, _) = stack.pop()?; // Kind::Object pointer
+                    let (recv_val, recv_kind) = stack.pop()?;
                     let nm = fb.ins().iconst(types::I32, name.0 as i64);
                     let cache = Box::new(std::cell::Cell::new((0usize, 0usize)));
                     let cache_addr =
@@ -1889,10 +1926,22 @@ pub(crate) fn compile(
                     obj_call_caches.push(cache);
                     let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
                     let argc_const = fb.ins().iconst(types::I64, *argc as i64);
-                    let inst = fb.ins().call(
-                        obj_call_ref,
-                        &[vm_param, recv_ptr, arg, nm, cache_const, argc_const],
-                    );
+                    let inst = match recv_kind {
+                        // DEFERRED ivar receiver (`@l.sum(d-1)`): the FUSED primitive
+                        // fetches self.@ivar + guards + calls — no separate ptr fetch.
+                        Kind::ObjectIvar(iv) => {
+                            let ivc = fb.ins().iconst(types::I32, iv as i64);
+                            fb.ins().call(
+                                ivar_obj_call_ref,
+                                &[vm_param, self_param, ivc, arg, nm, cache_const, argc_const],
+                            )
+                        }
+                        // Already-materialised Object pointer (local-stored receiver).
+                        _ => fb.ins().call(
+                            obj_call_ref,
+                            &[vm_param, recv_val, arg, nm, cache_const, argc_const],
+                        ),
+                    };
                     let (res, of) = {
                         let r = fb.inst_results(inst);
                         (r[0], r[1])
@@ -4774,6 +4823,77 @@ pub(crate) unsafe extern "C" fn jit_obj_call(
         }
     } else {
         return deopt; // megamorphic at a monomorphic site → interpreter
+    };
+    let f: extern "C" fn(*const crate::vm::Vm, *const Value, i64) -> NRet =
+        unsafe { std::mem::transmute(addr) };
+    f(vm as *const crate::vm::Vm, recv, arg)
+}
+
+/// FUSED ivar-receiver call `@ivar.name(arg)` (ADR 0034 gap 2 / treesum): fetches
+/// `self.@ivar` (an Object) and does the same monomorphic-PIC native call as
+/// [`jit_obj_call`] on it — in ONE primitive, so the recursive `@l.sum(d-1)` /
+/// `@r.sum(d-1)` shape skips the separate `jit_ivar_obj_ptr` fetch + the pointer
+/// round-trip. Two heap fetches (self for the ivar, the ivar Object for its class
+/// guard) but no inter-primitive glue. Deopts (`ovf=1`) on a non-Object ivar, a class
+/// miss, or an unresolvable callee.
+///
+/// # Safety
+/// As [`jit_obj_call`]: `vm`/`self_recv` valid; the on-miss compile reconstructs
+/// `&mut *vm` (touches `jit_native`/`protos`, not `heap`); the recv pointer into self's
+/// ivar table stays valid for the GC-free callee.
+pub(crate) unsafe extern "C" fn jit_ivar_obj_call(
+    vm: *mut crate::vm::Vm,
+    self_recv: *const Value,
+    ivar: u32,
+    arg: i64,
+    name: u32,
+    cache: *const std::cell::Cell<(usize, usize)>,
+    argc: i64,
+) -> NRet {
+    let deopt = NRet { res: 0, ovf: 1 };
+    if self_recv.is_null() {
+        return deopt;
+    }
+    // Fetch self.@ivar — a pointer to the receiver Object Value inside self's ivar table.
+    let self_oid = match unsafe { &*self_recv } {
+        Value::Object(o) => *o,
+        _ => return deopt,
+    };
+    let recv: *const Value = match unsafe { &*vm }.heap.get(self_oid) {
+        crate::heap::HeapObj::Instance(inst) => match inst.ivars.get(&crate::intern::SymId(ivar)) {
+            Some(v @ Value::Object(_)) => v as *const Value,
+            _ => return deopt,
+        },
+        _ => return deopt,
+    };
+    // Same PIC + native call as jit_obj_call, on the fetched receiver.
+    let cache = unsafe { &*cache };
+    let oid = match unsafe { &*recv } {
+        Value::Object(o) => *o,
+        _ => return deopt,
+    };
+    let cls_ptr = match unsafe { &*vm }.heap.class_ptr_of(oid) {
+        Some(p) => p,
+        None => return deopt,
+    };
+    let (cached_cls, cached_addr) = cache.get();
+    let addr = if cached_cls == cls_ptr {
+        cached_addr
+    } else if cached_cls == 0 {
+        let vmm = unsafe { &mut *vm };
+        let cls = match vmm.heap.try_class_of(oid) {
+            Some(c) => c,
+            None => return deopt,
+        };
+        match vmm.jit_compile_obj_callee(crate::intern::SymId(name), &cls, cls_ptr, argc as usize, false) {
+            Some(a) => {
+                cache.set((cls_ptr, a));
+                a
+            }
+            None => return deopt,
+        }
+    } else {
+        return deopt;
     };
     let f: extern "C" fn(*const crate::vm::Vm, *const Value, i64) -> NRet =
         unsafe { std::mem::transmute(addr) };

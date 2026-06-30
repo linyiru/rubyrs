@@ -871,6 +871,35 @@ noted for a separate fix.
 
 The full rubocop AST-walk (`bench_walk`, all 8 pieces) now runs native and beats YJIT.
 
+### Two remaining gaps (2026-06-29)
+
+**Gap A — the `.each`-form walk doesn't fire.** Real rubocop cops use
+`node.children.each { |c| … }` / `each_child_node`, not an explicit `while`. Only the
+`while` form compiles today; the `each` form declines (the method's `CallBlock(each)` op
+isn't modelled) and — worse — is a REGRESSION (jitN 21.5ms vs interp 17.6ms, YJIT 0.79ms):
+the interpreter's `each` re-runs `try_native_each_acc_loop`'s analysis on every call
+(22M×), and the block `{ |x| c += walk(x) if x.class==Node }` compile-declines (the block
+calls `walk`, unmodelled in a block). The fix is to **inline `recv.each { block }` into the
+method's native loop** — the block body IS the `while`-loop body (it shares the frame:
+`c`=captured slot, `x`=param), so inlining makes it compile exactly like the firing `while`
+form, with `walk(x)` a native self-call. The clean route is a bytecode pre-pass rewriting
+the `getter→Array, CreateBlock, CallBlock(each)` shape into the proven while-loop ops
+(splicing the block body, remapping jumps); friction: `Proto` isn't `Clone`, so `compile`
+would take `code`/`n_locals` overrides. A large, well-scoped follow-on.
+
+**Gap B — `treesum` fires but trails YJIT 1.6×.** The double-recursion `@v + @l.sum(d-1) +
+@r.sum(d-1)` is dominated by the per-node `heap.get` slab indirection: 3 self-ivar reads
+(`@v`/`@l`/`@r`) + 2 child class-guards (`@l`/`@r`). **Shipped: an ivar-receiver call FUSION**
+(`Kind::ObjectIvar` defers the ivar fetch so `@l.sum(d-1)` emits ONE `jit_ivar_obj_call` —
+fetch ivar + class guard + native call — instead of `jit_ivar_obj_ptr` + `jit_obj_call`):
+0.328ms → 0.30ms (8%, diff_cruby GREEN 957, no regression on the firing benches). But it
+still trails YJIT 0.19ms ~1.6×. The 3 redundant self-`heap.get`s could be cut by caching
+self's `Instance` pointer once per frame (~25%), but the 2 child class-guard `heap.get`s are
+inherent: YJIT reads an object's class from its header in one load, while rubyrs's
+`ObjId → slab slot → HeapObj::Instance` costs an extra indirection per guard. A clear treesum
+surpass therefore needs an object-header class (a heap-representation change) — out of scope
+here; the realistic dispatch shapes (`fib`, the OO north-star, `bench_walk`) already surpass.
+
 ## Risks
 
 - **YJIT-class scope.** A full method JIT with PIC + deopt + broad coverage is a
