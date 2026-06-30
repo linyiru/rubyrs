@@ -761,6 +761,13 @@ pub(crate) struct Vm {
     /// param) since the ABI differs (pointer vs Int value). Keyed by proto.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native_objparam: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
+    /// 2-ARG method specialization (`def walk(node, acc); …; walk(child, acc); end`,
+    /// ADR 0034 piece 1+8): param0 binds as a `*const Value` Object receiver pointer,
+    /// param1 as an Int. The C ABI is `(vm, self, ptr, i64) -> NRet` (called via
+    /// `NativeProto::call2`); a 2-arg self-recursion lowers to a native 4-arg self-call.
+    /// Kept separate from the 1-arg maps since the arity/ABI differ. Keyed by proto.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_native_objparam2: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
     /// FLOAT-param specialization of a 1-arg method (`def scale(n); n*1.5; end`
     /// called with a Float arg): the param binds as Float, the i64 arg carries f64
     /// bits. Leaf methods only (no cross-calls — those decline). Keyed by proto,
@@ -2045,6 +2052,8 @@ impl Vm {
             jit_native_zeroarg: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_objparam: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_native_objparam2: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_fparam: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]

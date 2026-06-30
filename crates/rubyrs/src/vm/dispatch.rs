@@ -15848,6 +15848,58 @@ impl Vm {
                 }
             }
         }
+        // 2-ARG method JIT dispatch (ADR 0034 piece 1+8): a no_recv / top-level method
+        // `walk(node, counts)` with an Object first arg and an Int second arg. Same
+        // already-resolved-`m` discipline as the 1-arg B1 path above (resolution
+        // unchanged; we only add native execution). param0 = a pointer to the Object
+        // arg on the operand stack (valid for the native call's duration — the compiled
+        // method is GC-free and doesn't touch the interpreter stack); param1 = an Int OR
+        // a Hash `ObjId` (`walk(node, counts)`, the value-type axis). A deopt or an arg
+        // shape that doesn't match the compiled `param2_hash` falls through to the frame.
+        #[cfg(feature = "jit-native")]
+        if self.jit_native_on && block.is_none() && argc == 2 && m.builtin.is_none() {
+            let sl = self.stack.len();
+            let a0_obj = matches!(self.stack.get(sl - 2), Some(Value::Object(_)));
+            let a1_int = matches!(self.stack.get(sl - 1), Some(Value::Int(_)));
+            let a1_hash = matches!(self.stack.get(sl - 1), Some(Value::Hash(_)));
+            if a0_obj && (a1_int || a1_hash) {
+                let proto_idx = m.proto_idx;
+                if !self.jit_native_objparam2.contains_key(&proto_idx) {
+                    let compiled = self.compile_native_objparam2(proto_idx);
+                    self.jit_native_objparam2.insert(proto_idx, compiled);
+                }
+                if let Some(Some(np)) = self.jit_native_objparam2.get(&proto_idx) {
+                    // The compiled proto's param1 kind must match the runtime arg: a
+                    // Hash-param method needs a Hash arg, an Int-param method an Int.
+                    let kind_ok = np.param2_hash.get() == a1_hash;
+                    if kind_ok {
+                        let is_array = np.returns_array.get();
+                        let is_float = np.returns_float.get();
+                        let is_nil = np.returns_nil.get();
+                        let vm_ptr = self as *const crate::vm::Vm;
+                        let a1 = match self.stack[sl - 1] {
+                            Value::Int(n) => n,
+                            Value::Hash(oid) => oid.0 as i64,
+                            _ => unreachable!(),
+                        };
+                        let a0_ptr = &self.stack[sl - 2] as *const Value as i64;
+                        if let Some(r) = np.call2(vm_ptr, &self_val, a0_ptr, a1) {
+                            self.stack.truncate(sl - 2);
+                            self.stack.push(if is_nil {
+                                Value::Nil
+                            } else if is_array {
+                                Value::Array(crate::value::ObjId(r as u32))
+                            } else if is_float {
+                                Value::Float(f64::from_bits(r as u64))
+                            } else {
+                                Value::Int(r)
+                            });
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
         self.check_frames()?;
         let n_locals = fixed.n_locals as usize;
         // Stack-eligible protos go straight to the arena; the rest
@@ -16249,6 +16301,7 @@ impl Vm {
             false, // ...and the accumulator/result float-ness mirrors it
             allow_zero_arg,
             false, // general method compile is not the obj-param variant
+            false, // not a 2-arg method
         );
         if let (Some(np), false) = (
             &compiled,
@@ -16284,6 +16337,7 @@ impl Vm {
             true, // fparam: Float element; result-Float allowed via is_method too
             false, // 1-arg fparam method — no 0-arg
             false, // fparam, not obj-param
+            false, // not a 2-arg method
         )
     }
 
@@ -16313,6 +16367,38 @@ impl Vm {
             false,
             false, // 1-arg
             true,  // obj-param: the param is an Object receiver pointer
+            false, // not a 2-arg method
+        )
+    }
+
+    /// Compile the 2-ARG method specialization (`def walk(node, acc); …;
+    /// walk(child, acc); end`, ADR 0034 piece 1+8): param0 binds as a `*const Value`
+    /// Object receiver pointer, param1 as an Int. The body's `node.children`
+    /// (obj-getter→Array PIC), `c.class == Node` (fused class guard), and the 2-arg
+    /// `walk(c, acc)` self-recursion (a native 4-arg self-call) all lower without an
+    /// external callee, so callees/getters are empty — the proto is class-agnostic
+    /// (the per-site PICs handle each receiver class), so no `guard_class` is set.
+    #[cfg(feature = "jit-native")]
+    fn compile_native_objparam2(&mut self, proto_idx: usize) -> Option<crate::jit_native::NativeProto> {
+        let self_name = self.protos[proto_idx].name.clone();
+        let self_name_id = self.interner.intern(&self_name);
+        let callees = crate::intern::FxHashMap::default();
+        let getters = crate::intern::FxHashMap::default();
+        let syms = self.jit_syms();
+        crate::jit_native::compile(
+            &self.protos[proto_idx],
+            self_name_id,
+            &callees,
+            &callees, // empty float callees
+            &callees, // empty obj-param callees
+            &getters,
+            &syms,
+            None,
+            false, // Int element (n/a for a method)
+            false,
+            false, // not 0-arg
+            false, // not the 1-arg obj-param variant
+            true,  // 2-arg method: param0=Object ptr, param1=Int
         )
     }
 
@@ -16752,6 +16838,7 @@ impl Vm {
             true,  // ...but Float accumulator/result
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
+            false, // not a 2-arg method
         )
     }
 
@@ -17941,6 +18028,7 @@ impl Vm {
             false,
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
+            false, // not a 2-arg method
         )
     }
 
@@ -17973,6 +18061,7 @@ impl Vm {
             float_acc,
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
+            false, // not a 2-arg method
         )
     }
 
@@ -18005,6 +18094,7 @@ impl Vm {
             float_acc,
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
+            false, // not a 2-arg method
         )
     }
 
@@ -18046,6 +18136,7 @@ impl Vm {
             float_acc,
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
+            false, // not a 2-arg method
         )
     }
 
@@ -18083,6 +18174,7 @@ impl Vm {
             float_acc,
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
+            false, // not a 2-arg method
         )
     }
 
@@ -18120,6 +18212,7 @@ impl Vm {
             false,
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
+            false, // not a 2-arg method
         )
     }
 
@@ -18160,6 +18253,7 @@ impl Vm {
             float_val,
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
+            false, // not a 2-arg method
         )
     }
 

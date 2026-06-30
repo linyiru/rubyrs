@@ -754,6 +754,76 @@ jit_obj_arg_crosscall / jit_stmt_if_merge / jit_ivar_array_index / jit_objparam.
 frontier: the FULL cop visitor (`bench_walk.rb`) needs the value-type axis (Hash[sym], Bool-as-control
 over symbols); the top-level `<main>`-while-loop driver is still 0-win (needs `<main>` compilation).
 
+### `bench_walk` pieces 1 + 8 — the 2-ARG method ABI + 2-arg recursion — SHIPPED
+
+The FULL cop visitor `walk(node, counts)` (`poc/rubocop-spike/bench_walk.rb`) declined at the
+very FIRST gate: the method arity gate admitted only 0/1 required positionals, so a 2-param
+method never even reached codegen. This is the keystone of the 8-piece `bench_walk` set (which
+is all-or-nothing — the method fires only when every piece lands). Pieces 1 (2-arg ABI) + 8
+(2-arg Object+Hash recursion) are now done for the **Object + Int** param shape (the Hash 2nd
+param is pieces 2–4, the value-type axis below):
+
+- **`obj_param2`** compile mode: param0 binds `Kind::Object` (i64 C-arg = `*const Value`),
+  param1 binds Int via the existing `two_param` plumbing (`arg3_slot = Some(1)`, a 4th i64
+  C-ABI param). The arity gate admits `n == 2` iff `obj_param2`. A 2-arg self-recursive
+  `CallNoRecv(name, 2)` lowers to a native 4-arg self-call (pop arg1 Int, arg0 Object ptr,
+  call `self_ref`). Result is Int (the threaded accumulator).
+- **`NativeProto::ptr2`** + **`call2`**: a 2-arg method's compiled code has a 4-param C
+  signature, exposed under a distinct fn-ptr type (the 3-arg `call` would mis-pass the ABI).
+- **Dispatch** (`try_invoke_fixed_method_from_stack`, new `argc == 2` arm): a no_recv / top-level
+  `walk(node, acc)` with an Object 1st arg + Int 2nd arg compiles `compile_native_objparam2`
+  (cached in `jit_native_objparam2`) and calls it with a pointer to the Object arg + the Int.
+  Same already-resolved-`m` discipline as the 1-arg B1 path; a deopt or non-(Object,Int) shape
+  falls through to the interpreter frame.
+
+Measured (`poc/rubocop-spike/bench_walk2.rb`, the rung-A 2-arg tree walk, best-of-3 wall ms):
+**jitN 0.506ms vs YJIT 0.517ms — ~1.02× ahead, 41× over interp (20.8ms), 6.8× over CRuby
+(3.45ms)**. The shape is dispatch/recursion-bound (where YJIT is also strong); the value-type
+axis is where rubyrs pulls further ahead. diff_cruby GREEN both builds (956), STRESS_GC clean,
+fixture `jit_obj_arg2_walk` (heterogeneous children, polymorphic-`Sub`-no-recurse, depth, non-zero
+seed). The proto is class-agnostic (empty callees/getters → no `guard_class`; the per-site PICs
+handle each receiver class), and the receiver pointer is valid across the call (array pinned,
+non-moving heap, GC-free pure method) — same soundness as the 1-arg obj-param path.
+
+### `bench_walk` pieces 2 + 3 + 4 — `Kind::Symbol` + Symbol-keyed Hash read/write — SHIPPED
+
+The value-type axis's substrate. `walk(node, counts)` reads the node's `type` Symbol and
+accumulates a per-type count in the Hash param (`counts[t] = (counts[t] || 0) + 1`):
+
+- **`Kind::Symbol`** — an i64 holding a `SymId.0`. Produced by `jit_obj_getter_sym` (an
+  Object-recv getter whose ivar is a Symbol — `node.type` → `@type`, monomorphic class PIC,
+  mirrors `jit_obj_getter_array`); chosen over the Int obj-call PIC when the getter result is
+  stored to a local used as a Hash KEY (`local_is_symbol`). Flows through `JumpIfFalse` as a
+  never-taken branch (a Symbol is always truthy).
+- **Piece 2 (read + `|| 0`)** — a `Call([], 1)` with a `HashObjId` receiver + a `Kind::Symbol`
+  key lowers to `jit_hash_get_symkey`, **gated on the following `Dup, JumpIfFalse, Jump, Pop,
+  LoadConstInt` `|| const` idiom** (sound: the primitive returns `0` for an absent default-less
+  key, which `|| 0` keeps — matching `nil → 0`; a bare `h[sym]` without the `||` declines so the
+  interpreter preserves nil). `JumpIfFalse` now models an Int/Symbol condition (always truthy).
+- **Piece 3 (write)** — a `CallAset([]=, 2)` with a `HashObjId` receiver + Symbol key + Int value
+  lowers to `jit_hash_set_symkey`.
+- **2-arg param1 = Hash** — `obj_param2` binds param1 as `HashObjId` when the body uses it as a
+  `[]`/`[]=` receiver (`local_is_hash`); the dispatch passes the Hash `ObjId` and validates the
+  runtime arg against the compiled `param2_hash`. The 2-arg self-recursion threads the Hash.
+  Nil-returning methods box `Value::Nil` (`returns_nil`).
+
+Measured (`poc/rubocop-spike/bench_walk3.rb`, best-of-3 wall ms): **jitN 0.95ms vs YJIT 1.28ms —
+1.35× ahead, 24× over interp (23.3ms), 4.6× over CRuby (4.36ms)**. The decisive perf lever: the
+Symbol-keyed Hash primitives do a **direct linear scan over `pairs`** (a handful of distinct keys)
+rather than `ruby_hash` + the lazy FxHashMap index — index-free, the read/write at 2.34ms → 0.95ms.
+diff_cruby GREEN both builds (957), STRESS_GC clean, fixture `jit_sym_hash_walk` (per-type counts,
+polymorphic-`Sub`, depth, pre-seeded hash, defaulted-`Hash.new(10)` deopt). A latent disambiguation
+bug fixed en route: `local_is_array`'s `[i]` arm matched the KEY position (`LoadLocal(slot),
+Call([],1)`) — it now requires the RECEIVER position (`LoadLocal(slot), <key-load>, Call([],1)`),
+so a Symbol hash-key local is no longer misread as an array.
+
+Remaining `bench_walk` pieces (the predicate axis, all consuming a `Kind::Symbol` value, so all
+were gated on piece 4): (5) Bool-returning predicate obj-methods (`send_type?`/`if_type?`) as
+branch conditions; (6) `is_a?(Class)` ancestry (vs the shipped exact `== class`); (7)
+`Symbol#length`. A latent **pre-existing interpreter bug** surfaced while testing: `IncLocal`
+(`x += 1`) WRAPS on i64 overflow instead of promoting to Bignum (`BinOpInt` + `BinOp` promote
+correctly) — orthogonal to this work, noted for a separate fix.
+
 ## Risks
 
 - **YJIT-class scope.** A full method JIT with PIC + deopt + broad coverage is a

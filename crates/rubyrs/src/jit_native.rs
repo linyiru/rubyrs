@@ -33,6 +33,11 @@ pub(crate) struct NRet {
 pub(crate) struct NativeProto {
     _module: JITModule,
     ptr: extern "C" fn(*const crate::vm::Vm, *const Value, i64) -> NRet,
+    /// 4-arg ABI for a 2-arg method (`(vm, self, arg0, arg1) -> NRet`, ADR 0034
+    /// piece 1+8). `Some` only when this proto was compiled with `obj_param2`; the
+    /// code address is the same machine code as `ptr` but the C signature has a 4th
+    /// param, so it MUST be called via `call2` (a 3-arg `call` would mis-pass the ABI).
+    ptr2: Option<extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>,
     /// Polymorphism guard: if non-zero, this code baked in cross-method callees
     /// resolved on ONE specific receiver class (the `Rc<Class>` pointer), so it
     /// is only valid when dispatched on that class — a subclass that overrides a
@@ -46,6 +51,16 @@ pub(crate) struct NativeProto {
     /// `def scale(n); n * 1.5; end`); a method that mixes Float and non-Float
     /// returns declines to compile (the box kind would be ambiguous).
     pub(crate) returns_float: std::cell::Cell<bool>,
+    /// When true the method returns `nil` (the i64 result is a sentinel 0) — the
+    /// dispatch boxes `Value::Nil`. Set for a method whose only `Return` is a Nil
+    /// (`walk(node, counts)` ends with a `while` loop, ADR 0034 pieces 2-4). A method
+    /// mixing Nil and a value return declines (ambiguous box kind).
+    pub(crate) returns_nil: std::cell::Cell<bool>,
+    /// For a 2-arg method (`obj_param2`): when true param1 (the 2nd C-arg) is a Hash
+    /// `ObjId`, else an Int (ADR 0034 pieces 1+8 / 2-4). Derived from the body (the
+    /// param used as a Hash receiver), read by the `argc==2` dispatch arm to decide
+    /// what to pass + which runtime arg shape to require.
+    pub(crate) param2_hash: std::cell::Cell<bool>,
     /// Monomorphic inline caches for `@arr[i].getter` sites (B4). Each holds
     /// `(element_class_ptr, ivar_sym)`; their stable heap addresses are baked
     /// into the native code as constants, so the `Box`es must outlive the code —
@@ -70,6 +85,16 @@ impl NativeProto {
         } else {
             None
         }
+    }
+
+    /// Run a 2-arg method (ADR 0034 piece 1+8): `arg0` is a `*const Value` to the
+    /// Object param, `arg1` an Int. `None` = deopt. Panics if this proto has no
+    /// 4-arg entry (caller guards on the proto coming from `jit_native_objparam2`).
+    #[inline]
+    pub(crate) fn call2(&self, vm: *const crate::vm::Vm, recv: &Value, arg0: i64, arg1: i64) -> Option<i64> {
+        let f = self.ptr2.expect("ICE: call2 on a non-2-arg NativeProto");
+        let r = f(vm, recv as *const Value, arg0, arg1);
+        if r.ovf == 0 { Some(r.res) } else { None }
     }
 
     /// Machine address of the compiled code — registered as a JIT symbol so a
@@ -111,6 +136,13 @@ enum Kind {
     /// explicit-recv `Call` arm, which emits a native→native PIC call on it (Step 1
     /// of the JIT generalization — the OO-dispatch lever). Any other use declines.
     Object,
+    /// An i64 that is a Symbol's `SymId.0` (ADR 0034 pieces 2-4, the value-type axis).
+    /// Produced by an Object-recv getter whose ivar is a Symbol (`node.type` →
+    /// `jit_obj_getter_sym`); consumed as a Hash KEY (`counts[t]` / `counts[t] = …`,
+    /// the Symbol-keyed Hash-accumulate). A Symbol is always truthy, so it flows
+    /// through `JumpIfFalse` as a never-taken branch. Boxed `Value::Sym` if returned
+    /// (not modelled today — methods that produce a Symbol value decline).
+    Symbol,
 }
 
 /// Compile an eligible `Proto` to native code, or `None` to keep interpreting.
@@ -205,17 +237,21 @@ fn local_is_array(code: &[Op], slot: u16, from_ip: usize, syms: &JitSyms) -> boo
     while j < code.len() {
         match &code[j] {
             // `kids.length`/`.size` is fused to LoadLocalCall(slot, length|size); a
-            // `kids[i]` is LoadLocal(slot), Call(bracket, 1) (1-arg, not fused).
+            // `kids[i]` is LoadLocal(slot), <key-load>, Call(bracket, 1). The key-load
+            // between distinguishes slot as the `[]` RECEIVER (an array) from slot in the
+            // KEY position (`counts[slot]`, where slot is loaded IMMEDIATELY before the
+            // Call) — those must not be confused, else a Symbol hash-key local is misread
+            // as an array (ADR 0034 pieces 2-4).
             Op::LoadLocalCall(s, name, _)
                 if *s == slot && (*name == syms.length || *name == syms.size) =>
             {
                 return true;
             }
             Op::LoadLocal(s) if *s == slot => {
-                if let Some(Op::Call(m, 1, _)) = code.get(j + 1) {
-                    if *m == syms.bracket {
-                        return true;
-                    }
+                if matches!(code.get(j + 1), Some(Op::LoadLocal(_) | Op::LoadConstInt(_) | Op::LoadSymbol(_)))
+                    && matches!(code.get(j + 2), Some(Op::Call(m, 1, _)) if *m == syms.bracket)
+                {
+                    return true;
                 }
             }
             Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) if *s == slot => {
@@ -248,6 +284,52 @@ fn local_is_obj_value(code: &[Op], slot: u16, from_ip: usize, syms: &JitSyms) ->
             _ => {}
         }
         j += 1;
+    }
+    false
+}
+
+/// True if local `slot`, after `from_ip`, is used as a Hash KEY — loaded immediately
+/// before a 1-arg `[]` or `[]=` (`counts[t]` / `counts[t] = …`) — before reassignment.
+/// So an Object-recv getter result stored into it (`t = node.type`) is read as a
+/// Symbol (`jit_obj_getter_sym`), not an Int (ADR 0034 pieces 2-4).
+fn local_is_symbol(code: &[Op], slot: u16, from_ip: usize, syms: &JitSyms) -> bool {
+    let mut j = from_ip;
+    while j < code.len() {
+        match &code[j] {
+            Op::LoadLocal(s) if *s == slot => {
+                if matches!(code.get(j + 1), Some(Op::Call(m, 1, _)) if *m == syms.bracket) {
+                    return true;
+                }
+            }
+            Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) if *s == slot => {
+                return false;
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    false
+}
+
+/// True if local `slot` is used as a Hash — the receiver of a 1-arg `[]` (`slot[k]`)
+/// or a 2-arg `[]=` (`slot[k] = v`) — anywhere in `code`. Lets a 2-arg method's
+/// param1 (`def walk(node, counts)`) bind as a `HashObjId` (ADR 0034 pieces 2-4). The
+/// receiver of `[]` is loaded, then the KEY is loaded, then the Call — so `slot` is a
+/// hash receiver when `LoadLocal(slot)` is followed by another load then `Call([],1)`,
+/// or by key-load(s) then `CallAset([]=,2)`.
+fn local_is_hash(code: &[Op], slot: u16, syms: &JitSyms) -> bool {
+    for (j, op) in code.iter().enumerate() {
+        if let Op::LoadLocal(s) = op {
+            if *s != slot {
+                continue;
+            }
+            // `slot[key]`: LoadLocal(slot), LoadLocal/LoadSymbol/LoadConstInt(key), Call([],1).
+            if matches!(code.get(j + 1), Some(Op::LoadLocal(_) | Op::LoadSymbol(_) | Op::LoadConstInt(_)))
+                && matches!(code.get(j + 2), Some(Op::Call(m, 1, _)) if *m == syms.bracket)
+            {
+                return true;
+            }
+        }
     }
     false
 }
@@ -325,14 +407,21 @@ pub(crate) fn compile(
     // `Kind::Object`. Only the obj-param dispatch path sets it; method-only, ignored
     // for blocks. Mutually exclusive with `float_elem`/`allow_zero_arg` in practice.
     obj_param: bool,
+    // The method has TWO required params (ADR 0034 piece 1+8): param0 is an Object
+    // (its i64 C-arg is a `*const Value`), param1 an Int. Adds a 4th C-ABI param
+    // (`two_param`) bound to slot 1, marks slot 0 `Kind::Object`, and admits a 2-arg
+    // self-recursive `CallNoRecv(name, 2)` native self-call. Method-only; the result
+    // is an Int (the accumulator). Mutually exclusive with `obj_param`/`float_elem`.
+    obj_param2: bool,
 ) -> Option<NativeProto> {
-    // Shape gate (methods only): 0 (iff `allow_zero_arg`) or 1 required positional, no
-    // optional/rest/kw. `params.len() == n_required_positional` rejects optionals; the
-    // unused i64 C-arg of a 0-arg method binds harmlessly to slot 0 (all slots are
-    // def_var'd at entry). A block's eligibility is checked by the caller.
+    // Shape gate (methods only): 0 (iff `allow_zero_arg`), 1, or 2 (iff `obj_param2`)
+    // required positional, no optional/rest/kw. `params.len() == n_required_positional`
+    // rejects optionals; the unused i64 C-arg of a 0-arg method binds harmlessly to
+    // slot 0 (all slots are def_var'd at entry). A block's eligibility is the caller's.
     if block.is_none() {
         let n = proto.n_required_positional as usize;
-        let arity_ok = (n == 1 || (n == 0 && allow_zero_arg)) && proto.params.len() == n;
+        let arity_ok = (n == 1 || (n == 0 && allow_zero_arg) || (n == 2 && obj_param2))
+            && proto.params.len() == n;
         if !arity_ok || proto.rest_param.is_some() || !proto.kw_param_defaults.is_empty() {
             return None;
         }
@@ -354,7 +443,7 @@ pub(crate) fn compile(
     //   EachObj   blk(vm,self,elem,memo)    -> arg2=elem(slot), arg3=memo(slot+1)
     //   EachIndex blk(vm,self,acc,elem,idx) -> arg2=captured acc, arg3=elem(slot),
     //                                          arg4=index(slot+1)
-    let (arg2_slot, arg3_slot, arg4_slot): (u32, Option<u32>, Option<u32>) = match acc_kind {
+    let (arg2_slot, mut arg3_slot, arg4_slot): (u32, Option<u32>, Option<u32>) = match acc_kind {
         AccKind::None => (param_slot, None, None),
         AccKind::Inject => (param_slot, Some(param_slot + 1), None),
         AccKind::EachAcc { acc_slot } => (acc_slot, Some(param_slot), None),
@@ -363,7 +452,15 @@ pub(crate) fn compile(
             (acc_slot, Some(param_slot), Some(param_slot + 1))
         }
     };
+    // 2-arg method: param0 (slot 0) is arg2_slot (Object), param1 (slot 1) is the 4th
+    // C-arg (Int or a Hash ObjId). Adds the 2nd i64 C-ABI param via `two_param`.
+    if obj_param2 && block.is_none() {
+        arg3_slot = Some(1);
+    }
     let two_param = arg3_slot.is_some();
+    // Is the 2nd param of a 2-arg method a Hash (used as a `[]`/`[]=` receiver)? Drives
+    // the param1 kind + the dispatch's arg shape (`NativeProto::param2_hash`).
+    let param1_is_hash = obj_param2 && block.is_none() && local_is_hash(&proto.code, 1, syms);
     let three_param = arg4_slot.is_some();
     // each-accumulator / each_with_index: `Return` yields the captured accumulator
     // (arg2_slot)'s value, not the block's (discarded) return.
@@ -440,6 +537,9 @@ pub(crate) fn compile(
             Op::BinOp(_) | Op::BinOpLocalLocal(_, _, _) | Op::BinOpInt(_, _) => {}
             // Self-recursive 1-arg call (`fib(n-1)`) → native self-call.
             Op::CallNoRecv(name, 1, _) if *name == self_name_id => {}
+            // Self-recursive 2-arg call (`walk(child, acc)`, ADR 0034 piece 8) → native
+            // 4-arg self-call. Only in a 2-arg method (`obj_param2`).
+            Op::CallNoRecv(name, 2, _) if obj_param2 && *name == self_name_id => {}
             // Call to another already-compiled 1-arg method → native call. A name
             // may be in BOTH maps (called with an Int arg at one site, Float at
             // another); register whichever symbols the maps offer — the codegen
@@ -527,6 +627,9 @@ pub(crate) fn compile(
     builder.symbol("jit_ivar_obj_ptr", jit_ivar_obj_ptr as *const u8);
     builder.symbol("jit_obj_call", jit_obj_call as *const u8);
     builder.symbol("jit_obj_getter_array", jit_obj_getter_array as *const u8);
+    builder.symbol("jit_obj_getter_sym", jit_obj_getter_sym as *const u8);
+    builder.symbol("jit_hash_get_symkey", jit_hash_get_symkey as *const u8);
+    builder.symbol("jit_hash_set_symkey", jit_hash_set_symkey as *const u8);
     builder.symbol("jit_array_elem_ptr", jit_array_elem_ptr as *const u8);
     builder.symbol("jit_value_is_class", jit_value_is_class as *const u8);
     builder.symbol("jit_ivar_len", jit_ivar_len as *const u8);
@@ -619,6 +722,11 @@ pub(crate) fn compile(
     let ogaid = module
         .declare_function("jit_obj_getter_array", Linkage::Import, &ogasig)
         .ok()?;
+    // `jit_obj_getter_sym`: same `(vm, recv:ptr, getter:i32, cache:ptr) -> (symid, i8)`
+    // shape as `jit_obj_getter_array` (`ogasig`).
+    let ogsid = module
+        .declare_function("jit_obj_getter_sym", Linkage::Import, &ogasig)
+        .ok()?;
     // `jit_array_elem_ptr`: (vm, objid:i64, i:i64) -> (ptr, i8) — same shape as
     // `jit_array_elem_int` (`aeisig`).
     let aepid = module
@@ -698,6 +806,15 @@ pub(crate) fn compile(
     let hsid = module
         .declare_function("jit_hash_accum_set_int", Linkage::Import, &hssig)
         .ok()?;
+    // `jit_hash_get_symkey` / `jit_hash_set_symkey` (Symbol-keyed Hash read/write,
+    // ADR 0034 pieces 2-4): same `(vm, hash:i64, symid:i64) -> (i64, i8)` /
+    // `(vm, hash:i64, symid:i64, val:i64) -> void` shapes as the Int-key accum pair.
+    let hgsymid = module
+        .declare_function("jit_hash_get_symkey", Linkage::Import, &hgsig)
+        .ok()?;
+    let hssymid = module
+        .declare_function("jit_hash_set_symkey", Linkage::Import, &hssig)
+        .ok()?;
     // Float-KEY accum primitives (`h[k] += v` with a Float `k`): same shapes as the
     // Int-key pair but the key i64 carries f64 BITS; bucket match replicates
     // `Value::ruby_eql`'s Float arm (see `jit_hash_accum_get_floatkey`). Value Int.
@@ -772,6 +889,10 @@ pub(crate) fn compile(
     let is_method = block.is_none();
     let mut m_float_ret = false;
     let mut m_nonfloat_ret = false;
+    // A METHOD whose `Return` is `nil` (`walk(node, counts)` ends with a `while`, ADR
+    // 0034 pieces 2-4) — boxed `Value::Nil` by dispatch. Mixing Nil + a value return
+    // declines (ambiguous box kind), checked alongside m_float/m_nonfloat below.
+    let mut m_nil_ret = false;
     // Inline-cache cells for `@arr[i].getter` sites (B4); their addresses are
     // baked into the code, so they're moved into the NativeProto to outlive it.
     let mut caches: Vec<Box<std::cell::Cell<(usize, u32)>>> = Vec::new();
@@ -787,6 +908,9 @@ pub(crate) fn compile(
         let ivar_obj_ref = module.declare_func_in_func(ivobjid, fb.func);
         let obj_call_ref = module.declare_func_in_func(ocid, fb.func);
         let obj_getter_arr_ref = module.declare_func_in_func(ogaid, fb.func);
+        let obj_getter_sym_ref = module.declare_func_in_func(ogsid, fb.func);
+        let hashget_symkey_ref = module.declare_func_in_func(hgsymid, fb.func);
+        let hashset_symkey_ref = module.declare_func_in_func(hssymid, fb.func);
         let arr_len_ref = module.declare_func_in_func(alenid, fb.func);
         let arr_elem_int_ref = module.declare_func_in_func(aeiid, fb.func);
         let arr_elem_ptr_ref = module.declare_func_in_func(aepid, fb.func);
@@ -913,6 +1037,15 @@ pub(crate) fn compile(
         // obj-call PIC. Method-only (block.is_none()); param is at slot 0.
         if obj_param && block.is_none() {
             local_kinds[param_slot as usize] = Kind::Object;
+        }
+        // 2-arg method (ADR 0034 pieces 1+8 / 2-4): slot 0 is the Object param (a
+        // `*const Value`), slot 1 the 2nd arg — an Int accumulator, OR a Hash `ObjId`
+        // (`def walk(node, counts)`) when the body uses param1 as a Hash receiver.
+        if obj_param2 && block.is_none() {
+            local_kinds[0] = Kind::Object;
+            if param1_is_hash {
+                local_kinds[1] = Kind::HashObjId;
+            }
         }
         let mut ip = 0usize;
         while ip < n {
@@ -1129,7 +1262,8 @@ pub(crate) fn compile(
                         // writes ivars (StoreIvar isn't modelled → it would decline), so
                         // the ivar table never reallocs, and the heap is non-moving + GC
                         // never runs mid-method. So a local can carry it across the loop.
-                        Kind::Int | Kind::ArrayObjId | Kind::Object => {
+                        // A Symbol stores its `SymId.0` i64 directly (`t = node.type`).
+                        Kind::Int | Kind::ArrayObjId | Kind::Object | Kind::Symbol => {
                             local_kinds[*s as usize] = k;
                             fb.def_var(vars[*s as usize], v);
                         }
@@ -1209,9 +1343,17 @@ pub(crate) fn compile(
                 }
                 Op::JumpIfFalse(off) => {
                     let (cond, k) = stack.pop()?;
-                    if k != Kind::Bool {
-                        return None; // only comparison conditions modelled
-                    }
+                    // The branch condition: a Bool uses its `icmp` value; an Int / Symbol /
+                    // Object is ALWAYS truthy in Ruby (even `0`), so the false-edge is never
+                    // taken — model it as a constant-true condition (the false block stays a
+                    // valid, unreachable successor, filled via `block_args`). This is what
+                    // lets `counts[t] || 0` (an Int condition, ADR 0034 pieces 2-4) compile.
+                    let cond = match k {
+                        Kind::Bool => cond,
+                        Kind::Int | Kind::Symbol | Kind::Object => fb.ins().iconst(types::I8, 1),
+                        Kind::Nil => fb.ins().iconst(types::I8, 0),
+                        _ => return None,
+                    };
                     let t = (ip as i64 + 1 + *off as i64) as usize;
                     let fall = blocks[ip + 1].unwrap();
                     let target = blocks[t].unwrap();
@@ -1275,6 +1417,14 @@ pub(crate) fn compile(
                             Kind::Float if float_acc || is_method => {
                                 m_float_ret = true;
                                 fb.ins().bitcast(types::I64, MemFlagsData::new(), v)
+                            }
+                            // A method that returns `nil` (boxed Value::Nil by dispatch):
+                            // return a 0 sentinel. Block drivers never hit this (their
+                            // return rules force Int/Float/Array).
+                            Kind::Nil if is_method => {
+                                m_nil_ret = true;
+                                let _ = (v, k);
+                                fb.ins().iconst(types::I64, 0)
                             }
                             _ => return None,
                         }
@@ -1358,6 +1508,31 @@ pub(crate) fn compile(
                     if rk != Kind::HashObjId {
                         return None;
                     }
+                    // Symbol-keyed read (`counts[t]`, ADR 0034 pieces 2-4): SOUND only as
+                    // part of `counts[t] || <const>` — the primitive returns 0 for an
+                    // absent (default-less) key, which the `|| 0` then keeps, matching
+                    // nil→0. A BARE `h[sym]` (no following `|| const`) would observe 0 vs
+                    // nil, so it declines here. The `|| const` idiom is the next 5 ops:
+                    // `Dup, JumpIfFalse, Jump, Pop, LoadConst{Int}`.
+                    if kk == Kind::Symbol {
+                        let or_idiom = matches!(code.get(ip + 1), Some(Op::Dup))
+                            && matches!(code.get(ip + 2), Some(Op::JumpIfFalse(_)))
+                            && matches!(code.get(ip + 3), Some(Op::Jump(_)))
+                            && matches!(code.get(ip + 4), Some(Op::Pop))
+                            && matches!(code.get(ip + 5), Some(Op::LoadConstInt(_)));
+                        if !or_idiom {
+                            return None;
+                        }
+                        let inst = fb.ins().call(hashget_symkey_ref, &[vm_param, recv, key]);
+                        let (res, of) = {
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
+                        };
+                        acc_ovf(&mut fb, of);
+                        stack.push((res, Kind::Int));
+                        ip += 1;
+                        continue;
+                    }
                     let keyarg = match kk {
                         Kind::Int => key,
                         Kind::Float => fb.ins().bitcast(types::I64, MemFlagsData::new(), key),
@@ -1395,8 +1570,22 @@ pub(crate) fn compile(
                     let (val, vk) = stack.pop()?;
                     let (key, kk) = stack.pop()?;
                     let (recv, rk) = stack.pop()?;
+                    if rk != Kind::HashObjId {
+                        return None;
+                    }
+                    // Symbol-keyed Int write (`counts[t] = R`, ADR 0034 pieces 2-4):
+                    // `[]=` evaluates to its RHS, so re-push `val` (the next op `Pop`s it).
+                    if kk == Kind::Symbol {
+                        if vk != Kind::Int {
+                            return None;
+                        }
+                        fb.ins().call(hashset_symkey_ref, &[vm_param, recv, key, val]);
+                        stack.push((val, Kind::Int));
+                        ip += 1;
+                        continue;
+                    }
                     let val_ok = if float_acc { vk == Kind::Float } else { vk == Kind::Int };
-                    if rk != Kind::HashObjId || !val_ok {
+                    if !val_ok {
                         return None;
                     }
                     let keyarg = match kk {
@@ -1473,6 +1662,31 @@ pub(crate) fn compile(
                         (r[0], r[1])
                     };
                     acc_ovf(&mut fb, of);
+                    stack.push((res, Kind::Int));
+                }
+                // 2-arg self-recursive call (`walk(child, acc)`, ADR 0034 piece 8):
+                // pop arg1 (Int acc) then arg0 (Object pointer), emit a native 4-arg
+                // call back into this function, OR the callee's overflow into ours.
+                // The result is an Int (the threaded accumulator).
+                Op::CallNoRecv(name, 2, _) if obj_param2 && *name == self_name_id => {
+                    let (arg1, k1) = stack.pop()?;
+                    let (arg0, k0) = stack.pop()?;
+                    // arg0 = the Object child pointer; arg1 = the threaded 2nd param —
+                    // an Int accumulator OR the Hash `ObjId` (`walk(c, counts)`). Both
+                    // pass as i64; the callee (this same proto) binds slot 1 to its own
+                    // param1 kind, so the kinds match by construction.
+                    let k1_ok = k1 == Kind::Int || (k1 == Kind::HashObjId && param1_is_hash);
+                    if k0 != Kind::Object || !k1_ok {
+                        return None;
+                    }
+                    let inst = fb.ins().call(self_ref, &[vm_param, self_param, arg0, arg1]);
+                    let (res, ovf) = {
+                        let r = fb.inst_results(inst);
+                        (r[0], r[1])
+                    };
+                    let cur = fb.use_var(ovf_var);
+                    let nv = fb.ins().bor(cur, ovf);
+                    fb.def_var(ovf_var, nv);
                     stack.push((res, Kind::Int));
                 }
                 // 1-arg no-recv call: pop the i64 arg, emit a native call to
@@ -1648,7 +1862,28 @@ pub(crate) fn compile(
                     // `ArrayObjId` (ADR 0034 Step 1, piece 1). Else the Int obj-call PIC.
                     let arr_result = matches!(code.get(ip + 1),
                         Some(Op::StoreLocal(dst)) if local_is_array(code, *dst, ip + 2, syms));
-                    if arr_result {
+                    // `node.type` whose result is stored to a local used as a Hash KEY
+                    // → a Symbol-returning getter (`jit_obj_getter_sym`), pushing
+                    // `Kind::Symbol` (ADR 0034 pieces 2-4).
+                    let sym_result = !arr_result && matches!(code.get(ip + 1),
+                        Some(Op::StoreLocal(dst)) if local_is_symbol(code, *dst, ip + 2, syms));
+                    if sym_result {
+                        let cache = Box::new(std::cell::Cell::new((0usize, 0u32)));
+                        let cache_addr =
+                            &*cache as *const std::cell::Cell<(usize, u32)> as i64;
+                        caches.push(cache);
+                        let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
+                        let inst = fb.ins().call(
+                            obj_getter_sym_ref,
+                            &[vm_param, recv_ptr, nm, cache_const],
+                        );
+                        let (res, of) = {
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
+                        };
+                        acc_ovf(&mut fb, of);
+                        stack.push((res, Kind::Symbol));
+                    } else if arr_result {
                         let cache = Box::new(std::cell::Cell::new((0usize, 0u32)));
                         let cache_addr =
                             &*cache as *const std::cell::Cell<(usize, u32)> as i64;
@@ -1728,7 +1963,10 @@ pub(crate) fn compile(
     // paths has an ambiguous box kind — decline. (Only reachable for methods; block
     // drivers force a single return kind, so m_nonfloat/m_float can't both be set.)
     let returns_float = m_float_ret;
-    if returns_float && m_nonfloat_ret {
+    let returns_nil = m_nil_ret;
+    // At most one box kind across all return paths (Float / non-Float Int-or-Array / Nil).
+    let box_kinds = (returns_float as u8) + (m_nonfloat_ret as u8) + (returns_nil as u8);
+    if box_kinds > 1 {
         return None;
     }
     module.define_function(fid, &mut ctx).ok()?;
@@ -1740,12 +1978,26 @@ pub(crate) fn compile(
             code_ptr,
         )
     };
+    // A 2-arg method (`obj_param2`) compiled with `two_param` has a 4-param C
+    // signature — expose the same code under the 4-arg fn-ptr type for `call2`.
+    let ptr2 = if obj_param2 && is_method {
+        Some(unsafe {
+            std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+                code_ptr,
+            )
+        })
+    } else {
+        None
+    };
     Some(NativeProto {
         _module: module,
         ptr,
+        ptr2,
         guard_class: std::cell::Cell::new(0),
         returns_array: std::cell::Cell::new(returns_array),
         returns_float: std::cell::Cell::new(returns_float),
+        returns_nil: std::cell::Cell::new(returns_nil),
+        param2_hash: std::cell::Cell::new(param1_is_hash),
         _caches: caches,
         _obj_call_caches: obj_call_caches,
     })
@@ -4132,6 +4384,136 @@ pub(crate) unsafe extern "C" fn jit_obj_getter_array(
     match inst.ivars.get(&crate::intern::SymId(ivar)) {
         Some(Value::Array(aid)) => NRet { res: aid.0 as i64, ovf: 0 },
         _ => deopt,
+    }
+}
+
+/// Object-recv getter whose ivar is a SYMBOL (`node.type` → `@type`, ADR 0034 pieces
+/// 2-4): returns the Symbol's `SymId.0`. Identical shape + monomorphic class PIC to
+/// [`jit_obj_getter_array`]; deopts on a non-Object recv, a non-simple-reader getter,
+/// or a non-Symbol ivar.
+///
+/// # Safety
+/// `vm` valid; `recv` a valid `*const Value` (or null → deopt); `cache` outlives the call.
+pub(crate) unsafe extern "C" fn jit_obj_getter_sym(
+    vm: *const crate::vm::Vm,
+    recv: *const Value,
+    getter_name: u32,
+    cache: *const std::cell::Cell<(usize, u32)>,
+) -> NRet {
+    let deopt = NRet { res: 0, ovf: 1 };
+    if recv.is_null() {
+        return deopt;
+    }
+    let vm = unsafe { &*vm };
+    let recv = unsafe { &*recv };
+    let cache = unsafe { &*cache };
+    let oid = match recv {
+        Value::Object(o) => *o,
+        _ => return deopt,
+    };
+    let inst = match vm.heap.get(oid) {
+        crate::heap::HeapObj::Instance(inst) => inst,
+        _ => return deopt,
+    };
+    let cls_ptr = match &inst.singleton_class {
+        Some(sc) => std::rc::Rc::as_ptr(sc) as usize,
+        None => std::rc::Rc::as_ptr(&inst.class) as usize,
+    };
+    let (cached_cls, cached_ivar) = cache.get();
+    let ivar = if cached_cls == cls_ptr {
+        cached_ivar
+    } else if cached_cls == 0 {
+        let cls = match &inst.singleton_class {
+            Some(sc) => sc.clone(),
+            None => inst.class.clone(),
+        };
+        let m = match vm.lookup_method_uncached(&cls, crate::intern::SymId(getter_name)) {
+            Some(m) => m,
+            None => return deopt,
+        };
+        let iv = match vm.protos[m.proto_idx].getter_ivar {
+            Some(iv) => iv,
+            None => return deopt,
+        };
+        cache.set((cls_ptr, iv.0));
+        iv.0
+    } else {
+        return deopt; // megamorphic
+    };
+    match inst.ivars.get(&crate::intern::SymId(ivar)) {
+        Some(Value::Sym(s)) => NRet { res: s.0 as i64, ovf: 0 },
+        _ => deopt,
+    }
+}
+
+/// Symbol-keyed Hash read (`counts[t]`, ADR 0034 pieces 2-4): the Int value at the
+/// Symbol key `symid` in Hash `hash_objid`, or **0** when the key is absent AND the
+/// Hash has no default (the `{}`-with-`|| 0` shape the codegen gates on). Deopts
+/// (`ovf=1`) on a present-but-non-Int value, or an absent key on a Hash WITH a default
+/// (where the interpreter must return the default, not 0). Uses the Hash's O(1) key
+/// index.
+///
+/// # Safety
+/// `vm` valid; `hash_objid` a live Hash slot.
+pub(crate) unsafe extern "C" fn jit_hash_get_symkey(
+    vm: *const crate::vm::Vm,
+    hash_objid: i64,
+    symid: i64,
+) -> NRet {
+    let vm = unsafe { &*vm };
+    let hid = crate::value::ObjId(hash_objid as u32);
+    let sym = symid as u32;
+    // Direct linear scan over `pairs` (matching a Symbol key by `SymId.0`). For the
+    // small accumulator Hashes this drives (a handful of distinct keys), an i64-compare
+    // scan beats `ruby_hash` + the FxHashMap index probe — and never builds/touches the
+    // lazy index, so the Hash stays index-free across the whole loop.
+    let h = match vm.heap.get(hid) {
+        crate::heap::HeapObj::Hash(h) => h,
+        _ => return NRet { res: 0, ovf: 1 },
+    };
+    for (k, v) in &h.pairs {
+        if matches!(k, Value::Sym(s) if s.0 == sym) {
+            return match v {
+                Value::Int(n) => NRet { res: *n, ovf: 0 },
+                _ => NRet { res: 0, ovf: 1 }, // present non-Int → interpreter
+            };
+        }
+    }
+    // Absent: 0 is sound ONLY when there's no user default (the codegen's `|| 0` then
+    // yields 0 too). A defaulted Hash must go to the interpreter.
+    if h.default_value.is_some() || h.default_block.is_some() {
+        NRet { res: 0, ovf: 1 }
+    } else {
+        NRet { res: 0, ovf: 0 }
+    }
+}
+
+/// Symbol-keyed Hash write (`counts[t] = val`, ADR 0034 pieces 2-4): store
+/// `Value::Int(val)` at the Symbol key `symid` in Hash `hash_objid` (insert or update,
+/// keeping the index live + insertion order).
+///
+/// # Safety
+/// `vm` valid; `hash_objid` a live Hash slot.
+pub(crate) unsafe extern "C" fn jit_hash_set_symkey(
+    vm: *mut crate::vm::Vm,
+    hash_objid: i64,
+    symid: i64,
+    val: i64,
+) {
+    let vm = unsafe { &mut *vm };
+    let hid = crate::value::ObjId(hash_objid as u32);
+    let sym = symid as u32;
+    // Linear find-or-append on `pairs` directly (no index — see `jit_hash_get_symkey`).
+    // If a stale index existed it must be invalidated, since we bypass `hash_insert`'s
+    // index maintenance; the accumulator Hashes this drives never build one, so the
+    // `index = None` reset is just defensive.
+    if let crate::heap::HeapObj::Hash(h) = vm.heap.get_mut(hid) {
+        if let Some(slot) = h.pairs.iter_mut().find(|(k, _)| matches!(k, Value::Sym(s) if s.0 == sym)) {
+            slot.1 = Value::Int(val);
+        } else {
+            h.pairs.push((Value::Sym(crate::intern::SymId(sym)), Value::Int(val)));
+            h.index = None;
+        }
     }
 }
 
