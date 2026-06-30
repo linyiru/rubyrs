@@ -183,6 +183,28 @@ impl Drop for SpanGuard<'_> {
 /// (and `b` already holds the emitted ops); the caller should
 /// then `return;` to skip the generic `Op::Call` path.
 ///
+/// Allocate the next per-call-site inline-cache id from the global counter `cc`.
+///
+/// Real ids run `0..=u16::MAX-1` (65535 slots); once exhausted, returns the
+/// `u16::MAX` sentinel — an UNCACHED call site (correct, just slower). This is
+/// load-bearing: `cid` is a `u16`, so a bare `*cc as u16` WRAPS once a program has
+/// >65535 call sites, aliasing distinct call sites onto one inline-cache slot (and
+/// making `u16::MAX` — the "no cache" sentinel `lookup_method_cached` relies on — a
+/// real slot, so every `__send__`/cext uncached call collides too). RuboCop has far
+/// more than 65535 call sites and hit exactly this: `__send__(:_reduce_42, …)` started
+/// dispatching to `emit_atom`. Capping (never wrapping, never incrementing past the
+/// limit so `call_caches` stays ≤ 65535) keeps `u16::MAX` permanently out of bounds.
+#[inline]
+fn alloc_cid(cc: &mut u32) -> u16 {
+    if *cc >= u16::MAX as u32 {
+        u16::MAX
+    } else {
+        let id = *cc as u16;
+        *cc += 1;
+        id
+    }
+}
+
 /// Each intercept short-circuits only when every relevant arg
 /// is a `SymbolLit` — dynamic forms (`attr_accessor(*xs)`,
 /// `alias_method(a, b)` with non-symbol args) fall through.
@@ -1214,7 +1236,7 @@ fn compile_call_arm(
         && let Expr::LVarRead(lname) = &r.node
     {
         let slot = b.local_slot(lname);
-        let cid = *cc as u16; *cc += 1;
+        let cid = alloc_cid(cc);
         b.emit(Op::LoadLocalCall(slot, name_id, cid));
         return;
     }
@@ -1260,8 +1282,7 @@ fn emit_method_call(
     has_kwargs: bool,
     cc: &mut u32,
 ) {
-    let cid = *cc as u16;
-    *cc += 1;
+    let cid = alloc_cid(cc);
     // The block+kwargs combo (`foo(**kw, &blk)`) emits a dedicated
     // `CallKwBlock*` op so the trailing keyword-splat Hash is treated
     // as kwargs (an empty/nil one dropped), not smuggled in as a
@@ -1708,8 +1729,7 @@ pub(crate) fn compile_expr(
                             // String part skips to_s entirely; see
                             // Op::InterpToS. Consumes a cache id for
                             // the non-String dispatch path.
-                            let cid = *cc as u16;
-                            *cc += 1;
+                            let cid = alloc_cid(cc);
                             b.emit(Op::InterpToS(cid));
                         }
                     }
@@ -1737,8 +1757,7 @@ pub(crate) fn compile_expr(
                             compile_expr(b, p, protos, interner, cc);
                             // Same InterpToS contract as
                             // InterpolatedStr above.
-                            let cid = *cc as u16;
-                            *cc += 1;
+                            let cid = alloc_cid(cc);
                             b.emit(Op::InterpToS(cid));
                         }
                     }
@@ -1968,8 +1987,7 @@ pub(crate) fn compile_expr(
             let name_id = interner.intern(name);
             compile_expr(b, receiver, protos, interner, cc);
             for a in args { compile_expr(b, a, protos, interner, cc); }
-            let cid = *cc as u16;
-            *cc += 1;
+            let cid = alloc_cid(cc);
             b.emit(Op::CallAset(name_id, args.len() as u8, cid));
         }
         Expr::Def { name, params, defaults, rest, n_required_post, kw_params, kw_rest, block_param, receiver, body } => {
@@ -2521,7 +2539,7 @@ pub(crate) fn compile_expr(
                 compile_expr(b, kw, protos, interner, cc);
             }
             let name_id = interner.intern(name);
-            let cid = *cc as u16; *cc += 1;
+            let cid = alloc_cid(cc);
             match (has_recv, block_arg.is_some(), kwsplat.is_some()) {
                 (true,  false, true)  => b.emit(Op::ApplyCallKw(name_id, cid)),
                 (false, false, true)  => b.emit(Op::ApplyCallKwNoRecv(name_id, cid)),
@@ -3083,14 +3101,14 @@ pub(crate) fn compile_block(
         for (anon_slot, inner_slots) in &destructure_jobs {
             // Coerce: locals[anon] = Array(locals[anon])
             b.emit(Op::LoadLocal(*anon_slot));
-            let cid = *cc as u16; *cc += 1;
+            let cid = alloc_cid(cc);
             b.emit(Op::CallNoRecv(interner.intern("Array"), 1, cid));
             b.emit(Op::StoreLocal(*anon_slot));
             // Unpack: locals[inner_i] = locals[anon][i]
             for (i, slot) in inner_slots.iter().enumerate() {
                 b.emit(Op::LoadLocal(*anon_slot));
                 b.emit(Op::LoadConstInt(i as i64));
-                let cid = *cc as u16; *cc += 1;
+                let cid = alloc_cid(cc);
                 b.emit(Op::Call(bracket_id, 1, cid));
                 b.emit(Op::StoreLocal(*slot));
             }
@@ -3221,4 +3239,33 @@ pub(crate) fn compile_block(
         parent.n_locals = block_n_locals;
     }
     (idx, param_start, n_params, rest_slot, kw_rest_slot)
+}
+
+#[cfg(test)]
+mod cid_alloc_tests {
+    use super::alloc_cid;
+
+    // Regression: the per-call-site inline-cache id must NEVER wrap (a `*cc as u16`
+    // truncation aliased distinct call sites onto one cache slot once a program had
+    // >65535 call sites — RuboCop — cross-wiring `__send__(:_reduce_42)` to `emit_atom`),
+    // and `u16::MAX` must stay reserved as the "no cache" sentinel (so `call_caches`,
+    // sized to the counter, never makes slot 65535 a real entry).
+    #[test]
+    fn alloc_cid_caps_without_wrapping() {
+        // Normal allocation increments.
+        let mut cc: u32 = 0;
+        assert_eq!(alloc_cid(&mut cc), 0);
+        assert_eq!(alloc_cid(&mut cc), 1);
+        assert_eq!(cc, 2);
+
+        // At the boundary: the last real slot is u16::MAX - 1, then the sentinel,
+        // and the counter never advances past u16::MAX (keeps call_caches ≤ 65535).
+        let mut cc: u32 = (u16::MAX - 1) as u32; // 65534
+        assert_eq!(alloc_cid(&mut cc), u16::MAX - 1); // 65534 — last real slot
+        assert_eq!(cc, u16::MAX as u32); // 65535
+        assert_eq!(alloc_cid(&mut cc), u16::MAX); // exhausted → uncached sentinel
+        assert_eq!(cc, u16::MAX as u32); // does NOT advance/wrap
+        assert_eq!(alloc_cid(&mut cc), u16::MAX); // stays sentinel forever
+        assert_eq!(cc, u16::MAX as u32);
+    }
 }
