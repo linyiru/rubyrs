@@ -504,6 +504,17 @@ pub(crate) struct Heap {
     /// (before any fiber can exist).
     #[cfg(feature = "_fiber")]
     pub(crate) fiber_class: Option<std::rc::Rc<crate::value::Class>>,
+    /// ADR 0035 Phase 2 — JIT-inline class guard. A table of class pointers PARALLEL to
+    /// `slots` (always the same length): the value `class_ptr_of` returns — the singleton
+    /// class if present, else the class — as a raw `usize`, or `0` for objects that bear no
+    /// dispatchable class (Array/Hash/Range/… and `Fiber` before its class is cached), whose
+    /// callers fall back to the slab walk. The native JIT will read this with an inline load
+    /// instead of an extern-C `class_ptr_of` call (Phase 3). Maintained at the two points
+    /// that set an object's effective class — `alloc` and `ensure_singleton_class`. A swept
+    /// slot's entry goes stale but is never read (`class_ptr_of` on a dead oid panics) and is
+    /// overwritten on the next `alloc` into that slot.
+    #[cfg(feature = "jit-native")]
+    pub(crate) class_ptrs: Vec<usize>,
 }
 
 impl Heap {
@@ -532,6 +543,30 @@ impl Heap {
             fiber_alloc_count: 0,
             #[cfg(feature = "_fiber")]
             fiber_class: None,
+            #[cfg(feature = "jit-native")]
+            class_ptrs: vec![],
+        }
+    }
+
+    /// ADR 0035 Phase 2 — the class pointer `class_ptr_of` would return for `obj`, computed
+    /// from the object alone (used to populate `class_ptrs` at `alloc`). `0` for objects with
+    /// no dispatchable class, and for a `Fiber` whose class isn't cached yet (the caller then
+    /// falls back to the slab walk, where `class_ptr_of` resolves it lazily).
+    #[cfg(feature = "jit-native")]
+    fn class_ptr_of_obj(&self, obj: &HeapObj) -> usize {
+        match obj {
+            HeapObj::Instance(i) => match &i.singleton_class {
+                Some(sc) => Rc::as_ptr(sc) as usize,
+                None => Rc::as_ptr(&i.class) as usize,
+            },
+            HeapObj::TypedData(d) => Rc::as_ptr(&d.class) as usize,
+            #[cfg(feature = "_fiber")]
+            HeapObj::Fiber(_) => self
+                .fiber_class
+                .as_ref()
+                .map(|c| Rc::as_ptr(c) as usize)
+                .unwrap_or(0),
+            _ => 0,
         }
     }
 
@@ -546,11 +581,17 @@ impl Heap {
     }
     pub(crate) fn alloc(&mut self, obj: HeapObj) -> ObjId {
         self.live_count += 1;
+        #[cfg(feature = "jit-native")]
+        let cls = self.class_ptr_of_obj(&obj); // before `obj` is moved into the slot
         if let Some(i) = self.free.pop() {
             self.slots[i as usize] = Slot::Live(obj);
             self.marks[i as usize] = false;
             self.old[i as usize] = false; // a freshly (re)allocated object is young
             self.young_slots.push(i);
+            #[cfg(feature = "jit-native")]
+            {
+                self.class_ptrs[i as usize] = cls;
+            }
             return ObjId(i);
         }
         let i = self.slots.len() as u32;
@@ -558,6 +599,11 @@ impl Heap {
         self.marks.push(false);
         self.old.push(false);
         self.young_slots.push(i);
+        #[cfg(feature = "jit-native")]
+        {
+            debug_assert_eq!(self.class_ptrs.len(), i as usize);
+            self.class_ptrs.push(cls);
+        }
         ObjId(i)
     }
     pub(crate) fn get(&self, id: ObjId) -> &HeapObj {
@@ -633,6 +679,35 @@ impl Heap {
     /// `None` for a non-Object slot (same cases as `try_class_of`).
     #[inline]
     pub(crate) fn class_ptr_of(&self, id: ObjId) -> Option<usize> {
+        // ADR 0035 Phase 2 — dogfood the JIT class table: serve from it when it holds a
+        // class (nonzero), falling back to the slab walk otherwise (non-class objects, and a
+        // Fiber before its class is cached → table 0). The debug-assert proves the table
+        // stays in sync with the slab-derived value on every live read, so Phase 3's inline
+        // codegen can trust it. (A swept slot is never reached — `get` panics on a dead oid.)
+        #[cfg(feature = "jit-native")]
+        {
+            let tbl = self.class_ptrs[id.0 as usize];
+            if tbl != 0 {
+                // A nonzero entry must match the slab exactly (catches a stale/wrong class).
+                // A zero entry means "no cached class" — fall back to the slab, which also
+                // resolves a Fiber whose class was cached only after the Fiber was allocated
+                // (so a 0 entry vs a `Some` slab is intended, not a desync, and is not asserted).
+                debug_assert_eq!(
+                    Some(tbl),
+                    self.class_ptr_of_slab(id),
+                    "ADR 0035 class_ptrs desync at oid {}",
+                    id.0
+                );
+                return Some(tbl);
+            }
+            return self.class_ptr_of_slab(id);
+        }
+        #[cfg(not(feature = "jit-native"))]
+        self.class_ptr_of_slab(id)
+    }
+    /// The slab-walk class pointer (the pre-ADR-0035 implementation): `class_ptr_of`'s
+    /// source of truth, kept as the fallback + the debug-assert oracle for the table.
+    fn class_ptr_of_slab(&self, id: ObjId) -> Option<usize> {
         match self.get(id) {
             HeapObj::Instance(i) => Some(match &i.singleton_class {
                 Some(sc) => Rc::as_ptr(sc) as usize,
@@ -726,6 +801,12 @@ impl Heap {
             cext_alloc_func: std::cell::Cell::new(None),
         });
         inst.singleton_class = Some(sc.clone());
+        // ADR 0035 Phase 2 — the object's effective class is now the singleton; keep the
+        // JIT class table in step (else a cached PIC guard would read the stale base class).
+        #[cfg(feature = "jit-native")]
+        {
+            self.class_ptrs[id.0 as usize] = Rc::as_ptr(&sc) as usize;
+        }
         sc
     }
     pub(crate) fn instance_mut(&mut self, id: ObjId) -> &mut Instance {

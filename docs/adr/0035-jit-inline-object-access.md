@@ -56,16 +56,26 @@ tag at runtime, not bake a constant. Only `OID_OFFSET` is stable. The kind track
 guarantees the variant, so the hot path needs no tag check — the same trust the existing
 primitives' deopt net provides.)
 
-### Phase 2 — JIT-addressable class-pointer table + `#[repr(C)]` view
-A `class_ptrs: Vec<usize>` indexed by `oid` (the value `class_ptr_of` returns: singleton
-class if present, else class; `0` for non-Instance), maintained at the `alloc` chokepoint +
-the 3 `singleton_class` set sites (a dead slot's stale entry is never read — `class_ptr_of`
-on a dead oid already panics). Exposed through a `#[repr(C)]` `JitObjView { class_ptrs:
-*const usize, len: usize }` at a **stable heap address** (`Box`) the JIT bakes once and
-loads the live base through (the `Vec` may reallocate; the view's address does not).
-Dogfooded by routing `class_ptr_of` through the table behind a STRESS-mode debug-assert that
-it equals the slab-derived class — proving the sync is correct before any codegen relies on
-it.
+### Phase 2 — JIT class-pointer table (✅ done; the `#[repr(C)]` view moves to Phase 3)
+A `class_ptrs: Vec<usize>` PARALLEL to `slots` (gated `feature = "jit-native"`), holding the
+value `class_ptr_of` returns (singleton class if present, else class; `0` for objects with no
+dispatchable class, and for a `Fiber` before its class is cached → caller falls back to the
+slab). Maintained at the **two** points that set an object's effective class: `alloc` (via a
+`class_ptr_of_obj` helper, computed before the object is moved into its slot) and
+`ensure_singleton_class`. The 3rd/4th `singleton_class` set sites turned out to be HASH
+singletons — `class_ptr_of` returns `None` for Hash, so they don't affect the table.
+`alloc` is the sole `slots` growth point, so the table stays length-synced; a swept slot's
+entry is stale but never read (`get` panics on a dead oid) and is overwritten on reuse.
+Dogfooded: `class_ptr_of` now serves from the table (returning the slab walk only for `0`
+entries), behind a `debug_assert` that a nonzero entry equals the slab-derived class —
+proving the sync before codegen relies on it. **Validated**: the full diff_cruby suite in a
+DEBUG jit-native build (assert live) passed all but 2 deep-recursion fixtures, which fail on
+a pre-existing debug-only `SystemStackError` (confirmed identical in a default debug build —
+unrelated to this change); plus a STRESS_GC churn test (20 000 allocs across two classes +
+singleton additions, forcing slot reuse) at exact CRuby parity with no desync. Release
+diff_cruby GREEN both builds (966). The `#[repr(C)] JitObjView` (a stable-addressed `Box`
+the JIT bakes + loads the live `class_ptrs` base through) is deferred to Phase 3, where the
+codegen that needs it lands.
 
 ### Phase 3 — inline the class guard in codegen
 Replace the `class_ptr_of` primitive call inside the obj-call PICs (`jit_obj_call`,
