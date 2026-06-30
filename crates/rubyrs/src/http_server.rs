@@ -546,7 +546,7 @@ fn install_rack_input(
     let pre_frames = pg.vm.frames.len();
     pg.vm.stack.push(sio_class);
     pg.vm.stack.push(body_val);
-    pg.vm.do_call(new_sym, 1, /* no_recv = */ false, /* cache_id = */ u16::MAX)?;
+    pg.vm.do_call(new_sym, 1, /* no_recv = */ false, /* cache_id = */ u32::MAX)?;
     // Drive `initialize` to completion. `new` uses the frame's
     // `swap_return` so the value left on the stack is the INSTANCE, not
     // initialize's return value.
