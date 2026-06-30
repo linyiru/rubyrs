@@ -100,16 +100,35 @@ desync). **Still to inline** (same mechanism): `jit_obj_call_bool` (predicates �
 `jit_value_is_a` (`is_a?`), and — once Phase 5 inlines the ivar read for the receiver —
 `jit_inst_obj_call` (treesum's `@l.sum`). This proves the inline-load codegen Phase 5 reuses.
 
-### Phase 4 — per-class ivar layout (the header proper)
-Assign each ivar a fixed slot index per class (a `HashMap<SymId, u16>` on `Class`, filled as
-ivars are first assigned), and store an Instance's ivars in a flat `Box<[Value]>` indexed by
-slot instead of the `SmallVec<[(SymId, Value); 4]>` scan. The class records its slot map; the
-JIT, monomorphic on the guarded class, knows the slot index at compile time.
+### Phase 4 — JIT-readable ivar array (✅ done; SIMPLER than a storage rewrite)
+The original plan (flat `Box<[Value]>` slot storage) hit a wall: the Instance size budget
+(≤136B, the `HashObj` ceiling) won't fit an inline-4 flat array without SmallVec's union
+trick, and dropping inline-small regresses alloc-heavy workloads (AR). The realization:
+**keep SmallVec, just make its element JIT-readable.** Replaced the bare tuple `(SymId,
+Value)` with a `#[repr(C)] IvarPair { sym @0, val @8, stride 24 }` and exposed the contiguous
+base via `IvarTable::as_ptr_len()` — backed by `SmallVec::as_ptr()`, a STABLE public API, not
+the SmallVec's fragile internals. No storage replacement, no `Instance` `#[repr(C)]`, no size
+change, inline-small preserved. Contained to IvarTable (its 145 callers untouched — it was
+fully encapsulated). offset/size const-asserts pin it. diff_cruby GREEN both builds (967),
+zero behaviour change.
 
-### Phase 5 — inline ivar reads in codegen
-Replace `jit_inst_get_int` / the ivar fetch in `jit_inst_obj_call` with an inline load:
-`Instance.ivars_ptr[slot]` at the compile-time slot index. Retire the ivar primitives on the
-hot path. **treesum surpass.**
+### Phase 5 — inline ivar reads in codegen (NEXT — treesum surpass)
+Per-node, treesum pays ~6 JIT↔primitive boundaries (`jit_self_inst` + `jit_inst_get_int` for
+`@v` + 2× `jit_inst_obj_call` for `@l`/`@r`, each of which also calls its callee). Plan to
+halve it to 3:
+- `jit_self_ivars(self) -> (base, len)` ONE primitive at entry (the ivar array base via
+  `as_ptr_len`), replacing `jit_self_inst`.
+- Inline ivar read for `@v`/`@l`/`@r`: read `base[slot]` (`IvarPair`, Phase 4 offsets) and
+  verify `sym` (deopt on mismatch). The slot comes from a **per-class slot map**
+  (`Class.ivar_slots: SymId→u16`, recorded at the `SetIvar` opcode — the receiver's class is
+  there) which the JIT reads at compile time (it has `recv_cls`); the runtime `sym` verify
+  makes it sound regardless of order. (Alternative: an inline scan loop, no slot map but
+  heavier codegen — the slot-map+bake path has the simpler, lower-risk runtime codegen.)
+- For `@l.sum`/`@r.sum`: the inline ivar read yields the recv pointer, then Phase 3b's inline
+  class guard + `call_indirect`. So `jit_inst_obj_call` retires on the hot path.
+Result target: **treesum beats YJIT**, plus a broad speedup for every self-ivar read (getters,
+AR attributes — like Phase 3b broadened past treesum). The most intricate codegen of the
+investment; done as its own validated step (diff_cruby both + STRESS_GC + A/B measure).
 
 ## Consequences
 
