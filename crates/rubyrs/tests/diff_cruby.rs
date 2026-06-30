@@ -1038,6 +1038,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn jit_obj_tree_walk() { run_diff("jit_obj_tree_walk"); }
 #[test] fn jit_each_obj_walk() { run_diff("jit_each_obj_walk"); }
 #[test] fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
+#[test] fn jit_inline_objcall_guard() { run_diff("jit_inline_objcall_guard"); }
 #[test] fn jit_obj_arg2_walk() { run_diff("jit_obj_arg2_walk"); }
 #[test] fn jit_sym_hash_walk() { run_diff("jit_sym_hash_walk"); }
 #[test] fn jit_obj_arg_crosscall() { run_diff("jit_obj_arg_crosscall"); }
@@ -1203,6 +1204,14 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "stdlib")]
 #[test] fn yaml_psych_error() { run_diff("yaml_psych_error"); }
 #[test] fn yaml_psych_treebuilder() { run_diff("yaml_psych_treebuilder"); }
+#[test] fn yaml_psych_block_scalar() { run_diff("yaml_psych_block_scalar"); }
+#[test] fn block_given_deferred_proc() { run_diff("block_given_deferred_proc"); }
+#[test] fn sprintf_named() { run_diff("sprintf_named"); }
+#[test] fn array_bsearch_index() { run_diff("array_bsearch_index"); }
+#[test] fn regex_stacked_quantifier() { run_diff("regex_stacked_quantifier"); }
+#[test] fn range_bsearch() { run_diff("range_bsearch"); }
+#[cfg(feature = "stdlib")]
+#[test] fn optparse_csv_yield() { run_diff("optparse_csv_yield"); }
 #[cfg(feature = "stdlib")]
 #[test] fn digest_hexdigest() { run_diff("digest_hexdigest"); }
 #[test] fn unpack_base64_strict() { run_diff("unpack_base64_strict"); }

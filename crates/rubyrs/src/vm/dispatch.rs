@@ -18200,7 +18200,9 @@ impl Vm {
     /// once). Centralised so all the block/method compile helpers share one source.
     #[cfg(feature = "jit-native")]
     fn jit_syms(&mut self) -> crate::jit_native::JitSyms {
+        let view_addr = self.heap.jit_view_addr();
         crate::jit_native::JitSyms {
+            view_addr,
             length: self.interner.intern("length"),
             size: self.interner.intern("size"),
             bracket: self.interner.intern("[]"),

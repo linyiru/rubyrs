@@ -520,6 +520,11 @@ pub(crate) fn compile(
     code_override: Option<&[Op]>,
     n_locals_override: Option<u16>,
 ) -> Option<NativeProto> {
+    // ADR 0035 Phase 3 — the baked address of the heap's `JitObjView` (`Heap::jit_view_addr`,
+    // threaded via `JitSyms`), through which the inline class guard loads the live
+    // `class_ptrs` base. `0` disables the inline fast path (the obj-call PIC falls back to the
+    // `jit_obj_call` primitive entirely).
+    let view_addr = syms.view_addr;
     // Shape gate (methods only): 0 (iff `allow_zero_arg`), 1, or 2 (iff `obj_param2`)
     // required positional, no optional/rest/kw. `params.len() == n_required_positional`
     // rejects optionals; the unused i64 C-arg of a 0-arg method binds harmlessly to
@@ -1150,6 +1155,18 @@ pub(crate) fn compile(
         let _ivar_ref = module.declare_func_in_func(ivid, fb.func);
         let ivar_obj_ref = module.declare_func_in_func(ivobjid, fb.func);
         let obj_call_ref = module.declare_func_in_func(ocid, fb.func);
+        // ADR 0035 Phase 3 — signature for the inline class-guard fast path's `call_indirect`
+        // to a cached obj-callee: `(vm:ptr, recv:ptr, arg:i64) -> (i64, i8)`, same as the
+        // address `jit_obj_call` caches + transmutes.
+        let obj_callee_sig = {
+            let mut s = module.make_signature();
+            s.params.push(AbiParam::new(ptr_ty)); // vm
+            s.params.push(AbiParam::new(ptr_ty)); // recv ptr
+            s.params.push(AbiParam::new(types::I64)); // arg
+            s.returns.push(AbiParam::new(types::I64));
+            s.returns.push(AbiParam::new(types::I8));
+            fb.func.import_signature(s)
+        };
         let _ivar_obj_call_ref = module.declare_func_in_func(iocid, fb.func);
         let self_inst_ref = module.declare_func_in_func(siid, fb.func);
         let inst_get_int_ref = module.declare_func_in_func(igiid, fb.func);
@@ -2011,26 +2028,90 @@ pub(crate) fn compile(
                     obj_call_caches.push(cache);
                     let cache_const = fb.ins().iconst(ptr_ty, cache_addr);
                     let argc_const = fb.ins().iconst(types::I64, *argc as i64);
-                    let inst = match recv_kind {
+                    let (res, of) = match recv_kind {
                         // DEFERRED ivar receiver (`@l.sum(d-1)`): the FUSED primitive
                         // fetches self.@ivar + guards + calls — no separate ptr fetch.
                         Kind::ObjectIvar(iv) => {
                             let ivc = fb.ins().iconst(types::I32, iv as i64);
                             let si = fb.use_var(self_inst_var);
-                            fb.ins().call(
+                            let inst = fb.ins().call(
                                 inst_obj_call_ref,
                                 &[vm_param, si, ivc, arg, nm, cache_const, argc_const],
-                            )
+                            );
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
                         }
-                        // Already-materialised Object pointer (local-stored receiver).
-                        _ => fb.ins().call(
-                            obj_call_ref,
-                            &[vm_param, recv_val, arg, nm, cache_const, argc_const],
-                        ),
-                    };
-                    let (res, of) = {
-                        let r = fb.inst_results(inst);
-                        (r[0], r[1])
+                        // Already-materialised Object pointer (local-stored receiver). ADR
+                        // 0035 Phase 3 — inline the class-guard fast path: on a PIC cache hit
+                        // (recv's class == the cached class), call the cached callee directly,
+                        // skipping the `jit_obj_call` primitive frame + its `class_ptr_of`.
+                        // Cold / miss / wrong class falls to the primitive (compile + cache +
+                        // deopt). `view_addr == 0` disables the fast path entirely.
+                        _ if view_addr != 0 => {
+                            let flags = MemFlagsData::new();
+                            // view.class_ptrs (offset 0) — the live base of the class table.
+                            let view = fb.ins().iconst(ptr_ty, view_addr);
+                            let base = fb.ins().load(ptr_ty, flags, view, 0);
+                            // oid = *(recv + 4) as u32 (Value::Object payload, ADR 0035 Ph1).
+                            let o32 = fb.ins().load(types::I32, flags, recv_val, 4);
+                            let oid = fb.ins().uextend(types::I64, o32);
+                            // cls = class_ptrs[oid]
+                            let off = fb.ins().imul_imm(oid, 8);
+                            let slot = fb.ins().iadd(base, off);
+                            let cls = fb.ins().load(ptr_ty, flags, slot, 0);
+                            let cached_cls = fb.ins().load(ptr_ty, flags, cache_const, 0);
+                            let cached_addr = fb.ins().load(ptr_ty, flags, cache_const, 8);
+                            // hit = cls != 0 && cls == cached_cls (a 0 cls means recv is not a
+                            // class-bearing Instance → take the slow path, which deopts; a 0
+                            // cached_cls means a cold cache → miss → slow path compiles it).
+                            let eq = fb.ins().icmp(IntCC::Equal, cls, cached_cls);
+                            let nz = fb.ins().icmp_imm(IntCC::NotEqual, cls, 0);
+                            let hit = fb.ins().band(eq, nz);
+                            let fast_b = fb.create_block();
+                            let slow_b = fb.create_block();
+                            let merge_b = fb.create_block();
+                            fb.append_block_param(merge_b, types::I64);
+                            fb.append_block_param(merge_b, types::I8);
+                            fb.ins().brif(hit, fast_b, &[], slow_b, &[]);
+                            // fast: direct call to the cached callee, no primitive frame.
+                            fb.switch_to_block(fast_b);
+                            fb.seal_block(fast_b);
+                            let fc = fb.ins().call_indirect(
+                                obj_callee_sig,
+                                cached_addr,
+                                &[vm_param, recv_val, arg],
+                            );
+                            let (fr, fo) = {
+                                let r = fb.inst_results(fc);
+                                (r[0], r[1])
+                            };
+                            fb.ins().jump(merge_b, &[fr.into(), fo.into()]);
+                            // slow: the existing primitive (compile/cache/deopt + the call).
+                            fb.switch_to_block(slow_b);
+                            fb.seal_block(slow_b);
+                            let sc = fb.ins().call(
+                                obj_call_ref,
+                                &[vm_param, recv_val, arg, nm, cache_const, argc_const],
+                            );
+                            let (sr, so) = {
+                                let r = fb.inst_results(sc);
+                                (r[0], r[1])
+                            };
+                            fb.ins().jump(merge_b, &[sr.into(), so.into()]);
+                            fb.switch_to_block(merge_b);
+                            fb.seal_block(merge_b);
+                            let p = fb.block_params(merge_b);
+                            (p[0], p[1])
+                        }
+                        // Fast path disabled (no view) — the primitive does everything.
+                        _ => {
+                            let inst = fb.ins().call(
+                                obj_call_ref,
+                                &[vm_param, recv_val, arg, nm, cache_const, argc_const],
+                            );
+                            let r = fb.inst_results(inst);
+                            (r[0], r[1])
+                        }
                     };
                     acc_ovf(&mut fb, of);
                     stack.push((res, Kind::Int));
@@ -5468,6 +5549,9 @@ pub(crate) struct JitSyms {
     pub class: SymId,
     // `x.is_a?(Const)` — the fused ancestry guard (ADR 0034 piece 6).
     pub is_a: SymId,
+    // ADR 0035 Phase 3 — baked address of the heap's `JitObjView` (`Heap::jit_view_addr`),
+    // through which the inline class guard loads the live `class_ptrs` base. `0` disables it.
+    pub view_addr: i64,
 }
 
 /// Native primitive: allocate a fresh empty Array, return its `ObjId` as i64.

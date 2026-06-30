@@ -77,11 +77,28 @@ diff_cruby GREEN both builds (966). The `#[repr(C)] JitObjView` (a stable-addres
 the JIT bakes + loads the live `class_ptrs` base through) is deferred to Phase 3, where the
 codegen that needs it lands.
 
-### Phase 3 — inline the class guard in codegen
-Replace the `class_ptr_of` primitive call inside the obj-call PICs (`jit_obj_call`,
-`jit_inst_obj_call`, `jit_value_is_a`) with inline Cranelift loads: deref the recv `Value`
-→ `oid` (offset 8, Phase 1) → `view.class_ptrs[oid]` (Phase 2). **Broad win** — every PIC
-guard in every compiled method, not just treesum (`bench_walk`, OO, AR all gain).
+### Phase 3 — inline the class guard in codegen (✅ done for the generic obj-call; bool/is_a/ivar-recv next)
+Replaced the `jit_obj_call` primitive call for a materialized-recv obj-call (the `_ =>` arm)
+with an inline class-guard fast path: load `view.class_ptrs` (offset 0 of the baked
+`JitObjView`), extract `oid` from the recv `Value` (`u32` at offset 4, Phase 1), load
+`class_ptrs[oid]` (Phase 2), compare to the PIC's cached class, and on a hit
+`call_indirect` the cached callee directly — skipping the primitive frame + its
+`class_ptr_of`. Cold / class-miss / non-Instance recv falls to the existing primitive
+(compile + cache + deopt), so correctness is unchanged. Threaded the baked view address
+through `JitSyms` (one builder, no per-call-site edits). `view_addr == 0` disables it.
+
+**Measured** (A/B, isolated generic obj-call in a native loop, `poc/jit-spike/bench_hammer.rb`):
+fast path OFF 0.82ms, ON **0.50ms — ~1.65×**; ON beats YJIT (0.67ms) by 1.35× where OFF
+trailed it. So the inline guard turns a YJIT-loss into a YJIT-win on this shape, confirming
+the PoC's thesis (the primitive-CALL boundary, not the slab index, was the cost) in the real
+JIT. Note `bench_b4` was NOT the vehicle — `objs.sum { |o| o.m }` uses the B4 whole-loop
+compiler, which already bakes its guard; the generic `recv.method(arg)` arm needed a dedicated
+bench. Correctness: parity interp == JIT == CRuby + STRESS_GC on `jit_inline_objcall_guard`
+(monomorphic fast path, POLYMORPHIC same-site cache-miss → slow-path recompile, native-loop
+hammer); diff_cruby GREEN both builds (967); debug jit-native obj-call fixtures clean (no
+desync). **Still to inline** (same mechanism): `jit_obj_call_bool` (predicates — `bench_walk`),
+`jit_value_is_a` (`is_a?`), and — once Phase 5 inlines the ivar read for the receiver —
+`jit_inst_obj_call` (treesum's `@l.sum`). This proves the inline-load codegen Phase 5 reuses.
 
 ### Phase 4 — per-class ivar layout (the header proper)
 Assign each ivar a fixed slot index per class (a `HashMap<SymId, u16>` on `Class`, filled as
