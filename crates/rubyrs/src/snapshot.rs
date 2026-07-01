@@ -117,12 +117,22 @@ pub(crate) struct ClassImage {
     pub(crate) ivars: Vec<(u32, ValueImage)>,
     /// Class variables (`@@foo`): (SymId, value).
     pub(crate) class_vars: Vec<(u32, ValueImage)>,
+    /// Nested constants (`class Foo::Bar` / `Foo::CONST = …`): (SymId, value).
+    /// `RuboCop::Formatter::SimpleTextFormatter` resolves through the
+    /// `RuboCop::Formatter` module's consts.
+    pub(crate) consts: Vec<(u32, ValueImage)>,
     /// Eigenclass id (`class << self`). Its own ClassImage holds the
     /// class-level methods defined that way (e.g. `YAML.safe_load` — stdlib
     /// modules define their surface here, NOT in `singleton_methods`).
     pub(crate) singleton_view: Option<u32>,
     /// The eigenclass's back-ref to its owning class (Weak), as a class id.
     pub(crate) singleton_target: Option<u32>,
+    /// Modules included into the eigenclass (`class << self; include Mod`) —
+    /// their instance methods become class methods (rubocop's ConfigFinder
+    /// gets `find_last_file_upwards` from an included FileFinder this way).
+    pub(crate) singleton_includes: Vec<u32>,
+    /// Modules prepended into the eigenclass (`class << self; prepend Mod`).
+    pub(crate) singleton_prepends: Vec<u32>,
 }
 
 /// Serializable image of a `Method`. `closure`/`builtin` payloads are
@@ -141,8 +151,21 @@ pub(crate) struct MethodImage {
     pub(crate) original_name: Option<u32>,
     /// `defining_class` Weak back-ref, as a class id (`None` = toplevel).
     pub(crate) defining_class: Option<u32>,
-    pub(crate) has_closure: bool,
+    /// `define_method`-installed closure (captured env), if any. FormatterSet's
+    /// `started`/`finished` capture a `method_name` here.
+    pub(crate) closure: Option<ClosureImage>,
     pub(crate) has_builtin: bool,
+}
+
+/// Serializable image of a `MethodClosure`. Captured env imaged inline
+/// (sharing with a live BlockHandle not preserved — fine for the common
+/// define_method-captures-a-constant case).
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+pub(crate) struct ClosureImage {
+    pub(crate) captured: Vec<ValueImage>,
+    pub(crate) param_start: u16,
+    pub(crate) n_params: u16,
+    pub(crate) captured_yield_block: Option<u32>,
 }
 
 fn vis_to_u8(v: Visibility) -> u8 {
@@ -369,7 +392,12 @@ fn capture_method(m: &Rc<Method>, ids: &mut ClassIds) -> MethodImage {
             .as_ref()
             .and_then(|w| w.upgrade())
             .map(|c| ids.intern(&c)),
-        has_closure: m.closure.is_some(),
+        closure: m.closure.as_ref().map(|cl| ClosureImage {
+            captured: cl.captured.borrow().iter().map(|v| image_value(v, ids)).collect(),
+            param_start: cl.param_start,
+            n_params: cl.n_params,
+            captured_yield_block: cl.captured_yield_block.map(|o| o.0),
+        }),
         has_builtin: m.builtin.is_some(),
     }
 }
@@ -400,6 +428,7 @@ fn capture_class(c: &Rc<Class>, ids: &mut ClassIds) -> ClassImage {
         singleton_methods,
         ivars: c.ivars.borrow().iter().map(|(s, v)| (s.0, image_value(v, ids))).collect(),
         class_vars: c.class_vars.borrow().iter().map(|(s, v)| (s.0, image_value(v, ids))).collect(),
+        consts: c.consts.borrow().iter().map(|(s, v)| (s.0, image_value(v, ids))).collect(),
         singleton_view: c.singleton_view.borrow().as_ref().map(|v| ids.intern(v)),
         singleton_target: c
             .singleton_target
@@ -407,6 +436,8 @@ fn capture_class(c: &Rc<Class>, ids: &mut ClassIds) -> ClassImage {
             .as_ref()
             .and_then(|w| w.upgrade())
             .map(|t| ids.intern(&t)),
+        singleton_includes: c.singleton_includes.borrow().iter().map(|m| ids.intern(m)).collect(),
+        singleton_prepends: c.singleton_prepends.borrow().iter().map(|m| ids.intern(m)).collect(),
     }
 }
 
@@ -535,12 +566,20 @@ fn new_class_shell(name: String, is_module: bool) -> Rc<Class> {
     })
 }
 
-fn build_method(mi: &MethodImage, defining: &Rc<Class>, id_to_class: &[Rc<Class>]) -> Rc<Method> {
+fn build_method(mi: &MethodImage, defining: &Rc<Class>, id_to_class: &[Rc<Class>], kinds: &[u8]) -> Rc<Method> {
     let defining_class = mi
         .defining_class
         .and_then(|id| id_to_class.get(id as usize))
         .map(Rc::downgrade)
         .or_else(|| Some(Rc::downgrade(defining)));
+    let closure = mi.closure.as_ref().map(|cl| crate::value::MethodClosure {
+        captured: std::rc::Rc::new(std::cell::RefCell::new(
+            cl.captured.iter().map(|vi| value_from_image(vi, id_to_class, kinds)).collect(),
+        )),
+        param_start: cl.param_start,
+        n_params: cl.n_params,
+        captured_yield_block: cl.captured_yield_block.map(crate::value::ObjId),
+    });
     Rc::new(Method {
         params: mi.params.clone(),
         proto_idx: mi.proto_idx as usize,
@@ -549,7 +588,7 @@ fn build_method(mi: &MethodImage, defining: &Rc<Class>, id_to_class: &[Rc<Class>
         }),
         defining_class,
         visibility: std::cell::Cell::new(u8_to_vis(mi.visibility)),
-        closure: None,
+        closure,
         builtin: None,
         original_name: mi.original_name.map(crate::intern::SymId),
     })
@@ -839,12 +878,12 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
             *cls.prepends.borrow_mut() =
                 ci.prepends.iter().map(|&id| resolved[id as usize].clone()).collect();
             for (name_sym, mi) in &ci.methods {
-                cls.methods.borrow_mut().insert(SymId(*name_sym), build_method(mi, cls, &resolved));
+                cls.methods.borrow_mut().insert(SymId(*name_sym), build_method(mi, cls, &resolved, &kinds));
             }
             for (name_sym, mi) in &ci.singleton_methods {
                 cls.singleton_methods
                     .borrow_mut()
-                    .insert(SymId(*name_sym), build_method(mi, cls, &resolved));
+                    .insert(SymId(*name_sym), build_method(mi, cls, &resolved, &kinds));
             }
             // Eigenclass (`class << self`) — its ClassImage (also restored)
             // carries the class-level methods; wire the view + back-ref.
@@ -854,6 +893,10 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
             if let Some(tid) = ci.singleton_target {
                 *cls.singleton_target.borrow_mut() = Some(Rc::downgrade(&resolved[tid as usize]));
             }
+            *cls.singleton_includes.borrow_mut() =
+                ci.singleton_includes.iter().map(|&id| resolved[id as usize].clone()).collect();
+            *cls.singleton_prepends.borrow_mut() =
+                ci.singleton_prepends.iter().map(|&id| resolved[id as usize].clone()).collect();
         } else {
             // Reused builtin / stdlib stub: merge USER-defined methods (a
             // native method has `has_builtin`; a closure needs P3c). `or_insert`
@@ -862,19 +905,44 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
             // JSON, …) define their surface as SINGLETON methods (`YAML.
             // safe_load`), and those must land on the reused module too.
             for (name_sym, mi) in &ci.methods {
-                if !mi.has_builtin && !mi.has_closure {
+                if !mi.has_builtin {
                     cls.methods
                         .borrow_mut()
                         .entry(SymId(*name_sym))
-                        .or_insert_with(|| build_method(mi, cls, &resolved));
+                        .or_insert_with(|| build_method(mi, cls, &resolved, &kinds));
                 }
             }
             for (name_sym, mi) in &ci.singleton_methods {
-                if !mi.has_builtin && !mi.has_closure {
+                if !mi.has_builtin {
                     cls.singleton_methods
                         .borrow_mut()
                         .entry(SymId(*name_sym))
-                        .or_insert_with(|| build_method(mi, cls, &resolved));
+                        .or_insert_with(|| build_method(mi, cls, &resolved, &kinds));
+                }
+            }
+            // Merge MONKEYPATCH module edges — modules included/prepended onto a
+            // core class at load time (e.g. the prism `unpack1` polyfill
+            // prepended to String). Only NEWLY-restored modules are appended
+            // (standard modules are already on the reused fresh class); this
+            // preserves the fresh builtin's own chain.
+            for &id in &ci.prepends {
+                if is_new[id as usize] {
+                    cls.prepends.borrow_mut().push(resolved[id as usize].clone());
+                }
+            }
+            for &id in &ci.includes {
+                if is_new[id as usize] {
+                    cls.includes.borrow_mut().push(resolved[id as usize].clone());
+                }
+            }
+            for &id in &ci.singleton_prepends {
+                if is_new[id as usize] {
+                    cls.singleton_prepends.borrow_mut().push(resolved[id as usize].clone());
+                }
+            }
+            for &id in &ci.singleton_includes {
+                if is_new[id as usize] {
+                    cls.singleton_includes.borrow_mut().push(resolved[id as usize].clone());
                 }
             }
         }
@@ -883,6 +951,9 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
         }
         for (s, vi) in &ci.class_vars {
             cls.class_vars.borrow_mut().insert(SymId(*s), value_from_image(vi, &resolved, &kinds));
+        }
+        for (s, vi) in &ci.consts {
+            cls.consts.borrow_mut().insert(SymId(*s), value_from_image(vi, &resolved, &kinds));
         }
     }
 
