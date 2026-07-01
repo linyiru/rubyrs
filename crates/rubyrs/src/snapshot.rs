@@ -49,6 +49,11 @@ pub(crate) struct CapturedGraph {
     pub(crate) registry: Vec<(u32, u32)>,
     pub(crate) const_classes: Vec<(u32, u32)>,
     pub(crate) toplevel_methods: Vec<(u32, MethodImage)>,
+    /// Whole heap, index = ObjId (P3a).
+    pub(crate) heap: Vec<HeapObjImage>,
+    /// All top-level constants as (name SymId, value image) — supersedes
+    /// `const_classes` (a Class value images as `ValueImage::Class`).
+    pub(crate) constants: Vec<(u32, ValueImage)>,
 }
 
 /// Borrow twin used at encode time so serialize doesn't clone the proto
@@ -62,6 +67,8 @@ struct VmImageRef<'a> {
     registry: &'a [(u32, u32)],
     const_classes: &'a [(u32, u32)],
     toplevel_methods: &'a [(u32, MethodImage)],
+    heap: &'a [HeapObjImage],
+    constants: &'a [(u32, ValueImage)],
 }
 
 /// Owned (decode) shape of the full image.
@@ -84,6 +91,10 @@ pub(crate) struct VmImage {
     pub(crate) const_classes: Vec<(u32, u32)>,
     /// Toplevel (`<main>`) methods: (name SymId, method).
     pub(crate) toplevel_methods: Vec<(u32, MethodImage)>,
+    /// Whole heap, index = ObjId (P3a).
+    pub(crate) heap: Vec<HeapObjImage>,
+    /// All top-level constants as (name SymId, value image).
+    pub(crate) constants: Vec<(u32, ValueImage)>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
@@ -132,6 +143,142 @@ fn vis_to_u8(v: Visibility) -> u8 {
         Visibility::Protected => 1,
         Visibility::Private => 2,
     }
+}
+
+/// Serializable encoding tag.
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
+pub(crate) enum EncImage {
+    Utf8,
+    UsAscii,
+    Binary,
+    Other(u8),
+}
+
+fn enc_image(e: crate::value::EncodingTag) -> EncImage {
+    use crate::value::EncodingTag as E;
+    match e {
+        E::Utf8 => EncImage::Utf8,
+        E::UsAscii => EncImage::UsAscii,
+        E::Binary => EncImage::Binary,
+        E::Other(n) => EncImage::Other(n),
+    }
+}
+
+/// Serializable image of a `Value`. Heap references (Array/Hash/Object/Range/
+/// Block/BigInt/Rational/BoundMethod/…) become `Obj(ObjId)` — the concrete
+/// `Value` variant is recovered from the restored slot's HeapObj type (1:1),
+/// so a single `Obj` arm covers them all. Inline strings serialize their
+/// bytes; Class → class id; Regex → its recompilable (source, flags). `f64`
+/// travels as bits so the image is `Eq` and NaN round-trips exactly.
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
+pub(crate) enum ValueImage {
+    Nil,
+    Bool(bool),
+    Int(i64),
+    Float(u64),
+    Sym(u32),
+    Str { bytes: Vec<u8>, enc: EncImage, frozen: bool },
+    Class(u32),
+    Regex { source: String, flags: u8 },
+    Obj(u32),
+}
+
+/// Serializable image of a heap slot. Data variants only (P3a); Block/
+/// BoundMethod/UnboundMethod/CurriedProc/TypedData/Fiber are recorded as
+/// `Unsupported` for now (closures + bound methods land in P3b).
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
+pub(crate) enum HeapObjImage {
+    Dead,
+    Instance { class: u32, ivars: Vec<(u32, ValueImage)>, frozen: bool },
+    Array { elems: Vec<ValueImage>, class_tag: Option<u32>, ivars: Vec<(u32, ValueImage)>, frozen: bool },
+    Hash { pairs: Vec<(ValueImage, ValueImage)>, class_tag: Option<u32>, ivars: Vec<(u32, ValueImage)>, frozen: bool, by_identity: bool },
+    Range { begin: ValueImage, end: ValueImage, exclusive: bool },
+    BigInt(Vec<u8>),
+    Rational { num: Vec<u8>, den: Vec<u8> },
+    Unsupported,
+}
+
+fn image_value(v: &crate::value::Value, ids: &mut ClassIds) -> ValueImage {
+    use crate::value::Value as V;
+    match v {
+        V::Nil => ValueImage::Nil,
+        V::Bool(b) => ValueImage::Bool(*b),
+        V::Int(n) => ValueImage::Int(*n),
+        V::Float(f) => ValueImage::Float(f.to_bits()),
+        V::Sym(s) => ValueImage::Sym(s.0),
+        V::Str(s) => ValueImage::Str {
+            bytes: s.content.borrow().to_vec(),
+            enc: enc_image(s.encoding.get()),
+            frozen: s.frozen.get(),
+        },
+        V::Class(c) => ValueImage::Class(ids.intern(c)),
+        V::Regex(r) => ValueImage::Regex { source: r.as_str().to_string(), flags: r.options() },
+        V::Object(o) | V::Array(o) | V::Hash(o) | V::Range(o) | V::Block(o) | V::BigInt(o)
+        | V::Rational(o) | V::BoundMethod(o) | V::UnboundMethod(o) | V::CurriedProc(o) => {
+            ValueImage::Obj(o.0)
+        }
+    }
+}
+
+fn image_ivars(it: &crate::value::IvarTable, ids: &mut ClassIds) -> Vec<(u32, ValueImage)> {
+    it.iter().map(|(s, v)| (s.0, image_value(v, ids))).collect()
+}
+
+fn image_fx_ivars(
+    m: &crate::intern::FxHashMap<crate::intern::SymId, crate::value::Value>,
+    ids: &mut ClassIds,
+) -> Vec<(u32, ValueImage)> {
+    m.iter().map(|(s, v)| (s.0, image_value(v, ids))).collect()
+}
+
+/// Capture the whole heap as a flat `Vec<HeapObjImage>` (index = ObjId, so
+/// references stay valid on restore). READ-ONLY.
+fn capture_heap(vm: &crate::vm::Vm, ids: &mut ClassIds) -> Vec<HeapObjImage> {
+    use crate::heap::{HeapObj, Slot};
+    vm.heap
+        .slots
+        .iter()
+        .map(|slot| match slot {
+            Slot::Dead => HeapObjImage::Dead,
+            Slot::Live(obj) => match obj {
+                HeapObj::Instance(i) => HeapObjImage::Instance {
+                    class: ids.intern(&i.class),
+                    ivars: image_ivars(&i.ivars, ids),
+                    frozen: i.frozen.get(),
+                },
+                HeapObj::Array(a) => HeapObjImage::Array {
+                    elems: a.elems.iter().map(|v| image_value(v, ids)).collect(),
+                    class_tag: a.class_tag.as_ref().map(|c| ids.intern(c)),
+                    ivars: image_fx_ivars(&a.ivars, ids),
+                    frozen: a.frozen.get(),
+                },
+                HeapObj::Hash(h) => HeapObjImage::Hash {
+                    pairs: h
+                        .pairs
+                        .iter()
+                        .map(|(k, v)| (image_value(k, ids), image_value(v, ids)))
+                        .collect(),
+                    class_tag: h.class_tag.as_ref().map(|c| ids.intern(c)),
+                    ivars: image_fx_ivars(&h.ivars, ids),
+                    frozen: h.frozen.get(),
+                    by_identity: h.by_identity.get(),
+                },
+                HeapObj::Range(r) => HeapObjImage::Range {
+                    begin: image_value(&r.begin, ids),
+                    end: image_value(&r.end, ids),
+                    exclusive: r.exclusive,
+                },
+                #[cfg(feature = "bignum")]
+                HeapObj::BigInt(b) => HeapObjImage::BigInt(b.to_signed_bytes_le()),
+                #[cfg(feature = "bignum")]
+                HeapObj::Rational(r) => HeapObjImage::Rational {
+                    num: r.num.to_signed_bytes_le(),
+                    den: r.den.to_signed_bytes_le(),
+                },
+                _ => HeapObjImage::Unsupported,
+            },
+        })
+        .collect()
 }
 
 /// Assigns dense ids to `Rc<Class>` by pointer identity, discovering the
@@ -242,7 +389,28 @@ pub(crate) fn capture(vm: &crate::vm::Vm) -> CapturedGraph {
         .iter()
         .map(|(sym, m)| (sym.0, capture_method(m, &mut ids)))
         .collect();
-    CapturedGraph { cache_counter: vm.cache_counter, classes, registry, const_classes, toplevel_methods }
+    // Full constants (class-valued ones image as ValueImage::Class; heap ones
+    // reference the heap captured below).
+    let constants: Vec<(u32, ValueImage)> = vm
+        .constants
+        .iter()
+        .map(|(sym, v)| (sym.0, image_value(v, &mut ids)))
+        .collect();
+    // Heap LAST — image_value calls above may have discovered more classes,
+    // but the heap walk itself can discover still more (Instance.class); the
+    // `ids` table keeps growing, and `classes` was already built by the
+    // fixpoint over classes reachable from the class/const roots. (Heap-only
+    // classes are an edge case handled by restore's unregistered-shell path.)
+    let heap = capture_heap(vm, &mut ids);
+    CapturedGraph {
+        cache_counter: vm.cache_counter,
+        classes,
+        registry,
+        const_classes,
+        toplevel_methods,
+        heap,
+        constants,
+    }
 }
 
 /// Serialize the VM's proto/interner tables + a [`CapturedGraph`] to postcard
@@ -262,6 +430,8 @@ pub(crate) fn to_bytes(
         registry: &graph.registry,
         const_classes: &graph.const_classes,
         toplevel_methods: &graph.toplevel_methods,
+        heap: &graph.heap,
+        constants: &graph.constants,
     };
     postcard::to_allocvec(&img)
 }
@@ -557,5 +727,70 @@ mod tests {
         };
         assert_eq!(as_s(&vr), as_s(&vc), "restored dispatch != cold");
         assert_eq!(as_s(&vr), "rex|woof|hi y|canis", "unexpected result");
+    }
+
+    /// P3a: the HEAP (arrays/hashes/strings/instances/ranges — with nested
+    /// Values, ivars, frozen bits, subclass tags) + all constants serialize
+    /// through postcard bytes LOSSLESSLY. Closes the heap-serialization risk
+    /// (the P3 analog of P1's class-graph proof); heap RESTORE is P3b.
+    #[test]
+    fn heap_and_constants_round_trip_through_bytes() {
+        let mut rt = crate::Runtime::new();
+        rt.eval(
+            r#"
+            FROZEN_ARR = [1, "two", :three, nil, true, 3.5].freeze
+            CONFIG = { "a" => 1, b: [10, 20], nested: { x: [1, 2] } }
+            class Widget
+              @count = 42
+              def initialize; @tag = "w"; @nums = [1, 2, 3]; end
+            end
+            INST = Widget.new
+            RNG = (1...5)
+            "#,
+            "<heap-snapshot-test>",
+        )
+        .expect("eval failed");
+
+        let graph = capture(&rt.vm);
+        let bytes = to_bytes(&rt.vm, &graph).expect("serialize failed");
+        let back = from_bytes(&bytes).expect("deserialize failed");
+
+        // Whole heap + constants round-trip losslessly.
+        assert_eq!(back.heap, graph.heap, "heap did not round-trip");
+        assert_eq!(back.constants, graph.constants, "constants did not round-trip");
+
+        // Spot-check: FROZEN_ARR → an Obj ref → a frozen Array of the right
+        // elements (proves nested-Value + frozen + variety survived).
+        let arr_sym = back
+            .interner
+            .iter()
+            .position(|s| s == "FROZEN_ARR")
+            .expect("FROZEN_ARR not interned") as u32;
+        let (_, arr_val) = back
+            .constants
+            .iter()
+            .find(|(s, _)| *s == arr_sym)
+            .expect("FROZEN_ARR constant missing");
+        let ValueImage::Obj(oid) = arr_val else { panic!("FROZEN_ARR not an Obj: {arr_val:?}") };
+        match &back.heap[*oid as usize] {
+            HeapObjImage::Array { elems, frozen, .. } => {
+                assert!(*frozen, "FROZEN_ARR lost its frozen bit");
+                assert_eq!(elems.len(), 6, "FROZEN_ARR elem count wrong");
+                assert_eq!(elems[0], ValueImage::Int(1));
+                assert!(matches!(&elems[1], ValueImage::Str { bytes, .. } if bytes == b"two"));
+                assert_eq!(elems[3], ValueImage::Nil);
+                assert_eq!(elems[4], ValueImage::Bool(true));
+            }
+            other => panic!("FROZEN_ARR heap slot not an Array: {other:?}"),
+        }
+
+        // And a subclass instance carries its ivars.
+        let inst_sym = back.interner.iter().position(|s| s == "INST").unwrap() as u32;
+        let (_, inst_val) = back.constants.iter().find(|(s, _)| *s == inst_sym).unwrap();
+        let ValueImage::Obj(ioid) = inst_val else { panic!("INST not Obj") };
+        assert!(
+            matches!(&back.heap[*ioid as usize], HeapObjImage::Instance { ivars, .. } if ivars.len() == 2),
+            "INST instance ivars lost"
+        );
     }
 }
